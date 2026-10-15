@@ -256,10 +256,10 @@ pub fn normalize_git_remote_url(value: &str) -> String {
                 .split('/')
                 .filter(|segment| !segment.is_empty())
                 .collect();
-            if let Some(host) = url.host_str().filter(|host| !host.is_empty()) {
-                if repository_segments.len() > 1 {
-                    return format!("{host}/{}", repository_segments.join("/"));
-                }
+            if let Some(host) = url.host_str().filter(|host| !host.is_empty())
+                && repository_segments.len() > 1
+            {
+                return format!("{host}/{}", repository_segments.join("/"));
             }
         } else {
             return normalized;

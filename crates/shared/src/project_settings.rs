@@ -233,14 +233,14 @@ pub fn resolve_project_settings(
         "enableAgentDeviceAccess",
         enable_agent_device_access
     );
-    if let Some(value) = overrides.text_generation_model_selection.clone() {
-        if provider_enabled(settings, project_id, &value.instance_id) {
-            effective.text_generation_model_selection = value;
-            sources.from_project.insert(
-                "textGenerationModelSelection",
-                ProjectSettingSource::Project,
-            );
-        }
+    if let Some(value) = overrides.text_generation_model_selection.clone()
+        && provider_enabled(settings, project_id, &value.instance_id)
+    {
+        effective.text_generation_model_selection = value;
+        sources.from_project.insert(
+            "textGenerationModelSelection",
+            ProjectSettingSource::Project,
+        );
     }
     apply_scoped!(
         effective,

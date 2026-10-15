@@ -132,10 +132,10 @@ fn letter_code(code: &str) -> Option<char> {
 pub fn resolve_event_keys(event: &ShortcutEvent) -> HashSet<String> {
     let layout_key = normalize_event_key(&event.key);
     let mut keys = HashSet::from([layout_key.clone()]);
-    if let Some(letter) = event.code.as_deref().and_then(letter_code) {
-        if !is_single_ascii_lower(&layout_key) {
-            keys.insert(letter.to_string());
-        }
+    if let Some(letter) = event.code.as_deref().and_then(letter_code)
+        && !is_single_ascii_lower(&layout_key)
+    {
+        keys.insert(letter.to_string());
     }
     keys.insert(shortcut_key_from_event(&event.key, event.code.as_deref()));
     keys

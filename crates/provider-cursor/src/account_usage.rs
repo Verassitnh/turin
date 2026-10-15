@@ -585,6 +585,9 @@ fn record_from_event(
     }))
 }
 
+/// `JSON.stringify([timestampMs, model, sessionId, totals, reportedCostUsd])`,
+/// byte for byte. serde_json writes integral floats as `1700000000000.0`, so
+/// numbers go through [`js_number_string`].
 fn billed_event_identity(
     timestamp_ms: f64,
     model: &str,
@@ -592,24 +595,23 @@ fn billed_event_identity(
     totals: &UsageTokenTotals,
     reported_cost_usd: Option<f64>,
 ) -> String {
-    let cost = match reported_cost_usd {
-        Some(cost) => Value::from(cost),
-        None => Value::Null,
-    };
-    serde_json::json!([
-        timestamp_ms,
-        model,
-        session_id,
-        {
-            "uncachedInputTokens": totals.uncached_input_tokens,
-            "cachedInputTokens": totals.cached_input_tokens,
-            "cacheCreationTokens": totals.cache_creation_tokens,
-            "outputTokens": totals.output_tokens,
-            "reasoningTokens": totals.reasoning_tokens,
-        },
-        cost
-    ])
-    .to_string()
+    let cost = reported_cost_usd.map_or_else(|| "null".to_owned(), js_number_string);
+    format!(
+        r#"[{},{},{},{{"uncachedInputTokens":{},"cachedInputTokens":{},"cacheCreationTokens":{},"outputTokens":{},"reasoningTokens":{}}},{}]"#,
+        js_number_string(timestamp_ms),
+        json_string(model),
+        json_string(session_id),
+        totals.uncached_input_tokens,
+        totals.cached_input_tokens,
+        totals.cache_creation_tokens,
+        totals.output_tokens,
+        totals.reasoning_tokens,
+        cost,
+    )
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned())
 }
 
 fn is_non_negative_number(value: &Value) -> bool {
@@ -732,12 +734,44 @@ fn encode_uri_component(value: &str) -> String {
     out
 }
 
+/// `Number.prototype.toString` for finite values, which is what `String(n)` and
+/// `JSON.stringify(n)` produce in upstream: `1700000000000`, `1e+21`, `1e-7`.
 fn js_number_string(value: f64) -> String {
-    if value.is_finite() && value.fract() == 0.0 && value.abs() < i64::MAX as f64 {
-        format!("{}", value as i64)
-    } else {
-        serde_json::json!(value).to_string()
+    if !value.is_finite() {
+        return "null".to_owned();
     }
+    if value == 0.0 {
+        return "0".to_owned();
+    }
+    let sign = if value < 0.0 { "-" } else { "" };
+    // Rust's `{:e}` prints the shortest digits that round-trip, as JS does.
+    let scientific = format!("{:e}", value.abs());
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("scientific form has an exponent");
+    let exponent: i32 = exponent.parse().expect("exponent is an integer");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let k = digits.len() as i32;
+    let n = exponent + 1;
+    let body = if k <= n && n <= 21 {
+        format!("{digits}{}", "0".repeat((n - k) as usize))
+    } else if 0 < n && n <= 21 {
+        let (whole, fraction) = digits.split_at(n as usize);
+        format!("{whole}.{fraction}")
+    } else if -6 < n && n <= 0 {
+        format!("0.{}{digits}", "0".repeat((-n) as usize))
+    } else {
+        let e = n - 1;
+        let sign_e = if e < 0 { "-" } else { "+" };
+        let (head, tail) = digits.split_at(1);
+        let mantissa = if tail.is_empty() {
+            head.to_owned()
+        } else {
+            format!("{head}.{tail}")
+        };
+        format!("{mantissa}e{sign_e}{}", e.abs())
+    };
+    format!("{sign}{body}")
 }
 
 #[cfg(test)]
@@ -1098,6 +1132,39 @@ mod tests {
         fn drop(&mut self) {
             self.0.fetch_sub(1, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn js_number_string_matches_json_stringify() {
+        assert_eq!(js_number_string(1_700_000_000_000.0), "1700000000000");
+        assert_eq!(js_number_string(0.25), "0.25");
+        assert_eq!(js_number_string(-0.0), "0");
+        assert_eq!(js_number_string(123.456), "123.456");
+        assert_eq!(js_number_string(0.000_001), "0.000001");
+        assert_eq!(js_number_string(1e-7), "1e-7");
+        assert_eq!(js_number_string(1e20), "100000000000000000000");
+        assert_eq!(js_number_string(1e21), "1e+21");
+        assert_eq!(js_number_string(1.5e300), "1.5e+300");
+        assert_eq!(js_number_string(-42.0), "-42");
+    }
+
+    #[test]
+    fn billed_identity_is_the_json_stringify_of_the_fields() {
+        let totals = UsageTokenTotals {
+            uncached_input_tokens: 10,
+            cached_input_tokens: 30,
+            cache_creation_tokens: 2,
+            output_tokens: 5,
+            reasoning_tokens: 0,
+        };
+        assert_eq!(
+            billed_event_identity(1_700_000_000_000.0, "gpt-5", "conv", &totals, Some(0.25)),
+            r#"[1700000000000,"gpt-5","conv",{"uncachedInputTokens":10,"cachedInputTokens":30,"cacheCreationTokens":2,"outputTokens":5,"reasoningTokens":0},0.25]"#
+        );
+        assert_eq!(
+            billed_event_identity(1_700_000_000_000.0, "gpt-5", "", &totals, None),
+            r#"[1700000000000,"gpt-5","",{"uncachedInputTokens":10,"cachedInputTokens":30,"cacheCreationTokens":2,"outputTokens":5,"reasoningTokens":0},null]"#
+        );
     }
 
     #[tokio::test]

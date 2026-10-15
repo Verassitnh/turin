@@ -188,7 +188,7 @@ pub fn should_preserve_assistant_line_breaks(text: &str) -> bool {
 }
 
 fn plain_inlines(text: &str) -> Inlines {
-    let mut builder = InlineBuilder::new(false);
+    let mut builder = InlineBuilder::new(false, "");
     builder.push_text(text, Marks::default());
     builder.finish()
 }
@@ -428,7 +428,7 @@ impl Lowering<'_> {
     }
 
     fn inlines_owned(&self, nodes: &[Node]) -> Inlines {
-        let mut builder = InlineBuilder::new(self.line_breaks);
+        let mut builder = InlineBuilder::new(self.line_breaks, self.source);
         for node in nodes {
             builder.node(node, Marks::default());
         }
@@ -463,18 +463,21 @@ fn is_closed_code_fence(source: &str, position: &markdown::unist::Position) -> b
 /// Builds collapsed inline text the way CSS `white-space: normal` renders it:
 /// runs of spaces, tabs and soft line breaks become one space, and spaces
 /// next to a forced break disappear.
-struct InlineBuilder {
+struct InlineBuilder<'a> {
     line_breaks: bool,
+    /// The document source, for authored link destinations.
+    source: &'a str,
     text: String,
     runs: Vec<InlineRun>,
     links: Vec<String>,
     images: Vec<(usize, String, String)>,
 }
 
-impl InlineBuilder {
-    fn new(line_breaks: bool) -> Self {
+impl<'a> InlineBuilder<'a> {
+    fn new(line_breaks: bool, source: &'a str) -> Self {
         Self {
             line_breaks,
+            source,
             text: String::new(),
             runs: Vec::new(),
             links: Vec::new(),
@@ -534,6 +537,18 @@ impl InlineBuilder {
             }
         }
         self.push_raw(&chunk, marks);
+    }
+
+    /// The link's destination, with [`keep_windows_path_destination`] applied.
+    fn link_destination(&self, link: &mdast::Link) -> String {
+        let authored = link
+            .position
+            .as_ref()
+            .and_then(|position| authored_destination(self.source, position, &link.children));
+        match authored {
+            Some(authored) => keep_windows_path_destination(authored, &link.url),
+            None => link.url.clone(),
+        }
     }
 
     fn hard_break(&mut self, marks: Marks) {
@@ -603,7 +618,8 @@ impl InlineBuilder {
             Node::Break(_) => self.hard_break(marks),
             Node::Link(link) => {
                 let ix = self.links.len();
-                self.links.push(normalize_link_url(&link.url));
+                self.links
+                    .push(normalize_link_url(&self.link_destination(link)));
                 for child in &link.children {
                     self.node(
                         child,
@@ -683,6 +699,63 @@ impl InlineBuilder {
             images: self.images,
         }
     }
+}
+
+/// `keepWindowsPathDestination`: a link destination that is a Windows path keeps
+/// its authored text. CommonMark reads the `\.` in `C:\me\.t3\shot.png` as an
+/// escape, so the decoded URL loses backslashes. A destination with `&` keeps the
+/// decoded URL, since it may hold character references.
+fn keep_windows_path_destination(authored: &str, decoded: &str) -> String {
+    if is_windows_absolute_path(authored) && !authored.contains('&') {
+        authored.to_string()
+    } else {
+        decoded.to_string()
+    }
+}
+
+/// `isWindowsAbsolutePath` (path.ts): a UNC path or a drive path.
+fn is_windows_absolute_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let drive = bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes.get(2).is_none_or(|&b| b == b'/' || b == b'\\');
+    drive || value.starts_with("\\\\")
+}
+
+/// The destination as written between `](` and the closing `)`, or between `<`
+/// and `>` (the source `sliceSerialize` gives for `resourceDestinationString`).
+fn authored_destination<'s>(
+    source: &'s str,
+    position: &markdown::unist::Position,
+    label: &[Node],
+) -> Option<&'s str> {
+    // The label ends at its last child, or right after the opening bracket.
+    let label_end = label
+        .last()
+        .and_then(Node::position)
+        .map_or(position.start.offset + 1, |end| end.end.offset);
+    let link_source = source.get(label_end..position.end.offset)?;
+    let open = link_source.find("](")? + 2;
+    let rest = link_source[open..].trim_start_matches([' ', '\t', '\n', '\r']);
+    if let Some(inner) = rest.strip_prefix('<') {
+        return inner.split_once('>').map(|(dest, _)| dest);
+    }
+    // Balanced parentheses may appear in a bare destination; whitespace or an
+    // unmatched `)` ends it.
+    let mut depth = 0usize;
+    let mut end = 0;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => break,
+            ')' => depth -= 1,
+            c if c.is_whitespace() => break,
+            _ => {}
+        }
+        end = i + c.len_utf8();
+    }
+    Some(&rest[..end])
 }
 
 /// `remarkNormalizeLinksAndTagInlineCode`: Windows drive links become `file:` URLs.
@@ -813,5 +886,33 @@ mod tests {
     #[test]
     fn windows_drive_links_become_file_urls() {
         assert_eq!(normalize_link_url("C:\\a\\b.txt"), "file:///C:/a/b.txt");
+    }
+
+    #[test]
+    fn windows_path_destinations_keep_their_backslashes() {
+        // `\.` is a CommonMark escape; the authored Windows path must win.
+        let doc = parse_chat_markdown(r"[x](C:\me\.t3\shot.png)", false);
+        assert_eq!(
+            para(&doc).links,
+            vec!["file:///C:/me/.t3/shot.png".to_string()]
+        );
+        let doc = parse_chat_markdown(r"[x](<C:\me\.t3\shot.png>)", false);
+        assert_eq!(
+            para(&doc).links,
+            vec!["file:///C:/me/.t3/shot.png".to_string()]
+        );
+    }
+
+    #[test]
+    fn windows_path_destinations_with_ampersands_keep_decoding() {
+        // A destination with `&` may hold character references, so it stays decoded.
+        let doc = parse_chat_markdown(r"[x](C:\a&amp;b\c.txt)", false);
+        assert_eq!(para(&doc).links, vec!["file:///C:/a&b/c.txt".to_string()]);
+    }
+
+    #[test]
+    fn relative_destinations_still_decode_escapes() {
+        let doc = parse_chat_markdown(r"[x](docs/a\.md)", false);
+        assert_eq!(para(&doc).links, vec!["docs/a.md".to_string()]);
     }
 }

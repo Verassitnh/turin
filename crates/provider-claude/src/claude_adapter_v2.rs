@@ -38,9 +38,12 @@ pub enum ClaudeHostRequest {
         request: ControlRequest,
         reply: oneshot::Sender<Option<Value>>,
     },
+    /// `ack` is answered once the plan is recorded, so the CLI cannot finish
+    /// the turn before the plan is visible.
     ProposedPlan {
         tool_use_id: String,
         markdown: String,
+        ack: oneshot::Sender<()>,
     },
 }
 
@@ -67,10 +70,17 @@ impl ControlHandler for HostHandler {
                 } => {
                     if tool_name == "ExitPlanMode" {
                         if let Some(plan) = proposed_plan(input) {
-                            let _ = sender.send(ClaudeHostRequest::ProposedPlan {
-                                tool_use_id: tool_use_id.clone(),
-                                markdown: plan,
-                            });
+                            let (ack, recorded) = oneshot::channel();
+                            if sender
+                                .send(ClaudeHostRequest::ProposedPlan {
+                                    tool_use_id: tool_use_id.clone(),
+                                    markdown: plan,
+                                    ack,
+                                })
+                                .is_ok()
+                            {
+                                tokio::select! { _ = recorded => {}, _ = cancel.cancelled() => {} }
+                            }
                         }
                         return Ok(Some(captured_plan(tool_use_id)));
                     }

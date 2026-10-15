@@ -878,14 +878,14 @@ impl ClaudeActor {
             ClaudeHostRequest::Hook { reply, .. } => {
                 let _ = reply.send(Some(json!({})));
             }
-            ClaudeHostRequest::ProposedPlan { markdown, .. } => {
+            ClaudeHostRequest::ProposedPlan { markdown, ack, .. } => {
                 let plan_id = new_plan_id(&active.scope);
                 let plan = proposed_plan_artifact(&active.scope, plan_id, &markdown);
-                let event = ProviderAdapterV2Event::PlanUpdated {
+                self.emit(ProviderAdapterV2Event::PlanUpdated {
                     driver: driver(),
                     plan,
-                };
-                self.emit(event);
+                });
+                let _ = ack.send(());
             }
         }
     }

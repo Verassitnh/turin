@@ -11,7 +11,8 @@ use turin_contracts::{
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2AppThread, OrchestrationV2ExecutionNodeKind, OrchestrationV2ProviderThread,
-        OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus, OrchestrationV2TurnItem,
+        OrchestrationV2PlanArtifact, OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus,
+        OrchestrationV2TurnItem,
         OrchestrationV2TurnItemStatus,
     },
     provider_instance::ProviderInstanceId,
@@ -40,11 +41,20 @@ pending = [json.loads(line) for line in open(os.environ["FAKE_FIXTURE"]) if line
 def emit(value):
     print(json.dumps(value), flush=True)
 
+def wait_response(request_id):
+    # The CLI blocks a turn on a permission callback until the host answers.
+    for line in sys.stdin:
+        if line.strip() and json.loads(line).get("type") == "control_response":
+            if json.loads(line)["response"].get("request_id") == request_id:
+                return
+
 def drain():
     while pending and pending[0]["type"] != "expect_outbound":
         entry = pending.pop(0)
         if entry["type"] == "emit_inbound":
             emit(entry["frame"])
+            if entry["frame"].get("type") == "control_request":
+                wait_response(entry["frame"]["request_id"])
         elif entry["type"] == "runtime_exit":
             sys.exit(0)
 
@@ -469,4 +479,55 @@ async fn read_only_tool_fixture_emits_tool_items_and_completes() {
             if node.kind == OrchestrationV2ExecutionNodeKind::ToolCall))
         .count();
     assert_eq!(tool_nodes, 4);
+}
+
+#[tokio::test]
+async fn exit_plan_mode_capture_emits_the_plan_and_completes() {
+    let harness = Harness::lines(&[
+        json!({"type": "expect_outbound", "label": "query.open", "frame": {}}),
+        json!({"type": "expect_outbound", "label": "prompt.offer:1", "frame": {}}),
+        json!({"type": "emit_inbound", "label": "control", "frame": {
+            "type": "control_request",
+            "request_id": "plan-request-1",
+            "uuid": "00000000-0000-4000-8000-000000000001",
+            "session_id": "plan-session",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "tool_use_id": "toolu_plan_1",
+                "input": {"plan": "1. Read the config\n2. Change the default"}
+            }
+        }}),
+        json!({"type": "emit_inbound", "label": "result", "frame": {
+            "type": "result", "subtype": "success", "is_error": false,
+            "result": "plan captured", "terminal_reason": "completed",
+            "session_id": "plan-session", "usage": {},
+            "uuid": "00000000-0000-4000-8000-000000000002"
+        }}),
+        json!({"type": "runtime_exit", "status": "success"}),
+    ]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Plan the change"))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed, "{seen:?}");
+    let plans: Vec<_> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::PlanUpdated { plan, .. } => Some(plan.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(plans.len(), 1);
+    match &plans[0] {
+        OrchestrationV2PlanArtifact::ProposedPlan { markdown, .. } => {
+            assert_eq!(markdown, "1. Read the config\n2. Change the default");
+        }
+        other => panic!("expected a proposed plan, got {other:?}"),
+    }
 }

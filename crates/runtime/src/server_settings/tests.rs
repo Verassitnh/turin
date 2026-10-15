@@ -110,7 +110,7 @@ mod service {
 
     use async_trait::async_trait;
     use serde_json::{Value, json};
-    use turin_contracts::settings::ServerSettingsPatch;
+    use turin_contracts::settings::{ServerSettings, ServerSettingsPatch};
     use turin_persistence::Db;
     use turin_provider_core::credential_store::{
         FileSecretStore, MemorySecretStore, SecretStore, SecretStoreError,
@@ -118,6 +118,7 @@ mod service {
 
     use super::super::service::ServerSettingsService;
     use crate::settings_secrets::{SECRET_REDACTED, source_control_host_secret_name};
+    use crate::support::atomic_write::write_file_string_atomically;
 
     /// A store whose writes can be switched to fail, to exercise rollback.
     struct Flaky {
@@ -385,5 +386,305 @@ mod service {
         .await
         .expect("a reload after the external edit");
         let _ = fx.dir.path();
+    }
+
+    // Ports of upstream serverSettings.test.ts, lines 102-328 (batch 1).
+
+    fn settings_value(settings: &ServerSettings) -> Value {
+        serde_json::to_value(settings).unwrap()
+    }
+
+    #[tokio::test]
+    async fn concurrent_model_preference_edits_serialize_without_cancelling_duplicate_adds() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let _watcher = service.start().await.unwrap();
+        let favorite = |model: &str| {
+            patch(
+                json!({"setModelFavorites": [{"provider": "codex_work", "model": model, "favorite": true}]}),
+            )
+        };
+        let hidden = |model: &str, hidden: bool| {
+            patch(
+                json!({"setModelsHidden": [{"provider": "codex_work", "model": model, "hidden": hidden}]}),
+            )
+        };
+        let order = patch(
+            json!({"setProviderModelOrder": {"provider": "codex_work", "modelOrder": ["luna", "sol"]}}),
+        );
+        let fav_sol = favorite("sol");
+        let fav_luna = favorite("luna");
+        let hide_astra = hidden("astra", true);
+        let hide_luna = hidden("luna", true);
+        let (a, b, c, d, e, f) = tokio::join!(
+            service.update_settings(&fav_sol),
+            service.update_settings(&fav_sol),
+            service.update_settings(&fav_luna),
+            service.update_settings(&hide_astra),
+            service.update_settings(&hide_luna),
+            service.update_settings(&order),
+        );
+        for result in [a, b, c, d, e, f] {
+            result.unwrap();
+        }
+        let value = settings_value(&service.get_settings().await.unwrap());
+        let mut models: Vec<&str> = value["favorites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["model"].as_str().unwrap())
+            .collect();
+        models.sort();
+        assert_eq!(models, ["luna", "sol"]);
+        let prefs = &value["providerModelPreferences"]["codex_work"];
+        let mut hidden_models: Vec<&str> = prefs["hiddenModels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.as_str().unwrap())
+            .collect();
+        hidden_models.sort();
+        assert_eq!(hidden_models, ["astra", "luna"]);
+        assert_eq!(prefs["modelOrder"], json!(["luna", "sol"]));
+    }
+
+    #[tokio::test]
+    async fn model_preferences_persist_and_broadcast_and_a_migration_cannot_undo_a_clear() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let _watcher = service.start().await.unwrap();
+        let prefs = json!({"codex_work": {"hiddenModels": ["astra"], "modelOrder": ["sol"]}});
+        let saved_patch = patch(json!({
+            "favorites": [{"provider": "codex_work", "model": "sol"}],
+            "providerModelPreferences": prefs,
+        }));
+        let mut changes = service.subscribe();
+        service.update_settings(&saved_patch).await.unwrap();
+        let received = settings_value(
+            &tokio::time::timeout(Duration::from_secs(5), changes.recv())
+                .await
+                .expect("a change")
+                .expect("open"),
+        );
+        assert_eq!(
+            received["favorites"],
+            json!([{"provider": "codex_work", "model": "sol"}])
+        );
+        assert_eq!(received["providerModelPreferences"], prefs);
+        let saved = read_file(&fx.path);
+        assert_eq!(
+            saved["favorites"],
+            json!([{"provider": "codex_work", "model": "sol"}])
+        );
+        assert_eq!(saved["providerModelPreferences"], prefs);
+
+        let hid = service
+            .update_settings(&patch(json!({"setModelsHidden": [{"provider": "codex_work", "model": "sol", "hidden": true}]})))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&hid)["providerModelPreferences"]["codex_work"],
+            json!({"hiddenModels": ["astra", "sol"], "modelOrder": ["sol"]})
+        );
+        let shown = service
+            .update_settings(&patch(json!({"setModelsHidden": [{"provider": "codex_work", "model": "astra", "hidden": false}]})))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&shown)["providerModelPreferences"]["codex_work"],
+            json!({"hiddenModels": ["sol"], "modelOrder": ["sol"]})
+        );
+        assert_eq!(
+            read_file(&fx.path)["providerModelPreferences"],
+            settings_value(&shown)["providerModelPreferences"]
+        );
+
+        service
+            .update_settings(&patch(
+                json!({"favorites": [], "providerModelPreferences": {}}),
+            ))
+            .await
+            .unwrap();
+        // A delayed seed from an older device cannot undo the clear.
+        let migrated = service
+            .update_settings(&patch(json!({"migrateModelPreferences": {
+                "favorites": [{"provider": "codex_work", "model": "sol"}],
+                "providerModelPreferences": prefs,
+            }})))
+            .await
+            .unwrap();
+        assert_eq!(settings_value(&migrated)["favorites"], json!([]));
+        assert_eq!(
+            settings_value(&migrated)["providerModelPreferences"],
+            json!({})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_saved_token_streaming_mode_migrates_per_project_without_resetting_other_settings() {
+        let fx = fixture().await;
+        std::fs::create_dir_all(fx.path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &fx.path,
+            r#"{
+              "responseStreamingMode": "token",
+              "enableAgentBrowserAccess": false,
+              "projectSettingsOverrides": {
+                "legacy": { "responseStreamingMode": "token", "defaultAutoPull": true },
+                "buffered": { "responseStreamingMode": "turn" },
+                "inherited": { "defaultAutoPull": false }
+              }
+            }"#,
+        )
+        .unwrap();
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let settings = service.get_settings().await.unwrap();
+        assert_eq!(
+            settings_value(&settings)["responseStreamingMode"],
+            json!("paragraph")
+        );
+        assert_eq!(
+            settings_value(&settings)["enableAgentBrowserAccess"],
+            json!(false)
+        );
+        let overrides = settings_value(&settings)["projectSettingsOverrides"].clone();
+        assert_eq!(
+            overrides,
+            json!({
+                "legacy": { "responseStreamingMode": "paragraph", "defaultAutoPull": true },
+                "buffered": { "responseStreamingMode": "turn" },
+                "inherited": { "defaultAutoPull": false },
+            })
+        );
+
+        service
+            .update_settings(&patch(json!({"responseStreamingMode": "turn"})))
+            .await
+            .unwrap();
+        let persisted: ServerSettings = serde_json::from_value(read_file(&fx.path)).unwrap();
+        assert_eq!(
+            settings_value(&persisted)["responseStreamingMode"],
+            json!("turn")
+        );
+        assert_eq!(
+            settings_value(&persisted)["projectSettingsOverrides"],
+            overrides
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_save_through_a_symlinked_settings_file_keeps_the_link() {
+        let fx = fixture().await;
+        let dotfiles = fx.dir.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let linked = dotfiles.join("settings.json");
+        std::fs::write(&linked, r#"{ "responseStreamingMode": "turn" }"#).unwrap();
+        std::fs::create_dir_all(fx.path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&linked, &fx.path).unwrap();
+
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        service
+            .update_settings(&patch(json!({"responseStreamingMode": "paragraph"})))
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read_link(&fx.path).unwrap(), linked);
+        let persisted: ServerSettings = serde_json::from_value(read_file(&linked)).unwrap();
+        assert_eq!(
+            settings_value(&persisted)["responseStreamingMode"],
+            json!("paragraph")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_settings_file_reloads_when_its_destination_changes() {
+        let fx = fixture().await;
+        let dotfiles = fx.dir.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let linked = dotfiles.join("settings.json");
+        std::fs::write(&linked, r#"{ "responseStreamingMode": "turn" }"#).unwrap();
+        std::fs::create_dir_all(fx.path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&linked, &fx.path).unwrap();
+
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let _watcher = service.start().await.unwrap();
+        let mut changes = service.subscribe();
+        write_file_string_atomically(&linked, r#"{ "responseStreamingMode": "paragraph" }"#)
+            .unwrap();
+
+        let change = tokio::time::timeout(Duration::from_secs(5), changes.recv())
+            .await
+            .expect("a reload")
+            .expect("open");
+        assert_eq!(
+            settings_value(&change)["responseStreamingMode"],
+            json!("paragraph")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_settings_link_that_is_repointed_is_followed() {
+        let fx = fixture().await;
+        let dotfiles = fx.dir.path().join("dotfiles");
+        let first = dotfiles.join("first").join("settings.json");
+        let second = dotfiles.join("second").join("settings.json");
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        std::fs::write(&first, r#"{ "responseStreamingMode": "turn" }"#).unwrap();
+        std::fs::write(&second, r#"{ "responseStreamingMode": "paragraph" }"#).unwrap();
+        std::fs::create_dir_all(fx.path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&first, &fx.path).unwrap();
+
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let _watcher = service.start().await.unwrap();
+        let mut repointed = service.subscribe();
+        std::fs::remove_file(&fx.path).unwrap();
+        std::os::unix::fs::symlink(&second, &fx.path).unwrap();
+        let change = tokio::time::timeout(Duration::from_secs(5), repointed.recv())
+            .await
+            .expect("a reload after repoint")
+            .expect("open");
+        assert_eq!(
+            settings_value(&change)["responseStreamingMode"],
+            json!("paragraph")
+        );
+
+        let mut edited = service.subscribe();
+        write_file_string_atomically(&second, r#"{ "responseStreamingMode": "turn" }"#).unwrap();
+        let change = tokio::time::timeout(Duration::from_secs(5), edited.recv())
+            .await
+            .expect("a reload after an edit to the new target")
+            .expect("open");
+        assert_eq!(
+            settings_value(&change)["responseStreamingMode"],
+            json!("turn")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dangling_settings_link_reloads_when_its_destination_appears() {
+        let fx = fixture().await;
+        let dotfiles = fx.dir.path().join("dotfiles");
+        let target = dotfiles.join("not-yet").join("settings.json");
+        std::fs::create_dir_all(fx.path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &fx.path).unwrap();
+
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let _watcher = service.start().await.unwrap();
+        let mut changes = service.subscribe();
+        write_file_string_atomically(&target, r#"{ "responseStreamingMode": "turn" }"#).unwrap();
+
+        let change = tokio::time::timeout(Duration::from_secs(5), changes.recv())
+            .await
+            .expect("a reload")
+            .expect("open");
+        assert_eq!(
+            settings_value(&change)["responseStreamingMode"],
+            json!("turn")
+        );
     }
 }

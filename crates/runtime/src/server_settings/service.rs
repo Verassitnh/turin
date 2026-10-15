@@ -45,7 +45,7 @@ use crate::settings_secrets::{
 };
 use crate::support::atomic_write::write_file_string_atomically;
 use crate::support::file_watch::{WATCH_DEBOUNCE, next_debounced, watch_file};
-use crate::support::symlink::resolve_symlink_target;
+use crate::support::symlink::{lexical_absolute, resolve_symlink_target};
 
 type Object = serde_json::Map<String, Value>;
 
@@ -62,6 +62,32 @@ fn settings_error(
         provider_instance_id: provider_instance_id.map(str::to_owned),
         environment_variable: environment_variable.map(str::to_owned),
         cause: Some(Value::String(cause.to_string())),
+    }
+}
+
+/// Points the watch at the destination of a settings symlink, or drops it when
+/// the settings path is not a link. Upstream `watchLinkTarget`. A destination
+/// that does not exist yet is still watched, so its creation reloads.
+fn refresh_link_target_watch(
+    settings_path: &Path,
+    events: &mpsc::UnboundedSender<()>,
+    current: &mut Option<(PathBuf, RecommendedWatcher)>,
+) {
+    let own = lexical_absolute(settings_path).ok();
+    let target = resolve_symlink_target(settings_path)
+        .ok()
+        .filter(|target| Some(target) != own.as_ref());
+    match target {
+        None => *current = None,
+        Some(target) if current.as_ref().map(|(path, _)| path) != Some(&target) => {
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            *current = watch_file(&target, events.clone())
+                .ok()
+                .map(|watcher| (target, watcher));
+        }
+        Some(_) => {}
     }
 }
 
@@ -234,10 +260,9 @@ pub struct ServerSettingsService {
     subscribers: Mutex<Vec<mpsc::UnboundedSender<ServerSettings>>>,
 }
 
-/// Owns the settings file watcher and the task that reloads on change. Dropping
+/// Owns the settings file watch and the task that reloads on change. Dropping
 /// it stops watching.
 pub struct SettingsWatcher {
-    _watchers: Vec<RecommendedWatcher>,
     task: JoinHandle<()>,
 }
 
@@ -306,37 +331,27 @@ impl ServerSettingsService {
         })?;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut watchers = Vec::new();
-        watchers.push(
-            watch_file(&self.settings_path, tx.clone()).map_err(|error| {
-                settings_error(
-                    &self.settings_path,
-                    ServerSettingsOperation::PrepareDirectory,
-                    None,
-                    None,
-                    error,
-                )
-            })?,
-        );
+        let link_watcher = watch_file(&self.settings_path, tx.clone()).map_err(|error| {
+            settings_error(
+                &self.settings_path,
+                ServerSettingsOperation::PrepareDirectory,
+                None,
+                None,
+                error,
+            )
+        })?;
         // A symlinked settings file is written in its destination's directory,
-        // which a watch on the link's directory never sees. Watch the target too.
-        if let Ok(target) = resolve_symlink_target(&self.settings_path)
-            && target
-                != std::fs::canonicalize(&self.settings_path)
-                    .unwrap_or_else(|_| self.settings_path.clone())
-            && target != self.settings_path
-        {
-            if let Some(parent) = target.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Ok(watcher) = watch_file(&target, tx.clone()) {
-                watchers.push(watcher);
-            }
-        }
+        // which a watch on the link's directory never sees. The link is resolved
+        // again on every change, so repointing it moves the target watch along.
+        let mut target_watch = None;
+        refresh_link_target_watch(&self.settings_path, &tx, &mut target_watch);
 
         let this = Arc::clone(self);
         let task = tokio::spawn(async move {
+            // Owned by the task so that aborting it stops every watch.
+            let _link_watcher = link_watcher;
             while next_debounced(&mut rx, WATCH_DEBOUNCE).await.is_some() {
+                refresh_link_target_watch(&this.settings_path, &tx, &mut target_watch);
                 // Upstream logs and keeps watching when a reload fails.
                 if let Err(error) = this.revalidate_and_emit().await {
                     tracing::warn!(error = %error, "settings reload failed");
@@ -346,10 +361,7 @@ impl ServerSettingsService {
 
         *self.cache.lock() = None;
         self.cached_settings().await?;
-        Ok(SettingsWatcher {
-            _watchers: watchers,
-            task,
-        })
+        Ok(SettingsWatcher { task })
     }
 
     /// Port of `getSettings`: the cached settings with secrets materialized.

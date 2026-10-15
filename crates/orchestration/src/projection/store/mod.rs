@@ -29,6 +29,8 @@ pub mod shell;
 mod shell_tests;
 pub mod unreadable;
 #[cfg(test)]
+mod upstream_tests;
+#[cfg(test)]
 mod window_tests;
 
 use std::sync::Arc;

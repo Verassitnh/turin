@@ -181,7 +181,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok → Cursor Auto | r3: process leak + unjustified cuts (92 tests) |
 | T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok → Cursor Auto | QC PASS (5 medium, 8 low) → r3 fixes active |
 | T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok → Cursor Auto | done (26 tests, real provider-core traits) → QC queued |
-| T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex → Sonnet → Cursor Auto | r3 active (from docs/handoff/T13a.md; ~124 tests) |
+| T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex → Sonnet → Cursor Auto | **merged to main** (202 tests; QC PASS wf_3daef7bb-ee4, fixes) |
 | T13b | Orchestrator write side: EventSink/Store, outbox/worker, receipts, command policy, thread lifecycle services | `crates/orchestration/src/pipeline/**` | Codex → Sonnet → Cursor Auto | r3 active (from docs/handoff/T13b.md) |
 | T13c | Orchestrator core + provider run services (Orchestrator.ts, ProviderSessionManager, RunExecution, ingest, recovery, checkpoints, PR reactors) | `crates/orchestration/src/core/**` | Cursor Auto (Codex when back) | active (base: T13b + T13a + stage) |
 | T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus → Sonnet → Cursor Auto | r3 active (from docs/handoff/T14.md; 451 tests) |

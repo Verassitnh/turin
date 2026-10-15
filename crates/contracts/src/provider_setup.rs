@@ -423,20 +423,18 @@ mod auth_methods {
         methods: &Option<Vec<ProviderAuthMethod>>,
         s: S,
     ) -> Result<S::Ok, S::Error> {
-        match methods {
-            Some(methods) => forward_compatible_array::serialize(methods, s),
-            None => s.serialize_none(),
-        }
+        forward_compatible_array::optional::serialize(methods, s)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(
         d: D,
     ) -> Result<Option<Vec<ProviderAuthMethod>>, D::Error> {
-        let methods: Vec<ProviderAuthMethod> = forward_compatible_array::deserialize(d)?;
-        if methods.len() > 32 {
+        let methods: Option<Vec<ProviderAuthMethod>> =
+            forward_compatible_array::optional::deserialize(d)?;
+        if methods.as_ref().is_some_and(|methods| methods.len() > 32) {
             return Err(serde::de::Error::custom("auth methods are limited to 32"));
         }
-        Ok(Some(methods))
+        Ok(methods)
     }
 }
 

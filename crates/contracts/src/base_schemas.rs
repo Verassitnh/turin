@@ -698,6 +698,33 @@ pub mod forward_compatible_union_array {
             .filter_map(ForwardCompatible::into_known)
             .collect())
     }
+
+    /// `optional`/`optionalKey(ForwardCompatibleUnionArray(X))`: use on
+    /// `Option<Vec<X>>` with `#[serde(default, skip_serializing_if =
+    /// "Option::is_none", with = "forward_compatible_union_array::optional")]`.
+    /// An absent key is `None`; `null` fails, as upstream.
+    pub mod optional {
+        use super::*;
+
+        pub fn serialize<S, T>(values: &Option<Vec<T>>, s: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+            T: Serialize,
+        {
+            match values {
+                Some(values) => super::serialize(values, s),
+                None => s.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D, T>(d: D) -> Result<Option<Vec<T>>, D::Error>
+        where
+            D: Deserializer<'de>,
+            T: TaggedUnion + serde::de::DeserializeOwned,
+        {
+            super::deserialize(d).map(Some)
+        }
+    }
 }
 
 /// `ForwardCompatibleArray`: wire codec for a server→client array whose
@@ -737,6 +764,33 @@ pub mod forward_compatible_array {
             .into_iter()
             .filter_map(|value| serde_json::from_value(value).ok())
             .collect())
+    }
+
+    /// `optional`/`optionalKey(ForwardCompatibleArray(X))`: use on
+    /// `Option<Vec<X>>` with `#[serde(default, skip_serializing_if =
+    /// "Option::is_none", with = "forward_compatible_array::optional")]`.
+    /// An absent key is `None`; `null` fails, as upstream.
+    pub mod optional {
+        use super::*;
+
+        pub fn serialize<S, T>(values: &Option<Vec<T>>, s: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+            T: Serialize,
+        {
+            match values {
+                Some(values) => super::serialize(values, s),
+                None => s.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D, T>(d: D) -> Result<Option<Vec<T>>, D::Error>
+        where
+            D: Deserializer<'de>,
+            T: serde::de::DeserializeOwned,
+        {
+            super::deserialize(d).map(Some)
+        }
     }
 }
 
@@ -1426,7 +1480,87 @@ mod tests {
         );
     }
 
+    #[test]
+    fn optional_union_array_keeps_absent_empty_and_filtered_distinct() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Holder {
+            #[serde(
+                default,
+                skip_serializing_if = "Option::is_none",
+                with = "forward_compatible_union_array::optional"
+            )]
+            shapes: Option<Vec<Shape>>,
+        }
+        let cases = [
+            (json!({}), None, json!({})),
+            (json!({"shapes": []}), Some(vec![]), json!({"shapes": []})),
+            (
+                json!({"shapes": [{"kind": "triangle"}, {"kind": "square", "side": 2}]}),
+                Some(vec![Shape::Square { side: 2.0 }]),
+                json!({"shapes": [{"kind": "square", "side": 2.0}]}),
+            ),
+            (
+                json!({"shapes": [{"kind": "triangle"}]}),
+                Some(vec![]),
+                json!({"shapes": []}),
+            ),
+        ];
+        for (wire, expected, encoded) in cases {
+            let decoded: Holder = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(decoded.shapes, expected, "{wire}");
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), encoded, "{wire}");
+        }
+        for broken in [
+            json!({"shapes": null}),
+            json!({"shapes": {"kind": "square", "side": 2}}),
+            json!({"shapes": [{"kind": "square", "side": "wide"}]}),
+        ] {
+            assert!(
+                serde_json::from_value::<Holder>(broken.clone()).is_err(),
+                "{broken}"
+            );
+        }
+    }
+
     // --- ForwardCompatibleArray ----------------------------------------
+
+    #[test]
+    fn optional_array_keeps_absent_empty_and_filtered_distinct() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Holder {
+            #[serde(
+                default,
+                skip_serializing_if = "Option::is_none",
+                with = "forward_compatible_array::optional"
+            )]
+            modes: Option<Vec<ClientSurface>>,
+        }
+        let cases = [
+            (json!({}), None, json!({})),
+            (json!({"modes": []}), Some(vec![]), json!({"modes": []})),
+            (
+                json!({"modes": ["desktop", "hologram", 5, null, "cli"]}),
+                Some(vec![ClientSurface::Desktop, ClientSurface::Cli]),
+                json!({"modes": ["desktop", "cli"]}),
+            ),
+            (
+                json!({"modes": ["hologram"]}),
+                Some(vec![]),
+                json!({"modes": []}),
+            ),
+        ];
+        for (wire, expected, encoded) in cases {
+            let decoded: Holder = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(decoded.modes, expected, "{wire}");
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), encoded, "{wire}");
+        }
+        for broken in [json!({"modes": null}), json!({"modes": "desktop"})] {
+            assert!(
+                serde_json::from_value::<Holder>(broken.clone()).is_err(),
+                "{broken}"
+            );
+        }
+    }
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     struct ArrayHolder<T>

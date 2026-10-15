@@ -35,6 +35,8 @@ pub mod logging;
 pub mod markdown_links;
 //TODO pub mod markdown_list_indentation;
 pub mod orchestration_timing;
+pub mod orchestration_v2_bounded_snapshot;
+pub mod orchestration_v2_thread_error;
 pub mod orchestration_v2_timeline;
 pub mod path;
 pub mod project_favicon;

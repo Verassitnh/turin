@@ -19,4 +19,7 @@ pub mod shared_support;
 pub mod source_control_clients;
 pub mod text_paste;
 pub mod thread_pull_request_compatibility;
+pub mod usage;
+pub mod usage_access;
+pub mod usage_progress;
 pub mod user_message;

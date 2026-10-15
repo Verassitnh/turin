@@ -1,6 +1,8 @@
 //! Codex provider adapter, ported from `CodexAdapterV2.ts` and `provider/Codex*.ts`.
 pub mod adapter;
 pub mod approvals;
+pub mod cli_args;
+pub mod codex_launch_args;
 pub mod codex_provider;
 pub mod codex_turn_token_usage;
 pub mod driver;

@@ -49,6 +49,8 @@ use turin_provider_core::text_generation::{
 };
 
 use crate::{
+    cli_args::tokenize_cli_args,
+    codex_launch_args::resolve_codex_launch_args,
     codex_provider::{now_ms, probe},
     orchestration_adapter::CodexProviderAdapter,
     runtime::CodexRuntimeConfig,
@@ -155,24 +157,25 @@ impl ProviderDriver for CodexDriver {
 }
 
 /// `binaryPath`, `homePath`, and `launchArgs` from settings, plus the instance
-/// environment. `launchArgs` splits on whitespace; upstream's `codexLaunchArgs.ts`
-/// shell-splits it (PORTING.md).
+/// environment. `launchArgs` resolves like upstream's `resolveCodexLaunchArgs`
+/// (instance env, then process env, then settings) and shell-splits the result.
 fn runtime_config(
     settings: &CodexSettings,
     input: &ProviderDriverCreateInput,
 ) -> CodexRuntimeConfig {
     let home_path = Some(settings.home_path.as_str().to_owned()).filter(|home| !home.is_empty());
-    let launch_args = settings
-        .launch_args
-        .as_str()
-        .split_whitespace()
-        .map(str::to_owned)
-        .collect();
     let environment: BTreeMap<String, String> = input
         .environment
         .iter()
         .map(|variable| (variable.name.as_str().to_owned(), variable.value.clone()))
         .collect();
+    let resolved = resolve_codex_launch_args(Some(settings.launch_args.as_str()), |name| {
+        environment
+            .get(name)
+            .cloned()
+            .or_else(|| std::env::var(name).ok())
+    });
+    let launch_args = tokenize_cli_args(&resolved);
     CodexRuntimeConfig {
         binary: PathBuf::from(settings.binary_path.as_str()),
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),

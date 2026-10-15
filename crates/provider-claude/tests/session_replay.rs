@@ -150,6 +150,31 @@ impl Harness {
     }
 
     fn with_transcript(transcript: String, dir: Option<PathBuf>) -> Self {
+        Self::with_transcript_env(transcript, dir, &[])
+    }
+
+    /// Replays a transcript with extra environment for the CLI, such as its config dir.
+    /// `cwd` is the working directory; a restarted process runs in the same one.
+    fn lines_with_env(
+        entries: &[Value],
+        env: &[(&str, String)],
+        cwd: Option<&std::path::Path>,
+    ) -> Self {
+        let dir = cwd.map(|cwd| cwd.to_path_buf()).unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("turin-claude-replay-{}", uuid::Uuid::new_v4()))
+        });
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("transcript-{}.ndjson", uuid::Uuid::new_v4()));
+        let body: String = entries.iter().map(|e| format!("{e}\n")).collect();
+        std::fs::write(&path, body).unwrap();
+        Self::with_transcript_env(path.display().to_string(), Some(dir), env)
+    }
+
+    fn with_transcript_env(
+        transcript: String,
+        dir: Option<PathBuf>,
+        extra: &[(&str, String)],
+    ) -> Self {
         let dir = dir.unwrap_or_else(|| {
             std::env::temp_dir().join(format!("turin-claude-replay-{}", uuid::Uuid::new_v4()))
         });
@@ -161,6 +186,9 @@ impl Harness {
 
         let mut env: BTreeMap<String, String> = std::env::vars().collect();
         env.insert("FAKE_FIXTURE".into(), transcript);
+        for (key, value) in extra {
+            env.insert((*key).into(), value.clone());
+        }
         env.insert(
             "FAKE_ARGV".into(),
             dir.join("argv.log").display().to_string(),
@@ -1355,6 +1383,191 @@ async fn fixture_compact_after_peer_turn_echo_holds_the_peer_turn_for_a_continua
     let (seen, status) = until_terminal(&mut events).await;
     assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
     assert_eq!(assistant_texts(&seen), vec!["PEER_ACK".to_owned()]);
+}
+
+/// Writes the transcript a restarted process reads for a subagent it did not
+/// launch: the session file, and the subagent's own file with its launch call.
+fn write_subagent_transcript(
+    config: &std::path::Path,
+    cwd: &std::path::Path,
+    session: &str,
+    task: &str,
+    launch: &str,
+) {
+    let project = config
+        .join("projects")
+        .join(turin_claude_protocol::transcript::project_key(cwd));
+    let subagents = project.join(session).join("subagents");
+    std::fs::create_dir_all(&subagents).unwrap();
+    std::fs::write(
+        project.join(format!("{session}.jsonl")),
+        format!(
+            "{}\n",
+            json!({"type": "user", "uuid": "root-1", "sessionId": session, "parentUuid": null,
+                "message": {"role": "user", "content": "Launch the agent"}})
+        ),
+    )
+    .unwrap();
+    let file = subagents.join(format!("agent-{task}.jsonl"));
+    std::fs::write(
+        &file,
+        format!(
+            "{}\n{}\n",
+            json!({"type": "user", "uuid": "sub-1", "sessionId": session, "parentUuid": null,
+                "message": {"role": "user", "content": "First"}}),
+            json!({"type": "assistant", "uuid": "sub-2", "sessionId": session, "parentUuid": "sub-1",
+                "message": {"id": "msg_sub", "role": "assistant", "content": [{"type": "text", "text": "FIRST_DONE"}]}}),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        file.with_extension("meta.json"),
+        json!({"toolUseId": launch}).to_string(),
+    )
+    .unwrap();
+}
+
+/// A subagent resumed by a process that never launched it (a restart) reopens its
+/// recorded subagent: the child thread is not created again, and the resume's
+/// message and result land in the thread it already had.
+#[tokio::test]
+async fn subagent_resumed_after_a_restart_reopens_its_child_thread() {
+    const SESSION: &str = "5e5510a0-0000-4000-8000-0000000000a1";
+    let config = std::env::temp_dir().join(format!("turin-claude-config-{}", uuid::Uuid::new_v4()));
+    let config_env = [("CLAUDE_CONFIG_DIR", config.display().to_string())];
+    let uuid_for = |n: u32| format!("00000000-0000-4000-8000-{n:012}");
+
+    // Process one: the subagent runs to completion, then the turn ends.
+    let first = Harness::lines_with_env(
+        &[
+            json!({"type": "expect_outbound", "label": "query.open", "frame": {}}),
+            json!({"type": "expect_outbound", "label": "prompt.offer:1", "frame": {}}),
+            json!({"type": "emit_inbound", "label": "frame", "frame": assistant_tool_use(
+                &uuid_for(1), None, "toolu_agent", "Agent",
+                json!({"description": "Agent A", "prompt": "First", "model": "haiku"}))}),
+            json!({"type": "emit_inbound", "label": "frame", "frame": {
+                "type": "system", "subtype": "task_started", "task_id": "task_a",
+                "tool_use_id": "toolu_agent", "description": "Agent A", "task_type": "local_agent",
+                "session_id": SESSION, "uuid": uuid_for(2)}}),
+            json!({"type": "emit_inbound", "label": "frame", "frame": {
+                "type": "system", "subtype": "task_notification", "task_id": "task_a",
+                "tool_use_id": "toolu_agent", "status": "completed", "summary": "FIRST_DONE",
+                "session_id": SESSION, "uuid": uuid_for(3)}}),
+            json!({"type": "emit_inbound", "label": "result", "frame": {
+                "type": "result", "subtype": "success", "is_error": false, "result": "launched",
+                "terminal_reason": "completed", "session_id": SESSION, "usage": {},
+                "uuid": uuid_for(4)}}),
+            json!({"type": "runtime_exit", "status": "success"}),
+        ],
+        &config_env,
+        None,
+    );
+    let runtime = first.open().await;
+    let mut events = runtime.events();
+    let thread = with_transcript_session(first.ensure(runtime.as_ref()).await, SESSION);
+    runtime
+        .start_turn(first.turn_input(thread.clone(), "Launch the agent"))
+        .await
+        .expect("start first turn");
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    let child_id = seen
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::SubagentUpdated { subagent, .. } => {
+                subagent.child_thread_id.clone()
+            }
+            _ => None,
+        })
+        .expect("the first run creates the child thread");
+    drop(runtime);
+    write_subagent_transcript(&config, &first.dir, SESSION, "task_a", "toolu_agent");
+
+    // Process two: the restarted CLI resumes the subagent with SendMessage.
+    let second = Harness::lines_with_env(
+        &[
+            json!({"type": "expect_outbound", "label": "query.open", "frame": {}}),
+            json!({"type": "expect_outbound", "label": "prompt.offer:1", "frame": {}}),
+            json!({"type": "emit_inbound", "label": "frame", "frame": assistant_tool_use(
+                &uuid_for(11), None, "toolu_send", "SendMessage",
+                json!({"to": "task_a", "message": "Second"}))}),
+            json!({"type": "emit_inbound", "label": "frame", "frame": {
+                "type": "system", "subtype": "task_started", "task_id": "task_a",
+                "tool_use_id": "toolu_send", "prompt": "Second", "description": "Agent A",
+                "task_type": "local_agent",
+                "session_id": SESSION, "uuid": uuid_for(12)}}),
+            json!({"type": "emit_inbound", "label": "frame", "frame": {
+                "type": "assistant", "parent_tool_use_id": "toolu_send", "session_id": SESSION,
+                "message": {"id": "msg_resumed", "role": "assistant", "content": [
+                    {"type": "text", "text": "SECOND_TEXT"}]},
+                "uuid": uuid_for(13)}}),
+            json!({"type": "emit_inbound", "label": "frame", "frame": {
+                "type": "system", "subtype": "task_notification", "task_id": "task_a",
+                "tool_use_id": "toolu_send", "status": "completed", "summary": "SECOND_DONE",
+                "session_id": SESSION, "uuid": uuid_for(14)}}),
+            json!({"type": "emit_inbound", "label": "result", "frame": {
+                "type": "result", "subtype": "success", "is_error": false, "result": "resumed",
+                "terminal_reason": "completed", "session_id": SESSION, "usage": {},
+                "uuid": uuid_for(15)}}),
+            json!({"type": "runtime_exit", "status": "success"}),
+        ],
+        &config_env,
+        Some(&first.dir),
+    );
+    let runtime = second.open().await;
+    let mut events = runtime.events();
+    // A restart keeps the stored provider thread, so the resumed process gets the same one.
+    let _ = second.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(second.turn_input(thread.clone(), "Send the agent a message"))
+        .await
+        .expect("start resumed turn");
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, ProviderAdapterV2Event::AppThreadCreated { .. })),
+        "the child thread already exists"
+    );
+    let resumed: Vec<Value> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::SubagentUpdated { subagent, .. } => {
+                serde_json::to_value(subagent).ok()
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        resumed.first().map(|s| &s["status"]),
+        Some(&json!("running"))
+    );
+    let last = resumed.last().expect("the resume reports");
+    assert_eq!(last["status"], "completed");
+    assert_eq!(last["result"], "SECOND_DONE");
+    assert_eq!(last["childThreadId"], json!(child_id.as_str()));
+    let child_messages: Vec<String> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::MessageUpdated { message, .. }
+                if message.thread_id == child_id =>
+            {
+                Some(message.text.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        child_messages.contains(&"Second".to_owned()),
+        "{child_messages:?}"
+    );
+    assert!(
+        child_messages.contains(&"SECOND_TEXT".to_owned()),
+        "{child_messages:?}"
+    );
+    let _ = std::fs::remove_dir_all(&config);
 }
 
 /// A `/goal` is read from the transcript: its synthetic output sets it, and a

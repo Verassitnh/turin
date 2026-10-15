@@ -771,7 +771,10 @@ impl ClaudeActor {
             match action {
                 Action::Command(Some(command)) => self.command(command).await,
                 Action::Command(None) => break,
-                Action::Event(Some(event)) => self.event(event),
+                Action::Event(Some(event)) => {
+                    self.recover_resumed_subagent(&event).await;
+                    self.event(event)
+                }
                 Action::Event(None) => {
                     self.claude = None;
                     self.host_requests = None;
@@ -1439,6 +1442,57 @@ impl ClaudeActor {
             }
             _ => {}
         }
+    }
+    /// Upstream `recoverResumedClaudeSubagent`, run before the frame routes: a
+    /// task_started that resumes a subagent this process never saw, from a tool
+    /// call of the running turn, is recorded from its transcript first. The
+    /// transcript names the launch tool call, which the registry keys it by.
+    async fn recover_resumed_subagent(&mut self, event: &ClaudeAdapterEvent) {
+        let ClaudeAdapterEvent::Background(frame) = event else {
+            return;
+        };
+        let raw = &frame.raw;
+        if !is_task_started(raw) {
+            return;
+        }
+        let (Some(task_id), Some(tool_use_id)) = (
+            task_id_of(raw),
+            raw.get("tool_use_id").and_then(Value::as_str),
+        ) else {
+            return;
+        };
+        let in_turn = self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.tool_calls.contains_key(tool_use_id));
+        if !in_turn || self.subagents.knows(task_id) {
+            return;
+        }
+        let Some(claude) = self.claude.as_ref() else {
+            return;
+        };
+        let history = claude.subagent_history(task_id).await;
+        let launch = history
+            .ok()
+            .and_then(|messages| messages.into_iter().find_map(|m| m.parent_tool_use_id));
+        let Some(launch) = launch.filter(|launch| launch != tool_use_id) else {
+            return;
+        };
+        let active = &mut self.active;
+        let mut turn_item_ordinal = |native: &str| match active.as_mut() {
+            Some(active) => item_ordinal(
+                &mut active.item_ordinals,
+                active.input.provider_turn_ordinal,
+                native,
+            ),
+            None => 0,
+        };
+        self.subagents.recover_resumed(
+            task_id,
+            &launch,
+            UtcDateTime::now(),
+            &mut turn_item_ordinal,
+        );
     }
     /// Upstream `handleSdkMessage` for an unconfirmed prompt. The echo confirms
     /// it, a lifecycle frame names it, and root output is gated until then.

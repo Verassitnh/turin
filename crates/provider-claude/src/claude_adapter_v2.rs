@@ -281,6 +281,8 @@ pub struct ClaudeAdapterV2 {
     requests: Option<mpsc::UnboundedReceiver<ClaudeHostRequest>>,
     session_id: Option<String>,
     cwd: Option<PathBuf>,
+    /// The CLI's config directory when the launch sets one. Transcripts live under it.
+    config_dir: Option<PathBuf>,
     pending_prompts: usize,
     pub latest_turn_capabilities: Vec<String>,
 }
@@ -293,6 +295,11 @@ impl ClaudeAdapterV2 {
         options.include_partial_messages = true;
         options.initialize.supported_dialog_kinds = Some(vec!["resume_return".into()]);
         let cwd = options.cwd.clone();
+        let config_dir = options
+            .env
+            .as_ref()
+            .and_then(|env| env.get("CLAUDE_CONFIG_DIR"))
+            .map(PathBuf::from);
         let (tx, rx) = mpsc::unbounded_channel();
         let handler = Arc::new(HostHandler {
             sender: tx,
@@ -326,6 +333,7 @@ impl ClaudeAdapterV2 {
             requests: Some(rx),
             session_id,
             cwd,
+            config_dir,
             pending_prompts: 0,
             latest_turn_capabilities: vec![],
         })
@@ -487,6 +495,7 @@ impl ClaudeAdapterV2 {
             .context("Claude session ID not known")?;
         let options = TranscriptOptions {
             dir: self.cwd.clone(),
+            config_dir: self.config_dir.clone(),
             ..Default::default()
         };
         get_subagent_messages(id, agent_id, &options).await

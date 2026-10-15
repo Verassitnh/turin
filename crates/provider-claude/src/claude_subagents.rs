@@ -422,6 +422,73 @@ impl SubagentRegistry {
         events
     }
 
+    /// Whether the registry has the task, from this process or a recovery.
+    pub fn knows(&self, task_id: &str) -> bool {
+        self.tasks.contains_key(task_id)
+    }
+
+    /// Upstream `recoverResumedClaudeSubagent`. After a restart, a resume in this
+    /// turn names a subagent this process never launched. Its record is the
+    /// finished subagent it was, under its launch tool call, so the resume reopens
+    /// it: its child thread is not created again. Emits nothing; the resume's
+    /// task_started does.
+    pub fn recover_resumed(
+        &mut self,
+        task_id: &str,
+        launch_tool_use_id: &str,
+        now: UtcDateTime,
+        turn_item_ordinal: &mut dyn FnMut(&str) -> u64,
+    ) {
+        let Some(scope) = self.scope.clone() else {
+            return;
+        };
+        let ids = subagent_ids(&scope.driver, &scope.provider_thread_id, task_id);
+        let ordinal = turn_item_ordinal(&format!("task:{task_id}:subagent"));
+        let subagent = OrchestrationV2Subagent {
+            id: ids.node_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            run_id: Some(scope.run_id.clone()),
+            parent_node_id: scope.root_node_id.clone(),
+            origin: OrchestrationV2SubagentOrigin::ProviderNative,
+            created_by: OrchestrationV2Actor::Agent,
+            driver: scope.driver.clone(),
+            provider_instance_id: scope.provider_instance_id.clone(),
+            provider_thread_id: None,
+            child_thread_id: Some(ids.child_thread_id.clone()),
+            native_task_ref: Some(native_ref(task_id)),
+            prompt: String::new(),
+            title: None,
+            model: None,
+            model_selection: None,
+            completion_wake: None,
+            completion_delivery: None,
+            status: OrchestrationV2SubagentStatus::Completed,
+            progress: None,
+            workflow: None,
+            result: None,
+            started_at: Some(now),
+            completed_at: Some(now),
+            updated_at: now,
+        };
+        let child = ChildThread::new(ids.child_thread_id.clone(), ids.child_root_node_id.clone());
+        self.task_by_run_tool_use
+            .insert(launch_tool_use_id.to_owned(), task_id.to_owned());
+        self.tasks.insert(
+            task_id.to_owned(),
+            Task {
+                subagent,
+                ids,
+                turn_item_ordinal: ordinal,
+                child,
+                provider_thread_id: scope.provider_thread_id,
+                provider_turn_id: scope.provider_turn_id,
+                root_node_id: scope.root_node_id,
+                confirmed: None,
+                nested: false,
+            },
+        );
+    }
+
     /// What the wake path reads about a task. `None` for an unknown task.
     pub fn wake_view(&self, task_id: &str) -> Option<WakeView> {
         let task = self.tasks.get(task_id)?;

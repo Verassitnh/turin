@@ -10,6 +10,7 @@ pub mod params;
 pub mod projection;
 #[cfg(test)]
 mod replay_tests;
+pub mod retry;
 pub mod runtime;
 pub mod subagent;
 pub mod tool_presentation;

@@ -15,6 +15,7 @@ use crate::{
     items,
     items::ItemArtifacts,
     orchestration_adapter::driver,
+    retry::{self, LatestFailure, ProviderRetry},
     subagent::{self, SubagentThread},
 };
 use serde_json::{Value, json};
@@ -64,6 +65,10 @@ pub struct TurnState {
     pub running_tools: Vec<Value>,
     /// The native subagent thread this is a child turn of. Its run and attempt are empty.
     pub subagent: Option<String>,
+    /// The last provider error that was not retried.
+    pub latest_failure: Option<LatestFailure>,
+    /// The retry this turn is in, while the provider retries it.
+    pub provider_retry: Option<ProviderRetry>,
 }
 
 impl TurnState {
@@ -78,6 +83,8 @@ impl TurnState {
             completed_texts: HashSet::new(),
             running_tools: vec![],
             subagent: None,
+            latest_failure: None,
+            provider_retry: None,
         }
     }
 
@@ -162,7 +169,8 @@ fn time_secs(value: Option<&Value>) -> Option<UtcDateTime> {
 pub fn turn_scoped<'a>(method: &str, params: &'a Value) -> Option<&'a str> {
     let handled = method.starts_with("item/")
         || method.starts_with("turn/")
-        || method == "thread/tokenUsage/updated";
+        || method == "thread/tokenUsage/updated"
+        || method == "error";
     if handled {
         native_turn_of(params)
     } else {
@@ -552,6 +560,7 @@ pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderA
         "item/agentMessage/delta" => {
             let item = str_of(&raw.params, "itemId").unwrap_or_default().to_owned();
             let delta = str_of(&raw.params, "delta").unwrap_or_default();
+            let events = retry::complete(&mut turn, now);
             append_text(
                 state,
                 &mut turn,
@@ -560,7 +569,7 @@ pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderA
                 TextKind::Assistant,
                 delta,
             );
-            vec![]
+            events
         }
         "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
             let (stream, index_field) = if raw.method == "item/reasoning/summaryTextDelta" {
@@ -576,14 +585,20 @@ pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderA
             let item = str_of(&raw.params, "itemId").unwrap_or_default().to_owned();
             let delta = str_of(&raw.params, "delta").unwrap_or_default();
             let key = reasoning_key(&native_turn, &item, stream, index);
+            let events = if delta.is_empty() {
+                vec![]
+            } else {
+                retry::complete(&mut turn, now)
+            };
             append_text(state, &mut turn, key, &item, TextKind::Reasoning, delta);
-            vec![]
+            events
         }
         "item/plan/delta" => {
             let item = str_of(&raw.params, "itemId").unwrap_or_default().to_owned();
             let delta = str_of(&raw.params, "delta").unwrap_or_default();
+            let events = retry::complete(&mut turn, now);
             append_text(state, &mut turn, item.clone(), &item, TextKind::Plan, delta);
-            vec![]
+            events
         }
         "turn/plan/updated" => todo_updated(&raw.params, &mut turn, state, now),
         "thread/tokenUsage/updated" => match raw.params.get("tokenUsage") {
@@ -600,6 +615,7 @@ pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderA
             }],
             None => vec![],
         },
+        "error" => retry::error(&mut turn, &raw.params, now),
         "turn/completed" => {
             let events = turn_completed(&raw.params, &mut turn, state, now);
             // The turn is finished: it is not reinserted.
@@ -668,10 +684,11 @@ fn item_started(
         "subAgentActivity" => return sub_agent_activity(item, thread, turn, state),
         _ => {}
     }
+    let mut events = retry::complete(turn, now);
     if kind != "reasoning" {
         items::resolve_position(turn, native_item, started_at, now);
     }
-    match kind {
+    events.extend(match kind {
         "agentMessage" => {
             if str_of(item, "phase") != Some("commentary")
                 && !turn.final_answer_items.iter().any(|id| id == native_item)
@@ -696,7 +713,8 @@ fn item_started(
         }
         "webSearch" => emit_item(items::web_search(turn, item, false, now)),
         _ => vec![],
-    }
+    });
+    events
 }
 
 /// Upstream `subAgentActivity` on `item/started`: a `started` activity registers
@@ -1168,7 +1186,9 @@ fn turn_completed(
         status,
         OrchestrationV2ProviderTurnStatus::Interrupted | OrchestrationV2ProviderTurnStatus::Failed
     );
-    let mut events = flush_turn(state, turn, stopped_early);
+    let retry = turn.provider_retry.take();
+    let mut events = retry::finish(turn, retry.clone(), status, now);
+    events.extend(flush_turn(state, turn, stopped_early));
     // Commands still running when an interrupted or failed turn ends were stopped with
     // it. A completed turn keeps the commands it still runs, so their completion lands.
     let stopped = if stopped_early {
@@ -1242,6 +1262,20 @@ fn turn_completed(
                 status == OrchestrationV2ProviderTurnStatus::Completed,
             )
         });
+    let (failure, failure_item_ordinal) = match status {
+        OrchestrationV2ProviderTurnStatus::Failed => {
+            let message = params
+                .pointer("/turn/error/message")
+                .and_then(Value::as_str);
+            let code = message
+                .and_then(|_| retry::error_info_code(params.pointer("/turn/error/codexErrorInfo")));
+            let (failure, ordinal) =
+                retry::terminal_failure(turn, retry.as_ref(), message, code.as_deref());
+            (Some(failure), Some(ordinal))
+        }
+        _ => (None, None),
+    };
+    let failed = failure.is_some();
     let completed_at = time_secs(params.pointer("/turn/completedAt")).unwrap_or(now);
     let provider = provider_turn(turn, status, Some(completed_at), None, token);
     events.push(ProviderAdapterV2Event::ProviderTurnUpdated {
@@ -1270,10 +1304,14 @@ fn turn_completed(
         run_ordinal: PositiveInt::new(turn.input.run_ordinal.max(1) as u64)
             .expect("positive ordinal"),
         status: terminal,
-        failure: None,
-        failure_item_ordinal: None,
-        retry: None,
-        retry_started_at: None,
+        failure,
+        failure_item_ordinal,
+        retry: failed
+            .then(|| retry.as_ref().map(|retry| retry.retry.clone()))
+            .flatten(),
+        retry_started_at: failed
+            .then(|| retry.as_ref().map(|retry| retry.started_at))
+            .flatten(),
         thread_disposition: OrchestrationV2ProviderThreadDisposition::Reusable,
     });
     events

@@ -2140,3 +2140,146 @@ fn async_agent_message_questions_become_a_message_answered_request() {
         "the question replaces the message text"
     );
 }
+
+/// Feeds a retrying `error` for the detached turn.
+fn retrying_error(state: &mut RuntimeState, message: &str) -> Vec<ProviderAdapterV2Event> {
+    notify(
+        state,
+        "error",
+        json!({
+            "threadId": "thread-1",
+            "turnId": "native-turn-1",
+            "willRetry": true,
+            "error": {"message": message, "additionalDetails": null, "codexErrorInfo": "responseStreamDisconnected"},
+        }),
+    )
+}
+
+#[test]
+fn provider_retry_progress_opens_then_recovers_on_the_next_output() {
+    let mut state = RuntimeState::default();
+    state
+        .turns
+        .insert("native-turn-1".into(), detached_turn("native-turn-1"));
+    let opened = retrying_error(&mut state, "Reconnecting... 2/5");
+    let retry = latest_items(&opened)
+        .into_iter()
+        .find(|item| item["retry"].is_object())
+        .expect("retry item");
+    assert_eq!(retry["status"], "running");
+    assert_eq!(retry["retry"]["attempt"], 2);
+    assert_eq!(retry["retry"]["maxAttempts"], 5);
+    let item_id = retry["id"].clone();
+    assert!(state.turns["native-turn-1"].provider_retry.is_some());
+
+    let recovered = notify(
+        &mut state,
+        "item/agentMessage/delta",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "itemId": "msg-1", "delta": "Hi"}),
+    );
+    let done = latest_items(&recovered)
+        .into_iter()
+        .find(|item| item["id"] == item_id)
+        .expect("retry item completes");
+    assert_eq!(done["status"], "completed");
+    assert_eq!(done["title"], "Provider recovered");
+    assert!(state.turns["native-turn-1"].provider_retry.is_none());
+}
+
+#[test]
+fn failed_turn_terminal_carries_its_retry_and_failure() {
+    let mut state = RuntimeState::default();
+    state
+        .turns
+        .insert("native-turn-1".into(), detached_turn("native-turn-1"));
+    retrying_error(&mut state, "Reconnecting... 2/5");
+    let ended = notify(
+        &mut state,
+        "turn/completed",
+        json!({
+            "threadId": "thread-1",
+            "turn": {
+                "id": "native-turn-1",
+                "status": "failed",
+                "completedAt": 3,
+                "error": {"message": "Reconnecting... 2/5"},
+            },
+        }),
+    );
+    let terminal = ended
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::TurnTerminal {
+                status,
+                failure,
+                failure_item_ordinal,
+                retry,
+                retry_started_at,
+                ..
+            } => Some((
+                *status,
+                failure.clone(),
+                *failure_item_ordinal,
+                retry.clone(),
+                *retry_started_at,
+            )),
+            _ => None,
+        })
+        .expect("terminal");
+    assert_eq!(terminal.0, ProviderAdapterV2TurnTerminalStatus::Failed);
+    let failure = terminal.1.expect("failure");
+    assert_eq!(failure.message.as_str(), "Reconnecting... 2/5");
+    assert!(terminal.2.is_some(), "the failure item keeps an ordinal");
+    let retry = terminal.3.expect("retry");
+    assert_eq!(retry.attempt.0.get(), 2);
+    assert!(terminal.4.is_some());
+}
+
+#[test]
+fn final_provider_error_becomes_the_failed_terminal_failure() {
+    let mut state = RuntimeState::default();
+    state
+        .turns
+        .insert("native-turn-1".into(), detached_turn("native-turn-1"));
+    notify(
+        &mut state,
+        "error",
+        json!({
+            "threadId": "thread-1",
+            "turnId": "native-turn-1",
+            "willRetry": false,
+            "error": {"message": "Usage limit reached", "additionalDetails": "Try again later", "codexErrorInfo": "usageLimitExceeded"},
+        }),
+    );
+    let ended = notify(
+        &mut state,
+        "turn/completed",
+        json!({
+            "threadId": "thread-1",
+            "turn": {"id": "native-turn-1", "status": "failed", "completedAt": 3, "error": {"message": "Usage limit reached", "codexErrorInfo": "usageLimitExceeded"}},
+        }),
+    );
+    let failure = ended
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::TurnTerminal { failure, retry, .. } => {
+                assert!(retry.is_none(), "no retry was open");
+                failure.clone()
+            }
+            _ => None,
+        })
+        .expect("failure on the terminal");
+    assert_eq!(
+        failure.class,
+        turin_contracts::orchestration_v2::OrchestrationV2ProviderFailureClass::UsageLimit
+    );
+    assert_eq!(
+        failure.message.as_str(),
+        "Try again later",
+        "details replace the message"
+    );
+    assert_eq!(
+        failure.code.as_ref().map(|code| code.as_str()),
+        Some("usageLimitExceeded")
+    );
+}

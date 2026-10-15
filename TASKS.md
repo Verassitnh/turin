@@ -32,9 +32,19 @@ when the logic is subtle (state machines, protocol framing, concurrency).
    compatibility, concurrency/perf, tests, conventions), each finding
    adversarially verified. Confirmed findings go back to the task's agent as
    a fix round (same model; new round id). Repeat until QC returns clean.
-5. PM merges into `main`, rebases waiting branches. After each wave merges,
+   Script: `scripts/qc/turin-qc.workflow.js` (args: worktree, scope,
+   upstream, context, optional dimensions; add a look-and-feel dimension for
+   UI branches).
+5. PM merges into `main`, pushes `main` to `origin`
+   (github.com/Verassitnh/turin, private), rebases waiting branches. After each wave merges,
    QC runs a cross-crate audit on `main` (seams between crates, duplicated
    logic, drift from upstream).
+
+## QC log
+
+| Run | Target | Result |
+|---|---|---|
+| wf_6ce02f2f-38c | foundation on `main` (base_schemas, PORTING, scripts) | running |
 
 ## Waves
 

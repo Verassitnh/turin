@@ -737,6 +737,8 @@ pub fn build_git_run_stacked_action_input(
     transport_action_id: &str,
     input: &RunVcsStackedActionInput,
 ) -> Result<GitRunStackedActionInput, turin_contracts::ContractError> {
+    // Upstream sends the array verbatim and the RPC rejects an empty entry, so an invalid path
+    // fails the whole input. Dropping it would commit a partial file set.
     let file_paths = input
         .file_paths
         .as_ref()
@@ -744,9 +746,15 @@ pub fn build_git_run_stacked_action_input(
         .map(|paths| {
             paths
                 .iter()
-                .filter_map(|path| GitFilePath::new(path.clone()).ok())
-                .collect::<Vec<_>>()
-        });
+                .map(|path| {
+                    GitFilePath::new(path.clone()).map_err(|_| turin_contracts::ContractError {
+                        expected: "non-empty git file path",
+                        got: path.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
     Ok(GitRunStackedActionInput {
         action_id: TrimmedNonEmptyString::new(transport_action_id)?,
         cwd: TrimmedNonEmptyString::new(&target.cwd)?,
@@ -1394,6 +1402,44 @@ mod tests {
                 "featureBranch": true,
                 "filePaths": ["a.rs", "b.rs"],
             })
+        );
+    }
+
+    #[test]
+    fn an_empty_file_path_fails_the_input_instead_of_committing_a_partial_set() {
+        let transport = create_vcs_action_transport_id(&resolved(), ACTION_ID);
+        let with_paths = |paths: Vec<&str>| RunVcsStackedActionInput {
+            file_paths: Some(paths.into_iter().map(str::to_owned).collect()),
+            ..run_input(ACTION_ID)
+        };
+
+        let error =
+            build_git_run_stacked_action_input(&resolved(), &transport, &with_paths(vec!["a", ""]))
+                .unwrap_err();
+        assert_eq!(error.expected, "non-empty git file path");
+        assert_eq!(error.got, "");
+        assert!(
+            build_git_run_stacked_action_input(&resolved(), &transport, &with_paths(vec![""]))
+                .is_err()
+        );
+
+        // Untrimmed, whitespace-only paths are valid entries, as upstream's GitFilePath is untrimmed.
+        let rpc =
+            build_git_run_stacked_action_input(&resolved(), &transport, &with_paths(vec![" "]))
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&rpc).unwrap()["filePaths"],
+            json!([" "])
+        );
+
+        // An empty list is omitted, matching upstream's `input.filePaths?.length` guard.
+        let rpc = build_git_run_stacked_action_input(&resolved(), &transport, &with_paths(vec![]))
+            .unwrap();
+        assert!(
+            serde_json::to_value(&rpc)
+                .unwrap()
+                .get("filePaths")
+                .is_none()
         );
     }
 

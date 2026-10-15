@@ -177,19 +177,18 @@ impl ExternalLauncher {
     /// Opens a URL in the default browser.
     pub async fn launch_browser(&self, target: &str) -> Result<(), ExternalLauncherError> {
         let args = vec![target.to_owned()];
-        self.host
-            .spawn_detached("open", &args)
-            .await
-            .map_err(|cause| {
-                ExternalLauncherError::BrowserSpawn(
-                    ExternalLauncherBrowserSpawnError::BrowserSpawn {
-                        command: "open".to_owned(),
-                        args,
-                        cause: io_cause(&cause),
-                        target: target.to_owned(),
-                    },
-                )
+        let spawned = match refuse_option_like(target) {
+            Ok(()) => self.host.spawn_detached("open", &args).await,
+            Err(refused) => Err(refused),
+        };
+        spawned.map_err(|cause| {
+            ExternalLauncherError::BrowserSpawn(ExternalLauncherBrowserSpawnError::BrowserSpawn {
+                command: "open".to_owned(),
+                args,
+                cause: io_cause(&cause),
+                target: target.to_owned(),
             })
+        })
     }
 
     /// Opens a workspace path in the selected editor. Starts the editor
@@ -292,18 +291,23 @@ impl ExternalLauncher {
                 },
             ));
         }
-        self.host
-            .spawn_detached(&launch.command, &launch.args)
-            .await
-            .map_err(|cause| {
-                ExternalLauncherError::EditorSpawn(ExternalLauncherEditorSpawnError::EditorSpawn {
-                    command: launch.command.clone(),
-                    args: launch.args.clone(),
-                    cause: io_cause(&cause),
-                    editor: launch.editor,
-                    target: launch.target.clone(),
-                })
+        let spawned = match refuse_option_like(&launch.target) {
+            Ok(()) => {
+                self.host
+                    .spawn_detached(&launch.command, &launch.args)
+                    .await
+            }
+            Err(refused) => Err(refused),
+        };
+        spawned.map_err(|cause| {
+            ExternalLauncherError::EditorSpawn(ExternalLauncherEditorSpawnError::EditorSpawn {
+                command: launch.command.clone(),
+                args: launch.args.clone(),
+                cause: io_cause(&cause),
+                editor: launch.editor,
+                target: launch.target.clone(),
             })
+        })
     }
 }
 
@@ -361,6 +365,21 @@ fn parse_target_path_and_position(target: &str) -> Option<TargetPathAndPosition>
         line: captures.get(2)?.as_str().to_owned(),
         column: captures.get(3).map(|column| column.as_str().to_owned()),
     })
+}
+
+/// Refuses a user-controlled value (workspace path, editor target, browser URL)
+/// that starts with `-`, because `open`, `code` and the other CLIs would read it
+/// as an option (`open -z`). Upstream passes these values bare. `--` is not
+/// used instead: it is not verified for every CLI here, and refusing works for
+/// all of them. No shell runs, so this is the only argv hazard.
+fn refuse_option_like(value: &str) -> io::Result<()> {
+    if value.starts_with('-') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing {value:?}: a leading '-' would be read as an option"),
+        ));
+    }
+    Ok(())
 }
 
 /// The error `cause` field: upstream carries the Effect error, which the wire
@@ -782,6 +801,45 @@ mod tests {
                 args: vec!["/workspace/odd\nname.ts".to_owned()],
             })
         );
+    }
+
+    #[tokio::test]
+    async fn refuses_option_like_editor_targets_before_spawning() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("bin");
+        write_executable(&bin.join("zed"));
+        let host = Arc::new(FakeHost::new());
+        let error = launcher(&host, env_for(home.path(), bin.to_str().unwrap()))
+            .launch_editor(&input(EditorId::Zed, "-n"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ExternalLauncherError::EditorSpawn(ExternalLauncherEditorSpawnError::EditorSpawn {
+                ref target,
+                ..
+            }) if target == "-n"
+        ));
+        assert_eq!(host.spawned(), Vec::<Spawn>::new());
+    }
+
+    #[tokio::test]
+    async fn refuses_option_like_browser_targets_before_spawning() {
+        let host = Arc::new(FakeHost::new());
+        let error = launcher(&host, Env::new())
+            .launch_browser("-z")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ExternalLauncherError::BrowserSpawn(ExternalLauncherBrowserSpawnError::BrowserSpawn {
+                ref target,
+                ..
+            }) if target == "-z"
+        ));
+        assert_eq!(host.spawned(), Vec::<Spawn>::new());
     }
 
     #[tokio::test]

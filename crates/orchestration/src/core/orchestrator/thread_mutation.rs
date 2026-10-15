@@ -425,7 +425,7 @@ pub(super) async fn decide(
 }
 
 /// Loads the thread a mutation addresses. A deleted thread refuses every kind.
-async fn load_thread(
+pub(super) async fn load_thread(
     orchestrator: &Orchestrator,
     command: &OrchestrationV2ServerCommand,
     thread_id: &turin_contracts::ThreadId,
@@ -446,7 +446,7 @@ async fn load_thread(
 
 /// [`load_thread`], then refuses an archived thread. Used by the kinds upstream
 /// lists as rejected on archive.
-async fn load_live_thread(
+pub(super) async fn load_live_thread(
     orchestrator: &Orchestrator,
     command: &OrchestrationV2ServerCommand,
     thread_id: &turin_contracts::ThreadId,

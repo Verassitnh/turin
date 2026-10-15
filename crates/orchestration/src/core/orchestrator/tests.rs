@@ -52,6 +52,13 @@ fn command_id(id: &str) -> CommandId {
     CommandId::new(id).expect("command id")
 }
 
+fn delete(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
+    OrchestrationV2ServerCommand::Client(OrchestrationV2Command::ThreadDelete {
+        command_id: command_id(command),
+        thread_id: thread(thread_id),
+    })
+}
+
 fn archive(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
     OrchestrationV2ServerCommand::Client(OrchestrationV2Command::ThreadArchive {
         command_id: command_id(command),
@@ -88,12 +95,12 @@ async fn a_kind_without_a_handler_is_rejected_and_leaves_no_receipt() {
     let (orchestrator, receipts) = harness().await;
 
     let error = orchestrator
-        .dispatch(archive("command:unported", "thread:a"))
+        .dispatch(delete("command:unported", "thread:a"))
         .await
         .expect_err("unported kinds are rejected");
 
     assert!(
-        matches!(error, OrchestratorError::CommandRejected { ref command_type, .. } if command_type == "thread.archive"),
+        matches!(error, OrchestratorError::CommandRejected { ref command_type, .. } if command_type == "thread.delete"),
         "{error:?}"
     );
     assert!(error.was_not_accepted());
@@ -756,4 +763,136 @@ async fn runtime_and_interaction_modes_update_the_thread_row() {
         ProviderInteractionMode::Plan
     );
     assert_eq!(after_interaction.runtime_mode, RuntimeMode::Auto);
+}
+
+#[tokio::test]
+async fn settle_parks_the_thread_and_clears_the_pin() {
+    let (orchestrator, _) = harness().await;
+    let id = thread("thread:settle");
+    orchestrator
+        .dispatch(create_command(
+            "command:create-settle",
+            "thread:settle",
+            "Settle",
+        ))
+        .await
+        .expect("create commits");
+    orchestrator
+        .dispatch(mutation(
+            "thread.pin",
+            "command:pin-settle",
+            "thread:settle",
+            json!({"orderKey": "a0"}),
+        ))
+        .await
+        .expect("pin commits");
+
+    orchestrator
+        .dispatch(mutation(
+            "thread.settle",
+            "command:settle",
+            "thread:settle",
+            json!({"settledAt": "2026-06-21T00:00:01.000Z"}),
+        ))
+        .await
+        .expect("settle commits");
+    let settled = orchestrator
+        .get_thread_projection(&id)
+        .await
+        .unwrap()
+        .thread;
+    assert_eq!(
+        settled.settled_override,
+        Some(OrchestrationV2SettleOverride::Settled)
+    );
+    assert!(settled.settled_at.is_some());
+    assert!(settled.pinned_at.flatten().is_none());
+    assert!(settled.pin_order_key.flatten().is_none());
+
+    // Settling an already settled, unpinned thread keeps updatedAt.
+    orchestrator
+        .dispatch(mutation(
+            "thread.settle",
+            "command:settle-again",
+            "thread:settle",
+            json!({}),
+        ))
+        .await
+        .expect("repeat settle commits");
+    let again = orchestrator
+        .get_thread_projection(&id)
+        .await
+        .unwrap()
+        .thread;
+    assert_eq!(again.updated_at, settled.updated_at);
+}
+
+#[tokio::test]
+async fn archive_sets_the_flag_then_refuses_a_second_archive_and_unarchive_restores() {
+    let (orchestrator, _) = harness().await;
+    let id = thread("thread:archive");
+    orchestrator
+        .dispatch(create_command(
+            "command:create-archive",
+            "thread:archive",
+            "Archive",
+        ))
+        .await
+        .expect("create commits");
+
+    let archived = orchestrator
+        .dispatch(mutation(
+            "thread.archive",
+            "command:archive",
+            "thread:archive",
+            json!({}),
+        ))
+        .await
+        .expect("archive commits");
+    assert!(matches!(
+        archived.stored_events[0].event,
+        OrchestrationV2DomainEvent::ThreadArchived { .. }
+    ));
+    assert!(
+        orchestrator
+            .get_thread_projection(&id)
+            .await
+            .unwrap()
+            .thread
+            .archived_at
+            .is_some()
+    );
+
+    let error = orchestrator
+        .dispatch(mutation(
+            "thread.archive",
+            "command:archive-again",
+            "thread:archive",
+            json!({}),
+        ))
+        .await
+        .expect_err("a second archive is refused");
+    assert!(
+        matches!(error, OrchestratorError::Dispatch { .. }),
+        "{error:?}"
+    );
+
+    orchestrator
+        .dispatch(mutation(
+            "thread.unarchive",
+            "command:unarchive",
+            "thread:archive",
+            json!({}),
+        ))
+        .await
+        .expect("unarchive commits");
+    assert!(
+        orchestrator
+            .get_thread_projection(&id)
+            .await
+            .unwrap()
+            .thread
+            .archived_at
+            .is_none()
+    );
 }

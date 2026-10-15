@@ -212,10 +212,13 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = temp_dir("t3code-scanner-");
-        let claude_home = root.path().join("claude-home");
-        let codex_home = root.path().join("codex-home");
-        let base_dir = root.path().join("base");
-        let home_dir = root.path().join("home");
+        // Canonical, as the app passes its config and home dirs: the realpath
+        // exclusion check compares against them (see the symlink case).
+        let canonical = fs::canonicalize(root.path()).expect("canonical root");
+        let claude_home = canonical.join("claude-home");
+        let codex_home = canonical.join("codex-home");
+        let base_dir = canonical.join("base");
+        let home_dir = canonical.join("home");
         for dir in [&claude_home, &codex_home, &base_dir, &home_dir] {
             fs::create_dir_all(dir).expect("fixture dir");
         }
@@ -1030,3 +1033,168 @@ async fn excludes_the_home_directory_temporary_root_and_t3_data_directory() {
     assert_eq!(paths(&result), vec![workspace.path().to_string_lossy().into_owned()]);
 }
 
+#[tokio::test]
+async fn excludes_t3_managed_worktree_sandboxes() {
+    let fixture = Fixture::new();
+    let worktree_cwd = fixture
+        .claude_home
+        .join(".t3")
+        .join("worktrees")
+        .join("t3code")
+        .join("wt-1");
+    fs::create_dir_all(&worktree_cwd).expect("worktree");
+    write_transcript(
+        &fixture.claude_transcript("-slug", "a.jsonl"),
+        &claude_session_line(&worktree_cwd),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(summarize(&result), Vec::new());
+}
+
+#[tokio::test]
+async fn excludes_codex_scratch_directories_and_downloads() {
+    let fixture = Fixture::new();
+    let scratch = fixture
+        .home_dir
+        .join("Documents")
+        .join("Codex")
+        .join("2026-09-01")
+        .join("some-conversation");
+    let downloads = fixture.home_dir.join("Downloads").join("unpacked");
+    let keep = fixture.workspace("t3code-workspace-keep-");
+    fs::create_dir_all(&scratch).expect("scratch");
+    fs::create_dir_all(&downloads).expect("downloads");
+    let cwds = [scratch, downloads, keep.path().to_path_buf()];
+    for (index, cwd) in cwds.iter().enumerate() {
+        write_transcript(
+            &fixture.codex_rollout("2026", "09", "01", &format!("rollout-{index}.jsonl")),
+            &codex_rollout_line(cwd),
+            ms("2026-09-01T00:00:00.000Z"),
+        );
+    }
+
+    let result = fixture.scan().await;
+
+    assert_eq!(paths(&result), vec![keep.path().to_string_lossy().into_owned()]);
+}
+
+#[tokio::test]
+async fn skips_linked_git_worktrees_and_reports_the_origin_of_real_checkouts() {
+    let fixture = Fixture::new();
+    let repo = fixture.workspace("t3code-workspace-repo-");
+    let worktree = fixture.workspace("t3code-workspace-worktree-");
+    let plain = fixture.workspace("t3code-workspace-plain-");
+    let no_remote = fixture.workspace("t3code-workspace-noremote-");
+    let submodule = fixture.workspace("t3code-workspace-submodule-");
+    let repo_git = repo.path().join(".git");
+    fs::create_dir_all(&repo_git).expect("repo git");
+    fs::write(
+        repo_git.join("config"),
+        "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:pingdotgg/t3code.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+    )
+    .expect("repo config");
+    fs::write(
+        worktree.path().join(".git"),
+        format!("gitdir: {}\n", repo_git.join("worktrees").join("wt").display()),
+    )
+    .expect("worktree pointer");
+    fs::create_dir_all(no_remote.path().join(".git")).expect("no-remote git");
+    fs::write(no_remote.path().join(".git").join("config"), "[core]\n").expect("config");
+    // Submodules also use a gitdir pointer, but into `modules/`, not `worktrees/`.
+    let submodule_git = repo_git.join("modules").join("vendor");
+    fs::create_dir_all(&submodule_git).expect("submodule git");
+    fs::write(
+        submodule_git.join("config"),
+        "[remote \"origin\"]\n\turl = ssh://github.com/pingdotgg/vendor.git\n",
+    )
+    .expect("submodule config");
+    fs::write(
+        submodule.path().join(".git"),
+        format!("gitdir: {}\n", submodule_git.display()),
+    )
+    .expect("submodule pointer");
+    let cwds = [
+        repo.path(),
+        worktree.path(),
+        plain.path(),
+        no_remote.path(),
+        submodule.path(),
+    ];
+    for (index, cwd) in cwds.iter().enumerate() {
+        write_transcript(
+            &fixture.claude_transcript(&format!("-slug-{index}"), "a.jsonl"),
+            &claude_session_line(cwd),
+            ms(&format!("2026-01-0{}T00:00:00.000Z", index + 1)),
+        );
+    }
+
+    let result = fixture.scan().await;
+
+    let found: Vec<(String, Option<Option<AgentSessionProjectGit>>)> = result
+        .candidates
+        .iter()
+        .map(|candidate| (candidate.path.as_str().to_owned(), candidate.git.clone()))
+        .collect();
+    let git = |remote_key: Option<&str>, repository: Option<&str>| {
+        Some(Some(AgentSessionProjectGit {
+            remote_key: remote_key.map(str::to_owned),
+            repository: repository.map(str::to_owned),
+        }))
+    };
+    assert_eq!(
+        found,
+        vec![
+            (
+                submodule.path().to_string_lossy().into_owned(),
+                git(Some("github.com/pingdotgg/vendor"), Some("pingdotgg/vendor")),
+            ),
+            (no_remote.path().to_string_lossy().into_owned(), git(None, None)),
+            (plain.path().to_string_lossy().into_owned(), Some(None)),
+            (
+                repo.path().to_string_lossy().into_owned(),
+                git(Some("github.com/pingdotgg/t3code"), Some("pingdotgg/t3code")),
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn excludes_sandboxes_under_the_configured_worktrees_dir_without_t3_in_the_path() {
+    let fixture = Fixture::new();
+    // Only the configured prefix can match here: the base dir has no `.t3` segment.
+    let worktree_cwd = fixture.base_dir.join("worktrees").join("t3code").join("wt-2");
+    fs::create_dir_all(&worktree_cwd).expect("worktree");
+    write_transcript(
+        &fixture.claude_transcript("-slug", "a.jsonl"),
+        &claude_session_line(&worktree_cwd),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(summarize(&result), Vec::new());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn excludes_sandboxes_reached_through_a_symlink_into_the_worktrees_dir() {
+    let fixture = Fixture::new();
+    let worktree_cwd = fixture.base_dir.join("worktrees").join("t3code").join("wt-3");
+    fs::create_dir_all(&worktree_cwd).expect("worktree");
+    // The recorded cwd's own spelling looks harmless; only its realpath is managed.
+    let links = fixture.workspace("t3code-scanner-links-");
+    let symlink_cwd = links.path().join("innocent-project");
+    std::os::unix::fs::symlink(&worktree_cwd, &symlink_cwd).expect("symlink");
+    write_transcript(
+        &fixture.claude_transcript("-slug", "a.jsonl"),
+        &claude_session_line(&symlink_cwd),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(summarize(&result), Vec::new());
+}

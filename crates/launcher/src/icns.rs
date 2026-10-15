@@ -1,5 +1,7 @@
 //! Port of upstream/apps/server/src/assets/icns.ts.
 
+use turin_shared::image_dimensions::read_image_dimensions;
+
 const ICNS_HEADER_BYTES: usize = 8;
 const ICNS_MAGIC: &[u8; 4] = b"icns";
 const PNG_MAGIC: &[u8; 4] = b"\x89PNG";
@@ -26,7 +28,12 @@ pub fn extract_icns_png(bytes: &[u8], min_size: u32) -> Option<Vec<u8>> {
         let entry = &bytes[offset + ICNS_HEADER_BYTES..offset + length];
         let is_png = entry.len() >= 4 && &entry[..4] == PNG_MAGIC;
         offset += length;
-        let Some(width) = (if is_png { png_width(entry) } else { None }) else {
+        let dimensions = if is_png {
+            read_image_dimensions(entry)
+        } else {
+            None
+        };
+        let Some(width) = dimensions.map(|dimensions| dimensions.width) else {
             continue;
         };
         let is_better = match best {
@@ -39,18 +46,6 @@ pub fn extract_icns_png(bytes: &[u8], min_size: u32) -> Option<Vec<u8>> {
         }
     }
     best.map(|(png, _)| png.to_vec())
-}
-
-/// Width of a PNG from its IHDR header, `None` for anything else. Mirrors the
-/// PNG branch of upstream `readImageDimensions` (a zero width or height is
-/// rejected there too).
-fn png_width(bytes: &[u8]) -> Option<u32> {
-    if bytes.len() < 24 || &bytes[..4] != PNG_MAGIC || &bytes[12..16] != b"IHDR" {
-        return None;
-    }
-    let width = read_u32(bytes, 16)?;
-    let height = read_u32(bytes, 20)?;
-    (width > 0 && height > 0).then_some(width)
 }
 
 /// Big-endian `u32` at `offset`, `None` when the buffer is too short.

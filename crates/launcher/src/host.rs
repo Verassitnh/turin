@@ -2,20 +2,21 @@
 //! spawns, timed command output, and a monotonic clock.
 //!
 //! Production uses [`SystemHost`]. Tests inject a recording host so no real
-//! application is ever launched. The PATH lookup is a stand-in for upstream
-//! `@t3tools/shared/shell` (`isCommandAvailable`), which is not on main yet;
-//! see PORTING.md Deviations.
+//! application is ever launched. The command lookup is upstream
+//! `@t3tools/shared/shell` (`isCommandAvailable`) through `turin-shared`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use turin_shared::shell::{
+    CommandAvailabilityOptions, CommandResolutionCache, Platform, ShellContext, ShellEnv,
+};
 
 /// Upstream `ProcessEnv`: the environment a lookup or launch sees.
 pub type Env = HashMap<String, String>;
@@ -65,7 +66,23 @@ impl LaunchHost for SystemHost {
     }
 
     fn is_command_available(&self, command: &str, env: &Env) -> bool {
-        resolve_command_path(command, env).is_some()
+        let shell_env: ShellEnv = env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let ctx = ShellContext {
+            platform: Platform::current(),
+            host_env: &shell_env,
+            // Process-wide, as upstream's command-resolution cache is. The key
+            // includes PATH, so a changed search path never sees a stale answer.
+            cache: CommandResolutionCache::global(),
+            now: Instant::now(),
+        };
+        turin_shared::shell::is_command_available(
+            command,
+            &CommandAvailabilityOptions::default(),
+            &ctx,
+        )
     }
 
     fn read_directory(&self, path: &Path) -> Vec<String> {
@@ -136,45 +153,6 @@ impl LaunchHost for SystemHost {
     }
 }
 
-/// Command resolution on macOS: a command with a `/` is checked as-is,
-/// otherwise each PATH entry from `env` is tried in order.
-pub fn resolve_command_path(command: &str, env: &Env) -> Option<PathBuf> {
-    if command.contains('/') {
-        let candidate = PathBuf::from(command);
-        return is_executable_file(&candidate).then_some(candidate);
-    }
-    let path_value = env.get("PATH")?;
-    if path_value.is_empty() {
-        return None;
-    }
-    let mut seen = HashSet::new();
-    for entry in path_value.split(':') {
-        let entry = strip_wrapping_quotes(entry.trim());
-        if entry.is_empty() || !seen.insert(entry) {
-            continue;
-        }
-        let candidate = Path::new(entry).join(command);
-        if is_executable_file(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-/// Upstream `stripWrappingQuotes` (`/^"+|"+$/g`): drops every leading and
-/// trailing `"`, so a PATH entry written as `"/opt/x/bin"` still matches.
-fn strip_wrapping_quotes(value: &str) -> &str {
-    value.trim_matches('"')
-}
-
-/// `is_file` plus any execute bit set. Approximates `access(X_OK)` without
-/// the uid check.
-fn is_executable_file(path: &Path) -> bool {
-    fs::metadata(path)
-        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
 /// Process environment as an [`Env`] map.
 pub fn process_env() -> Env {
     std::env::vars().collect()
@@ -203,11 +181,8 @@ mod tests {
             format!("{}:{}", first.display(), second.display()),
         )]);
 
-        assert_eq!(
-            resolve_command_path("tool", &env),
-            Some(second.join("tool"))
-        );
-        assert_eq!(resolve_command_path("missing", &env), None);
+        assert!(SystemHost.is_command_available("tool", &env));
+        assert!(!SystemHost.is_command_available("missing", &env));
     }
 
     #[test]
@@ -218,10 +193,10 @@ mod tests {
         fs::set_permissions(&tool, fs::Permissions::from_mode(0o644)).unwrap();
         let env = Env::from([("PATH".to_owned(), home.path().display().to_string())]);
 
-        assert_eq!(resolve_command_path("tool", &env), None);
-        assert_eq!(
-            resolve_command_path("tool", &Env::from([("PATH".to_owned(), String::new())])),
-            None
+        assert!(!SystemHost.is_command_available("tool", &env));
+        assert!(
+            !SystemHost
+                .is_command_available("tool", &Env::from([("PATH".to_owned(), String::new())]))
         );
     }
 
@@ -236,7 +211,7 @@ mod tests {
             format!("  \"{}\"  :/usr/bin", bin.display()),
         )]);
 
-        assert_eq!(resolve_command_path("tool", &env), Some(tool));
+        assert!(SystemHost.is_command_available("tool", &env));
     }
 
     #[test]
@@ -245,10 +220,11 @@ mod tests {
         let tool = home.path().join("bin/tool");
         write_executable(&tool);
 
-        assert_eq!(
-            resolve_command_path(tool.to_str().unwrap(), &Env::new()),
-            Some(tool)
-        );
+        assert!(SystemHost.is_command_available(tool.to_str().unwrap(), &Env::new()));
+        assert!(!SystemHost.is_command_available(
+            home.path().join("bin/missing").to_str().unwrap(),
+            &Env::new()
+        ));
     }
 }
 

@@ -56,7 +56,7 @@ struct Endpoint {
 }
 
 enum Keepalive {
-    V1(OpenCodeServerProcess),
+    V1(Box<OpenCodeServerProcess>),
     V2(ServerLoan),
 }
 
@@ -275,7 +275,11 @@ impl ProviderAdapterV2 for OpenCodeAdapter {
                 .await?;
                 Ok(Arc::new(OpenCodeSession {
                     kind: SessionKind::V1(session),
-                    keepalive: Mutex::new(connection.process.map(Keepalive::V1)),
+                    keepalive: Mutex::new(
+                        connection
+                            .process
+                            .map(|process| Keepalive::V1(Box::new(process))),
+                    ),
                 }))
             }
             OpenCodeGeneration::V2 => {

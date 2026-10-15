@@ -55,7 +55,7 @@ when the logic is subtle (state machines, protocol framing, concurrency).
 |---|---|---|
 | wf_c926ef06-3ca | T03 design system + shell (+ look-and-feel) | FAIL: 1 high, 4 medium, 27 low. docs/qc/wf_c926ef06-3ca-T03-design-system.md |
 | wf_e8a1a7c1-d53 | T21 hooks (spec, lifecycle, security/trust, process) | running |
-| wf_d6d58e6c-789 | T24 app icon (visual fidelity, reproducibility) | running |
+| wf_d6d58e6c-789 | T24 app icon (visual fidelity, reproducibility) | PASS: 1 medium, 6 low; T scale needs user decision. docs/qc/wf_d6d58e6c-789-T24-icon.md |
 | wf_8b97ef76-9c9 | T02 persistence | PASS: 15 medium, 27 low → T02b. docs/qc/wf_8b97ef76-9c9-T02-persistence.md |
 | wf_b2f290b9-219 | T00a fix round (base_schemas helpers) | PASS: 6 low → T00c |
 | wf_42618e43-71a | T04 protocol docs (accuracy, completeness, Rust viability) | FAIL: 7 high, 18 medium → T04b. Cursor via ACP viable. docs/qc/wf_42618e43-71a-T04-protocols.md |
@@ -75,7 +75,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | done (merged; QC PASS) |
 | T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | active |
 | T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | QC FAIL (1 high) → fix round r4 active; sidebar items moved to T15 |
-| T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex | QC FAIL → T04b fix round active |
+| T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex | T04b fixes done (18/21; 2,15 partial) → re-QC |
 
 ### Wave 2: backend leaves (after T01)
 
@@ -125,5 +125,5 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T24 | Turin app icon: T3 Code icon with a single T | `assets/**` | Opus | review (QC wf_d6d58e6c-789) |
+| T24 | Turin app icon: T3 Code icon with a single T | `assets/**` | Opus | QC PASS; fix round r2 + 1.0× vs 1.25× comparison for user |
 | T24b | Wire icon: dev Dock icon, bundle .icns/actool, in-app mark | `crates/app` | Opus | todo (after T24 + T03 merge) |

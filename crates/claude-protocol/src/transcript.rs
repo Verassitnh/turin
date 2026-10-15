@@ -1001,6 +1001,43 @@ pub async fn get_session_messages(
         .collect();
     Ok(slice(messages, options.offset, options.limit))
 }
+fn valid_id(id: &str, allowed: impl Fn(char) -> bool) -> bool {
+    (1..=128).contains(&id.len()) && id.chars().all(allowed)
+}
+/// SDK `$We` + `zWe`: a plain parent walk from the last user/assistant entry, with no
+/// compact rewrites or sibling insertion.
+fn subagent_chain(entries: &[Value]) -> Vec<Value> {
+    let entries: Vec<&Value> = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.get("type").and_then(Value::as_str),
+                Some("user" | "assistant" | "attachment")
+            ) && entry_id(entry).is_some()
+        })
+        .collect();
+    let by_id: HashMap<&str, &Value> = entries
+        .iter()
+        .filter_map(|entry| Some((entry_id(entry)?, *entry)))
+        .collect();
+    let mut current = entries.iter().rev().copied().find(|entry| {
+        matches!(
+            entry.get("type").and_then(Value::as_str),
+            Some("user" | "assistant")
+        )
+    });
+    let mut seen = HashSet::new();
+    let mut chain = vec![];
+    while let Some(entry) = current {
+        if !seen.insert(entry_id(entry)) {
+            break;
+        }
+        chain.push(entry.clone());
+        current = parent_uuid(entry).and_then(|parent| by_id.get(parent).copied());
+    }
+    chain.reverse();
+    chain
+}
 pub async fn get_subagent_messages(
     id: &str,
     agent_id: &str,
@@ -1041,12 +1078,14 @@ pub async fn get_subagent_messages(
     let tool_id = metadata
         .as_ref()
         .and_then(|v| v.get("toolUseId"))
-        .and_then(Value::as_str);
+        .and_then(Value::as_str)
+        .filter(|id| valid_id(id, |c| c.is_ascii_alphanumeric() || "_.:-".contains(c)));
     let parent_id = metadata
         .as_ref()
         .and_then(|v| v.get("parentAgentId"))
-        .and_then(Value::as_str);
-    let messages = session_chain(&entries)
+        .and_then(Value::as_str)
+        .filter(|id| valid_id(id, |c| c.is_ascii_alphanumeric() || "_-".contains(c)));
+    let messages = subagent_chain(&entries)
         .into_iter()
         .filter(|e| {
             matches!(
@@ -1782,6 +1821,62 @@ mod tests {
         let listed = list_sessions(&options).await.unwrap();
         let source = listed.iter().find(|info| info.session_id == id).unwrap();
         assert_eq!(source.custom_title.as_deref(), Some("Head AI"));
+        fs::remove_dir_all(root).await.unwrap();
+    }
+    #[tokio::test]
+    async fn subagent_messages_use_a_plain_parent_walk_and_validate_ids() {
+        let (root, options, id, folder) = write_session(&[user("u1", None, "parent")]).await;
+        let sub = folder.join(&id).join("subagents");
+        fs::create_dir_all(&sub).await.unwrap();
+        let reply = |uuid: &str, text: &str| json!({"type":"assistant","uuid":uuid,"parentUuid":"s1","sessionId":id,"message":{"id":"m1","role":"assistant","content":[{"type":"text","text":text}]}});
+        let body = [
+            json!({"type":"user","uuid":"s1","parentUuid":null,"sessionId":id,"message":{"role":"user","content":"child"}}),
+            reply("s2", "sibling"),
+            reply("s3", "kept"),
+            json!({"type":"progress","uuid":"p1","parentUuid":"s3","sessionId":id}),
+            json!({"type":"user","uuid":"s4","parentUuid":"s3","sessionId":id,"message":{"role":"user","content":"next"}}),
+        ]
+        .iter()
+        .map(|entry| format!("{entry}\n"))
+        .collect::<String>();
+        fs::write(sub.join("agent-child.jsonl"), body)
+            .await
+            .unwrap();
+        fs::write(
+            sub.join("agent-child.meta.json"),
+            r#"{"toolUseId":"bad id!","parentAgentId":"agent.with.dots"}"#,
+        )
+        .await
+        .unwrap();
+        let messages = get_subagent_messages(&id, "child", &options).await.unwrap();
+        let uuids: Vec<&str> = messages
+            .iter()
+            .map(|message| message.uuid.as_str())
+            .collect();
+        assert_eq!(uuids, ["s1", "s3", "s4"]);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.parent_tool_use_id.is_none())
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.parent_agent_id.is_none())
+        );
+
+        fs::write(
+            sub.join("agent-child.meta.json"),
+            r#"{"toolUseId":"toolu_01:a.b-c","parentAgentId":"agent_1-x"}"#,
+        )
+        .await
+        .unwrap();
+        let messages = get_subagent_messages(&id, "child", &options).await.unwrap();
+        assert_eq!(
+            messages[0].parent_tool_use_id.as_deref(),
+            Some("toolu_01:a.b-c")
+        );
+        assert_eq!(messages[0].parent_agent_id.as_deref(), Some("agent_1-x"));
         fs::remove_dir_all(root).await.unwrap();
     }
     #[test]

@@ -1595,4 +1595,249 @@ mod service {
             json!({"driver": "cursor", "config": {"enabled": "nope"}})
         );
     }
+
+    // Ports of upstream serverSettings.test.ts, lines 1254-1480 (batch 6).
+
+    #[tokio::test]
+    async fn in_config_enabled_flags_fold_through_updates() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let next = service
+            .update_settings(&patch(json!({"providerInstances": {"grok": {
+                "driver": "grok",
+                "enabled": true,
+                "config": {"enabled": false, "binaryPath": "/opt/grok"},
+            }}})))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&next)["providerInstances"]["grok"],
+            json!({"driver": "grok", "enabled": false, "config": {"binaryPath": "/opt/grok"}})
+        );
+    }
+
+    #[tokio::test]
+    async fn observability_urls_and_the_base_directory_are_trimmed_on_update() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let next = service
+            .update_settings(&patch(json!({
+                "addProjectBaseDirectory": "  ~/Development  ",
+                "observability": {
+                    "otlpTracesUrl": "  http://localhost:4318/v1/traces  ",
+                    "otlpMetricsUrl": "  http://localhost:4318/v1/metrics  ",
+                    "otlpLogsUrl": "  http://localhost:4318/v1/logs  ",
+                },
+            })))
+            .await
+            .unwrap();
+        let value = settings_value(&next);
+        assert_eq!(value["addProjectBaseDirectory"], json!("~/Development"));
+        assert_eq!(
+            value["observability"],
+            json!({
+                "otlpTracesUrl": "http://localhost:4318/v1/traces",
+                "otlpMetricsUrl": "http://localhost:4318/v1/metrics",
+                "otlpLogsUrl": "http://localhost:4318/v1/logs",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn only_non_default_settings_are_written_to_disk() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        service
+            .update_settings(&patch(json!({
+                "addProjectBaseDirectory": "~/Development",
+                "observability": {
+                    "otlpTracesUrl": "http://localhost:4318/v1/traces",
+                    "otlpMetricsUrl": "http://localhost:4318/v1/metrics",
+                },
+                "automaticGitFetchInterval": 10_000,
+            })))
+            .await
+            .unwrap();
+        assert_eq!(
+            read_file(&fx.path),
+            json!({
+                "addProjectBaseDirectory": "~/Development",
+                "observability": {
+                    "otlpTracesUrl": "http://localhost:4318/v1/traces",
+                    "otlpMetricsUrl": "http://localhost:4318/v1/metrics",
+                },
+                "backgroundActivity": {
+                    "schemaVersion": 1,
+                    "profile": "custom",
+                    "baseProfile": "balanced",
+                    "overrides": {"automaticGitFetchInterval": 10_000},
+                },
+                "automaticGitFetchInterval": 10_000,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_inline_value_stays_on_disk_when_a_secret_write_fails() {
+        let fx = fixture().await;
+        let store = Arc::new(Flaky {
+            inner: MemorySecretStore::new(),
+            fail_writes: AtomicBool::new(true),
+        });
+        std::fs::create_dir_all(fx.path.parent().unwrap()).unwrap();
+        let original = r#"{"providerInstances":{"codex_personal":{"driver":"codex","environment":[{"name":"API_TOKEN","value":"inline-test-token","sensitive":true}],"config":{}}}}"#;
+        std::fs::write(&fx.path, original).unwrap();
+        let service = ServerSettingsService::new(&fx.path, store, fx.db.clone());
+        let error = service
+            .update_settings(&patch(json!({"providerInstances": {"codex_personal": {
+                "driver": "codex",
+                "environment": [{"name": "API_TOKEN", "value": "", "sensitive": true, "valueRedacted": true}],
+                "config": {},
+            }}})))
+            .await
+            .unwrap_err();
+        let ServerSettingsError::ServerSettingsError { operation, .. } = &error;
+        assert_eq!(operation.as_str(), "write-secret");
+        assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), original);
+        let settings = settings_value(&service.get_settings().await.unwrap());
+        assert_eq!(
+            settings["providerInstances"]["codex_personal"]["environment"][0]["value"],
+            json!("inline-test-token")
+        );
+    }
+
+    /// Writes an inline secret, saves `variable` over it, and checks what is kept
+    /// on disk and what a fresh service reads back.
+    async fn save_over_inline_secret(variable: Value, expected: &str, duplicate: bool) {
+        let fx = fixture().await;
+        let original = if duplicate {
+            r#"{"providerInstances":{"codex_personal":{"driver":"codex","environment":[{"name":"API_TOKEN","value":"inline-test-token","sensitive":true},{"name":"API_TOKEN","value":"last-inline-test-token","sensitive":true}],"config":{}}}}"#
+        } else {
+            r#"{"providerInstances":{"codex_personal":{"driver":"codex","environment":[{"name":"API_TOKEN","value":"inline-test-token","sensitive":true}],"config":{}}}}"#
+        };
+        write_raw_settings(&fx.path, original);
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let initial = settings_value(&service.get_settings().await.unwrap());
+        assert_eq!(
+            initial["providerInstances"]["codex_personal"]["environment"][0]["value"],
+            json!(if duplicate {
+                "inline-test-token"
+            } else {
+                "inline-test-token"
+            })
+        );
+
+        let environment = if duplicate {
+            json!([variable, variable])
+        } else {
+            json!([variable])
+        };
+        let next = service
+            .update_settings(&patch(json!({"providerInstances": {"codex_personal": {
+                "driver": "codex",
+                "displayName": "Renamed provider",
+                "environment": environment,
+                "config": {},
+            }}})))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&next)["providerInstances"]["codex_personal"]["environment"][0]["value"],
+            json!(expected)
+        );
+        let raw = std::fs::read_to_string(&fx.path).unwrap();
+        assert!(!raw.contains("inline-test-token"));
+        assert!(!raw.contains("replacement-test-token"));
+
+        let fresh = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let reloaded = settings_value(&fresh.get_settings().await.unwrap());
+        assert_eq!(
+            reloaded["providerInstances"]["codex_personal"]["environment"][0]["value"],
+            json!(expected)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_inline_secret_is_preserved_on_a_redacted_settings_save() {
+        save_over_inline_secret(
+            json!({"name": "API_TOKEN", "value": "", "sensitive": true, "valueRedacted": true}),
+            "inline-test-token",
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_effective_last_inline_secret_is_preserved_when_names_are_duplicated() {
+        save_over_inline_secret(
+            json!({"name": "API_TOKEN", "value": "", "sensitive": true, "valueRedacted": true}),
+            "last-inline-test-token",
+            true,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_inline_secret_is_replaced_by_an_explicit_value() {
+        save_over_inline_secret(
+            json!({"name": "API_TOKEN", "value": "replacement-test-token", "sensitive": true}),
+            "replacement-test-token",
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_inline_secret_is_cleared_by_an_explicit_empty_value() {
+        save_over_inline_secret(
+            json!({"name": "API_TOKEN", "value": "", "sensitive": true}),
+            "",
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_secret_operations_keep_their_order_for_either_sensitive_position() {
+        for sensitive_last in [true, false] {
+            let fx = fixture().await;
+            let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+            let secret = json!({"name": "API_TOKEN", "value": "secret-last", "sensitive": true});
+            let plain = json!({"name": "API_TOKEN", "value": "plain-last", "sensitive": false});
+            let environment = if sensitive_last {
+                json!([plain, secret])
+            } else {
+                json!([secret, plain])
+            };
+            let next = service
+                .update_settings(&patch(json!({"providerInstances": {"codex_duplicate": {
+                    "driver": "codex",
+                    "environment": environment,
+                    "config": {},
+                }}})))
+                .await
+                .unwrap();
+            let env = &settings_value(&next)["providerInstances"]["codex_duplicate"]["environment"];
+            let last = env.as_array().unwrap().last().unwrap();
+            assert_eq!(
+                last["value"],
+                json!(if sensitive_last {
+                    "secret-last"
+                } else {
+                    "plain-last"
+                }),
+                "sensitive_last={sensitive_last}"
+            );
+            let sensitive = env
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["sensitive"] == json!(true));
+            assert_eq!(
+                sensitive.map(|entry| entry["value"].clone()),
+                Some(json!(if sensitive_last { "secret-last" } else { "" })),
+                "sensitive_last={sensitive_last}"
+            );
+        }
+    }
 }

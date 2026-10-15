@@ -16,6 +16,7 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use turin_contracts::orchestration_v2::OrchestrationV2NotificationOutcome;
 use turin_contracts::{
     MessageId, NodeId, PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId,
     TrimmedNonEmptyString, UtcDateTime,
@@ -39,6 +40,9 @@ use turin_contracts::{
     },
 };
 use turin_provider_core::id_allocator::{IdAllocator, derive};
+use turin_provider_core::notification::{
+    BackgroundWork, BackgroundWorkKind, BackgroundWorkReport, background_work_notification,
+};
 use turin_provider_core::provider_continuation_requests::{
     ProviderContinuationDelivery, ProviderContinuationRequest, ProviderContinuationRequests,
 };
@@ -132,6 +136,8 @@ struct Pending {
 /// provider thread, the task's prompt, and the turns its executions run.
 struct V2Child {
     thread: OrchestrationV2AppThread,
+    /// The title the task call gave, which the child's reports are labelled with.
+    title: Option<String>,
     provider_thread: OrchestrationV2ProviderThread,
     parent_thread: ThreadId,
     prompt: String,
@@ -151,8 +157,16 @@ struct V2Inner {
     /// The wake each idle session is in: an execution OpenCode started on its own.
     wakes: HashMap<String, Wake>,
     /// Subagent reports waiting in each session's inbox for the next wake.
-    reports: HashMap<String, Vec<String>>,
+    reports: HashMap<String, Vec<WakeReport>>,
     wake_seq: u64,
+}
+
+/// A subagent's report waiting in the inbox (upstream's `state.reports`).
+struct WakeReport {
+    text: String,
+    label: Option<String>,
+    child_thread: Option<ThreadId>,
+    outcome: OrchestrationV2NotificationOutcome,
 }
 
 /// A turn OpenCode started on its own while the thread had none (upstream `Wake`). The
@@ -1114,11 +1128,26 @@ impl OpenCodeV2Session {
             };
             guard.wake_seq += 1;
             let message_id = IdAllocator.message(&route, guard.wake_seq);
-            let detail = guard
-                .reports
-                .remove(session_id)
-                .filter(|texts| !texts.is_empty())
-                .map(|texts| texts.join("\n\n"));
+            let reports = guard.reports.remove(session_id).unwrap_or_default();
+            let detail = (!reports.is_empty()).then(|| {
+                reports
+                    .iter()
+                    .map(|report| report.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            });
+            let background: Vec<BackgroundWorkReport> = reports
+                .iter()
+                .map(|report| BackgroundWorkReport {
+                    work: BackgroundWork {
+                        label: report.label.clone(),
+                        kind: BackgroundWorkKind::Subagent {
+                            child_thread_id: report.child_thread.clone(),
+                        },
+                    },
+                    outcome: report.outcome,
+                })
+                .collect();
             guard.wakes.insert(
                 session_id.to_owned(),
                 Wake {
@@ -1131,7 +1160,7 @@ impl OpenCodeV2Session {
                 provider_thread_id,
                 driver: self.driver.clone(),
                 detail,
-                notification: None,
+                notification: background_work_notification(&background),
                 delegated_completion: None,
                 // The adapter parks the CLI's output itself, so the dispatch only ingests it.
                 delivery: Some(ProviderContinuationDelivery::AdapterBuffered),
@@ -1165,26 +1194,51 @@ impl OpenCodeV2Session {
             return;
         }
         let payload = item.get("payload");
-        let source = payload
-            .and_then(|payload| payload.pointer("/metadata/source"))
-            .and_then(Value::as_str);
-        let child = payload
-            .and_then(|payload| payload.pointer("/metadata/childID"))
-            .and_then(Value::as_str);
-        let text = payload
-            .and_then(|payload| payload.get("text"))
-            .and_then(Value::as_str);
-        if source != Some("subagent") || child.is_none() {
+        let metadata = |key: &str| {
+            payload
+                .and_then(|payload| payload.pointer(&format!("/metadata/{key}")))
+                .and_then(Value::as_str)
+        };
+        let Some(child) = metadata("childID") else {
+            return;
+        };
+        if metadata("source") != Some("subagent") {
             return;
         }
-        if let Some(text) = text {
-            self.inner
-                .lock()
-                .reports
-                .entry(session_id.to_owned())
-                .or_default()
-                .push(text.to_owned());
-        }
+        let Some(text) = payload
+            .and_then(|payload| payload.get("text"))
+            .and_then(Value::as_str)
+        else {
+            return;
+        };
+        let outcome = match metadata("state") {
+            Some("completed") => OrchestrationV2NotificationOutcome::Completed,
+            Some("error") => OrchestrationV2NotificationOutcome::Failed,
+            Some("cancelled") => OrchestrationV2NotificationOutcome::Cancelled,
+            _ => OrchestrationV2NotificationOutcome::Unknown,
+        };
+        let mut guard = self.inner.lock();
+        // The label is the task's title, else the description OpenCode sent.
+        let (label, child_thread) = match guard.subagents.get(child) {
+            Some(known) => (
+                known
+                    .title
+                    .clone()
+                    .or_else(|| metadata("description").map(str::to_owned)),
+                Some(known.thread.id.clone()),
+            ),
+            None => (metadata("description").map(str::to_owned), None),
+        };
+        guard
+            .reports
+            .entry(session_id.to_owned())
+            .or_default()
+            .push(WakeReport {
+                text: text.to_owned(),
+                label,
+                child_thread,
+                outcome,
+            });
     }
 
     /// `emitSubagent`'s child thread: created the first time a task reveals its child session.
@@ -1248,6 +1302,7 @@ impl OpenCodeV2Session {
             child_session.to_owned(),
             V2Child {
                 thread,
+                title: title.map(str::to_owned),
                 provider_thread,
                 parent_thread: parent.thread_id.clone(),
                 prompt: prompt.to_owned(),

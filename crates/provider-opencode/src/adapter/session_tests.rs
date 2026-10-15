@@ -1787,6 +1787,8 @@ async fn v2_wake_offers_a_continuation_and_parks_the_execution_events() {
     assert_eq!(offer.thread_id, ThreadId::new("thread_1").unwrap());
     assert_eq!(offer.provider_thread_id, thread_id);
     assert_eq!(offer.detail.as_deref(), Some("the report"));
+    // The reports make the wake's notification, as upstream's backgroundWorkNotification.
+    assert!(offer.notification.is_some());
     assert_eq!(
         offer.delivery,
         Some(turin_provider_core::provider_continuation_requests::ProviderContinuationDelivery::AdapterBuffered)

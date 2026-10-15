@@ -6975,10 +6975,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "indexmap",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "turin-contracts",
+ "turin-shared",
+ "unicode-normalization",
 ]
 
 [[package]]

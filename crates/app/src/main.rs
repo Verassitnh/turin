@@ -4,6 +4,9 @@ mod assets;
 mod branding;
 mod components;
 mod hooks;
+// Pure settings logic is ported ahead of the views that consume it.
+#[allow(dead_code)]
+mod settings;
 mod theme;
 // The ui primitives are a library: every upstream variant and size is ported
 // ahead of its callers.

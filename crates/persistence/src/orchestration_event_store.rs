@@ -7,7 +7,9 @@
 //!
 //! `publish_committed` is in-memory and must run after `Db::write` returns.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+
+use indexmap::IndexMap;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -146,8 +148,7 @@ pub struct AgentReplayStats {
 
 #[derive(Clone, Default)]
 struct PromptHints {
-    order: VecDeque<String>,
-    values: HashMap<String, i64>,
+    values: IndexMap<String, i64>,
 }
 
 impl PromptHints {
@@ -156,15 +157,10 @@ impl PromptHints {
     }
 
     fn remember(&mut self, key: String, sequence: i64) {
-        if self.values.contains_key(&key) {
-            self.order.retain(|existing| existing != &key);
-        }
-        self.order.push_back(key.clone());
+        self.values.shift_remove(&key);
         self.values.insert(key, sequence);
         while self.values.len() > PROMPT_HINT_CAP {
-            if let Some(oldest) = self.order.pop_front() {
-                self.values.remove(&oldest);
-            }
+            self.values.shift_remove_index(0);
         }
     }
 }

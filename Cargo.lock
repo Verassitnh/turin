@@ -6831,6 +6831,7 @@ name = "turin-persistence"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "indexmap",
  "parking_lot",
  "pretty_assertions",
  "regex",

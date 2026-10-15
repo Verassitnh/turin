@@ -99,6 +99,20 @@ impl V2Client {
         .await
     }
 
+    /// `session.remove`: deletes the session. A text generation session is removed
+    /// after its one prompt, so OpenCode does not keep it.
+    pub async fn remove_session(&self, session_id: &str) -> Result<(), OpenCodeRuntimeError> {
+        self.empty(
+            "session.remove",
+            Method::DELETE,
+            &format!("/api/session/{}", encode(session_id)),
+            &[],
+            None,
+            &[200, 204],
+        )
+        .await
+    }
+
     pub async fn session_active(&self) -> Result<Map<String, Value>, OpenCodeRuntimeError> {
         self.unwrap_data(
             "session.active",
@@ -883,6 +897,25 @@ mod tests {
         assert_eq!(first["id"], "m1");
         assert_eq!(second["id"], "m2");
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_session_is_delete_on_the_session_path() {
+        let server = FakeServer::spawn(|request| {
+            assert_eq!(request.method, "DELETE");
+            assert_eq!(request.target, "/api/session/ses_1");
+            FakeResponse::empty(204)
+        })
+        .await;
+        let client = V2Client::connect(&server.url, "pw").unwrap();
+        client.remove_session("ses_1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remove_session_reports_a_missing_session() {
+        let server = FakeServer::spawn(|_| FakeResponse::json(404, r#"{"error":"missing"}"#)).await;
+        let client = V2Client::connect(&server.url, "pw").unwrap();
+        assert!(client.remove_session("ses_gone").await.is_err());
     }
 
     #[tokio::test]

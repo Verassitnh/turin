@@ -65,6 +65,7 @@ fn native_ref(id: &str) -> OrchestrationV2ProviderRef {
         ordinal: None,
     }
 }
+#[allow(clippy::result_large_err)]
 fn native_id(thread: &OrchestrationV2ProviderThread) -> Result<&str, ProviderAdapterV2Error> {
     thread
         .native_thread_ref
@@ -685,16 +686,13 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
         );
         params["threadId"] = json!(native);
         if let (Some(target), Some(turns)) = (&input.provider_turn_id, &input.source_provider_turns)
+            && let Some(turn) = turns.iter().find(|turn| &turn.id == target)
+            && let Some(id) = turn
+                .native_turn_ref
+                .as_ref()
+                .and_then(|r| r.native_id.as_ref())
         {
-            if let Some(turn) = turns.iter().find(|turn| &turn.id == target) {
-                if let Some(id) = turn
-                    .native_turn_ref
-                    .as_ref()
-                    .and_then(|r| r.native_id.as_ref())
-                {
-                    params["lastTurnId"] = json!(id.as_str());
-                }
-            }
+            params["lastTurnId"] = json!(id.as_str());
         }
         let response = self
             .session

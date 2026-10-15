@@ -12,6 +12,8 @@ pub mod codex_text_generation;
 pub mod command;
 pub mod git_branch_names;
 pub mod json_reply;
+pub mod opencode2_text_generation;
+pub mod opencode_text_generation;
 pub mod text_generation;
 pub mod text_generation_operations;
 pub mod text_generation_policy;

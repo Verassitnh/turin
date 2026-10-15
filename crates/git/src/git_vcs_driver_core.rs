@@ -4,17 +4,27 @@
 //! it echoes argv and remote URLs, which can carry credentials. Matching it
 //! against fixed patterns yields a tag and a message that quotes none of the
 //! matched text.
+//!
+//! `GitCommandError` stays unboxed so callers match the contract variant.
+
+#![allow(clippy::result_large_err)]
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use regex::Regex;
-use turin_contracts::git::{GitCommandFailureReason, VcsRef};
+use tokio::sync::Semaphore;
+use turin_contracts::git::{GitCommandError, GitCommandFailureReason, VcsRef};
 use turin_contracts::review::ReviewDiffFileStat;
 
+use crate::process::{OutputMode, ProcessRunError, ProcessRunInput, ProcessRunner};
 use crate::remote_refs::parse_remote_ref_with_remote_names;
 
 pub const GIT_LIST_BRANCHES_DEFAULT_LIMIT: usize = 100;
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_000_000;
+const OUTPUT_TRUNCATED_MARKER: &str = "\n\n[truncated]";
 
 static BRANCH_AB: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\+(\d+)\s+-(\d+)$").unwrap());
 static REVIEW_NUMSTAT: LazyLock<Regex> =
@@ -610,6 +620,250 @@ fn js_parse_int(value: &str) -> i64 {
     if negative { -magnitude } else { magnitude }
 }
 
+pub struct ExecuteGitInput {
+    pub operation: String,
+    pub cwd: String,
+    pub args: Vec<String>,
+    pub stdin: Option<String>,
+    pub env: Option<HashMap<String, String>>,
+    /// `None` uses the 30s default. `Some(None)` waits until git exits.
+    pub timeout: Option<Option<Duration>>,
+    pub allow_non_zero_exit: bool,
+    pub max_output_bytes: Option<usize>,
+    pub append_truncation_marker: bool,
+}
+
+impl ExecuteGitInput {
+    pub fn new(operation: impl Into<String>, cwd: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            operation: operation.into(),
+            cwd: cwd.into(),
+            args,
+            stdin: None,
+            env: None,
+            timeout: None,
+            allow_non_zero_exit: false,
+            max_output_bytes: None,
+            append_truncation_marker: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecuteGitResult {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
+/// Direct `git <args>` with spawn cwd set to the repo. `GIT_OPTIONAL_LOCKS=0`
+/// so status polling does not take `index.lock`. Trace2 span events are not
+/// emitted; see PORTING.md.
+pub struct GitVcsDriverCore {
+    git_processes: Arc<Semaphore>,
+}
+
+impl GitVcsDriverCore {
+    pub fn new() -> Self {
+        Self {
+            git_processes: Arc::new(Semaphore::new(8)),
+        }
+    }
+
+    pub async fn execute(
+        &self,
+        input: ExecuteGitInput,
+    ) -> Result<ExecuteGitResult, GitCommandError> {
+        let timeout = input.timeout.unwrap_or(Some(DEFAULT_TIMEOUT));
+        let admits = match timeout {
+            None => false,
+            Some(duration) => duration <= DEFAULT_TIMEOUT,
+        };
+        let _permit = if admits {
+            Some(
+                self.git_processes
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| {
+                        git_error(
+                            &input,
+                            "Failed to spawn Git process.",
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        let mut env: HashMap<String, String> = std::env::vars().collect();
+        env.insert("GIT_OPTIONAL_LOCKS".to_owned(), "0".to_owned());
+        if let Some(extra) = &input.env {
+            env.extend(extra.clone());
+        }
+        env.extend(windows_long_path_config_env(host_platform(), &env));
+
+        let max_output_bytes = input.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES);
+        let mut run = ProcessRunInput::new("git", input.args.clone());
+        run.cwd = Some(input.cwd.clone());
+        run.spawn_cwd = Some(input.cwd.clone());
+        run.timeout = Some(timeout);
+        run.env = Some(env);
+        run.stdin = input.stdin.clone();
+        run.max_output_bytes = Some(max_output_bytes);
+        if input.append_truncation_marker {
+            run.output_mode = Some(OutputMode::Truncate);
+            run.truncated_marker = Some(OUTPUT_TRUNCATED_MARKER.to_owned());
+        }
+
+        let output = ProcessRunner.run(run).await.map_err(|error| match error {
+            ProcessRunError::Spawn { cause, .. } => git_error(
+                &input,
+                "Failed to spawn Git process.",
+                None,
+                None,
+                None,
+                None,
+                Some(cause),
+            ),
+            ProcessRunError::Stdin { cause, .. } => git_error(
+                &input,
+                "Failed to write Git process input.",
+                None,
+                None,
+                None,
+                None,
+                Some(cause),
+            ),
+            ProcessRunError::Read { stream, cause, .. } => {
+                let detail = if stream == crate::process::ProcessStream::ExitCode {
+                    "Failed to read Git process exit code."
+                } else {
+                    "Failed to read Git process output."
+                };
+                git_error(&input, detail, None, None, None, None, Some(cause))
+            }
+            ProcessRunError::OutputLimit { observed_bytes, .. } => git_error(
+                &input,
+                &format!("Git output exceeded {max_output_bytes} bytes and was truncated."),
+                None,
+                None,
+                None,
+                Some(observed_bytes as f64),
+                None,
+            ),
+            ProcessRunError::Timeout { .. } => git_error(
+                &input,
+                "Git command timed out.",
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+        })?;
+
+        if !input.allow_non_zero_exit && output.code != Some(0) {
+            let reason = classify_git_failure(&output.stderr);
+            return Err(git_error(
+                &input,
+                "Git command exited with a non-zero status.",
+                output.code.map(|code| code as f64),
+                Some(output.stdout.chars().count() as f64),
+                Some(output.stderr.chars().count() as f64),
+                None,
+                None,
+            )
+            .with_reason(reason));
+        }
+
+        Ok(ExecuteGitResult {
+            exit_code: output.code,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            stdout_truncated: output.stdout_truncated,
+            stderr_truncated: output.stderr_truncated,
+        })
+    }
+}
+
+impl Default for GitVcsDriverCore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn host_platform() -> &'static str {
+    if cfg!(windows) { "win32" } else { "other" }
+}
+
+fn git_error(
+    input: &ExecuteGitInput,
+    detail: &str,
+    exit_code: Option<f64>,
+    stdout_length: Option<f64>,
+    stderr_length: Option<f64>,
+    output_length: Option<f64>,
+    cause: Option<String>,
+) -> GitCommandError {
+    GitCommandError::GitCommandError {
+        operation: input.operation.clone(),
+        command: "git".to_owned(),
+        cwd: input.cwd.clone(),
+        argument_count: Some(input.args.len() as f64),
+        exit_code,
+        stdout_length,
+        stderr_length,
+        output_length,
+        reason: None,
+        detail: detail.to_owned(),
+        cause: cause.map(|message| serde_json::json!({ "message": message })),
+    }
+}
+
+trait WithReason {
+    fn with_reason(self, reason: Option<GitCommandFailureReason>) -> Self;
+}
+
+impl WithReason for GitCommandError {
+    fn with_reason(self, reason: Option<GitCommandFailureReason>) -> Self {
+        match self {
+            Self::GitCommandError {
+                operation,
+                command,
+                cwd,
+                argument_count,
+                exit_code,
+                stdout_length,
+                stderr_length,
+                output_length,
+                detail,
+                cause,
+                ..
+            } => Self::GitCommandError {
+                operation,
+                command,
+                cwd,
+                argument_count,
+                exit_code,
+                stdout_length,
+                stderr_length,
+                output_length,
+                reason,
+                detail,
+                cause,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -815,5 +1069,50 @@ mod tests {
                 behind: 1
             }
         );
+    }
+
+    #[tokio::test]
+    async fn non_zero_git_keeps_the_reason_and_drops_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().display().to_string();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&cwd)
+            .status()
+            .unwrap();
+        let secret = "secret-token-value";
+        let error = GitVcsDriverCore::new()
+            .execute(ExecuteGitInput::new(
+                "GitVcsDriver.test.redactedFailure",
+                &cwd,
+                vec!["status".to_owned(), format!("--unknown-option={secret}")],
+            ))
+            .await
+            .expect_err("unknown option fails");
+        let GitCommandError::GitCommandError {
+            detail,
+            reason,
+            command,
+            argument_count,
+            ..
+        } = error;
+        assert_eq!(command, "git");
+        assert_eq!(argument_count, Some(2.0));
+        assert!(!detail.contains(secret));
+        assert_eq!(reason, None);
+        assert!(!detail.contains("fatal"));
+
+        let bare = tempfile::tempdir().unwrap();
+        let missing = GitVcsDriverCore::new()
+            .execute(ExecuteGitInput::new(
+                "GitVcsDriver.test.missingRepo",
+                bare.path().display().to_string(),
+                vec!["rev-parse".to_owned(), "--is-inside-work-tree".to_owned()],
+            ))
+            .await
+            .expect_err("not a repository");
+        let GitCommandError::GitCommandError { reason, detail, .. } = missing;
+        assert_eq!(reason, Some(GitCommandFailureReason::NotARepository));
+        assert!(!detail.contains("fatal"));
     }
 }

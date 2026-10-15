@@ -194,3 +194,4 @@ Hooks get event JSON on stdin and `TURIN_*` env vars (`TURIN_EVENT`,
 | `contracts/base_schemas.rs` | `isUnknownUnionMember(value)` | no function; match `ForwardCompatible::Unknown` | Rust enums make it a pattern |
 | `contracts/base_schemas.rs` | `PortSchema` | omitted | only used by cut features |
 | `contracts/base_schemas.rs` | cut-feature exports (AuthSessionId, RpcClientId, SecretRef, DpopFailureReason, Client* enums) | omitted | features cut (PORTING cut list) |
+| `git/git_vcs_driver_core.rs` | trace2 JSON monitor emits span events for every git command | not emitted | span events are observability; command results, env, and timeouts are unchanged |

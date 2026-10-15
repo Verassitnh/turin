@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, Weak};
 use async_trait::async_trait;
 use futures::stream::{self, unfold};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use turin_acp::compat::InitializeResponse;
 use turin_acp::cursor::{AskQuestionParams, CreatePlanParams};
 use turin_acp::protocol::RequestContext;
@@ -84,46 +84,19 @@ pub enum RuntimeReply {
     Plan(PlanDisposition),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum CursorEvent {
-    Update(CursorUpdate),
-    Approval {
-        request_id: String,
-        title: Option<String>,
-        kind: turin_contracts::orchestration_v2::OrchestrationV2RuntimeRequestKind,
-        options: Vec<turin_contracts::provider_policy::ProviderApprovalOption>,
-        ask_question_fallback: bool,
-    },
-    UserInput {
-        request_id: String,
-        tool_call_id: String,
-        questions: Vec<turin_contracts::orchestration_v2::OrchestrationV2UserInputQuestion>,
-        raw: Value,
-    },
-    Plan {
-        request_id: String,
-        tool_call_id: String,
-        markdown: String,
-        steps: Vec<turin_contracts::orchestration_v2::OrchestrationV2PlanStep>,
-        raw: Value,
-    },
-    Todos {
-        raw: Value,
-    },
-    Task {
-        raw: Value,
-    },
-    Image {
-        raw: Value,
-    },
-    TurnSettled {
-        stop_reason: Option<String>,
-    },
+/// What a waiting card asked for, read without taking the card.
+enum Waiting {
+    Permission,
+    Ask(AskQuestionParams),
+    Plan,
 }
 
 enum Pending {
     Permission(oneshot::Sender<ProviderApprovalDecision>),
-    Ask(oneshot::Sender<AskDisposition>),
+    Ask {
+        sender: oneshot::Sender<AskDisposition>,
+        params: AskQuestionParams,
+    },
     Plan(oneshot::Sender<PlanDisposition>),
 }
 
@@ -138,11 +111,8 @@ struct ActiveTurn {
 
 struct SessionInner {
     client: AcpClient,
-    events: mpsc::UnboundedSender<CursorEvent>,
     provider_events: mpsc::UnboundedSender<ProviderAdapterV2Event>,
     pending: Mutex<HashMap<String, Pending>>,
-    pending_kind: Mutex<HashMap<String, PendingKind>>,
-    asks: Mutex<HashMap<String, turin_acp::cursor::AskQuestionParams>>,
     grants: Mutex<HashSet<String>>,
     thread: Mutex<Option<CursorThread>>,
     provider_thread: Mutex<Option<OrchestrationV2ProviderThread>>,
@@ -156,13 +126,6 @@ struct SessionInner {
     driver: ProviderDriverKind,
     provider_session_id: ProviderSessionId,
     provider_session: OrchestrationV2ProviderSession,
-}
-
-#[derive(Clone, Copy)]
-enum PendingKind {
-    Permission,
-    Ask,
-    Plan,
 }
 
 impl Drop for SessionInner {
@@ -180,7 +143,7 @@ fn cancel_pending(item: Pending) {
         Pending::Permission(sender) => {
             let _ = sender.send(ProviderApprovalDecision::Cancel);
         }
-        Pending::Ask(sender) => {
+        Pending::Ask { sender, .. } => {
             let _ = sender.send(AskDisposition::Cancelled);
         }
         Pending::Plan(sender) => {
@@ -236,7 +199,6 @@ impl CursorAdapter {
 #[derive(Clone)]
 pub struct CursorSession {
     inner: Arc<SessionInner>,
-    events: Arc<AsyncMutex<mpsc::UnboundedReceiver<CursorEvent>>>,
     provider_events: Arc<Mutex<Option<mpsc::UnboundedReceiver<ProviderAdapterV2Event>>>>,
 }
 
@@ -265,7 +227,6 @@ impl CursorSession {
         cwd: String,
         model: Option<TrimmedNonEmptyString>,
     ) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
         let (provider_tx, provider_rx) = mpsc::unbounded_channel();
         let now = UtcDateTime::now();
         let provider_session = OrchestrationV2ProviderSession {
@@ -283,11 +244,8 @@ impl CursorSession {
         };
         let inner = Arc::new(SessionInner {
             client: client.clone(),
-            events: tx,
             provider_events: provider_tx,
             pending: Mutex::new(HashMap::new()),
-            pending_kind: Mutex::new(HashMap::new()),
-            asks: Mutex::new(HashMap::new()),
             grants: Mutex::new(HashSet::new()),
             thread: Mutex::new(None),
             provider_thread: Mutex::new(None),
@@ -305,7 +263,6 @@ impl CursorSession {
         register_handlers(&client, &inner);
         Self {
             inner,
-            events: Arc::new(AsyncMutex::new(rx)),
             provider_events: Arc::new(Mutex::new(Some(provider_rx))),
         }
     }
@@ -329,10 +286,6 @@ impl CursorSession {
         *self.inner.initialize.lock().expect("initialize") = Some(response.clone());
         self.refresh_capabilities(None);
         Ok(response)
-    }
-
-    pub async fn recv(&self) -> Option<CursorEvent> {
-        self.events.lock().await.recv().await
     }
 
     pub fn auth_status(&self) -> CursorSignInStatus {
@@ -564,13 +517,20 @@ impl CursorSession {
             .get("stopReason")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let _ = self.inner.events.send(CursorEvent::TurnSettled {
-            stop_reason: stop_reason.clone(),
-        });
         Ok(PromptOutcome {
             stop_reason,
             raw: result,
         })
+    }
+
+    /// The kind of card still open for `request_id`, without closing it.
+    fn waiting(&self, request_id: &str) -> Option<Waiting> {
+        let pending = self.inner.pending.lock().expect("pending");
+        match pending.get(request_id)? {
+            Pending::Permission(_) => Some(Waiting::Permission),
+            Pending::Plan(_) => Some(Waiting::Plan),
+            Pending::Ask { params, .. } => Some(Waiting::Ask(params.clone())),
+        }
     }
 
     /// Cancels waiting cards, then `session/cancel`.
@@ -601,7 +561,7 @@ impl CursorSession {
             (Pending::Permission(sender), RuntimeReply::Approval(decision)) => {
                 sender.send(decision).is_ok()
             }
-            (Pending::Ask(sender), RuntimeReply::UserInput(disposition)) => {
+            (Pending::Ask { sender, .. }, RuntimeReply::UserInput(disposition)) => {
                 sender.send(disposition).is_ok()
             }
             (Pending::Plan(sender), RuntimeReply::Plan(disposition)) => {
@@ -1197,41 +1157,27 @@ impl ProviderSessionRuntime for CursorSession {
         input: ProviderAdapterV2RuntimeRequestResponseInput,
     ) -> Result<(), ProviderAdapterV2Error> {
         let request_id = input.request_id.as_str();
-        let kind = self
-            .inner
-            .pending_kind
-            .lock()
-            .expect("pending kind")
-            .get(request_id)
-            .copied();
-        let reply = match kind {
-            Some(PendingKind::Ask) => {
-                let params = self
-                    .inner
-                    .asks
-                    .lock()
-                    .expect("asks")
-                    .get(request_id)
-                    .cloned();
+        let (reply, request_kind) = match self.waiting(request_id) {
+            Some(Waiting::Ask(params)) => {
                 let cancelled = input.decision == Some(ProviderApprovalDecision::Cancel);
-                let disposition = match params {
-                    Some(params) => extensions::ask_disposition_from_answers(
-                        &params,
-                        input.answers.as_ref().unwrap_or(&Default::default()),
-                        cancelled,
-                    ),
-                    None => AskDisposition::Cancelled,
-                };
-                RuntimeReply::UserInput(disposition)
+                let disposition = extensions::ask_disposition_from_answers(
+                    &params,
+                    input.answers.as_ref().unwrap_or(&Default::default()),
+                    cancelled,
+                );
+                (
+                    RuntimeReply::UserInput(disposition),
+                    OrchestrationV2RuntimeRequestKind::UserInput,
+                )
             }
-            Some(PendingKind::Plan) => RuntimeReply::Plan(plan_disposition(input.decision)),
-            _ => RuntimeReply::Approval(input.decision.unwrap_or(ProviderApprovalDecision::Cancel)),
-        };
-        let request_kind = match kind {
-            Some(PendingKind::Ask) | Some(PendingKind::Plan) => {
-                OrchestrationV2RuntimeRequestKind::UserInput
-            }
-            _ => OrchestrationV2RuntimeRequestKind::Permission,
+            Some(Waiting::Plan) => (
+                RuntimeReply::Plan(plan_disposition(input.decision)),
+                OrchestrationV2RuntimeRequestKind::UserInput,
+            ),
+            _ => (
+                RuntimeReply::Approval(input.decision.unwrap_or(ProviderApprovalDecision::Cancel)),
+                OrchestrationV2RuntimeRequestKind::Permission,
+            ),
         };
         self.answer_request(request_id, reply).map_err(|error| {
             map_error(
@@ -1242,12 +1188,6 @@ impl ProviderSessionRuntime for CursorSession {
                 error,
             )
         })?;
-        self.inner
-            .pending_kind
-            .lock()
-            .expect("pending kind")
-            .remove(request_id);
-        self.inner.asks.lock().expect("asks").remove(request_id);
         let status = if input.decision == Some(ProviderApprovalDecision::Cancel) {
             OrchestrationV2RuntimeRequestStatus::Cancelled
         } else {
@@ -1320,7 +1260,6 @@ fn register_handlers(client: &AcpClient, inner: &Arc<SessionInner>) {
                 if let Some(inner) = weak.upgrade() {
                     for update in events::parse_session_update(&params) {
                         emit_update(&inner, &update);
-                        let _ = inner.events.send(CursorEvent::Update(update));
                     }
                 }
                 Ok(())
@@ -1336,19 +1275,9 @@ fn register_handlers(client: &AcpClient, inner: &Arc<SessionInner>) {
     }
     register_ask(client, inner);
     register_plan(client, inner);
-    register_side(
-        client,
-        inner,
-        turin_acp::cursor::UPDATE_TODOS,
-        SideKind::Todos,
-    );
-    register_side(client, inner, turin_acp::cursor::TASK, SideKind::Task);
-    register_side(
-        client,
-        inner,
-        turin_acp::cursor::GENERATE_IMAGE,
-        SideKind::Image,
-    );
+    register_side(client, turin_acp::cursor::UPDATE_TODOS);
+    register_side(client, turin_acp::cursor::TASK);
+    register_side(client, turin_acp::cursor::GENERATE_IMAGE);
 }
 
 async fn handle_permission(
@@ -1370,16 +1299,14 @@ async fn handle_permission(
                 &permissions::answer_for_decision(&request, ProviderApprovalDecision::Accept),
             ));
         }
+        if permissions::is_ask_question_fallback(&request) {
+            tracing::debug!(tool_call_id = ?request.tool_call_id, "cursor ask_question fallback permission");
+        }
         inner
             .pending
             .lock()
             .expect("pending")
             .insert(ctx.request_id.clone(), Pending::Permission(tx));
-        inner
-            .pending_kind
-            .lock()
-            .expect("pending kind")
-            .insert(ctx.request_id.clone(), PendingKind::Permission);
         emit_runtime_request(
             &inner,
             &ctx.request_id,
@@ -1387,13 +1314,6 @@ async fn handle_permission(
             OrchestrationV2RuntimeRequestStatus::Pending,
             None,
         );
-        let _ = inner.events.send(CursorEvent::Approval {
-            request_id: ctx.request_id,
-            title: request.title.clone(),
-            kind: permissions::request_kind(&request),
-            options: permissions::approval_options(&request),
-            ask_question_fallback: permissions::is_ask_question_fallback(&request),
-        });
     }
     let decision = rx.await.unwrap_or(ProviderApprovalDecision::Cancel);
     if decision == ProviderApprovalDecision::AcceptForSession
@@ -1411,12 +1331,11 @@ fn register_ask(client: &AcpClient, inner: &Arc<SessionInner>) {
     client.on_ext_request(turin_acp::cursor::ASK_QUESTION, move |params, ctx| {
         let weak = weak.clone();
         async move {
-            let parsed: AskQuestionParams =
-                serde_json::from_value(params.clone()).map_err(|_| {
-                    AcpError::from(turin_acp::errors::AcpRequestError::invalid_params(
-                        "Invalid cursor/ask_question payload.",
-                    ))
-                })?;
+            let parsed: AskQuestionParams = serde_json::from_value(params).map_err(|_| {
+                AcpError::from(turin_acp::errors::AcpRequestError::invalid_params(
+                    "Invalid cursor/ask_question payload.",
+                ))
+            })?;
             let (tx, rx) = oneshot::channel();
             {
                 let Some(inner) = weak.upgrade() else {
@@ -1424,21 +1343,13 @@ fn register_ask(client: &AcpClient, inner: &Arc<SessionInner>) {
                         AskDisposition::Cancelled,
                     )));
                 };
-                inner
-                    .pending
-                    .lock()
-                    .expect("pending")
-                    .insert(ctx.request_id.clone(), Pending::Ask(tx));
-                inner
-                    .pending_kind
-                    .lock()
-                    .expect("pending kind")
-                    .insert(ctx.request_id.clone(), PendingKind::Ask);
-                inner
-                    .asks
-                    .lock()
-                    .expect("asks")
-                    .insert(ctx.request_id.clone(), parsed.clone());
+                inner.pending.lock().expect("pending").insert(
+                    ctx.request_id.clone(),
+                    Pending::Ask {
+                        sender: tx,
+                        params: parsed,
+                    },
+                );
                 emit_runtime_request(
                     &inner,
                     &ctx.request_id,
@@ -1446,12 +1357,6 @@ fn register_ask(client: &AcpClient, inner: &Arc<SessionInner>) {
                     OrchestrationV2RuntimeRequestStatus::Pending,
                     None,
                 );
-                let _ = inner.events.send(CursorEvent::UserInput {
-                    request_id: ctx.request_id,
-                    tool_call_id: parsed.tool_call_id.clone(),
-                    questions: extensions::user_input_questions(&parsed),
-                    raw: params,
-                });
             }
             let disposition = rx.await.unwrap_or(AskDisposition::Cancelled);
             Ok(extensions::nested_outcome(&extensions::ask_result(
@@ -1466,12 +1371,11 @@ fn register_plan(client: &AcpClient, inner: &Arc<SessionInner>) {
     client.on_ext_request(turin_acp::cursor::CREATE_PLAN, move |params, ctx| {
         let weak = weak.clone();
         async move {
-            let parsed: CreatePlanParams =
-                serde_json::from_value(params.clone()).map_err(|_| {
-                    AcpError::from(turin_acp::errors::AcpRequestError::invalid_params(
-                        "Invalid cursor/create_plan payload.",
-                    ))
-                })?;
+            serde_json::from_value::<CreatePlanParams>(params).map_err(|_| {
+                AcpError::from(turin_acp::errors::AcpRequestError::invalid_params(
+                    "Invalid cursor/create_plan payload.",
+                ))
+            })?;
             let (tx, rx) = oneshot::channel();
             {
                 let Some(inner) = weak.upgrade() else {
@@ -1484,11 +1388,6 @@ fn register_plan(client: &AcpClient, inner: &Arc<SessionInner>) {
                     .lock()
                     .expect("pending")
                     .insert(ctx.request_id.clone(), Pending::Plan(tx));
-                inner
-                    .pending_kind
-                    .lock()
-                    .expect("pending kind")
-                    .insert(ctx.request_id.clone(), PendingKind::Plan);
                 emit_runtime_request(
                     &inner,
                     &ctx.request_id,
@@ -1496,13 +1395,6 @@ fn register_plan(client: &AcpClient, inner: &Arc<SessionInner>) {
                     OrchestrationV2RuntimeRequestStatus::Pending,
                     None,
                 );
-                let _ = inner.events.send(CursorEvent::Plan {
-                    request_id: ctx.request_id,
-                    tool_call_id: parsed.tool_call_id.clone(),
-                    markdown: parsed.plan.clone(),
-                    steps: extensions::plan_steps(&parsed.todos),
-                    raw: params,
-                });
             }
             let disposition = rx.await.unwrap_or(PlanDisposition::Cancelled);
             Ok(extensions::nested_outcome(&extensions::plan_result(
@@ -1512,29 +1404,9 @@ fn register_plan(client: &AcpClient, inner: &Arc<SessionInner>) {
     });
 }
 
-#[derive(Clone, Copy)]
-enum SideKind {
-    Todos,
-    Task,
-    Image,
-}
-
-fn register_side(client: &AcpClient, inner: &Arc<SessionInner>, method: &str, kind: SideKind) {
-    let weak = Arc::downgrade(inner);
-    client.on_ext_request(method, move |params, _ctx| {
-        let weak = weak.clone();
-        async move {
-            if let Some(inner) = weak.upgrade() {
-                let event = match kind {
-                    SideKind::Todos => CursorEvent::Todos { raw: params },
-                    SideKind::Task => CursorEvent::Task { raw: params },
-                    SideKind::Image => CursorEvent::Image { raw: params },
-                };
-                let _ = inner.events.send(event);
-            }
-            Ok(json!({}))
-        }
-    });
+/// Side-channel requests the CLI ignores. Acknowledged, not projected yet.
+fn register_side(client: &AcpClient, method: &str) {
+    client.on_ext_request(method, |_params, _ctx| async { Ok(json!({})) });
 }
 
 #[cfg(test)]
@@ -1555,6 +1427,15 @@ mod tests {
             agent_read,
             agent_write,
         )
+    }
+
+    async fn next_event(events: &mut ProviderEventStream) -> ProviderAdapterV2Event {
+        use futures::StreamExt;
+        tokio::time::timeout(Duration::from_secs(5), events.next())
+            .await
+            .expect("provider event within 5s")
+            .expect("provider stream open")
+            .expect("provider event ok")
     }
 
     async fn read_frame(read: &mut DuplexStream) -> Value {
@@ -1828,6 +1709,7 @@ mod tests {
         const { assert!(!auth::AUTHENTICATE_ON_AUTH_REQUIRED) };
         let thread = session.new_session(Path::new("/work")).await.unwrap();
         assert_eq!(thread.session_id, "sess-1");
+        let mut events = session.events();
         let acp: Value = serde_json::from_str(
             &std::fs::read_to_string(home_path.join("acp-config.json")).unwrap(),
         )
@@ -1854,61 +1736,44 @@ mod tests {
 
         let running = session.clone();
         let turn = tokio::spawn(async move { running.prompt("hello", &[]).await });
-        loop {
-            match tokio::time::timeout(Duration::from_secs(5), session.recv())
-                .await
-                .unwrap()
-                .unwrap()
-            {
-                CursorEvent::Update(_)
-                | CursorEvent::Todos { .. }
-                | CursorEvent::Task { .. }
-                | CursorEvent::Image { .. } => {}
-                CursorEvent::Approval {
-                    request_id,
-                    options,
-                    ..
-                } => {
-                    assert!(
-                        options
-                            .iter()
-                            .any(|option| option.label.as_str() == permissions::ALWAYS_ALLOW_LABEL)
-                    );
-                    session
-                        .answer_request(
-                            &request_id,
-                            RuntimeReply::Approval(Decision::AcceptForSession),
-                        )
-                        .unwrap();
-                }
-                CursorEvent::UserInput { request_id, .. } => {
-                    session
-                        .answer_request(
-                            &request_id,
-                            RuntimeReply::UserInput(AskDisposition::Answered(vec![
-                                turin_acp::cursor::AskAnswer {
-                                    question_id: "q1".to_owned(),
-                                    selected_option_ids: vec!["a".to_owned()],
-                                },
-                            ])),
-                        )
-                        .unwrap();
-                }
-                CursorEvent::Plan { request_id, .. } => {
-                    session
-                        .answer_request(
-                            &request_id,
-                            RuntimeReply::Plan(PlanDisposition::Accepted {
-                                plan_uri: Some("file:///plan.md".to_owned()),
-                            }),
-                        )
-                        .unwrap();
-                }
-                CursorEvent::TurnSettled { stop_reason } => {
-                    assert_eq!(stop_reason.as_deref(), Some("end_turn"));
-                    break;
-                }
+        // Cards arrive in the order the peer sends them: approval, question, plan.
+        let mut answered = 0;
+        while answered < 3 {
+            let ProviderAdapterV2Event::RuntimeRequestUpdated {
+                runtime_request, ..
+            } = next_event(&mut events).await
+            else {
+                continue;
+            };
+            if runtime_request.status != OrchestrationV2RuntimeRequestStatus::Pending {
+                continue;
             }
+            let id = runtime_request.id.as_str().to_owned();
+            match answered {
+                0 => session
+                    .answer_request(&id, RuntimeReply::Approval(Decision::AcceptForSession))
+                    .unwrap(),
+                1 => session
+                    .answer_request(
+                        &id,
+                        RuntimeReply::UserInput(AskDisposition::Answered(vec![
+                            turin_acp::cursor::AskAnswer {
+                                question_id: "q1".to_owned(),
+                                selected_option_ids: vec!["a".to_owned()],
+                            },
+                        ])),
+                    )
+                    .unwrap(),
+                _ => session
+                    .answer_request(
+                        &id,
+                        RuntimeReply::Plan(PlanDisposition::Accepted {
+                            plan_uri: Some("file:///plan.md".to_owned()),
+                        }),
+                    )
+                    .unwrap(),
+            }
+            answered += 1;
         }
         assert_eq!(
             turn.await.unwrap().unwrap().stop_reason.as_deref(),
@@ -1963,6 +1828,7 @@ mod tests {
     #[tokio::test]
     async fn interrupt_sends_session_cancel() {
         let (client, mut read, mut write) = pair();
+        let (sent_tx, sent_rx) = oneshot::channel();
         let peer = tokio::spawn(async move {
             let init = read_frame(&mut read).await;
             write_frame(&mut write, v1_initialized(&init["id"])).await;
@@ -1974,6 +1840,7 @@ mod tests {
             .await;
             let prompt = read_frame(&mut read).await;
             assert_eq!(prompt["method"], "session/prompt");
+            let _ = sent_tx.send(());
             write_frame(
                 &mut write,
                 json!({
@@ -2000,14 +1867,10 @@ mod tests {
         session.new_session(Path::new("/work")).await.unwrap();
         let running = session.clone();
         let turn = tokio::spawn(async move { running.prompt("stop", &[]).await });
-        match tokio::time::timeout(Duration::from_secs(5), session.recv())
+        tokio::time::timeout(Duration::from_secs(5), sent_rx)
             .await
             .unwrap()
-            .unwrap()
-        {
-            CursorEvent::Update(_) => {}
-            other => panic!("unexpected {other:?}"),
-        }
+            .unwrap();
         session.cancel_turn().await.unwrap();
         let outcome = tokio::time::timeout(Duration::from_secs(5), turn)
             .await

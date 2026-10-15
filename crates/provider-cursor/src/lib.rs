@@ -8,6 +8,7 @@ mod account_usage;
 mod acp_config;
 mod auth;
 mod capabilities;
+mod driver;
 mod error;
 mod events;
 mod extensions;
@@ -35,6 +36,7 @@ pub use capabilities::{
     SelectionTransition, cursor_capabilities, image_prompts_supported, negotiate_capabilities,
     plan_selection_transition,
 };
+pub use driver::CursorDriver;
 pub use error::{CursorError, CursorOperation};
 pub use events::{CursorUpdate, PlanStep, parse_session_update};
 pub use extensions::{

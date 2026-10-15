@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{Connection, OpenFlags};
@@ -12,14 +12,33 @@ use rusqlite::{Connection, OpenFlags};
 use super::T3ImportError;
 
 const BUSY: Duration = Duration::from_secs(5);
-/// Pages per `sqlite3_backup_step`. Large enough that a 1 GB file is not one
-/// syscall per 256 KB, small enough that a writer can commit between steps.
-const STEP_PAGES: i32 = 1024;
 const STEP_PAUSE: Duration = Duration::from_millis(25);
 /// Consecutive busy/locked results before giving up. 30s covers a checkpoint
 /// on a database T3 is still writing.
 const MAX_PAUSES: u32 = 1_200;
 const SNAPSHOT_DIR: &str = "/tmp";
+
+/// Bounds on one copy. A writer that commits between steps makes SQLite start
+/// the copy again from page 1, and each restart still returns `More`. Without
+/// these limits a busy T3 database could keep the copy running forever.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CopyLimits {
+    /// Pages per `sqlite3_backup_step`. Large enough that a 1 GB file is not
+    /// one syscall per 256 KB, small enough that a writer can commit between
+    /// steps.
+    pub(super) step_pages: i32,
+    /// Restarts before the copy fails as busy. Each restart is followed by
+    /// [`STEP_PAUSE`].
+    pub(super) max_restarts: u32,
+    /// Wall-clock budget for the whole copy. Never reset, not even by `More`.
+    pub(super) deadline: Duration,
+}
+
+const COPY_LIMITS: CopyLimits = CopyLimits {
+    step_pages: 1024,
+    max_restarts: 100,
+    deadline: Duration::from_secs(60),
+};
 
 /// A snapshot file owned by a temporary directory.
 pub struct T3Snapshot {
@@ -42,6 +61,14 @@ pub(crate) fn snapshot(src: &Path) -> Result<T3Snapshot, T3ImportError> {
 }
 
 pub(crate) fn backup_to(src: &Path, dest: &Path) -> Result<(), T3ImportError> {
+    backup_with_limits(src, dest, COPY_LIMITS)
+}
+
+pub(super) fn backup_with_limits(
+    src: &Path,
+    dest: &Path,
+    limits: CopyLimits,
+) -> Result<(), T3ImportError> {
     if let Some(parent) = dest.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -70,32 +97,45 @@ pub(crate) fn backup_to(src: &Path, dest: &Path) -> Result<(), T3ImportError> {
     })?;
     let backup = Backup::new(&source, &mut copied)
         .map_err(|err| crate::errors::PersistenceError::sql("t3Import.snapshot.backup", &err))?;
+    let started = Instant::now();
     let mut pauses = 0u32;
+    let mut restarts = 0u32;
+    // `progress().remaining` only falls while the copy moves forward. A
+    // restart puts it back at the page count, so a value that does not fall
+    // means SQLite started over.
+    let mut last_remaining = i32::MAX;
+    let busy = || -> T3ImportError {
+        crate::errors::PersistenceError::sql("t3Import.snapshot.step", &busy_err()).into()
+    };
     loop {
+        if started.elapsed() > limits.deadline {
+            return Err(busy());
+        }
         match backup
-            .step(STEP_PAGES)
+            .step(limits.step_pages)
             .map_err(|err| crate::errors::PersistenceError::sql("t3Import.snapshot.step", &err))?
         {
             StepResult::Done => break,
-            StepResult::More => pauses = 0,
+            StepResult::More => {
+                pauses = 0;
+                let remaining = backup.progress().remaining;
+                if remaining >= last_remaining {
+                    restarts += 1;
+                    if restarts > limits.max_restarts {
+                        return Err(busy());
+                    }
+                    thread::sleep(STEP_PAUSE);
+                }
+                last_remaining = remaining;
+            }
             StepResult::Busy | StepResult::Locked => {
                 pauses += 1;
                 if pauses > MAX_PAUSES {
-                    return Err(crate::errors::PersistenceError::sql(
-                        "t3Import.snapshot.step",
-                        &busy_err(),
-                    )
-                    .into());
+                    return Err(busy());
                 }
                 thread::sleep(STEP_PAUSE);
             }
-            _ => {
-                return Err(crate::errors::PersistenceError::sql(
-                    "t3Import.snapshot.step",
-                    &busy_err(),
-                )
-                .into());
-            }
+            _ => return Err(busy()),
         }
     }
     drop(backup);

@@ -1,9 +1,14 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 
 use crate::migrations::{RunMigrationsOptions, migration_manifest, run_migrations};
 
+use super::snapshot::{CopyLimits, backup_with_limits};
 use super::*;
 
 fn file_db(dir: &Path, name: &str, through: Option<i64>) -> PathBuf {
@@ -319,4 +324,84 @@ fn import_into_leaves_no_destination_when_verification_fails() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert!(names.is_empty(), "{names:?}");
+}
+
+/// A WAL source larger than one copy step, and a writer that commits as fast
+/// as it can until `stop` is set. Every commit makes the copy restart.
+fn churning_source(dir: &Path) -> (PathBuf, Arc<AtomicBool>, JoinHandle<()>) {
+    let src = dir.join("churning.sqlite");
+    let conn = Connection::open(&src).unwrap();
+    conn.execute_batch(
+        "
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE blobs (id INTEGER PRIMARY KEY, body BLOB NOT NULL);
+        CREATE TABLE tick (n INTEGER NOT NULL);
+        INSERT INTO tick (n) VALUES (0);
+        BEGIN;
+        ",
+    )
+    .unwrap();
+    for id in 0..300 {
+        conn.execute(
+            "INSERT INTO blobs (id, body) VALUES (?1, zeroblob(4000))",
+            params![id],
+        )
+        .unwrap();
+    }
+    conn.execute_batch("COMMIT;").unwrap();
+    drop(conn);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_stop = Arc::clone(&stop);
+    let writer_src = src.clone();
+    let writer = thread::spawn(move || {
+        let conn = Connection::open(&writer_src).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        conn.execute_batch("PRAGMA synchronous = OFF;").unwrap();
+        while !writer_stop.load(Ordering::Relaxed) {
+            conn.execute("UPDATE tick SET n = n + 1", []).unwrap();
+        }
+    });
+    (src, stop, writer)
+}
+
+#[test]
+fn a_copy_that_keeps_restarting_gives_up_after_the_restart_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let (src, stop, writer) = churning_source(dir.path());
+    let dest = dir.path().join("copy.sqlite");
+    let limits = CopyLimits {
+        step_pages: 1,
+        max_restarts: 5,
+        deadline: Duration::from_secs(60),
+    };
+    let result = backup_with_limits(&src, &dest, limits);
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("t3Import.snapshot.step"), "{err}");
+    assert!(!dest.exists());
+}
+
+#[test]
+fn a_copy_that_keeps_restarting_gives_up_at_the_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let (src, stop, writer) = churning_source(dir.path());
+    let dest = dir.path().join("copy.sqlite");
+    let limits = CopyLimits {
+        step_pages: 1,
+        max_restarts: u32::MAX,
+        deadline: Duration::from_millis(300),
+    };
+    let started = Instant::now();
+    let result = backup_with_limits(&src, &dest, limits);
+    let elapsed = started.elapsed();
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("t3Import.snapshot.step"), "{err}");
+    assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
+    assert!(!dest.exists());
 }

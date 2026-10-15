@@ -10,9 +10,9 @@
 use turin_contracts::{
     MessageId, UtcDateTime,
     orchestration_v2::{
-        OrchestrationV2AppThread, OrchestrationV2Command as C, OrchestrationV2DomainEvent,
-        OrchestrationV2RunStatus, OrchestrationV2RuntimeRequestStatus,
-        OrchestrationV2ServerCommand, OrchestrationV2SettleOverride,
+        OrchestrationV2AppThread, OrchestrationV2Command as C, OrchestrationV2RunStatus,
+        OrchestrationV2RuntimeRequestStatus, OrchestrationV2ServerCommand,
+        OrchestrationV2SettleOverride,
     },
 };
 
@@ -31,19 +31,23 @@ macro_rules! thread_event {
         let thread: OrchestrationV2AppThread = $thread;
         let id = $decision.event_id(&thread.id);
         let occurred_at = $decision.now();
-        $decision.emit(OrchestrationV2DomainEvent::$variant {
-            id,
-            thread_id: thread.id.clone(),
-            run_id: None,
-            node_id: None,
-            driver: None,
-            provider_instance_id: Some(thread.provider_instance_id.clone()),
-            raw_event_id: None,
-            occurred_at,
-            payload: thread,
-        });
+        $decision.emit(
+            turin_contracts::orchestration_v2::OrchestrationV2DomainEvent::$variant {
+                id,
+                thread_id: thread.id.clone(),
+                run_id: None,
+                node_id: None,
+                driver: None,
+                provider_instance_id: Some(thread.provider_instance_id.clone()),
+                raw_event_id: None,
+                occurred_at,
+                payload: thread,
+            },
+        );
     }};
 }
+
+pub(super) use thread_event;
 
 /// Decides the thread-row kinds ported here. `Ok(false)` leaves the command to
 /// another group.

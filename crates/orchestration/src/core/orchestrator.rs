@@ -18,7 +18,9 @@ pub mod services;
 mod tests;
 mod thread_archive;
 mod thread_lifecycle;
+mod thread_metadata;
 mod thread_mutation;
+mod thread_pull_request;
 
 use std::sync::Arc;
 

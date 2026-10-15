@@ -151,10 +151,12 @@ fn to_tree_nodes(directory: MutableDirectory) -> Vec<TurnDiffTreeNode> {
 
 /// `summarizeTurnDiffStats`.
 pub fn summarize_turn_diff_stats(files: &[CheckpointFileSummary]) -> TurnDiffStat {
-    files.iter().fold(TurnDiffStat::default(), |acc, file| TurnDiffStat {
-        additions: acc.additions + file.additions,
-        deletions: acc.deletions + file.deletions,
-    })
+    files
+        .iter()
+        .fold(TurnDiffStat::default(), |acc, file| TurnDiffStat {
+            additions: acc.additions + file.additions,
+            deletions: acc.deletions + file.deletions,
+        })
 }
 
 /// `buildTurnDiffTree`.
@@ -298,7 +300,10 @@ impl RenderOnce for ChangedFilesCard {
                     .line_height(rems(1.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
-                    .child(format!("{count} changed file{}", if count == 1 { "" } else { "s" }))
+                    .child(format!(
+                        "{count} changed file{}",
+                        if count == 1 { "" } else { "s" }
+                    ))
                     .when(summary.additions > 0 || summary.deletions > 0, |this| {
                         this.child(diff_stat_label(summary, cx))
                     }),
@@ -316,35 +321,43 @@ impl RenderOnce for ChangedFilesCard {
                             "Expand all folders"
                         };
                         this.child(
-                            Button::new(ElementId::NamedChild(Arc::new(self.id.clone()), "toggle".into()))
-                                .variant(ButtonVariant::GhostMuted)
-                                .size(ButtonSize::IconXs)
-                                .tooltip(Tooltip::new(label))
-                                .child(
-                                    Icon::new(if all_expanded {
-                                        IconName::ChevronsDownUp
-                                    } else {
-                                        IconName::ChevronsUpDown
-                                    })
-                                    .size(rems(0.75)),
-                                )
-                                .on_click(move |_, _, cx| {
-                                    toggle_state.update(cx, |state, cx| {
-                                        state.all_expanded = !state.all_expanded;
-                                        state.overrides.clear();
-                                        cx.notify();
-                                    });
-                                }),
+                            Button::new(ElementId::NamedChild(
+                                Arc::new(self.id.clone()),
+                                "toggle".into(),
+                            ))
+                            .variant(ButtonVariant::GhostMuted)
+                            .size(ButtonSize::IconXs)
+                            .tooltip(Tooltip::new(label))
+                            .child(
+                                Icon::new(if all_expanded {
+                                    IconName::ChevronsDownUp
+                                } else {
+                                    IconName::ChevronsUpDown
+                                })
+                                .size(rems(0.75)),
+                            )
+                            .on_click(move |_, _, cx| {
+                                toggle_state.update(cx, |state, cx| {
+                                    state.all_expanded = !state.all_expanded;
+                                    state.overrides.clear();
+                                    cx.notify();
+                                });
+                            }),
                         )
                     })
                     .child(
-                        Button::new(ElementId::NamedChild(Arc::new(self.id.clone()), "open".into()))
-                            .variant(ButtonVariant::GhostMuted)
-                            .size(ButtonSize::Xs)
-                            .tooltip(Tooltip::new("Open the full diff"))
-                            .child(Icon::new(IconName::FileDiff).size(rems(0.75)))
-                            .child("Open diff")
-                            .on_click(move |_, window, cx| open(&run_id, first_path.as_deref(), window, cx)),
+                        Button::new(ElementId::NamedChild(
+                            Arc::new(self.id.clone()),
+                            "open".into(),
+                        ))
+                        .variant(ButtonVariant::GhostMuted)
+                        .size(ButtonSize::Xs)
+                        .tooltip(Tooltip::new("Open the full diff"))
+                        .child(Icon::new(IconName::FileDiff).size(rems(0.75)))
+                        .child("Open diff")
+                        .on_click(move |_, window, cx| {
+                            open(&run_id, first_path.as_deref(), window, cx)
+                        }),
                     ),
             );
         let nodes = build_turn_diff_tree(&self.files);
@@ -452,7 +465,11 @@ fn render_node(
                 .on_click(move |_, _, cx| {
                     let path = toggle_path.clone();
                     toggle.update(cx, |state, cx| {
-                        let current = state.overrides.get(&path).copied().unwrap_or(state.all_expanded);
+                        let current = state
+                            .overrides
+                            .get(&path)
+                            .copied()
+                            .unwrap_or(state.all_expanded);
                         state.overrides.insert(path, !current);
                         cx.notify();
                     });
@@ -534,9 +551,20 @@ mod tests {
         ]);
         assert_eq!(tree.len(), 2);
         match &tree[0] {
-            TurnDiffTreeNode::Directory { name, stat, children, .. } => {
+            TurnDiffTreeNode::Directory {
+                name,
+                stat,
+                children,
+                ..
+            } => {
                 assert_eq!(name, "src/a/b");
-                assert_eq!(*stat, TurnDiffStat { additions: 4, deletions: 2 });
+                assert_eq!(
+                    *stat,
+                    TurnDiffStat {
+                        additions: 4,
+                        deletions: 2
+                    }
+                );
                 assert_eq!(children.len(), 2);
             }
             other => panic!("{other:?}"),

@@ -26,7 +26,12 @@ use super::types::{RunStatus, ThreadTimelineSnapshot};
 /// User responses the view sends back to whatever owns the thread.
 pub trait TimelineSource: 'static {
     /// `onRespondToApproval`.
-    fn respond_to_approval(&self, request_id: &str, decision: ProviderApprovalDecision, cx: &mut App);
+    fn respond_to_approval(
+        &self,
+        request_id: &str,
+        decision: ProviderApprovalDecision,
+        cx: &mut App,
+    );
     /// The composer's pending-user-input submit: answers keyed by question id.
     fn respond_to_user_input(&self, request_id: &str, answers: Vec<(String, String)>, cx: &mut App);
     /// `onDismissActivePendingUserInput`.
@@ -80,9 +85,12 @@ pub fn snapshot_from_fixture(thread: &FixtureThread) -> ThreadTimelineSnapshot {
         ..Default::default()
     });
     let latest_run = thread.latest_run();
-    let running = latest_run
-        .as_ref()
-        .filter(|run| matches!(run.status, RunStatus::Running | RunStatus::Starting | RunStatus::Waiting));
+    let running = latest_run.as_ref().filter(|run| {
+        matches!(
+            run.status,
+            RunStatus::Running | RunStatus::Starting | RunStatus::Waiting
+        )
+    });
     ThreadTimelineSnapshot {
         thread_id: thread.thread_id.clone(),
         timeline_entries,
@@ -115,7 +123,9 @@ mod parking_lot_free {
             Self(std::sync::Mutex::new(value))
         }
         pub fn lock(&self) -> std::sync::MutexGuard<'_, T> {
-            self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
         }
     }
 }
@@ -145,13 +155,23 @@ impl MockTimelineSource {
                 .split_inclusive(' ')
                 .map(str::to_string)
                 .collect();
-            cx.background_executor().timer(Duration::from_millis(1500)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
             for word in words {
-                cx.background_executor().timer(Duration::from_millis(60)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(60))
+                    .await;
                 let snapshot = {
                     let mut thread = stream_source.thread.lock();
                     let Some(item) = thread.items.iter_mut().rev().find(|item| {
-                        matches!(item.item.payload, TurnItemPayload::AssistantMessage { streaming: true, .. })
+                        matches!(
+                            item.item.payload,
+                            TurnItemPayload::AssistantMessage {
+                                streaming: true,
+                                ..
+                            }
+                        )
                     }) else {
                         return;
                     };
@@ -160,16 +180,11 @@ impl MockTimelineSource {
                     }
                     snapshot_from_fixture(&thread)
                 };
-                if cx
-                    .update(|cx| {
-                        stream_source
-                            .store
-                            .update(cx, |store, cx| store.publish(snapshot, cx))
-                    })
-                    .is_err()
-                {
-                    return;
-                }
+                cx.update(|cx| {
+                    stream_source
+                        .store
+                        .update(cx, |store, cx| store.publish(snapshot, cx))
+                });
             }
         })
         .detach();
@@ -178,12 +193,18 @@ impl MockTimelineSource {
 
     fn republish(&self, cx: &mut App) {
         let snapshot = snapshot_from_fixture(&self.thread.lock());
-        self.store.update(cx, |store, cx| store.publish(snapshot, cx));
+        self.store
+            .update(cx, |store, cx| store.publish(snapshot, cx));
     }
 }
 
 impl TimelineSource for MockTimelineSource {
-    fn respond_to_approval(&self, request_id: &str, decision: ProviderApprovalDecision, cx: &mut App) {
+    fn respond_to_approval(
+        &self,
+        request_id: &str,
+        decision: ProviderApprovalDecision,
+        cx: &mut App,
+    ) {
         tracing::info!(request_id, ?decision, "mock: approval response");
         self.thread
             .lock()
@@ -192,7 +213,12 @@ impl TimelineSource for MockTimelineSource {
         self.republish(cx);
     }
 
-    fn respond_to_user_input(&self, request_id: &str, answers: Vec<(String, String)>, cx: &mut App) {
+    fn respond_to_user_input(
+        &self,
+        request_id: &str,
+        answers: Vec<(String, String)>,
+        cx: &mut App,
+    ) {
         tracing::info!(request_id, ?answers, "mock: user input response");
         self.dismiss_user_input(request_id, cx);
     }

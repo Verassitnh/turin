@@ -1,10 +1,9 @@
 //! Port of upstream/apps/web/src/components/ChatView.tsx (layout only).
 //!
-//! The chat column: the 52px drag-region header, the messages timeline
-//! (empty state for now) and the composer docked at the bottom of the
-//! `--chat-content-max-width` lane. Timeline, banners, find and the thread
-//! details panel arrive with the thread view task; the terminal drawer is
-//! cut.
+//! The chat column: the 52px drag-region header, the messages timeline and
+//! the composer docked at the bottom of the `--chat-content-max-width` lane,
+//! with pending approvals / questions attached above it. Find and the thread
+//! details panel are not ported yet; the terminal drawer is cut.
 
 use gpui_kit::{
     App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window,
@@ -13,12 +12,12 @@ use gpui_kit::{
 
 use super::chat::chat_header::ChatHeader;
 use super::chat::composer_surface::ComposerSurface;
+use super::chat::messages_timeline::MessagesTimeline;
+use super::chat::timeline::source::MockTimelineSource;
 use super::drag_region::DragRegion as _;
 use super::workspace_titlebar::workspace_titlebar_content_left;
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
-use crate::theme::tokens::{CHAT_CONTENT_MAX_WIDTH, TEXT_SM, WORKSPACE_TOPBAR_HEIGHT};
-use gpui_kit::prelude::FluentBuilder as _;
+use crate::theme::tokens::{CHAT_CONTENT_MAX_WIDTH, WORKSPACE_TOPBAR_HEIGHT};
 
 #[derive(IntoElement)]
 pub struct ChatView {
@@ -38,6 +37,10 @@ impl RenderOnce for ChatView {
         };
         // `.chat-composer-lane` / timeline `padding-inline: 3rem` at ≥640px.
         let lane_inset = rems(3.);
+        let timeline = window.use_keyed_state("messages-timeline", cx, |window, cx| {
+            let store = MockTimelineSource::start(cx);
+            MessagesTimeline::new(store, window, cx)
+        });
 
         div()
             .flex()
@@ -72,22 +75,9 @@ impl RenderOnce for ChatView {
                     .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .when(
-                        std::env::var("TURIN_DEMO").is_ok_and(|v| v == "markdown"),
-                        |this| this.child(markdown_demo()),
-                    )
-                    .child(
-                        // Empty server thread (MessagesTimeline.tsx).
-                        div()
-                            .flex()
-                            .flex_1()
-                            .items_center()
-                            .justify_center()
-                            .px(lane_inset)
-                            .text_size(TEXT_SM.size)
-                            .text_color(with_alpha(theme.muted_foreground, 0.3))
-                            .child("Send a message to start the conversation."),
-                    )
+                    // `MessagesTimeline`, owned by the chat column for now; the
+                    // thread route will own it once threads are selectable.
+                    .child(timeline)
                     .child(
                         div()
                             .flex_shrink_0()
@@ -105,41 +95,4 @@ impl RenderOnce for ChatView {
                     ),
             )
     }
-}
-
-// TEMP(T16): markdown harness, removed once the timeline view lands.
-fn markdown_demo() -> impl IntoElement {
-    use super::chat::markdown::ChatMarkdown;
-    use super::chat::timeline::fixtures::long_thread;
-    use super::chat::timeline::turn_item::TurnItemPayload;
-    let thread = long_thread(6);
-    let texts: Vec<String> = thread
-        .items
-        .iter()
-        .filter_map(|item| match &item.item.payload {
-            TurnItemPayload::AssistantMessage { text, .. } => Some(text.clone()),
-            TurnItemPayload::ProposedPlan { markdown, .. } => Some(markdown.clone()),
-            _ => None,
-        })
-        .skip(
-            std::env::var("TURIN_DEMO_SKIP")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-        )
-        .collect();
-    crate::ui::scroll_area("md-demo").child(
-        div().px(rems(3.)).py_4().child(
-            div()
-                .mx_auto()
-                .w_full()
-                .max_w(CHAT_CONTENT_MAX_WIDTH)
-                .flex()
-                .flex_col()
-                .gap_6()
-                .children(texts.into_iter().enumerate().map(|(ix, text)| {
-                    ChatMarkdown::new(("md-demo", ix), text).document_order(ix as u64 * 10_000)
-                })),
-        ),
-    )
 }

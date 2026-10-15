@@ -13,9 +13,9 @@
 //! (SendMessage, `reopen`); the workflow coordinator's members.
 use crate::{
     claude_subagent_threads::{
-        ChildThread, SubagentIds, SubagentNodeInput, child_tool_call, child_turn_scope,
-        conversation_events, normalize_result_text, open_tool_status, subagent_ids,
-        subagent_node_events, subagent_turn_item, tool_call_events,
+        ChildMessage, ChildThread, SubagentIds, SubagentNodeInput, child_tool_call,
+        child_turn_scope, conversation_events, normalize_result_text, open_tool_status,
+        subagent_ids, subagent_node_events, subagent_turn_item, tool_call_events,
     },
     claude_tool_titles::{ToolPresentation, fallback_presentation, presentations_from_meta},
     claude_workflow_progress::{
@@ -394,13 +394,14 @@ impl SubagentRegistry {
             let ordinal = task.child.ordinal(&native);
             events.extend(conversation_events(
                 &scope.driver,
-                &task.child.thread_id,
-                &task.child.root_node_id,
-                Some(&scope.thread_id),
-                &native,
-                OrchestrationV2ConversationMessageRole::User,
-                &prompt,
-                ordinal,
+                &task.child,
+                ChildMessage {
+                    native_item_id: &native,
+                    sender: Some(&scope.thread_id),
+                    role: OrchestrationV2ConversationMessageRole::User,
+                    text: &prompt,
+                    ordinal,
+                },
                 now,
             ));
         }
@@ -547,8 +548,6 @@ impl SubagentRegistry {
             &task.provider_thread_id,
             &task.provider_turn_id,
         );
-        let child_thread = task.child.thread_id.clone();
-        let child_root = task.child.root_node_id.clone();
         let mut events = Vec::new();
         for (index, block) in blocks.iter().enumerate() {
             match block.get("type").and_then(Value::as_str) {
@@ -565,13 +564,14 @@ impl SubagentRegistry {
                     task.child.last_assistant_text = Some(text.to_owned());
                     events.extend(conversation_events(
                         &driver,
-                        &child_thread,
-                        &child_root,
-                        None,
-                        &native,
-                        OrchestrationV2ConversationMessageRole::Assistant,
-                        text,
-                        ordinal,
+                        &task.child,
+                        ChildMessage {
+                            native_item_id: &native,
+                            sender: None,
+                            role: OrchestrationV2ConversationMessageRole::Assistant,
+                            text,
+                            ordinal,
+                        },
                         now,
                     ));
                 }
@@ -735,13 +735,14 @@ impl SubagentRegistry {
                 let ordinal = task.child.ordinal(&format!("task:{task_id}:result"));
                 events.extend(conversation_events(
                     &task.subagent.driver,
-                    &task.child.thread_id,
-                    &task.child.root_node_id,
-                    None,
-                    &format!("task:{task_id}:result"),
-                    OrchestrationV2ConversationMessageRole::Assistant,
-                    &result,
-                    ordinal,
+                    &task.child,
+                    ChildMessage {
+                        native_item_id: &format!("task:{task_id}:result"),
+                        sender: None,
+                        role: OrchestrationV2ConversationMessageRole::Assistant,
+                        text: &result,
+                        ordinal,
+                    },
                     now,
                 ));
             }

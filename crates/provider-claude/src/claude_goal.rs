@@ -61,7 +61,7 @@ pub fn next_claude_goal(
         "assistant" => {
             let message = frame.get("message")?;
             if message.get("model").and_then(Value::as_str) == Some("<synthetic>") {
-                return assistant_goal(current, &js_trim(&text_of(message.get("content")?)));
+                return assistant_goal(current, js_trim(&text_of(message.get("content")?)));
             }
             None
         }

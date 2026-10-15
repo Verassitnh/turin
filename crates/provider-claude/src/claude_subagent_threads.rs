@@ -141,31 +141,37 @@ pub fn native_ref(driver: &ProviderDriverKind, native_item_id: &str) -> Orchestr
     .expect("native ref matches the contract shape")
 }
 
+/// One message for a child thread: its native item, its sender, and its text.
+pub struct ChildMessage<'a> {
+    pub native_item_id: &'a str,
+    /// The parent thread, for the launch prompt and a resume's message.
+    pub sender: Option<&'a ThreadId>,
+    pub role: OrchestrationV2ConversationMessageRole,
+    pub text: &'a str,
+    pub ordinal: u64,
+}
+
 /// Upstream `emitSubagentConversationMessage`: a message in the child thread
 /// and its turn item.
 pub fn conversation_events(
     driver: &ProviderDriverKind,
-    child: &ThreadId,
-    child_root: &NodeId,
-    sender: Option<&ThreadId>,
-    native_item_id: &str,
-    role: OrchestrationV2ConversationMessageRole,
-    text: &str,
-    ordinal: u64,
+    child: &ChildThread,
+    message: ChildMessage<'_>,
     now: UtcDateTime,
 ) -> Vec<ProviderAdapterV2Event> {
+    let native_item_id = message.native_item_id;
     let artifacts = make_subagent_conversation_artifacts(SubagentConversationArtifactsInput {
         message_id: derive::message_from_provider_item(driver, native_item_id),
-        sender_thread_id: sender.cloned(),
+        sender_thread_id: message.sender.cloned(),
         turn_item_id: derive::turn_item_from_provider_item(driver, native_item_id),
-        thread_id: child.clone(),
-        root_node_id: child_root.clone(),
+        thread_id: child.thread_id.clone(),
+        root_node_id: child.root_node_id.clone(),
         provider_thread_id: None,
         provider_turn_id: None,
         native_item_ref: Some(native_ref(driver, native_item_id)),
-        role,
-        text: text.to_owned(),
-        ordinal,
+        role: message.role,
+        text: message.text.to_owned(),
+        ordinal: message.ordinal,
         now,
     });
     vec![

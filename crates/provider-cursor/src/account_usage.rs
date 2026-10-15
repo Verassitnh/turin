@@ -60,6 +60,16 @@ impl AccountUsageRead {
             error,
         }
     }
+
+    /// A read that ended without records. The account key is kept when it is known.
+    fn failed(account_key: Option<String>) -> Self {
+        Self {
+            account_key,
+            records: Vec::new(),
+            missing: false,
+            error: Some(GENERIC_ERROR.to_owned()),
+        }
+    }
 }
 
 /// Why a keychain read did not produce a token. Turin does not open Keychain.
@@ -159,26 +169,31 @@ pub async fn read_cursor_account_usage(
     end_date: f64,
     client: Arc<dyn DashboardClient>,
 ) -> AccountUsageRead {
-    let token = match load_token(&source) {
+    // The credential file is blocking IO, so it stays off the async workers.
+    let loaded = tokio::task::spawn_blocking(move || load_token(&source))
+        .await
+        .unwrap_or(TokenLoad::Failed {
+            error: "Cursor credentials could not be read.".to_owned(),
+        });
+    let token = match loaded {
         TokenLoad::Missing { error } => return AccountUsageRead::empty(true, error),
         TokenLoad::Failed { error } => return AccountUsageRead::empty(false, Some(error)),
         TokenLoad::Token(token) => token,
     };
+    // Identity is decoded before the timed read so a timeout can still report it.
+    let Some((account_key, user_id)) = account_identity(&token) else {
+        return AccountUsageRead::failed(None);
+    };
+    let cookie = format!(
+        "WorkosCursorSessionToken={}",
+        encode_uri_component(&format!("{user_id}::{token}"))
+    );
     let read = tokio::time::timeout(
         READ_TIMEOUT,
-        read_with_token(token, since_ms, end_date, client),
+        read_with_token(account_key.clone(), cookie, since_ms, end_date, client),
     )
     .await;
-    match read {
-        Ok(Ok(result)) => result,
-        Ok(Err(failure)) => AccountUsageRead {
-            account_key: failure.account_key,
-            records: Vec::new(),
-            missing: false,
-            error: Some(GENERIC_ERROR.to_owned()),
-        },
-        Err(_) => AccountUsageRead::empty(false, Some(GENERIC_ERROR.to_owned())),
-    }
+    read.unwrap_or_else(|_| AccountUsageRead::failed(Some(account_key)))
 }
 
 enum TokenLoad {
@@ -226,10 +241,6 @@ fn load_token(source: &CredentialSource) -> TokenLoad {
     }
 }
 
-struct ReadFailure {
-    account_key: Option<String>,
-}
-
 enum PageOutcome {
     Events {
         events: Vec<Value>,
@@ -239,70 +250,62 @@ enum PageOutcome {
 }
 
 async fn read_with_token(
-    access_token: String,
+    account_key: String,
+    cookie: String,
     since_ms: f64,
     end_date: f64,
     client: Arc<dyn DashboardClient>,
-) -> Result<AccountUsageRead, ReadFailure> {
-    let subject = jwt_subject(&access_token).map_err(|_| ReadFailure { account_key: None })?;
-    let user_id = subject
-        .rsplit('|')
-        .next()
-        .filter(|id| !id.is_empty())
-        .ok_or(ReadFailure { account_key: None })?;
-    let account_key = sha256_hex(subject.as_bytes());
+) -> AccountUsageRead {
     if !since_ms.is_finite() || !end_date.is_finite() || since_ms < 0.0 || since_ms > end_date {
-        return Err(ReadFailure {
-            account_key: Some(account_key),
-        });
+        return AccountUsageRead::failed(Some(account_key));
     }
-    let cookie = format!(
-        "WorkosCursorSessionToken={}",
-        encode_uri_component(&format!("{user_id}::{access_token}"))
-    );
     let mut total: Option<u64> = None;
-    let mut ahead: VecDeque<tokio::task::JoinHandle<Result<PageOutcome, ()>>> = VecDeque::new();
+    let mut ahead = Prefetch::default();
     let mut pages: Vec<Vec<Value>> = Vec::new();
     let mut page = 1u64;
     loop {
         let target = prefetch_target(total, page);
-        while ahead.len() < target {
-            let next = page + ahead.len() as u64;
+        while ahead.pages.len() < target {
+            let next = page + ahead.pages.len() as u64;
             let client = Arc::clone(&client);
             let cookie = cookie.clone();
             let known_total = total;
-            ahead.push_back(tokio::spawn(async move {
+            ahead.pages.push_back(tokio::spawn(async move {
                 read_page(client, next, known_total, since_ms, end_date, cookie).await
             }));
         }
-        let outcome = if let Some(handle) = ahead.pop_front() {
-            match handle.await {
-                Ok(result) => result,
-                Err(_) => Err(()),
+        let outcome = match ahead.pages.front_mut() {
+            // Await the handle in place so dropping this future still reaches it through `ahead`.
+            Some(handle) => {
+                let joined = handle.await;
+                ahead.pages.pop_front();
+                joined.unwrap_or(Err(()))
             }
-        } else {
-            read_page(
-                Arc::clone(&client),
-                page,
-                total,
-                since_ms,
-                end_date,
-                cookie.clone(),
-            )
-            .await
+            None => {
+                read_page(
+                    Arc::clone(&client),
+                    page,
+                    total,
+                    since_ms,
+                    end_date,
+                    cookie.clone(),
+                )
+                .await
+            }
         };
-        let outcome = outcome.map_err(|_| ReadFailure {
-            account_key: Some(account_key.clone()),
-        })?;
+        let Ok(outcome) = outcome else {
+            ahead.shutdown().await;
+            return AccountUsageRead::failed(Some(account_key));
+        };
         match outcome {
             PageOutcome::Denied => {
-                abort_ahead(&mut ahead);
-                return Ok(AccountUsageRead {
+                ahead.shutdown().await;
+                return AccountUsageRead {
                     account_key: Some(account_key),
                     records: Vec::new(),
                     missing: false,
                     error: Some("Sign in to Cursor again to read account usage.".to_owned()),
-                });
+                };
             }
             PageOutcome::Events {
                 events,
@@ -320,13 +323,36 @@ async fn read_with_token(
         }
         page += 1;
     }
-    abort_ahead(&mut ahead);
+    ahead.shutdown().await;
     assemble_records(pages, total, since_ms, end_date, account_key)
 }
 
-fn abort_ahead(ahead: &mut VecDeque<tokio::task::JoinHandle<Result<PageOutcome, ()>>>) {
-    for handle in ahead.drain(..) {
-        handle.abort();
+/// Prefetched page reads. Dropping it aborts every read still in flight, so a
+/// read that is cancelled by its caller does not leave cookie-bearing requests
+/// running. Upstream forks them into the read's scope for the same reason.
+#[derive(Default)]
+struct Prefetch {
+    pages: VecDeque<tokio::task::JoinHandle<Result<PageOutcome, ()>>>,
+}
+
+impl Prefetch {
+    /// Aborts the reads still in flight and waits until each has stopped, so
+    /// no request is open once the read has returned.
+    async fn shutdown(&mut self) {
+        for handle in &self.pages {
+            handle.abort();
+        }
+        for handle in self.pages.drain(..) {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for Prefetch {
+    fn drop(&mut self) {
+        for handle in &self.pages {
+            handle.abort();
+        }
     }
 }
 
@@ -440,14 +466,12 @@ fn assemble_records(
     since_ms: f64,
     end_date: f64,
     account_key: String,
-) -> Result<AccountUsageRead, ReadFailure> {
+) -> AccountUsageRead {
     let raw_count: usize = pages.iter().map(Vec::len).sum();
     if let Some(total) = total
         && raw_count < total as usize
     {
-        return Err(ReadFailure {
-            account_key: Some(account_key),
-        });
+        return AccountUsageRead::failed(Some(account_key));
     }
     let mut removals_remaining = total.map(|total| raw_count - total as usize).unwrap_or(0);
     let mut previous_keys: Vec<String> = Vec::new();
@@ -466,28 +490,24 @@ fn assemble_records(
         removals_remaining -= removal_count;
         previous_keys = event_keys;
         for raw in events.iter().skip(removal_count) {
-            let Some(record) =
-                record_from_event(raw, since_ms, end_date, &account_key, &mut occurrences)
-                    .map_err(|_| ReadFailure {
-                        account_key: Some(account_key.clone()),
-                    })?
-            else {
-                continue;
-            };
+            let record =
+                match record_from_event(raw, since_ms, end_date, &account_key, &mut occurrences) {
+                    Ok(Some(record)) => record,
+                    Ok(None) => continue,
+                    Err(()) => return AccountUsageRead::failed(Some(account_key)),
+                };
             records.push(record);
         }
     }
     if removals_remaining != 0 {
-        return Err(ReadFailure {
-            account_key: Some(account_key),
-        });
+        return AccountUsageRead::failed(Some(account_key));
     }
-    Ok(AccountUsageRead {
+    AccountUsageRead {
         account_key: Some(account_key),
         records,
         missing: false,
         error: None,
-    })
+    }
 }
 
 fn record_from_event(
@@ -571,6 +591,9 @@ fn record_from_event(
     }))
 }
 
+/// `JSON.stringify([timestampMs, model, sessionId, totals, reportedCostUsd])`,
+/// byte for byte. serde_json writes integral floats as `1700000000000.0`, so
+/// numbers go through [`js_number_string`].
 fn billed_event_identity(
     timestamp_ms: f64,
     model: &str,
@@ -578,24 +601,23 @@ fn billed_event_identity(
     totals: &UsageTokenTotals,
     reported_cost_usd: Option<f64>,
 ) -> String {
-    let cost = match reported_cost_usd {
-        Some(cost) => Value::from(cost),
-        None => Value::Null,
-    };
-    serde_json::json!([
-        timestamp_ms,
-        model,
-        session_id,
-        {
-            "uncachedInputTokens": totals.uncached_input_tokens,
-            "cachedInputTokens": totals.cached_input_tokens,
-            "cacheCreationTokens": totals.cache_creation_tokens,
-            "outputTokens": totals.output_tokens,
-            "reasoningTokens": totals.reasoning_tokens,
-        },
-        cost
-    ])
-    .to_string()
+    let cost = reported_cost_usd.map_or_else(|| "null".to_owned(), js_number_string);
+    format!(
+        r#"[{},{},{},{{"uncachedInputTokens":{},"cachedInputTokens":{},"cacheCreationTokens":{},"outputTokens":{},"reasoningTokens":{}}},{}]"#,
+        js_number_string(timestamp_ms),
+        json_string(model),
+        json_string(session_id),
+        totals.uncached_input_tokens,
+        totals.cached_input_tokens,
+        totals.cache_creation_tokens,
+        totals.output_tokens,
+        totals.reasoning_tokens,
+        cost,
+    )
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned())
 }
 
 fn is_non_negative_number(value: &Value) -> bool {
@@ -616,6 +638,18 @@ fn tokens(value: Option<&Value>) -> u64 {
     } else {
         0
     }
+}
+
+/// The account key (a hash of the JWT subject, never the token) and the user
+/// id that goes in the session cookie. `None` means the token is unusable.
+fn account_identity(access_token: &str) -> Option<(String, String)> {
+    let subject = jwt_subject(access_token).ok()?;
+    let user_id = subject
+        .rsplit('|')
+        .next()
+        .filter(|id| !id.is_empty())?
+        .to_owned();
+    Some((sha256_hex(subject.as_bytes()), user_id))
 }
 
 fn jwt_subject(access_token: &str) -> Result<String, ()> {
@@ -706,12 +740,44 @@ fn encode_uri_component(value: &str) -> String {
     out
 }
 
+/// `Number.prototype.toString` for finite values, which is what `String(n)` and
+/// `JSON.stringify(n)` produce in upstream: `1700000000000`, `1e+21`, `1e-7`.
 fn js_number_string(value: f64) -> String {
-    if value.is_finite() && value.fract() == 0.0 && value.abs() < i64::MAX as f64 {
-        format!("{}", value as i64)
-    } else {
-        serde_json::json!(value).to_string()
+    if !value.is_finite() {
+        return "null".to_owned();
     }
+    if value == 0.0 {
+        return "0".to_owned();
+    }
+    let sign = if value < 0.0 { "-" } else { "" };
+    // Rust's `{:e}` prints the shortest digits that round-trip, as JS does.
+    let scientific = format!("{:e}", value.abs());
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("scientific form has an exponent");
+    let exponent: i32 = exponent.parse().expect("exponent is an integer");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let k = digits.len() as i32;
+    let n = exponent + 1;
+    let body = if k <= n && n <= 21 {
+        format!("{digits}{}", "0".repeat((n - k) as usize))
+    } else if 0 < n && n <= 21 {
+        let (whole, fraction) = digits.split_at(n as usize);
+        format!("{whole}.{fraction}")
+    } else if -6 < n && n <= 0 {
+        format!("0.{}{digits}", "0".repeat((-n) as usize))
+    } else {
+        let e = n - 1;
+        let sign_e = if e < 0 { "-" } else { "+" };
+        let (head, tail) = digits.split_at(1);
+        let mantissa = if tail.is_empty() {
+            head.to_owned()
+        } else {
+            format!("{head}.{tail}")
+        };
+        format!("{mantissa}e{sign_e}{}", e.abs())
+    };
+    format!("{sign}{body}")
 }
 
 #[cfg(test)]
@@ -1055,5 +1121,276 @@ mod tests {
             result.records.last().unwrap().timestamp_ms,
             1_780_000_008_000.0
         );
+    }
+
+    /// Marks a dashboard request that has started and not yet finished. An
+    /// aborted request drops its future, which is what ends it here.
+    struct OpenRequest(Arc<AtomicUsize>);
+
+    impl OpenRequest {
+        fn start(open: &Arc<AtomicUsize>) -> Self {
+            open.fetch_add(1, Ordering::SeqCst);
+            Self(Arc::clone(open))
+        }
+    }
+
+    impl Drop for OpenRequest {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn js_number_string_matches_json_stringify() {
+        assert_eq!(js_number_string(1_700_000_000_000.0), "1700000000000");
+        assert_eq!(js_number_string(0.25), "0.25");
+        assert_eq!(js_number_string(-0.0), "0");
+        assert_eq!(js_number_string(123.456), "123.456");
+        assert_eq!(js_number_string(0.000_001), "0.000001");
+        assert_eq!(js_number_string(1e-7), "1e-7");
+        assert_eq!(js_number_string(1e20), "100000000000000000000");
+        assert_eq!(js_number_string(1e21), "1e+21");
+        assert_eq!(js_number_string(1.5e300), "1.5e+300");
+        assert_eq!(js_number_string(-42.0), "-42");
+    }
+
+    #[test]
+    fn billed_identity_is_the_json_stringify_of_the_fields() {
+        let totals = UsageTokenTotals {
+            uncached_input_tokens: 10,
+            cached_input_tokens: 30,
+            cache_creation_tokens: 2,
+            output_tokens: 5,
+            reasoning_tokens: 0,
+        };
+        assert_eq!(
+            billed_event_identity(1_700_000_000_000.0, "gpt-5", "conv", &totals, Some(0.25)),
+            r#"[1700000000000,"gpt-5","conv",{"uncachedInputTokens":10,"cachedInputTokens":30,"cacheCreationTokens":2,"outputTokens":5,"reasoningTokens":0},0.25]"#
+        );
+        assert_eq!(
+            billed_event_identity(1_700_000_000_000.0, "gpt-5", "", &totals, None),
+            r#"[1700000000000,"gpt-5","",{"uncachedInputTokens":10,"cachedInputTokens":30,"cacheCreationTokens":2,"outputTokens":5,"reasoningTokens":0},null]"#
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_page_read_leaves_no_request_open() {
+        let access = token("auth|demo");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::json!({"accessToken": access}).to_string(),
+        )
+        .unwrap();
+        let full_page = serde_json::json!({
+            "totalUsageEventsCount": 8001,
+            "usageEventsDisplay": (0..1000)
+                .map(|_| serde_json::json!({"tokenUsage": null}))
+                .collect::<Vec<_>>(),
+        });
+        // Page 3 fails while pages 4 onwards are still waiting on Cursor.
+        for (second_status, second_body, expected) in [
+            (
+                200,
+                full_page.clone(),
+                "Cursor account usage could not be read.",
+            ),
+            (
+                401,
+                Value::Null,
+                "Sign in to Cursor again to read account usage.",
+            ),
+        ] {
+            let open = Arc::new(AtomicUsize::new(0));
+            let open_task = Arc::clone(&open);
+            let first = full_page.clone();
+            let client = script(move |request| {
+                let page = serde_json::from_str::<Value>(&request.body).unwrap()["page"]
+                    .as_u64()
+                    .unwrap();
+                let open = Arc::clone(&open_task);
+                let first = first.clone();
+                let second_body = second_body.clone();
+                async move {
+                    match page {
+                        1 => Ok(json_response(200, first)),
+                        2 => Ok(json_response(second_status, second_body)),
+                        3 => Err(()),
+                        _ => {
+                            let _request = OpenRequest::start(&open);
+                            std::future::pending::<()>().await;
+                            Err(())
+                        }
+                    }
+                }
+            });
+            let result = read_cursor_account_usage(
+                CredentialSource::File(path.clone()),
+                0.0,
+                1_781_000_000_000.0,
+                client,
+            )
+            .await;
+            assert_eq!(result.error.as_deref(), Some(expected));
+            assert!(result.records.is_empty());
+            assert_eq!(open.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn reads_past_one_hundred_pages_until_a_short_page() {
+        let access = token("auth|demo");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::json!({"accessToken": access}).to_string(),
+        )
+        .unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_task = Arc::clone(&requests);
+        let client = script(move |_| {
+            let seen = requests_task.fetch_add(1, Ordering::SeqCst) + 1;
+            let length = if seen <= 100 { 1000 } else { 1 };
+            let events: Vec<Value> = (0..length)
+                .map(|_| serde_json::json!({"tokenUsage": null}))
+                .collect();
+            async move {
+                Ok(json_response(
+                    200,
+                    serde_json::json!({
+                        "totalUsageEventsCount": 100_001,
+                        "usageEventsDisplay": events
+                    }),
+                ))
+            }
+        });
+        let result = read_cursor_account_usage(
+            CredentialSource::File(path),
+            0.0,
+            1_781_000_000_000.0,
+            client,
+        )
+        .await;
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(requests.load(Ordering::SeqCst), 101);
+        assert!(result.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn full_page_at_the_reported_count_still_needs_a_terminal_page() {
+        let access = token("auth|demo");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::json!({"accessToken": access}).to_string(),
+        )
+        .unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_task = Arc::clone(&requests);
+        let client = script(move |_| {
+            let seen = requests_task.fetch_add(1, Ordering::SeqCst) + 1;
+            let body = if seen == 1 {
+                let events: Vec<Value> = (0..1000)
+                    .map(|index| {
+                        serde_json::json!({
+                            "timestamp": (1_780_000_000_000u64 + index).to_string(),
+                            "model": "gpt-5",
+                            "tokenUsage": {"inputTokens": 10, "outputTokens": 5}
+                        })
+                    })
+                    .collect();
+                serde_json::json!({"totalUsageEventsCount": 1000, "usageEventsDisplay": events})
+            } else {
+                serde_json::json!({"totalUsageEventsCount": 1000})
+            };
+            async move { Ok(json_response(200, body)) }
+        });
+        let result = read_cursor_account_usage(
+            CredentialSource::File(path),
+            0.0,
+            1_781_000_000_000.0,
+            client,
+        )
+        .await;
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.records.len(), 1000);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn truncated_pages_are_not_presented_as_complete_history() {
+        let access = token("auth|demo");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::json!({"accessToken": access}).to_string(),
+        )
+        .unwrap();
+        let client = script(|_| async {
+            Ok(json_response(
+                200,
+                serde_json::json!({"totalUsageEventsCount": 101, "usageEventsDisplay": []}),
+            ))
+        });
+        let result = read_cursor_account_usage(
+            CredentialSource::File(path),
+            0.0,
+            1_781_000_000_000.0,
+            client,
+        )
+        .await;
+        assert!(result.error.is_some());
+        assert!(result.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unreadable_credentials_stop_before_any_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(&path, "{not json").unwrap();
+        let client = script(|_| async { panic!("no request") });
+        let result = read_cursor_account_usage(
+            CredentialSource::File(path),
+            0.0,
+            1_781_000_000_000.0,
+            client,
+        )
+        .await;
+        assert_eq!(
+            result.error.as_deref(),
+            Some("Cursor credentials could not be read.")
+        );
+        assert!(!result.missing);
+        assert!(result.account_key.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_that_never_answers_keeps_the_account_key() {
+        let access = token("auth|demo");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::json!({"accessToken": access}).to_string(),
+        )
+        .unwrap();
+        let client =
+            script(|_| async { std::future::pending::<Result<DashboardResponse, ()>>().await });
+        let result = read_cursor_account_usage(
+            CredentialSource::File(path),
+            0.0,
+            1_781_000_000_000.0,
+            client,
+        )
+        .await;
+        assert_eq!(
+            result.error.as_deref(),
+            Some("Cursor account usage could not be read.")
+        );
+        assert_eq!(result.account_key, Some(sha256_hex(b"auth|demo")));
     }
 }

@@ -143,8 +143,6 @@ struct SessionInner {
     active_turn: Mutex<Option<ActiveTurn>>,
     home: Option<PathBuf>,
     image_prompts: AtomicBool,
-    /// Whether the session's Cursor mode is `plan`. Starts as `agent`.
-    plan_mode: AtomicBool,
     capabilities: Mutex<OrchestrationV2ProviderCapabilities>,
     auth: Mutex<CursorSignInStatus>,
     initialize: Mutex<Option<InitializeResponse>>,
@@ -280,7 +278,6 @@ impl CursorSession {
             active_turn: Mutex::new(None),
             home: cursor_home,
             image_prompts: AtomicBool::new(false),
-            plan_mode: AtomicBool::new(false),
             capabilities: Mutex::new(capabilities::cursor_capabilities()),
             auth: Mutex::new(CursorSignInStatus::idle()),
             initialize: Mutex::new(None),
@@ -377,17 +374,6 @@ impl CursorSession {
         .await
     }
 
-    /// Upstream `makeCursorAgentOptions` sets `mode: "plan"` for plan interaction.
-    /// Only changes are sent, so a default turn never touches the session mode.
-    async fn sync_interaction_mode(&self, plan: bool) -> Result<(), CursorError> {
-        if self.inner.plan_mode.load(Ordering::SeqCst) == plan {
-            return Ok(());
-        }
-        self.set_mode(if plan { "plan" } else { "agent" }).await?;
-        self.inner.plan_mode.store(plan, Ordering::SeqCst);
-        Ok(())
-    }
-
     pub async fn set_mode(&self, mode_id: &str) -> Result<Value, CursorError> {
         let session_id = self.session_id()?;
         let mode_id = mode_id.to_owned();
@@ -396,6 +382,18 @@ impl CursorSession {
             .set_session_mode(json!({"sessionId": session_id, "modeId": mode_id}))
             .await
             .map_err(|error| CursorError::from_acp(CursorOperation::Config, &error))
+    }
+
+    /// Upstream sends `mode: "plan"` with a plan-mode turn and `"agent"` otherwise.
+    async fn apply_interaction_mode(
+        &self,
+        mode: ProviderInteractionMode,
+    ) -> Result<(), CursorError> {
+        let mode_id = match mode {
+            ProviderInteractionMode::Plan => "plan",
+            ProviderInteractionMode::Default => "agent",
+        };
+        self.set_mode(mode_id).await.map(|_| ())
     }
 
     fn session_id(&self) -> Result<String, CursorError> {
@@ -1365,11 +1363,9 @@ impl ProviderSessionRuntime for CursorSession {
         self.apply_model_selection(&input.model_selection)
             .await
             .map_err(|error| map_error(kind.clone(), error))?;
-        self.sync_interaction_mode(
-            input.runtime_policy.interaction_mode == ProviderInteractionMode::Plan,
-        )
-        .await
-        .map_err(|error| map_error(kind.clone(), error))?;
+        self.apply_interaction_mode(input.runtime_policy.interaction_mode)
+            .await
+            .map_err(|error| map_error(kind.clone(), error))?;
         let native = native_session_id(&input.provider_thread).unwrap_or_default();
         let context = TurnContext {
             scope: Scope {
@@ -2160,6 +2156,44 @@ mod tests {
         assert!(error.not_signed_in);
         assert_eq!(session.auth_status().phase, auth::SignInPhase::NotSignedIn);
         session.sign_in().await.unwrap();
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn interaction_mode_selects_plan_or_agent_on_the_open_process() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            let init = read_frame(&mut read).await;
+            write_frame(&mut write, v1_initialized(&init["id"])).await;
+            let created = read_frame(&mut read).await;
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": created["id"], "result": {"sessionId": "sess-mode"}}),
+            )
+            .await;
+            for expected in ["plan", "agent"] {
+                let mode = read_frame(&mut read).await;
+                assert_eq!(mode["method"], "session/set_mode");
+                assert_eq!(mode["params"]["sessionId"], "sess-mode");
+                assert_eq!(mode["params"]["modeId"], expected);
+                write_frame(
+                    &mut write,
+                    json!({"jsonrpc":"2.0","id": mode["id"], "result": {}}),
+                )
+                .await;
+            }
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        session
+            .apply_interaction_mode(ProviderInteractionMode::Plan)
+            .await
+            .unwrap();
+        session
+            .apply_interaction_mode(ProviderInteractionMode::Default)
+            .await
+            .unwrap();
         peer.await.unwrap();
     }
 
@@ -3022,32 +3056,6 @@ mod tests {
             session.provider_session().capabilities,
             session.capabilities()
         );
-        peer.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn plan_interaction_switches_the_cursor_mode_and_back() {
-        let (client, mut read, mut write) = pair();
-        let peer = tokio::spawn(async move {
-            peer_open(&mut read, &mut write, "sess-mode").await;
-            for expected in ["plan", "agent"] {
-                let set = read_frame(&mut read).await;
-                assert_eq!(set["method"], "session/set_mode");
-                assert_eq!(set["params"]["modeId"], expected);
-                write_frame(
-                    &mut write,
-                    json!({"jsonrpc":"2.0","id": set["id"], "result": {}}),
-                )
-                .await;
-            }
-        });
-        let session = CursorSession::from_client(client, None);
-        session.initialize().await.unwrap();
-        session.new_session(Path::new("/work")).await.unwrap();
-        session.sync_interaction_mode(true).await.unwrap();
-        // A repeat of the same mode sends nothing.
-        session.sync_interaction_mode(true).await.unwrap();
-        session.sync_interaction_mode(false).await.unwrap();
         peer.await.unwrap();
     }
 

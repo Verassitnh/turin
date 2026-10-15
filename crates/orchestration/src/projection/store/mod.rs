@@ -123,7 +123,7 @@ impl ProjectionStore {
         self.read(move |conn| {
             let tx = conn
                 .unchecked_transaction()
-                .map_err(|error| ProjectionStoreError::setup(error))?;
+                .map_err(ProjectionStoreError::setup)?;
             let result = f(&tx);
             // A read transaction has nothing to commit; dropping rolls it back.
             drop(tx);

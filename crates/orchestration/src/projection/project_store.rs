@@ -116,7 +116,7 @@ impl ProjectStore {
     ) -> Result<Vec<ProjectRow>, PersistenceError> {
         self.db.read(move |conn| {
             let mut statement = conn.prepare("SELECT project_id, title, workspace_root, default_model_selection_json, default_thread_env_mode, auto_pull, favicon_path, project_icon_json, scripts_json, created_at, updated_at, deleted_at FROM projection_projects ORDER BY created_at ASC, project_id ASC").map_err(|e| PersistenceError::sql("ProjectStore.list", &e))?;
-            let rows = statement.query_map([], |row| raw_row(row)).map_err(|e| PersistenceError::sql("ProjectStore.list", &e))?;
+            let rows = statement.query_map([], raw_row).map_err(|e| PersistenceError::sql("ProjectStore.list", &e))?;
             let mut result = Vec::new();
             for raw in rows {
                 let row = decode_row(raw.map_err(|e| PersistenceError::sql("ProjectStore.list", &e))?)?;
@@ -258,18 +258,14 @@ fn upsert(tx: &Transaction<'_>, row: &ProjectRow) -> Result<(), PersistenceError
     let model = row
         .default_model_selection
         .as_ref()
-        .map(|value| serde_json::to_string(value))
+        .map(serde_json::to_string)
         .transpose()
         .map_err(|e| invalid(e.to_string()))?;
-    let env = row
-        .default_thread_env_mode
-        .as_ref()
-        .map(|value| {
-            serde_json::to_value(value)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned))
-        })
-        .flatten();
+    let env = row.default_thread_env_mode.as_ref().and_then(|value| {
+        serde_json::to_value(value)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+    });
     let icon = row
         .project_icon
         .as_ref()

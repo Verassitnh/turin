@@ -259,7 +259,7 @@ mod tests {
             &ended_late_low_ordinal,
             &ended_early_high_ordinal
         ));
-        let unfinished = run("c", 0 + 3, "running", None);
+        let unfinished = run("c", 3, "running", None);
         assert!(run_ran_after(&unfinished, &ended_late_low_ordinal));
         let same_end = run("d", 9, "completed", Some("2026-01-01T00:10:00.000Z"));
         assert!(run_ran_after(&same_end, &ended_late_low_ordinal));

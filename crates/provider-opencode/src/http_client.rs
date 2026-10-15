@@ -57,23 +57,30 @@ impl HttpClient {
         expected: &[u16],
         timeout: Option<Duration>,
     ) -> Result<Bytes, OpenCodeRuntimeError> {
-        let response = self
-            .send(operation, method, path, query, extra_query, body, timeout)
-            .await?;
-        let status = response.status().as_u16();
-        let content_type = header_str(response.headers(), reqwest::header::CONTENT_TYPE);
-        if content_type.as_deref() == Some("text/html") {
-            return Err(OpenCodeRuntimeError::new(
-                operation,
-                "Request is not supported by this version of OpenCode Server (Server responded with text/html)",
-            ));
-        }
-        let bytes = response.bytes().await.map_err(|err| {
-            OpenCodeRuntimeError::new(
-                operation,
-                format!("Couldn't read the OpenCode response: {err}"),
-            )
-        })?;
+        // The deadline covers the body as well as the headers. Upstream wraps the
+        // whole SDK call in `Effect.timeoutOption`, so a server that sends headers
+        // and then stalls must still fail.
+        let exchange = async {
+            let response = self
+                .send(operation, method, path, query, extra_query, body)
+                .await?;
+            let status = response.status().as_u16();
+            let content_type = header_str(response.headers(), reqwest::header::CONTENT_TYPE);
+            if content_type.as_deref() == Some("text/html") {
+                return Err(OpenCodeRuntimeError::new(
+                    operation,
+                    "Request is not supported by this version of OpenCode Server (Server responded with text/html)",
+                ));
+            }
+            let bytes = response.bytes().await.map_err(|err| {
+                OpenCodeRuntimeError::new(
+                    operation,
+                    format!("Couldn't read the OpenCode response: {err}"),
+                )
+            })?;
+            Ok((status, bytes))
+        };
+        let (status, bytes) = within(operation, timeout, exchange).await?;
         if expected.contains(&status) {
             return Ok(bytes);
         }
@@ -169,7 +176,6 @@ impl HttpClient {
         query: &[(&str, String)],
         extra_query: &[(String, String)],
         body: Option<&serde_json::Value>,
-        timeout: Option<Duration>,
     ) -> Result<reqwest::Response, OpenCodeRuntimeError> {
         let url = self.url(&method, path, query, extra_query);
         let mut builder = self.http.request(method.clone(), url);
@@ -178,22 +184,10 @@ impl HttpClient {
         if let Some(body) = body {
             builder = builder.json(body);
         }
-        let request = async {
-            builder.send().await.map_err(|err| {
-                OpenCodeRuntimeError::new(operation, "Couldn't reach the OpenCode server.")
-                    .with_cause(err)
-            })
-        };
-        match timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, request).await {
-                Ok(result) => result,
-                Err(_elapsed) => Err(OpenCodeRuntimeError::new(
-                    operation,
-                    "Timed out while waiting for the OpenCode server.",
-                )),
-            },
-            None => request.await,
-        }
+        builder.send().await.map_err(|err| {
+            OpenCodeRuntimeError::new(operation, "Couldn't reach the OpenCode server.")
+                .with_cause(err)
+        })
     }
 
     fn url(
@@ -266,6 +260,27 @@ impl HttpClient {
     }
 }
 
+/// Runs one whole JSON exchange under `timeout`, if the caller set one.
+async fn within<T>(
+    operation: &str,
+    timeout: Option<Duration>,
+    exchange: impl std::future::Future<Output = Result<T, OpenCodeRuntimeError>>,
+) -> Result<T, OpenCodeRuntimeError> {
+    let Some(timeout) = timeout else {
+        return exchange.await;
+    };
+    match tokio::time::timeout(timeout, exchange).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(OpenCodeRuntimeError::new(
+            operation,
+            "Timed out while waiting for the OpenCode server.",
+        )),
+    }
+}
+
+/// `no_proxy`: upstream's Effect/Node fetch ignores `HTTP(S)_PROXY`, `ALL_PROXY`
+/// and the system proxy, so a proxy in the environment must not route the
+/// loopback server (or an external one) away from the adapter.
 pub fn shared_http() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -343,5 +358,40 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_deadline_covers_a_body_that_stalls_after_the_headers() {
+        // Headers arrive with a 1 MiB Content-Length, a few bytes follow, then the socket stays open.
+        let server = FakeServer::spawn(|_| FakeResponse {
+            status: 200,
+            content_type: Some("application/json".to_string()),
+            body: Vec::new(),
+            stream: Some(vec![b"{\"healthy\"".to_vec()]),
+            hold: true,
+            follow: None,
+            truncated: true,
+        })
+        .await;
+        let client = HttpClient::new(&server.url, "", false).unwrap();
+        let started = std::time::Instant::now();
+        let err = client
+            .send_json(
+                "global.health",
+                Method::GET,
+                "/global/health",
+                &[],
+                &[],
+                None,
+                &[200],
+                Some(Duration::from_millis(200)),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.detail,
+            "Timed out while waiting for the OpenCode server."
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

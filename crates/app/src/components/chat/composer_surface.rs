@@ -157,7 +157,9 @@ impl RenderOnce for ComposerSurface {
                                     .justify_center()
                                     .rounded_full()
                                     .bg(theme.message_action)
-                                    .shadow(tokens::shadow_xs(0.05))
+                                    // Empty draft → disabled: `disabled:opacity-64
+                                    // disabled:shadow-none`. The enabled
+                                    // message-action/24 shadow lands with the composer.
                                     .opacity(0.64)
                                     .child(
                                         svg()

@@ -80,16 +80,31 @@ icns and the compare sheet are rebuilt from it. Once a native PNG is committed, 
 
 ## Shipping on macOS 26+
 
-For the Liquid Glass icon on Tahoe, compile the project into the bundle:
+For the Liquid Glass icon on Tahoe, compile the project into the bundle's resources:
 
 ```sh
-xcrun actool assets/prod/app-icon.icon --compile <Bundle>/Contents/Resources \
-  --platform macosx --minimum-deployment-target 11.0 --app-icon AppIcon \
-  --output-partial-info-plist /tmp/partial.plist
+uv run assets/export-icons.py --bundle-resources <Bundle>/Contents/Resources
 ```
 
-This writes `Assets.car` and `AppIcon.icns`. Set `CFBundleIconName = AppIcon` and
-`CFBundleIconFile = AppIcon`. To ship only the classic icon, copy `turin-black.icns` in as the
-`CFBundleIconFile` instead.
+This runs:
+
+```sh
+xcrun actool "$PWD/assets/prod/app-icon.icon" --compile <Bundle>/Contents/Resources \
+  --platform macosx --minimum-deployment-target 11.0 --app-icon app-icon \
+  --output-partial-info-plist <tmp>/partial.plist
+```
+
+It writes `Assets.car` and `app-icon.icns`. Set `CFBundleIconName = app-icon` and
+`CFBundleIconFile = app-icon` in Info.plist, which are the keys in the partial plist. The
+`app-icon.icns` fallback only goes up to 256px. On macOS 11–15 the full-size icon comes from
+`Assets.car`.
+
+`--app-icon` must be the `.icon` file's basename. With any other name, actool exits 0 and writes
+nothing, and the bundle ships without an icon. The flag fails unless `Assets.car` and
+`app-icon.icns` are non-empty and the plist keys match. If you call actool yourself, check the
+outputs the same way.
+
+To ship only the classic icon, copy `turin-black.icns` into `Contents/Resources` and set
+`CFBundleIconFile = turin-black` instead.
 
 Do not edit the generated PNG, ICO or ICNS files directly.

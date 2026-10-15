@@ -25,6 +25,7 @@ import argparse
 import io
 import json
 import os
+import plistlib
 import re
 import shutil
 import struct
@@ -316,6 +317,31 @@ def build_icns(macos_png: Path, out: Path, tmp: Path) -> None:
     subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(out)], check=True)
 
 
+# --- macOS app bundle (Tahoe Liquid Glass icon) ---
+
+def compile_bundle_icon(icon: Path, resources: Path) -> None:
+    """actool the .icon into Assets.car + <name>.icns. actool exits 0 and writes nothing when
+    --app-icon doesn't match the project's basename, so check the outputs explicitly."""
+    name = icon.stem
+    resources.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="turin-actool-") as tmp_name:
+        plist = Path(tmp_name) / "partial.plist"
+        subprocess.run(
+            ["xcrun", "actool", str(icon.resolve()), "--compile", str(resources.resolve()),
+             "--platform", "macosx", "--minimum-deployment-target", "11.0", "--app-icon", name,
+             "--output-partial-info-plist", str(plist)],
+            check=True, capture_output=True,
+        )
+        keys = plistlib.loads(plist.read_bytes())
+    for output in (resources / "Assets.car", resources / f"{name}.icns"):
+        if not output.is_file() or output.stat().st_size == 0:
+            sys.exit(f"actool produced no {output.name}; nothing was compiled")
+    if keys.get("CFBundleIconName") != name or keys.get("CFBundleIconFile") != name:
+        sys.exit(f"unexpected actool Info.plist keys: {keys}")
+    print(f"compiled {resources}/Assets.car and {name}.icns; set Info.plist "
+          f"CFBundleIconName = {name} and CFBundleIconFile = {name}")
+
+
 # --- comparison sheet ---
 
 def compare_sheet(out: Path) -> None:
@@ -358,7 +384,13 @@ def main() -> None:
     parser.add_argument("--keep-macos-png", action="store_true",
                         help="leave prod/black-macos-1024.png untouched (e.g. a native Icon Composer "
                              "pre-Tahoe export) and build the icns and compare sheet from it")
+    parser.add_argument("--bundle-resources", type=Path, metavar="DIR",
+                        help="only compile prod/app-icon.icon with actool into DIR (an app bundle's "
+                             "Contents/Resources) and verify Assets.car + app-icon.icns were written")
     args = parser.parse_args()
+    if args.bundle_resources:
+        compile_bundle_icon(SOURCE, args.bundle_resources)
+        return
 
     tool, version = find_ictool()
     print(f"ictool {version}: {tool}")

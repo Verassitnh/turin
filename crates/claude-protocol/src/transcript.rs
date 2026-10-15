@@ -688,14 +688,29 @@ fn session_chain(entries: &[Value]) -> Vec<Value> {
     chain.reverse();
     insert_siblings(&by_id, &order, chain)
 }
+fn queued_command_source(entry: &Value) -> Option<&str> {
+    if entry.get("type").and_then(Value::as_str) != Some("attachment") {
+        return None;
+    }
+    let attachment = entry.get("attachment")?;
+    if attachment.get("type").and_then(Value::as_str) != Some("queued_command") {
+        return None;
+    }
+    attachment
+        .get("source_uuid")
+        .and_then(Value::as_str)
+        .filter(|source| !source.is_empty())
+}
+/// SDK `bI`: an exact uuid wins anywhere in the list before any queued-command source match.
 fn message_index(entries: &[Value], target: &str) -> Option<usize> {
-    entries.iter().position(|entry| {
-        entry_id(entry) == Some(target)
-            || entry
-                .pointer("/attachment/source_uuid")
-                .and_then(Value::as_str)
-                == Some(target)
-    })
+    entries
+        .iter()
+        .position(|entry| entry_id(entry) == Some(target))
+        .or_else(|| {
+            entries
+                .iter()
+                .position(|entry| queued_command_source(entry) == Some(target))
+        })
 }
 fn is_main_turn(entry: &Value) -> bool {
     matches!(
@@ -1474,6 +1489,68 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["u1", "a1", "a2", "u2"]
         );
+        fs::remove_dir_all(root).await.unwrap();
+    }
+    async fn write_session(entries: &[Value]) -> (PathBuf, TranscriptOptions, String, PathBuf) {
+        let root = std::env::temp_dir().join(format!("turin-claude-fork-{}", uuid::Uuid::new_v4()));
+        let dir = root.join("work");
+        fs::create_dir_all(&dir).await.unwrap();
+        let options = TranscriptOptions {
+            dir: Some(dir.clone()),
+            config_dir: Some(root.join("config")),
+            ..Default::default()
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let folder = projects_dir(&options).join(project_key(&dir));
+        fs::create_dir_all(&folder).await.unwrap();
+        let body: String = entries
+            .iter()
+            .map(|entry| {
+                let mut entry = entry.clone();
+                entry["sessionId"] = json!(id);
+                format!("{}\n", serde_json::to_string(&entry).unwrap())
+            })
+            .collect();
+        fs::write(folder.join(format!("{id}.jsonl")), body)
+            .await
+            .unwrap();
+        (root, options, id, folder)
+    }
+    fn user(uuid: &str, parent: Option<&str>, text: &str) -> Value {
+        json!({"type":"user","uuid":uuid,"parentUuid":parent,"message":{"role":"user","content":text}})
+    }
+    fn assistant(uuid: &str, parent: &str) -> Value {
+        json!({"type":"assistant","uuid":uuid,"parentUuid":parent,"message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}})
+    }
+    #[tokio::test]
+    async fn fork_cut_prefers_exact_uuid_over_queued_command_source() {
+        let (root, options, id, folder) = write_session(&[
+            user("u1", None, "first"),
+            assistant("a2", "u1"),
+            json!({"type":"attachment","uuid":"A3","parentUuid":"a2","attachment":{"type":"queued_command","prompt":"later","source_uuid":"u5"}}),
+            assistant("a4", "A3"),
+            user("u5", Some("a4"), "fifth"),
+            assistant("a6", "u5"),
+        ])
+        .await;
+        let fork = fork_session(&id, &options, Some("u5"), Some("Cut"))
+            .await
+            .unwrap();
+        let forked = read_entries(&folder.join(format!("{fork}.jsonl")))
+            .await
+            .unwrap();
+        let originals: Vec<&str> = forked
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .pointer("/forkedFrom/messageUuid")
+                    .and_then(Value::as_str)
+            })
+            .collect();
+        assert_eq!(originals, ["u1", "a2", "A3", "a4", "u5"]);
+        let other =
+            json!({"type":"attachment","uuid":"x","attachment":{"type":"other","source_uuid":"t"}});
+        assert_eq!(message_index(&[other], "t"), None);
         fs::remove_dir_all(root).await.unwrap();
     }
     #[test]

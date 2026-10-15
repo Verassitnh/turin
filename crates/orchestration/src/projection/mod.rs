@@ -12,6 +12,7 @@ pub mod store;
 pub mod thread_history_paging;
 pub mod thread_live_event_coalescer;
 pub mod thread_search;
+pub mod tool_output_image_bytes;
 pub mod turn_item;
 pub mod turn_item_position_store;
 

@@ -7,3 +7,4 @@ pub mod pending_background_work;
 pub mod thread_error;
 pub mod thread_pull_requests;
 pub mod timeline;
+pub mod tool_output;

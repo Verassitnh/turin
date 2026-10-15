@@ -31,7 +31,7 @@ use super::super::github_account_logic::{
 use super::super::layout::{SettingsRow, SettingsSection, setting_reset_button};
 use super::super::model_picker::{provider_is_selectable, resolve_default_selection};
 use super::super::panels_logic::{
-    BackgroundActivityOverridePatch, background_activity_override_settings, duration_to_seconds,
+    background_activity_fetch_interval_settings, duration_to_seconds,
 };
 use super::super::rows::{BoolRow, Json, SelectRowSpec};
 use super::super::search::searchable_setting;
@@ -671,20 +671,14 @@ impl SettingsView {
         let default_seconds = duration_to_seconds(preset.automatic_git_fetch_interval);
         let can_reset = seconds != default_seconds;
         let current = vm.server.background_activity.clone();
-        let resolved_for_write = resolved;
         let reset = {
             let current = current.clone();
             let action = self.cb(cx, move |this, _, cx| {
-                let next = background_activity_override_settings(
-                    &current,
-                    &resolved,
-                    BackgroundActivityOverridePatch::default(),
+                let next = background_activity_fetch_interval_settings(&current, None);
+                this.update_server(
+                    json!({ "backgroundActivity": serde_json::to_value(next).unwrap_or(Value::Null) }),
+                    cx,
                 );
-                let mut value = serde_json::to_value(next).unwrap_or(Value::Null);
-                if let Some(overrides) = value.get_mut("overrides").and_then(Value::as_object_mut) {
-                    overrides.remove("automaticGitFetchInterval");
-                }
-                this.update_server(json!({ "backgroundActivity": value }), cx);
             });
             div()
                 .flex()
@@ -709,15 +703,12 @@ impl SettingsView {
             window,
             cx,
             move |this, value, cx| {
-                let next = background_activity_override_settings(
-                    &current,
-                    &resolved_for_write,
-                    BackgroundActivityOverridePatch {
-                        automatic_git_fetch_interval: Some(value * 1_000),
-                        ..Default::default()
-                    },
+                let next =
+                    background_activity_fetch_interval_settings(&current, Some(value * 1_000));
+                this.update_server(
+                    json!({ "backgroundActivity": serde_json::to_value(next).unwrap_or(Value::Null) }),
+                    cx,
                 );
-                this.update_server(json!({ "backgroundActivity": serde_json::to_value(next).unwrap_or(Value::Null) }), cx);
             },
         );
         let (id, title) = searchable_setting("git-fetch-interval");

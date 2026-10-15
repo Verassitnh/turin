@@ -10,8 +10,9 @@ use turin_contracts::model_selection::ModelSelection;
 use turin_contracts::provider_instance::{ProviderInstanceConfig, ProviderInstanceId};
 use turin_contracts::settings::{
     BackgroundActivityOverrides, BackgroundActivityProfile, BackgroundActivityProfileSelection,
-    BackgroundActivitySchemaVersion, BackgroundActivitySettings, ClientSettings, ServerSettings,
-    ServerSettingsPatch, SidebarProjectGroupingMode, UnifiedSettings, default_unified_settings,
+    BackgroundActivitySchemaVersion, BackgroundActivitySettings, ClientSettings,
+    DurationFromMillis, ServerSettings, ServerSettingsPatch, SidebarProjectGroupingMode,
+    UnifiedSettings, default_unified_settings,
 };
 use turin_shared::server_settings::{
     ResolvedBackgroundActivity, normalize_background_activity_settings,
@@ -294,6 +295,24 @@ pub fn background_activity_override_settings(
     }
 }
 
+/// `backgroundActivityOverrideSettings` in SourceControlSettings.tsx: sets or
+/// clears only `automaticGitFetchInterval` (`None` clears it) and keeps the other
+/// saved overrides as they are, so they keep following the base profile. The
+/// General helper above materializes every resolved value, which would pin them.
+pub fn background_activity_fetch_interval_settings(
+    current: &BackgroundActivitySettings,
+    automatic_git_fetch_interval: Option<DurationFromMillis>,
+) -> BackgroundActivitySettings {
+    let mut overrides = current.overrides.clone();
+    overrides.automatic_git_fetch_interval = automatic_git_fetch_interval;
+    BackgroundActivitySettings {
+        schema_version: BackgroundActivitySchemaVersion,
+        profile: BackgroundActivityProfileSelection::Custom,
+        base_profile: Some(background_activity_base_profile(current)),
+        overrides,
+    }
+}
+
 fn background_activity_base_profile(
     settings: &BackgroundActivitySettings,
 ) -> BackgroundActivityProfile {
@@ -372,6 +391,40 @@ mod tests {
         assert_eq!(
             resolve_background_activity_profile_option(&settings),
             BackgroundActivityProfileOption::Advanced
+        );
+    }
+
+    #[test]
+    fn source_control_fetch_interval_keeps_other_overrides_following_the_profile() {
+        let current = BackgroundActivitySettings {
+            schema_version: BackgroundActivitySchemaVersion,
+            profile: BackgroundActivityProfileSelection::Custom,
+            base_profile: Some(BackgroundActivityProfile::Balanced),
+            overrides: BackgroundActivityOverrides {
+                pause_when_on_battery: Some(true),
+                idle_client_ttl: Some(9_000),
+                ..Default::default()
+            },
+        };
+        let set = background_activity_fetch_interval_settings(&current, Some(60_000));
+        assert_eq!(set.overrides.automatic_git_fetch_interval, Some(60_000));
+        assert_eq!(set.overrides.pause_when_on_battery, Some(true));
+        assert_eq!(set.overrides.idle_client_ttl, Some(9_000));
+        assert_eq!(
+            serde_json::to_value(&set.overrides).unwrap(),
+            json!({
+                "automaticGitFetchInterval": 60_000,
+                "idleClientTtl": 9_000,
+                "pauseWhenOnBattery": true,
+            })
+        );
+
+        // Clearing removes only the fetch interval; nothing is materialized.
+        let cleared = background_activity_fetch_interval_settings(&set, None);
+        assert_eq!(cleared.overrides.automatic_git_fetch_interval, None);
+        assert_eq!(
+            serde_json::to_value(&cleared.overrides).unwrap(),
+            json!({ "idleClientTtl": 9_000, "pauseWhenOnBattery": true })
         );
     }
 

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use turin_contracts::base_schemas::js_trim;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,8 +255,24 @@ pub struct AsyncRotatingFileSink {
     file_path: PathBuf,
     max_bytes: u64,
     max_files: u64,
-    state: Mutex<AsyncState>,
+    state: Arc<Mutex<AsyncState>>,
     fail_appends: AtomicUsize,
+}
+
+/// Runs blocking file I/O on tokio's blocking pool so it never stalls a
+/// runtime worker. A panic in `f` is re-raised on the caller.
+async fn run_blocking<T, F>(f: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(value) => value,
+        Err(error) => match error.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(error) => panic!("blocking file task was cancelled: {error}"),
+        },
+    }
 }
 
 impl AsyncRotatingFileSink {
@@ -283,25 +299,32 @@ impl AsyncRotatingFileSink {
                 },
             ));
         }
-        let file_path = file_path.into();
-        if let Some(parent) = file_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent).map_err(|cause| {
-                RotatingFileSinkOpenError::Io(sink_error("initialize", &file_path, cause))
-            })?;
-        }
         let sink = Arc::new(Self {
-            file_path,
+            file_path: file_path.into(),
             max_bytes,
             max_files,
-            state: Mutex::new(AsyncState { current_size: 0 }),
+            state: Arc::new(Mutex::new(AsyncState { current_size: 0 })),
             fail_appends: AtomicUsize::new(0),
         });
-        sink.prune().map_err(RotatingFileSinkOpenError::Io)?;
-        let size = sink.read_size().map_err(RotatingFileSinkOpenError::Io)?;
+        let initializing = Arc::clone(&sink);
+        let size = run_blocking(move || initializing.initialize())
+            .await
+            .map_err(RotatingFileSinkOpenError::Io)?;
         sink.state.lock().await.current_size = size;
         Ok(sink)
+    }
+
+    /// Blocking half of `open`: create the directory, prune overflow backups,
+    /// and read the live file's size.
+    fn initialize(&self) -> Result<u64, RotatingFileSinkError> {
+        if let Some(parent) = self.file_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .map_err(|cause| sink_error("initialize", &self.file_path, cause))?;
+        }
+        self.prune()?;
+        self.read_size()
     }
 
     #[cfg(test)]
@@ -314,20 +337,30 @@ impl AsyncRotatingFileSink {
         chunk: impl AsRef<[u8]>,
     ) -> Result<(), RotatingFileSinkError> {
         let buffer = chunk.as_ref().to_vec();
-        let mut state = self.state.lock().await;
+        // Take the lock in call order (tokio's mutex is fair), then hand the
+        // owned guard to the blocking pool so the append runs off the workers.
+        let mut state = Arc::clone(&self.state).lock_owned().await;
         if buffer.is_empty() {
             return Ok(());
         }
+        let sink = Arc::clone(self);
+        run_blocking(move || sink.write_locked(&mut state, &buffer)).await
+    }
+
+    fn write_locked(
+        &self,
+        state: &mut OwnedMutexGuard<AsyncState>,
+        buffer: &[u8],
+    ) -> Result<(), RotatingFileSinkError> {
         let length = buffer.len() as u64;
-        let written = async {
+        let written = (|| {
             if state.current_size > 0 && state.current_size + length > self.max_bytes {
-                self.rotate(&mut state).await?;
+                self.rotate(state)?;
             }
-            self.append(&buffer)?;
+            self.append(buffer)?;
             state.current_size += length;
             Ok(())
-        }
-        .await;
+        })();
         if written.is_err()
             && let Ok(size) = self.read_size()
         {
@@ -336,7 +369,7 @@ impl AsyncRotatingFileSink {
         written
     }
 
-    async fn rotate(&self, state: &mut AsyncState) -> Result<(), RotatingFileSinkError> {
+    fn rotate(&self, state: &mut AsyncState) -> Result<(), RotatingFileSinkError> {
         let result = (|| {
             rm_force(&suffixed(&self.file_path, self.max_files))?;
             for index in (1..self.max_files).rev() {
@@ -529,6 +562,7 @@ fn js_string_to_number(text: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     fn temp_dir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -652,8 +686,22 @@ mod tests {
     #[test]
     fn js_integer_rejects_what_number_does_not_make_an_integer() {
         for suffix in [
-            "1.5", "abc", "Infinity", "-Infinity", "1e400", "-", "+", ".", "0x", "0x1g", "0b2",
-            "-0x10", "1e", "1e+", "1_000", "1 2",
+            "1.5",
+            "abc",
+            "Infinity",
+            "-Infinity",
+            "1e400",
+            "-",
+            "+",
+            ".",
+            "0x",
+            "0x1g",
+            "0b2",
+            "-0x10",
+            "1e",
+            "1e+",
+            "1_000",
+            "1 2",
         ] {
             assert_eq!(js_integer(suffix), None, "{suffix:?}");
         }
@@ -692,6 +740,49 @@ mod tests {
         };
         assert_eq!(error.operation, "prune");
         assert_eq!(error.file_path, file_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_blocked_append_does_not_stall_the_runtime() {
+        // A FIFO makes the append's open block until a reader arrives. On a
+        // single-thread runtime, an inline append would hold the only worker,
+        // so the task yielding below would not get to run before the reader
+        // opens.
+        let directory = temp_dir();
+        let file_path = directory.path().join("fifo.log");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&file_path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let sink = AsyncRotatingFileSink::open(&file_path, 1024, 2)
+            .await
+            .unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let reader_path = file_path.clone();
+        let reader = std::thread::spawn(move || {
+            // Backstop so a stalled runtime fails the assertion instead of hanging.
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(5));
+            let mut contents = String::new();
+            std::fs::File::open(reader_path)
+                .unwrap()
+                .read_to_string(&mut contents)
+                .unwrap();
+            contents
+        });
+        let writer = {
+            let sink = Arc::clone(&sink);
+            tokio::spawn(async move { sink.write("hello\n").await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !writer.is_finished(),
+            "the append finished before a reader opened the FIFO"
+        );
+        release_tx.send(()).unwrap();
+        writer.await.unwrap().unwrap();
+        assert_eq!(reader.join().unwrap(), "hello\n");
     }
 
     #[tokio::test]

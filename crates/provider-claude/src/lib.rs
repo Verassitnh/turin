@@ -11,4 +11,5 @@ pub mod claude_provider_adapter;
 pub mod claude_query_options;
 pub mod claude_turn_items;
 pub mod claude_turn_token_usage;
+pub mod claude_usage_limits;
 pub mod claude_workflow_progress;

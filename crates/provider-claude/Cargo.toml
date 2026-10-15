@@ -18,6 +18,7 @@ uuid.workspace = true
 tokio-util.workspace = true
 indexmap.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 parking_lot.workspace = true
 tokio-stream.workspace = true
 futures.workspace = true

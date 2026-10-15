@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
 use futures::stream::{self, unfold};
@@ -502,7 +502,7 @@ impl CursorSession {
         if let Some(thread) = self.inner.thread.lock().expect("thread").clone() {
             return Ok(thread);
         }
-        let cwd = cwd.display().to_string();
+        let cwd = absolute_path(cwd).display().to_string();
         self.open_with_snapshot(CursorOperation::SessionNew, |client| async move {
             client
                 .create_session(json!({"cwd": cwd, "mcpServers": []}))
@@ -518,7 +518,7 @@ impl CursorSession {
         cwd: &Path,
     ) -> Result<CursorThread, CursorError> {
         let session_id = session_id.to_owned();
-        let cwd = cwd.display().to_string();
+        let cwd = absolute_path(cwd).display().to_string();
         self.open_with_snapshot(CursorOperation::SessionLoad, |client| async move {
             client
                 .load_session(json!({
@@ -555,8 +555,11 @@ impl CursorSession {
             .inner
             .client
             .prompt(json!({"sessionId": session_id, "prompt": prompt}))
-            .await
-            .map_err(|error| self.fail_auth(CursorOperation::Prompt, error))?;
+            .await;
+        // The turn is over either way. A permission, question, or plan card still
+        // waiting here would never get an answer, because the agent stopped asking.
+        self.cancel_waiters();
+        let result = result.map_err(|error| self.fail_auth(CursorOperation::Prompt, error))?;
         let stop_reason = result
             .get("stopReason")
             .and_then(Value::as_str)
@@ -738,6 +741,23 @@ impl CursorSession {
             cancel_pending(item);
         }
     }
+}
+
+/// `session/new` and `session/load` require an absolute `cwd`. A relative path
+/// resolves against the Turin process cwd, as upstream's `process.cwd()` does.
+fn absolute_path(path: &Path) -> PathBuf {
+    let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    if path.as_os_str().is_empty() {
+        current
+    } else if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        current.join(path)
+    }
+}
+
+fn absolute_cwd(cwd: Option<&str>) -> PathBuf {
+    absolute_path(Path::new(cwd.map_or("", str::trim)))
 }
 
 fn native_session_id(thread: &OrchestrationV2ProviderThread) -> Option<String> {
@@ -927,11 +947,9 @@ impl ProviderAdapterV2 for CursorAdapter {
         &self,
         input: ProviderAdapterV2OpenSessionInput,
     ) -> Result<Arc<dyn ProviderSessionRuntime>, ProviderAdapterV2Error> {
-        let cwd = input
-            .runtime_policy
-            .cwd
-            .clone()
-            .unwrap_or_else(|| ".".to_owned());
+        let cwd = absolute_cwd(input.runtime_policy.cwd.as_deref())
+            .display()
+            .to_string();
         let client = spawn(SpawnCommand {
             program: &self.program,
             args: auth::ACP_ARGS,
@@ -1012,18 +1030,14 @@ impl ProviderSessionRuntime for CursorSession {
         if let Some(thread) = self.inner.provider_thread.lock().expect("thread").clone() {
             return Ok(thread);
         }
-        let cwd = input
-            .runtime_policy
-            .cwd
-            .clone()
-            .unwrap_or_else(|| ".".to_owned());
+        let cwd = absolute_cwd(input.runtime_policy.cwd.as_deref());
         let native = input
             .existing_provider_thread
             .as_ref()
             .and_then(native_session_id);
         let opened = match native {
-            Some(native) => self.load_session(&native, Path::new(&cwd)).await,
-            None => self.new_session(Path::new(&cwd)).await,
+            Some(native) => self.load_session(&native, &cwd).await,
+            None => self.new_session(&cwd).await,
         };
         let opened = opened.map_err(|error| {
             map_error(
@@ -1059,24 +1073,22 @@ impl ProviderSessionRuntime for CursorSession {
                 provider_thread_id: input.provider_thread.id.clone(),
             })
         })?;
-        let cwd = input
-            .runtime_policy
-            .as_ref()
-            .and_then(|policy| policy.cwd.clone())
-            .unwrap_or_else(|| ".".to_owned());
-        let opened = self
-            .load_session(&native, Path::new(&cwd))
-            .await
-            .map_err(|error| {
-                map_error(
-                    ProviderAdapterErrorKind::ResumeThread {
-                        driver: self.inner.driver.clone(),
-                        provider_session_id: self.inner.provider_session_id.clone(),
-                        provider_thread_id: input.provider_thread.id.clone(),
-                    },
-                    error,
-                )
-            })?;
+        let cwd = absolute_cwd(
+            input
+                .runtime_policy
+                .as_ref()
+                .and_then(|policy| policy.cwd.as_deref()),
+        );
+        let opened = self.load_session(&native, &cwd).await.map_err(|error| {
+            map_error(
+                ProviderAdapterErrorKind::ResumeThread {
+                    driver: self.inner.driver.clone(),
+                    provider_session_id: self.inner.provider_session_id.clone(),
+                    provider_thread_id: input.provider_thread.id.clone(),
+                },
+                error,
+            )
+        })?;
         let app_thread = input
             .thread_id
             .clone()
@@ -1295,25 +1307,31 @@ impl ProviderSessionRuntime for CursorSession {
     }
 }
 
+/// The client's handler map holds these closures, and the client lives inside
+/// `SessionInner`. A strong `Arc` here would make the cycle permanent: the
+/// cursor-agent child is never killed and open cards never resolve. Handlers
+/// hold `Weak` and drop their strong reference before waiting on the user.
 fn register_handlers(client: &AcpClient, inner: &Arc<SessionInner>) {
     {
-        let inner = Arc::clone(inner);
+        let weak = Arc::downgrade(inner);
         client.on_session_update(move |params| {
-            let inner = Arc::clone(&inner);
+            let weak = weak.clone();
             async move {
-                for update in events::parse_session_update(&params) {
-                    emit_update(&inner, &update);
-                    let _ = inner.events.send(CursorEvent::Update(update));
+                if let Some(inner) = weak.upgrade() {
+                    for update in events::parse_session_update(&params) {
+                        emit_update(&inner, &update);
+                        let _ = inner.events.send(CursorEvent::Update(update));
+                    }
                 }
                 Ok(())
             }
         });
     }
     {
-        let inner = Arc::clone(inner);
+        let weak = Arc::downgrade(inner);
         client.on_request_permission(move |params, ctx| {
-            let inner = Arc::clone(&inner);
-            async move { handle_permission(inner, params, ctx).await }
+            let weak = weak.clone();
+            async move { handle_permission(weak, params, ctx).await }
         });
     }
     register_ask(client, inner);
@@ -1334,44 +1352,53 @@ fn register_handlers(client: &AcpClient, inner: &Arc<SessionInner>) {
 }
 
 async fn handle_permission(
-    inner: Arc<SessionInner>,
+    weak: Weak<SessionInner>,
     params: Value,
     ctx: RequestContext,
 ) -> Result<Value, AcpError> {
     let request = permissions::parse_permission_request(&params);
     let key = permissions::session_grant_key(&request);
-    if inner.grants.lock().expect("grants").contains(&key) {
-        return Ok(permissions::permission_result(
-            &permissions::answer_for_decision(&request, ProviderApprovalDecision::Accept),
-        ));
-    }
     let (tx, rx) = oneshot::channel();
-    inner
-        .pending
-        .lock()
-        .expect("pending")
-        .insert(ctx.request_id.clone(), Pending::Permission(tx));
-    inner
-        .pending_kind
-        .lock()
-        .expect("pending kind")
-        .insert(ctx.request_id.clone(), PendingKind::Permission);
-    emit_runtime_request(
-        &inner,
-        &ctx.request_id,
-        permissions::request_kind(&request),
-        OrchestrationV2RuntimeRequestStatus::Pending,
-        None,
-    );
-    let _ = inner.events.send(CursorEvent::Approval {
-        request_id: ctx.request_id,
-        title: request.title.clone(),
-        kind: permissions::request_kind(&request),
-        options: permissions::approval_options(&request),
-        ask_question_fallback: permissions::is_ask_question_fallback(&request),
-    });
+    {
+        let Some(inner) = weak.upgrade() else {
+            return Ok(permissions::permission_result(
+                &permissions::PermissionAnswer::Cancelled,
+            ));
+        };
+        if inner.grants.lock().expect("grants").contains(&key) {
+            return Ok(permissions::permission_result(
+                &permissions::answer_for_decision(&request, ProviderApprovalDecision::Accept),
+            ));
+        }
+        inner
+            .pending
+            .lock()
+            .expect("pending")
+            .insert(ctx.request_id.clone(), Pending::Permission(tx));
+        inner
+            .pending_kind
+            .lock()
+            .expect("pending kind")
+            .insert(ctx.request_id.clone(), PendingKind::Permission);
+        emit_runtime_request(
+            &inner,
+            &ctx.request_id,
+            permissions::request_kind(&request),
+            OrchestrationV2RuntimeRequestStatus::Pending,
+            None,
+        );
+        let _ = inner.events.send(CursorEvent::Approval {
+            request_id: ctx.request_id,
+            title: request.title.clone(),
+            kind: permissions::request_kind(&request),
+            options: permissions::approval_options(&request),
+            ask_question_fallback: permissions::is_ask_question_fallback(&request),
+        });
+    }
     let decision = rx.await.unwrap_or(ProviderApprovalDecision::Cancel);
-    if decision == ProviderApprovalDecision::AcceptForSession {
+    if decision == ProviderApprovalDecision::AcceptForSession
+        && let Some(inner) = weak.upgrade()
+    {
         inner.grants.lock().expect("grants").insert(key);
     }
     Ok(permissions::permission_result(
@@ -1380,9 +1407,9 @@ async fn handle_permission(
 }
 
 fn register_ask(client: &AcpClient, inner: &Arc<SessionInner>) {
-    let inner = Arc::clone(inner);
+    let weak = Arc::downgrade(inner);
     client.on_ext_request(turin_acp::cursor::ASK_QUESTION, move |params, ctx| {
-        let inner = Arc::clone(&inner);
+        let weak = weak.clone();
         async move {
             let parsed: AskQuestionParams =
                 serde_json::from_value(params.clone()).map_err(|_| {
@@ -1391,34 +1418,41 @@ fn register_ask(client: &AcpClient, inner: &Arc<SessionInner>) {
                     ))
                 })?;
             let (tx, rx) = oneshot::channel();
-            inner
-                .pending
-                .lock()
-                .expect("pending")
-                .insert(ctx.request_id.clone(), Pending::Ask(tx));
-            inner
-                .pending_kind
-                .lock()
-                .expect("pending kind")
-                .insert(ctx.request_id.clone(), PendingKind::Ask);
-            inner
-                .asks
-                .lock()
-                .expect("asks")
-                .insert(ctx.request_id.clone(), parsed.clone());
-            emit_runtime_request(
-                &inner,
-                &ctx.request_id,
-                OrchestrationV2RuntimeRequestKind::UserInput,
-                OrchestrationV2RuntimeRequestStatus::Pending,
-                None,
-            );
-            let _ = inner.events.send(CursorEvent::UserInput {
-                request_id: ctx.request_id,
-                tool_call_id: parsed.tool_call_id.clone(),
-                questions: extensions::user_input_questions(&parsed),
-                raw: params,
-            });
+            {
+                let Some(inner) = weak.upgrade() else {
+                    return Ok(extensions::nested_outcome(&extensions::ask_result(
+                        AskDisposition::Cancelled,
+                    )));
+                };
+                inner
+                    .pending
+                    .lock()
+                    .expect("pending")
+                    .insert(ctx.request_id.clone(), Pending::Ask(tx));
+                inner
+                    .pending_kind
+                    .lock()
+                    .expect("pending kind")
+                    .insert(ctx.request_id.clone(), PendingKind::Ask);
+                inner
+                    .asks
+                    .lock()
+                    .expect("asks")
+                    .insert(ctx.request_id.clone(), parsed.clone());
+                emit_runtime_request(
+                    &inner,
+                    &ctx.request_id,
+                    OrchestrationV2RuntimeRequestKind::UserInput,
+                    OrchestrationV2RuntimeRequestStatus::Pending,
+                    None,
+                );
+                let _ = inner.events.send(CursorEvent::UserInput {
+                    request_id: ctx.request_id,
+                    tool_call_id: parsed.tool_call_id.clone(),
+                    questions: extensions::user_input_questions(&parsed),
+                    raw: params,
+                });
+            }
             let disposition = rx.await.unwrap_or(AskDisposition::Cancelled);
             Ok(extensions::nested_outcome(&extensions::ask_result(
                 disposition,
@@ -1428,9 +1462,9 @@ fn register_ask(client: &AcpClient, inner: &Arc<SessionInner>) {
 }
 
 fn register_plan(client: &AcpClient, inner: &Arc<SessionInner>) {
-    let inner = Arc::clone(inner);
+    let weak = Arc::downgrade(inner);
     client.on_ext_request(turin_acp::cursor::CREATE_PLAN, move |params, ctx| {
-        let inner = Arc::clone(&inner);
+        let weak = weak.clone();
         async move {
             let parsed: CreatePlanParams =
                 serde_json::from_value(params.clone()).map_err(|_| {
@@ -1439,30 +1473,37 @@ fn register_plan(client: &AcpClient, inner: &Arc<SessionInner>) {
                     ))
                 })?;
             let (tx, rx) = oneshot::channel();
-            inner
-                .pending
-                .lock()
-                .expect("pending")
-                .insert(ctx.request_id.clone(), Pending::Plan(tx));
-            inner
-                .pending_kind
-                .lock()
-                .expect("pending kind")
-                .insert(ctx.request_id.clone(), PendingKind::Plan);
-            emit_runtime_request(
-                &inner,
-                &ctx.request_id,
-                OrchestrationV2RuntimeRequestKind::UserInput,
-                OrchestrationV2RuntimeRequestStatus::Pending,
-                None,
-            );
-            let _ = inner.events.send(CursorEvent::Plan {
-                request_id: ctx.request_id,
-                tool_call_id: parsed.tool_call_id.clone(),
-                markdown: parsed.plan.clone(),
-                steps: extensions::plan_steps(&parsed.todos),
-                raw: params,
-            });
+            {
+                let Some(inner) = weak.upgrade() else {
+                    return Ok(extensions::nested_outcome(&extensions::plan_result(
+                        PlanDisposition::Cancelled,
+                    )));
+                };
+                inner
+                    .pending
+                    .lock()
+                    .expect("pending")
+                    .insert(ctx.request_id.clone(), Pending::Plan(tx));
+                inner
+                    .pending_kind
+                    .lock()
+                    .expect("pending kind")
+                    .insert(ctx.request_id.clone(), PendingKind::Plan);
+                emit_runtime_request(
+                    &inner,
+                    &ctx.request_id,
+                    OrchestrationV2RuntimeRequestKind::UserInput,
+                    OrchestrationV2RuntimeRequestStatus::Pending,
+                    None,
+                );
+                let _ = inner.events.send(CursorEvent::Plan {
+                    request_id: ctx.request_id,
+                    tool_call_id: parsed.tool_call_id.clone(),
+                    markdown: parsed.plan.clone(),
+                    steps: extensions::plan_steps(&parsed.todos),
+                    raw: params,
+                });
+            }
             let disposition = rx.await.unwrap_or(PlanDisposition::Cancelled);
             Ok(extensions::nested_outcome(&extensions::plan_result(
                 disposition,
@@ -1479,16 +1520,18 @@ enum SideKind {
 }
 
 fn register_side(client: &AcpClient, inner: &Arc<SessionInner>, method: &str, kind: SideKind) {
-    let inner = Arc::clone(inner);
+    let weak = Arc::downgrade(inner);
     client.on_ext_request(method, move |params, _ctx| {
-        let inner = Arc::clone(&inner);
+        let weak = weak.clone();
         async move {
-            let event = match kind {
-                SideKind::Todos => CursorEvent::Todos { raw: params },
-                SideKind::Task => CursorEvent::Task { raw: params },
-                SideKind::Image => CursorEvent::Image { raw: params },
-            };
-            let _ = inner.events.send(event);
+            if let Some(inner) = weak.upgrade() {
+                let event = match kind {
+                    SideKind::Todos => CursorEvent::Todos { raw: params },
+                    SideKind::Task => CursorEvent::Task { raw: params },
+                    SideKind::Image => CursorEvent::Image { raw: params },
+                };
+                let _ = inner.events.send(event);
+            }
             Ok(json!({}))
         }
     });
@@ -2069,5 +2112,122 @@ mod tests {
     fn launch_never_passes_force_or_yolo() {
         assert!(auth::launch_is_unforced(auth::ACP_ARGS));
         assert_eq!(auth::ACP_ARGS, &["acp"]);
+    }
+
+    #[test]
+    fn missing_or_relative_cwd_resolves_to_an_absolute_path() {
+        assert!(absolute_cwd(None).is_absolute());
+        assert!(absolute_cwd(Some("  ")).is_absolute());
+        assert_eq!(absolute_cwd(Some("/work")), PathBuf::from("/work"));
+        let relative = absolute_cwd(Some("work/app"));
+        assert!(relative.is_absolute());
+        assert!(relative.ends_with("work/app"));
+    }
+
+    #[tokio::test]
+    async fn new_session_sends_an_absolute_cwd_on_the_wire() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            let init = read_frame(&mut read).await;
+            write_frame(&mut write, v1_initialized(&init["id"])).await;
+            let created = read_frame(&mut read).await;
+            assert_eq!(created["method"], "session/new");
+            assert!(Path::new(created["params"]["cwd"].as_str().unwrap()).is_absolute());
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": created["id"], "result": {"sessionId": "sess-cwd"}}),
+            )
+            .await;
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        let thread = session
+            .new_session(Path::new("relative/project"))
+            .await
+            .unwrap();
+        assert_eq!(thread.session_id, "sess-cwd");
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_turn_resolves_open_permission_cards() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            let init = read_frame(&mut read).await;
+            write_frame(&mut write, v1_initialized(&init["id"])).await;
+            let created = read_frame(&mut read).await;
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": created["id"], "result": {"sessionId": "sess-f"}}),
+            )
+            .await;
+            let prompt = read_frame(&mut read).await;
+            assert_eq!(prompt["method"], "session/prompt");
+            write_frame(
+                &mut write,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 21,
+                    "method": "session/request_permission",
+                    "params": {
+                        "sessionId": "sess-f",
+                        "toolCall": {"toolCallId": "call-f", "title": "Run ls", "kind": "execute", "rawInput": {"command": "ls"}},
+                        "options": [{"optionId": "once", "name": "Allow once", "kind": "allow_once"}]
+                    }
+                }),
+            )
+            .await;
+            // The agent dies mid-turn: the prompt fails before the card is answered.
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": prompt["id"], "error": {"code": -32603, "message": "agent exited"}}),
+            )
+            .await;
+            let answered = read_frame(&mut read).await;
+            assert_eq!(answered["id"], 21);
+            assert_eq!(answered["result"]["outcome"]["outcome"], "cancelled");
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let error = session.prompt("hi", &[]).await.unwrap_err();
+        assert!(error.to_string().contains("agent exited"));
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_the_session_kills_the_agent_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let script = format!("echo $$ > '{}'; exec sleep 60", pid_file.display());
+        let client = spawn(SpawnCommand {
+            program: "sh",
+            args: &["-c", script.as_str()],
+            cwd: None,
+        })
+        .await
+        .unwrap();
+        let session = CursorSession::from_client(client, None);
+        let pid = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = pid.trim().parse::<u32>()
+                {
+                    return pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(session);
+        // The process guard kills and reaps the group before `drop` returns.
+        let alive = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "cursor-agent child {pid} survived the session drop");
     }
 }

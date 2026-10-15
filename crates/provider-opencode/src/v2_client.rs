@@ -42,6 +42,15 @@ impl V2Client {
         })
     }
 
+    /// Records every JSON exchange through `protocol` (see `protocol_log`).
+    pub fn with_protocol_log(
+        mut self,
+        protocol: std::sync::Arc<dyn crate::protocol_log::ProtocolLog>,
+    ) -> Self {
+        self.http = self.http.with_protocol_log(protocol);
+        self
+    }
+
     pub fn with_silent_timeout(mut self, timeout: Duration) -> Self {
         self.silent_timeout = timeout;
         self

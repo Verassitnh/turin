@@ -111,9 +111,34 @@ impl OpenCodeV1Session {
         password: Option<&str>,
         model: Option<&str>,
     ) -> Result<Arc<Self>, ProviderAdapterV2Error> {
-        let client = V1Client::new(base_url, cwd, password).map_err(|err| {
+        Self::open_logged(
+            instance_id,
+            provider_session_id,
+            cwd,
+            base_url,
+            password,
+            model,
+            None,
+        )
+        .await
+    }
+
+    /// `open` with the adapter's NDJSON protocol sink attached to every session call.
+    pub async fn open_logged(
+        instance_id: ProviderInstanceId,
+        provider_session_id: ProviderSessionId,
+        cwd: &str,
+        base_url: &str,
+        password: Option<&str>,
+        model: Option<&str>,
+        protocol: Option<Arc<dyn crate::protocol_log::ProtocolLog>>,
+    ) -> Result<Arc<Self>, ProviderAdapterV2Error> {
+        let mut client = V1Client::new(base_url, cwd, password).map_err(|err| {
             ProviderAdapterV2Error::protocol(format!("OpenCode v1 client: {}", err.detail))
         })?;
+        if let Some(protocol) = protocol {
+            client = client.with_protocol_log(protocol);
+        }
         let now = UtcDateTime::now();
         let cwd = turin_contracts::TrimmedNonEmptyString::new(cwd)
             .map_err(|_| ProviderAdapterV2Error::protocol("OpenCode session cwd is blank"))?;

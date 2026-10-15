@@ -15,6 +15,7 @@ mod http_client;
 mod ledger;
 mod permission_rules;
 mod process_group;
+mod protocol_log;
 mod runtime;
 mod semver;
 mod server_owner;
@@ -48,6 +49,9 @@ pub use events::{V1Event, V2Event, V2StreamEvent, decode_v1_event, decode_v2_eve
 pub use ledger::{OpenCodeServerLedger, ServerLease};
 pub use permission_rules::{
     SessionPermissionRule, agent_path_allows, last_effect, rule, session_permission_rules,
+};
+pub use protocol_log::{
+    NdjsonProtocolLog, ProtocolDirection, ProtocolEvent, ProtocolLog, ProtocolMessageKind,
 };
 pub use runtime::{
     ConnectOpenCodeServer, OpenCodeServerConnection, OpenCodeServerProcess, StartOpenCodeServer,

@@ -9,8 +9,11 @@ use std::time::Duration;
 use bytes::Bytes;
 use reqwest::Method;
 
+use std::sync::Arc;
+
 use crate::auth::{basic_authorization, encode_uri_component};
 use crate::error::{EventStreamError, OpenCodeRuntimeError};
+use crate::protocol_log::{ProtocolDirection, ProtocolEvent, ProtocolLog, ProtocolMessageKind};
 use crate::sse::{self, EventStream, SseFrame};
 use crate::urlutil::{append_query, join_server_path, parse_http_base};
 
@@ -23,6 +26,7 @@ pub struct HttpClient {
     /// when the password is empty (the SDK treats `""` as missing).
     always_authorize: bool,
     directory: Option<String>,
+    protocol: Option<Arc<dyn ProtocolLog>>,
 }
 
 impl HttpClient {
@@ -37,6 +41,7 @@ impl HttpClient {
             password: password.into(),
             always_authorize,
             directory: None,
+            protocol: None,
         })
     }
 
@@ -45,8 +50,80 @@ impl HttpClient {
         self
     }
 
+    pub fn with_protocol_log(mut self, protocol: Arc<dyn ProtocolLog>) -> Self {
+        self.protocol = Some(protocol);
+        self
+    }
+
+    fn record(
+        &self,
+        direction: ProtocolDirection,
+        message_kind: ProtocolMessageKind,
+        method: &str,
+        payload: serde_json::Value,
+    ) {
+        if let Some(protocol) = &self.protocol {
+            protocol.record(ProtocolEvent {
+                direction,
+                message_kind,
+                method: method.to_owned(),
+                payload,
+            });
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn send_json(
+        &self,
+        operation: &str,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        extra_query: &[(String, String)],
+        body: Option<&serde_json::Value>,
+        expected: &[u16],
+        timeout: Option<Duration>,
+    ) -> Result<Bytes, OpenCodeRuntimeError> {
+        self.record(
+            ProtocolDirection::Outgoing,
+            ProtocolMessageKind::Request,
+            operation,
+            body.cloned().unwrap_or(serde_json::Value::Null),
+        );
+        let result = self
+            .exchange_json(
+                operation,
+                method,
+                path,
+                query,
+                extra_query,
+                body,
+                expected,
+                timeout,
+            )
+            .await;
+        match &result {
+            Ok(bytes) => {
+                let payload = serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null);
+                self.record(
+                    ProtocolDirection::Incoming,
+                    ProtocolMessageKind::Response,
+                    operation,
+                    payload,
+                );
+            }
+            Err(err) => self.record(
+                ProtocolDirection::Incoming,
+                ProtocolMessageKind::Error,
+                operation,
+                serde_json::Value::String(err.detail.clone()),
+            ),
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn exchange_json(
         &self,
         operation: &str,
         method: Method,
@@ -469,5 +546,56 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[derive(Default)]
+    struct Recorder(parking_lot::Mutex<Vec<crate::protocol_log::ProtocolEvent>>);
+
+    impl crate::protocol_log::ProtocolLog for Recorder {
+        fn record(&self, event: crate::protocol_log::ProtocolEvent) {
+            self.0.lock().push(event);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_json_exchange_is_recorded_as_a_request_then_a_response() {
+        let server = FakeServer::spawn(|_| FakeResponse::json(200, r#"{"id":"ses_1"}"#)).await;
+        let recorder = Arc::new(Recorder::default());
+        let client = HttpClient::new(&server.url, "", false)
+            .unwrap()
+            .with_protocol_log(recorder.clone());
+        client
+            .send_json(
+                "session.create",
+                Method::POST,
+                "/session",
+                &[],
+                &[],
+                Some(&serde_json::json!({"title": "private"})),
+                &[200],
+                None,
+            )
+            .await
+            .unwrap();
+        let events = recorder.0.lock();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].direction,
+            crate::protocol_log::ProtocolDirection::Outgoing
+        );
+        assert_eq!(
+            events[0].message_kind,
+            crate::protocol_log::ProtocolMessageKind::Request
+        );
+        assert_eq!(events[0].method, "session.create");
+        assert_eq!(
+            events[1].direction,
+            crate::protocol_log::ProtocolDirection::Incoming
+        );
+        assert_eq!(
+            events[1].message_kind,
+            crate::protocol_log::ProtocolMessageKind::Response
+        );
+        assert_eq!(events[1].payload["id"], "ses_1");
     }
 }

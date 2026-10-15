@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, oneshot};
 
 use crate::error::OpenCodeRuntimeError;
 use crate::ledger::OpenCodeServerLedger;
+use crate::protocol_log::ProtocolLog;
 use crate::runtime::VerifyFn;
 use crate::server_owner::{OpenCodeServerOwner, OwnerConfig};
 use crate::v2_client::V2Client;
@@ -43,6 +44,8 @@ pub struct OpenCode2Config {
     pub idle: Option<Duration>,
     pub shutdown_grace: Option<Duration>,
     pub ledger: Option<OpenCodeServerLedger>,
+    /// Receives each v2 request and response (see `protocol_log`).
+    pub protocol: Option<Arc<dyn ProtocolLog>>,
 }
 
 #[derive(Clone)]
@@ -58,6 +61,7 @@ enum Mode {
         url: String,
         password: String,
         cached: Box<Mutex<Option<OpenCode2Connection>>>,
+        protocol: Option<Arc<dyn ProtocolLog>>,
     },
     Spawned {
         owner: OpenCodeServerOwner,
@@ -78,12 +82,17 @@ impl OpenCode2Server {
                     url: server_url,
                     password: config.server_password,
                     cached: Box::new(Mutex::new(None)),
+                    protocol: config.protocol,
                 },
             });
         }
         let password = generate_password();
         let cached = Arc::new(Mutex::new(None));
-        let verify = spawned_verify(password.clone(), Arc::clone(&cached));
+        let verify = spawned_verify(
+            password.clone(),
+            Arc::clone(&cached),
+            config.protocol.clone(),
+        );
         let owner = OpenCodeServerOwner::new(OwnerConfig {
             binary_path: config.binary_path,
             directory: config.directory,
@@ -119,11 +128,12 @@ impl OpenCode2Server {
                 url,
                 password,
                 cached,
+                protocol,
             } => {
                 let connection = {
                     let mut slot = cached.lock().await;
                     if slot.is_none() {
-                        let client = V2Client::connect(url, password)?;
+                        let client = attach(V2Client::connect(url, password)?, protocol);
                         let version = verify_server(&client).await?;
                         *slot = Some(OpenCode2Connection {
                             url: url.clone(),
@@ -224,12 +234,24 @@ async fn lent_connection(
     Ok(connection)
 }
 
-fn spawned_verify(password: String, cached: Arc<Mutex<Option<OpenCode2Connection>>>) -> VerifyFn {
+fn attach(client: V2Client, protocol: &Option<Arc<dyn ProtocolLog>>) -> V2Client {
+    match protocol {
+        Some(protocol) => client.with_protocol_log(Arc::clone(protocol)),
+        None => client,
+    }
+}
+
+fn spawned_verify(
+    password: String,
+    cached: Arc<Mutex<Option<OpenCode2Connection>>>,
+    protocol: Option<Arc<dyn ProtocolLog>>,
+) -> VerifyFn {
     Arc::new(move |input| {
         let password = password.clone();
         let cached = Arc::clone(&cached);
+        let protocol = protocol.clone();
         Box::pin(async move {
-            let client = V2Client::connect(&input.url, &password)?;
+            let client = attach(V2Client::connect(&input.url, &password)?, &protocol);
             let version = verify_server(&client).await?;
             *cached.lock().await = Some(OpenCode2Connection {
                 url: input.url,
@@ -332,6 +354,7 @@ mod tests {
             idle: None,
             shutdown_grace: None,
             ledger: None,
+            protocol: None,
         })
         .unwrap();
         let version = opencode
@@ -364,6 +387,7 @@ mod tests {
             idle: None,
             shutdown_grace: None,
             ledger: None,
+            protocol: None,
         })
         .unwrap();
         let err = opencode

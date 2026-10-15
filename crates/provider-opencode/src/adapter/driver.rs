@@ -21,6 +21,7 @@ use crate::adapter::v2::OpenCodeV2Session;
 use crate::command::SystemOpenCodeBinary;
 use crate::error::OpenCodeRuntimeError;
 use crate::ledger::OpenCodeServerLedger;
+use crate::protocol_log::ProtocolLog;
 use crate::runtime::{
     ConnectOpenCodeServer, OpenCodeServerProcess, connect_to_open_code_server, default_v1_verify,
 };
@@ -92,6 +93,7 @@ pub struct OpenCodeAdapter {
     endpoint: Option<Endpoint>,
     v2_server: Mutex<Option<Arc<OpenCode2Server>>>,
     ledger: Option<OpenCodeServerLedger>,
+    protocol: Option<Arc<dyn ProtocolLog>>,
 }
 
 impl OpenCodeAdapter {
@@ -104,7 +106,15 @@ impl OpenCodeAdapter {
             endpoint: None,
             v2_server: Mutex::new(None),
             ledger: None,
+            protocol: None,
         }
+    }
+
+    /// Sends each OpenCode request and response to `protocol`. `ProtocolLog` lines
+    /// hold structure only; see `protocol_log`.
+    pub fn with_protocol_log(mut self, protocol: Arc<dyn ProtocolLog>) -> Self {
+        self.protocol = Some(protocol);
+        self
     }
 
     /// Records every server this adapter spawns in `ledger`, so a T3 server
@@ -136,6 +146,7 @@ impl OpenCodeAdapter {
             }),
             v2_server: Mutex::new(None),
             ledger: None,
+            protocol: None,
         }
     }
 
@@ -163,6 +174,7 @@ impl OpenCodeAdapter {
             idle: None,
             shutdown_grace: None,
             ledger: self.ledger.clone(),
+            protocol: self.protocol.clone(),
         })?);
         *slot = Some(Arc::clone(&server));
         Ok(server)
@@ -227,6 +239,7 @@ impl ProviderAdapterV2 for OpenCodeAdapter {
                 &cwd,
                 model,
                 endpoint,
+                self.protocol.clone(),
             )
             .await;
         }
@@ -264,13 +277,14 @@ impl ProviderAdapterV2 for OpenCodeAdapter {
                 )
                 .await
                 .map_err(|err| ProviderAdapterV2Error::protocol(err.detail))?;
-                let session = OpenCodeV1Session::open(
+                let session = OpenCodeV1Session::open_logged(
                     self.instance_id.clone(),
                     input.provider_session_id,
                     &cwd,
                     &connection.url,
                     connection.v1_client_password(),
                     Some(model),
+                    self.protocol.clone(),
                 )
                 .await?;
                 Ok(Arc::new(OpenCodeSession {
@@ -311,16 +325,18 @@ async fn open_endpoint(
     cwd: &str,
     model: &str,
     endpoint: &Endpoint,
+    protocol: Option<Arc<dyn ProtocolLog>>,
 ) -> Result<Arc<dyn ProviderSessionRuntime>, ProviderAdapterV2Error> {
     match endpoint.generation {
         OpenCodeGeneration::V1 => {
-            let session = OpenCodeV1Session::open(
+            let session = OpenCodeV1Session::open_logged(
                 instance_id.clone(),
                 provider_session_id.clone(),
                 cwd,
                 &endpoint.base_url,
                 (!endpoint.password.is_empty()).then_some(endpoint.password.as_str()),
                 Some(model),
+                protocol,
             )
             .await?;
             Ok(Arc::new(OpenCodeSession {
@@ -329,8 +345,11 @@ async fn open_endpoint(
             }))
         }
         OpenCodeGeneration::V2 => {
-            let client = V2Client::connect(&endpoint.base_url, &endpoint.password)
+            let mut client = V2Client::connect(&endpoint.base_url, &endpoint.password)
                 .map_err(|err| ProviderAdapterV2Error::protocol(err.detail))?;
+            if let Some(protocol) = protocol {
+                client = client.with_protocol_log(protocol);
+            }
             let session = OpenCodeV2Session::open(
                 instance_id.clone(),
                 provider_session_id.clone(),

@@ -5,6 +5,9 @@ pub mod chat_header;
 // Chat-lane geometry for the canvas; the canvas does not call it yet.
 #[allow(dead_code)]
 pub mod chat_canvas_layout;
+// Pure citation-selector text logic; the DOM capture half is not ported yet.
+#[allow(dead_code)]
+pub mod assistant_text_selection;
 pub mod composer_pending_panels;
 pub mod composer_surface;
 pub mod markdown;

@@ -5,6 +5,8 @@ use crate::source_control::{SourceControlProviderError, SourceControlProviderInf
 use crate::vcs::VcsDriverKind;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+// Upstream bounds listRefs limit with this; enforced at the service boundary.
+#[allow(dead_code)]
 const GIT_LIST_BRANCHES_MAX_LIMIT: u64 = 200;
 
 /// `GitFilePath`: a non-empty, *untrimmed* path string.

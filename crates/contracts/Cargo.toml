@@ -9,6 +9,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+unicode-ccc.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

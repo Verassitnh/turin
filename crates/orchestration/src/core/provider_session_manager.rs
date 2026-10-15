@@ -33,8 +33,11 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{error, warn};
 use turin_contracts::{
-    ProviderSessionId, ProviderThreadId, ThreadId,
-    orchestration_v2::{OrchestrationV2ProviderSession, OrchestrationV2ProviderSessionStatus},
+    ProviderSessionId, ProviderThreadId, ProviderTurnId, ThreadId,
+    orchestration_v2::{
+        OrchestrationV2ProviderSession, OrchestrationV2ProviderSessionStatus,
+        OrchestrationV2ProviderThread,
+    },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
 };
 use turin_provider_core::{
@@ -42,8 +45,8 @@ use turin_provider_core::{
     provider_adapter::{
         ProviderAdapterErrorKind, ProviderAdapterV2, ProviderAdapterV2Error,
         ProviderAdapterV2Event, ProviderAdapterV2EventSubscription,
-        ProviderAdapterV2OpenSessionInput, ProviderAdapterV2TurnInput, ProviderEventStream,
-        ProviderSessionRuntime,
+        ProviderAdapterV2InterruptInput, ProviderAdapterV2OpenSessionInput,
+        ProviderAdapterV2TurnInput, ProviderEventStream, ProviderSessionRuntime,
     },
     provider_errors::{ProviderInstanceNotFoundError, ProviderWorkspaceMissingError},
     provider_instance_registry::ProviderInstanceRegistry,
@@ -54,6 +57,8 @@ use crate::pipeline::orchestrator_port::BoxError;
 
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_MAX_IDLE_PIN: Duration = Duration::from_secs(4 * 60 * 60);
+/// Upper bound on a runtime's explicit close at release (`RELEASE_SCOPE_CLOSE_TIMEOUT_MS`).
+const RELEASE_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `ProviderSessionReleaseReason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -142,6 +147,43 @@ pub struct SessionRelease {
     /// Last session snapshot the runtime reported.
     pub last_session: OrchestrationV2ProviderSession,
     pub released_at: chrono::DateTime<chrono::Utc>,
+    /// Background tasks the released process left on its provider threads.
+    /// Their process is gone, so nothing will report them ending.
+    pub released_background_tasks: Vec<ReleasedBackgroundTasks>,
+}
+
+/// A provider thread's background-task roster as read at release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleasedBackgroundTasks {
+    pub thread_id: ThreadId,
+    pub provider_thread_id: ProviderThreadId,
+    pub task_ids: Vec<String>,
+}
+
+/// A turn the provider reports as running on a session's thread.
+#[derive(Debug, Clone)]
+pub struct RunningProviderTurn {
+    pub provider_thread: OrchestrationV2ProviderThread,
+    pub provider_turn_id: ProviderTurnId,
+}
+
+/// The projection reads the session manager needs (T13a's `ProjectionStore`,
+/// see `core::projection_reads`).
+#[async_trait]
+pub trait ProviderSessionReads: Send + Sync {
+    /// Running provider turns on `thread_id` whose provider thread belongs to the session.
+    async fn running_turns(
+        &self,
+        thread_id: &ThreadId,
+        provider_session_id: &ProviderSessionId,
+    ) -> Result<Vec<RunningProviderTurn>, BoxError>;
+
+    /// Background-task rosters the session's provider threads hold on `thread_ids`.
+    async fn pending_background_tasks(
+        &self,
+        thread_ids: &[ThreadId],
+        provider_session_id: &ProviderSessionId,
+    ) -> Result<Vec<ReleasedBackgroundTasks>, BoxError>;
 }
 
 /// The writes the session manager makes. `EventSink` backs it in production.
@@ -275,6 +317,7 @@ struct ReleaseRequest {
 struct Inner {
     lookup: Arc<dyn ProviderAdapterLookup>,
     sink: Arc<dyn ProviderSessionSink>,
+    reads: Arc<dyn ProviderSessionReads>,
     options: ProviderSessionManagerOptions,
     sessions: Mutex<HashMap<ProviderSessionId, Arc<LiveSession>>>,
     open_locks: Mutex<HashMap<ProviderSessionId, Arc<AsyncMutex<()>>>>,
@@ -467,6 +510,41 @@ impl Inner {
             // Dropping the sender ends the subscriber stream.
         }
 
+        // Read after the session left the live map: a replacement session with
+        // the same id may already report tasks on these threads.
+        let released_background_tasks = if request.reason
+            != ProviderSessionReleaseReason::ServerShutdown
+            && session.runtime.background_tasks_end_with_process()
+        {
+            match self
+                .reads
+                .pending_background_tasks(&attached, &session.provider_session_id)
+                .await
+            {
+                Ok(tasks) => tasks,
+                Err(cause) => {
+                    warn!(%cause, "orchestration-v2.provider-session-release-roster-read-failed");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Stop the provider process explicitly when the runtime supports it;
+        // otherwise dropping the runtime must stop it.
+        if let Some(close) = session.runtime.close() {
+            match tokio::time::timeout(RELEASE_CLOSE_TIMEOUT, close).await {
+                Ok(Ok(())) => {}
+                Ok(Err(cause)) => {
+                    warn!(%cause, "orchestration-v2.driver-session.close-failed");
+                }
+                Err(_) => {
+                    warn!("orchestration-v2.driver-session.close-timed-out");
+                }
+            }
+        }
+
         let identity = session.identity();
         let release = SessionRelease {
             identity,
@@ -475,10 +553,10 @@ impl Inner {
             thread_ids: attached,
             last_session: session.runtime.provider_session().clone(),
             released_at: chrono::Utc::now(),
+            released_background_tasks,
         };
         let provider_session_id = request.provider_session_id;
-        // Last reference to the session: its runtime drops here, which is
-        // where the adapter stops its process.
+        // Last reference to the session: its runtime drops here.
         drop(session);
         self.sink.session_released(&release).await.map_err(|cause| {
             ProviderSessionManagerError::Release {
@@ -1079,12 +1157,14 @@ impl ProviderSessionManager {
     pub fn new(
         lookup: Arc<dyn ProviderAdapterLookup>,
         sink: Arc<dyn ProviderSessionSink>,
+        reads: Arc<dyn ProviderSessionReads>,
         options: ProviderSessionManagerOptions,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 lookup,
                 sink,
+                reads,
                 options,
                 sessions: Mutex::new(HashMap::new()),
                 open_locks: Mutex::new(HashMap::new()),
@@ -1289,6 +1369,35 @@ impl ProviderSessionManager {
         let Some(session) = self.inner.get_session(provider_session_id) else {
             return Ok(());
         };
+        // Interrupt the detaching thread's running turns before it leaves: the
+        // provider keeps running them otherwise, and nothing else will stop them.
+        if session.supports_multiple_provider_threads {
+            match self
+                .inner
+                .reads
+                .running_turns(thread_id, provider_session_id)
+                .await
+            {
+                Ok(turns) => {
+                    for turn in turns {
+                        let interrupt = session
+                            .runtime
+                            .interrupt_turn(ProviderAdapterV2InterruptInput {
+                                provider_thread: turn.provider_thread,
+                                provider_turn_id: turn.provider_turn_id,
+                                request_runtime_restart: None,
+                            })
+                            .await;
+                        if let Err(cause) = interrupt {
+                            warn!(%cause, "orchestration-v2.driver-session.detach-interrupt-failed");
+                        }
+                    }
+                }
+                Err(cause) => {
+                    warn!(%cause, "orchestration-v2.driver-session.detach-turn-read-failed");
+                }
+            }
+        }
         let remaining = {
             let mut state = session.state.lock();
             if !state.attached_thread_ids.shift_remove(thread_id) {

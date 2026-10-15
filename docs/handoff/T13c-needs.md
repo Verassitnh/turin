@@ -25,3 +25,11 @@
   session are wanted; the manager omits them today.
 - Agent access settings (`AgentScope`, browser/device tools) if the manager should clear agent
   scope on attach.
+
+## Status update (T13c seams, resolved in-branch)
+- `ProviderSessionSink` over `EventSink`: done (`core/session_sink.rs`).
+- T13a read seams (running turns, pending background tasks, node stored, pending native inputs, plan): done
+  in `core/projection_reads.rs` over `ProjectionStore::get_thread_records`, without editing `projection/**`.
+- `ProviderAdapterV2Error: Display`: already present (`provider_adapter.rs`).
+- `ProviderSessionRuntime::close()`: added in provider-core as an additive default (`None`). T08 to reconcile.
+- `OrchestratorPort`: not yet implemented (see docs/handoff/T13c.md item A).

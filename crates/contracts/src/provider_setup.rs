@@ -607,7 +607,9 @@ pub struct ChatGptTransferredProfileCredentials {
     #[serde(deserialize_with = "checks::non_empty_max_string::<_, 16384>")]
     pub id_token: String,
     pub issuer: String,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub expires_at: f64,
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub earliest_refresh_at: Option<f64>,
     pub scopes: Vec<String>,
     pub subject: String,

@@ -137,9 +137,13 @@ pub struct UsageTokenTotals {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageCategoryCost {
+    #[serde(with = "crate::base_schemas::js_number")]
     pub input: f64,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub cache_read: f64,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub cache_write: f64,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub output: f64,
 }
 
@@ -162,10 +166,12 @@ pub struct UsageBucket {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<TrimmedNonEmptyString>,
     pub totals: UsageTokenTotals,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub cost_usd: f64,
     /// What the cached input would have cost at full input rates minus what
     /// it actually cost. Requires the rate table, so it is computed alongside
     /// cost rather than derived on the client.
+    #[serde(with = "crate::base_schemas::js_number")]
     pub cache_savings_usd: f64,
     /// `costUsd` by token category. Cost with no known rates stays out of it,
     /// and it is absent when nothing could be split or the server predates it.
@@ -173,11 +179,14 @@ pub struct UsageBucket {
     pub category_cost_usd: Option<UsageCategoryCost>,
     /// Cost of fast and ultrafast requests. Absent when zero; the rest is standard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub fast_cost_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub ultrafast_cost_usd: Option<f64>,
     /// What fast and ultrafast requests cost above the standard rate. Absent when zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub speed_premium_usd: Option<f64>,
     pub cost_source: UsageCostSource,
     /// Distinct assistant responses, after de-duplication.
@@ -322,6 +331,7 @@ pub struct UsageSummaryInput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSummary {
+    #[serde(with = "crate::base_schemas::js_number")]
     pub contract_version: f64,
     pub read_at: String,
     pub time_zone: TrimmedNonEmptyString,

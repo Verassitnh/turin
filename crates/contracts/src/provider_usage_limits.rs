@@ -11,6 +11,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 mod used_percent {
     use super::*;
 
+    pub fn serialize<S: serde::Serializer>(value: &f64, s: S) -> Result<S::Ok, S::Error> {
+        crate::base_schemas::serialize_js_number(*value, s)
+    }
+
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
         let value = f64::deserialize(d)?;
         if (0.0..=100.0).contains(&value) {
@@ -36,7 +40,7 @@ pub struct ServerProviderUsageWindow {
     pub id: TrimmedNonEmptyString,
     pub kind: ServerProviderUsageWindowKind,
     pub label: TrimmedNonEmptyString,
-    #[serde(deserialize_with = "used_percent::deserialize")]
+    #[serde(with = "used_percent")]
     pub used_percent: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<IsoDateTime>,
@@ -258,8 +262,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A JS-style number: whole values are integers, as the codec writes them.
+    fn num(value: f64) -> serde_json::Value {
+        if value.fract() == 0.0 {
+            json!(value as i64)
+        } else {
+            json!(value)
+        }
+    }
+
     fn window(id: &str, used: f64) -> serde_json::Value {
-        json!({"id": id, "kind": "session", "label": "Session", "usedPercent": used})
+        json!({"id": id, "kind": "session", "label": "Session", "usedPercent": num(used)})
     }
 
     #[test]
@@ -275,7 +288,7 @@ mod tests {
         assert_eq!(ok.resets_at.as_deref(), Some("2026-01-01T00:00:00Z"));
         assert_eq!(
             serde_json::to_value(&window_ok()).unwrap()["usedPercent"],
-            json!(0.0)
+            json!(0)
         );
         for used in [-0.1, 100.1] {
             assert!(

@@ -789,6 +789,7 @@ pub struct PullRequestListEntry {
     pub updated_at: IsoDateTime,
     /// Server epoch milliseconds when the provider read started; preserved on cache hits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub observed_at: Option<f64>,
     pub viewer_review_requested: bool,
     pub labels: Vec<PullRequestLabel>,
@@ -1098,6 +1099,7 @@ pub struct PullRequestSummary {
     pub updated_at: IsoDateTime,
     /// Server epoch milliseconds when the provider read started; preserved on cache hits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub observed_at: Option<f64>,
     #[serde(
         default,
@@ -1265,6 +1267,7 @@ pub struct PullRequestDetail {
     pub updated_at: IsoDateTime,
     /// Server epoch milliseconds when the provider read started; preserved on cache hits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub observed_at: Option<f64>,
     pub merged_at: Option<IsoDateTime>,
     pub closed_at: Option<IsoDateTime>,
@@ -1386,6 +1389,7 @@ pub struct PullRequestDetailView {
     pub created_at: IsoDateTime,
     pub updated_at: IsoDateTime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub observed_at: Option<f64>,
     pub merged_at: Option<IsoDateTime>,
     pub closed_at: Option<IsoDateTime>,
@@ -1452,7 +1456,9 @@ pub struct PullRequestDiffInput {
 #[serde(rename_all = "camelCase")]
 pub struct PullRequestOmittedFileStat {
     pub path: TrimmedNonEmptyString,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub additions: f64,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub deletions: f64,
 }
 

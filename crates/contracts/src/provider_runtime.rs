@@ -348,6 +348,7 @@ pub struct ThreadMetadataUpdatedPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadTokenUsageCost {
+    #[serde(with = "crate::base_schemas::js_number")]
     pub amount: f64,
     #[serde(deserialize_with = "token_usage_currency::deserialize")]
     pub currency: TrimmedNonEmptyString,
@@ -517,6 +518,7 @@ pub struct TurnCompletedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage: Option<UnknownRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub total_cost_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<TrimmedNonEmptyString>,
@@ -1124,6 +1126,7 @@ pub struct ToolProgressPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<TrimmedNonEmptyString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub elapsed_seconds: Option<f64>,
     /// Owning task/agent when the tool ran inside a subagent.
     #[serde(default, skip_serializing_if = "Option::is_none")]

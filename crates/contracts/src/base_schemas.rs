@@ -43,6 +43,51 @@ pub fn js_len(value: &str) -> usize {
     value.encode_utf16().count()
 }
 
+/// Largest integer a JS number holds exactly (`Number.MAX_SAFE_INTEGER`).
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// Writes a `Schema.Number` the way `JSON.stringify` does: a whole number has
+/// no fractional part (`2`, not `2.0`), so re-saved JSON stays byte-identical
+/// to what the TS server writes.
+pub fn serialize_js_number<S: Serializer>(value: f64, s: S) -> Result<S::Ok, S::Error> {
+    if value.is_finite() && value.fract() == 0.0 && value.abs() <= MAX_SAFE_INTEGER {
+        s.serialize_i64(value as i64)
+    } else {
+        s.serialize_f64(value)
+    }
+}
+
+/// `Schema.Number` field codec (`#[serde(with = "js_number")] f64`); decodes
+/// any JSON number, encodes whole numbers without a fraction.
+pub mod js_number {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &f64, s: S) -> Result<S::Ok, S::Error> {
+        super::serialize_js_number(*value, s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        f64::deserialize(d)
+    }
+}
+
+/// `Option<f64>` counterpart of [`js_number`]: `NullOr(Schema.Number)` (encodes
+/// `null`) or, with `skip_serializing_if`, `optional(Schema.Number)`.
+pub mod js_number_nullable {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(value) => super::serialize_js_number(*value, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+        Option::<f64>::deserialize(d)
+    }
+}
+
 #[doc(hidden)]
 pub mod __private {
     pub use serde;

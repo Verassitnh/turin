@@ -37,7 +37,9 @@ pub enum ReviewDiffPreviewSourceKind {
 pub struct ReviewDiffFileStat {
     pub path: String,
     pub previous_path: Option<String>,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub additions: f64,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub deletions: f64,
 }
 

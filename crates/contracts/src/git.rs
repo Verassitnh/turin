@@ -647,14 +647,19 @@ pub enum GitCommandError {
         cwd: String,
         // `Schema.Number` upstream: floats, not ints.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         argument_count: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         exit_code: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         stdout_length: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         stderr_length: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         output_length: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<GitCommandFailureReason>,

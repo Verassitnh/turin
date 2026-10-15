@@ -18,7 +18,8 @@
 //! like `JSON.stringify` does (`js_number`).
 
 use crate::base_schemas::{
-    ContractError, ProjectId, ThreadId, TrimmedNonEmptyString, TrimmedString,
+    ContractError, ProjectId, ThreadId, TrimmedNonEmptyString, TrimmedString, js_number,
+    js_number_nullable, serialize_js_number,
 };
 use crate::environment::{EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules};
 use crate::keybindings::KeybindingShortcut;
@@ -61,50 +62,6 @@ mod optional_key {
         d: D,
     ) -> Result<Option<T>, D::Error> {
         T::deserialize(d).map(Some)
-    }
-}
-
-/// Largest integer a JS number holds exactly (`Number.MAX_SAFE_INTEGER`).
-const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
-
-/// Writes a `Schema.Number` the way `JSON.stringify` does: a whole number has
-/// no fractional part (`2`, not `2.0`), so re-saved settings files stay
-/// byte-identical to the ones the TS server writes.
-fn serialize_js_number<S: Serializer>(value: f64, s: S) -> Result<S::Ok, S::Error> {
-    if value.is_finite() && value.fract() == 0.0 && value.abs() <= MAX_SAFE_INTEGER {
-        s.serialize_i64(value as i64)
-    } else {
-        s.serialize_f64(value)
-    }
-}
-
-/// `Schema.Number` field codec (see [`serialize_js_number`]); decodes any JSON
-/// number.
-mod js_number {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(value: &f64, s: S) -> Result<S::Ok, S::Error> {
-        super::serialize_js_number(*value, s)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
-        f64::deserialize(d)
-    }
-}
-
-/// `Schema.NullOr(Schema.Number)` field codec: `None` encodes `null`.
-mod js_number_nullable {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(value: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
-        match value {
-            Some(value) => super::serialize_js_number(*value, s),
-            None => s.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
-        Option::<f64>::deserialize(d)
     }
 }
 

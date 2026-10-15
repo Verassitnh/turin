@@ -172,6 +172,7 @@ pub enum VcsProcessExitError {
         cwd: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         argument_count: Option<NonNegativeInt>,
+        #[serde(with = "crate::base_schemas::js_number")]
         exit_code: f64,
         detail: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,6 +244,7 @@ pub enum VcsProcessTimeoutError {
         cwd: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         argument_count: Option<NonNegativeInt>,
+        #[serde(with = "crate::base_schemas::js_number")]
         timeout_ms: f64,
     },
 }

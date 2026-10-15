@@ -1,25 +1,20 @@
-//! Port of upstream/apps/server/src/provider/ClaudeModelManifest.ts, plus the
-//! Claude slice of `ModelManifest.ts` (`resolveProviderCatalog`) that
-//! `ClaudeModelCatalog` reads.
-//!
-//! The manifest is static data: `model-manifest.json` is compiled into the
-//! binary, the same file upstream imports as its bundle. Upstream also
-//! refreshes it over HTTP with a disk cache. Turin ships the bundle only, so
-//! there is no remote refresh (see PORTING.md, provider-claude model manifest).
+//! Port of upstream/apps/server/src/provider/ClaudeModelManifest.ts: the
+//! Claude profile and model adapter schemas, decoded from the manifest's JSON
+//! `adapter` fields. The catalog itself comes from provider-core's
+//! `model_manifest` (typed manifest, `resolveProviderCatalog`). Remote refresh
+//! and the disk cache live in that service, which the driver owns.
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{cmp::Ordering, collections::HashSet, sync::OnceLock};
-use turin_contracts::{TrimmedNonEmptyString, js_trim, model::ModelCapabilities};
+use std::cmp::Ordering;
+use turin_contracts::provider_instance::ProviderDriverKind;
+use turin_contracts::{TrimmedNonEmptyString, js_trim};
 use turin_provider_core::{
+    model_manifest::{ModelManifestData, resolve_provider_catalog},
     semver::{compare_semver_versions, normalize_semver_version},
-    server_provider::ServerProviderModelBadge,
 };
 
 pub const CLAUDE_DRIVER: &str = "claudeAgent";
-
-/// `model-manifest.json`, the bundle shared with `apps/server`.
-const BUNDLED_MODEL_MANIFEST_JSON: &str = include_str!("../../provider-core/model-manifest.json");
 
 /// `ClaudeCodeProfileSchema`: the runtime mapping for one capability profile.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -138,112 +133,15 @@ pub fn has_valid_claude_manifest_adapters(manifest: &Value) -> bool {
             .all(|model| decode_claude_model_adapter(model.get("adapter")).is_some())
 }
 
-/// `ModelCatalog.ProviderCatalogModel`. Provider-owned metadata stays as JSON
-/// (`adapter`, `profile_adapter`); the provider decodes it with the functions above.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProviderCatalogModel {
-    pub slug: String,
-    pub name: String,
-    pub short_name: Option<String>,
-    pub sub_provider: Option<String>,
-    pub aliases: Option<Vec<String>>,
-    pub badge: Option<ServerProviderModelBadge>,
-    pub is_legacy: bool,
-    pub capabilities: Option<ModelCapabilities>,
-    pub adapter: Option<Value>,
-    pub profile_adapter: Option<Value>,
-}
+pub use turin_provider_core::model_manifest::{
+    ProviderCatalog, ProviderCatalogModel, bundled_model_manifest,
+};
 
-/// `ModelCatalog.ProviderCatalog`: one provider's entry in the manifest.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProviderCatalog {
-    pub models: Vec<ProviderCatalogModel>,
-    pub default_chat_model: Option<String>,
-}
-
-/// `resolveProviderCatalog(manifest, driverKind)`: the driver's catalog entry,
-/// or `None` when the manifest has no entry or its references are invalid
-/// (duplicate slugs, a missing profile, a missing chat default, or
-/// capabilities that do not decode).
-pub fn resolve_provider_catalog(manifest: &Value, driver: &str) -> Option<ProviderCatalog> {
-    let catalog = manifest.get("providers")?.get(driver)?;
-    let profiles = catalog.get("profiles")?.as_object()?;
-    let entries = catalog.get("models")?.as_array()?;
-
-    let mut seen = HashSet::new();
-    let mut models = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let slug = entry.get("slug")?.as_str()?;
-        if !seen.insert(slug.to_owned()) {
-            return None;
-        }
-        let profile = match entry.get("profile").and_then(Value::as_str) {
-            Some(profile_id) => Some(profiles.get(profile_id)?),
-            None => None,
-        };
-        let capabilities = match profile.and_then(|profile| profile.get("capabilities")) {
-            Some(value) => Some(serde_json::from_value(value.clone()).ok()?),
-            None => None,
-        };
-        models.push(ProviderCatalogModel {
-            slug: slug.to_owned(),
-            name: entry.get("name")?.as_str()?.to_owned(),
-            short_name: entry
-                .get("shortName")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            sub_provider: entry
-                .get("subProvider")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            aliases: match entry.get("aliases") {
-                Some(aliases) => Some(
-                    aliases
-                        .as_array()?
-                        .iter()
-                        .map(|alias| alias.as_str().map(str::to_owned))
-                        .collect::<Option<Vec<_>>>()?,
-                ),
-                None => None,
-            },
-            badge: match entry.get("badge").and_then(Value::as_str) {
-                Some("new") => Some(ServerProviderModelBadge::New),
-                Some(_) => return None,
-                None => None,
-            },
-            is_legacy: match entry.get("status").and_then(Value::as_str)? {
-                "current" => false,
-                "legacy" => true,
-                _ => return None,
-            },
-            capabilities,
-            adapter: entry.get("adapter").cloned(),
-            profile_adapter: profile.and_then(|profile| profile.get("adapter")).cloned(),
-        });
-    }
-
-    let default_chat_model = match catalog.get("defaults").and_then(|d| d.get("chat")) {
-        Some(chat) => {
-            let chat = chat.as_str()?;
-            if !seen.contains(chat) {
-                return None;
-            }
-            Some(chat.to_owned())
-        }
-        None => None,
-    };
-    Some(ProviderCatalog {
-        models,
-        default_chat_model,
-    })
-}
-
-/// The bundled `model-manifest.json`, parsed once.
-pub fn bundled_model_manifest() -> &'static Value {
-    static MANIFEST: OnceLock<Value> = OnceLock::new();
-    MANIFEST.get_or_init(|| {
-        serde_json::from_str(BUNDLED_MODEL_MANIFEST_JSON).expect("bundled model manifest is JSON")
-    })
+/// The Claude entry of a typed manifest, through provider-core's
+/// `resolveProviderCatalog`. `None` when the manifest has no Claude entry or
+/// its references are invalid.
+pub fn resolve_claude_provider_catalog(manifest: &ModelManifestData) -> Option<ProviderCatalog> {
+    resolve_provider_catalog(manifest, &ProviderDriverKind::new(CLAUDE_DRIVER).ok()?)
 }
 
 #[cfg(test)]
@@ -262,10 +160,10 @@ mod tests {
     #[test]
     fn bundled_manifest_has_valid_claude_adapters_and_chat_default() {
         let manifest = bundled_model_manifest();
-        assert_eq!(manifest["version"], 1);
-        assert!(has_valid_claude_manifest_adapters(manifest));
-        let catalog = resolve_provider_catalog(manifest, CLAUDE_DRIVER)
-            .expect("bundled Claude catalog resolves");
+        let value = serde_json::to_value(&manifest).expect("manifest serializes");
+        assert!(has_valid_claude_manifest_adapters(&value));
+        let catalog =
+            resolve_claude_provider_catalog(&manifest).expect("bundled Claude catalog resolves");
         assert!(!catalog.models.is_empty());
         assert_eq!(
             catalog.default_chat_model.as_deref(),
@@ -314,21 +212,5 @@ mod tests {
         assert!(has_valid_claude_manifest_adapters(
             &json!({"providers": {}})
         ));
-    }
-
-    #[test]
-    fn resolve_rejects_missing_profiles_and_bad_chat_defaults() {
-        let dangling = manifest_with_claude(
-            json!({}),
-            json!([{"slug": "m", "name": "M", "status": "current", "profile": "nope"}]),
-        );
-        assert!(resolve_provider_catalog(&dangling, CLAUDE_DRIVER).is_none());
-
-        let mut unknown_default = manifest_with_claude(
-            json!({}),
-            json!([{"slug": "m", "name": "M", "status": "current"}]),
-        );
-        unknown_default["providers"]["claudeAgent"]["defaults"] = json!({"chat": "other"});
-        assert!(resolve_provider_catalog(&unknown_default, CLAUDE_DRIVER).is_none());
     }
 }

@@ -5,10 +5,11 @@
 //! manifest below covers resolver behavior once.
 use super::*;
 use crate::claude_model_manifest::{
-    CLAUDE_DRIVER, has_valid_claude_manifest_adapters, resolve_provider_catalog,
+    has_valid_claude_manifest_adapters, resolve_claude_provider_catalog,
 };
 use serde_json::{Value, json};
 use turin_contracts::model_selection::ModelSelection;
+use turin_provider_core::model_manifest::decode_manifest;
 
 fn manifest() -> Value {
     json!({
@@ -62,7 +63,13 @@ fn manifest() -> Value {
 
 /// Resolves Claude's catalog the way the driver does: through its manifest catalog entry.
 fn catalog_from_manifest(manifest: &Value) -> ClaudeModelCatalog {
-    resolve_claude_model_catalog(resolve_provider_catalog(manifest, CLAUDE_DRIVER).as_ref())
+    let typed = decode_manifest(manifest.clone());
+    resolve_claude_model_catalog(
+        typed
+            .as_ref()
+            .and_then(resolve_claude_provider_catalog)
+            .as_ref(),
+    )
 }
 
 fn selection(value: Value) -> ModelSelection {

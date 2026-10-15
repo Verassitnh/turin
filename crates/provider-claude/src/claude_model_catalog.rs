@@ -4,9 +4,8 @@
 //! `claude_model_manifest`) and falls back to the bundled entry when the
 //! given one is missing or has invalid adapters.
 use crate::claude_model_manifest::{
-    CLAUDE_DRIVER, ClaudeCodeCompatibility, ClaudeCodeProfile, ProviderCatalog,
-    bundled_model_manifest, decode_claude_model_adapter, decode_claude_profile_adapter,
-    resolve_provider_catalog,
+    ClaudeCodeCompatibility, ClaudeCodeProfile, ProviderCatalog, bundled_model_manifest,
+    decode_claude_model_adapter, decode_claude_profile_adapter, resolve_claude_provider_catalog,
 };
 use std::{cmp::Ordering, sync::OnceLock};
 use turin_contracts::{
@@ -19,8 +18,11 @@ use turin_contracts::{
     model_selection::ModelSelection,
 };
 use turin_provider_core::{
+    model_manifest::ManifestModelStatus,
     semver::compare_semver_versions,
-    server_provider::{ServerProviderModel, ServerProviderUpdateRequiredModel},
+    server_provider::{
+        ServerProviderModel, ServerProviderModelBadge, ServerProviderUpdateRequiredModel,
+    },
 };
 
 /// `EMPTY_CAPABILITIES`: a model without capabilities presents no options.
@@ -65,11 +67,11 @@ fn catalog_server_model(
             ),
             None => None,
         },
-        badge: entry.badge,
+        badge: entry.badge.map(|_| ServerProviderModelBadge::New),
         is_custom: false,
         is_default: (catalog.default_chat_model.as_deref() == Some(entry.slug.as_str()))
             .then_some(true),
-        is_legacy: entry.is_legacy.then_some(true),
+        is_legacy: (entry.status == ManifestModelStatus::Legacy).then_some(true),
         capabilities: entry.capabilities.clone(),
     })
 }
@@ -95,7 +97,7 @@ fn try_resolve_claude_model_catalog(
 fn bundled_claude_provider_catalog() -> Option<&'static ProviderCatalog> {
     static CATALOG: OnceLock<Option<ProviderCatalog>> = OnceLock::new();
     CATALOG
-        .get_or_init(|| resolve_provider_catalog(bundled_model_manifest(), CLAUDE_DRIVER))
+        .get_or_init(|| resolve_claude_provider_catalog(&bundled_model_manifest()))
         .as_ref()
 }
 

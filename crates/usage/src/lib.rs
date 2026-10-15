@@ -2,4 +2,7 @@
 
 pub mod usage_aggregation;
 pub mod usage_pricing;
+pub mod usage_scan_cache;
 pub mod usage_transcript_reader;
+#[cfg(test)]
+mod test_formats;

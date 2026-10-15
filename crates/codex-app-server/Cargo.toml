@@ -1,0 +1,19 @@
+[package]
+name = "turin-codex-app-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+jsonschema = { version = "0.30", default-features = false }
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true

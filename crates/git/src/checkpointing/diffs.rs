@@ -1,5 +1,7 @@
 //! Port of upstream/apps/server/src/checkpointing/Diffs.ts
 
+use crate::locale_compare::locale_compare;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnDiffFileSummary {
     pub path: String,
@@ -37,7 +39,7 @@ pub fn parse_turn_diff_files_from_numstat(numstat: &str) -> Vec<TurnDiffFileSumm
             deletions: counts.deletions,
         });
     }
-    files.sort_by(|left, right| left.path.cmp(&right.path));
+    files.sort_by(|left, right| locale_compare(&left.path, &right.path));
     files
 }
 
@@ -121,6 +123,24 @@ mod tests {
         assert_eq!(files[0].additions, 2);
         assert_eq!(files[1].path, "src/b.ts");
         assert_eq!(files[1].deletions, 2);
+    }
+
+    #[test]
+    fn orders_paths_like_local_compare_not_bytes() {
+        // Byte order puts "B.ts" and "Zed" before "_x"; upstream's localeCompare does not.
+        let numstat = [
+            "1\t0\tZed",
+            "1\t0\tB.ts",
+            "1\t0\t_x",
+            "1\t0\témile",
+            "1\t0\ta.ts",
+        ]
+        .join("\0");
+        let paths: Vec<String> = parse_turn_diff_files_from_numstat(&numstat)
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        assert_eq!(paths, ["_x", "a.ts", "B.ts", "émile", "Zed"]);
     }
 
     #[test]

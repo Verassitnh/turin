@@ -47,9 +47,7 @@ impl fmt::Display for WorkspaceRootStatPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error(
-    "Failed to stat workspace root '{normalized_workspace_root}' during '{phase}'."
-)]
+#[error("Failed to stat workspace root '{normalized_workspace_root}' during '{phase}'.")]
 pub struct WorkspaceRootStatFailedError {
     pub workspace_root: String,
     pub normalized_workspace_root: String,
@@ -166,7 +164,8 @@ impl WorkspacePaths {
             return Err(outside(workspace_root, relative_path));
         }
         let absolute_path = node_resolve(&[workspace_root, normalized_input]);
-        let relative_to_root = to_posix_relative_path(&node_relative(workspace_root, &absolute_path));
+        let relative_to_root =
+            to_posix_relative_path(&node_relative(workspace_root, &absolute_path));
         if relative_to_root.is_empty()
             || relative_to_root == "."
             || relative_to_root.starts_with("../")
@@ -299,7 +298,11 @@ fn segment_is_absolute(segment: &str) -> bool {
 /// Node `path.posix.join`: concatenate, then normalize. An absolute segment
 /// does not reset the result (that is `resolve`'s job).
 pub(crate) fn node_join(parts: &[&str]) -> String {
-    let filtered: Vec<&str> = parts.iter().copied().filter(|part| !part.is_empty()).collect();
+    let filtered: Vec<&str> = parts
+        .iter()
+        .copied()
+        .filter(|part| !part.is_empty())
+        .collect();
     if filtered.is_empty() {
         return ".".to_owned();
     }
@@ -312,10 +315,18 @@ pub(crate) fn node_relative(from: &str, to: &str) -> String {
     if from == to {
         return String::new();
     }
-    let from_parts: Vec<&str> = from.split(['/', '\\']).filter(|part| !part.is_empty()).collect();
-    let to_parts: Vec<&str> = to.split(['/', '\\']).filter(|part| !part.is_empty()).collect();
+    let from_parts: Vec<&str> = from
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    let to_parts: Vec<&str> = to
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
     let mut common = 0;
-    while common < from_parts.len() && common < to_parts.len() && from_parts[common] == to_parts[common]
+    while common < from_parts.len()
+        && common < to_parts.len()
+        && from_parts[common] == to_parts[common]
     {
         common += 1;
     }
@@ -409,10 +420,7 @@ mod tests {
     async fn resolves_an_existing_directory() {
         let cwd = tempfile::tempdir().unwrap();
         let cwd = cwd.path().to_string_lossy().into_owned();
-        let resolved = paths()
-            .normalize_workspace_root(&cwd, false)
-            .await
-            .unwrap();
+        let resolved = paths().normalize_workspace_root(&cwd, false).await.unwrap();
         assert_eq!(resolved, cwd);
     }
 
@@ -428,7 +436,10 @@ mod tests {
             error.to_string().contains("Workspace root does not exist:"),
             "{error}"
         );
-        assert!(matches!(error, NormalizeWorkspaceRootError::NotExists(WorkspaceRootNotExistsError { .. })));
+        assert!(matches!(
+            error,
+            NormalizeWorkspaceRootError::NotExists(WorkspaceRootNotExistsError { .. })
+        ));
     }
 
     #[tokio::test]
@@ -492,9 +503,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            error.to_string().contains(
-                "Workspace file path must be relative to the project root: ../escape.md"
-            ),
+            error
+                .to_string()
+                .contains("Workspace file path must be relative to the project root: ../escape.md"),
             "{error}"
         );
     }

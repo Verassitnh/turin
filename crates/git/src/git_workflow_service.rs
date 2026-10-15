@@ -22,9 +22,7 @@ use turin_contracts::git::{
 };
 use turin_contracts::vcs::{VcsDriverKind, VcsError};
 
-use crate::git_manager::{
-    GitManager, GitManagerRemoteStatusOptions, GitRunStackedActionOptions,
-};
+use crate::git_manager::{GitManager, GitManagerRemoteStatusOptions, GitRunStackedActionOptions};
 use crate::git_vcs_driver_core::{
     CreateWorktreeOptions, ExecuteGitInput, GitDeleteLocalBranchInput, GitFetchRemoteInput,
     GitRemoteBranchExistsInput, GitRemoteExistsInput, GitRenameBranchInput, GitRenameBranchResult,
@@ -52,11 +50,15 @@ impl GitWorkflowService {
     }
 
     pub async fn is_repository(&self, cwd: &str) -> Result<bool, GitManagerServiceError> {
-        Ok(self.detect_manager("GitWorkflowService.isRepository", cwd).await? == Some(true))
+        Ok(self
+            .detect_manager("GitWorkflowService.isRepository", cwd)
+            .await?
+            == Some(true))
     }
 
     pub async fn has_commit(&self, cwd: &str, ref_name: &str) -> Result<bool, GitCommandError> {
-        self.ensure_command("GitWorkflowService.hasCommit", cwd).await?;
+        self.ensure_command("GitWorkflowService.hasCommit", cwd)
+            .await?;
         let mut input = ExecuteGitInput::new(
             "GitWorkflowService.hasCommit",
             cwd,
@@ -77,7 +79,8 @@ impl GitWorkflowService {
         if ref_name.contains(['*', '?', '[', '\\']) {
             return Ok(false);
         }
-        self.ensure_command("GitWorkflowService.hasRefNamed", cwd).await?;
+        self.ensure_command("GitWorkflowService.hasRefNamed", cwd)
+            .await?;
         let result = self
             .git
             .execute(ExecuteGitInput::new(
@@ -228,7 +231,10 @@ impl GitWorkflowService {
         self.git.fetch_remote(input).await
     }
 
-    pub async fn remote_exists(&self, input: &GitRemoteExistsInput) -> Result<bool, GitCommandError> {
+    pub async fn remote_exists(
+        &self,
+        input: &GitRemoteExistsInput,
+    ) -> Result<bool, GitCommandError> {
         self.ensure_command("GitWorkflowService.remoteExists", &input.cwd)
             .await?;
         self.git.remote_exists(input).await
@@ -252,7 +258,10 @@ impl GitWorkflowService {
         self.git.resolve_remote_tracking_commit(input).await
     }
 
-    pub async fn remove_worktree(&self, input: &VcsRemoveWorktreeInput) -> Result<(), GitCommandError> {
+    pub async fn remove_worktree(
+        &self,
+        input: &VcsRemoveWorktreeInput,
+    ) -> Result<(), GitCommandError> {
         self.ensure_command("GitWorkflowService.removeWorktree", input.cwd.as_str())
             .await?;
         self.git.remove_worktree(input).await
@@ -303,7 +312,11 @@ impl GitWorkflowService {
             .map_err(GitManagerServiceError::Command)
     }
 
-    async fn ensure_manager(&self, operation: &str, cwd: &str) -> Result<(), GitManagerServiceError> {
+    async fn ensure_manager(
+        &self,
+        operation: &str,
+        cwd: &str,
+    ) -> Result<(), GitManagerServiceError> {
         let handle = self
             .registry
             .resolve(&VcsDriverResolveInput {
@@ -313,15 +326,17 @@ impl GitWorkflowService {
             .await
             .map_err(|error| manager_route(operation, cwd, error))?;
         if handle.kind != VcsDriverKind::Git {
-            return Err(GitManagerServiceError::Manager(GitManagerError::GitManagerError {
-                operation: operation.to_owned(),
-                cwd: cwd.to_owned(),
-                detail: format!(
-                    "The {operation} workflow currently supports Git repositories only; detected {}. ({cwd})",
-                    handle.kind
-                ),
-                cause: None,
-            }));
+            return Err(GitManagerServiceError::Manager(
+                GitManagerError::GitManagerError {
+                    operation: operation.to_owned(),
+                    cwd: cwd.to_owned(),
+                    detail: format!(
+                        "The {operation} workflow currently supports Git repositories only; detected {}. ({cwd})",
+                        handle.kind
+                    ),
+                    cause: None,
+                },
+            ));
         }
         Ok(())
     }
@@ -371,15 +386,17 @@ impl GitWorkflowService {
         match handle {
             None => Ok(Some(false)),
             Some(handle) if handle.kind == VcsDriverKind::Git => Ok(Some(true)),
-            Some(handle) => Err(GitManagerServiceError::Manager(GitManagerError::GitManagerError {
-                operation: operation.to_owned(),
-                cwd: cwd.to_owned(),
-                detail: format!(
-                    "The {operation} workflow currently supports Git repositories only; detected {}. ({cwd})",
-                    handle.kind
-                ),
-                cause: None,
-            })),
+            Some(handle) => Err(GitManagerServiceError::Manager(
+                GitManagerError::GitManagerError {
+                    operation: operation.to_owned(),
+                    cwd: cwd.to_owned(),
+                    detail: format!(
+                        "The {operation} workflow currently supports Git repositories only; detected {}. ({cwd})",
+                        handle.kind
+                    ),
+                    cause: None,
+                },
+            )),
         }
     }
 
@@ -548,7 +565,10 @@ impl crate::vcs_status_broadcaster::GitWorkflowService for GitWorkflowService {
         self.manager.invalidate_status(cwd);
     }
 
-    async fn pull_current_branch(&self, cwd: &str) -> Result<VcsPullResult, GitManagerServiceError> {
+    async fn pull_current_branch(
+        &self,
+        cwd: &str,
+    ) -> Result<VcsPullResult, GitManagerServiceError> {
         GitWorkflowService::pull_current_branch(self, cwd)
             .await
             .map_err(GitManagerServiceError::Command)
@@ -567,9 +587,7 @@ async fn workflow_local(
             cause: None,
         })
     })?;
-    service
-        .local_status(&VcsStatusInput { cwd })
-        .await
+    service.local_status(&VcsStatusInput { cwd }).await
 }
 
 #[cfg(test)]
@@ -609,10 +627,12 @@ mod tests {
         let status = service.status(&VcsStatusInput { cwd }).await.unwrap();
         assert!(!status.is_repo);
         assert!(status.working_tree.files.is_empty());
-        assert!(!service
-            .is_repository(dir.path().to_str().unwrap())
-            .await
-            .unwrap());
+        assert!(
+            !service
+                .is_repository(dir.path().to_str().unwrap())
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

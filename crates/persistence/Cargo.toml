@@ -6,9 +6,19 @@ license.workspace = true
 
 [dependencies]
 turin-contracts.workspace = true
-anyhow.workspace = true
+chrono.workspace = true
+indexmap.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+rusqlite = { workspace = true, features = ["backup"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile.workspace = true

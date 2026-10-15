@@ -108,9 +108,11 @@ mod service {
     use std::time::Duration;
     use turin_contracts::settings::default_server_settings;
 
+    use crate::server_settings::decode_settings_json;
     use async_trait::async_trait;
     use serde_json::{Value, json};
-    use turin_contracts::settings::{ServerSettings, ServerSettingsPatch};
+    use turin_contracts::provider_instance::ProviderInstanceMutation;
+    use turin_contracts::settings::{ServerSettings, ServerSettingsError, ServerSettingsPatch};
     use turin_persistence::Db;
     use turin_provider_core::credential_store::{
         FileSecretStore, MemorySecretStore, SecretStore, SecretStoreError,
@@ -686,5 +688,247 @@ mod service {
             settings_value(&change)["responseStreamingMode"],
             json!("turn")
         );
+    }
+
+    // Ports of upstream serverSettings.test.ts, lines 328-567 (batch 2).
+
+    /// A store whose reads always fail, to surface a read-secret error.
+    struct ReadFailing;
+
+    #[async_trait]
+    impl SecretStore for ReadFailing {
+        async fn get(&self, name: &str) -> Result<Option<Vec<u8>>, SecretStoreError> {
+            Err(SecretStoreError::Read {
+                resource: format!("secret {name}"),
+                detail: "secret backend unavailable".into(),
+            })
+        }
+        async fn set(&self, _name: &str, _value: &[u8]) -> Result<(), SecretStoreError> {
+            Ok(())
+        }
+        async fn remove(&self, _name: &str) -> Result<(), SecretStoreError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_environment_secret_read_names_the_variable_and_hides_the_cause() {
+        let fx = fixture().await;
+        std::fs::create_dir_all(fx.path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &fx.path,
+            r#"{"providerInstances":{"codex_personal":{"driver":"codex","environment":[{"name":"OPENROUTER_API_KEY","value":"","sensitive":true,"valueRedacted":true}],"config":{}}}}"#,
+        )
+        .unwrap();
+        let service = ServerSettingsService::new(&fx.path, Arc::new(ReadFailing), fx.db.clone());
+        let error = service.get_settings().await.unwrap_err();
+        let ServerSettingsError::ServerSettingsError {
+            operation,
+            provider_instance_id,
+            environment_variable,
+            ..
+        } = &error;
+        assert_eq!(operation.as_str(), "read-secret");
+        assert_eq!(provider_instance_id.as_deref(), Some("codex_personal"));
+        assert_eq!(environment_variable.as_deref(), Some("OPENROUTER_API_KEY"));
+        assert!(!error.to_string().contains("secret backend unavailable"));
+    }
+
+    #[tokio::test]
+    async fn a_provider_history_query_failure_is_identified_as_such() {
+        let fx = fixture().await;
+        fx.db
+            .write(|conn| {
+                conn.execute_batch("DROP TABLE projection_thread_sessions")
+                    .map_err(|err| {
+                        turin_persistence::PersistenceError::sql("test.dropSessions", &err)
+                    })
+            })
+            .await
+            .unwrap();
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let error = service.get_settings().await.unwrap_err();
+        let ServerSettingsError::ServerSettingsError {
+            operation,
+            settings_path,
+            ..
+        } = &error;
+        assert_eq!(operation.as_str(), "read-provider-history");
+        assert_eq!(settings_path, &fx.path.display().to_string());
+    }
+
+    #[tokio::test]
+    async fn a_failed_settings_read_is_retried_rather_than_kept() {
+        let fx = fixture().await;
+        std::fs::create_dir_all(&fx.path).unwrap();
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let error = service.get_settings().await.unwrap_err();
+        let ServerSettingsError::ServerSettingsError { operation, .. } = &error;
+        assert_eq!(operation.as_str(), "read-file");
+
+        std::fs::remove_dir_all(&fx.path).unwrap();
+        std::fs::write(&fx.path, r#"{ "responseStreamingMode": "turn" }"#).unwrap();
+        let settings = service.get_settings().await.unwrap();
+        assert_eq!(
+            settings_value(&settings)["responseStreamingMode"],
+            json!("turn")
+        );
+    }
+
+    #[test]
+    fn a_nested_settings_patch_decodes_to_its_own_shape() {
+        let raw = json!({"textGenerationModelSelection": {"options": [{"id": "fastMode", "value": false}]}});
+        let decoded: ServerSettingsPatch = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), raw);
+    }
+
+    #[test]
+    fn a_legacy_object_shaped_selection_decodes_to_an_option_list() {
+        let settings = decode_settings_json(
+            r#"{"textGenerationModelSelection":{"provider":"codex","model":"gpt-5.4-mini","options":{"reasoningEffort":"low"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            settings_value(&settings)["textGenerationModelSelection"],
+            json!({
+                "instanceId": "codex",
+                "model": "gpt-5.4-mini",
+                "options": [{"id": "reasoningEffort", "value": "low"}],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_updates_merge_without_dropping_siblings() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let model = default_server_settings()
+            .text_generation_model_selection
+            .model
+            .to_string();
+        service
+            .update_settings(&patch(json!({
+                "observability": {"otlpTracesUrl": "http://localhost:4318/v1/traces"},
+                "textGenerationModelSelection": {
+                    "instanceId": "codex",
+                    "model": model,
+                    "options": [
+                        {"id": "reasoningEffort", "value": "high"},
+                        {"id": "fastMode", "value": true},
+                    ],
+                },
+            })))
+            .await
+            .unwrap();
+        let next = service
+            .update_settings(&patch(json!({
+                "observability": {"otlpMetricsUrl": "http://localhost:4318/v1/metrics"},
+                "textGenerationModelSelection": {"options": [{"id": "fastMode", "value": false}]},
+            })))
+            .await
+            .unwrap();
+        let value = settings_value(&next);
+        assert_eq!(
+            value["observability"]["otlpTracesUrl"],
+            json!("http://localhost:4318/v1/traces")
+        );
+        assert_eq!(
+            value["observability"]["otlpMetricsUrl"],
+            json!("http://localhost:4318/v1/metrics")
+        );
+        assert_eq!(
+            value["textGenerationModelSelection"],
+            json!({
+                "instanceId": "codex",
+                "model": model,
+                "options": [
+                    {"id": "reasoningEffort", "value": "high"},
+                    {"id": "fastMode", "value": false},
+                ],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_concurrent_provider_instance_create_is_refused_for_the_loser() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let instance_id =
+            turin_contracts::provider_instance::ProviderInstanceId::new("acpRegistry_shared")
+                .unwrap();
+        let create = |name: &str| {
+            serde_json::from_value::<ProviderInstanceMutation>(json!({
+                "operation": "create",
+                "instanceId": "acpRegistry_shared",
+                "instance": {
+                    "driver": "acpRegistry",
+                    "displayName": name,
+                    "config": {"agentId": "shared", "distribution": "auto"},
+                },
+            }))
+            .unwrap()
+        };
+        let (first, second) = (create("First"), create("Second"));
+        let (a, b) = tokio::join!(
+            service.update_provider_instance(&first, None),
+            service.update_provider_instance(&second, None),
+        );
+        assert_eq!([a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(), 1);
+        let settings = service.get_settings().await.unwrap();
+        let name = settings.provider_instances[&instance_id]
+            .display_name
+            .as_ref()
+            .map(|value| value.to_string());
+        assert!(name.as_deref() == Some("First") || name.as_deref() == Some("Second"));
+    }
+
+    #[tokio::test]
+    async fn provider_instance_mutations_wait_while_a_settings_snapshot_is_in_use() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let snapshot = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move {
+                service
+                    .with_settings_snapshot(|_settings| async move {
+                        let _ = entered_tx.send(());
+                        let _ = release_rx.await;
+                    })
+                    .await
+            })
+        };
+        entered_rx.await.unwrap();
+
+        let mutation = serde_json::from_value::<ProviderInstanceMutation>(json!({
+            "operation": "upsert",
+            "instanceId": "acpRegistry_kilo",
+            "instance": {
+                "driver": "acpRegistry",
+                "displayName": "Kilo",
+                "config": {"agentId": "kilo", "distribution": "auto"},
+            },
+        }))
+        .unwrap();
+        let writer = {
+            let service = Arc::clone(&service);
+            tokio::spawn(async move { service.update_provider_instance(&mutation, None).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!writer.is_finished(), "a mutation waits for the snapshot");
+
+        release_tx.send(()).unwrap();
+        snapshot.await.unwrap().unwrap();
+        writer.await.unwrap().unwrap();
+        let settings = service.get_settings().await.unwrap();
+        let instance_id =
+            turin_contracts::provider_instance::ProviderInstanceId::new("acpRegistry_kilo")
+                .unwrap();
+        let name = settings.provider_instances[&instance_id]
+            .display_name
+            .as_ref()
+            .map(|value| value.to_string());
+        assert_eq!(name.as_deref(), Some("Kilo"));
     }
 }

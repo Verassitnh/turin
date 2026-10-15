@@ -426,16 +426,21 @@ impl ServerSettingsService {
         .await
     }
 
-    /// Port of `withSettingsSnapshot`: runs `use_fn` on the materialized settings
-    /// while writes are paused.
-    pub async fn with_settings_snapshot<T>(
+    /// Port of `withSettingsSnapshot`: runs `use_fn` on the materialized settings.
+    /// The write lock is held until `use_fn` completes, so a mutation started
+    /// meanwhile waits for it.
+    pub async fn with_settings_snapshot<T, F, Fut>(
         &self,
-        use_fn: impl FnOnce(&ServerSettings) -> T,
-    ) -> Result<T, ServerSettingsError> {
+        use_fn: F,
+    ) -> Result<T, ServerSettingsError>
+    where
+        F: FnOnce(ServerSettings) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
         let _write = self.write_lock.lock().await;
         let settings = self.cached_settings().await?;
         let materialized = self.materialize(&settings).await?;
-        Ok(use_fn(&resolve_text_generation_provider(materialized)))
+        Ok(use_fn(resolve_text_generation_provider(materialized)).await)
     }
 
     /// Port of `streamChanges` (PubSub.unbounded): a subscriber gets its own channel.

@@ -118,6 +118,16 @@ pub fn code_unit_cmp(left: &str, right: &str) -> std::cmp::Ordering {
 /// whitespace, before digits), as `localeCompare` sees it in en-US.
 const COLLATION_PUNCTUATION: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
 
+/// Every JS `\s` char (WhiteSpace + LineTerminator), in code point order.
+/// `locale_compare` ranks them by position so all whitespace sorts before
+/// punctuation, whatever the script.
+const JS_WHITESPACE_CHARS: [char; 25] = [
+    '\u{0009}', '\u{000a}', '\u{000b}', '\u{000c}', '\u{000d}', '\u{0020}', '\u{00a0}',
+    '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}',
+    '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200a}', '\u{2028}', '\u{2029}',
+    '\u{202f}', '\u{205f}', '\u{3000}', '\u{feff}',
+];
+
 /// Approximates `String.prototype.localeCompare` in the default en-US locale
 /// (ICU root collation) without an ICU dependency.
 ///
@@ -147,7 +157,10 @@ pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
                 continue;
             }
             let lowered = c.to_lowercase().next().unwrap_or(c);
-            let weight = if is_js_whitespace_char(c) || c.is_control() {
+            let weight = if let Some(rank) = JS_WHITESPACE_CHARS.iter().position(|ws| *ws == c) {
+                // Above raw control code points (all < 200), below punctuation.
+                200 + rank as u32
+            } else if c.is_control() {
                 c as u32
             } else if let Some(index) = COLLATION_PUNCTUATION.find(c) {
                 1_000 + index as u32
@@ -348,6 +361,37 @@ mod tests {
         assert_eq!(locale_compare("b", "r\u{e9}sum\u{e9}"), Less);
         assert_eq!(locale_compare("same", "same"), std::cmp::Ordering::Equal);
         assert_eq!(locale_compare("ab", "a"), Greater);
+    }
+
+    #[test]
+    fn locale_compare_sorts_every_whitespace_before_letters() {
+        use std::cmp::Ordering::{Greater, Less};
+        // U+2003 and U+3000 used to take their code point as weight, which put
+        // them after ASCII letters.
+        assert_eq!(locale_compare("\u{2003}x", "ax"), Less);
+        assert_eq!(locale_compare("\u{3000}x", "ax"), Less);
+        assert_eq!(locale_compare("\u{2003}x", "-x"), Less);
+        assert_eq!(locale_compare("\u{2003}x", "9x"), Less);
+        assert_eq!(locale_compare("ax", "\u{2003}x"), Greater);
+        assert_eq!(locale_compare("\u{2003}", "\u{2003}"), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn js_whitespace_table_matches_the_predicate() {
+        let table: Vec<char> = JS_WHITESPACE_CHARS.to_vec();
+        let mut sorted = table.clone();
+        sorted.sort();
+        assert_eq!(table, sorted);
+        for code_point in 0..=0x10FFFFu32 {
+            let Some(ch) = char::from_u32(code_point) else {
+                continue;
+            };
+            assert_eq!(
+                table.contains(&ch),
+                is_js_whitespace_char(ch),
+                "U+{code_point:04X}"
+            );
+        }
     }
 
     #[test]

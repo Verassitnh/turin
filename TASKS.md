@@ -35,10 +35,10 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T01 | Port all kept contracts modules | `crates/contracts` | GLM | todo |
-| T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | todo |
-| T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Sonnet | todo |
-| T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex | todo |
+| T01 | Port all kept contracts modules | `crates/contracts` | GLM | active |
+| T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | active |
+| T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Sonnet | active |
+| T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex | active |
 
 ### Wave 2: backend leaves (after T01)
 

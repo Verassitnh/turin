@@ -11,17 +11,12 @@
 // not ported yet (T14 reducers, the chat header menu, settings) use the rest.
 #![allow(dead_code)]
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 
 // Re-exports upstream keeps on Sidebar.logic so the view has one import site.
 use super::runtime::collate::locale_compare;
-use crate::state::models::{
-    EnvironmentThreadShell, GoalStatus, InteractionMode, PendingSubagentRequest,
-    ProviderFailureClass, RunStatus, SettledOverride, ThreadRelationship, ThreadRunSummary,
-    ThreadRuntimeSummary, background_work_holds_completion, is_latest_run_settled,
-    resolve_thread_working_started_at, thread_pull_request_search_terms,
-};
 #[allow(unused_imports)]
 pub use super::runtime::thread_inbox::{
     is_thread_working as is_sidebar_thread_working, sort_inbox_threads_by_return,
@@ -37,8 +32,14 @@ pub use super::runtime::thread_sort::{
     pin_order_key_between, sort_active_threads_by_order_key as sort_threads_for_sidebar,
     sort_pinned_threads_by_order_key as sort_pinned_threads_for_sidebar,
 };
+use crate::state::models::{
+    EnvironmentProject, EnvironmentThreadShell, GoalStatus, InteractionMode,
+    PendingSubagentRequest, ProviderFailureClass, RunStatus, SettledOverride, ThreadRelationship,
+    ThreadRunSummary, ThreadRuntimeSummary, background_work_holds_completion,
+    is_latest_run_settled, resolve_thread_working_started_at, thread_pull_request_search_terms,
+};
 use crate::timestamp_format::parse_timestamp_ms;
-use turin_contracts::ThreadId;
+use turin_contracts::{EnvironmentId, ProjectId, ThreadId};
 
 /// Delay before holding the jump modifier reveals the ⌘1…9 hints.
 pub const THREAD_JUMP_HINT_SHOW_DELAY_MS: u64 = 200;
@@ -1467,10 +1468,13 @@ pub fn get_project_sort_timestamp<P: SidebarProjectLike + ?Sized, T: SortableThr
     stamp.map_or(f64::NEG_INFINITY, |ms| ms as f64)
 }
 
+/// `sortProjectsByActivity`: newest activity first; `tiebreak` orders equal
+/// timestamps (upstream passes each caller's `localeCompare` chain).
 fn sort_projects_by_activity<'t, P: SidebarProjectLike + Clone, T: SortableThread + 't>(
     projects: &[P],
     sort_order: ProjectSortOrder,
     project_threads: impl Fn(&P) -> Vec<&'t T>,
+    tiebreak: impl Fn(&P, &P) -> Ordering,
 ) -> Vec<P> {
     let Some(order) = sort_order.thread_order() else {
         return projects.to_vec();
@@ -1488,9 +1492,8 @@ fn sort_projects_by_activity<'t, P: SidebarProjectLike + Clone, T: SortableThrea
     keyed.sort_by(|(left_ts, left), (right_ts, right)| {
         right_ts
             .partial_cmp(left_ts)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| locale_compare(left.sort_title(), right.sort_title()))
-            .then_with(|| locale_compare(&left.sort_id(), &right.sort_id()))
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| tiebreak(left, right))
     });
     keyed
         .into_iter()
@@ -1548,12 +1551,76 @@ pub fn sort_logical_projects_for_sidebar(
             by_group.entry(group).or_default().push(thread);
         }
     }
-    sort_projects_by_activity(projects, sort_order, |project| {
-        by_group
-            .get(project.project_key.as_str())
-            .cloned()
-            .unwrap_or_default()
-    })
+    sort_projects_by_activity(
+        projects,
+        sort_order,
+        |project| {
+            by_group
+                .get(project.project_key.as_str())
+                .cloned()
+                .unwrap_or_default()
+        },
+        |left, right| {
+            locale_compare(left.sort_title(), right.sort_title())
+                .then_with(|| locale_compare(&left.sort_id(), &right.sort_id()))
+        },
+    )
+}
+
+impl SidebarProjectLike for EnvironmentProject {
+    fn sort_title(&self) -> &str {
+        &self.title
+    }
+    fn sort_id(&self) -> String {
+        self.key()
+    }
+    fn sort_created_at(&self) -> Option<&str> {
+        self.created_at.as_deref()
+    }
+    fn sort_updated_at(&self) -> Option<&str> {
+        self.updated_at.as_deref()
+    }
+}
+
+/// `sortScopedProjectsForSidebar`: the cross-environment project list. Ids
+/// repeat across environments, so threads group by (environment, project),
+/// and archived threads never count as activity.
+pub fn sort_scoped_projects_for_sidebar(
+    projects: &[EnvironmentProject],
+    threads: &[EnvironmentThreadShell],
+    sort_order: ProjectSortOrder,
+) -> Vec<EnvironmentProject> {
+    let mut by_project: HashMap<(&EnvironmentId, &ProjectId), Vec<&EnvironmentThreadShell>> =
+        HashMap::new();
+    for thread in threads {
+        if thread.archived_at.is_some() {
+            continue;
+        }
+        by_project
+            .entry((&thread.environment_id, &thread.project_id))
+            .or_default()
+            .push(thread);
+    }
+    sort_projects_by_activity(
+        projects,
+        sort_order,
+        |project| {
+            by_project
+                .get(&(&project.environment_id, &project.id))
+                .cloned()
+                .unwrap_or_default()
+        },
+        |left, right| {
+            locale_compare(&left.title, &right.title)
+                .then_with(|| {
+                    locale_compare(
+                        &left.environment_id.to_string(),
+                        &right.environment_id.to_string(),
+                    )
+                })
+                .then_with(|| locale_compare(&left.id.to_string(), &right.id.to_string()))
+        },
+    )
 }
 
 /// `sortSidebarV2ProjectGroups`: hidden subagent threads never reorder projects.
@@ -1577,13 +1644,11 @@ pub fn working_label(thread: &EnvironmentThreadShell) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::state::models::fixtures::{
-        env, project_id, run_id, runtime, shell, thread_id,
-    };
+    use super::*;
+    use crate::state::models::fixtures::{env, project_id, run_id, runtime, shell, thread_id};
     use crate::state::models::{
         BackgroundTaskKind, ForkedFrom, PendingBackgroundTask, ThreadLineage,
     };
-    use super::*;
     use futures::executor::block_on;
 
     fn strings(values: &[&str]) -> Vec<String> {
@@ -2750,6 +2815,99 @@ mod tests {
                 .map(|p| p.project_key.as_str())
                 .collect::<Vec<_>>(),
             vec!["project-1", "project-2"]
+        );
+    }
+
+    // describe("sortScopedProjectsForSidebar")
+    fn scoped_project(
+        environment: &str,
+        id: &str,
+        title: &str,
+        updated_at: &str,
+    ) -> EnvironmentProject {
+        EnvironmentProject {
+            environment_id: env(environment),
+            id: project_id(id),
+            title: title.into(),
+            workspace_root: format!("/work/{id}"),
+            favicon_path: None,
+            project_icon: None,
+            created_at: Some("2026-03-09T10:00:00.000Z".into()),
+            updated_at: Some(updated_at.into()),
+            is_scratch: false,
+            source: None,
+        }
+    }
+
+    #[test]
+    fn keeps_identical_project_ids_in_different_environments_separate() {
+        let projects = vec![
+            scoped_project(
+                "environment-local",
+                "shared-project",
+                "Local project",
+                "2026-03-09T10:00:00.000Z",
+            ),
+            scoped_project(
+                "environment-remote",
+                "shared-project",
+                "Remote project",
+                "2026-03-09T10:00:00.000Z",
+            ),
+        ];
+        let mut local =
+            updated_thread("thread-local", "shared-project", "2026-03-09T10:02:00.000Z");
+        local.environment_id = env("environment-local");
+        let mut remote = updated_thread(
+            "thread-remote",
+            "shared-project",
+            "2026-03-09T10:10:00.000Z",
+        );
+        remote.environment_id = env("environment-remote");
+        let threads = [local, remote];
+        assert_eq!(
+            sort_scoped_projects_for_sidebar(&projects, &threads, ProjectSortOrder::UpdatedAt)
+                .iter()
+                .map(|p| p.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Remote project", "Local project"]
+        );
+    }
+
+    #[test]
+    fn does_not_use_archived_threads_as_project_activity() {
+        let projects = vec![
+            scoped_project(
+                "environment-local",
+                "project-visible",
+                "Visible project",
+                "2026-03-09T10:01:00.000Z",
+            ),
+            scoped_project(
+                "environment-local",
+                "project-archived",
+                "Archived-only project",
+                "2026-03-09T10:00:00.000Z",
+            ),
+        ];
+        let visible = updated_thread(
+            "thread-visible",
+            "project-visible",
+            "2026-03-09T10:02:00.000Z",
+        );
+        let mut archived = updated_thread(
+            "thread-archived",
+            "project-archived",
+            "2026-03-09T10:10:00.000Z",
+        );
+        archived.archived_at = Some("2026-03-09T10:11:00.000Z".into());
+        let threads = [visible, archived];
+        assert_eq!(
+            sort_scoped_projects_for_sidebar(&projects, &threads, ProjectSortOrder::UpdatedAt)
+                .iter()
+                .map(|p| p.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Visible project", "Archived-only project"]
         );
     }
 

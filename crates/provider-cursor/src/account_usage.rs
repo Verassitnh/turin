@@ -8,7 +8,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -232,7 +231,10 @@ struct ReadFailure {
 }
 
 enum PageOutcome {
-    Events { events: Vec<Value>, total: Option<u64> },
+    Events {
+        events: Vec<Value>,
+        total: Option<u64>,
+    },
     Denied,
 }
 
@@ -262,7 +264,6 @@ async fn read_with_token(
     let mut ahead: VecDeque<tokio::task::JoinHandle<Result<PageOutcome, ()>>> = VecDeque::new();
     let mut pages: Vec<Vec<Value>> = Vec::new();
     let mut page = 1u64;
-    let mut completed = false;
     loop {
         let target = prefetch_target(total, page);
         while ahead.len() < target {
@@ -303,14 +304,16 @@ async fn read_with_token(
                     error: Some("Sign in to Cursor again to read account usage.".to_owned()),
                 });
             }
-            PageOutcome::Events { events, total: page_total } => {
+            PageOutcome::Events {
+                events,
+                total: page_total,
+            } => {
                 if total.is_none() {
                     total = page_total;
                 }
                 let short = (events.len() as u64) < PAGE_SIZE;
                 pages.push(events);
                 if short {
-                    completed = true;
                     break;
                 }
             }
@@ -318,11 +321,6 @@ async fn read_with_token(
         page += 1;
     }
     abort_ahead(&mut ahead);
-    if !completed {
-        return Err(ReadFailure {
-            account_key: Some(account_key),
-        });
-    }
     assemble_records(pages, total, since_ms, end_date, account_key)
 }
 
@@ -338,11 +336,7 @@ fn prefetch_target(total: Option<u64>, page: u64) -> usize {
         Some(total) => i64::from(u32::try_from(total.div_ceil(PAGE_SIZE)).unwrap_or(u32::MAX)),
     };
     let room = pages - i64::try_from(page).unwrap_or(i64::MAX) + 1;
-    if room <= 0 {
-        0
-    } else {
-        (room as usize).min(6)
-    }
+    if room <= 0 { 0 } else { (room as usize).min(6) }
 }
 
 async fn read_page(
@@ -355,7 +349,10 @@ async fn read_page(
 ) -> Result<PageOutcome, ()> {
     let limit = match total {
         None => 1000,
-        Some(total) => total.div_ceil(PAGE_SIZE).saturating_mul(2).saturating_add(1),
+        Some(total) => total
+            .div_ceil(PAGE_SIZE)
+            .saturating_mul(2)
+            .saturating_add(1),
     };
     if page > limit {
         return Err(());
@@ -392,7 +389,10 @@ async fn read_page(
     parse_page_object(&object, total).ok_or(())
 }
 
-fn parse_page_object(body: &Map<String, Value>, expected_total: Option<u64>) -> Option<PageOutcome> {
+fn parse_page_object(
+    body: &Map<String, Value>,
+    expected_total: Option<u64>,
+) -> Option<PageOutcome> {
     if body.contains_key("error") || body.contains_key("message") || body.contains_key("code") {
         return None;
     }
@@ -455,7 +455,10 @@ fn assemble_records(
     let mut occurrences: HashMap<String, u64> = HashMap::new();
     for events in &pages {
         let event_keys = if removals_remaining > 0 {
-            events.iter().map(|event| sha256_hex(canonical_json(event).as_bytes())).collect()
+            events
+                .iter()
+                .map(|event| sha256_hex(canonical_json(event).as_bytes()))
+                .collect()
         } else {
             Vec::new()
         };
@@ -463,10 +466,11 @@ fn assemble_records(
         removals_remaining -= removal_count;
         previous_keys = event_keys;
         for raw in events.iter().skip(removal_count) {
-            let Some(record) = record_from_event(raw, since_ms, end_date, &account_key, &mut occurrences)
-                .map_err(|_| ReadFailure {
-                    account_key: Some(account_key.clone()),
-                })?
+            let Some(record) =
+                record_from_event(raw, since_ms, end_date, &account_key, &mut occurrences)
+                    .map_err(|_| ReadFailure {
+                        account_key: Some(account_key.clone()),
+                    })?
             else {
                 continue;
             };
@@ -515,14 +519,20 @@ fn record_from_event(
         }
     }
     let timestamp_ms = match event.get("timestamp") {
-        Some(Value::String(text)) if !text.trim().is_empty() => text.trim().parse::<f64>().map_err(|_| ())?,
+        Some(Value::String(text)) if !text.trim().is_empty() => {
+            text.trim().parse::<f64>().map_err(|_| ())?
+        }
         Some(Value::Number(number)) => number.as_f64().ok_or(())?,
         _ => return Err(()),
     };
     if !timestamp_ms.is_finite() {
         return Err(());
     }
-    let model = event.get("model").and_then(Value::as_str).filter(|model| !model.is_empty()).ok_or(())?;
+    let model = event
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty())
+        .ok_or(())?;
     if timestamp_ms < since_ms || timestamp_ms > end_date {
         return Ok(None);
     }
@@ -533,9 +543,17 @@ fn record_from_event(
         output_tokens: tokens(usage.get("outputTokens")),
         reasoning_tokens: 0,
     };
-    let reported_cost_usd = usage.get("totalCents").and_then(Value::as_f64).map(|cents| cents / 100.0);
-    let session_id = event.get("conversationId").and_then(Value::as_str).unwrap_or("").to_owned();
-    let identity = billed_event_identity(timestamp_ms, model, &session_id, &totals, reported_cost_usd);
+    let reported_cost_usd = usage
+        .get("totalCents")
+        .and_then(Value::as_f64)
+        .map(|cents| cents / 100.0);
+    let session_id = event
+        .get("conversationId")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let identity =
+        billed_event_identity(timestamp_ms, model, &session_id, &totals, reported_cost_usd);
     let key = sha256_hex(identity.as_bytes());
     let occurrence = occurrences.entry(key.clone()).or_insert(0);
     let dedupe_key = format!("cursor-account:{account_key}:{key}:{occurrence}");
@@ -581,7 +599,9 @@ fn billed_event_identity(
 }
 
 fn is_non_negative_number(value: &Value) -> bool {
-    value.as_f64().is_some_and(|number| number.is_finite() && number >= 0.0)
+    value
+        .as_f64()
+        .is_some_and(|number| number.is_finite() && number >= 0.0)
 }
 
 fn tokens(value: Option<&Value>) -> u64 {
@@ -694,35 +714,22 @@ fn js_number_string(value: f64) -> String {
     }
 }
 
-pub fn read_access_token_file(path: &Path) -> Option<String> {
-    let text = fs::read_to_string(path).ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
-    value
-        .get("accessToken")
-        .and_then(Value::as_str)
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     fn token(sub: &str) -> String {
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-            serde_json::json!({"sub": sub}).to_string().as_bytes(),
-        );
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::json!({"sub": sub}).to_string().as_bytes());
         format!("header.{payload}.signature")
     }
 
+    type ScriptFuture =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<DashboardResponse, ()>> + Send>>;
+
     struct Script {
-        answer: Box<
-            dyn Fn(DashboardRequest) -> std::pin::Pin<
-                    Box<dyn std::future::Future<Output = Result<DashboardResponse, ()>> + Send>,
-                > + Send
-                + Sync,
-        >,
+        answer: Box<dyn Fn(DashboardRequest) -> ScriptFuture + Send + Sync>,
     }
 
     #[async_trait]
@@ -770,7 +777,11 @@ mod tests {
         let pages_task = Arc::clone(&pages);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("auth.json");
-        fs::write(&path, serde_json::json!({"accessToken": access}).to_string()).unwrap();
+        fs::write(
+            &path,
+            serde_json::json!({"accessToken": access}).to_string(),
+        )
+        .unwrap();
         let client = script(move |request| {
             pages_task.fetch_add(1, Ordering::SeqCst);
             let page = serde_json::from_str::<Value>(&request.body).unwrap()["page"]
@@ -781,7 +792,11 @@ mod tests {
                 assert_eq!(request.redirect, "error");
                 assert_eq!(request.origin, "https://cursor.com");
                 assert_eq!(request.content_type, "application/json");
-                assert!(request.cookie.contains("WorkosCursorSessionToken=demo%3A%3A"));
+                assert!(
+                    request
+                        .cookie
+                        .contains("WorkosCursorSessionToken=demo%3A%3A")
+                );
                 let length = if page == 1 { 1000 } else { 1 };
                 let events: Vec<Value> = (0..length)
                     .map(|index| {
@@ -833,16 +848,22 @@ mod tests {
         let access = token("auth|demo");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("auth.json");
-        fs::write(&path, serde_json::json!({"accessToken": access}).to_string()).unwrap();
+        fs::write(
+            &path,
+            serde_json::json!({"accessToken": access}).to_string(),
+        )
+        .unwrap();
         for body in [
             serde_json::json!({}),
             serde_json::json!({"totalUsageEventsCount": 0}),
             serde_json::json!({"totalUsageEventsCount": 0, "usageEventsDisplay": []}),
         ] {
-            let body = body.clone();
-            let client = script(move |_| {
+            let client = script({
                 let body = body.clone();
-                async move { Ok(json_response(200, body)) }
+                move |_| {
+                    let body = body.clone();
+                    async move { Ok(json_response(200, body)) }
+                }
             });
             let result = read_cursor_account_usage(
                 CredentialSource::File(path.clone()),
@@ -864,10 +885,12 @@ mod tests {
             Value::String("invalid".to_owned()),
             serde_json::json!(0),
         ] {
-            let body = body.clone();
-            let client = script(move |_| {
+            let client = script({
                 let body = body.clone();
-                async move { Ok(json_response(200, body)) }
+                move |_| {
+                    let body = body.clone();
+                    async move { Ok(json_response(200, body)) }
+                }
             });
             let result = read_cursor_account_usage(
                 CredentialSource::File(path.clone()),
@@ -886,7 +909,11 @@ mod tests {
         let access = token("auth|demo");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("auth.json");
-        fs::write(&path, serde_json::json!({"accessToken": access.clone()}).to_string()).unwrap();
+        fs::write(
+            &path,
+            serde_json::json!({"accessToken": access.clone()}).to_string(),
+        )
+        .unwrap();
         let event = |index: u64| {
             serde_json::json!({
                 "timestamp": (1_780_000_000_000u64 + index).to_string(),
@@ -930,18 +957,16 @@ mod tests {
                 .filter(|record| record.timestamp_ms == 1_780_000_000_999.0)
                 .count();
             assert_eq!(duplicates, if total == 2000 { 1 } else { 2 });
-            let keys: std::collections::HashSet<_> =
-                result.records.iter().map(|record| record.dedupe_key.clone()).collect();
+            let keys: std::collections::HashSet<_> = result
+                .records
+                .iter()
+                .map(|record| record.dedupe_key.clone())
+                .collect();
             assert_eq!(keys.len(), total as usize);
         }
         let denied = script(move |_| {
             let body = access.clone();
-            async move {
-                Ok(DashboardResponse {
-                    status: 401,
-                    body,
-                })
-            }
+            async move { Ok(DashboardResponse { status: 401, body }) }
         });
         let result = read_cursor_account_usage(
             CredentialSource::File(path.clone()),

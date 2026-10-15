@@ -17,9 +17,10 @@
 //! Windows-drive link normalisation. Raw HTML is shown as literal text, which
 //! is what upstream's sanitizer leaves of anything outside its allowlist.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
-use markdown::mdast::{self, AlignKind, Node};
+use markdown::mdast::{self, AlignKind, Node, ReferenceKind};
 use markdown::{Constructs, ParseOptions};
 
 /// `GITHUB_ALERT_PRESENTATIONS` keys.
@@ -155,12 +156,14 @@ pub fn parse_chat_markdown(text: &str, line_breaks: bool) -> MarkdownDocument {
             blocks: vec![Block::Paragraph(plain_inlines(text))],
         };
     };
+    let children = root.children().cloned().unwrap_or_default();
+    let definitions = link_definitions(&children, text);
     let mut cx = Lowering {
         source: text,
         line_breaks,
         footnotes: Vec::new(),
+        definitions: &definitions,
     };
-    let children = root.children().cloned().unwrap_or_default();
     let mut blocks = cx.blocks(&children, None);
     if !cx.footnotes.is_empty() {
         blocks.push(Block::Footnotes(std::mem::take(&mut cx.footnotes)));
@@ -188,7 +191,8 @@ pub fn should_preserve_assistant_line_breaks(text: &str) -> bool {
 }
 
 fn plain_inlines(text: &str) -> Inlines {
-    let mut builder = InlineBuilder::new(false, "");
+    let definitions = LinkDefinitions::new();
+    let mut builder = InlineBuilder::new(false, "", &definitions);
     builder.push_text(text, Marks::default());
     builder.finish()
 }
@@ -200,6 +204,39 @@ struct Lowering<'a> {
     source: &'a str,
     line_breaks: bool,
     footnotes: Vec<(String, Vec<Block>)>,
+    definitions: &'a LinkDefinitions,
+}
+
+/// Resolved link definition URLs by identifier. A definition may sit anywhere
+/// in the document, and the first one for an identifier wins.
+type LinkDefinitions = HashMap<String, String>;
+
+fn link_definitions(nodes: &[Node], source: &str) -> LinkDefinitions {
+    let mut definitions = HashMap::new();
+    collect_link_definitions(nodes, source, &mut definitions);
+    definitions
+}
+
+fn collect_link_definitions(nodes: &[Node], source: &str, out: &mut LinkDefinitions) {
+    for node in nodes {
+        if let Node::Definition(definition) = node {
+            // The same Windows-path rule as inline destinations, applied to the
+            // definition's authored destination.
+            let url = match definition
+                .position
+                .as_ref()
+                .and_then(|position| authored_definition_destination(source, position))
+            {
+                Some(authored) => keep_windows_path_destination(authored, &definition.url),
+                None => definition.url.clone(),
+            };
+            out.entry(definition.identifier.clone())
+                .or_insert_with(|| normalize_link_url(&url));
+        }
+        if let Some(children) = node.children() {
+            collect_link_definitions(children, source, out);
+        }
+    }
 }
 
 /// `GITHUB_ALERT_MARKER`: `[!NOTE]` on its own line.
@@ -273,10 +310,14 @@ impl Lowering<'_> {
         if !stripped {
             return vec![Block::Paragraph(plain_inlines(value))];
         }
+        // The recovered text is its own parse, so its references resolve against
+        // its own definitions.
+        let definitions = link_definitions(&children, &source);
         let mut inner = Lowering {
             source: &source,
             line_breaks: self.line_breaks,
             footnotes: std::mem::take(&mut self.footnotes),
+            definitions: &definitions,
         };
         let blocks = inner.blocks(&children, None);
         self.footnotes = inner.footnotes;
@@ -428,7 +469,7 @@ impl Lowering<'_> {
     }
 
     fn inlines_owned(&self, nodes: &[Node]) -> Inlines {
-        let mut builder = InlineBuilder::new(self.line_breaks, self.source);
+        let mut builder = InlineBuilder::new(self.line_breaks, self.source, self.definitions);
         for node in nodes {
             builder.node(node, Marks::default());
         }
@@ -467,6 +508,7 @@ struct InlineBuilder<'a> {
     line_breaks: bool,
     /// The document source, for authored link destinations.
     source: &'a str,
+    definitions: &'a LinkDefinitions,
     text: String,
     runs: Vec<InlineRun>,
     links: Vec<String>,
@@ -474,10 +516,11 @@ struct InlineBuilder<'a> {
 }
 
 impl<'a> InlineBuilder<'a> {
-    fn new(line_breaks: bool, source: &'a str) -> Self {
+    fn new(line_breaks: bool, source: &'a str, definitions: &'a LinkDefinitions) -> Self {
         Self {
             line_breaks,
             source,
+            definitions,
             text: String::new(),
             runs: Vec::new(),
             links: Vec::new(),
@@ -551,6 +594,44 @@ impl<'a> InlineBuilder<'a> {
         }
     }
 
+    fn push_link(&mut self, url: String, children: &[Node], marks: Marks) {
+        let ix = self.links.len();
+        self.links.push(url);
+        for child in children {
+            self.node(
+                child,
+                Marks {
+                    link: Some(ix),
+                    ..marks
+                },
+            );
+        }
+    }
+
+    fn push_image(&mut self, url: String, alt: &str, marks: Marks) {
+        self.images.push((self.text.len(), alt.to_string(), url));
+        if !alt.is_empty() {
+            self.push_text(alt, marks);
+        }
+    }
+
+    /// `revert` in mdast-util-to-hast: a reference without a definition is
+    /// its source text, brackets and label included.
+    fn revert_reference(
+        &mut self,
+        children: &[Node],
+        kind: ReferenceKind,
+        label: Option<&str>,
+        identifier: &str,
+        marks: Marks,
+    ) {
+        self.push_text("[", marks);
+        for child in children {
+            self.node(child, marks);
+        }
+        self.push_text(&reference_suffix(kind, label, identifier), marks);
+    }
+
     fn hard_break(&mut self, marks: Marks) {
         // Spaces before a forced break are not rendered.
         while self.text.ends_with(' ') {
@@ -617,33 +698,33 @@ impl<'a> InlineBuilder<'a> {
             ),
             Node::Break(_) => self.hard_break(marks),
             Node::Link(link) => {
-                let ix = self.links.len();
-                self.links
-                    .push(normalize_link_url(&self.link_destination(link)));
-                for child in &link.children {
-                    self.node(
-                        child,
-                        Marks {
-                            link: Some(ix),
-                            ..marks
-                        },
-                    );
-                }
+                let url = normalize_link_url(&self.link_destination(link));
+                self.push_link(url, &link.children, marks);
             }
             Node::LinkReference(reference) => {
-                // Unresolved references render as their text.
-                for child in &reference.children {
-                    self.node(child, marks);
+                match self.definitions.get(&reference.identifier).cloned() {
+                    Some(url) => self.push_link(url, &reference.children, marks),
+                    None => self.revert_reference(
+                        &reference.children,
+                        reference.reference_kind,
+                        reference.label.as_deref(),
+                        &reference.identifier,
+                        marks,
+                    ),
                 }
             }
-            Node::Image(image) => {
-                self.images
-                    .push((self.text.len(), image.alt.clone(), image.url.clone()));
-                if !image.alt.is_empty() {
-                    self.push_text(&image.alt, marks);
+            Node::Image(image) => self.push_image(image.url.clone(), &image.alt, marks),
+            Node::ImageReference(image) => match self.definitions.get(&image.identifier).cloned() {
+                Some(url) => self.push_image(url, &image.alt, marks),
+                None => {
+                    let suffix = reference_suffix(
+                        image.reference_kind,
+                        image.label.as_deref(),
+                        &image.identifier,
+                    );
+                    self.push_text(&format!("![{}{suffix}", image.alt), marks);
                 }
-            }
-            Node::ImageReference(image) => self.push_text(&image.alt, marks),
+            },
             Node::FootnoteReference(reference) => self.push_raw(
                 &reference
                     .label
@@ -737,7 +818,23 @@ fn authored_destination<'s>(
         .map_or(position.start.offset + 1, |end| end.end.offset);
     let link_source = source.get(label_end..position.end.offset)?;
     let open = link_source.find("](")? + 2;
-    let rest = link_source[open..].trim_start_matches([' ', '\t', '\n', '\r']);
+    destination_at(&link_source[open..])
+}
+
+/// The destination of a definition, as written after its `]:`.
+fn authored_definition_destination<'s>(
+    source: &'s str,
+    position: &markdown::unist::Position,
+) -> Option<&'s str> {
+    let definition_source = source.get(position.start.offset..position.end.offset)?;
+    let open = definition_source.find("]:")? + 2;
+    destination_at(&definition_source[open..])
+}
+
+/// A destination at the start of `rest` (after optional white space): either
+/// `<...>` or a bare run that ends at white space or an unmatched `)`.
+fn destination_at(rest: &str) -> Option<&str> {
+    let rest = rest.trim_start_matches([' ', '\t', '\n', '\r']);
     if let Some(inner) = rest.strip_prefix('<') {
         return inner.split_once('>').map(|(dest, _)| dest);
     }
@@ -756,6 +853,21 @@ fn authored_destination<'s>(
         end = i + c.len_utf8();
     }
     Some(&rest[..end])
+}
+
+/// The text after a reference's `[text]`: `]` for a shortcut, `][]` for a
+/// collapsed reference, `][label]` for a full one (`label || identifier`).
+fn reference_suffix(kind: ReferenceKind, label: Option<&str>, identifier: &str) -> String {
+    match kind {
+        ReferenceKind::Shortcut => "]".to_string(),
+        ReferenceKind::Collapsed => "][]".to_string(),
+        ReferenceKind::Full => {
+            let label = label
+                .filter(|label| !label.is_empty())
+                .unwrap_or(identifier);
+            format!("][{label}]")
+        }
+    }
 }
 
 /// `remarkNormalizeLinksAndTagInlineCode`: Windows drive links become `file:` URLs.
@@ -914,5 +1026,79 @@ mod tests {
     fn relative_destinations_still_decode_escapes() {
         let doc = parse_chat_markdown(r"[x](docs/a\.md)", false);
         assert_eq!(para(&doc).links, vec!["docs/a.md".to_string()]);
+    }
+
+    #[test]
+    fn full_collapsed_and_shortcut_references_resolve_to_their_definitions() {
+        let doc = parse_chat_markdown(
+            "[docs][d], [again][], and [third]\n\n[d]: https://x.dev\n[again]: https://y.dev\n[third]: https://z.dev",
+            false,
+        );
+        let inlines = para(&doc);
+        assert_eq!(inlines.text, "docs, again, and third");
+        assert_eq!(
+            inlines.links,
+            vec![
+                "https://x.dev".to_string(),
+                "https://y.dev".to_string(),
+                "https://z.dev".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn reference_labels_match_case_and_white_space() {
+        let doc = parse_chat_markdown(
+            "[Docs  Page][DOCS page]\n\n[docs page]: https://x.dev",
+            false,
+        );
+        assert_eq!(para(&doc).links, vec!["https://x.dev".to_string()]);
+    }
+
+    #[test]
+    fn unresolved_references_keep_their_source_text() {
+        let doc = parse_chat_markdown("[a][missing] [b][] [WIP] fix", false);
+        let inlines = para(&doc);
+        assert_eq!(inlines.text, "[a][missing] [b][] [WIP] fix");
+        assert!(inlines.links.is_empty());
+    }
+
+    #[test]
+    fn first_definition_of_an_identifier_wins() {
+        let doc = parse_chat_markdown(
+            "[x][a]\n\n[a]: https://one.dev\n[a]: https://two.dev",
+            false,
+        );
+        assert_eq!(para(&doc).links, vec!["https://one.dev".to_string()]);
+    }
+
+    #[test]
+    fn definitions_inside_containers_resolve_across_the_document() {
+        let doc = parse_chat_markdown("see [a]\n\n> [a]: https://x.dev", false);
+        assert_eq!(para(&doc).links, vec!["https://x.dev".to_string()]);
+    }
+
+    #[test]
+    fn reference_definitions_keep_windows_path_destinations() {
+        // The definition's `\.` is a CommonMark escape; the authored path must win.
+        let doc = parse_chat_markdown("[x][shot]\n\n[shot]: C:\\me\\.t3\\shot.png", false);
+        assert_eq!(
+            para(&doc).links,
+            vec!["file:///C:/me/.t3/shot.png".to_string()]
+        );
+    }
+
+    #[test]
+    fn reference_images_resolve_or_keep_their_source_text() {
+        let doc = parse_chat_markdown("![alt][pic]\n\n[pic]: https://img.dev/a.png", false);
+        let inlines = para(&doc);
+        assert_eq!(inlines.text, "alt");
+        assert_eq!(
+            inlines.images,
+            vec![(0, "alt".to_string(), "https://img.dev/a.png".to_string())]
+        );
+        let doc = parse_chat_markdown("![alt][missing]", false);
+        assert_eq!(para(&doc).text, "![alt][missing]");
+        assert!(para(&doc).images.is_empty());
     }
 }

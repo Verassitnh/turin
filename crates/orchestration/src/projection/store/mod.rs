@@ -13,6 +13,8 @@ pub mod apply;
 pub mod canonical;
 pub mod shell;
 #[cfg(test)]
+mod shell_tests;
+#[cfg(test)]
 mod window_tests;
 
 use std::sync::Arc;

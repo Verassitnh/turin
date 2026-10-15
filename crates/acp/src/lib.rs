@@ -6,6 +6,7 @@ pub mod compat;
 pub mod cursor;
 pub mod errors;
 pub mod meta;
+pub mod process;
 pub mod protocol;
 pub mod schema;
 
@@ -16,3 +17,4 @@ pub use compat::{
     ProtocolGeneration,
 };
 pub use errors::AcpError;
+pub use process::{SpawnCommand, spawn};

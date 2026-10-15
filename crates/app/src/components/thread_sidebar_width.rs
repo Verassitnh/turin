@@ -36,8 +36,14 @@ mod tests {
     #[test]
     fn initial_width_defaults_and_respects_minimum() {
         assert_eq!(resolve_initial_thread_sidebar_width(None, 1400.), 256.);
-        assert_eq!(resolve_initial_thread_sidebar_width(Some(100.), 1400.), 208.);
-        assert_eq!(resolve_initial_thread_sidebar_width(Some(320.), 1400.), 320.);
+        assert_eq!(
+            resolve_initial_thread_sidebar_width(Some(100.), 1400.),
+            208.
+        );
+        assert_eq!(
+            resolve_initial_thread_sidebar_width(Some(320.), 1400.),
+            320.
+        );
     }
 
     #[test]

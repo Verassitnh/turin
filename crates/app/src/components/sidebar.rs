@@ -12,9 +12,8 @@ pub mod sidebar_thread_header;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, CursorStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, px, rems,
+    App, CursorStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    RenderOnce, SharedString, Styled as _, Window, div, px, rems,
 };
 
 use self::sidebar_chrome::{SidebarChromeFooter, SidebarChromeHeader};
@@ -259,21 +258,17 @@ impl RenderOnce for SidebarThreadRow {
                                 ),
                         )
                         .child(
-                            div()
-                                .mt_1()
-                                .flex()
-                                .min_w_0()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .truncate()
-                                        .text_size(TEXT_SM.size)
-                                        .line_height(TEXT_SM.line_height)
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(with_alpha(theme.foreground, 0.9))
-                                        .child(data.title),
-                                ),
+                            div().mt_1().flex().min_w_0().child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_size(TEXT_SM.size)
+                                    .line_height(TEXT_SM.line_height)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(with_alpha(theme.foreground, 0.9))
+                                    .child(data.title),
+                            ),
                         )
                         .children(line3),
                 ),
@@ -369,12 +364,14 @@ impl RenderOnce for SidebarSectionHeader {
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(muted)
                 .child(self.label)
+                .child(div().flex_1().min_w_2().child(
+                    Separator::horizontal().color(with_alpha(theme.sidebar_border, 0.6).into()),
+                ))
                 .child(
-                    div().flex_1().min_w_2().child(
-                        Separator::horizontal().color(with_alpha(theme.sidebar_border, 0.6).into()),
-                    ),
-                )
-                .child(Icon::new(IconName::ChevronDown).size(rems(0.75)).color(muted)),
+                    Icon::new(IconName::ChevronDown)
+                        .size(rems(0.75))
+                        .color(muted),
+                ),
         )
     }
 }
@@ -396,30 +393,32 @@ impl RenderOnce for Sidebar {
                     .p(SIDEBAR_CONTENT_INSET)
                     .child(SidebarThreadHeader { has_projects: true }),
             )
-            .child(div().flex_1().min_h_0().child(
-                scroll_area_hidden("sidebar-content").child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_h_full()
-                        .px(SIDEBAR_CONTENT_INSET)
-                        .pb(SIDEBAR_CONTENT_INSET)
-                        .children(
-                            active
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, row)| SidebarThreadRow::new(row, index == 0)),
-                        )
-                        .child(
-                            div()
-                                .mt_auto()
-                                .flex()
-                                .flex_col()
-                                .child(SidebarSectionHeader::new("Settled"))
-                                .children(settled.into_iter().map(SidebarSlimThreadRow::new)),
-                        ),
+            .child(
+                div().flex_1().min_h_0().child(
+                    scroll_area_hidden("sidebar-content").child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_h_full()
+                            .px(SIDEBAR_CONTENT_INSET)
+                            .pb(SIDEBAR_CONTENT_INSET)
+                            .children(
+                                active
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, row)| SidebarThreadRow::new(row, index == 0)),
+                            )
+                            .child(
+                                div()
+                                    .mt_auto()
+                                    .flex()
+                                    .flex_col()
+                                    .child(SidebarSectionHeader::new("Settled"))
+                                    .children(settled.into_iter().map(SidebarSlimThreadRow::new)),
+                            ),
+                    ),
                 ),
-            ))
+            )
             .child(SidebarChromeFooter)
     }
 }

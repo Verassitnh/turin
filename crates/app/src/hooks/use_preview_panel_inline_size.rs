@@ -28,7 +28,10 @@ pub fn get_preview_panel_max_width(viewport_width: f32, container_width: Option<
 
 /// `useResizableWidth`'s clamp.
 pub fn clamp_preview_panel_width(width: f32, max_width: f32) -> f32 {
-    width.clamp(PREVIEW_PANEL_MIN_WIDTH, max_width.max(PREVIEW_PANEL_MIN_WIDTH))
+    width.clamp(
+        PREVIEW_PANEL_MIN_WIDTH,
+        max_width.max(PREVIEW_PANEL_MIN_WIDTH),
+    )
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ use gpui_kit::{
 
 use crate::assets::SEND_ARROW;
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
+use crate::theme::color::{MixSpace, color_mix, with_alpha};
 use crate::theme::tokens::{self, LEADING_RELAXED, RADIUS_3XL, RADIUS_MD, TEXT_SM, tw};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 
@@ -61,11 +61,15 @@ impl RenderOnce for ComposerSurface {
         let theme = cx.app_theme();
         let dark = theme.is_dark();
         // Light: `--card` at the 80% glass opacity; dark: `--surface-raised`.
-        let surface = if dark {
-            with_alpha(theme.surface_raised, 0.8)
+        // Flattened over the canvas: GPUI paints box shadows under the
+        // element (CSS clips them to outside the border box), so a
+        // translucent fill would show its own drop shadow through it.
+        let glass = if dark {
+            theme.surface_raised
         } else {
-            with_alpha(theme.card, 0.8)
+            theme.card
         };
+        let surface = color_mix(MixSpace::Srgb, glass, 0.8, theme.background);
         let outline = if dark {
             with_alpha(tw::WHITE, 0.05)
         } else {

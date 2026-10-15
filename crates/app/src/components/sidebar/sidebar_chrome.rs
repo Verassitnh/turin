@@ -74,11 +74,7 @@ impl RenderOnce for SidebarChromeHeader {
                                             .h(px(cap))
                                             .text_color(theme.foreground),
                                     )
-                                    .child(
-                                        div()
-                                            .text_color(theme.muted_foreground)
-                                            .child("Code"),
-                                    ),
+                                    .child(div().text_color(theme.muted_foreground).child("Code")),
                             ),
                     ),
             )

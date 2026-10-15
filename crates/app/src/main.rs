@@ -8,10 +8,12 @@ mod theme;
 mod ui;
 
 mod assets;
+// Ported upstream constants and helpers (storage keys, brand-width
+// minimum, statuses) land before their callers.
+#[allow(dead_code)]
 mod components;
+#[allow(dead_code)]
 mod hooks;
-#[cfg(feature = "screenshot")]
-mod screenshot;
 
 use gpui_kit::*;
 
@@ -69,7 +71,7 @@ fn main() {
             theme::init(cx);
             app_sidebar_layout::bind_keys(cx);
             let right_panel = dev_overrides(cx);
-            let (_window, _) = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
+            gpui_kit::open_window(window_options(cx), cx, |window, cx| {
                 cx.new(|cx| {
                     let mut layout = AppSidebarLayout::new(window, cx);
                     layout.set_right_panel_open(right_panel);
@@ -78,7 +80,5 @@ fn main() {
             })
             .expect("failed to open window");
             cx.activate(true);
-            #[cfg(feature = "screenshot")]
-            screenshot::schedule(_window, cx);
         });
 }

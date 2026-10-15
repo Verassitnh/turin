@@ -6,7 +6,9 @@
 //! terminal drawer toggle is cut with the terminal.
 
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{App, ClickEvent, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div};
+use gpui_kit::{
+    App, ClickEvent, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div,
+};
 
 use crate::theme::tokens::RADIUS_LG;
 use crate::ui::{Button, ButtonSize, ButtonVariant, IconName, Tooltip};

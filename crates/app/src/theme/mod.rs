@@ -251,7 +251,12 @@ impl AppTheme {
             info_foreground: info_foreground.into(),
             success: success.into(),
             success_foreground: success_foreground.into(),
-            diff_addition_foreground: if dark { tw::EMERALD_400 } else { tw::EMERALD_600 }.into(),
+            diff_addition_foreground: if dark {
+                tw::EMERALD_400
+            } else {
+                tw::EMERALD_600
+            }
+            .into(),
             diff_deletion_foreground: if dark { tw::RED_400 } else { tw::RED_600 }.into(),
             border: line(p.border, p.text),
             input: line(p.input, p.text),

@@ -5,8 +5,8 @@
 //! yet; callers pass the resolved color.
 
 use gpui_kit::{
-    App, FontWeight, Hsla, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Styled as _, Window, div, px, rems,
+    App, FontWeight, Hsla, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
+    Window, div, px, rems,
 };
 
 use crate::theme::ActiveAppTheme;

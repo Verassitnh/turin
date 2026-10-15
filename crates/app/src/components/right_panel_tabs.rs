@@ -10,7 +10,7 @@
 
 use gpui_kit::{
     App, CursorStyle, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    StatefulInteractiveElement as _, Styled as _, Window, div, rems,
+    Styled as _, Window, div, rems,
 };
 
 use super::drag_region::DragRegion as _;
@@ -21,7 +21,13 @@ use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 
 /// A surface tab: `h-6 max-w-36 rounded-md pl-1.5 pr-2 text-xs gap-0.5`,
 /// active `bg-accent text-foreground`.
-fn surface_tab(id: &'static str, icon: IconName, label: &'static str, active: bool, cx: &App) -> impl IntoElement {
+fn surface_tab(
+    id: &'static str,
+    icon: IconName,
+    label: &'static str,
+    active: bool,
+    cx: &App,
+) -> impl IntoElement {
     let theme = cx.app_theme().clone();
     let tab = div()
         .id(id)
@@ -76,7 +82,13 @@ impl RenderOnce for RightPanelTabs {
                     .h(WORKSPACE_TOPBAR_HEIGHT)
                     .pl_2()
                     .pr(rems(7.))
-                    .child(surface_tab("right-panel-tab-diff", IconName::FileDiff, "Diff", true, cx))
+                    .child(surface_tab(
+                        "right-panel-tab-diff",
+                        IconName::FileDiff,
+                        "Diff",
+                        true,
+                        cx,
+                    ))
                     .child(surface_tab(
                         "right-panel-tab-prs",
                         IconName::GitPullRequest,

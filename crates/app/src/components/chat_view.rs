@@ -7,8 +7,8 @@
 //! cut.
 
 use gpui_kit::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, Styled as _,
-    Window, div, px, rems,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window,
+    div, px, rems,
 };
 
 use super::chat::chat_header::ChatHeader;

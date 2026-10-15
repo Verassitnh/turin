@@ -117,7 +117,12 @@ impl AppSidebarLayout {
         cx.notify();
     }
 
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(target) = self.resizing else {
             return;
         };
@@ -130,11 +135,15 @@ impl AppSidebarLayout {
         let viewport_width = f32::from(window.viewport_size().width);
         match target {
             ResizeTarget::Sidebar => {
-                let max = resolve_thread_sidebar_maximum_width(viewport_width, THREAD_SIDEBAR_MIN_WIDTH);
+                let max =
+                    resolve_thread_sidebar_maximum_width(viewport_width, THREAD_SIDEBAR_MIN_WIDTH);
                 self.sidebar_width = clamp_thread_sidebar_width(x, THREAD_SIDEBAR_MIN_WIDTH, max);
             }
             ResizeTarget::RightPanel => {
-                let max = get_preview_panel_max_width(viewport_width, Some(self.main_width(viewport_width)));
+                let max = get_preview_panel_max_width(
+                    viewport_width,
+                    Some(self.main_width(viewport_width)),
+                );
                 self.right_panel_width = clamp_preview_panel_width(viewport_width - x, max);
             }
         }
@@ -230,7 +239,9 @@ impl Render for AppSidebarLayout {
                     .bottom_0()
                     .left(px(4.))
                     .w(px(1.))
-                    .when(dragging_panel, |this| this.bg(with_alpha(theme.primary, 0.6)))
+                    .when(dragging_panel, |this| {
+                        this.bg(with_alpha(theme.primary, 0.6))
+                    })
                     .when(!dragging_panel, |this| {
                         this.group_hover("right-panel-resize", |style| style.bg(theme.border))
                     }),

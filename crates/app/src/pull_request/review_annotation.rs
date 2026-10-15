@@ -545,7 +545,7 @@ impl Render for ReviewThreadCard {
             if let Some(cursor) = thread.next_comments_cursor.as_ref().map(|c| c.as_str().to_owned()) {
                 let loading = self.loading_cursor.is_some();
                 body = body.child(
-                    div().mt_2().child(
+                    div().mt_2().flex().child(
                         Button::new(SharedString::from(format!("thread-more-{thread_id}")))
                             .size(ButtonSize::Xs)
                             .variant(ButtonVariant::Ghost)
@@ -590,6 +590,7 @@ impl Render for ReviewThreadCard {
                 } else {
                     div()
                         .mt_2()
+                        .flex()
                         .child(
                             Button::new(SharedString::from(format!("reply-{thread_id}")))
                                 .size(ButtonSize::Xs)

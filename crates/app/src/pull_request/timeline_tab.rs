@@ -31,7 +31,7 @@ use super::pull_request_detail_logic::{
     PullRequestCommentOrder, PullRequestReviewOutcome, PullRequestTimelineEvent,
     PullRequestTimelineEventKind, PullRequestTimelineRow, PullRequestTimelineSource,
     build_pull_request_timeline, group_pull_request_timeline_conversations,
-    is_pull_request_verdict_stale, newest_pull_request_commit_at, order_pull_request_comments,
+    is_pull_request_verdict_stale, newest_pull_request_commit_at,
     pull_request_review_outcome,
 };
 use super::pull_request_editing_logic::{EditingSubject, can_edit_pull_request_comment};
@@ -74,7 +74,10 @@ impl TimelineTab {
         Self {
             ctx,
             order: PullRequestCommentOrder::Newest,
-            open_groups: HashSet::new(),
+            // `TURIN_TIMELINE_OPEN=<first entry id>` (dev/screenshots) opens a conversation.
+            open_groups: std::env::var("TURIN_TIMELINE_OPEN")
+                .map(|ids| ids.split(',').map(str::to_owned).collect())
+                .unwrap_or_default(),
             edit: None,
             _subscriptions: vec![subscription],
         }
@@ -873,7 +876,11 @@ impl Render for TimelineTab {
                         .filter(|comment| can_edit_pull_request_comment(&subject, comment))
                         .map(|comment| (comment.id.as_str(), comment))
                         .collect();
-                    let ordered = order_pull_request_comments(&events, self.order);
+                    // `build_pull_request_timeline` answers newest first; "oldest" reads it backwards.
+                    let ordered: Vec<PullRequestTimelineEvent> = match self.order {
+                        PullRequestCommentOrder::Newest => events.clone(),
+                        PullRequestCommentOrder::Oldest => events.iter().rev().cloned().collect(),
+                    };
                     let rows = group_pull_request_timeline_conversations(&ordered);
                     let mut rail = div().relative().child(
                         div()
@@ -975,6 +982,8 @@ pub fn mount_isolated(
     let bg = cx.app_theme().background;
     let view: gpui_kit::AnyView = match tab {
         DetailTab::Timeline => cx.new(|cx| TimelineTab::new(ctx, window, cx)).into(),
+        DetailTab::Code => cx.new(|cx| super::code_tab::CodeTab::new(ctx, window, cx)).into(),
+        DetailTab::Guide => cx.new(|cx| super::guide_tab::GuideTab::new(ctx, window, cx)).into(),
         _ => return None,
     };
     Some(cx.new(|_| Frame { view, bg }).into())

@@ -551,14 +551,47 @@ fn align(old_key: &[String], new_key: &[String]) -> Vec<Step> {
     steps
 }
 
+/// The line arrays and counts of the file being rebuilt.
+#[derive(Default)]
+struct Rebuilt {
+    addition_lines: Vec<String>,
+    deletion_lines: Vec<String>,
+    additions: u64,
+    deletions: u64,
+}
+
+fn flush_change(
+    state: &mut Rebuilt,
+    content: &mut Vec<HunkContent>,
+    pending_del: &mut Vec<&str>,
+    pending_add: &mut Vec<&str>,
+) {
+    if pending_del.is_empty() && pending_add.is_empty() {
+        return;
+    }
+    content.push(HunkContent::Change {
+        deletions: pending_del.len(),
+        additions: pending_add.len(),
+        addition_line_index: state.addition_lines.len(),
+        deletion_line_index: state.deletion_lines.len(),
+    });
+    state
+        .deletion_lines
+        .extend(pending_del.iter().map(|text| (*text).to_owned()));
+    state
+        .addition_lines
+        .extend(pending_add.iter().map(|text| (*text).to_owned()));
+    state.deletions += pending_del.len() as u64;
+    state.additions += pending_add.len() as u64;
+    pending_del.clear();
+    pending_add.clear();
+}
+
 /// `hideWhitespaceChanges`: each hunk is diffed again with all whitespace removed, so a line
 /// whose only change is whitespace becomes context.
 pub fn hide_whitespace_changes(file: &PatchFile) -> PatchFile {
     let mut hunks = Vec::with_capacity(file.meta.hunks.len());
-    let mut additions = 0;
-    let mut deletions = 0;
-    let mut addition_lines: Vec<String> = Vec::new();
-    let mut deletion_lines: Vec<String> = Vec::new();
+    let mut state = Rebuilt::default();
     for hunk in &file.meta.hunks {
         // A hunk is the unit: old = context + deletions, new = context + additions, in order.
         let mut old_side: Vec<&str> = Vec::new();
@@ -603,33 +636,14 @@ pub fn hide_whitespace_changes(file: &PatchFile) -> PatchFile {
         let mut content: Vec<HunkContent> = Vec::new();
         let mut pending_del: Vec<&str> = Vec::new();
         let mut pending_add: Vec<&str> = Vec::new();
-        let mut flush = |content: &mut Vec<HunkContent>,
-                         pending_del: &mut Vec<&str>,
-                         pending_add: &mut Vec<&str>| {
-            if pending_del.is_empty() && pending_add.is_empty() {
-                return;
-            }
-            content.push(HunkContent::Change {
-                deletions: pending_del.len(),
-                additions: pending_add.len(),
-                addition_line_index: addition_lines.len(),
-                deletion_line_index: deletion_lines.len(),
-            });
-            deletion_lines.extend(pending_del.iter().map(|text| (*text).to_owned()));
-            addition_lines.extend(pending_add.iter().map(|text| (*text).to_owned()));
-            deletions += pending_del.len() as u64;
-            additions += pending_add.len() as u64;
-            pending_del.clear();
-            pending_add.clear();
-        };
         for step in steps {
             match step {
                 Step::Match(_, new_index) => {
-                    flush(&mut content, &mut pending_del, &mut pending_add);
-                    let addition_index = addition_lines.len();
-                    let deletion_index = deletion_lines.len();
-                    addition_lines.push(new_side[new_index].to_owned());
-                    deletion_lines.push(new_side[new_index].to_owned());
+                    flush_change(&mut state, &mut content, &mut pending_del, &mut pending_add);
+                    let addition_index = state.addition_lines.len();
+                    let deletion_index = state.deletion_lines.len();
+                    state.addition_lines.push(new_side[new_index].to_owned());
+                    state.deletion_lines.push(new_side[new_index].to_owned());
                     match content.last_mut() {
                         Some(HunkContent::Context { lines, .. }) => *lines += 1,
                         _ => content.push(HunkContent::Context {
@@ -643,7 +657,7 @@ pub fn hide_whitespace_changes(file: &PatchFile) -> PatchFile {
                 Step::Add(new_index) => pending_add.push(new_side[new_index]),
             }
         }
-        flush(&mut content, &mut pending_del, &mut pending_add);
+        flush_change(&mut state, &mut content, &mut pending_del, &mut pending_add);
         hunks.push(Hunk {
             deletion_start: hunk.deletion_start,
             addition_start: hunk.addition_start,
@@ -653,11 +667,11 @@ pub fn hide_whitespace_changes(file: &PatchFile) -> PatchFile {
     let mut next = file.clone();
     next.meta = FileDiffMetadata {
         hunks,
-        addition_lines,
-        deletion_lines,
+        addition_lines: state.addition_lines,
+        deletion_lines: state.deletion_lines,
     };
-    next.additions = additions;
-    next.deletions = deletions;
+    next.additions = state.additions;
+    next.deletions = state.deletions;
     next
 }
 

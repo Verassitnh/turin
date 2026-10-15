@@ -78,6 +78,8 @@ pub struct PullRequestRow {
     matched_elsewhere: bool,
     meta_width: Pixels,
     on_select: SelectRow,
+    /// The store and layer callback the stack trigger opens its menu with.
+    stack: Option<(gpui_kit::Entity<super::view_model::PullRequestStore>, super::stack_popover::SelectLayer)>,
 }
 
 impl PullRequestRow {
@@ -90,6 +92,7 @@ impl PullRequestRow {
             matched_elsewhere: false,
             meta_width: px(640.),
             on_select,
+            stack: None,
         }
     }
 
@@ -112,6 +115,17 @@ impl PullRequestRow {
     /// A search found this, but in something the row does not show.
     pub fn matched_elsewhere(mut self, matched: bool) -> Self {
         self.matched_elsewhere = matched;
+        self
+    }
+
+    /// `PullRequestStackPopover`: the stack trigger opens the layers menu (reads the stack from
+    /// `store`, and `on_select` opens the chosen layer).
+    pub fn stack_popover(
+        mut self,
+        store: gpui_kit::Entity<super::view_model::PullRequestStore>,
+        on_select: super::stack_popover::SelectLayer,
+    ) -> Self {
+        self.stack = Some((store, on_select));
         self
     }
 
@@ -191,25 +205,43 @@ impl RenderOnce for PullRequestRow {
             .items_center()
             .gap(rems(0.375))
             .text_size(meta_text_size())
-            .when_some(entry.stack.as_ref(), |this, stack| {
-                let label = format!(
-                    "View stack #{}, layer {} of {}",
-                    stack.number.get(),
-                    stack.position.get(),
-                    stack.size.get()
-                );
-                this.child(with_tooltip(
-                    "pr-stack-trigger",
-                    label,
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_size(TEXT_XS.size)
-                        .text_color(theme.muted_foreground)
-                        .child(Icon::new(IconName::Layers).size(rems(0.75)))
-                        .child(format!("{}/{}", stack.position.get(), stack.size.get())),
-                ))
+            .when_some(entry.stack.as_ref(), |this, stack| match self.stack.clone() {
+                Some((store, on_select)) => {
+                    let reference = turin_contracts::pull_request::PullRequestRef {
+                        project_id: entry.project_id.clone(),
+                        host: Some(entry.host.clone()),
+                        expected_account_id: None,
+                        allow_stale: None,
+                        repository: entry.repository.clone(),
+                        number: entry.number,
+                    };
+                    this.child(super::stack_popover::PullRequestStackPopover::new(
+                        store,
+                        reference,
+                        stack.clone(),
+                        on_select,
+                    ))
+                }
+                None => {
+                    let label = format!(
+                        "View stack #{}, layer {} of {}",
+                        stack.number.get(),
+                        stack.position.get(),
+                        stack.size.get()
+                    );
+                    this.child(with_tooltip(
+                        "pr-stack-trigger",
+                        label,
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_size(TEXT_XS.size)
+                            .text_color(theme.muted_foreground)
+                            .child(Icon::new(IconName::Layers).size(rems(0.75)))
+                            .child(format!("{}/{}", stack.position.get(), stack.size.get())),
+                    ))
+                }
             })
             .child(PullRequestDiffStat::new(entry.additions, entry.deletions).mono());
 

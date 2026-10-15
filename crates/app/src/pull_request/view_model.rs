@@ -254,6 +254,17 @@ pub trait PullRequestSource: 'static {
     );
     /// The Code tab: read the diff, scoped to one commit or the whole pull request.
     fn load_diff(&self, reference: &PullRequestRef, commit: Option<String>, cx: &mut App);
+    /// The next slice of a diff the host hands over a page at a time (`PullRequestDiffResult::
+    /// next_cursor`). The source appends the slice to the held patch and publishes the result.
+    fn load_diff_page(
+        &self,
+        reference: &PullRequestRef,
+        commit: Option<String>,
+        cursor: &str,
+        cx: &mut App,
+    ) {
+        let _ = (reference, commit, cursor, cx);
+    }
     /// "Viewed" checkboxes.
     fn set_files_viewed(
         &self,

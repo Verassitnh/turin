@@ -139,6 +139,20 @@ impl PullRequestsPage {
         cx.notify();
     }
 
+    /// A stack layer was chosen in a row's stack menu: open it like a row.
+    pub fn select_reference(
+        &mut self,
+        environment_id: EnvironmentId,
+        reference: PullRequestRef,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(PullRequestsPageEvent::Select {
+            environment_id,
+            reference,
+        });
+        cx.notify();
+    }
+
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.selected_key = None;
         cx.notify();
@@ -487,7 +501,20 @@ impl Render for PullRequestsPage {
                         })
                         .children(group.entries.iter().map(|entry| {
                             let key = pull_request_entry_key(&entry.entry, Some(entry.environment_id.as_str()));
+                            let stack_select: super::stack_popover::SelectLayer = {
+                                let page = page.clone();
+                                let environment_id = entry.environment_id.clone();
+                                Rc::new(move |reference, cx| {
+                                    let reference = reference.clone();
+                                    let environment_id = environment_id.clone();
+                                    page.update(cx, |this, cx| {
+                                        this.select_reference(environment_id, reference, cx)
+                                    })
+                                    .ok();
+                                })
+                            };
                             PullRequestRow::new(entry.clone(), on_select.clone())
+                                .stack_popover(self.store.clone(), stack_select)
                                 .selected(selected_key.as_deref() == Some(key.as_str()))
                                 .show_provider(show_provider)
                                 .matched_elsewhere(

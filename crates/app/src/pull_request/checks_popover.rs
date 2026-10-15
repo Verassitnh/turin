@@ -16,9 +16,11 @@ use gpui_kit::{
     ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
     Window, div, rems,
 };
-use turin_contracts::pull_request::{PullRequestCheck, PullRequestChecksState, PullRequestUpdateMethod};
+use turin_contracts::pull_request::{
+    PullRequestCheck, PullRequestChecksState, PullRequestUpdateMethod,
+};
 
-use super::detail_layout::{TriggerBox, alpha};
+use super::detail_layout::{TriggerBox, alpha, scroll_box};
 use super::presentation_view::{PullRequestCheckStatusIcon, tone_color};
 use super::pull_request_detail_logic::group_pull_request_checks;
 use super::pull_request_presentation::{
@@ -29,8 +31,13 @@ use crate::theme::tokens::{TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{
     Button, ButtonSize, ButtonVariant, Icon, IconName, PopoverOptions, PopoverPadding,
-    PopoverWidth, Tooltip, popover, scroll_area,
+    PopoverWidth, Tooltip, popover,
 };
+
+type OpenUrl = Rc<dyn Fn(&str, &mut App)>;
+type ToggleFn = Rc<dyn Fn(&mut Window, &mut App)>;
+/// Called with the way the reader chose to catch the branch up.
+pub type UpdateBranch = Rc<dyn Fn(PullRequestUpdateMethod, &mut Window, &mut App)>;
 
 /// `max-h-64`.
 const LIST_MAX_HEIGHT: f32 = 16.;
@@ -49,8 +56,8 @@ fn checks_body(
     id: &str,
     checks: &[PullRequestCheck],
     show_all: bool,
-    on_toggle: Rc<dyn Fn(&mut Window, &mut App)>,
-    on_open: Rc<dyn Fn(&str, &mut App)>,
+    on_toggle: ToggleFn,
+    on_open: OpenUrl,
     theme: &AppTheme,
 ) -> AnyElement {
     if checks.is_empty() {
@@ -61,12 +68,17 @@ fn checks_body(
             .into_any_element();
     }
     let groups = group_pull_request_checks(checks);
-    let can_collapse = groups.attention.len() + groups.running.len() > 0 && !groups.completed.is_empty();
+    let can_collapse =
+        groups.attention.len() + groups.running.len() > 0 && !groups.completed.is_empty();
     let visible: Vec<PullRequestCheck> = groups
         .attention
         .iter()
         .chain(groups.running.iter())
-        .chain(if show_all || !can_collapse { groups.completed.iter() } else { [].iter() })
+        .chain(if show_all || !can_collapse {
+            groups.completed.iter()
+        } else {
+            [].iter()
+        })
         .cloned()
         .collect();
     let rows = visible.into_iter().enumerate().map(|(index, check)| {
@@ -120,9 +132,11 @@ fn checks_body(
         .flex_col()
         .gap_1()
         .child(
-            scroll_area(SharedString::from(format!("{id}-scroll")))
-                .max_h(rems(LIST_MAX_HEIGHT))
-                .child(div().flex().flex_col().gap_1().children(rows)),
+            scroll_box(
+                SharedString::from(format!("{id}-scroll")),
+                rems(LIST_MAX_HEIGHT),
+            )
+            .child(div().flex().flex_col().gap_1().children(rows)),
         )
         .when(can_collapse, |this| {
             this.child(
@@ -143,7 +157,7 @@ pub struct PullRequestChecksPopover {
     checks: Vec<PullRequestCheck>,
     checks_state: PullRequestChecksState,
     stale: bool,
-    on_open: Option<Rc<dyn Fn(&str, &mut App)>>,
+    on_open: Option<OpenUrl>,
 }
 
 impl PullRequestChecksPopover {
@@ -168,7 +182,7 @@ impl PullRequestChecksPopover {
     }
 
     /// How a check's details link opens (the thread's browser, else the system's).
-    pub fn on_open(mut self, on_open: Rc<dyn Fn(&str, &mut App)>) -> Self {
+    pub fn on_open(mut self, on_open: OpenUrl) -> Self {
         self.on_open = Some(on_open);
         self
     }
@@ -191,11 +205,12 @@ impl RenderOnce for PullRequestChecksPopover {
         .tooltip(Tooltip::new(format!("Checks: {}", presentation.label)));
         let checks = self.checks;
         let stale = self.stale;
-        let on_open: Rc<dyn Fn(&str, &mut App)> = self
+        let on_open: OpenUrl = self
             .on_open
             .unwrap_or_else(|| Rc::new(|url, cx| cx.open_url(url)));
         let label = presentation.label;
         let popup_theme = theme.clone();
+        let popover_id = SharedString::from(format!("{id}-popover"));
         popover(
             SharedString::from(format!("{id}-popover")),
             PopoverOptions {
@@ -206,6 +221,9 @@ impl RenderOnce for PullRequestChecksPopover {
             cx,
         )
         .anchor(Anchor::TopLeft)
+        .bg(theme.popover)
+        .font_family(theme.fonts.sans.clone())
+        .default_open(super::dropdown::demo_open(&popover_id))
         .trigger(trigger)
         .content(move |_, window, cx| {
             let theme = &popup_theme;
@@ -219,7 +237,7 @@ impl RenderOnce for PullRequestChecksPopover {
                         *state = !*state;
                         cx.notify();
                     });
-                }) as Rc<dyn Fn(&mut Window, &mut App)>
+                }) as ToggleFn
             };
             div()
                 .flex()
@@ -251,17 +269,33 @@ impl RenderOnce for PullRequestChecksPopover {
     }
 }
 
+/// What [`freshness_warning`] draws.
+pub struct FreshnessWarning {
+    /// "This branch is out-of-date with main by 3 commits."
+    pub summary: String,
+    /// Each way the host offers and this reader may take.
+    pub methods: Vec<PullRequestUpdateMethod>,
+    /// An action is in flight: the buttons are disabled.
+    pub pending: bool,
+    pub stacked: bool,
+    /// What the warning is about, drawn in the same amber before the mark: the base branch.
+    pub name: AnyElement,
+    pub max_width: gpui_kit::Pixels,
+    pub on_update: UpdateBranch,
+}
+
 /// `PullRequestBaseFreshnessWarning`: the base branch wearing the stale-branch mark, and the
 /// popover that says how far behind it is with a button per way the host offers to catch up.
-pub fn freshness_warning(
-    summary: String,
-    methods: Vec<PullRequestUpdateMethod>,
-    pending: bool,
-    stacked: bool,
-    name: AnyElement,
-    on_update: Rc<dyn Fn(PullRequestUpdateMethod, &mut Window, &mut App)>,
-    theme: &AppTheme,
-) -> AnyElement {
+pub fn freshness_warning(input: FreshnessWarning, theme: &AppTheme) -> AnyElement {
+    let FreshnessWarning {
+        summary,
+        methods,
+        pending,
+        stacked,
+        name,
+        max_width,
+        on_update,
+    } = input;
     let warning = theme.warning_foreground;
     let trigger = TriggerBox::new("pr-base-freshness-trigger", {
         div()
@@ -274,10 +308,14 @@ pub fn freshness_warning(
                 this.child(Icon::new(IconName::Layers).size(rems(0.75)).color(warning))
             })
             .child(name)
-            .child(Icon::new(IconName::TriangleAlert).size(rems(0.875)).color(warning))
+            .child(
+                Icon::new(IconName::TriangleAlert)
+                    .size(rems(0.875))
+                    .color(warning),
+            )
             .into_any_element()
     })
-    .max_w(gpui_kit::relative(0.4))
+    .max_w(max_width)
     .tooltip(Tooltip::new(summary.clone()));
     let foreground = theme.foreground;
     let muted = theme.muted_foreground;
@@ -289,6 +327,8 @@ pub fn freshness_warning(
         on_update,
         foreground,
         muted,
+        popup_bg: theme.popover,
+        popup_font: theme.fonts.sans.clone().into(),
     }
     .into_any_element()
 }
@@ -299,9 +339,11 @@ struct FreshnessPopover {
     summary: String,
     methods: Vec<PullRequestUpdateMethod>,
     pending: bool,
-    on_update: Rc<dyn Fn(PullRequestUpdateMethod, &mut Window, &mut App)>,
+    on_update: UpdateBranch,
     foreground: gpui_kit::Hsla,
     muted: gpui_kit::Hsla,
+    popup_bg: gpui_kit::Hsla,
+    popup_font: SharedString,
 }
 
 impl RenderOnce for FreshnessPopover {
@@ -314,6 +356,8 @@ impl RenderOnce for FreshnessPopover {
             on_update,
             foreground,
             muted,
+            popup_bg,
+            popup_font,
         } = self;
         popover(
             "pr-base-freshness",
@@ -325,6 +369,9 @@ impl RenderOnce for FreshnessPopover {
             cx,
         )
         .anchor(Anchor::TopLeft)
+        .bg(popup_bg)
+        .font_family(popup_font)
+        .default_open(super::dropdown::demo_open("pr-base-freshness"))
         .max_w(rems(20.))
         .trigger(trigger)
         .content(move |_, _, _| {

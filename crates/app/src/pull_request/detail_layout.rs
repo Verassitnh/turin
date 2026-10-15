@@ -236,7 +236,7 @@ pub fn format_count(value: u64) -> String {
     let digits = value.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);
@@ -336,6 +336,13 @@ pub fn ghost_bar(cx: &App) -> Div {
         .bg(alpha(cx.app_theme().muted_foreground, 0.15))
 }
 
+/// A vertically scrolling box that is only as tall as its content, up to `max_height`
+/// (`overflow-y-auto max-h-*`); `ui::scroll_area` fills its parent instead.
+pub fn scroll_box(id: impl Into<ElementId>, max_height: gpui_kit::Rems) -> gpui_kit::Stateful<Div> {
+    use gpui_kit::StatefulInteractiveElement as _;
+    div().id(id).max_h(max_height).overflow_y_scroll()
+}
+
 /// Wraps a ghost in the single `animate-skeleton` pulse.
 fn pulse(id: &'static str, content: Div) -> AnyElement {
     skeleton_group(id, content)
@@ -345,17 +352,24 @@ fn pulse(id: &'static str, content: Div) -> AnyElement {
 pub fn people_ghost(rows: usize, cx: &App) -> AnyElement {
     pulse(
         "pr-people-ghost",
-        div().flex().flex_col().gap_1().p_1().children((0..rows).map(|index| {
-            div()
-                .flex()
-                .h(rems(1.75))
-                .items_center()
-                .gap_2()
-                .rounded(RADIUS_MD)
-                .px_2()
-                .child(ghost_bar(cx).size(rems(1.)).rounded_full())
-                .child(ghost_bar(cx).w(gpui_kit::relative(META_WIDTHS[index % META_WIDTHS.len()])))
-        })),
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_1()
+            .children((0..rows).map(|index| {
+                div()
+                    .flex()
+                    .h(rems(1.75))
+                    .items_center()
+                    .gap_2()
+                    .rounded(RADIUS_MD)
+                    .px_2()
+                    .child(ghost_bar(cx).size(rems(1.)).rounded_full())
+                    .child(
+                        ghost_bar(cx).w(gpui_kit::relative(META_WIDTHS[index % META_WIDTHS.len()])),
+                    )
+            })),
     )
 }
 
@@ -399,23 +413,31 @@ pub fn timeline_ghost(rows: usize, cx: &App) -> AnyElement {
 pub fn conversation_ghost(rows: usize, cx: &App) -> AnyElement {
     pulse(
         "pr-conversation-ghost",
-        div().flex().flex_col().gap_4().py_2().children((0..rows).map(|index| {
-            div()
-                .flex()
-                .items_start()
-                .gap_2()
-                .child(ghost_bar(cx).size(rems(1.25)).rounded_full())
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .gap(rems(0.375))
-                        .child(ghost_bar(cx).w(gpui_kit::relative(META_WIDTHS[index % META_WIDTHS.len()])))
-                        .child(ghost_bar(cx).w_full())
-                        .child(ghost_bar(cx).w(gpui_kit::relative(0.75))),
-                )
-        })),
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .py_2()
+            .children((0..rows).map(|index| {
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .child(ghost_bar(cx).size(rems(1.25)).rounded_full())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .gap(rems(0.375))
+                            .child(
+                                ghost_bar(cx)
+                                    .w(gpui_kit::relative(META_WIDTHS[index % META_WIDTHS.len()])),
+                            )
+                            .child(ghost_bar(cx).w_full())
+                            .child(ghost_bar(cx).w(gpui_kit::relative(0.75))),
+                    )
+            })),
     )
 }
 
@@ -459,7 +481,11 @@ pub fn detail_ghost(
     let theme = cx.app_theme().clone();
     let _ = width;
     let tabs = [DetailTab::Summary, DetailTab::Timeline, DetailTab::Code];
-    let selected = if tabs.contains(&active) { active } else { tabs[0] };
+    let selected = if tabs.contains(&active) {
+        active
+    } else {
+        tabs[0]
+    };
     let state = seed
         .as_ref()
         .map(|seed| resolve_pull_request_state(seed.state, seed.is_draft));
@@ -497,10 +523,7 @@ pub fn detail_ghost(
             .items_center()
             .gap_1()
             .child(ghost_bar(cx).w(rems(6.)))
-            .child(div().flex_shrink_0().child(format!(
-                "#{}",
-                "…"
-            ))),
+            .child(div().flex_shrink_0().child(format!("#{}", "…"))),
     };
     let title = match &seed {
         Some(seed) => div()
@@ -511,7 +534,11 @@ pub fn detail_ghost(
             .line_height(rems(1.375))
             .child(SharedString::from(seed.title.as_str().to_owned()))
             .into_any_element(),
-        None => ghost_bar(cx).h(rems(1.25)).w(gpui_kit::relative(0.8)).max_w(rems(28.)).into_any_element(),
+        None => ghost_bar(cx)
+            .h(rems(1.25))
+            .w(gpui_kit::relative(0.8))
+            .max_w(rems(28.))
+            .into_any_element(),
     };
     let author = match &seed {
         Some(seed) => PullRequestActorLabel::new(seed.author.clone())
@@ -600,7 +627,10 @@ pub fn detail_ghost(
             )
         }
         None => checks_status_line(
-            ghost_bar(cx).size(rems(0.875)).rounded_full().into_any_element(),
+            ghost_bar(cx)
+                .size(rems(0.875))
+                .rounded_full()
+                .into_any_element(),
             "",
             theme.muted_foreground,
         )
@@ -652,7 +682,13 @@ pub fn detail_ghost(
         .border_color(alpha(theme.border, 0.6))
         .child(top_row)
         .child(body)
-        .child(tab_bar(&tabs, selected, None, Some(checks_line.into_any_element()), &theme));
+        .child(tab_bar(
+            &tabs,
+            selected,
+            None,
+            Some(checks_line.into_any_element()),
+            &theme,
+        ));
 
     let reviewers = meta_row(
         IconName::Users,

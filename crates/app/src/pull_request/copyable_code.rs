@@ -61,7 +61,11 @@ impl RenderOnce for PullRequestCopyableCode {
         let value = self.value.clone();
         let tooltip = SharedString::from(format!(
             "{}: {}",
-            if is_copied { "Copied" } else { self.copy_label.as_ref() },
+            if is_copied {
+                "Copied"
+            } else {
+                self.copy_label.as_ref()
+            },
             self.value
         ));
         let group = SharedString::from(format!("copyable:{:?}", self.id));
@@ -90,7 +94,11 @@ impl RenderOnce for PullRequestCopyableCode {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .child(if is_copied { SharedString::from("Copied") } else { value.clone() }),
+                    .child(if is_copied {
+                        SharedString::from("Copied")
+                    } else {
+                        value.clone()
+                    }),
             )
             .on_click({
                 let copied = copied.clone();

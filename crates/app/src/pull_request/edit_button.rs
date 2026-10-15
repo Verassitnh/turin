@@ -4,4 +4,5 @@
 //! and Summary tabs, so it lives with the comment pieces in `comment_body`; this module is the
 //! upstream file's name for it.
 
+#[allow(unused_imports)]
 pub use super::comment_body::EditButton as PullRequestEditButton;

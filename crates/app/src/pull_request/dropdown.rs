@@ -33,6 +33,7 @@ where
     let build = std::rc::Rc::new(build);
     Popover::new(popover_id.clone())
         .appearance(false)
+        .default_open(demo_open(&popover_id))
         .overlay_closable(false)
         .anchor(anchor)
         .trigger(trigger)
@@ -57,6 +58,11 @@ where
             state.update(cx, |state, _| state.menu = Some(menu.clone()));
             menu
         })
+}
+
+/// Dev hook for screenshots: `TURIN_PR_OPEN=<id>` opens the menu or popover whose id contains it.
+pub fn demo_open(id: &str) -> bool {
+    std::env::var("TURIN_PR_OPEN").is_ok_and(|wanted| !wanted.is_empty() && id.contains(&wanted))
 }
 
 #[allow(dead_code)]

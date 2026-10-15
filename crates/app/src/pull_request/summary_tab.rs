@@ -23,8 +23,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, Context, CursorStyle, Entity, EventEmitter,
     FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, div, px, rems,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    div, px, rems,
 };
 use regex::Regex;
 use turin_contracts::pull_request::{
@@ -32,7 +32,9 @@ use turin_contracts::pull_request::{
     PullRequestDetailView, PullRequestReviewThread,
 };
 
-use super::comment_body::{CommentBody, EditButton, PULL_REQUEST_SUBJECT, ReactionBar, pull_request_markdown};
+use super::comment_body::{
+    CommentBody, EditButton, PULL_REQUEST_SUBJECT, ReactionBar, pull_request_markdown,
+};
 use super::comment_form::{MarkdownEditor, MarkdownEditorEvent};
 use super::detail_context::DetailContext;
 use super::detail_layout::{alpha, conversation_ghost, meta_row};
@@ -40,8 +42,8 @@ use super::detail_panel::editing_subject;
 use super::dropdown::dropdown;
 use super::pickers::{PullRequestLabelPicker, PullRequestReviewerPicker};
 use super::presentation_view::{
-    PullRequestActorAvatar, PullRequestActorLabel, PullRequestCheckStatusIcon, PullRequestLabelChip,
-    PullRequestReviewOutcomeBadge, actor_tooltip, tone_color,
+    PullRequestActorAvatar, PullRequestActorLabel, PullRequestCheckStatusIcon,
+    PullRequestLabelChip, PullRequestReviewOutcomeBadge, actor_tooltip, tone_color,
 };
 use super::pull_request_detail_logic::{
     PullRequestCommentOrder, PullRequestReviewOutcome, latest_pull_request_review_outcomes,
@@ -104,9 +106,14 @@ impl EventEmitter<SummaryTabEvent> for SummaryTab {}
 impl SummaryTab {
     pub fn new(ctx: DetailContext, _: &mut Window, cx: &mut Context<Self>) -> Self {
         let subscription = cx.observe(&ctx.store, |_, _, cx| cx.notify());
+        let scroll = ScrollHandle::new();
+        // Dev hook for screenshots: start scrolled down, which folds the panel's header.
+        if std::env::var("TURIN_PR_OPEN").is_ok_and(|wanted| wanted == "detail-scrolled") {
+            scroll.set_offset(gpui_kit::point(px(0.), px(-420.)));
+        }
         Self {
             ctx,
-            scroll: ScrollHandle::new(),
+            scroll,
             last_top: 0.,
             open: [true, false, true],
             shown_comments: COMMENT_PAGE,
@@ -144,19 +151,23 @@ impl SummaryTab {
             )
             .allow_empty(true)
         });
-        let subscription = cx.subscribe(&editor, |this, _, event: &MarkdownEditorEvent, cx| match event {
-            MarkdownEditorEvent::Save(body) => {
-                if let Some(source) = this.ctx.source(cx) {
-                    source.update_body(&this.ctx.reference, body.clone(), cx);
-                }
-                this.body_editor = None;
-                cx.notify();
-            }
-            MarkdownEditorEvent::Cancel => {
-                this.body_editor = None;
-                cx.notify();
-            }
-        });
+        let subscription =
+            cx.subscribe(
+                &editor,
+                |this, _, event: &MarkdownEditorEvent, cx| match event {
+                    MarkdownEditorEvent::Save(body) => {
+                        if let Some(source) = this.ctx.source(cx) {
+                            source.update_body(&this.ctx.reference, body.clone(), cx);
+                        }
+                        this.body_editor = None;
+                        cx.notify();
+                    }
+                    MarkdownEditorEvent::Cancel => {
+                        this.body_editor = None;
+                        cx.notify();
+                    }
+                },
+            );
         self._subscriptions.push(subscription);
         self.body_editor = Some(editor);
         cx.notify();
@@ -177,19 +188,22 @@ impl SummaryTab {
         let editor_id = SharedString::from(format!("pr-comment-editor-{id}"));
         let editor = cx.new(|cx| MarkdownEditor::new(editor_id, &comment.body, None, window, cx));
         let target = id.clone();
-        let subscription = cx.subscribe(&editor, move |this, _, event: &MarkdownEditorEvent, cx| match event {
-            MarkdownEditorEvent::Save(body) => {
-                if let Some(source) = this.ctx.source(cx) {
-                    source.update_comment(&this.ctx.reference, &target, kind, body.clone(), cx);
+        let subscription = cx.subscribe(
+            &editor,
+            move |this, _, event: &MarkdownEditorEvent, cx| match event {
+                MarkdownEditorEvent::Save(body) => {
+                    if let Some(source) = this.ctx.source(cx) {
+                        source.update_comment(&this.ctx.reference, &target, kind, body.clone(), cx);
+                    }
+                    this.comment_editor = None;
+                    cx.notify();
                 }
-                this.comment_editor = None;
-                cx.notify();
-            }
-            MarkdownEditorEvent::Cancel => {
-                this.comment_editor = None;
-                cx.notify();
-            }
-        });
+                MarkdownEditorEvent::Cancel => {
+                    this.comment_editor = None;
+                    cx.notify();
+                }
+            },
+        );
         self._subscriptions.push(subscription);
         self.comment_editor = Some((id, editor));
         cx.notify();
@@ -213,8 +227,9 @@ pub fn review_state_label(state: &str) -> String {
 
 static COMMENT_MARKERS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").expect("static pattern"));
-static ALERT_LINES: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)^[ \t\r\f\v]*>?[ \t\r\f\v]*\[!\w+\][ \t\r\f\v]*$").expect("static pattern"));
+static ALERT_LINES: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^[ \t\r\f\v]*>?[ \t\r\f\v]*\[!\w+\][ \t\r\f\v]*$").expect("static pattern")
+});
 static LINKS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"!?(\[([^\]]+)\])\([^)]*\)").expect("static pattern"));
 static LEADING_MARKS: LazyLock<Regex> =
@@ -247,17 +262,30 @@ pub fn locale_string(iso: &str) -> String {
 
 /// The ring a verdict puts around a face (`pullRequestReviewOutcomeRingClassName`): opaque, so a
 /// stale verdict is mixed into the background instead of being made translucent.
-pub fn outcome_ring_color(outcome: PullRequestReviewOutcome, stale: bool, theme: &AppTheme) -> Hsla {
+pub fn outcome_ring_color(
+    outcome: PullRequestReviewOutcome,
+    stale: bool,
+    theme: &AppTheme,
+) -> Hsla {
     let dark = theme.is_dark();
     let base = match outcome {
-        PullRequestReviewOutcome::Approved => {
-            tone_color(if dark { "text-emerald-400" } else { "text-emerald-500" }, theme)
-        }
+        PullRequestReviewOutcome::Approved => tone_color(
+            if dark {
+                "text-emerald-400"
+            } else {
+                "text-emerald-500"
+            },
+            theme,
+        ),
         PullRequestReviewOutcome::ChangesRequested => theme.destructive,
         PullRequestReviewOutcome::Dismissed => alpha(theme.muted_foreground, 0.6),
     };
     if stale {
-        let weight = if outcome == PullRequestReviewOutcome::Dismissed { 0.3 } else { 0.35 };
+        let weight = if outcome == PullRequestReviewOutcome::Dismissed {
+            0.3
+        } else {
+            0.35
+        };
         color_mix(MixSpace::Srgb, base, weight, theme.background).into()
     } else {
         base
@@ -300,10 +328,9 @@ fn reviewer_entries(detail: &PullRequestDetailView) -> Vec<ReviewerEntry> {
         .collect();
     for entry in &outcomes {
         let listed = entry.actor.as_ref().is_some_and(|actor| {
-            detail
-                .reviewers
-                .iter()
-                .any(|listed| reviewer_key(listed.login.as_str()) == reviewer_key(actor.login.as_str()))
+            detail.reviewers.iter().any(|listed| {
+                reviewer_key(listed.login.as_str()) == reviewer_key(actor.login.as_str())
+            })
         });
         if !listed {
             entries.push(ReviewerEntry {
@@ -364,15 +391,21 @@ impl Render for SummaryTab {
                     .into_any_element()
             } else {
                 div()
-                    .flex()
-                    .items_center()
-                    .children(entries.iter().enumerate().map(|(index, entry)| {
-                        reviewer_face(entry, index, &theme)
-                    }))
+                    .relative()
+                    .flex_shrink_0()
+                    .h(px(16.))
+                    .w(px(16. + 12. * (entries.len() as f32 - 1.)))
+                    .children(
+                        entries
+                            .iter()
+                            .enumerate()
+                            .map(|(index, entry)| reviewer_face(entry, index, &theme)),
+                    )
                     .into_any_element()
             })
             .when(
-                detail.capabilities.reviewers.request && detail.capabilities.reviewers.list_candidates,
+                detail.capabilities.reviewers.request
+                    && detail.capabilities.reviewers.list_candidates,
                 |this| {
                     this.child(PullRequestReviewerPicker::new(
                         self.ctx.clone(),
@@ -418,7 +451,12 @@ impl Render for SummaryTab {
             .px_4()
             .pt(rems(0.625))
             .pb_1()
-            .child(meta_row(IconName::Users, "Reviewers", reviewers_value, &theme))
+            .child(meta_row(
+                IconName::Users,
+                "Reviewers",
+                reviewers_value,
+                &theme,
+            ))
             .when(
                 !detail.labels.is_empty() || detail.capabilities.labels == Some(true),
                 |this| this.child(meta_row(IconName::Tag, "Labels", labels_value, &theme)),
@@ -426,7 +464,8 @@ impl Render for SummaryTab {
 
         // ── Description ────────────────────────────────────────────────────────────────────────
         let subject = editing_subject(&detail, can_write);
-        let can_edit_description = super::pull_request_editing_logic::can_edit_pull_request_change_request(&subject);
+        let can_edit_description =
+            super::pull_request_editing_logic::can_edit_pull_request_change_request(&subject);
         let description: AnyElement = match self.body_editor.clone() {
             Some(editor) => editor.into_any_element(),
             None => {
@@ -442,22 +481,22 @@ impl Render for SummaryTab {
                     .flex()
                     .items_start()
                     .gap_1()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .child(pull_request_markdown(
-                                SharedString::from(format!("pr-description-{}", detail.url.as_str())),
-                                text,
-                            )),
-                    )
+                    .child(div().min_w_0().flex_1().child(pull_request_markdown(
+                        SharedString::from(format!("pr-description-{}", detail.url.as_str())),
+                        text,
+                    )))
                     .when(can_edit_description, |this| {
                         this.child(
-                            EditButton::new("pr-edit-description", "pr-description", "Edit description")
-                                .on_click(move |window, cx| {
-                                    let body = body.clone();
-                                    weak.update(cx, |tab, cx| tab.begin_body_edit(&body, window, cx)).ok();
-                                }),
+                            EditButton::new(
+                                "pr-edit-description",
+                                "pr-description",
+                                "Edit description",
+                            )
+                            .on_click(move |window, cx| {
+                                let body = body.clone();
+                                weak.update(cx, |tab, cx| tab.begin_body_edit(&body, window, cx))
+                                    .ok();
+                            }),
                         )
                     })
                     .into_any_element()
@@ -466,13 +505,25 @@ impl Render for SummaryTab {
         let _ = PULL_REQUEST_SUBJECT;
 
         let checks = self.render_checks(&detail, cx);
-        let comments = self.render_comments(&detail, &snapshot_flags(can_write, activity_pending), window, cx);
+        let comments = self.render_comments(
+            &detail,
+            &snapshot_flags(can_write, activity_pending),
+            window,
+            cx,
+        );
         let comment_count = detail.comment_count;
         let comments_actions = self.render_comment_actions(&detail, cx);
 
         scroll
             .child(facts)
-            .child(self.section(Section::Description, "Description", None, description, &theme, cx))
+            .child(self.section(
+                Section::Description,
+                "Description",
+                None,
+                description,
+                &theme,
+                cx,
+            ))
             .child(self.section(Section::Checks, "Checks", None, checks, &theme, cx))
             .child(self.section(
                 Section::Comments,
@@ -538,16 +589,20 @@ fn reviewer_face(entry: &ReviewerEntry, index: usize, theme: &AppTheme) -> AnyEl
         ),
         None => named,
     };
-    let ring = entry
-        .outcome
-        .map_or(theme.background, |outcome| outcome_ring_color(outcome, entry.stale, theme));
+    let ring = entry.outcome.map_or(theme.background, |outcome| {
+        outcome_ring_color(outcome, entry.stale, theme)
+    });
     div()
-        .id(SharedString::from(format!("pr-reviewer-{index}-{}", entry.key)))
-        .relative()
+        .id(SharedString::from(format!(
+            "pr-reviewer-{index}-{}",
+            entry.key
+        )))
+        .absolute()
+        .top_0()
+        .left(px(12. * index as f32))
         .flex()
         .flex_shrink_0()
         .size(px(16.))
-        .when(index > 0, |this| this.ml(px(-4.)))
         .rounded_full()
         .hover(|style| style.opacity(1.))
         .child(
@@ -610,12 +665,17 @@ impl SummaryTab {
                             })
                             .child(SharedString::from(title.to_owned()))
                             .child(
-                                Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
-                                    .size(rems(0.875))
-                                    .color(alpha(theme.muted_foreground, 0.6)),
+                                Icon::new(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size(rems(0.875))
+                                .color(alpha(theme.muted_foreground, 0.6)),
                             )
                             .on_click(move |_, _, cx| {
-                                weak.update(cx, |tab, cx| tab.toggle_section(section, cx)).ok();
+                                weak.update(cx, |tab, cx| tab.toggle_section(section, cx))
+                                    .ok();
                             }),
                     )
                     .children(actions),
@@ -668,12 +728,10 @@ impl SummaryTab {
                             .text_size(TEXT_XS.size)
                             .line_height(rems(1.25))
                             .when(url.is_some(), |this| this.cursor(CursorStyle::PointingHand))
-                            .child(
-                                div().mt(px(2.)).child(PullRequestCheckStatusIcon::new(
-                                    SharedString::from(format!("{id}-icon")),
-                                    check.status,
-                                )),
-                            )
+                            .child(div().mt(px(2.)).child(PullRequestCheckStatusIcon::new(
+                                SharedString::from(format!("{id}-icon")),
+                                check.status,
+                            )))
                             .child(
                                 div()
                                     .min_w_0()
@@ -700,7 +758,11 @@ impl SummaryTab {
     }
 
     /// The Comments heading's controls: the filter menu and the order toggle.
-    fn render_comment_actions(&self, detail: &PullRequestDetailView, cx: &mut Context<Self>) -> AnyElement {
+    fn render_comment_actions(
+        &self,
+        detail: &PullRequestDetailView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let weak = cx.entity().downgrade();
         let filtered_out = detail.comments.len() - self.filtered_comments(detail).len();
         let filter = self.filter;
@@ -715,34 +777,39 @@ impl SummaryTab {
             } else {
                 "Filter".to_owned()
             });
-        let menu = dropdown("pr-comment-filter", Anchor::TopRight, filter_button, move |menu, _, _| {
-            let bots = menu_weak.clone();
-            let resolved = menu_weak.clone();
-            menu.label("Show")
-                .item(
-                    PopupMenuItem::new("Bot comments")
-                        .checked(filter.bots)
-                        .on_click(move |_, _, cx| {
-                            bots.update(cx, |tab, cx| {
-                                tab.filter.bots = !tab.filter.bots;
-                                cx.notify();
-                            })
-                            .ok();
-                        }),
-                )
-                .item(
-                    PopupMenuItem::new("Resolved or dismissed")
-                        .checked(filter.resolved)
-                        .on_click(move |_, _, cx| {
-                            resolved
-                                .update(cx, |tab, cx| {
-                                    tab.filter.resolved = !tab.filter.resolved;
+        let menu = dropdown(
+            "pr-comment-filter",
+            Anchor::TopRight,
+            filter_button,
+            move |menu, _, _| {
+                let bots = menu_weak.clone();
+                let resolved = menu_weak.clone();
+                menu.label("Show")
+                    .item(
+                        PopupMenuItem::new("Bot comments")
+                            .checked(filter.bots)
+                            .on_click(move |_, _, cx| {
+                                bots.update(cx, |tab, cx| {
+                                    tab.filter.bots = !tab.filter.bots;
                                     cx.notify();
                                 })
                                 .ok();
-                        }),
-                )
-        });
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Resolved or dismissed")
+                            .checked(filter.resolved)
+                            .on_click(move |_, _, cx| {
+                                resolved
+                                    .update(cx, |tab, cx| {
+                                        tab.filter.resolved = !tab.filter.resolved;
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            }),
+                    )
+            },
+        );
         let order = self.order;
         div()
             .flex()
@@ -832,24 +899,26 @@ impl SummaryTab {
                 return None;
             }
             let weak = weak.clone();
-            Some(Button::new("pr-older-comments")
-                .size(ButtonSize::Sm)
-                .variant(ButtonVariant::Outline)
-                .label(format!(
-                    "Show {} older comment{} ({} hidden)",
-                    hidden.min(COMMENT_PAGE),
-                    if hidden == 1 { "" } else { "s" },
-                    hidden
-                ))
-                .w_full()
-                .on_click(move |_, _, cx| {
-                    weak.update(cx, |tab, cx| {
-                        tab.shown_comments = step;
-                        cx.notify();
+            Some(
+                Button::new("pr-older-comments")
+                    .size(ButtonSize::Sm)
+                    .variant(ButtonVariant::Outline)
+                    .label(format!(
+                        "Show {} older comment{} ({} hidden)",
+                        hidden.min(COMMENT_PAGE),
+                        if hidden == 1 { "" } else { "s" },
+                        hidden
+                    ))
+                    .w_full()
+                    .on_click(move |_, _, cx| {
+                        weak.update(cx, |tab, cx| {
+                            tab.shown_comments = step;
+                            cx.notify();
+                        })
+                        .ok();
                     })
-                    .ok();
-                })
-                .into_any_element())
+                    .into_any_element(),
+            )
         };
 
         let mut column = div().flex().flex_col().gap_3();
@@ -934,7 +1003,11 @@ impl SummaryTab {
         let tooltip = format!(
             "{}{}",
             locale_string(&created),
-            if url.is_some() { " · Open comment on host" } else { "" }
+            if url.is_some() {
+                " · Open comment on host"
+            } else {
+                ""
+            }
         );
         let source = self.ctx.source(cx);
         div()
@@ -949,7 +1022,10 @@ impl SummaryTab {
             .child(PullRequestActorLabel::new(comment.author.clone()))
             .child(
                 div()
-                    .id(SharedString::from(format!("pr-comment-time-{}", comment.id.as_str())))
+                    .id(SharedString::from(format!(
+                        "pr-comment-time-{}",
+                        comment.id.as_str()
+                    )))
                     .text_color(theme.muted_foreground)
                     .when(url.is_some(), |this| {
                         let foreground = theme.foreground;
@@ -995,14 +1071,19 @@ impl SummaryTab {
                 .text_color(theme.muted_foreground)
                 .child(
                     div()
-                        .id(SharedString::from(format!("pr-comment-path-{}", comment.id.as_str())))
+                        .id(SharedString::from(format!(
+                            "pr-comment-path-{}",
+                            comment.id.as_str()
+                        )))
                         .min_w_0()
                         .truncate()
                         .font_family(theme.fonts.mono.clone())
                         .child(SharedString::from(label.clone()))
                         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx)),
                 )
-                .when(outdated, |this| this.child(div().flex_shrink_0().child("Outdated")))
+                .when(outdated, |this| {
+                    this.child(div().flex_shrink_0().child("Outdated"))
+                })
                 .into_any_element(),
         )
     }
@@ -1028,12 +1109,10 @@ impl SummaryTab {
             .flex()
             .items_start()
             .gap_1()
-            .child(
-                div().min_w_0().flex_1().child(CommentBody::new(
-                    SharedString::from(format!("pr-comment-body-{}", comment.id.as_str())),
-                    comment.body.clone(),
-                )),
-            )
+            .child(div().min_w_0().flex_1().child(CommentBody::new(
+                SharedString::from(format!("pr-comment-body-{}", comment.id.as_str())),
+                comment.body.clone(),
+            )))
             .when(can_edit, |this| {
                 this.child(
                     EditButton::new(
@@ -1043,7 +1122,8 @@ impl SummaryTab {
                     )
                     .on_click(move |window, cx| {
                         let target = target.clone();
-                        weak.update(cx, |tab, cx| tab.begin_comment_edit(&target, window, cx)).ok();
+                        weak.update(cx, |tab, cx| tab.begin_comment_edit(&target, window, cx))
+                            .ok();
                     }),
                 )
             })
@@ -1093,22 +1173,30 @@ impl SummaryTab {
             let toggle = {
                 let weak = weak.clone();
                 let key = key.clone();
-                Rc::new(move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
-                    let key = key.clone();
-                    weak.update(cx, |tab, cx| {
-                        if !tab.expanded.remove(&key) {
-                            tab.expanded.insert(key);
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-                })
+                Rc::new(
+                    move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
+                        let key = key.clone();
+                        weak.update(cx, |tab, cx| {
+                            if !tab.expanded.remove(&key) {
+                                tab.expanded.insert(key);
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    },
+                )
             };
             let body_open = (open && !(body.is_none() && !can_edit)).then(|| {
                 div()
                     .px_3()
                     .pb_3()
-                    .child(div().mt_2().child(self.comment_body(detail, comment, can_edit, group.clone(), cx)))
+                    .child(div().mt_2().child(self.comment_body(
+                        detail,
+                        comment,
+                        can_edit,
+                        group.clone(),
+                        cx,
+                    )))
                     .into_any_element()
             });
             let header_toggle = toggle.clone();
@@ -1149,10 +1237,16 @@ impl SummaryTab {
                                         })
                                         .child(label)
                                         .child(
-                                            Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown })
-                                                .size(rems(0.875)),
+                                            Icon::new(if open {
+                                                IconName::ChevronUp
+                                            } else {
+                                                IconName::ChevronDown
+                                            })
+                                            .size(rems(0.875)),
                                         )
-                                        .on_click(move |event, window, cx| header_toggle(event, window, cx)),
+                                        .on_click(move |event, window, cx| {
+                                            header_toggle(event, window, cx)
+                                        }),
                                 )
                                 .child(reaction_bar),
                         )
@@ -1172,7 +1266,9 @@ impl SummaryTab {
                                         move |style| style.text_color(foreground)
                                     })
                                     .child(SharedString::from(preview.clone().unwrap_or_default()))
-                                    .on_click(move |event, window, cx| preview_toggle(event, window, cx)),
+                                    .on_click(move |event, window, cx| {
+                                        preview_toggle(event, window, cx)
+                                    }),
                             )
                         }),
                 )
@@ -1216,9 +1312,9 @@ impl SummaryTab {
                             .text_color(theme.muted_foreground)
                             .child(identity)
                             .children(match (outcome, comment.review_state.as_deref()) {
-                                (Some(outcome), _) => {
-                                    Some(PullRequestReviewOutcomeBadge::new(outcome).into_any_element())
-                                }
+                                (Some(outcome), _) => Some(
+                                    PullRequestReviewOutcomeBadge::new(outcome).into_any_element(),
+                                ),
                                 (None, Some(state)) => {
                                     Some(div().child(review_state_label(state)).into_any_element())
                                 }
@@ -1267,7 +1363,10 @@ mod tests {
     fn lists_requested_reviewers_then_those_who_ruled_unasked() {
         let detail = fixtures::detail_view();
         let entries = reviewer_entries(&detail);
-        let logins: Vec<_> = entries.iter().map(|entry| entry.key.to_lowercase()).collect();
+        let logins: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.key.to_lowercase())
+            .collect();
         let mut unique = logins.clone();
         unique.sort();
         unique.dedup();
@@ -1287,5 +1386,4 @@ mod tests {
             .collect();
         assert!(kept.len() <= detail.comments.len());
     }
-
 }

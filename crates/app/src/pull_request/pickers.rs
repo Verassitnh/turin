@@ -26,14 +26,14 @@ use turin_contracts::pull_request::{
 };
 
 use super::detail_context::DetailContext;
-use super::detail_layout::{TriggerBox, alpha, people_ghost};
+use super::detail_layout::{TriggerBox, alpha, people_ghost, scroll_box};
 use super::presentation_view::PullRequestActorAvatar;
 use super::pull_request_list_logic::pull_request_label_color;
 use crate::theme::tokens::{RADIUS_SM, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{
     Button, ButtonSize, ButtonVariant, Icon, IconName, PopoverOptions, PopoverPadding,
-    PopoverWidth, Tooltip, popover, scroll_area,
+    PopoverWidth, Tooltip, popover,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,9 +136,7 @@ struct PickerBody {
 
 impl PickerBody {
     fn new(ctx: DetailContext, kind: Kind, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(kind.search_label())
-        });
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(kind.search_label()));
         let subscriptions = vec![
             cx.observe(&ctx.store, |_, _, cx| cx.notify()),
             cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
@@ -178,7 +176,10 @@ impl PickerBody {
             .unwrap_or_default();
         let login = candidate.login.as_str().to_owned();
         let next: Vec<String> = if candidate.is_requested {
-            current.into_iter().filter(|entry| *entry != login).collect()
+            current
+                .into_iter()
+                .filter(|entry| *entry != login)
+                .collect()
         } else {
             current.into_iter().chain([login]).collect()
         };
@@ -262,38 +263,47 @@ impl Render for PickerBody {
                                 name: candidate.name.clone(),
                                 avatar_url: candidate.avatar_url.clone(),
                             };
-                            row(SharedString::from(format!("pr-reviewer-pick-{}", candidate.id.as_str())), &theme)
-                                .child(
-                                    div()
-                                        .flex()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .items_center()
-                                        .gap(rems(0.375))
-                                        .child(PullRequestActorAvatar::new(Some(&actor)))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .child(SharedString::from(actor.login.as_str().to_owned())),
-                                        ),
-                                )
-                                .when(candidate.kind == PullRequestReviewerKind::Team, |this| {
-                                    this.child(
+                            row(
+                                SharedString::from(format!(
+                                    "pr-reviewer-pick-{}",
+                                    candidate.id.as_str()
+                                )),
+                                &theme,
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .items_center()
+                                    .gap(rems(0.375))
+                                    .child(PullRequestActorAvatar::new(Some(&actor)))
+                                    .child(
                                         div()
-                                            .flex_shrink_0()
-                                            .text_color(theme.muted_foreground)
-                                            .child("team"),
-                                    )
-                                })
-                                .when(candidate.is_requested, |this| {
-                                    this.child(Icon::new(IconName::Check).size(rems(0.875)))
-                                })
-                                .on_click(move |_, _, cx| {
-                                    weak.update(cx, |body, cx| body.toggle_reviewer(&target, cx)).ok();
-                                })
-                                .into_any_element()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(SharedString::from(
+                                                actor.login.as_str().to_owned(),
+                                            )),
+                                    ),
+                            )
+                            .when(candidate.kind == PullRequestReviewerKind::Team, |this| {
+                                this.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_color(theme.muted_foreground)
+                                        .child("team"),
+                                )
+                            })
+                            .when(candidate.is_requested, |this| {
+                                this.child(Icon::new(IconName::Check).size(rems(0.875)))
+                            })
+                            .on_click(move |_, _, cx| {
+                                weak.update(cx, |body, cx| body.toggle_reviewer(&target, cx))
+                                    .ok();
+                            })
+                            .into_any_element()
                         })
                         .collect();
                     (rows, list.truncated, false)
@@ -312,29 +322,40 @@ impl Render for PickerBody {
                             let dot = pull_request_label_color(candidate.color.as_deref())
                                 .and_then(|hex| hex.strip_prefix('#').map(str::to_owned))
                                 .and_then(|digits| u32::from_str_radix(&digits, 16).ok())
-                                .map_or(theme.muted_foreground, |value| gpui_kit::rgb(value).into());
-                            row(SharedString::from(format!("pr-label-pick-{}", candidate.name.as_str())), &theme)
-                                .child(div().flex_shrink_0().size(rems(0.5)).rounded_full().bg(dot))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .truncate()
-                                        .child(SharedString::from(candidate.name.as_str().to_owned()))
-                                        .children(candidate.description.clone().map(|description| {
-                                            div()
-                                                .flex()
-                                                .text_color(theme.muted_foreground)
-                                                .child(format!(" · {description}"))
-                                        })),
-                                )
-                                .when(candidate.is_applied, |this| {
-                                    this.child(Icon::new(IconName::Check).size(rems(0.875)))
-                                })
-                                .on_click(move |_, _, cx| {
-                                    weak.update(cx, |body, cx| body.toggle_label(&target, cx)).ok();
-                                })
-                                .into_any_element()
+                                .map_or(theme.muted_foreground, |value| {
+                                    gpui_kit::rgb(value).into()
+                                });
+                            row(
+                                SharedString::from(format!(
+                                    "pr-label-pick-{}",
+                                    candidate.name.as_str()
+                                )),
+                                &theme,
+                            )
+                            .child(div().flex_shrink_0().size(rems(0.5)).rounded_full().bg(dot))
+                            .child(
+                                div()
+                                    .flex()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .child(SharedString::from(candidate.name.as_str().to_owned()))
+                                    .children(candidate.description.clone().map(|description| {
+                                        div()
+                                            .flex()
+                                            .text_color(theme.muted_foreground)
+                                            .child(format!(" · {description}"))
+                                    })),
+                            )
+                            .when(candidate.is_applied, |this| {
+                                this.child(Icon::new(IconName::Check).size(rems(0.875)))
+                            })
+                            .on_click(move |_, _, cx| {
+                                weak.update(cx, |body, cx| body.toggle_label(&target, cx))
+                                    .ok();
+                            })
+                            .into_any_element()
                         })
                         .collect();
                     (rows, list.truncated, false)
@@ -346,11 +367,20 @@ impl Render for PickerBody {
             people_ghost(4, cx)
         } else if rows.is_empty() {
             message(
-                if query.is_empty() { kind.empty_label() } else { kind.no_match_label() },
+                if query.is_empty() {
+                    kind.empty_label()
+                } else {
+                    kind.no_match_label()
+                },
                 &theme,
             )
         } else {
-            div().flex().flex_col().p_1().children(rows).into_any_element()
+            div()
+                .flex()
+                .flex_col()
+                .p_1()
+                .children(rows)
+                .into_any_element()
         };
 
         div()
@@ -368,15 +398,11 @@ impl Render for PickerBody {
                         .border_color(alpha(theme.border, 0.7))
                         .pb(rems(0.375))
                         .child(
-                            div()
-                                .absolute()
-                                .top(rems(0.375))
-                                .left_0()
-                                .child(
-                                    Icon::new(IconName::Search)
-                                        .size(rems(1.))
-                                        .color(alpha(theme.muted_foreground, 0.55)),
-                                ),
+                            div().absolute().top(rems(0.375)).left_0().child(
+                                Icon::new(IconName::Search)
+                                    .size(rems(1.))
+                                    .color(alpha(theme.muted_foreground, 0.55)),
+                            ),
                         )
                         .child(
                             div().pl(rems(1.25)).child(
@@ -389,25 +415,33 @@ impl Render for PickerBody {
                 ),
             )
             .child(
-                scroll_area(SharedString::from(format!("pr-picker-list-{kind:?}")))
-                    .max_h(rems(18.))
-                    .child(list)
-                    .when(truncated, |this| {
-                        this.child(
-                            div()
-                                .px_2()
-                                .py(rems(0.375))
-                                .text_size(TEXT_XS.size)
-                                .text_color(theme.muted_foreground)
-                                .child(kind.truncated_label()),
-                        )
-                    }),
+                scroll_box(
+                    SharedString::from(format!("pr-picker-list-{kind:?}")),
+                    rems(18.),
+                )
+                .child(list)
+                .when(truncated, |this| {
+                    this.child(
+                        div()
+                            .px_2()
+                            .py(rems(0.375))
+                            .text_size(TEXT_XS.size)
+                            .text_color(theme.muted_foreground)
+                            .child(kind.truncated_label()),
+                    )
+                }),
             )
     }
 }
 
 /// `PullRequestCandidatePicker`: the icon button, and what it opens.
-fn candidate_picker(ctx: DetailContext, kind: Kind, allowed: bool, window: &mut Window, cx: &mut App) -> AnyElement {
+fn candidate_picker(
+    ctx: DetailContext,
+    kind: Kind,
+    allowed: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     if !allowed {
         return Button::new(SharedString::from(format!("pr-picker-{kind:?}-disabled")))
             .size(ButtonSize::IconXs)
@@ -424,6 +458,10 @@ fn candidate_picker(ctx: DetailContext, kind: Kind, allowed: bool, window: &mut 
         .icon(kind.icon())
         .tooltip(Tooltip::new(kind.label()));
     let body_ctx = ctx;
+    let (popup_bg, popup_font) = {
+        let theme = cx.app_theme();
+        (theme.popover, theme.fonts.sans.clone())
+    };
     let body_key = SharedString::from(format!("{id}-body"));
     popover(
         SharedString::from(format!("{id}-popover")),
@@ -436,6 +474,9 @@ fn candidate_picker(ctx: DetailContext, kind: Kind, allowed: bool, window: &mut 
         cx,
     )
     .anchor(Anchor::TopLeft)
+    .bg(popup_bg)
+    .font_family(popup_font)
+    .default_open(super::dropdown::demo_open(&id))
     .trigger(trigger)
     .content(move |_, window, cx| {
         let ctx = body_ctx.clone();
@@ -489,6 +530,35 @@ impl RenderOnce for PullRequestLabelPicker {
 #[allow(dead_code)]
 fn _unused(_: Option<Popover>, _: Option<TriggerBox>) {
     let _ = px(0.);
+}
+
+/// Dev hook for screenshots (`TURIN_PR_OPEN` naming a picker): fills the candidate lists the
+/// source would read from the host.
+pub fn demo_seed(
+    store: &Entity<super::view_model::PullRequestStore>,
+    reference: &turin_contracts::pull_request::PullRequestRef,
+    cx: &mut App,
+) {
+    if !std::env::var("TURIN_PR_OPEN").is_ok_and(|wanted| wanted.contains("picker")) {
+        return;
+    }
+    let reviewers = serde_json::json!({"truncated": false, "candidates": [
+        {"login": "mara", "name": "Mara Voss", "avatarUrl": null, "id": "u1", "kind": "user", "isRequested": true},
+        {"login": "noah", "name": "Noah Okafor", "avatarUrl": null, "id": "u2", "kind": "user", "isRequested": false},
+        {"login": "platform", "name": null, "avatarUrl": null, "id": "t1", "kind": "team", "isRequested": false},
+    ]});
+    let labels = serde_json::json!({"truncated": true, "candidates": [
+        {"name": "ui", "color": "1d76db", "description": "Visual changes", "isApplied": true},
+        {"name": "bug", "color": "d73a4a", "description": null, "isApplied": false},
+        {"name": "port", "color": "a371f7", "description": "Upstream port", "isApplied": true},
+    ]});
+    let reference = reference.clone();
+    store.update(cx, |store, cx| {
+        store.update_detail(&reference, cx, |snapshot| {
+            snapshot.reviewer_candidates = serde_json::from_value(reviewers).ok();
+            snapshot.label_candidates = serde_json::from_value(labels).ok();
+        })
+    });
 }
 
 #[cfg(test)]

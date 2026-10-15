@@ -54,7 +54,10 @@ fn layer_content(layer: &PullRequestStackLayer, compact: bool, theme: &AppTheme)
         .min_w_0()
         .items_center()
         .gap_2()
-        .child(PullRequestStateGlyph::new(layer.state, layer.is_draft.unwrap_or(false)))
+        .child(PullRequestStateGlyph::new(
+            layer.state,
+            layer.is_draft.unwrap_or(false),
+        ))
         .child(
             div()
                 .flex()
@@ -95,7 +98,11 @@ pub fn stack_menu_items(
     menu = match notice {
         Some(_) => menu.label(format!(
             "{header}  ·  {}",
-            if stale { "May be stale" } else { "Refreshing…" }
+            if stale {
+                "May be stale"
+            } else {
+                "Refreshing…"
+            }
         )),
         None => menu.label(header),
     };
@@ -107,7 +114,8 @@ pub fn stack_menu_items(
         };
         let row_layer = layer.clone();
         let row_theme = theme.clone();
-        let mut item = PopupMenuItem::element(move |_, _| layer_row(&row_layer, current, &row_theme));
+        let mut item =
+            PopupMenuItem::element(move |_, _| layer_row(&row_layer, current, &row_theme));
         if let Some(on_select) = on_select.clone() {
             item = item.on_click(move |_, _, cx| on_select(&target, cx));
         } else {
@@ -127,7 +135,9 @@ fn layer_row(layer: &PullRequestStackLayer, current: bool, theme: &AppTheme) -> 
         .items_center()
         .gap_2()
         .child(layer_content(layer, false, theme))
-        .when(current, |this| this.child(Icon::new(IconName::Check).size(rems(0.875))))
+        .when(current, |this| {
+            this.child(Icon::new(IconName::Check).size(rems(0.875)))
+        })
         .into_any_element()
 }
 
@@ -160,17 +170,22 @@ pub fn stack_menu(
     let reference = ctx.reference.clone();
     let select = ctx.nav.select_pull_request.clone();
     let notice = notice.map(str::to_owned);
-    dropdown("pr-stack-menu", Anchor::TopLeft, button, move |menu, _, _| {
-        stack_menu_items(
-            menu,
-            &stack,
-            notice.as_deref(),
-            false,
-            &reference,
-            Some(select.clone()),
-            &theme,
-        )
-    })
+    dropdown(
+        "pr-stack-menu",
+        Anchor::TopLeft,
+        button,
+        move |menu, _, _| {
+            stack_menu_items(
+                menu,
+                &stack,
+                notice.as_deref(),
+                false,
+                &reference,
+                Some(select.clone()),
+                &theme,
+            )
+        },
+    )
     .into_any_element()
 }
 

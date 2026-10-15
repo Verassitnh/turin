@@ -25,9 +25,8 @@ use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, CursorStyle, Entity,
-    FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity,
-    Window, div, px, rems,
+    FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px, rems,
 };
 use turin_contracts::EnvironmentId;
 use turin_contracts::pull_request::{
@@ -36,36 +35,34 @@ use turin_contracts::pull_request::{
 };
 
 use super::checks_popover::PullRequestChecksPopover;
+use super::code_tab::CodeTab;
+use super::comment_body::EditButton;
 use super::copyable_code::PullRequestCopyableCode;
 use super::detail_context::{DetailContext, DetailNav, DetailTab};
 use super::detail_layout::{
     HEADER_LABELS_MIN_WIDTH, HeaderBody, alpha, checks_status_line, detail_ghost, files_label,
     format_count, header_body, tab_bar, timeline_ghost, title_row, visible_tabs,
 };
-use super::code_tab::CodeTab;
-use super::comment_body::EditButton;
 use super::guide_tab::GuideTab;
 use super::list_states::PullRequestsUnavailableState;
 use super::presentation_view::{
     PullRequestActorLabel, PullRequestDiffStat, PullRequestStateGlyph, Spinner, tone_color,
 };
 use super::pull_request_detail_logic::{
-    PULL_REQUEST_MERGE_METHOD_LABELS, PullRequestPrimaryControl,
+    PULL_REQUEST_MERGE_METHOD_LABELS, PullRequestPrimaryControl, PullRequestReviewOutcome,
     allowed_pull_request_merge_methods, is_pull_request_conflicting,
     latest_pull_request_review_outcomes, loading_pull_request_checkout_command,
     pull_request_action_menu_has_group, pull_request_action_needs_host_refresh,
-    pull_request_checkout_command, resolve_base_freshness,
+    pull_request_checkout_command, readable_failure, resolve_base_freshness,
     resolve_pull_request_merge_method, resolve_pull_request_primary_control,
-    PullRequestReviewOutcome,
 };
 use super::pull_request_editing_logic::{
     ConfirmClick, EditingSubject, InlineActionConfirm, can_edit_pull_request_change_request,
     open_on_host_label,
 };
 use super::pull_request_presentation::{
-    pull_request_checks_state,
-    pull_request_review_outcome_tone_class_name, resolve_pull_request_state,
-    summarize_pull_request_checks,
+    pull_request_checks_state, pull_request_review_outcome_tone_class_name,
+    resolve_pull_request_state, summarize_pull_request_checks,
 };
 use super::summary_tab::{SummaryTab, SummaryTabEvent};
 use super::timeline_tab::TimelineTab;
@@ -146,6 +143,14 @@ pub enum TimelineOrder {
 }
 
 impl TimelineOrder {
+    fn as_comment_order(self) -> super::pull_request_detail_logic::PullRequestCommentOrder {
+        use super::pull_request_detail_logic::PullRequestCommentOrder as Order;
+        match self {
+            Self::Newest => Order::Newest,
+            Self::Oldest => Order::Oldest,
+        }
+    }
+
     fn toggled(self) -> Self {
         match self {
             Self::Newest => Self::Oldest,
@@ -213,7 +218,11 @@ pub fn editing_subject(detail: &PullRequestDetailView, can_write: bool) -> Editi
     EditingSubject {
         author: detail.author.as_ref(),
         capabilities: &detail.capabilities,
-        viewer: if can_write { detail.viewer.as_ref().map(|viewer| viewer.as_str()) } else { None },
+        viewer: if can_write {
+            detail.viewer.as_ref().map(|viewer| viewer.as_str())
+        } else {
+            None
+        },
         viewer_permissions: &detail.viewer_permissions,
     }
 }
@@ -288,11 +297,10 @@ impl HeaderState {
         let detail_checks_state = pull_request_checks_state(&detail.checks);
         // List rollups can omit workflows awaiting approval. Only refreshed detail can clear those.
         let checks_state = if detail_checks_state != Some(PullRequestChecksState::Failing)
-            && detail
-                .checks
-                .iter()
-                .any(|check| check.status == turin_contracts::pull_request::PullRequestCheckStatus::ActionRequired)
-        {
+            && detail.checks.iter().any(|check| {
+                check.status
+                    == turin_contracts::pull_request::PullRequestCheckStatus::ActionRequired
+            }) {
             Some(PullRequestChecksState::Pending)
         } else {
             detail_checks_state
@@ -309,13 +317,12 @@ impl HeaderState {
             can_mark_ready: can(PullRequestAction::Ready),
             can_enable_auto_merge: can_merge_single && can(PullRequestAction::EnableAutoMerge),
         });
-        let shows_draft_toggle = open
-            && can(if detail.is_draft {
+        let shows_draft_toggle =
+            open && can(if detail.is_draft {
                 PullRequestAction::Ready
             } else {
                 PullRequestAction::Draft
-            })
-            && !(detail.is_draft && primary == Some(PullRequestPrimaryControl::Ready));
+            }) && !(detail.is_draft && primary == Some(PullRequestPrimaryControl::Ready));
         let shows_auto_merge = can_merge_single
             && open
             && ((auto_merge_armed && can(PullRequestAction::DisableAutoMerge))
@@ -354,10 +361,7 @@ impl HeaderState {
                 .count()
         };
         Self {
-            pending_auto_merge_label: format!(
-                "Auto-merge ({})",
-                selected_label.to_lowercase()
-            ),
+            pending_auto_merge_label: format!("Auto-merge ({})", selected_label.to_lowercase()),
             allowed_merge_methods: allowed,
             selected_merge_method: selected,
             selected_merge_method_label: selected_label,
@@ -369,7 +373,8 @@ impl HeaderState {
             shows_auto_merge,
             shows_merge_now,
             shows_merge_methods,
-            shows_approve_workflows: workflow_approvals > 0 && can(PullRequestAction::ApproveWorkflows),
+            shows_approve_workflows: workflow_approvals > 0
+                && can(PullRequestAction::ApproveWorkflows),
             checks_state,
             checks_summary,
             approval_count,
@@ -401,6 +406,8 @@ const CONDENSE_MARGIN: f32 = 32.;
 const REOPEN_AT: f32 = 4.;
 /// Height of the expanded header body before it has been measured.
 const DEFAULT_FOLD_HEIGHT: f32 = 132.;
+/// Height of the condensed row that stands in for the body (`px-4 pb-2 pt-1` + one `text-xs` line).
+const CONDENSED_ROW_HEIGHT: f32 = 36.;
 
 pub struct PullRequestDetailPanel {
     pub ctx: DetailContext,
@@ -429,6 +436,8 @@ pub struct PullRequestDetailPanel {
     toasts: Vec<Toast>,
     next_toast: u64,
     seen_error: Option<String>,
+    /// The action last sent, so a failure can be said in its own words.
+    last_action: Option<(PullRequestAction, Option<PullRequestUpdateMethod>)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -443,6 +452,7 @@ impl PullRequestDetailPanel {
         if let Some(source) = store.read(cx).source() {
             source.open_detail(&reference, cx);
         }
+        super::pickers::demo_seed(&store, &reference, cx);
         let panel = cx.entity().downgrade();
         let nav = DetailNav {
             open_commit: {
@@ -508,6 +518,7 @@ impl PullRequestDetailPanel {
             toasts: Vec::new(),
             next_toast: 0,
             seen_error: None,
+            last_action: None,
             _subscriptions: subscriptions,
         }
     }
@@ -516,7 +527,7 @@ impl PullRequestDetailPanel {
     /// supplies it once it knows how to open another pull request.
     pub fn set_select_pull_request(
         &mut self,
-        select: Rc<dyn Fn(&PullRequestRef, &mut App)>,
+        select: super::stack_popover::SelectLayer,
         cx: &mut Context<Self>,
     ) {
         self.ctx.nav.select_pull_request = select;
@@ -540,7 +551,10 @@ impl PullRequestDetailPanel {
 
     /// `openCommit`: scope the Code tab to the commit and show it.
     pub fn open_commit(&mut self, oid: String, cx: &mut Context<Self>) {
-        self.code_commit = Some(oid);
+        self.code_commit = Some(oid.clone());
+        if let Some(code) = &self.code {
+            code.update(cx, |code, cx| code.set_commit(Some(oid), cx));
+        }
         self.set_tab(DetailTab::Code, cx);
     }
 
@@ -548,6 +562,13 @@ impl PullRequestDetailPanel {
     pub fn open_file_in_code(&mut self, path: String, cx: &mut Context<Self>) {
         self.code_commit = None;
         self.code_reveal = Some(path);
+        if let Some(code) = &self.code {
+            let path = self.code_reveal.take().unwrap_or_default();
+            code.update(cx, |code, cx| {
+                code.set_commit(None, cx);
+                code.reveal_file(&path, cx);
+            });
+        }
         self.set_tab(DetailTab::Code, cx);
     }
 
@@ -560,7 +581,28 @@ impl PullRequestDetailPanel {
         if error != self.seen_error {
             self.seen_error = error.clone();
             if let Some(error) = error {
-                self.push_toast(ToastKind::Error, "Could not complete the action", Some(error), cx);
+                // Said as the thing that did not happen, with the host's own sentence under it, or
+                // what to check when it said only that it refused.
+                let (title, hint) = match self.last_action {
+                    Some((action, update_method)) => (
+                        action_failure_label(action),
+                        if update_method == Some(PullRequestUpdateMethod::Rebase) {
+                            UPDATE_BRANCH_REBASE_FAILURE_HINT
+                        } else {
+                            action_failure_hint(action)
+                        },
+                    ),
+                    None => (
+                        "Could not complete the action",
+                        "The host refused it. Check that you have write access to this repository.",
+                    ),
+                };
+                self.push_toast(
+                    ToastKind::Error,
+                    title,
+                    Some(readable_failure(Some(&error), hint)),
+                    cx,
+                );
             }
         }
         cx.notify();
@@ -578,6 +620,15 @@ impl PullRequestDetailPanel {
         };
         if condensed != self.condensed {
             self.condensed = condensed;
+            if condensed {
+                // Refund after the fold so the content under the reader does not jump with the
+                // header's height: the chrome that leaves is the body minus the condensed row.
+                let delta = (self.fold_height - CONDENSED_ROW_HEIGHT).max(0.);
+                let handle = self.summary.read(cx).scroll_handle().clone();
+                let offset = handle.offset();
+                let refunded = (offset.y + px(delta)).min(px(0.));
+                handle.set_offset(gpui_kit::point(offset.x, refunded));
+            }
             cx.notify();
         }
     }
@@ -627,12 +678,7 @@ impl PullRequestDetailPanel {
 
     /// `inlineConfirm.props(action, onConfirm)`: the first press arms, a second press on the same
     /// control confirms, and three seconds without one disarms.
-    fn confirm_click(
-        &mut self,
-        action: &str,
-        element_key: &str,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn confirm_click(&mut self, action: &str, element_key: &str, cx: &mut Context<Self>) -> bool {
         let scope = self.scope_key();
         let click = InlineActionConfirm::click(&mut self.confirm, &scope, action, element_key);
         self.confirm_epoch += 1;
@@ -657,11 +703,15 @@ impl PullRequestDetailPanel {
     }
 
     fn can_write(&self, cx: &App) -> bool {
-        self.ctx.snapshot(cx).is_some_and(|snapshot| snapshot.can_write)
+        self.ctx
+            .snapshot(cx)
+            .is_some_and(|snapshot| snapshot.can_write)
     }
 
     fn pending_action(&self, cx: &App) -> Option<PullRequestAction> {
-        self.ctx.snapshot(cx).and_then(|snapshot| snapshot.pending_action)
+        self.ctx
+            .snapshot(cx)
+            .and_then(|snapshot| snapshot.pending_action)
     }
 
     /// `perform`: every control is disabled while one action runs.
@@ -679,6 +729,7 @@ impl PullRequestDetailPanel {
             return;
         };
         InlineActionConfirm::disarm(&mut self.confirm);
+        self.last_action = Some((action, update_method));
         source.run_action(&self.ctx.reference, action, method, update_method, cx);
         if pull_request_action_needs_host_refresh(action) {
             source.refresh_detail(&self.ctx.reference, cx);
@@ -708,13 +759,17 @@ impl PullRequestDetailPanel {
     fn begin_title_edit(&mut self, title: &str, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| InputState::new(window, cx).default_value(title.to_owned()));
         let panel = cx.entity().downgrade();
-        let subscription = cx.subscribe_in(&input, window, move |this, state, event: &InputEvent, _, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                let text = state.read(cx).value().to_string();
-                this.save_title(text, cx);
-            }
-            let _ = &panel;
-        });
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            move |this, state, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    let text = state.read(cx).value().to_string();
+                    this.save_title(text, cx);
+                }
+                let _ = &panel;
+            },
+        );
         self._subscriptions.push(subscription);
         input.update(cx, |input, cx| input.focus(window, cx));
         self.title_edit = Some(input);
@@ -747,10 +802,24 @@ impl PullRequestDetailPanel {
         match self.tab {
             DetailTab::Summary => {}
             DetailTab::Timeline if self.timeline.is_none() => {
-                self.timeline = Some(cx.new(|cx| TimelineTab::new(ctx, window, cx)));
+                let timeline = cx.new(|cx| TimelineTab::new(ctx, window, cx));
+                let order = self.timeline_order.as_comment_order();
+                timeline.update(cx, |timeline, cx| timeline.set_order(order, cx));
+                self.timeline = Some(timeline);
             }
             DetailTab::Code if self.code.is_none() => {
-                self.code = Some(cx.new(|cx| CodeTab::new(ctx, window, cx)));
+                let code = cx.new(|cx| CodeTab::new(ctx, window, cx));
+                let commit = self.code_commit.clone();
+                let reveal = self.code_reveal.take();
+                code.update(cx, |code, cx| {
+                    if commit.is_some() {
+                        code.set_commit(commit, cx);
+                    }
+                    if let Some(path) = reveal {
+                        code.reveal_file(&path, cx);
+                    }
+                });
+                self.code = Some(code);
             }
             DetailTab::Guide if self.guide.is_none() => {
                 self.guide = Some(cx.new(|cx| GuideTab::new(ctx, window, cx)));
@@ -840,7 +909,16 @@ impl Render for PullRequestDetailPanel {
         let theme = cx.app_theme().clone();
         let weak = cx.entity().downgrade();
         let snapshot = self.ctx.snapshot(cx);
-        let detail_load = snapshot.map(|s| s.detail.clone()).unwrap_or(Loadable::Pending);
+        let detail_load = match std::env::var("TURIN_PR_OPEN").as_deref() {
+            // Dev hooks for screenshots: the loading ghost and the failed read.
+            Ok("detail-ghost") => Loadable::Pending,
+            Ok("detail-error") => Loadable::Failed(
+                "gh: could not reach api.github.com. Check your connection.".to_owned(),
+            ),
+            _ => snapshot
+                .map(|s| s.detail.clone())
+                .unwrap_or(Loadable::Pending),
+        };
         let root = div()
             .relative()
             .flex()
@@ -873,8 +951,17 @@ impl Render for PullRequestDetailPanel {
             }
             Loadable::Failed(error) => {
                 let weak = weak.clone();
-                let mut unavailable = PullRequestsUnavailableState::new(error)
-                    .title("Could not load this pull request");
+                // `isPullRequestNotFound`: the host says nothing is there at that number.
+                let not_found = error.to_lowercase().contains("not found");
+                let mut unavailable = if not_found {
+                    PullRequestsUnavailableState::new(
+                        "It may be an issue rather than a pull request, or this account can't see it.",
+                    )
+                    .title(format!("Pull request #{} not found", self.ctx.reference.number.get()))
+                } else {
+                    PullRequestsUnavailableState::new(error)
+                        .title("Could not load this pull request")
+                };
                 unavailable.on_retry = Some(Rc::new(move |_, _, cx| {
                     weak.update(cx, |panel, cx| panel.refresh(cx)).ok();
                 }));
@@ -888,7 +975,10 @@ impl Render for PullRequestDetailPanel {
 
 impl PullRequestDetailPanel {
     /// What the list already knows of the pull request, shown while the detail arrives.
-    fn list_seed(&self, cx: &App) -> Option<super::pull_request_list_logic::EnvironmentPullRequestEntry> {
+    fn list_seed(
+        &self,
+        cx: &App,
+    ) -> Option<super::pull_request_list_logic::EnvironmentPullRequestEntry> {
         let store = self.ctx.store.read(cx);
         store
             .entries()
@@ -960,7 +1050,8 @@ impl PullRequestDetailPanel {
                 })
                 .on_click(move |_, _, cx| {
                     let url = url.clone();
-                    weak.update(cx, |panel, cx| panel.open_external(&url, cx)).ok();
+                    weak.update(cx, |panel, cx| panel.open_external(&url, cx))
+                        .ok();
                 })
         };
         let repository_label = {
@@ -984,7 +1075,8 @@ impl PullRequestDetailPanel {
                         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                         .on_click(move |_, _, cx| {
                             let url = url.clone();
-                            weak.update(cx, |panel, cx| panel.open_external(&url, cx)).ok();
+                            weak.update(cx, |panel, cx| panel.open_external(&url, cx))
+                                .ok();
                         })
                         .into_any_element()
                 }
@@ -1102,7 +1194,11 @@ impl PullRequestDetailPanel {
                                     .size(ButtonSize::Xs)
                                     .variant(ButtonVariant::Outline)
                                     .disabled(!can_write || self.title_saving)
-                                    .label(if self.title_saving { "Saving..." } else { "Save" })
+                                    .label(if self.title_saving {
+                                        "Saving..."
+                                    } else {
+                                        "Save"
+                                    })
                                     .on_click(move |_, _, cx| {
                                         let text = save_input.read(cx).value().to_string();
                                         weak_save
@@ -1123,7 +1219,13 @@ impl PullRequestDetailPanel {
                 .is_some_and(|layer| layer.number != detail.number)
         });
         let freshness = resolve_base_freshness(&core_detail(&detail));
-        let base_element = self.render_base_branch(&detail, stacked, freshness.as_ref(), pending_action.is_some(), cx);
+        let base_element = self.render_base_branch(
+            &detail,
+            stacked,
+            freshness.as_ref(),
+            pending_action.is_some(),
+            cx,
+        );
         let head_element = PullRequestCopyableCode::new(
             SharedString::from(format!("pr-head-{}", detail.head_branch.as_str())),
             detail.head_branch.as_str().to_owned(),
@@ -1158,13 +1260,17 @@ impl PullRequestDetailPanel {
                 updated: div()
                     .child(format!(
                         "updated {}",
-                        super::relative_time::format_relative_time_label(detail.updated_at.as_str())
+                        super::relative_time::format_relative_time_label(
+                            detail.updated_at.as_str()
+                        )
                     ))
                     .into_any_element(),
                 checkout: checkout_element,
                 base: base_element,
                 head: head_element.into_any_element(),
-                files: div().child(files_label(detail.changed_files)).into_any_element(),
+                files: div()
+                    .child(files_label(detail.changed_files))
+                    .into_any_element(),
                 diff_stat: PullRequestDiffStat::new(detail.additions, detail.deletions)
                     .mono()
                     .into_any_element(),
@@ -1192,10 +1298,18 @@ impl PullRequestDetailPanel {
                     .overflow_hidden()
                     .child(PullRequestActorLabel::new(detail.author.clone()).avatar_only())
                     .child(div().flex_shrink_0().child(
-                        super::relative_time::format_relative_time_label(detail.updated_at.as_str()),
+                        super::relative_time::format_relative_time_label(
+                            detail.updated_at.as_str(),
+                        ),
                     )),
             )
-            .child(div().h(rems(0.75)).w(px(1.)).flex_shrink_0().bg(alpha(theme.border, 0.7)))
+            .child(
+                div()
+                    .h(rems(0.75))
+                    .w(px(1.))
+                    .flex_shrink_0()
+                    .bg(alpha(theme.border, 0.7)),
+            )
             .child(
                 div()
                     .flex()
@@ -1209,7 +1323,7 @@ impl PullRequestDetailPanel {
                     .child(
                         div()
                             .min_w_0()
-                            .max_w(gpui_kit::relative(0.4))
+                            .max_w(px(((self.width - 32. - 190.) * 0.4).max(48.)))
                             .truncate()
                             .child(SharedString::from(detail.base_branch.as_str().to_owned())),
                     )
@@ -1248,7 +1362,8 @@ impl PullRequestDetailPanel {
 
         // ── Tab bar and its trailing slot ──────────────────────────────────────────────────────
         let tabs = visible_tabs(detail.capabilities.diff, REVIEW_GUIDES_ENABLED);
-        let trailing = self.render_tab_trailing(&detail, &state, activity_pending, pending_action, cx);
+        let trailing =
+            self.render_tab_trailing(&detail, &state, activity_pending, pending_action, cx);
         let tab_bar_element = tab_bar(
             &tabs,
             self.tab,
@@ -1373,6 +1488,7 @@ impl PullRequestDetailPanel {
             .min_w_0()
             .child(div().min_w_0().truncate().child(base.clone()));
         let weak = cx.entity().downgrade();
+        let max_w = px(((self.width - 32. - 150.) * 0.4).max(64.));
         match freshness {
             Some(freshness) => {
                 let behind = match freshness.behind_by {
@@ -1388,17 +1504,25 @@ impl PullRequestDetailPanel {
                     detail.base_branch.as_str()
                 );
                 super::checks_popover::freshness_warning(
-                    summary,
-                    freshness.methods.clone(),
-                    action_pending,
-                    stacked,
-                    name.into_any_element(),
-                    Rc::new(move |method, _, cx| {
-                        weak.update(cx, |panel, cx| {
-                            panel.perform(PullRequestAction::UpdateBranch, None, Some(method), cx)
-                        })
-                        .ok();
-                    }),
+                    super::checks_popover::FreshnessWarning {
+                        summary,
+                        methods: freshness.methods.clone(),
+                        pending: action_pending,
+                        stacked,
+                        name: name.into_any_element(),
+                        max_width: max_w,
+                        on_update: Rc::new(move |method, _, cx| {
+                            weak.update(cx, |panel, cx| {
+                                panel.perform(
+                                    PullRequestAction::UpdateBranch,
+                                    None,
+                                    Some(method),
+                                    cx,
+                                )
+                            })
+                            .ok();
+                        }),
+                    },
                     &theme,
                 )
             }
@@ -1412,7 +1536,7 @@ impl PullRequestDetailPanel {
                     .id("pr-base-branch")
                     .flex()
                     .min_w_0()
-                    .max_w(gpui_kit::relative(0.4))
+                    .max_w(max_w)
                     .flex_shrink_0()
                     .items_center()
                     .gap_1()
@@ -1489,7 +1613,9 @@ impl PullRequestDetailPanel {
                         checks_state,
                     )
                     .into_any_element(),
-                    None => Icon::new(IconName::CircleDot).size(rems(0.875)).into_any_element(),
+                    None => Icon::new(IconName::CircleDot)
+                        .size(rems(0.875))
+                        .into_any_element(),
                 };
                 Some(
                     checks_status_line(icon, state.checks_summary.clone(), theme.muted_foreground)
@@ -1539,7 +1665,11 @@ impl PullRequestDetailPanel {
                                 .items_center()
                                 .gap_1()
                                 .text_color(tone)
-                                .child(Icon::new(IconName::CircleCheck).size(rems(0.75)).color(tone))
+                                .child(
+                                    Icon::new(IconName::CircleCheck)
+                                        .size(rems(0.75))
+                                        .color(tone),
+                                )
                                 .child(format_count(state.approval_count as u64))
                                 .into_any_element()
                         }),
@@ -1573,6 +1703,12 @@ impl PullRequestDetailPanel {
                                 .on_click(move |_, _, cx| {
                                     weak.update(cx, |panel, cx| {
                                         panel.timeline_order = panel.timeline_order.toggled();
+                                        if let Some(timeline) = &panel.timeline {
+                                            let order = panel.timeline_order.as_comment_order();
+                                            timeline.update(cx, |timeline, cx| {
+                                                timeline.set_order(order, cx)
+                                            });
+                                        }
                                         cx.notify();
                                     })
                                     .ok();
@@ -1613,12 +1749,7 @@ impl PullRequestDetailPanel {
             .gap_1();
 
         if let Some(stack) = native_stack {
-            row = row.child(super::stack_popover::stack_menu(
-                &self.ctx,
-                stack,
-                None,
-                cx,
-            ));
+            row = row.child(super::stack_popover::stack_menu(&self.ctx, stack, None, cx));
         }
 
         let armed_badge = |label: String| {
@@ -1629,7 +1760,9 @@ impl PullRequestDetailPanel {
                 .when(!narrow, |this| this.child(label.clone()))
                 .into_any_element()
         };
-        if state.auto_merge_armed && state.primary != Some(PullRequestPrimaryControl::AutoMergeArmed) {
+        if state.auto_merge_armed
+            && state.primary != Some(PullRequestPrimaryControl::AutoMergeArmed)
+        {
             row = row.child(armed_badge(state.armed_auto_merge_label.clone()));
         }
         match state.primary {
@@ -1662,7 +1795,10 @@ impl PullRequestDetailPanel {
                         }),
                 );
             }
-            Some(control @ (PullRequestPrimaryControl::EnableAutoMerge | PullRequestPrimaryControl::Merge)) => {
+            Some(
+                control @ (PullRequestPrimaryControl::EnableAutoMerge
+                | PullRequestPrimaryControl::Merge),
+            ) => {
                 let (action, key, idle_label, pending_label, confirm_label) =
                     if control == PullRequestPrimaryControl::Merge {
                         (
@@ -1696,7 +1832,11 @@ impl PullRequestDetailPanel {
                         .size(ButtonSize::Xs)
                         .variant(ButtonVariant::Default)
                         .disabled(action_pending)
-                        .icon(if armed { IconName::Check } else { IconName::GitMerge })
+                        .icon(if armed {
+                            IconName::Check
+                        } else {
+                            IconName::GitMerge
+                        })
                         .when(!narrow, |this| this.label(label.clone()))
                         .tooltip(Tooltip::new(label.clone()))
                         .on_click(move |_, _, cx| {
@@ -1723,7 +1863,10 @@ impl PullRequestDetailPanel {
                                 .items_center()
                                 .gap_1()
                                 .text_color(state_color)
-                                .child(PullRequestStateGlyph::new(detail.state, detail.is_draft).size(rems(0.875)))
+                                .child(
+                                    PullRequestStateGlyph::new(detail.state, detail.is_draft)
+                                        .size(rems(0.875)),
+                                )
                                 .child(presentation.label),
                         ),
                 );
@@ -1786,9 +1929,12 @@ impl PullRequestDetailPanel {
         } else {
             button.icon(IconName::Ellipsis)
         };
-        super::dropdown::dropdown("pr-more-menu", Anchor::TopRight, button, move |menu, _, _| {
-            model.build(menu)
-        })
+        super::dropdown::dropdown(
+            "pr-more-menu",
+            Anchor::TopRight,
+            button,
+            move |menu, _, _| model.build(menu),
+        )
         .into_any_element()
     }
 }
@@ -1838,11 +1984,15 @@ impl MoreMenu {
         idle: &str,
         confirm: &str,
         icon: IconName,
-        action: PullRequestAction,
-        method: Option<PullRequestMergeMethod>,
+        run: (PullRequestAction, Option<PullRequestMergeMethod>),
     ) -> PopupMenuItem {
+        let (action, method) = run;
         self.item(
-            if armed { confirm.to_owned() } else { idle.to_owned() },
+            if armed {
+                confirm.to_owned()
+            } else {
+                idle.to_owned()
+            },
             icon,
             self.action_pending,
             move |panel, cx| {
@@ -1858,28 +2008,45 @@ impl MoreMenu {
         let number = self.number;
         let state = &self.state;
         // Refresh, then the guide, as the hand-offs (ask, explain, fix) need a thread.
-        menu = menu.item(self.item("Refresh", IconName::RefreshCw, self.refreshing, |panel, cx| {
-            panel.refresh(cx)
-        }));
+        menu = menu.item(self.item(
+            "Refresh",
+            IconName::RefreshCw,
+            self.refreshing,
+            |panel, cx| panel.refresh(cx),
+        ));
         if self.guides {
-            menu = menu.item(self.item("Write guide", IconName::Sparkles, false, |panel, cx| {
-                if let Some(source) = panel.ctx.source(cx) {
-                    source.generate_guide(&panel.ctx.reference, cx);
-                }
-                panel.set_tab(DetailTab::Guide, cx);
-            }));
+            menu = menu.item(
+                self.item("Write guide", IconName::Sparkles, false, |panel, cx| {
+                    if let Some(source) = panel.ctx.source(cx) {
+                        source.generate_guide(&panel.ctx.reference, cx);
+                    }
+                    panel.set_tab(DetailTab::Guide, cx);
+                }),
+            );
         }
         menu = menu.separator();
         if self.pr_state == PullRequestState::Open {
             if state.shows_draft_toggle {
                 let is_draft = self.is_draft;
                 menu = menu.item(self.item(
-                    if is_draft { "Ready for review" } else { "Convert to draft" },
-                    if is_draft { IconName::GitPullRequestArrow } else { IconName::GitPullRequestDraft },
+                    if is_draft {
+                        "Ready for review"
+                    } else {
+                        "Convert to draft"
+                    },
+                    if is_draft {
+                        IconName::GitPullRequestArrow
+                    } else {
+                        IconName::GitPullRequestDraft
+                    },
                     self.action_pending,
                     move |panel, cx| {
                         panel.perform(
-                            if is_draft { PullRequestAction::Ready } else { PullRequestAction::Draft },
+                            if is_draft {
+                                PullRequestAction::Ready
+                            } else {
+                                PullRequestAction::Draft
+                            },
                             None,
                             None,
                             cx,
@@ -1894,8 +2061,7 @@ impl MoreMenu {
                     "Merge now",
                     "Confirm merge?",
                     IconName::GitMerge,
-                    PullRequestAction::Merge,
-                    Some(state.selected_merge_method),
+                    (PullRequestAction::Merge, Some(state.selected_merge_method)),
                 ));
             }
             if state.auto_merge_armed && state.shows_auto_merge {
@@ -1912,8 +2078,10 @@ impl MoreMenu {
                     "Enable auto-merge",
                     "Confirm auto-merge?",
                     IconName::GitMerge,
-                    PullRequestAction::EnableAutoMerge,
-                    Some(state.selected_merge_method),
+                    (
+                        PullRequestAction::EnableAutoMerge,
+                        Some(state.selected_merge_method),
+                    ),
                 ));
             }
             if state.shows_merge_methods {
@@ -1924,7 +2092,6 @@ impl MoreMenu {
                     let weak = self.weak.clone();
                     menu = menu.item(
                         PopupMenuItem::new(merge_method_label(method))
-                            .icon(menu_icon(IconName::GitMerge))
                             .checked(method == state.selected_merge_method)
                             .disabled(self.action_pending)
                             .on_click(move |_, _, cx| {
@@ -1947,16 +2114,23 @@ impl MoreMenu {
             }
         }
         let open_url = url.clone();
-        menu = menu.item(self.item(self.open_label.clone(), IconName::ArrowUpRight, false, move |panel, cx| {
-            panel.open_external(&open_url, cx)
-        }));
+        menu = menu.item(self.item(
+            self.open_label.clone(),
+            IconName::ArrowUpRight,
+            false,
+            move |panel, cx| panel.open_external(&open_url, cx),
+        ));
         let copy_url = url.clone();
-        menu = menu.item(self.item("Copy link", IconName::Link, false, move |panel, cx| {
-            panel.copy(copy_url.clone(), "PR link", cx)
-        }));
-        menu = menu.item(self.item("Copy PR number", IconName::Copy, false, move |panel, cx| {
-            panel.copy(format!("#{number}"), "PR number", cx)
-        }));
+        menu = menu.item(
+            self.item("Copy link", IconName::Link, false, move |panel, cx| {
+                panel.copy(copy_url.clone(), "PR link", cx)
+            }),
+        );
+        menu = menu.item(
+            self.item("Copy PR number", IconName::Copy, false, move |panel, cx| {
+                panel.copy(format!("#{number}"), "PR number", cx)
+            }),
+        );
         if self.can_close {
             menu = menu.separator().item(self.confirm_item(
                 "close",
@@ -1964,8 +2138,7 @@ impl MoreMenu {
                 "Close pull request",
                 "Confirm close?",
                 IconName::GitPullRequestClosed,
-                PullRequestAction::Close,
-                None,
+                (PullRequestAction::Close, None),
             ));
         } else if self.can_reopen {
             menu = menu.separator().item(self.item(
@@ -1981,8 +2154,7 @@ impl MoreMenu {
                 "Revert changes",
                 "Confirm revert?",
                 IconName::RotateCcw,
-                PullRequestAction::Revert,
-                None,
+                (PullRequestAction::Revert, None),
             ));
         }
         menu
@@ -1999,7 +2171,14 @@ mod tests {
     }
 
     fn state_of(detail: &PullRequestDetailView, can_write: bool) -> HeaderState {
-        HeaderState::resolve(detail, can_write, None, None, PullRequestMergeMethod::Merge, true)
+        HeaderState::resolve(
+            detail,
+            can_write,
+            None,
+            None,
+            PullRequestMergeMethod::Merge,
+            true,
+        )
     }
 
     #[test]
@@ -2008,7 +2187,10 @@ mod tests {
             repository_url("https://github.com/acme/turin/pull/482"),
             Some("https://github.com/acme/turin".to_owned())
         );
-        assert_eq!(repository_url("https://github.com/acme/turin/issues/4"), None);
+        assert_eq!(
+            repository_url("https://github.com/acme/turin/issues/4"),
+            None
+        );
         assert_eq!(repository_url("https://github.com/acme/turin/pull/"), None);
     }
 
@@ -2072,5 +2254,4 @@ mod tests {
         assert_eq!(TimelineOrder::Newest.toggled(), TimelineOrder::Oldest);
         assert_eq!(TimelineOrder::Oldest.toggled(), TimelineOrder::Newest);
     }
-
 }

@@ -24,7 +24,7 @@ use crate::runtime::{
     ConnectOpenCodeServer, OpenCodeServerProcess, connect_to_open_code_server, default_v1_verify,
 };
 use crate::v2_client::V2Client;
-use crate::v2_server::{OpenCode2Config, OpenCode2Server};
+use crate::v2_server::{OpenCode2Config, OpenCode2Server, ServerLoan};
 use crate::version_probe::{
     OpenCodeBinary, OpenCodeCommandResult, OpenCodeGeneration, ProbeSettings,
     probe_open_code_runtime,
@@ -59,7 +59,7 @@ struct Endpoint {
 
 enum Keepalive {
     V1(OpenCodeServerProcess),
-    V2(OpenCode2Server),
+    V2(ServerLoan),
 }
 
 enum SessionKind {
@@ -80,7 +80,7 @@ impl Drop for OpenCodeSession {
         };
         match keepalive {
             Keepalive::V1(process) => drop(process),
-            Keepalive::V2(server) => drop(server),
+            Keepalive::V2(loan) => drop(loan),
         }
     }
 }
@@ -92,6 +92,7 @@ pub struct OpenCodeAdapter {
     settings: OpenCodeSettings,
     probed: Mutex<Option<OpenCodeGeneration>>,
     endpoint: Option<Endpoint>,
+    v2_server: Mutex<Option<Arc<OpenCode2Server>>>,
 }
 
 impl OpenCodeAdapter {
@@ -102,6 +103,7 @@ impl OpenCodeAdapter {
             settings,
             probed: Mutex::new(None),
             endpoint: None,
+            v2_server: Mutex::new(None),
         }
     }
 
@@ -125,6 +127,7 @@ impl OpenCodeAdapter {
                 base_url: base_url.into(),
                 password: password.into(),
             }),
+            v2_server: Mutex::new(None),
         }
     }
 
@@ -136,6 +139,39 @@ impl OpenCodeAdapter {
             .or_else(|| *self.probed.lock());
         select_generation(probed)
     }
+
+    /// The instance's one OpenCode 2 server, built on first use.
+    fn v2_server(&self) -> Result<Arc<OpenCode2Server>, OpenCodeRuntimeError> {
+        let mut slot = self.v2_server.lock();
+        if let Some(server) = slot.as_ref() {
+            return Ok(Arc::clone(server));
+        }
+        let server = Arc::new(OpenCode2Server::start(OpenCode2Config {
+            binary_path: self.settings.binary_path.clone(),
+            server_url: self.settings.server_url.clone(),
+            server_password: self.settings.server_password.clone(),
+            directory: host_cwd(),
+            environment: std::env::vars().collect(),
+            idle: None,
+            shutdown_grace: None,
+        })?);
+        *slot = Some(Arc::clone(&server));
+        Ok(server)
+    }
+
+    /// Stops a spawned OpenCode 2 server. Dropping the adapter kills it too.
+    pub async fn close(&self) {
+        let server = self.v2_server.lock().take();
+        if let Some(server) = server {
+            server.close().await;
+        }
+    }
+}
+
+fn host_cwd() -> String {
+    std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| ".".to_owned())
 }
 
 struct CommandBinary;
@@ -204,11 +240,7 @@ impl ProviderAdapterV2 for OpenCodeAdapter {
             .cwd
             .clone()
             .filter(|cwd| !cwd.trim().is_empty())
-            .unwrap_or_else(|| {
-                std::env::current_dir()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|_| ".".to_owned())
-            });
+            .unwrap_or_else(host_cwd);
         let model = input.model_selection.model.as_str();
         if let Some(endpoint) = &self.endpoint {
             return open_endpoint(
@@ -269,24 +301,12 @@ impl ProviderAdapterV2 for OpenCodeAdapter {
                 }))
             }
             OpenCodeGeneration::V2 => {
-                let server = OpenCode2Server::start(OpenCode2Config {
-                    binary_path: self.settings.binary_path.clone(),
-                    server_url: self.settings.server_url.clone(),
-                    server_password: self.settings.server_password.clone(),
-                    directory: cwd.clone(),
-                    environment: BTreeMap::new(),
-                    idle: None,
-                    shutdown_grace: None,
-                })
-                .map_err(|err| ProviderAdapterV2Error::protocol(err.detail))?;
-                let connection = server
-                    .with_connection(|connection| async move {
-                        Ok::<_, OpenCodeRuntimeError>(connection)
-                    })
+                let (connection, loan) = self
+                    .v2_server()
+                    .map_err(|err| ProviderAdapterV2Error::protocol(err.detail))?
+                    .borrow()
                     .await
-                    .map_err(|err: OpenCodeRuntimeError| {
-                        ProviderAdapterV2Error::protocol(err.detail)
-                    })?;
+                    .map_err(|err| ProviderAdapterV2Error::protocol(err.detail))?;
                 let session = OpenCodeV2Session::open(
                     self.instance_id.clone(),
                     input.provider_session_id,
@@ -296,7 +316,7 @@ impl ProviderAdapterV2 for OpenCodeAdapter {
                 )?;
                 Ok(Arc::new(OpenCodeSession {
                     kind: SessionKind::V2(session),
-                    keepalive: Mutex::new(Some(Keepalive::V2(server))),
+                    keepalive: Mutex::new(Some(Keepalive::V2(loan))),
                 }))
             }
         }

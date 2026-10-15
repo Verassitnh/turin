@@ -222,16 +222,21 @@ impl OpenCodeServerProcess {
         let code = (*self.exit_rx.borrow()).or(Some(-1));
         let _ = self.exit_tx.send(code);
     }
-}
 
-impl Drop for OpenCodeServerProcess {
-    fn drop(&mut self) {
+    /// SIGKILLs the process group without the grace period. For drop paths.
+    pub fn kill(&self) {
         if self.stopped.swap(true, Ordering::SeqCst) {
             return;
         }
         let _ = signal_process_group(self.pid, SIGKILL);
         self.forget_lease();
         self.finish_tasks();
+    }
+}
+
+impl Drop for OpenCodeServerProcess {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
@@ -605,7 +610,7 @@ pub fn parse_server_url_from_output(output: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
 
@@ -617,7 +622,7 @@ mod tests {
         Arc::new(|_| Box::pin(async { Ok("1.19.0".to_string()) }))
     }
 
-    fn write_fake_opencode() -> PathBuf {
+    pub(crate) fn write_fake_opencode() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("turin-oc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("opencode.sh");
@@ -661,7 +666,7 @@ done
         path
     }
 
-    fn temp_file(name: &str) -> PathBuf {
+    pub(crate) fn temp_file(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "turin-oc-{name}-{}-{}",
             std::process::id(),
@@ -674,7 +679,7 @@ done
         path
     }
 
-    fn alive(pid: u32) -> bool {
+    pub(crate) fn alive(pid: u32) -> bool {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
             .stdout(std::process::Stdio::null())

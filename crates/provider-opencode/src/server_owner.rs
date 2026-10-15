@@ -78,6 +78,29 @@ impl OpenCodeServerOwner {
         force_close(&self.inner).await;
     }
 
+    /// Synchronous close for drop paths: SIGKILLs the process group at once.
+    /// A start in flight holds the state lock, so that case closes on the
+    /// runtime as soon as the start settles.
+    pub fn kill(&self) {
+        let Ok(mut state) = self.inner.state.try_lock() else {
+            let inner = Arc::clone(&self.inner);
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move { force_close(&inner).await });
+            }
+            return;
+        };
+        cancel_idle(&mut state);
+        if let Some(watch) = state.watch.take() {
+            watch.abort();
+        }
+        let server = state.server.take();
+        state.borrowers = 0;
+        drop(state);
+        if let Some(server) = server {
+            server.kill();
+        }
+    }
+
     pub async fn with_server<T, E, F, Fut>(&self, use_server: F) -> Result<T, E>
     where
         E: From<OpenCodeRuntimeError>,

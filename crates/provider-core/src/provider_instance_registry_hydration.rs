@@ -278,6 +278,38 @@ mod tests {
     }
 
     #[test]
+    fn folds_overrides_from_multiple_projects() {
+        let instance_id = id("codex_work");
+        let other_id = id("claudeAgent_personal");
+        let settings = settings_with(
+            indexmap::IndexMap::from([
+                (instance_id.clone(), codex(Some(false), None)),
+                (
+                    other_id.clone(),
+                    ProviderInstanceConfig {
+                        driver: ProviderDriverKind::new("claudeAgent").unwrap(),
+                        ..codex(Some(false), None)
+                    },
+                ),
+            ]),
+            vec![
+                (
+                    project("project-a"),
+                    vec![(instance_id.clone(), Some(true))],
+                ),
+                (project("project-b"), vec![(other_id.clone(), Some(true))]),
+            ],
+        );
+        let merged = derive_provider_instance_config_map(&settings, &[]);
+        assert_eq!(merged[&instance_id].enabled, Some(true));
+        assert_eq!(merged[&other_id].enabled, Some(true));
+        assert_eq!(
+            merged[&other_id].driver,
+            ProviderDriverKind::new("claudeAgent").unwrap()
+        );
+    }
+
+    #[test]
     fn adds_a_default_instance_when_the_slot_is_empty() {
         let settings = default_server_settings();
         let driver = ProviderDriverKind::new("codex").unwrap();

@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use turin_contracts::{CommandId, EventId, NodeId, RawEventId, RunId, ThreadId};
 
 use crate::db::{AbortOnDrop, Db};
-use crate::errors::{PersistenceDecodeError, PersistenceError};
+use crate::errors::{PersistenceDecodeError, PersistenceError, PersistenceSqlError};
 use crate::sql_value::SqlValue;
 
 const READ_PAGE_SIZE: i64 = 500;
@@ -1423,16 +1423,11 @@ impl LiveHub {
                 if state.items.len() + 1 > LIVE_STREAM_MAX_ITEMS
                     || state.bytes + event.bytes > LIVE_STREAM_MAX_BYTES
                 {
-                    state.failed = Some(PersistenceError::Sql(crate::errors::sql_error(
-                        "OrchestrationEventStore.streamApplicationEvents:buffer",
-                        &rusqlite::Error::SqliteFailure(
-                            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOMEM),
-                            Some(
-                                "The live event buffer is full. Resume from the last received sequence."
-                                    .into(),
-                            ),
-                        ),
-                    )));
+                    state.failed = Some(PersistenceError::Sql(PersistenceSqlError {
+                        operation: "OrchestrationEventStore.streamApplicationEvents:buffer".into(),
+                        detail: None,
+                        correlation: None,
+                    }));
                     break;
                 }
                 state.bytes += event.bytes;

@@ -834,10 +834,9 @@ async fn live_buffer_counts_the_full_agent_event() {
         match next {
             Ok(_) => continue,
             Err(err) => {
-                assert!(
-                    err.to_string().contains("streamApplicationEvents:buffer"),
-                    "{err}"
-                );
+                let message = err.to_string();
+                assert!(message.contains("streamApplicationEvents:buffer"), "{message}");
+                assert!(!message.contains("SQLITE"), "{message}");
                 saw_error = true;
                 break;
             }

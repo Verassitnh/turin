@@ -434,10 +434,8 @@ async fn selects_the_latest_waiting_secret_only_from_active_runs() {
     }
 }
 
-/// Upstream line 4085. The upstream body asserts shell counts over a stale
-/// turn-item row and that the full projection fails to decode it. It has no
-/// timing assertion; it is ignored here to match the requested `timing` marker.
-#[ignore = "stale-row shell perf case; not a timing assertion upstream, run manually"]
+/// Upstream line 4085. Asserts shell counts over a stale turn-item row and that
+/// the full projection fails to decode it.
 #[tokio::test]
 async fn builds_shell_snapshots_without_decoding_full_turn_item_payloads() {
     let store = memory_store().await;
@@ -840,7 +838,6 @@ fn visible_kinds(rows: &[OrchestrationV2ProjectedTurnItem]) -> Vec<String> {
 /// (statement shapes from the SQL tracer) and the nested cursor walks, which
 /// use `buildBoundedThreadProjection`, a cut socket-budget helper (see the
 /// `thread_history_paging` module header).
-#[ignore = "omits the SQL statement tracing assertions and the cut buildBoundedThreadProjection cursor walks (upstream lines 5102-5140 and 5385-5450)"]
 #[tokio::test]
 async fn keeps_fork_visible_items_stable_after_a_source_run_is_rolled_back() {
     let (store, _dir) = file_store().await;

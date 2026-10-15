@@ -194,7 +194,9 @@ impl ProjectionStore {
         thread_id: &ThreadId,
     ) -> Result<OrchestrationV2ThreadProjection, ProjectionStoreError> {
         let id = thread_id.clone();
-        self.read_for_thread(thread_id, false, move |conn| {
+        // Upstream issues these statements unwrapped; one read transaction keeps the
+        // fork-source recursion on one snapshot. See PORTING.md.
+        self.read_for_thread(thread_id, true, move |conn| {
             read_projection(conn, &id, &[], None)
         })
         .await

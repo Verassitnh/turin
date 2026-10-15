@@ -1,52 +1,21 @@
-//! `new Intl.Collator(undefined, { numeric: true, sensitivity: "base" })`,
-//! approximately: digit runs compare as numbers, everything else
-//! case-insensitively. Used to order a diff's files by path
-//! (`filePathCollator` in useReviewFilePatches.ts).
+//! `new Intl.Collator(undefined, { numeric: true, sensitivity: "base" })`
+//! (`filePathCollator` in useReviewFilePatches.ts), which orders a diff's
+//! files by path. The collation itself is `turin_shared::js_string`'s
+//! `locale_compare_with`, shared with `localeCompare`.
 
 use std::cmp::Ordering;
 
-#[derive(PartialEq, Eq)]
-enum Chunk {
-    Number(String),
-    Text(String),
-}
-
-fn chunks(value: &str) -> Vec<Chunk> {
-    let mut out: Vec<Chunk> = Vec::new();
-    for c in value.chars() {
-        let digit = c.is_ascii_digit();
-        match out.last_mut() {
-            Some(Chunk::Number(part)) if digit => part.push(c),
-            Some(Chunk::Text(part)) if !digit => part.extend(c.to_lowercase()),
-            _ => out.push(if digit {
-                Chunk::Number(c.to_string())
-            } else {
-                Chunk::Text(c.to_lowercase().collect())
-            }),
-        }
-    }
-    out
-}
-
-fn compare_numbers(a: &str, b: &str) -> Ordering {
-    let (a, b) = (a.trim_start_matches('0'), b.trim_start_matches('0'));
-    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
-}
+use turin_shared::js_string::{LocaleCompareOptions, locale_compare_with};
 
 pub fn natural_compare(a: &str, b: &str) -> Ordering {
-    let (ca, cb) = (chunks(a), chunks(b));
-    for (x, y) in ca.iter().zip(cb.iter()) {
-        let ordering = match (x, y) {
-            (Chunk::Number(x), Chunk::Number(y)) => compare_numbers(x, y),
-            (Chunk::Text(x), Chunk::Text(y)) => x.cmp(y),
-            (Chunk::Number(_), Chunk::Text(_)) => Ordering::Less,
-            (Chunk::Text(_), Chunk::Number(_)) => Ordering::Greater,
-        };
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
-    }
-    ca.len().cmp(&cb.len())
+    locale_compare_with(
+        a,
+        b,
+        LocaleCompareOptions {
+            numeric: true,
+            base_sensitivity: true,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -65,5 +34,41 @@ mod tests {
             paths,
             vec!["crates/x.rs", "docs/a.md", "docs/z.md", "README.md"]
         );
+    }
+
+    // Expected orders are `[...paths].sort(new Intl.Collator(undefined, { numeric: true,
+    // sensitivity: "base" }).compare)` on Node v22 (en-US ICU).
+    #[test]
+    fn punctuation_follows_icu_root_order() {
+        let mut paths = vec!["src/foo.ts", "src/foo_bar.ts", "src/foo-bar.ts"];
+        paths.sort_by(|a, b| natural_compare(a, b));
+        assert_eq!(
+            paths,
+            vec!["src/foo_bar.ts", "src/foo-bar.ts", "src/foo.ts"]
+        );
+        assert_eq!(natural_compare("foo_bar.ts", "foo-bar.ts"), Ordering::Less);
+        assert_eq!(natural_compare("a_b", "a/b"), Ordering::Less);
+    }
+
+    #[test]
+    fn punctuation_sorts_before_digits_so_file_precedes_file1() {
+        let mut paths = vec!["file10.ts", "file.ts", "file2.ts", "file1.ts"];
+        paths.sort_by(|a, b| natural_compare(a, b));
+        assert_eq!(paths, vec!["file.ts", "file1.ts", "file2.ts", "file10.ts"]);
+    }
+
+    #[test]
+    fn digit_runs_compare_by_value_and_leading_zeros_do_not_count() {
+        assert_eq!(natural_compare("file9.ts", "file10.ts"), Ordering::Less);
+        assert_eq!(natural_compare("a1b", "a01c"), Ordering::Less);
+        assert_eq!(natural_compare("x01", "x1"), Ordering::Equal);
+        assert_eq!(natural_compare("a0", "a"), Ordering::Greater);
+        assert_eq!(natural_compare("1a", "1"), Ordering::Greater);
+    }
+
+    #[test]
+    fn base_sensitivity_ignores_accents() {
+        assert_eq!(natural_compare("\u{e9}.ts", "e.ts"), Ordering::Equal);
+        assert_eq!(natural_compare("e.ts", "f.ts"), Ordering::Less);
     }
 }

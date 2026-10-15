@@ -76,6 +76,8 @@ runs. Never keep copies of user databases.
 | wf_9dc37bfd-861 | T04b protocol docs fix round | FAIL: 5 high, 13 medium, 6 low. docs/qc/wf_9dc37bfd-861-T04b-protocols.md |
 | wf_342ba162-dd7 | T24 icon fix rounds | PASS: 1 low (fixed, merged) |
 | wf_4a9d9be1-c7c | T03 fix round re-QC | aborted: Claude session limit → rerun as wf_5a0d0e56-76b |
+| wf_5bf4fe41-dd5 | T12a ACP crate | running |
+| wf_118a9a5d-526 | T11a OpenCode transport | running |
 | wf_5a0d0e56-76b | T03 fix round re-QC (Sonnet verify, Opus look-and-feel) | PASS: 6 low → T03c. docs/qc/wf_5a0d0e56-76b-T03-r2-design-system.md |
 | wf_e19abae9-25e | T02b persistence fix round | FAIL: Db drop lost-wakeup deadlock (high) + index whitespace (low). docs/qc/wf_e19abae9-25e-T02b-persistence.md |
 | wf_6497dded-82d | T04c protocol-doc application check (Sonnet/Haiku) | PASS: 3 low. docs/qc/wf_6497dded-82d-T04c-protocols.md |
@@ -126,10 +128,10 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T09 | Codex provider: CodexAdapterV2 + provider/Codex* | `crates/provider-codex` | Codex | r3 active (Codex re-auth) |
 | T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok | QC FAIL (1 high: requests hang after EOF; exit status not surfaced) → r3 fix (Grok) |
 | T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex | r3 active (Codex re-auth) |
-| T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | done (r2 routing/perms/ledger, live smoke ok) → QC pending |
+| T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | done → QC wf_118a9a5d-526 |
 | T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok | active (base: stage) |
-| T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok | done (nested Cursor shapes) → QC pending |
-| T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok | active (base: stage) |
+| T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok | done → QC wf_5bf4fe41-dd5 |
+| T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok | r1 done (24 tests, local traits) → r2 wiring to real provider-core |
 | T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex → Sonnet | r2 active (Codex usage limit again) |
 | T13b | Orchestrator write side: EventSink/Store, outbox/worker, receipts, command policy, thread lifecycle services | `crates/orchestration/src/pipeline/**` | Codex → Sonnet | r2 active (Codex usage limit again) |
 | T13c | Orchestrator core + provider run services (Orchestrator.ts, ProviderSessionManager, RunExecution, ingest, recovery, checkpoints, PR reactors) | `crates/orchestration/src/core/**` | Codex (high) | todo (after T13a/b + T08) |

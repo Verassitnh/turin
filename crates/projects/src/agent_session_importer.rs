@@ -291,8 +291,8 @@ impl AgentSessionImporter {
                 root_thread_id: thread_id.clone(),
             },
             forked_from: None,
-            created_at: created_at,
-            updated_at: updated_at,
+            created_at,
+            updated_at,
             archived_at: None,
             settled_override: Some(OrchestrationV2SettleOverride::Settled),
             settled_at: Some(updated_at),
@@ -335,8 +335,8 @@ impl AgentSessionImporter {
             context_usage: None,
             native_metadata: None,
             goal: None,
-            created_at: created_at,
-            updated_at: updated_at,
+            created_at,
+            updated_at,
         };
 
         // Codex resumes by its native thread id. Claude's CLI resumes by session id.

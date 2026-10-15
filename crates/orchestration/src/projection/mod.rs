@@ -7,6 +7,7 @@ pub mod project_commands;
 pub mod project_store;
 pub mod queued_run_order;
 pub mod shared;
+pub mod shell_stream;
 pub(crate) mod sql;
 pub mod store;
 pub mod thread_history_paging;

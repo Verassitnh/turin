@@ -11,6 +11,7 @@ pub mod checkpoint_diff;
 pub mod client_state;
 pub mod command_result;
 pub mod composer_dispatch;
+pub mod composer_path_search;
 pub mod contracts;
 pub mod entities;
 pub mod events;

@@ -134,8 +134,12 @@ impl Client {
                 if validate_known(&method, entry.params, params.as_ref()).is_err() {
                     return;
                 }
+                // Upstream runs these with Effect.forEach, which stops at the first failure and
+                // then the outer Effect.ignore discards it.
                 for handler in handlers {
-                    let _ = handler(params.clone()).await;
+                    if handler(params.clone()).await.is_err() {
+                        break;
+                    }
                 }
             }
             .boxed()

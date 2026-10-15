@@ -909,3 +909,36 @@ async fn handlers_registered_under_unknown_notification_method_are_ignored() {
         0
     );
 }
+
+#[tokio::test]
+async fn notification_handlers_stop_after_the_first_failure() {
+    let (client, _peer_reader, mut peer_writer) = client_pair();
+    let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    client.handle_server_notification("item/agentMessage/delta", |_params| async {
+        Err(AppServerError::Cancelled)
+    });
+    let counter = second_calls.clone();
+    client.handle_server_notification("item/agentMessage/delta", move |_params| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async { Ok(()) }
+    });
+    let (barrier_tx, barrier_rx) = oneshot::channel::<()>();
+    let barrier_tx = std::sync::Mutex::new(Some(barrier_tx));
+    client.handle_unknown_server_notification(Arc::new(move |_method, _params| {
+        if let Some(tx) = barrier_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        async {}.boxed()
+    }));
+    write_frame(
+        &mut peer_writer,
+        json!({"method":"item/agentMessage/delta","params":serde_json::from_str::<Value>(DELTA_PARAMS).unwrap()}),
+    )
+    .await;
+    write_frame(&mut peer_writer, json!({"method":"x/barrier","params":{}})).await;
+    timeout(Duration::from_secs(1), barrier_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

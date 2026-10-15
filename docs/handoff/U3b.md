@@ -19,7 +19,7 @@ Env: `export PATH=$HOME/.cargo/bin:$PATH DEVELOPER_DIR=/Applications/Xcode.app/C
 | `fileContextMenu.ts` (+ `components/preview/fileExplorerLabel.ts` wording) | `state/file_context_menu.rs` | 15 (7 upstream cases, 8 for the capability and activation decisions upstream does not test) |
 | `hooks/useLiveRefresh.ts` (decision half) | `state/live_refresh.rs` | 18 (upstream cases plus cadence state) |
 | `sidebarProjectGrouping.ts` | `state/sidebar_project_grouping.rs` | 9. No upstream test file exists |
-| `uiStateStore.ts` (state, mutators, persisted JSON) | `state/ui_state_store.rs` | 18 (`uiStateStore.test.ts`) |
+| `uiStateStore.ts` (state, mutators, persisted JSON) | `state/ui_state_store.rs` | 19 (`uiStateStore.test.ts`, plus an array-index sanitizer case) |
 | `components/ProviderUpdateLaunchNotification.logic.ts` | `components/provider_update_launch_notification_logic.rs` + `_tests.rs` | 47 (`.logic.test.ts`, 1149 lines) |
 
 Commits: `412692c` (first-run, file menu, live refresh, sidebar grouping),

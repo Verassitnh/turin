@@ -279,8 +279,11 @@ fn enum_text(value: &impl serde::Serialize) -> String {
 /// sent while the queue is held), so a queued run resumed later can have a
 /// lower ordinal than one that already ended. An unfinished run is the latest.
 pub fn run_ran_after(run: &OrchestrationV2Run, other: &OrchestrationV2Run) -> bool {
-    let end =
-        |candidate: &OrchestrationV2Run| candidate.completed_at.map(|at| at.0.timestamp_millis());
+    let end = |candidate: &OrchestrationV2Run| {
+        candidate
+            .completed_at
+            .map(|at| at.as_datetime().timestamp_millis())
+    };
     let cmp_end = |left: Option<i64>, right: Option<i64>| match (left, right) {
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Greater,

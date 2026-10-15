@@ -320,9 +320,7 @@ pub(crate) fn node_relative(from: &str, to: &str) -> String {
         common += 1;
     }
     let mut out = Vec::new();
-    for _ in common..from_parts.len() {
-        out.push("..");
-    }
+    out.extend(std::iter::repeat_n("..", from_parts.len() - common));
     out.extend(to_parts[common..].iter().copied());
     out.join("/")
 }

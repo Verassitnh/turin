@@ -59,19 +59,11 @@ const REFS_CAPACITY: usize = 64;
 const STATUS_REFRESH_CAPACITY: usize = 2_048;
 
 pub fn review_diff_args() -> Vec<String> {
-    [
-        "diff",
-        "--find-renames",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--minimal",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
+    ["diff", "--find-renames", "--no-color", "--no-ext-diff", "--no-textconv", "--minimal"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(PATCH_RENDER_PREFIX_ARGS.into_iter().map(str::to_owned))
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -161,16 +153,20 @@ pub struct GitRangeContext {
     pub diff_patch: String,
 }
 
+pub type WorktreeClaimedCallback = Arc<dyn Fn(&str) + Send + Sync>;
+pub type SubmodulesDisabledCallback = Arc<dyn Fn(&str) + Send + Sync>;
+pub type SubmodulesFinishedCallback = Arc<dyn Fn(bool, Option<String>) + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct CreateWorktreeOptions {
     pub worktrees_directory: Option<String>,
     pub submodules: Option<WorktreeSubmodules>,
     pub on_checkout_progress: Option<Arc<dyn Fn(CheckoutProgress) + Send + Sync>>,
-    pub on_worktree_claimed: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    pub on_worktree_claimed: Option<WorktreeClaimedCallback>,
     pub on_submodules_started: Option<Arc<dyn Fn() + Send + Sync>>,
-    pub on_submodules_disabled: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    pub on_submodules_disabled: Option<SubmodulesDisabledCallback>,
     pub on_submodule_line: Option<GitLineCallback>,
-    pub on_submodules_finished: Option<Arc<dyn Fn(bool, Option<String>) + Send + Sync>>,
+    pub on_submodules_finished: Option<SubmodulesFinishedCallback>,
 }
 
 #[derive(Debug, Clone)]

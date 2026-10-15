@@ -121,7 +121,7 @@ pub enum RefreshCauseReason {
 
 #[derive(Debug, Clone)]
 pub enum RefreshDiagnosticValue {
-    Service(GitManagerServiceError),
+    Service(Box<GitManagerServiceError>),
     Error { name: String },
     Type(&'static str),
     Uninspectable,
@@ -234,6 +234,8 @@ struct Inner {
 
 struct ActivePoller {
     cancel: CancellationToken,
+    /// Kept so dropping the poller aborts the task. The field is read by `Drop` of the handle.
+    #[allow(dead_code)]
     handle: AbortOnDropHandle<()>,
     subscriber_count: usize,
     demand: Arc<Mutex<HashMap<String, usize>>>,
@@ -557,10 +559,10 @@ impl Inner {
         if let Some(pulled) = self.maybe_auto_pull(cwd, remote.as_ref(), &options.policy_cwds).await {
             return Ok(pulled.remote);
         }
-        if let Some(remote_value) = remote.as_ref() {
-            if divergence_moved(previous.as_ref(), remote_value) {
-                self.refresh_local_status_core(cwd).await?;
-            }
+        if let Some(remote_value) = remote.as_ref()
+            && divergence_moved(previous.as_ref(), remote_value)
+        {
+            self.refresh_local_status_core(cwd).await?;
         }
         Ok(self.update_cached_remote(cwd, remote, true))
     }
@@ -760,7 +762,9 @@ impl Inner {
 
     fn log_refresh_failure(&self, cwd: &str, error: &GitManagerServiceError, consecutive_failures: u32, delay: Duration) {
         let diagnostics = remote_refresh_failure_diagnostics(&RefreshCause {
-            reasons: vec![RefreshCauseReason::Fail(RefreshDiagnosticValue::Service(error.clone()))],
+            reasons: vec![RefreshCauseReason::Fail(RefreshDiagnosticValue::Service(Box::new(
+                error.clone(),
+            )))],
         });
         let next_delay_ms = delay.as_millis();
         tracing::warn!(
@@ -813,12 +817,12 @@ impl PollerSet {
             }
             Some(_) => true,
         };
-        if remove {
-            if let Some(poller) = pollers.remove(cwd) {
-                drop(pollers);
-                poller.cancel.cancel();
-                drop(poller);
-            }
+        if remove
+            && let Some(poller) = pollers.remove(cwd)
+        {
+            drop(pollers);
+            poller.cancel.cancel();
+            drop(poller);
         }
     }
 }

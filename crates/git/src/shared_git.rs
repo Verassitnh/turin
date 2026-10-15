@@ -72,8 +72,7 @@ pub fn sanitize_branch_fragment(raw: &str) -> String {
                             "-",
                         ),
                         "",
-                    )
-                    .into_owned(),
+                    ),
                 64,
             ),
             "",
@@ -263,10 +262,9 @@ fn parse_simple_url(value: &str) -> Option<SimpleUrl> {
         ("http", rest)
     } else if let Some(rest) = value.strip_prefix("ssh://") {
         ("ssh", rest)
-    } else if let Some(rest) = value.strip_prefix("git://") {
-        ("git", rest)
     } else {
-        return None;
+        let rest = value.strip_prefix("git://")?;
+        ("git", rest)
     };
     if rest.is_empty() {
         return None;

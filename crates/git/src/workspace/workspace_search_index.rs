@@ -788,17 +788,17 @@ fn with_directory_ancestors(entries: &[ProjectEntry]) -> Vec<ProjectEntry> {
     for entry in entries {
         let mut parent = parent_path_of(entry.path.as_str());
         while let Some(parent_path) = parent {
-            if !by_path.contains_key(parent_path) {
-                if let Ok(path) = TrimmedNonEmptyString::new(parent_path) {
-                    by_path.insert(
-                        parent_path.to_owned(),
-                        ProjectEntry {
-                            path,
-                            kind: ProjectEntryKind::Directory,
-                            ignored: None,
-                        },
-                    );
-                }
+            if !by_path.contains_key(parent_path)
+                && let Ok(path) = TrimmedNonEmptyString::new(parent_path)
+            {
+                by_path.insert(
+                    parent_path.to_owned(),
+                    ProjectEntry {
+                        path,
+                        kind: ProjectEntryKind::Directory,
+                        ignored: None,
+                    },
+                );
             }
             parent = parent_path_of(parent_path);
         }
@@ -1027,34 +1027,25 @@ mod tests {
         assert!(mapped.truncated);
     }
 
+    type ScanFilesCallback = Box<dyn FnMut() -> Result<FinderResult<()>, String> + Send>;
+    type MixedSearchCallback =
+        Box<dyn FnMut(&str, u64) -> Result<FinderResult<MixedSearchResult>, String> + Send>;
+    type FileSearchCallback =
+        Box<dyn FnMut(&str, u64) -> Result<FinderResult<FileSearchResult>, String> + Send>;
+    type GrepCallback =
+        Box<dyn FnMut(&str, &GrepOptions) -> Result<FinderResult<GrepResult>, String> + Send>;
+
     struct MockFinder {
         wait: Mutex<Result<FinderResult<bool>, String>>,
         wait_timeouts: Mutex<Vec<u64>>,
         scanning: Arc<AtomicBool>,
         destroy_error: Mutex<Option<String>>,
         destroy_count: AtomicUsize,
-        scan_files: Mutex<Option<Box<dyn FnMut() -> Result<FinderResult<()>, String> + Send>>>,
-        mixed_search: Mutex<
-            Option<
-                Box<
-                    dyn FnMut(&str, u64) -> Result<FinderResult<MixedSearchResult>, String> + Send,
-                >,
-            >,
-        >,
-        file_search: Mutex<
-            Option<
-                Box<dyn FnMut(&str, u64) -> Result<FinderResult<FileSearchResult>, String> + Send>,
-            >,
-        >,
+        scan_files: Mutex<Option<ScanFilesCallback>>,
+        mixed_search: Mutex<Option<MixedSearchCallback>>,
+        file_search: Mutex<Option<FileSearchCallback>>,
         file_calls: Mutex<Vec<(String, u64)>>,
-        grep: Mutex<
-            Option<
-                Box<
-                    dyn FnMut(&str, &GrepOptions) -> Result<FinderResult<GrepResult>, String>
-                        + Send,
-                >,
-            >,
-        >,
+        grep: Mutex<Option<GrepCallback>>,
         grep_calls: Mutex<Vec<GrepOptions>>,
     }
 
@@ -1169,8 +1160,10 @@ mod tests {
         }
     }
 
+    type ScriptedFinder = Result<FinderResult<Arc<dyn FileFinderEngine>>, String>;
+
     struct ScriptFactory {
-        next: Mutex<Option<Result<FinderResult<Arc<dyn FileFinderEngine>>, String>>>,
+        next: Mutex<Option<ScriptedFinder>>,
     }
 
     impl ScriptFactory {

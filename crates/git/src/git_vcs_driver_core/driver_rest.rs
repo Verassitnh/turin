@@ -1271,7 +1271,7 @@ impl GitVcsDriverCore {
         }
         let branch = parse_remote_ref_with_remote_names(
             input.ref_name.as_deref().unwrap_or(""),
-            &[input.remote_name.clone()],
+            std::slice::from_ref(&input.remote_name),
         )
         .map(|parsed| parsed.branch_name)
         .unwrap_or_else(|| input.ref_name.clone().unwrap_or_default());
@@ -1486,9 +1486,9 @@ impl GitVcsDriverCore {
         } else {
             false
         };
-        let checkout = if local_exists {
-            argv(&["checkout", ref_name])
-        } else if remote_exists && local_tracking.is_none() && local_target_exists {
+        let checkout = if local_exists
+            || (remote_exists && local_tracking.is_none() && local_target_exists)
+        {
             argv(&["checkout", ref_name])
         } else if remote_exists && local_tracking.is_none() {
             argv(&["checkout", "--track", ref_name])

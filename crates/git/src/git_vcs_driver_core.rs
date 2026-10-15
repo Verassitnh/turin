@@ -29,6 +29,7 @@ pub(super) const OUTPUT_TRUNCATED_MARKER: &str = "\n\n[truncated]";
 mod driver;
 pub use driver::{
     CreateWorktreeOptions, GitCommitOptions, GitCommitResult, GitDeleteLocalBranchInput,
+    SubmodulesDisabledCallback, SubmodulesFinishedCallback, WorktreeClaimedCallback,
     GitEnsureRemoteInput, GitFetchPullRequestBranchInput, GitFetchPullRequestHeadCommitInput,
     GitFetchRemoteBranchInput, GitFetchRemoteInput, GitFetchRemoteTrackingBranchInput,
     GitLocalStatusOptions, GitPreparedCommitContext, GitPushOptions, GitPushResult, GitPushStatus,
@@ -866,10 +867,7 @@ impl LineTail {
 
 /// Git redraws progress with a bare `\r`. Treat `\r\n`, `\r`, and `\n` as breaks.
 fn drain_output_lines(buffer: &mut String, callback: &GitLineCallback, flush: bool) {
-    loop {
-        let Some((at, len)) = next_line_break(buffer) else {
-            break;
-        };
+    while let Some((at, len)) = next_line_break(buffer) {
         let line = buffer[..at].to_owned();
         buffer.replace_range(..at + len, "");
         if !line.is_empty() {

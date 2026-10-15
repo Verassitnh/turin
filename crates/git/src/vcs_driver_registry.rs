@@ -232,11 +232,11 @@ impl VcsDriverRegistry {
         requested: RequestedVcsKind,
         cwd: &str,
     ) -> Result<Option<VcsDriverHandle>, VcsError> {
-        if let RequestedVcsKind::Kind(kind) = requested {
-            if kind != VcsDriverKind::Unknown {
-                let driver = self.get(kind).await?;
-                return self.detect_with_driver(kind, driver, cwd).await;
-            }
+        if let RequestedVcsKind::Kind(kind) = requested
+            && kind != VcsDriverKind::Unknown
+        {
+            let driver = self.get(kind).await?;
+            return self.detect_with_driver(kind, driver, cwd).await;
         }
         self.detect_with_driver(VcsDriverKind::Git, Arc::clone(&self.git), cwd)
             .await
@@ -329,10 +329,7 @@ fn detection_cache_key(kind: RequestedVcsKind, cwd: &str) -> String {
 /// `exists` that turns an IO error into `None` so the caller treats the whole
 /// disk snapshot as unknown and invalidates, matching `Effect.orElseSucceed`.
 async fn try_exists(path: &Path) -> Option<bool> {
-    match tokio::fs::try_exists(path).await {
-        Ok(exists) => Some(exists),
-        Err(_) => None,
-    }
+    tokio::fs::try_exists(path).await.ok()
 }
 
 fn lexical_absolute(path: &Path) -> PathBuf {

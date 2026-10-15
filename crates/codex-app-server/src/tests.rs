@@ -842,3 +842,70 @@ async fn handlers_registered_under_unknown_request_method_are_ignored() {
         json!({"id":3,"result":{"from":"unknown"}})
     );
 }
+
+const DELTA_PARAMS: &str =
+    r#"{"delta":"Ready","itemId":"item-1","threadId":"thread-1","turnId":"turn-1"}"#;
+
+#[tokio::test]
+async fn known_notification_without_handler_skips_unknown_handler() {
+    let (client, _peer_reader, mut peer_writer) = client_pair();
+    let (barrier_tx, barrier_rx) = oneshot::channel::<String>();
+    let barrier_tx = std::sync::Mutex::new(Some(barrier_tx));
+    let unknown_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = unknown_seen.clone();
+    client.handle_unknown_server_notification(Arc::new(move |method, _params| {
+        seen.lock().unwrap().push(method.clone());
+        if let Some(tx) = barrier_tx.lock().unwrap().take() {
+            let _ = tx.send(method);
+        }
+        async {}.boxed()
+    }));
+    write_frame(
+        &mut peer_writer,
+        json!({"method":"item/agentMessage/delta","params":serde_json::from_str::<Value>(DELTA_PARAMS).unwrap()}),
+    )
+    .await;
+    write_frame(&mut peer_writer, json!({"method":"x/unknown","params":{}})).await;
+    // Notifications are dispatched in arrival order, so the unknown one arriving here proves the
+    // known one was already handled.
+    assert_eq!(
+        timeout(Duration::from_secs(1), barrier_rx)
+            .await
+            .unwrap()
+            .unwrap(),
+        "x/unknown"
+    );
+    assert_eq!(*unknown_seen.lock().unwrap(), vec!["x/unknown".to_string()]);
+}
+
+#[tokio::test]
+async fn handlers_registered_under_unknown_notification_method_are_ignored() {
+    let (client, _peer_reader, mut peer_writer) = client_pair();
+    let registered_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = registered_calls.clone();
+    client.handle_server_notification("x/custom-notification", move |_params| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async { Ok(()) }
+    });
+    let (barrier_tx, barrier_rx) = oneshot::channel::<()>();
+    let barrier_tx = std::sync::Mutex::new(Some(barrier_tx));
+    client.handle_unknown_server_notification(Arc::new(move |_method, _params| {
+        if let Some(tx) = barrier_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        async {}.boxed()
+    }));
+    write_frame(
+        &mut peer_writer,
+        json!({"method":"x/custom-notification","params":{"a":1}}),
+    )
+    .await;
+    timeout(Duration::from_secs(1), barrier_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        registered_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}

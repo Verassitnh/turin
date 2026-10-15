@@ -114,24 +114,28 @@ impl Client {
         raw.set_notification_handler(Arc::new(move |method, params| {
             let notifications = notifications.clone();
             async move {
-                let handlers = notifications.notifications.lock().get(&method).cloned();
-                let unknown = notifications.unknown_notification.lock().clone();
-                if let Some(handlers) = handlers {
-                    let entry = meta::method_meta(meta::SERVER_NOTIFICATION_METHODS, &method);
-                    if validate_known(
-                        &method,
-                        entry.and_then(|entry| entry.params),
-                        params.as_ref(),
-                    )
-                    .is_err()
-                    {
-                        return;
+                // Mirrors upstream dispatchNotification: a protocol-known notification only
+                // reaches its registered handlers (none is a no-op), and everything else goes to
+                // the unknown-notification handler.
+                let Some(entry) = meta::method_meta(meta::SERVER_NOTIFICATION_METHODS, &method)
+                else {
+                    let unknown = notifications.unknown_notification.lock().clone();
+                    if let Some(handler) = unknown {
+                        handler(method, params).await;
                     }
-                    for handler in handlers {
-                        let _ = handler(params.clone()).await;
-                    }
-                } else if let Some(handler) = unknown {
-                    handler(method, params).await;
+                    return;
+                };
+                let handlers = notifications
+                    .notifications
+                    .lock()
+                    .get(&method)
+                    .cloned()
+                    .unwrap_or_default();
+                if validate_known(&method, entry.params, params.as_ref()).is_err() {
+                    return;
+                }
+                for handler in handlers {
+                    let _ = handler(params.clone()).await;
                 }
             }
             .boxed()

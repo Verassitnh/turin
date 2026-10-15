@@ -467,7 +467,7 @@ mod tests {
         );
         let options = choices(&[" first\t", "second"]);
         assert_eq!(
-            project_pending_user_input_answer(options.clone(), &[record.clone()]),
+            project_pending_user_input_answer(options.clone(), std::slice::from_ref(&record)),
             options
         );
         assert_eq!(

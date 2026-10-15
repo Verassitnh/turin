@@ -11,11 +11,11 @@
 //! within their own file only, and the aggregator still applies the global
 //! dedupe pass over the small surviving key set.
 //!
-//! Deviation: upstream memoises each entry's JSON fragment by identity between
-//! persists. Here every persist re-encodes the whole cache. Same document shape,
-//! more CPU per persist; see PORTING.md.
+//! Each entry's JSON is memoised between persists (`ScanCacheWriter`), so a
+//! persist re-encodes only the entries that changed.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::IndexMap;
@@ -59,12 +59,13 @@ pub struct CachedFile {
     pub size: i64,
     pub mtime_ms: f64,
     pub provider: UsageProviderKind,
-    /// Records from newline-terminated lines, up to `position.resume_offset`.
-    pub records: Vec<UsageRecord>,
+    /// Records from newline-terminated lines, up to `position.resume_offset`. Shared,
+    /// so cloning an entry (a scan's snapshot, a warm hit) copies no records.
+    pub records: Arc<[UsageRecord]>,
     /// Records from a trailing segment the writer had not newline-terminated at
     /// parse time. Kept apart from `records` because an incremental parse
     /// re-reads that segment and would otherwise double count it.
-    pub tail_records: Vec<UsageRecord>,
+    pub tail_records: Arc<[UsageRecord]>,
     pub position: TranscriptParsePosition,
     id: u64,
 }
@@ -85,16 +86,16 @@ impl CachedFile {
         size: i64,
         mtime_ms: f64,
         provider: UsageProviderKind,
-        records: Vec<UsageRecord>,
-        tail_records: Vec<UsageRecord>,
+        records: impl Into<Arc<[UsageRecord]>>,
+        tail_records: impl Into<Arc<[UsageRecord]>>,
         position: TranscriptParsePosition,
     ) -> Self {
         Self {
             size,
             mtime_ms,
             provider,
-            records,
-            tail_records,
+            records: records.into(),
+            tail_records: tail_records.into(),
             position,
             id: NEXT_ENTRY_ID.fetch_add(1, Ordering::Relaxed),
         }
@@ -299,29 +300,45 @@ where
         // anything outside their real ranges must reject the entry: a bogus guard
         // length would otherwise fail every parse of the file, silently dropping
         // its usage instead of costing the documented cold re-parse.
-        let (Some(resume_offset), Some(guard_length), Some(guard_hash)) = (
+        let (Some(resume_offset), Some(guard_length)) = (
             entry.get("o").and_then(safe_integer),
             entry.get("gl").and_then(safe_integer),
-            entry.get("gh").and_then(safe_integer),
         ) else {
             continue;
         };
-        if guard_length > GUARD_LENGTH
-            || guard_length > resume_offset
-            || guard_hash > u64::from(u32::MAX)
-        {
+        if guard_length > GUARD_LENGTH || guard_length > resume_offset {
             continue;
         }
-        let saved_state = entry.get("cs").cloned().unwrap_or(Value::Null);
+        // Upstream accepts any finite guard hash. A window hash is a u32, so any
+        // other value can never match: keep the entry with resume disabled, which
+        // re-parses the file whole on the next change, as a mismatch would.
+        let Some(guard_hash) = entry
+            .get("gh")
+            .and_then(Value::as_f64)
+            .filter(|hash| hash.is_finite())
+        else {
+            continue;
+        };
+        let fingerprint = (guard_hash.fract() == 0.0
+            && (0.0..=f64::from(u32::MAX)).contains(&guard_hash))
+        .then_some(guard_hash as u32);
+        // A missing state is not a state: upstream drops the entry. v4 entries are
+        // exempt, since they predate the state and are re-parsed below.
+        let saved_state = entry.get("cs").cloned();
         // v4 records of stateful formats (Codex) predate service tiers, so they
         // all priced as standard. Keep them, because the rollout may be gone, but
         // make a live rollout re-parse whole: no file has size -1, and a zero
         // position cannot resume.
         let legacy = format.state.is_some() && version < USAGE_SCAN_CACHE_VERSION;
-        // A corrupt state disqualifies the entry: resuming with it would attach
-        // appended usage to the wrong model or replay fork-copied history.
-        if !legacy && !is_valid_state(format, &saved_state) {
-            continue;
+        if !legacy {
+            // A corrupt state disqualifies the entry: resuming with it would attach
+            // appended usage to the wrong model or replay fork-copied history.
+            let Some(state) = saved_state.as_ref() else {
+                continue;
+            };
+            if !is_valid_state(format, state) {
+                continue;
+            }
         }
 
         let (Some(records), Some(tail_records)) = (
@@ -341,9 +358,13 @@ where
         } else {
             TranscriptParsePosition {
                 resume_offset,
-                guard_length,
-                guard_hash: guard_hash as u32,
-                state: saved_state,
+                guard_length: if fingerprint.is_some() {
+                    guard_length
+                } else {
+                    0
+                },
+                guard_hash: fingerprint.unwrap_or(0),
+                state: saved_state.unwrap_or(Value::Null),
             }
         };
         cache.insert(
@@ -794,5 +815,70 @@ mod tests {
         assert_eq!(writer.fragments.len(), 1);
         assert_eq!(decode(&serde_json::from_str(&third).unwrap()), cache);
         assert_ne!(first, third);
+    }
+
+    fn codex_entry() -> CachedFile {
+        let mut entry = cached(
+            100.0,
+            vec![record(|record| {
+                record.provider = UsageProviderKind::Codex;
+                record.dedupe_key = None;
+            })],
+        );
+        entry.provider = UsageProviderKind::Codex;
+        entry.position = position(|position| {
+            position.state =
+                json!({ "session": "s", "model": "m", "speed": "standard", "last": null });
+        });
+        entry
+    }
+
+    #[test]
+    fn keeps_an_entry_whose_guard_hash_cannot_match_and_disables_its_resume() {
+        // Upstream accepts any finite guard hash. This one can never match a window,
+        // so the entry stays cached (a warm hit still serves it) and resume is off.
+        for hash in [-1.0, 1.5, 1e20] {
+            let mut encoded =
+                encode_scan_cache(&cache_with(vec![("/a.jsonl", 100.0, vec![plain_record()])]));
+            file_mut(&mut encoded, "/a.jsonl")["gh"] = json!(hash);
+
+            let restored = decode(&encoded);
+            let entry = restored
+                .get("/a.jsonl")
+                .unwrap_or_else(|| panic!("kept for {hash}"));
+            assert_eq!(&*entry.records, [plain_record()]);
+            assert_eq!(entry.position.guard_length, 0);
+            assert_eq!(entry.position.guard_hash, 0);
+            assert_eq!(entry.position.resume_offset, 120);
+        }
+    }
+
+    #[test]
+    fn drops_an_entry_without_a_state_field_unless_it_is_a_legacy_v4_entry() {
+        // Stateless (Claude) and stateful (Codex) entries both need an explicit state.
+        let mut encoded =
+            encode_scan_cache(&cache_with(vec![("/a.jsonl", 100.0, vec![plain_record()])]));
+        file_mut(&mut encoded, "/a.jsonl")
+            .as_object_mut()
+            .unwrap()
+            .remove("cs");
+        assert!(!decode(&encoded).contains_key("/a.jsonl"));
+
+        let mut encoded = encode_scan_cache(&ScanCache::from_iter([(
+            "/c.jsonl".to_owned(),
+            codex_entry(),
+        )]));
+        file_mut(&mut encoded, "/c.jsonl")
+            .as_object_mut()
+            .unwrap()
+            .remove("cs");
+        assert!(!decode(&encoded).contains_key("/c.jsonl"));
+
+        // A v4 Codex entry predates the state, so it is kept and re-parsed on change.
+        encoded["version"] = json!(4);
+        let restored = decode(&encoded);
+        let legacy = restored.get("/c.jsonl").expect("legacy v4 entry kept");
+        assert_eq!(legacy.size, -1);
+        assert_eq!(legacy.position.resume_offset, 0);
     }
 }

@@ -215,12 +215,16 @@ fn redact_provider_failure_text(value: &str) -> String {
     let sanitized = replace_unsafe_control_characters(value);
     let url_re = regex::Regex::new(r#"(?i)\bhttps?://[^\s<>"']+"#).expect("url regex");
     let bearer_re = regex::Regex::new(r"(?i)\b(Bearer|Basic)\s+[^\s,;]+").expect("bearer regex");
+    // Upstream's key list needs a word boundary before `token`/`secret`, so
+    // `refresh_token=` and `client_secret=` slipped through. The `[a-z0-9_-]*`
+    // prefix lets compound keys match. It is still bounded on the right, so
+    // `input_tokens=` and `token_count=` stay visible.
     let json_re = regex::Regex::new(
-        r#"(?i)(["'](?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)["']\s*:\s*["'])[^"']*(["'])"#,
+        r#"(?i)(["'][a-z0-9_-]*(?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)["']\s*:\s*["'])[^"']*(["'])"#,
     )
     .expect("json regex");
     let pair_re = regex::Regex::new(
-        r#"(?i)(\b(?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)\b\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)"#,
+        r#"(?i)(\b[a-z0-9_-]*(?:access[_-]?token|api[_-]?key|authorization|credential|password|secret|token)\b\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)"#,
     )
     .expect("pair regex");
     let sk_re = regex::Regex::new(r"\bsk-[A-Za-z0-9_-]{16,}\b").expect("sk regex");
@@ -552,6 +556,18 @@ mod tests {
         assert_eq!(code_of(Some(None)).as_deref(), Some("cause_code"));
         assert_eq!(code_of(None).as_deref(), Some("cause_code"));
         assert_eq!(code_of(Some(Some("own_code"))).as_deref(), Some("own_code"));
+    }
+
+    #[test]
+    fn redacts_compound_credential_keys() {
+        let message = redact_provider_failure_text(
+            "request failed refresh_token=RT-abc123 client_secret=CS-xyz id_token: IT-1 {\"session_token\": \"ST-2\"} input_tokens=5",
+        );
+        for secret in ["RT-abc123", "CS-xyz", "IT-1", "ST-2"] {
+            assert!(!message.contains(secret), "{message}");
+        }
+        // Keys that only contain `token` mid-word are not credentials.
+        assert!(message.contains("input_tokens=5"), "{message}");
     }
 
     #[test]

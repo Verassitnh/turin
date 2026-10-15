@@ -16,8 +16,8 @@
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, Context, CursorStyle, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
-    MouseButton, MouseMoveEvent, ParentElement as _, Render, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, actions, div, px, rems,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div, px, rems,
 };
 
 use super::chat::panel_layout_controls::PanelLayoutControls;
@@ -66,6 +66,19 @@ enum ResizeTarget {
     RightPanel,
 }
 
+/// Port of the drag bookkeeping in upstream hooks/useResizeDrag.ts: the
+/// width follows `start_width ± (x - start_x)`, so pressing off-centre in
+/// the hit area never jumps the edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ResizeDrag {
+    target: ResizeTarget,
+    start_x: f32,
+    start_width: f32,
+}
+
+/// useResizeDrag's 2px "moved" threshold.
+const RESIZE_CLICK_SLOP: f32 = 2.;
+
 pub struct AppSidebarLayout {
     focus_handle: FocusHandle,
     sidebar_open: bool,
@@ -74,7 +87,10 @@ pub struct AppSidebarLayout {
     right_panel_open: bool,
     right_panel_maximized: bool,
     right_panel_width: f32,
-    resizing: Option<ResizeTarget>,
+    resizing: Option<ResizeDrag>,
+    /// The last drag moved past [`RESIZE_CLICK_SLOP`]; the rail's
+    /// double-click reset ignores it, as useResizeDrag suppresses the click.
+    last_drag_moved: bool,
     _appearance: Subscription,
 }
 
@@ -95,6 +111,7 @@ impl AppSidebarLayout {
             right_panel_maximized: false,
             right_panel_width: PREVIEW_PANEL_DEFAULT_WIDTH,
             resizing: None,
+            last_drag_moved: false,
             _appearance: appearance,
         }
     }
@@ -123,7 +140,7 @@ impl AppSidebarLayout {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = self.resizing else {
+        let Some(drag) = self.resizing else {
             return;
         };
         if !event.dragging() {
@@ -131,20 +148,28 @@ impl AppSidebarLayout {
             cx.notify();
             return;
         }
-        let x = f32::from(event.position.x);
+        let delta = f32::from(event.position.x) - drag.start_x;
+        if delta.abs() > RESIZE_CLICK_SLOP {
+            self.last_drag_moved = true;
+        }
         let viewport_width = f32::from(window.viewport_size().width);
-        match target {
+        match drag.target {
             ResizeTarget::Sidebar => {
                 let max =
                     resolve_thread_sidebar_maximum_width(viewport_width, THREAD_SIDEBAR_MIN_WIDTH);
-                self.sidebar_width = clamp_thread_sidebar_width(x, THREAD_SIDEBAR_MIN_WIDTH, max);
+                self.sidebar_width = clamp_thread_sidebar_width(
+                    drag.start_width + delta,
+                    THREAD_SIDEBAR_MIN_WIDTH,
+                    max,
+                );
             }
             ResizeTarget::RightPanel => {
+                // The panel's edge is on its left: dragging left widens it.
                 let max = get_preview_panel_max_width(
                     viewport_width,
                     Some(self.main_width(viewport_width)),
                 );
-                self.right_panel_width = clamp_preview_panel_width(viewport_width - x, max);
+                self.right_panel_width = clamp_preview_panel_width(drag.start_width - delta, max);
             }
         }
         cx.notify();
@@ -177,7 +202,7 @@ impl Render for AppSidebarLayout {
         let sidebar_open = self.sidebar_open;
         let right_panel_open = self.right_panel_open;
         let maximized = right_panel_open && self.right_panel_maximized;
-        let resizing = self.resizing;
+        let resizing = self.resizing.map(|drag| drag.target);
 
         // SidebarRail: a 16px hit area centred on the sidebar's right edge,
         // showing a 2px `sidebar-border` line on hover. Laid over the main
@@ -205,15 +230,20 @@ impl Render for AppSidebarLayout {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.resizing = Some(ResizeTarget::Sidebar);
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.last_drag_moved = false;
+                    this.resizing = Some(ResizeDrag {
+                        target: ResizeTarget::Sidebar,
+                        start_x: f32::from(event.position.x),
+                        start_width: sidebar_width,
+                    });
                     cx.stop_propagation();
                     cx.notify();
                 }),
             )
             .on_click(cx.listener(|this, event: &gpui_kit::ClickEvent, _, cx| {
                 // Double-click resets to the default width.
-                if event.click_count() == 2 {
+                if event.click_count() == 2 && !this.last_drag_moved {
                     this.sidebar_width = THREAD_SIDEBAR_DEFAULT_WIDTH;
                     cx.notify();
                 }
@@ -248,8 +278,12 @@ impl Render for AppSidebarLayout {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.resizing = Some(ResizeTarget::RightPanel);
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.resizing = Some(ResizeDrag {
+                        target: ResizeTarget::RightPanel,
+                        start_x: f32::from(event.position.x),
+                        start_width: right_panel_width,
+                    });
                     cx.stop_propagation();
                     cx.notify();
                 }),

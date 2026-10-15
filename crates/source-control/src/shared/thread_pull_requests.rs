@@ -329,12 +329,11 @@ fn url_host_with_port(url: &Url) -> Option<String> {
 pub fn pull_request_host_of_identity(identity: &RepositoryIdentity) -> Option<String> {
     let like = RepositoryIdentityLike {
         canonical_key: Some(identity.canonical_key.as_str()),
-        remote_url: Some(identity.locator.remote_url.as_str()),
     };
     match identity.provider.as_ref() {
         Some(provider) => Some(pull_request_host_of(
             Some(&like),
-            SourceControlProviderKind::new(provider.as_str()).ok()?,
+            &SourceControlProviderKind::new(provider.as_str()).ok()?,
         )),
         None => {
             let first = identity

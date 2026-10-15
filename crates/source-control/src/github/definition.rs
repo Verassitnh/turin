@@ -179,9 +179,8 @@ pub fn definition() -> SourceControlClientDefinition {
             Some(turin_contracts::pull_request::pull_request_host_of(
                 Some(&turin_contracts::pull_request::RepositoryIdentityLike {
                     canonical_key: Some(identity.canonical_key.as_str()),
-                    remote_url: Some(identity.locator.remote_url.as_str()),
                 }),
-                host_kind.clone(),
+                &host_kind,
             ))
         }),
         is_change_request_in_repository: Arc::new(move |identity, link| {

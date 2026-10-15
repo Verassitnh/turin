@@ -140,7 +140,7 @@ pub(crate) fn provider_detail(error: &PullRequestProviderError) -> String {
         return error.detail.clone();
     }
     pull_request_provider_requirement(
-        error.provider.clone(),
+        &error.provider,
         if error.reason == PullRequestProviderErrorReason::MissingTool {
             PullRequestUnavailableReason::CliMissing
         } else {

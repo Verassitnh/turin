@@ -9,7 +9,7 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use turin_contracts::pull_request::{
-    NativeStackKind, PullRequestActivity, PullRequestChecks, PullRequestDetail, PullRequestPreview,
+    PullRequestActivity, PullRequestChecks, PullRequestDetail, PullRequestPreview,
     PullRequestRef, PullRequestReportStateInput, PullRequestStack, PullRequestStackLayer,
     PullRequestState, PullRequestSummary, PullRequestThreadCommentsInput,
     PullRequestThreadCommentsResult,
@@ -237,7 +237,6 @@ impl Inner {
             .await
             .map_err(|error| to_pull_request_error("stack", error))?;
         Ok(stack.map(|stack| PullRequestStack {
-            kind: NativeStackKind,
             id: tne(&stack.id),
             number: positive(stack.number),
             url: tne(&stack.url),

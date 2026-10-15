@@ -73,7 +73,7 @@ fn tne(value: &str) -> Option<TrimmedNonEmptyString> {
 fn to_change_request(record: NormalizedGitHubPullRequestRecord) -> Option<ChangeRequest> {
     Some(ChangeRequest {
         provider: kind(),
-        number: record.number,
+        number: turin_contracts::PositiveInt::new(record.number)?,
         title: tne(&record.title)?,
         url: record.url,
         base_ref_name: tne(&record.base_ref_name)?,
@@ -1988,7 +1988,7 @@ mod tests {
         };
         let (first, second) = tokio::join!(first, second);
         let first = first.unwrap();
-        assert_eq!(first.iter().map(|pr| pr.number).collect::<Vec<_>>(), vec![7]);
+        assert_eq!(first.iter().map(|pr| pr.number.get()).collect::<Vec<_>>(), vec![7]);
         assert_eq!(first[0].head_sha.as_ref().map(|s| s.as_str()), Some("a".repeat(40).as_str()));
         assert!(second.unwrap().is_empty());
         let documents = documents.lock();
@@ -2064,7 +2064,7 @@ mod tests {
             .list_change_requests(list_input("me:main", Some(ChangeRequestState::Open), Some(1)))
             .await
             .unwrap();
-        assert_eq!(open.iter().map(|pr| pr.number).collect::<Vec<_>>(), vec![8]);
+        assert_eq!(open.iter().map(|pr| pr.number.get()).collect::<Vec<_>>(), vec![8]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2125,7 +2125,7 @@ mod tests {
             context: None,
             reference: reference.into(),
         };
-        assert_eq!(h.provider.get_change_request(get("#42")).await.unwrap().number, 42);
+        assert_eq!(h.provider.get_change_request(get("#42")).await.unwrap().number.get(), 42);
         h.provider.get_change_request(get("https://github.com/other/thing/pull/42")).await.unwrap();
         assert_eq!(
             *variables.lock(),

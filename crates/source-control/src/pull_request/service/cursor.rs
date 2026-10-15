@@ -157,7 +157,7 @@ mod tests {
             parse_list_cursor("2026-07-02T00:00:00.123+02:00|0|")
                 .unwrap()
                 .seen_at,
-            vec![]
+            Vec::<u64>::new()
         );
         assert!(parse_list_cursor("garbage").is_none());
         assert!(parse_list_cursor("2026-07-02T00:00:00Z|1234567890|").is_none());

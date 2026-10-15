@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 use turin_contracts::base_schemas::{ProjectId, TrimmedNonEmptyString};
 use turin_contracts::pull_request::{
-    PullRequestDiffStat, PullRequestDraftFilter, PullRequestInvolvement, PullRequestListEntry,
+    PullRequestDiffStat, PullRequestDraftFilter, PullRequestInvolvement, PullRequestListCursor, PullRequestListEntry,
     PullRequestListFilters, PullRequestListInput, PullRequestListProjectError,
     PullRequestListResult, PullRequestListStatsInput, PullRequestListStatsResult,
     PullRequestProviderSummary, PullRequestRef, PullRequestReviewFilter,
@@ -463,7 +463,9 @@ impl Inner {
         let mut next_cursors = IndexMap::new();
         for batch in &batches {
             if let Some(cursor) = &batch.next_cursor {
-                next_cursors.insert(tne(&batch.key), tne(cursor));
+                if let Ok(cursor) = PullRequestListCursor::new(cursor) {
+                    next_cursors.insert(tne(&batch.key), cursor);
+                }
             }
         }
         let mut entries: Vec<PullRequestListEntry> = batches

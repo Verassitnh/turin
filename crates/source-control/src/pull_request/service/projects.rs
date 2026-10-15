@@ -99,9 +99,8 @@ fn host_of(identity: &RepositoryIdentity, kind: &SourceControlProviderKind) -> S
     pull_request_host_of(
         Some(&RepositoryIdentityLike {
             canonical_key: Some(identity.canonical_key.as_str()),
-            remote_url: Some(identity.locator.remote_url.as_str()),
         }),
-        kind.clone(),
+        kind,
     )
 }
 

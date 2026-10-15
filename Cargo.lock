@@ -7111,11 +7111,15 @@ name = "turin-provider-codex"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "futures",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "turin-codex-app-server",
  "turin-contracts",
 ]
 

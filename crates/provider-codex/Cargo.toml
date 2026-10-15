@@ -6,7 +6,11 @@ license.workspace = true
 
 [dependencies]
 turin-contracts.workspace = true
+turin-codex-app-server = { path = "../codex-app-server" }
 anyhow.workspace = true
+chrono.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

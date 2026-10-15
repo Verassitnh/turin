@@ -83,6 +83,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
+| T04c | Apply T04b re-QC corrections to protocol docs | `docs/protocols` | Haiku | active |
 | T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet | active r2 (GLM out of credits) |
 | T05b | Shared utils, contract-dependent files | `crates/shared` | GLM | todo (after T01) |
 | T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok | active (base: T01 branch) |
@@ -97,7 +98,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T09 | Codex provider: CodexAdapterV2 + provider/Codex* | `crates/provider-codex` | Codex (high) | todo |
 | T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok | active r2 (Codex usage limit) |
 | T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex (high) | todo |
-| T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | active |
+| T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | r1 done (live smoke ok) → r2: v1 directory routing + perms + ledger, then QC |
 | T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok | todo |
 | T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok | active r2 (Codex usage limit) |
 | T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok | todo |

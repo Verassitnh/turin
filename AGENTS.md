@@ -44,7 +44,10 @@ TASKS.md is the PM's board; don't edit it.
 
 - **Never search the whole disk.** No `find /`, `find ~`, or recursive grep
   over `/`, `$HOME`, `~/.bun`, `~/Library` (a watchdog kills them after 20s;
-  they pinned the CPU). Upstream's npm dependencies are installed read-only in
-  `./upstream/node_modules` (e.g. `effect`, `@effect/*`, `@pierre/diffs`,
-  `@tiptap/*`): read sources there. Search only inside your worktree,
+  they pinned the CPU). Upstream's npm dependencies are installed read-only
+  (pnpm layout): each workspace has its own `node_modules`, e.g.
+  `./upstream/apps/server/node_modules/effect/src`,
+  `./upstream/apps/web/node_modules/@pierre/diffs`; every package is also at
+  `./upstream/node_modules/.pnpm/<name>@<ver>/node_modules/<name>`. Mobile,
+  cloud-infra and platform-binary packages were pruned. Search only inside your worktree,
   `./upstream`, or `~/.cargo/registry/src` for Rust crates.

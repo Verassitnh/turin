@@ -1286,7 +1286,7 @@ fn other_projects_actions_survive_overriding_clearing_or_resetting_one_project()
         json!({"projectScriptOverrides": {"first-project": null}}),
     );
     assert_eq!(
-        resolve(&reset, project(&first, &[first_action.clone()])).to_vec(),
+        resolve(&reset, project(&first, std::slice::from_ref(&first_action))).to_vec(),
         vec![default_action.clone()]
     );
     assert_eq!(

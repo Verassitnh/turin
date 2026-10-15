@@ -417,6 +417,8 @@ pub struct PullRequestDetailPanel {
     timeline: Option<Entity<TimelineTab>>,
     code: Option<Entity<CodeTab>>,
     guide: Option<Entity<GuideTab>>,
+    /// The floating comment / review composer (`PullRequestComposer`).
+    composer: Entity<super::comment_form::PullRequestComposer>,
     /// The timeline's order, set by the toggle in the tab bar.
     pub timeline_order: TimelineOrder,
     /// The commit the Code tab is scoped to (`selectedCodeCommitOid`), set by the summary's commit
@@ -488,6 +490,8 @@ impl PullRequestDetailPanel {
             nav,
         };
         let summary = cx.new(|cx| SummaryTab::new(ctx.clone(), window, cx));
+        let composer =
+            cx.new(|cx| super::comment_form::PullRequestComposer::new(ctx.clone(), window, cx));
         let subscriptions = vec![
             cx.observe(&store, |this, _, cx| this.on_store(cx)),
             cx.subscribe(&summary, |this, _, event: &SummaryTabEvent, cx| {
@@ -503,6 +507,7 @@ impl PullRequestDetailPanel {
             timeline: None,
             code: None,
             guide: None,
+            composer,
             timeline_order: TimelineOrder::Newest,
             code_commit: None,
             code_reveal: None,
@@ -822,7 +827,18 @@ impl PullRequestDetailPanel {
                 self.code = Some(code);
             }
             DetailTab::Guide if self.guide.is_none() => {
-                self.guide = Some(cx.new(|cx| GuideTab::new(ctx, window, cx)));
+                let guide = cx.new(|cx| GuideTab::new(ctx, window, cx));
+                // The guide's last stop asks for the review: open the composer on it.
+                let composer = self.composer.downgrade();
+                guide.update(cx, |guide, cx| {
+                    guide.set_on_finish(
+                        Some(std::rc::Rc::new(move |cx: &mut App| {
+                            composer.update(cx, |composer, cx| composer.open_review(cx)).ok();
+                        })),
+                        cx,
+                    )
+                });
+                self.guide = Some(guide);
             }
             _ => {}
         }
@@ -1465,7 +1481,15 @@ impl PullRequestDetailPanel {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(content),
+                    .child(content)
+                    // `absolute right-4 bottom-3`: the composer floats over every tab.
+                    .child(
+                        div()
+                            .absolute()
+                            .right(rems(1.))
+                            .bottom(rems(0.75))
+                            .child(self.composer.clone()),
+                    ),
             )
             .children(self.render_toasts(cx))
             .into_any_element()

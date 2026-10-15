@@ -167,7 +167,9 @@ impl RenderOnce for ComposerSurface {
                                             .size(px(14.))
                                             .text_color(theme.message_action_foreground),
                                     )
-                                    .tooltip(|window, cx| Tooltip::new("Send").build(window, cx)),
+                                    .tooltip(|window, cx| {
+                                        Tooltip::new("Submit message").build(window, cx)
+                                    }),
                             ),
                     ),
             )

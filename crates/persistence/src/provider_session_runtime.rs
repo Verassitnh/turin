@@ -4,6 +4,7 @@
 //! by `list` and fail `get_by_thread_id`, matching upstream.
 
 use rusqlite::{Connection, OptionalExtension, params};
+use turin_contracts::ThreadId;
 
 use crate::errors::{PersistenceDecodeError, PersistenceError, PersistenceErrorCorrelation};
 
@@ -38,7 +39,7 @@ impl ProviderSessionStatus {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderSessionRuntime {
-    pub thread_id: String,
+    pub thread_id: ThreadId,
     pub provider_name: String,
     pub provider_instance_id: Option<String>,
     pub adapter_key: String,
@@ -67,21 +68,21 @@ pub fn upsert(
     let resume = json_text(runtime.resume_cursor.as_ref()).map_err(|err| {
         decode(
             "ProviderSessionRuntimeRepository.upsert:encodeRequest",
-            &runtime.thread_id,
+            runtime.thread_id.as_str(),
             err,
         )
     })?;
     let payload = json_text(runtime.runtime_payload.as_ref()).map_err(|err| {
         decode(
             "ProviderSessionRuntimeRepository.upsert:encodeRequest",
-            &runtime.thread_id,
+            runtime.thread_id.as_str(),
             err,
         )
     })?;
     conn.execute(
         sql,
         params![
-            runtime.thread_id,
+            runtime.thread_id.as_str(),
             runtime.provider_name,
             runtime.provider_instance_id,
             runtime.adapter_key,
@@ -96,7 +97,7 @@ pub fn upsert(
         PersistenceError::Sql(
             crate::errors::sql_error("ProviderSessionRuntimeRepository.upsert:query", &err)
                 .with_correlation(PersistenceErrorCorrelation::ThreadId(
-                    runtime.thread_id.clone(),
+                    runtime.thread_id.as_str().to_owned(),
                 )),
         )
     })?;
@@ -105,35 +106,40 @@ pub fn upsert(
 
 pub fn record_imported_transcript(
     conn: &Connection,
-    thread_id: &str,
+    thread_id: &ThreadId,
     source: &serde_json::Value,
 ) -> Result<(), PersistenceError> {
     let source_json = serde_json::to_string(source).map_err(|err| {
         decode(
             "ProviderSessionRuntimeRepository.recordImportedTranscript:encodeRequest",
-            thread_id,
+            thread_id.as_str(),
             err.to_string(),
         )
     })?;
-    conn.execute(RECORD_IMPORTED_SQL, params![thread_id, source_json])
-        .map_err(|err| {
-            PersistenceError::Sql(
-                crate::errors::sql_error(
-                    "ProviderSessionRuntimeRepository.recordImportedTranscript:query",
-                    &err,
-                )
-                .with_correlation(PersistenceErrorCorrelation::ThreadId(thread_id.to_owned())),
+    conn.execute(
+        RECORD_IMPORTED_SQL,
+        params![thread_id.as_str(), source_json],
+    )
+    .map_err(|err| {
+        PersistenceError::Sql(
+            crate::errors::sql_error(
+                "ProviderSessionRuntimeRepository.recordImportedTranscript:query",
+                &err,
             )
-        })?;
+            .with_correlation(PersistenceErrorCorrelation::ThreadId(
+                thread_id.as_str().to_owned(),
+            )),
+        )
+    })?;
     Ok(())
 }
 
 pub fn get_by_thread_id(
     conn: &Connection,
-    thread_id: &str,
+    thread_id: &ThreadId,
 ) -> Result<Option<ProviderSessionRuntime>, PersistenceError> {
     let row = conn
-        .query_row(SELECT_SQL, params![thread_id], decode_raw)
+        .query_row(SELECT_SQL, params![thread_id.as_str()], decode_raw)
         .optional()
         .map_err(|err| {
             PersistenceError::Sql(
@@ -141,14 +147,16 @@ pub fn get_by_thread_id(
                     "ProviderSessionRuntimeRepository.getByThreadId:query",
                     &err,
                 )
-                .with_correlation(PersistenceErrorCorrelation::ThreadId(thread_id.to_owned())),
+                .with_correlation(PersistenceErrorCorrelation::ThreadId(
+                    thread_id.as_str().to_owned(),
+                )),
             )
         })?;
     row.map(|row| {
         decode_runtime(row).map_err(|(_thread, issue)| {
             decode(
                 "ProviderSessionRuntimeRepository.getByThreadId:decodeRow",
-                thread_id,
+                thread_id.as_str(),
                 issue,
             )
         })
@@ -190,10 +198,13 @@ pub fn list(
     Ok(out)
 }
 
-pub fn delete_by_thread_id(conn: &Connection, thread_id: &str) -> Result<(), PersistenceError> {
+pub fn delete_by_thread_id(
+    conn: &Connection,
+    thread_id: &ThreadId,
+) -> Result<(), PersistenceError> {
     conn.execute(
         "DELETE FROM provider_session_runtime WHERE thread_id = ?1",
-        params![thread_id],
+        params![thread_id.as_str()],
     )
     .map_err(|err| {
         PersistenceError::Sql(
@@ -201,7 +212,9 @@ pub fn delete_by_thread_id(conn: &Connection, thread_id: &str) -> Result<(), Per
                 "ProviderSessionRuntimeRepository.deleteByThreadId:query",
                 &err,
             )
-            .with_correlation(PersistenceErrorCorrelation::ThreadId(thread_id.to_owned())),
+            .with_correlation(PersistenceErrorCorrelation::ThreadId(
+                thread_id.as_str().to_owned(),
+            )),
         )
     })?;
     Ok(())
@@ -357,8 +370,10 @@ fn decode_runtime(row: RawRuntime) -> Result<ProviderSessionRuntime, (String, St
     })?;
     let resume_cursor = parse_json_column(&row.thread_id, row.resume_cursor.as_deref())?;
     let runtime_payload = parse_json_column(&row.thread_id, row.runtime_payload.as_deref())?;
+    let thread_id = ThreadId::new(&row.thread_id)
+        .map_err(|err| (row.thread_id.clone(), format!("invalid thread id: {err}")))?;
     Ok(ProviderSessionRuntime {
-        thread_id: row.thread_id,
+        thread_id,
         provider_name: row.provider_name,
         provider_instance_id: row.provider_instance_id,
         adapter_key: row.adapter_key,

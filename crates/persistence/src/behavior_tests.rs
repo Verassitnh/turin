@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use rusqlite::Connection;
+use turin_contracts::{CommandId, EventId, ThreadId};
 
 use crate::db::{Db, WAL_SIZE_LIMIT_BYTES};
 use crate::errors::PersistenceError;
@@ -28,6 +29,18 @@ use crate::pull_request_review_guides::{ThreadPullRequestKey, get as get_guide, 
 
 const NOW: &str = "2026-01-02T03:04:05.006Z";
 
+fn event_id(value: &str) -> EventId {
+    EventId::new(value).unwrap()
+}
+
+fn thread_id(value: &str) -> ThreadId {
+    ThreadId::new(value).unwrap()
+}
+
+fn command_id(value: &str) -> CommandId {
+    CommandId::new(value).unwrap()
+}
+
 async fn memory_db() -> Db {
     Db::open_in_memory().await.expect("memory db")
 }
@@ -42,8 +55,8 @@ fn sql_err(err: rusqlite::Error) -> PersistenceError {
 
 fn subagent(id: &str, node: &str, prompt: &str, progress: &str) -> AgentEvent {
     AgentEvent {
-        id: id.into(),
-        thread_id: "thread:subagent-prompt".into(),
+        id: event_id(id),
+        thread_id: thread_id("thread:subagent-prompt"),
         event_type: "subagent.updated".into(),
         occurred_at: NOW.into(),
         payload: serde_json::json!({
@@ -325,7 +338,7 @@ async fn stores_a_subagent_prompt_once_and_replays_it() {
         .read_agent_events(ReadAgentEvents {
             after_sequence: Some(0),
             through_sequence: None,
-            thread_id: Some("thread:subagent-prompt".into()),
+            thread_id: Some(thread_id("thread:subagent-prompt")),
             command_id: None,
             event_type: None,
             limit: None,
@@ -361,7 +374,7 @@ async fn stores_the_full_prompt_when_the_hint_row_rolled_back() {
         &"Audit the repository. ".repeat(20),
         "Reading files",
     );
-    event.thread_id = "thread:subagent-rollback".into();
+    event.thread_id = thread_id("thread:subagent-rollback");
     let store_for_rollback = store.clone();
     let rolled = event.clone();
     let err: Result<(), PersistenceError> = store
@@ -380,7 +393,7 @@ async fn stores_the_full_prompt_when_the_hint_row_rolled_back() {
     assert!(matches!(err, Err(PersistenceError::Closed)));
 
     let mut second = event.clone();
-    second.id = "event:subagent-after-rollback".into();
+    second.id = event_id("event:subagent-after-rollback");
     let appended = store
         .append_agent_events(AppendAgentEvents {
             command_id: None,
@@ -428,13 +441,13 @@ async fn stores_json_columns_as_text_and_rejects_invalid_json() {
     let store = memory_store().await;
     let appended = store
         .append_project_event(ProjectEventInput {
-            event_id: "evt-store-roundtrip".into(),
+            event_id: event_id("evt-store-roundtrip"),
             aggregate_id: "project-roundtrip".into(),
             event_type: "project.created".into(),
             occurred_at: NOW.into(),
-            command_id: Some("cmd-store-roundtrip".into()),
+            command_id: Some(command_id("cmd-store-roundtrip")),
             causation_event_id: None,
-            correlation_id: Some("cmd-store-roundtrip".into()),
+            correlation_id: Some(command_id("cmd-store-roundtrip")),
             payload: serde_json::json!({"title": "Roundtrip Project"}),
             metadata: serde_json::json!({"adapterKey": "codex", "origin": {"surface": "cli"}}),
         })
@@ -446,7 +459,7 @@ async fn stores_json_columns_as_text_and_rejects_invalid_json() {
         .read(move |conn| {
             conn.query_row(
                 "SELECT typeof(payload_json), typeof(metadata_json) FROM orchestration_events WHERE event_id = ?1",
-                [&event_id],
+                [event_id.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(sql_err)
@@ -524,7 +537,7 @@ async fn high_water_ignores_legacy_rows_and_pages_application_events() {
     assert_eq!(store.latest_application_sequence().await.unwrap(), 0);
     assert_eq!(
         store
-            .latest_agent_sequence(Some("legacy-only".into()))
+            .latest_agent_sequence(Some(thread_id("legacy-only")))
             .await
             .unwrap(),
         0
@@ -590,8 +603,8 @@ async fn high_water_ignores_legacy_rows_and_pages_application_events() {
         .read_agent_events(ReadAgentEvents {
             after_sequence: Some(0),
             through_sequence: Some(application),
-            thread_id: Some("target".into()),
-            command_id: Some("selected-command".into()),
+            thread_id: Some(thread_id("target")),
+            command_id: Some(command_id("selected-command")),
             event_type: None,
             limit: Some(17),
             skip_unknown_event_types: false,
@@ -602,7 +615,8 @@ async fn high_water_ignores_legacy_rows_and_pages_application_events() {
     assert!(
         scoped
             .iter()
-            .all(|event| event.command_id.as_deref() == Some("selected-command"))
+            .all(|event| event.command_id.as_ref().map(CommandId::as_str)
+                == Some("selected-command"))
     );
 }
 
@@ -641,7 +655,7 @@ async fn high_water_and_command_reads_use_their_indexes() {
     assert_eq!(store.latest_application_sequence().await.unwrap(), 25_000);
     assert_eq!(
         store
-            .latest_agent_sequence(Some("target".into()))
+            .latest_agent_sequence(Some(thread_id("target")))
             .await
             .unwrap(),
         1
@@ -651,7 +665,7 @@ async fn high_water_and_command_reads_use_their_indexes() {
             after_sequence: None,
             through_sequence: None,
             thread_id: None,
-            command_id: Some("retried-command".into()),
+            command_id: Some(command_id("retried-command")),
             event_type: None,
             limit: None,
             skip_unknown_event_types: false,
@@ -748,7 +762,7 @@ async fn releases_consumed_application_replay_pages() {
                 crate::orchestration_event_store::append_project_event(
                     tx,
                     &ProjectEventInput {
-                        event_id: format!("retention-{index}"),
+                        event_id: event_id(&format!("retention-{index}")),
                         aggregate_id: format!("retention-{index}"),
                         event_type: "project.created".into(),
                         occurred_at: NOW.into(),
@@ -796,8 +810,8 @@ async fn live_buffer_counts_the_full_agent_event() {
                 sequence: index + 1,
                 command_id: None,
                 event: AgentEvent {
-                    id: format!("e{index}"),
-                    thread_id: "t".into(),
+                    id: event_id(&format!("e{index}")),
+                    thread_id: thread_id("t"),
                     event_type: "message.updated".into(),
                     occurred_at: NOW.into(),
                     payload: serde_json::json!({ "body": body }),
@@ -846,7 +860,7 @@ async fn live_stream_replays_then_delivers_a_committed_publish() {
     let store = memory_store().await;
     store
         .append_project_event(ProjectEventInput {
-            event_id: "live-seed".into(),
+            event_id: event_id("live-seed"),
             aggregate_id: "project".into(),
             event_type: "project.created".into(),
             occurred_at: NOW.into(),
@@ -870,8 +884,8 @@ async fn live_stream_replays_then_delivers_a_committed_publish() {
         .append_agent_events(AppendAgentEvents {
             command_id: None,
             events: vec![AgentEvent {
-                id: "live-after".into(),
-                thread_id: "target".into(),
+                id: event_id("live-after"),
+                thread_id: thread_id("target"),
                 event_type: "provider-session.detached".into(),
                 occurred_at: NOW.into(),
                 payload: serde_json::json!({
@@ -906,7 +920,7 @@ async fn live_stream_replays_then_delivers_a_committed_publish() {
 async fn command_receipts_insert_once_and_upsert() {
     let db = memory_db().await;
     let receipt = OrchestrationCommandReceipt {
-        command_id: "cmd".into(),
+        command_id: command_id("cmd"),
         aggregate_kind: AggregateKind::Thread,
         aggregate_id: "thread".into(),
         command_type: "turn.start".into(),
@@ -931,7 +945,7 @@ async fn command_receipts_insert_once_and_upsert() {
         rejected.error = Some("no".into());
         move |tx| {
             upsert(tx, &rejected)?;
-            let loaded = get_by_command_id(tx, "cmd")?.unwrap();
+            let loaded = get_by_command_id(tx, &command_id("cmd"))?.unwrap();
             assert_eq!(loaded.status, ReceiptStatus::Rejected);
             assert_eq!(loaded.error.as_deref(), Some("no"));
             Ok(())
@@ -946,7 +960,7 @@ async fn provider_runtime_keeps_imported_transcripts_and_skips_bad_rows() {
     let db = memory_db().await;
     db.write(|tx| {
         let runtime = ProviderSessionRuntime {
-            thread_id: "thread-1".into(),
+            thread_id: thread_id("thread-1"),
             provider_name: "codex".into(),
             provider_instance_id: Some("codex".into()),
             adapter_key: "codex".into(),
@@ -959,14 +973,14 @@ async fn provider_runtime_keeps_imported_transcripts_and_skips_bad_rows() {
         upsert_runtime(tx, &runtime, UpsertConflict::Update)?;
         record_imported_transcript(
             tx,
-            "thread-1",
+            &thread_id("thread-1"),
             &serde_json::json!({"providerInstanceId": "codex", "filePath": "/tmp/a.jsonl"}),
         )?;
         let mut next = runtime.clone();
         next.runtime_payload = Some(serde_json::json!({"cwd": "/work"}));
         next.last_seen_at = "2026-01-02T03:04:06.000Z".into();
         upsert_runtime(tx, &next, UpsertConflict::Update)?;
-        let loaded = get_by_thread_id(tx, "thread-1")?.unwrap();
+        let loaded = get_by_thread_id(tx, &thread_id("thread-1"))?.unwrap();
         assert_eq!(loaded.runtime_payload.as_ref().unwrap()["cwd"], "/work");
         assert_eq!(
             loaded.runtime_payload.as_ref().unwrap()["importedTranscripts"][0]["filePath"],
@@ -984,7 +998,7 @@ async fn provider_runtime_keeps_imported_transcripts_and_skips_bad_rows() {
         .map_err(sql_err)?;
         let listed = list(tx, false)?;
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].thread_id, "thread-1");
+        assert_eq!(listed[0].thread_id.as_str(), "thread-1");
         Ok(())
     })
     .await

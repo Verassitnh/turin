@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+turin-contracts.workspace = true
 chrono.workspace = true
 parking_lot.workspace = true
 regex.workspace = true

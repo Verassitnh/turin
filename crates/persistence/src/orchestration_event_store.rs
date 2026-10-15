@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params_from_iter};
 use tokio::sync::mpsc;
 
+use turin_contracts::{CommandId, EventId, NodeId, RawEventId, RunId, ThreadId};
+
 use crate::db::{AbortOnDrop, Db};
 use crate::errors::{PersistenceDecodeError, PersistenceError};
 use crate::sql_value::SqlValue;
@@ -43,49 +45,50 @@ END
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectEvent {
     pub sequence: i64,
-    pub event_id: String,
+    pub event_id: EventId,
     pub event_type: String,
     pub aggregate_kind: String,
+    /// Upstream `ProjectId` for project rows. Left as text so a non-project aggregate can round-trip.
     pub aggregate_id: String,
     pub occurred_at: String,
-    pub command_id: Option<String>,
-    pub causation_event_id: Option<String>,
-    pub correlation_id: Option<String>,
+    pub command_id: Option<CommandId>,
+    pub causation_event_id: Option<EventId>,
+    pub correlation_id: Option<CommandId>,
     pub payload: serde_json::Value,
     pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectEventInput {
-    pub event_id: String,
+    pub event_id: EventId,
     pub aggregate_id: String,
     pub event_type: String,
     pub occurred_at: String,
-    pub command_id: Option<String>,
-    pub causation_event_id: Option<String>,
-    pub correlation_id: Option<String>,
+    pub command_id: Option<CommandId>,
+    pub causation_event_id: Option<EventId>,
+    pub correlation_id: Option<CommandId>,
     pub payload: serde_json::Value,
     pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentEvent {
-    pub id: String,
-    pub thread_id: String,
+    pub id: EventId,
+    pub thread_id: ThreadId,
     pub event_type: String,
     pub occurred_at: String,
     pub payload: serde_json::Value,
-    pub run_id: Option<String>,
-    pub node_id: Option<String>,
+    pub run_id: Option<RunId>,
+    pub node_id: Option<NodeId>,
     pub driver: Option<String>,
     pub provider_instance_id: Option<String>,
-    pub raw_event_id: Option<String>,
+    pub raw_event_id: Option<RawEventId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredAgentEvent {
     pub sequence: i64,
-    pub command_id: Option<String>,
+    pub command_id: Option<CommandId>,
     pub event: AgentEvent,
 }
 
@@ -106,7 +109,7 @@ impl ApplicationStoredEvent {
 
 #[derive(Debug, Clone)]
 pub struct AppendAgentEvents {
-    pub command_id: Option<String>,
+    pub command_id: Option<CommandId>,
     pub events: Vec<AgentEvent>,
 }
 
@@ -114,8 +117,8 @@ pub struct AppendAgentEvents {
 pub struct ReadAgentEvents {
     pub after_sequence: Option<i64>,
     pub through_sequence: Option<i64>,
-    pub thread_id: Option<String>,
-    pub command_id: Option<String>,
+    pub thread_id: Option<ThreadId>,
+    pub command_id: Option<CommandId>,
     pub event_type: Option<String>,
     pub limit: Option<u64>,
     pub skip_unknown_event_types: bool,
@@ -249,10 +252,10 @@ impl OrchestrationEventStore {
 
     pub async fn latest_agent_sequence(
         &self,
-        thread_id: Option<String>,
+        thread_id: Option<ThreadId>,
     ) -> Result<i64, PersistenceError> {
         self.db
-            .read(move |conn| latest_agent_sequence(conn, thread_id.as_deref()))
+            .read(move |conn| latest_agent_sequence(conn, thread_id.as_ref().map(ThreadId::as_str)))
             .await
     }
 
@@ -526,9 +529,12 @@ pub(crate) fn append_project_event(
                 &rusqlite::Error::QueryReturnedNoRows,
             )
         })?;
-    row_to_project(&map_row(row).map_err(|err| {
-        PersistenceError::sql("OrchestrationEventStore.appendProjectEvent:insert", &err)
-    })?)
+    row_to_project(
+        &map_row(row).map_err(|err| {
+            PersistenceError::sql("OrchestrationEventStore.appendProjectEvent:insert", &err)
+        })?,
+        "OrchestrationEventStore.appendProjectEvent:decode",
+    )
 }
 
 fn append_agent_events(
@@ -561,7 +567,7 @@ fn append_agent_events(
         };
         let (sql, params) = agent_insert_sql(
             event,
-            input.command_id.as_deref(),
+            input.command_id.as_ref().map(CommandId::as_str),
             actor,
             &payload_json,
             &metadata_json,
@@ -690,10 +696,16 @@ fn subagent_prompt(event: &AgentEvent) -> Option<(String, String)> {
 fn metadata_for_v2(event: &AgentEvent) -> serde_json::Value {
     let mut meta = serde_json::Map::new();
     if let Some(run_id) = &event.run_id {
-        meta.insert("runId".into(), serde_json::Value::String(run_id.clone()));
+        meta.insert(
+            "runId".into(),
+            serde_json::Value::String(run_id.as_str().to_owned()),
+        );
     }
     if let Some(node_id) = &event.node_id {
-        meta.insert("nodeId".into(), serde_json::Value::String(node_id.clone()));
+        meta.insert(
+            "nodeId".into(),
+            serde_json::Value::String(node_id.as_str().to_owned()),
+        );
     }
     if let Some(driver) = &event.driver {
         meta.insert("driver".into(), serde_json::Value::String(driver.clone()));
@@ -705,7 +717,10 @@ fn metadata_for_v2(event: &AgentEvent) -> serde_json::Value {
         );
     }
     if let Some(raw) = &event.raw_event_id {
-        meta.insert("rawEventId".into(), serde_json::Value::String(raw.clone()));
+        meta.insert(
+            "rawEventId".into(),
+            serde_json::Value::String(raw.as_str().to_owned()),
+        );
     }
     serde_json::Value::Object(meta)
 }
@@ -713,15 +728,15 @@ fn metadata_for_v2(event: &AgentEvent) -> serde_json::Value {
 fn infer_actor_kind(event: &ProjectEventInput) -> &'static str {
     if event
         .command_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with("provider:"))
+        .as_ref()
+        .is_some_and(|id| id.as_str().starts_with("provider:"))
     {
         return "provider";
     }
     if event
         .command_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with("server:"))
+        .as_ref()
+        .is_some_and(|id| id.as_str().starts_with("server:"))
     {
         return "server";
     }
@@ -761,8 +776,8 @@ pub fn read_agent_events(
             RowFilter {
                 after: cursor,
                 through: query.through_sequence,
-                thread_id: query.thread_id.as_deref(),
-                command_id: query.command_id.as_deref(),
+                thread_id: query.thread_id.as_ref().map(ThreadId::as_str),
+                command_id: query.command_id.as_ref().map(CommandId::as_str),
                 event_type: query.event_type.as_deref(),
                 only_agent: true,
                 limit: page_limit,
@@ -772,7 +787,10 @@ pub fn read_agent_events(
         let last = rows.last().map(|row| row.sequence);
         for row in rows {
             if keep_row(&row, query.skip_unknown_event_types)? {
-                out.push(row_to_agent(&row)?);
+                out.push(row_to_agent(
+                    &row,
+                    "OrchestrationEventStore.readAgentEvents:decode",
+                )?);
             }
         }
         let Some(last) = last else { break };
@@ -977,23 +995,36 @@ fn keep_row(row: &EventRow, skip_unknown: bool) -> Result<bool, PersistenceError
 
 fn row_to_application(row: &EventRow) -> Result<ApplicationStoredEvent, PersistenceError> {
     if row.aggregate_kind == "project" {
-        Ok(ApplicationStoredEvent::Project(row_to_project(row)?))
+        Ok(ApplicationStoredEvent::Project(row_to_project(
+            row,
+            "OrchestrationEventStore.appendProjectEvent:decode",
+        )?))
     } else {
-        Ok(ApplicationStoredEvent::Agent(row_to_agent(row)?))
+        Ok(ApplicationStoredEvent::Agent(row_to_agent(
+            row,
+            "OrchestrationEventStore.readAgentEvents:decode",
+        )?))
     }
 }
 
-fn row_to_project(row: &EventRow) -> Result<ProjectEvent, PersistenceError> {
+fn row_to_project(
+    row: &EventRow,
+    operation: &'static str,
+) -> Result<ProjectEvent, PersistenceError> {
     Ok(ProjectEvent {
         sequence: row.sequence,
-        event_id: row.event_id.clone(),
+        event_id: parse_brand(operation, &row.event_id, new_event_id)?,
         event_type: row.event_type.clone(),
         aggregate_kind: row.aggregate_kind.clone(),
         aggregate_id: row.stream_id.clone(),
         occurred_at: row.occurred_at.clone(),
-        command_id: row.command_id.clone(),
-        causation_event_id: row.causation_event_id.clone(),
-        correlation_id: row.correlation_id.clone(),
+        command_id: parse_brand_opt(operation, row.command_id.as_deref(), new_command_id)?,
+        causation_event_id: parse_brand_opt(
+            operation,
+            row.causation_event_id.as_deref(),
+            new_event_id,
+        )?,
+        correlation_id: parse_brand_opt(operation, row.correlation_id.as_deref(), new_command_id)?,
         payload: parse_known_payload(
             "OrchestrationEventStore.appendProjectEvent:decode",
             &row.payload_json,
@@ -1005,7 +1036,10 @@ fn row_to_project(row: &EventRow) -> Result<ProjectEvent, PersistenceError> {
     })
 }
 
-fn row_to_agent(row: &EventRow) -> Result<StoredAgentEvent, PersistenceError> {
+fn row_to_agent(
+    row: &EventRow,
+    operation: &'static str,
+) -> Result<StoredAgentEvent, PersistenceError> {
     let payload = parse_known_payload(
         "OrchestrationEventStore.readAgentEvents:decode",
         &row.payload_json,
@@ -1022,20 +1056,61 @@ fn row_to_agent(row: &EventRow) -> Result<StoredAgentEvent, PersistenceError> {
     };
     Ok(StoredAgentEvent {
         sequence: row.sequence,
-        command_id: row.command_id.clone(),
+        command_id: parse_brand_opt(operation, row.command_id.as_deref(), new_command_id)?,
         event: AgentEvent {
-            id: row.event_id.clone(),
-            thread_id: row.stream_id.clone(),
+            id: parse_brand(operation, &row.event_id, new_event_id)?,
+            thread_id: parse_brand(operation, &row.stream_id, new_thread_id)?,
             event_type: row.event_type.clone(),
             occurred_at: row.occurred_at.clone(),
             payload,
-            run_id: field("runId"),
-            node_id: field("nodeId"),
+            run_id: parse_brand_opt(operation, field("runId").as_deref(), new_run_id)?,
+            node_id: parse_brand_opt(operation, field("nodeId").as_deref(), new_node_id)?,
             driver: field("driver"),
             provider_instance_id: field("providerInstanceId"),
-            raw_event_id: field("rawEventId"),
+            raw_event_id: parse_brand_opt(
+                operation,
+                field("rawEventId").as_deref(),
+                new_raw_event_id,
+            )?,
         },
     })
+}
+
+fn new_event_id(value: &str) -> Result<EventId, turin_contracts::ContractError> {
+    EventId::new(value)
+}
+fn new_command_id(value: &str) -> Result<CommandId, turin_contracts::ContractError> {
+    CommandId::new(value)
+}
+fn new_thread_id(value: &str) -> Result<ThreadId, turin_contracts::ContractError> {
+    ThreadId::new(value)
+}
+fn new_run_id(value: &str) -> Result<RunId, turin_contracts::ContractError> {
+    RunId::new(value)
+}
+fn new_node_id(value: &str) -> Result<NodeId, turin_contracts::ContractError> {
+    NodeId::new(value)
+}
+fn new_raw_event_id(value: &str) -> Result<RawEventId, turin_contracts::ContractError> {
+    RawEventId::new(value)
+}
+
+fn parse_brand<T>(
+    operation: &'static str,
+    value: &str,
+    make: fn(&str) -> Result<T, turin_contracts::ContractError>,
+) -> Result<T, PersistenceError> {
+    make(value).map_err(|err| decode_err(operation, err.to_string()))
+}
+
+fn parse_brand_opt<T>(
+    operation: &'static str,
+    value: Option<&str>,
+    make: fn(&str) -> Result<T, turin_contracts::ContractError>,
+) -> Result<Option<T>, PersistenceError> {
+    value
+        .map(|value| parse_brand(operation, value, make))
+        .transpose()
 }
 
 fn parse_json(operation: &'static str, json: &str) -> Result<serde_json::Value, PersistenceError> {
@@ -1419,16 +1494,25 @@ fn wire_event(event: &ApplicationStoredEvent) -> serde_json::Value {
         ApplicationStoredEvent::Agent(stored) => {
             let event = &stored.event;
             let mut body = serde_json::Map::new();
-            body.insert("id".into(), serde_json::Value::String(event.id.clone()));
+            body.insert(
+                "id".into(),
+                serde_json::Value::String(event.id.as_str().to_owned()),
+            );
             body.insert(
                 "threadId".into(),
-                serde_json::Value::String(event.thread_id.clone()),
+                serde_json::Value::String(event.thread_id.as_str().to_owned()),
             );
             if let Some(run_id) = &event.run_id {
-                body.insert("runId".into(), serde_json::Value::String(run_id.clone()));
+                body.insert(
+                    "runId".into(),
+                    serde_json::Value::String(run_id.as_str().to_owned()),
+                );
             }
             if let Some(node_id) = &event.node_id {
-                body.insert("nodeId".into(), serde_json::Value::String(node_id.clone()));
+                body.insert(
+                    "nodeId".into(),
+                    serde_json::Value::String(node_id.as_str().to_owned()),
+                );
             }
             if let Some(driver) = &event.driver {
                 body.insert("driver".into(), serde_json::Value::String(driver.clone()));
@@ -1440,7 +1524,10 @@ fn wire_event(event: &ApplicationStoredEvent) -> serde_json::Value {
                 );
             }
             if let Some(raw) = &event.raw_event_id {
-                body.insert("rawEventId".into(), serde_json::Value::String(raw.clone()));
+                body.insert(
+                    "rawEventId".into(),
+                    serde_json::Value::String(raw.as_str().to_owned()),
+                );
             }
             body.insert(
                 "occurredAt".into(),

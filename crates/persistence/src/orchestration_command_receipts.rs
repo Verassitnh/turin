@@ -3,6 +3,7 @@
 //! Statements take the caller's connection so they can share a `Db::write` transaction.
 
 use rusqlite::{Connection, OptionalExtension, params_from_iter};
+use turin_contracts::CommandId;
 
 use crate::errors::PersistenceError;
 use crate::sql_value::SqlValue;
@@ -55,7 +56,7 @@ impl ReceiptStatus {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrchestrationCommandReceipt {
-    pub command_id: String,
+    pub command_id: CommandId,
     pub aggregate_kind: AggregateKind,
     pub aggregate_id: String,
     pub command_type: String,
@@ -141,7 +142,7 @@ pub fn upsert(
 
 pub fn get_by_command_id(
     conn: &Connection,
-    command_id: &str,
+    command_id: &CommandId,
 ) -> Result<Option<OrchestrationCommandReceipt>, PersistenceError> {
     let mut stmt = conn
         .prepare(
@@ -158,7 +159,7 @@ pub fn get_by_command_id(
                 &err,
             )
         })?;
-    stmt.query_row([command_id], decode_receipt)
+    stmt.query_row([command_id.as_str()], decode_receipt)
         .optional()
         .map_err(|err| {
             PersistenceError::sql(
@@ -203,8 +204,20 @@ fn decode_receipt(
             ),
         )));
     };
+    let command_id_text: String = row.get(0)?;
+    let command_id = match CommandId::new(&command_id_text) {
+        Ok(command_id) => command_id,
+        Err(err) => {
+            return Ok(Err(PersistenceError::Decode(
+                crate::errors::PersistenceDecodeError::new(
+                    "OrchestrationCommandReceiptRepository.getByCommandId:decode",
+                    err.to_string(),
+                ),
+            )));
+        }
+    };
     Ok(Ok(OrchestrationCommandReceipt {
-        command_id: row.get(0)?,
+        command_id,
         aggregate_kind,
         aggregate_id: row.get(2)?,
         command_type: row.get(3)?,

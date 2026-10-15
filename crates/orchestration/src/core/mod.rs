@@ -6,6 +6,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod projection_reads;
+pub mod provider_continuation_service;
 pub mod provider_event_ingestor;
 pub mod provider_session_manager;
 pub mod provider_session_transition_policy;

@@ -6,17 +6,23 @@
 //! effectful `RunExecutionService` follows in file order (see
 //! docs/handoff/T13e.md).
 
+use std::collections::{HashMap, HashSet};
+
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{Value, json};
 use turin_contracts::{
-    EventId, NodeId, ThreadId, TurnItemId, UtcDateTime,
+    EventId, NodeId, ProviderThreadId, ProviderTurnId, RunAttemptId, RunId, ThreadId, TurnItemId,
+    UtcDateTime,
     orchestration_v2::{
-        OrchestrationV2DomainEvent, OrchestrationV2ExecutionNode, OrchestrationV2ProviderThread,
-        OrchestrationV2Run, OrchestrationV2Subagent, OrchestrationV2SubagentStatus,
-        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
+        OrchestrationV2DomainEvent, OrchestrationV2ExecutionNode,
+        OrchestrationV2LineageRelationship, OrchestrationV2PlanArtifact,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadDisposition,
+        OrchestrationV2ProviderThreadStatus, OrchestrationV2Run, OrchestrationV2RunStatus,
+        OrchestrationV2Subagent, OrchestrationV2SubagentStatus, OrchestrationV2TurnItem,
+        OrchestrationV2TurnItemStatus,
     },
 };
-use turin_provider_core::id_allocator::derive;
+use turin_provider_core::{id_allocator::derive, provider_adapter::ProviderAdapterV2Event};
 
 use crate::projection::turn_item;
 
@@ -297,6 +303,306 @@ pub fn make_interrupt_result_turn_item(
     }
 }
 
+/// `ProviderEventRoutingState`. Upstream threads an immutable copy through
+/// `routeProviderEvent`; here the state is updated in place, which gives the
+/// same routing decisions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderEventRoutingState {
+    pub owned_thread_ids: HashSet<ThreadId>,
+    /// Set once this run's root turn ended. A child thread created after that
+    /// belongs to the run that is live then, so this one no longer adopts it,
+    /// except a workflow member enrolled below: its coordinator keeps this run
+    /// open, so the member is this run's to follow.
+    pub root_turn_ended: bool,
+    /// Member thread id to the coordinator child thread that spawned it.
+    pub workflow_member_parents: HashMap<ThreadId, ThreadId>,
+    pub owned_provider_thread_ids: HashSet<ProviderThreadId>,
+    pub owned_provider_turn_ids: HashSet<ProviderTurnId>,
+    pub inherited_background_turn_items: HashMap<TurnItemId, RunId>,
+    pub root_provider_turn_id: Option<ProviderTurnId>,
+}
+
+/// The run, attempt and provider thread a routed event is checked against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderEventRouteIdentity {
+    pub thread_id: ThreadId,
+    pub run_id: RunId,
+    pub attempt_id: RunAttemptId,
+    pub provider_thread_id: ProviderThreadId,
+}
+
+/// A background turn item a new run may deliver, because its run is settled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InheritedBackgroundTurnItemRoute {
+    pub id: TurnItemId,
+    pub run_id: RunId,
+}
+
+/// `makeProviderEventRoutingState`.
+pub fn make_provider_event_routing_state(
+    identity: &ProviderEventRouteIdentity,
+    inherited_background_turn_items: &[InheritedBackgroundTurnItemRoute],
+    provider_turn_id: Option<&ProviderTurnId>,
+    related_thread_ids: &[ThreadId],
+    related_provider_thread_ids: &[ProviderThreadId],
+) -> ProviderEventRoutingState {
+    let mut owned_thread_ids: HashSet<ThreadId> = related_thread_ids.iter().cloned().collect();
+    owned_thread_ids.insert(identity.thread_id.clone());
+    let mut owned_provider_thread_ids: HashSet<ProviderThreadId> =
+        related_provider_thread_ids.iter().cloned().collect();
+    owned_provider_thread_ids.insert(identity.provider_thread_id.clone());
+    ProviderEventRoutingState {
+        owned_thread_ids,
+        root_turn_ended: false,
+        workflow_member_parents: HashMap::new(),
+        owned_provider_thread_ids,
+        owned_provider_turn_ids: provider_turn_id.cloned().into_iter().collect(),
+        inherited_background_turn_items: inherited_background_turn_items
+            .iter()
+            .map(|item| (item.id.clone(), item.run_id.clone()))
+            .collect(),
+        root_provider_turn_id: provider_turn_id.cloned(),
+    }
+}
+
+/// `routeProviderEvent`: whether `event` belongs to this run, and the state
+/// after it. A `true` event is delivered; the state is updated in place.
+pub fn route_provider_event(
+    event: &ProviderAdapterV2Event,
+    input: &ProviderEventRouteIdentity,
+    state: &mut ProviderEventRoutingState,
+) -> bool {
+    let owns_thread = |state: &ProviderEventRoutingState, thread_id: &ThreadId| {
+        state.owned_thread_ids.contains(thread_id)
+    };
+    let owns_child_thread = |state: &ProviderEventRoutingState, thread_id: &ThreadId| {
+        thread_id != &input.thread_id && owns_thread(state, thread_id)
+    };
+    let owns_run = |run_id: Option<&RunId>| run_id == Some(&input.run_id);
+
+    match event {
+        ProviderAdapterV2Event::ProviderSessionUpdated { .. } => false,
+        ProviderAdapterV2Event::AppThreadCreated { app_thread, .. } => {
+            if app_thread.id == input.thread_id {
+                return true;
+            }
+            let lineage = &app_thread.lineage;
+            let owned_subagent = lineage.relationship_to_parent
+                == Some(OrchestrationV2LineageRelationship::Subagent)
+                && lineage
+                    .parent_thread_id
+                    .as_ref()
+                    .is_some_and(|parent| owns_thread(state, parent))
+                && (!state.root_turn_ended
+                    || state.workflow_member_parents.get(&app_thread.id)
+                        == lineage.parent_thread_id.as_ref());
+            if owned_subagent {
+                state.owned_thread_ids.insert(app_thread.id.clone());
+            }
+            owned_subagent
+        }
+        ProviderAdapterV2Event::ProviderThreadUpdated {
+            provider_thread, ..
+        } => {
+            let belongs = state
+                .owned_provider_thread_ids
+                .contains(&provider_thread.id)
+                || provider_thread
+                    .app_thread_id
+                    .as_ref()
+                    .is_some_and(|thread| owns_thread(state, thread));
+            if belongs {
+                state
+                    .owned_provider_thread_ids
+                    .insert(provider_thread.id.clone());
+            }
+            belongs
+        }
+        ProviderAdapterV2Event::ProviderTurnUpdated {
+            thread_id,
+            provider_turn,
+            ..
+        } => {
+            let is_root = provider_turn.run_attempt_id.as_ref() == Some(&input.attempt_id);
+            let belongs = is_root
+                || (provider_turn.provider_thread_id != input.provider_thread_id
+                    && state
+                        .owned_provider_thread_ids
+                        .contains(&provider_turn.provider_thread_id))
+                || state.owned_provider_turn_ids.contains(&provider_turn.id)
+                || thread_id
+                    .as_ref()
+                    .is_some_and(|thread| owns_child_thread(state, thread));
+            if belongs {
+                state
+                    .owned_provider_turn_ids
+                    .insert(provider_turn.id.clone());
+                if is_root {
+                    state.root_provider_turn_id = Some(provider_turn.id.clone());
+                }
+            }
+            belongs
+        }
+        ProviderAdapterV2Event::NodeUpdated { node, .. } => {
+            let belongs =
+                owns_run(node.run_id.as_ref()) || owns_child_thread(state, &node.thread_id);
+            match &node.provider_thread_id {
+                Some(provider_thread_id) if belongs => {
+                    state
+                        .owned_provider_thread_ids
+                        .insert(provider_thread_id.clone());
+                    true
+                }
+                _ => belongs,
+            }
+        }
+        ProviderAdapterV2Event::SubagentUpdated { subagent, .. } => {
+            let belongs =
+                owns_run(subagent.run_id.as_ref()) || owns_child_thread(state, &subagent.thread_id);
+            let (Some(workflow), Some(coordinator_child)) =
+                (&subagent.workflow, &subagent.child_thread_id)
+            else {
+                return belongs;
+            };
+            if !owns_run(subagent.run_id.as_ref()) {
+                return belongs;
+            }
+            for member in &workflow.agents {
+                if let Some(member_child) = &member.child_thread_id {
+                    state
+                        .workflow_member_parents
+                        .insert(member_child.clone(), coordinator_child.clone());
+                }
+            }
+            true
+        }
+        ProviderAdapterV2Event::MessageUpdated { message, .. } => {
+            owns_run(message.run_id.as_ref()) || owns_child_thread(state, &message.thread_id)
+        }
+        ProviderAdapterV2Event::TurnItemUpdated { turn_item, .. } => {
+            let common = turn_item::common(turn_item);
+            if owns_run(common.run_id) || owns_child_thread(state, common.thread_id) {
+                return true;
+            }
+            // Keep the item's original ownership, but let the one live run
+            // deliver an exact carryover identity selected from the projection.
+            let inherited_run_id = state.inherited_background_turn_items.get(common.id);
+            let is_inherited_background_item = common.thread_id == &input.thread_id
+                && common.run_id.is_some()
+                && inherited_run_id == common.run_id
+                && is_background_capable(turn_item::type_tag(turn_item));
+            if !is_inherited_background_item {
+                return false;
+            }
+            if is_turn_item_work_active(common.status) {
+                return true;
+            }
+            state.inherited_background_turn_items.remove(common.id);
+            true
+        }
+        ProviderAdapterV2Event::PlanUpdated { plan, .. } => {
+            let (thread_id, run_id) = match plan {
+                OrchestrationV2PlanArtifact::ProposedPlan {
+                    thread_id, run_id, ..
+                }
+                | OrchestrationV2PlanArtifact::TodoList {
+                    thread_id, run_id, ..
+                } => (thread_id, run_id),
+            };
+            owns_run(run_id.as_ref()) || owns_child_thread(state, thread_id)
+        }
+        ProviderAdapterV2Event::RuntimeRequestUpdated {
+            thread_id,
+            runtime_request,
+            ..
+        } => {
+            thread_id
+                .as_ref()
+                .is_some_and(|thread| owns_child_thread(state, thread))
+                || runtime_request
+                    .provider_turn_id
+                    .as_ref()
+                    .is_some_and(|turn| state.owned_provider_turn_ids.contains(turn))
+        }
+        ProviderAdapterV2Event::TurnTerminal {
+            provider_turn_id, ..
+        } => {
+            if state.root_provider_turn_id.as_ref() == Some(provider_turn_id) {
+                state.root_turn_ended = true;
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// `finalProviderThreadStatus`.
+pub fn final_provider_thread_status(
+    disposition: OrchestrationV2ProviderThreadDisposition,
+) -> OrchestrationV2ProviderThreadStatus {
+    match disposition {
+        OrchestrationV2ProviderThreadDisposition::Broken => {
+            OrchestrationV2ProviderThreadStatus::Error
+        }
+        OrchestrationV2ProviderThreadDisposition::Reusable => {
+            OrchestrationV2ProviderThreadStatus::Idle
+        }
+    }
+}
+
+/// `canRouteRelatedSubagent`: only a completed subagent's child thread is resumed.
+pub fn can_route_related_subagent(status: OrchestrationV2SubagentStatus) -> bool {
+    status == OrchestrationV2SubagentStatus::Completed
+}
+
+/// `selectInheritedBackgroundTurnItems`: background items of a settled earlier
+/// run on the same provider thread that are still open. The new run takes
+/// over their delivery.
+pub fn select_inherited_background_turn_items(
+    thread_id: &ThreadId,
+    current_provider_thread_id: &ProviderThreadId,
+    current_run_ordinal: u64,
+    runs: &[OrchestrationV2Run],
+    turn_items: &[OrchestrationV2TurnItem],
+) -> Vec<InheritedBackgroundTurnItemRoute> {
+    let settled_prior_run_ids: HashSet<&RunId> = runs
+        .iter()
+        .filter(|run| {
+            &run.thread_id == thread_id
+                && run.ordinal.get() < current_run_ordinal
+                && matches!(
+                    run.status,
+                    OrchestrationV2RunStatus::Interrupted
+                        | OrchestrationV2RunStatus::Failed
+                        | OrchestrationV2RunStatus::Cancelled
+                )
+        })
+        .map(|run| &run.id)
+        .collect();
+    turn_items
+        .iter()
+        .filter_map(|item| {
+            let common = turn_item::common(item);
+            let run_id = common.run_id?;
+            (common.thread_id == thread_id
+                && common.provider_thread_id == Some(current_provider_thread_id)
+                && settled_prior_run_ids.contains(run_id)
+                && is_background_capable(turn_item::type_tag(item))
+                && is_turn_item_work_active(common.status))
+            .then(|| InheritedBackgroundTurnItemRoute {
+                id: common.id.clone(),
+                run_id: run_id.clone(),
+            })
+        })
+        .collect()
+}
+
+/// `backgroundCapableTurnItemTypes`: work whose lifecycle can outlive the root turn.
+fn is_background_capable(type_tag: &str) -> bool {
+    matches!(type_tag, "command_execution" | "dynamic_tool" | "subagent")
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
@@ -540,6 +846,174 @@ mod tests {
             wire_item["parentItemId"],
             serde_json::to_value(derive::run_signal_turn_item(&run().id, "interrupt-request"))
                 .expect("id")
+        );
+    }
+
+    fn identity() -> ProviderEventRouteIdentity {
+        ProviderEventRouteIdentity {
+            thread_id: ThreadId::new("thread-1").expect("id"),
+            run_id: RunId::new("run-1").expect("id"),
+            attempt_id: RunAttemptId::new("attempt-1").expect("id"),
+            provider_thread_id: ProviderThreadId::new("provider-thread-1").expect("id"),
+        }
+    }
+
+    fn provider_turn_event(
+        turn_id: &str,
+        attempt: &str,
+        provider_thread: &str,
+    ) -> ProviderAdapterV2Event {
+        serde_json::from_value(json!({
+            "type": "provider_turn.updated", "driver": "codex", "provider_turn": {
+                "id": turn_id, "providerThreadId": provider_thread, "nodeId": "node-root",
+                "runAttemptId": attempt, "nativeTurnRef": null, "ordinal": 1,
+                "status": "running", "startedAt": NOW, "completedAt": null,
+                "tokenUsage": null, "turnTokenUsage": null,
+            },
+        }))
+        .expect("provider turn event")
+    }
+
+    fn terminal_event(turn_id: &str) -> ProviderAdapterV2Event {
+        serde_json::from_value(json!({
+            "type": "turn.terminal", "driver": "codex",
+            "provider_thread_id": "provider-thread-1", "provider_turn_id": turn_id,
+            "run_ordinal": 1, "status": "completed", "failure": null,
+            "thread_disposition": "reusable",
+        }))
+        .expect("terminal event")
+    }
+
+    #[test]
+    fn root_turn_terminal_routes_only_for_the_root_provider_turn() {
+        let identity = identity();
+        let mut state = make_provider_event_routing_state(&identity, &[], None, &[], &[]);
+
+        // Another attempt's turn is not ours, so it does not become the root.
+        let other = provider_turn_event("turn-other", "attempt-other", "provider-thread-other");
+        assert!(!route_provider_event(&other, &identity, &mut state));
+        assert!(!route_provider_event(
+            &terminal_event("turn-other"),
+            &identity,
+            &mut state
+        ));
+        assert!(!state.root_turn_ended);
+
+        let root = provider_turn_event("turn-root", "attempt-1", "provider-thread-1");
+        assert!(route_provider_event(&root, &identity, &mut state));
+        assert_eq!(
+            state.root_provider_turn_id,
+            Some(ProviderTurnId::new("turn-root").expect("id"))
+        );
+
+        assert!(route_provider_event(
+            &terminal_event("turn-root"),
+            &identity,
+            &mut state
+        ));
+        assert!(state.root_turn_ended);
+    }
+
+    #[test]
+    fn node_on_this_run_adopts_its_provider_thread() {
+        let identity = identity();
+        let mut state = make_provider_event_routing_state(&identity, &[], None, &[], &[]);
+        let mut node = node("node-x", "thread-1", Some("run-1"), "root_turn", "running");
+        node.provider_thread_id = Some(ProviderThreadId::new("provider-thread-new").expect("id"));
+        let event = ProviderAdapterV2Event::NodeUpdated {
+            driver: serde_json::from_value(json!("codex")).expect("driver"),
+            node,
+        };
+        assert!(route_provider_event(&event, &identity, &mut state));
+        assert!(
+            state
+                .owned_provider_thread_ids
+                .contains(&ProviderThreadId::new("provider-thread-new").expect("id"))
+        );
+    }
+
+    #[test]
+    fn inherited_background_item_routes_until_it_settles() {
+        let identity = identity();
+        let item_id = TurnItemId::new("turn-item:bg").expect("id");
+        let inherited = vec![InheritedBackgroundTurnItemRoute {
+            id: item_id.clone(),
+            run_id: RunId::new("run-0").expect("id"),
+        }];
+        let mut state = make_provider_event_routing_state(&identity, &inherited, None, &[], &[]);
+        let item = |status: &str| {
+            let mut value = json!({
+                "type": "command_execution", "id": "turn-item:bg", "threadId": "thread-1",
+                "runId": "run-0", "nodeId": null, "providerThreadId": "provider-thread-1",
+                "providerTurnId": null, "nativeItemRef": null, "parentItemId": null,
+                "ordinal": 2, "status": status, "title": "sleep", "startedAt": NOW,
+                "completedAt": null, "updatedAt": NOW, "input": "sleep 300",
+            });
+            if status != "running" {
+                value["completedAt"] = json!(NOW);
+            }
+            ProviderAdapterV2Event::TurnItemUpdated {
+                driver: serde_json::from_value(json!("codex")).expect("driver"),
+                turn_item: serde_json::from_value(value).expect("item"),
+            }
+        };
+
+        assert!(route_provider_event(
+            &item("running"),
+            &identity,
+            &mut state
+        ));
+        assert!(state.inherited_background_turn_items.contains_key(&item_id));
+        assert!(route_provider_event(
+            &item("completed"),
+            &identity,
+            &mut state
+        ));
+        assert!(!state.inherited_background_turn_items.contains_key(&item_id));
+    }
+
+    #[test]
+    fn selects_only_open_background_items_of_settled_prior_runs_on_this_provider_thread() {
+        let run = |id: &str, ordinal: u64, status: &str| -> OrchestrationV2Run {
+            let mut value =
+                crate::pipeline::test_support::run_json(id, "thread-1", ordinal, status);
+            value["providerThreadId"] = json!("provider-thread-1");
+            serde_json::from_value(value).expect("run fixture")
+        };
+        let runs = vec![
+            run("run-prior", 1, "interrupted"),
+            run("run-live", 2, "running"),
+            run("run-done", 3, "completed"),
+        ];
+        let item = |id: &str, run_id: &str, status: &str| -> OrchestrationV2TurnItem {
+            serde_json::from_value(json!({
+                "type": "command_execution", "id": id, "threadId": "thread-1",
+                "runId": run_id, "nodeId": null, "providerThreadId": "provider-thread-1",
+                "providerTurnId": null, "nativeItemRef": null, "parentItemId": null,
+                "ordinal": 2, "status": status, "title": "sleep", "startedAt": NOW,
+                "completedAt": null, "updatedAt": NOW, "input": "sleep 300",
+            }))
+            .expect("item fixture")
+        };
+        let items = vec![
+            item("open-prior", "run-prior", "running"),
+            item("settled-prior", "run-prior", "completed"),
+            item("open-live", "run-live", "running"),
+            item("open-done", "run-done", "running"),
+        ];
+        let selected = select_inherited_background_turn_items(
+            &ThreadId::new("thread-1").expect("id"),
+            &ProviderThreadId::new("provider-thread-1").expect("id"),
+            4,
+            &runs,
+            &items,
+        );
+        assert_eq!(
+            selected,
+            vec![InheritedBackgroundTurnItemRoute {
+                id: TurnItemId::new("open-prior").expect("id"),
+                run_id: RunId::new("run-prior").expect("id"),
+            }]
         );
     }
 }

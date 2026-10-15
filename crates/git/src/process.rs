@@ -51,6 +51,7 @@ pub struct ProcessRunInput {
     pub clear_env: Vec<String>,
     pub stdin: Option<String>,
     pub on_stdout_chunk: Option<StdoutChunkCallback>,
+    pub on_stderr_chunk: Option<StdoutChunkCallback>,
     pub max_output_bytes: Option<usize>,
     pub output_mode: Option<OutputMode>,
     pub truncated_marker: Option<String>,
@@ -69,6 +70,7 @@ impl ProcessRunInput {
             clear_env: Vec::new(),
             stdin: None,
             on_stdout_chunk: None,
+            on_stderr_chunk: None,
             max_output_bytes: None,
             output_mode: None,
             truncated_marker: None,
@@ -227,6 +229,7 @@ impl ProcessRunner {
         let stdin = child.stdin.take();
         let stdin_text = input.stdin.clone();
         let on_stdout_chunk = input.on_stdout_chunk.clone();
+        let on_stderr_chunk = input.on_stderr_chunk.clone();
 
         let work_invocation = invocation.clone();
         let stdin_bytes = stdin_text.as_ref().map(String::len).unwrap_or(0);
@@ -245,7 +248,7 @@ impl ProcessRunner {
                 max_output_bytes,
                 output_mode,
                 stderr_marker,
-                None,
+                on_stderr_chunk,
             )));
             let stdin_handle = AbortOnDropHandle::new(tokio::spawn(write_stdin(stdin, stdin_text)));
             // Readers and the stdin writer run together so a full pipe cannot stall git.

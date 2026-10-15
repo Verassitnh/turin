@@ -22,9 +22,22 @@ use crate::process::{OutputMode, ProcessRunError, ProcessRunInput, ProcessRunner
 use crate::remote_refs::parse_remote_ref_with_remote_names;
 
 pub const GIT_LIST_BRANCHES_DEFAULT_LIMIT: usize = 100;
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_000_000;
-const OUTPUT_TRUNCATED_MARKER: &str = "\n\n[truncated]";
+pub(super) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_000_000;
+pub(super) const OUTPUT_TRUNCATED_MARKER: &str = "\n\n[truncated]";
+
+mod driver;
+pub use driver::{
+    CreateWorktreeOptions, GitCommitOptions, GitCommitResult, GitDeleteLocalBranchInput,
+    GitEnsureRemoteInput, GitFetchPullRequestBranchInput, GitFetchPullRequestHeadCommitInput,
+    GitFetchRemoteBranchInput, GitFetchRemoteInput, GitFetchRemoteTrackingBranchInput,
+    GitLocalStatusOptions, GitPreparedCommitContext, GitPushOptions, GitPushResult, GitPushStatus,
+    GitRangeContext, GitRefreshCheckedOutBranchInput, GitRefreshCheckedOutBranchResult,
+    GitRemoteBranchExistsInput, GitRemoteExistsInput, GitRemoteStatusDetails, GitRemoteStatusOptions,
+    GitRenameBranchInput, GitRenameBranchResult, GitResolveCommitInput, GitResolveCommitResult,
+    GitResolveRemoteTrackingCommitInput, GitResolveRemoteTrackingCommitResult,
+    GitSetBranchUpstreamInput, GitStatusDetails,
+};
 
 static BRANCH_AB: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\+(\d+)\s+-(\d+)$").unwrap());
 static REVIEW_NUMSTAT: LazyLock<Regex> =
@@ -620,6 +633,8 @@ fn js_parse_int(value: &str) -> i64 {
     if negative { -magnitude } else { magnitude }
 }
 
+pub type GitLineCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
 pub struct ExecuteGitInput {
     pub operation: String,
     pub cwd: String,
@@ -631,6 +646,8 @@ pub struct ExecuteGitInput {
     pub allow_non_zero_exit: bool,
     pub max_output_bytes: Option<usize>,
     pub append_truncation_marker: bool,
+    pub on_stdout_line: Option<GitLineCallback>,
+    pub on_stderr_line: Option<GitLineCallback>,
 }
 
 impl ExecuteGitInput {
@@ -645,6 +662,8 @@ impl ExecuteGitInput {
             allow_non_zero_exit: false,
             max_output_bytes: None,
             append_truncation_marker: false,
+            on_stdout_line: None,
+            on_stderr_line: None,
         }
     }
 }
@@ -663,12 +682,14 @@ pub struct ExecuteGitResult {
 /// emitted; see PORTING.md.
 pub struct GitVcsDriverCore {
     git_processes: Arc<Semaphore>,
+    state: Arc<driver::DriverState>,
 }
 
 impl GitVcsDriverCore {
     pub fn new() -> Self {
         Self {
             git_processes: Arc::new(Semaphore::new(8)),
+            state: Arc::new(driver::DriverState::new()),
         }
     }
 
@@ -711,6 +732,8 @@ impl GitVcsDriverCore {
         env.extend(windows_long_path_config_env(host_platform(), &env));
 
         let max_output_bytes = input.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES);
+        let stdout_tail = input.on_stdout_line.clone().map(LineTail::new);
+        let stderr_tail = input.on_stderr_line.clone().map(LineTail::new);
         let mut run = ProcessRunInput::new("git", input.args.clone());
         run.cwd = Some(input.cwd.clone());
         run.spawn_cwd = Some(input.cwd.clone());
@@ -721,6 +744,12 @@ impl GitVcsDriverCore {
         if input.append_truncation_marker {
             run.output_mode = Some(OutputMode::Truncate);
             run.truncated_marker = Some(OUTPUT_TRUNCATED_MARKER.to_owned());
+        }
+        if let Some(tail) = &stdout_tail {
+            run.on_stdout_chunk = Some(tail.chunk_callback());
+        }
+        if let Some(tail) = &stderr_tail {
+            run.on_stderr_chunk = Some(tail.chunk_callback());
         }
 
         let output = ProcessRunner.run(run).await.map_err(|error| match error {
@@ -769,6 +798,12 @@ impl GitVcsDriverCore {
                 None,
             ),
         })?;
+        if let Some(tail) = &stdout_tail {
+            tail.flush();
+        }
+        if let Some(tail) = &stderr_tail {
+            tail.flush();
+        }
 
         if !input.allow_non_zero_exit && output.code != Some(0) {
             let reason = classify_git_failure(&output.stderr);
@@ -800,11 +835,76 @@ impl Default for GitVcsDriverCore {
     }
 }
 
+struct LineTail {
+    buffer: Arc<parking_lot::Mutex<String>>,
+    callback: GitLineCallback,
+}
+
+impl LineTail {
+    fn new(callback: GitLineCallback) -> Self {
+        Self {
+            buffer: Arc::new(parking_lot::Mutex::new(String::new())),
+            callback,
+        }
+    }
+
+    fn chunk_callback(&self) -> crate::process::StdoutChunkCallback {
+        let buffer = self.buffer.clone();
+        let callback = self.callback.clone();
+        Arc::new(move |chunk: &[u8]| {
+            let mut pending = buffer.lock();
+            pending.push_str(&String::from_utf8_lossy(chunk));
+            drain_output_lines(&mut pending, &callback, false);
+        })
+    }
+
+    fn flush(&self) {
+        let mut pending = self.buffer.lock();
+        drain_output_lines(&mut pending, &self.callback, true);
+    }
+}
+
+/// Git redraws progress with a bare `\r`. Treat `\r\n`, `\r`, and `\n` as breaks.
+fn drain_output_lines(buffer: &mut String, callback: &GitLineCallback, flush: bool) {
+    loop {
+        let Some((at, len)) = next_line_break(buffer) else {
+            break;
+        };
+        let line = buffer[..at].to_owned();
+        buffer.replace_range(..at + len, "");
+        if !line.is_empty() {
+            callback(&line);
+        }
+    }
+    if flush {
+        let trailing = std::mem::take(buffer);
+        if !trailing.is_empty() {
+            callback(&trailing);
+        }
+    }
+}
+
+fn next_line_break(buffer: &str) -> Option<(usize, usize)> {
+    let bytes = buffer.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' {
+            let len = if bytes.get(index + 1) == Some(&b'\n') { 2 } else { 1 };
+            return Some((index, len));
+        }
+        if bytes[index] == b'\n' {
+            return Some((index, 1));
+        }
+        index += 1;
+    }
+    None
+}
+
 fn host_platform() -> &'static str {
     if cfg!(windows) { "win32" } else { "other" }
 }
 
-fn git_error(
+pub(super) fn git_error(
     input: &ExecuteGitInput,
     detail: &str,
     exit_code: Option<f64>,

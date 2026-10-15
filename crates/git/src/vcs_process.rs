@@ -145,6 +145,7 @@ impl VcsProcess {
                 clear_env: input.clear_env.clone(),
                 stdin: input.stdin.clone(),
                 on_stdout_chunk: input.on_stdout_chunk.clone(),
+                on_stderr_chunk: None,
                 max_output_bytes: Some(input.max_output_bytes.unwrap_or(DEFAULT_MAX_OUTPUT_BYTES)),
                 output_mode: Some(input.output_mode.unwrap_or(OutputMode::Truncate)),
                 truncated_marker: Some(if input.append_truncation_marker {

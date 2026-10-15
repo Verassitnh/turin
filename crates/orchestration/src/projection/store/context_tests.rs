@@ -340,3 +340,73 @@ async fn is_node_stored_matches_only_the_exact_stored_node() {
     assert!(store.is_node_stored(&stored).await.unwrap());
     assert!(!store.is_node_stored(&changed).await.unwrap());
 }
+
+#[tokio::test]
+async fn turn_start_context_reads_the_thread_runs_and_run_scoped_items() {
+    let (store, _dir) = file_store().await;
+    create_thread(&store, "thread:turn-start").await;
+    apply_all(
+        &store,
+        vec![
+            event(
+                "run.created",
+                "thread:turn-start",
+                T0,
+                run("thread:turn-start", "run:turn-start", 1, "queued"),
+            ),
+            event(
+                "message.updated",
+                "thread:turn-start",
+                T0,
+                crate::projection::test_support::message(
+                    "thread:turn-start",
+                    "message:turn-start",
+                    Some("run:turn-start"),
+                    "user",
+                    "first",
+                    T0,
+                ),
+            ),
+            event(
+                "turn-item.updated",
+                "thread:turn-start",
+                T0,
+                crate::projection::test_support::user_message_item(
+                    "thread:turn-start",
+                    "item:turn-start",
+                    "run:turn-start",
+                    1,
+                    "first",
+                    "turn_start",
+                ),
+            ),
+        ],
+    )
+    .await;
+    let thread_id = tid("thread:turn-start");
+
+    let context = store
+        .get_turn_start_context(
+            &thread_id,
+            &turin_contracts::RunId::new("run:turn-start").unwrap(),
+        )
+        .await
+        .expect("turn start context");
+    let missing = store
+        .get_turn_start_context(
+            &tid("thread:turn-start-absent"),
+            &turin_contracts::RunId::new("run:turn-start").unwrap(),
+        )
+        .await;
+
+    assert_eq!(context.thread.id.as_str(), "thread:turn-start");
+    assert_eq!(context.runs.len(), 1);
+    assert_eq!(context.turn_items.len(), 1);
+    assert!(context.checkpoint_scopes.is_empty());
+    // A user message with text and no attachments is conversation, not a compact command.
+    assert!(context.has_conversation);
+    assert!(matches!(
+        missing,
+        Err(ProjectionStoreError::ThreadNotFound { .. })
+    ));
+}

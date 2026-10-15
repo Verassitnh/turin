@@ -3,12 +3,14 @@
 //! Each read names its upstream method in its doc comment. SQL is copied
 //! verbatim; a read that also needed a thread check calls `read_thread`.
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use turin_contracts::orchestration_v2::{
-    OrchestrationV2AppThread, OrchestrationV2CheckpointScope, OrchestrationV2ConversationMessage,
+    OrchestrationV2AppThread, OrchestrationV2CheckpointScope, OrchestrationV2ContextHandoff,
+    OrchestrationV2ContextTransfer, OrchestrationV2ConversationMessage,
     OrchestrationV2ExecutionNode, OrchestrationV2ProviderSession, OrchestrationV2ProviderThread,
     OrchestrationV2ProviderTurn, OrchestrationV2ResponseCapability, OrchestrationV2Run,
-    OrchestrationV2RunAttempt, OrchestrationV2RuntimeRequest, OrchestrationV2TurnItem,
+    OrchestrationV2RunAttempt, OrchestrationV2RuntimeRequest, OrchestrationV2Subagent,
+    OrchestrationV2TurnItem,
 };
 use turin_contracts::{MessageId, ProviderThreadId, ProviderTurnId, RunAttemptId, ThreadId};
 
@@ -519,4 +521,171 @@ pub(crate) fn checkpoint_capture_context(
         provider_thread,
         ready_checkpoint_ordinals,
     })
+}
+
+/// JavaScript `String.prototype.trim` whitespace, for SQLite `trim(x, chars)`.
+/// Compact-command recognition must trim the way upstream does.
+const JS_TRIM_WHITESPACE: &str = " \t\n\r\u{0b}\u{0c}\u{a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}";
+
+/// `getTurnStartContext` result: everything a turn start reads, scoped to one run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnStartContext {
+    pub has_conversation: bool,
+    pub thread: OrchestrationV2AppThread,
+    pub runs: Vec<OrchestrationV2Run>,
+    pub attempts: Vec<OrchestrationV2RunAttempt>,
+    pub nodes: Vec<OrchestrationV2ExecutionNode>,
+    pub subagents: Vec<OrchestrationV2Subagent>,
+    pub provider_sessions: Vec<OrchestrationV2ProviderSession>,
+    pub provider_threads: Vec<OrchestrationV2ProviderThread>,
+    pub provider_turns: Vec<OrchestrationV2ProviderTurn>,
+    pub messages: Vec<OrchestrationV2ConversationMessage>,
+    pub checkpoint_scopes: Vec<OrchestrationV2CheckpointScope>,
+    pub context_handoffs: Vec<OrchestrationV2ContextHandoff>,
+    pub context_transfers: Vec<OrchestrationV2ContextTransfer>,
+    pub turn_items: Vec<OrchestrationV2TurnItem>,
+}
+
+/// `getTurnStartContext`. Errors with `ThreadNotFound` when the thread is missing.
+pub(crate) fn turn_start_context(
+    conn: &Connection,
+    thread_id: &ThreadId,
+    run_id: &str,
+) -> Result<TurnStartContext, ReadFailure> {
+    let thread = read_thread(conn, thread_id)?;
+    let thread_param = thread_id.as_str();
+    let runs = query_payloads(
+        conn,
+        "SELECT payload_json FROM orchestration_v2_projection_runs
+         WHERE thread_id = ?1 ORDER BY ordinal ASC",
+        [thread_param],
+    )?;
+    let attempts = query_payloads(
+        conn,
+        "SELECT payload_json FROM orchestration_v2_projection_run_attempts
+         WHERE thread_id = ?1 ORDER BY run_id ASC, attempt_ordinal ASC",
+        [thread_param],
+    )?;
+    let nodes: Vec<OrchestrationV2ExecutionNode> = query_payloads(
+        conn,
+        "SELECT payload_json FROM orchestration_v2_projection_nodes
+         WHERE thread_id = ?1 AND node_id IN (
+           SELECT json_extract(payload_json, '$.rootNodeId') FROM orchestration_v2_projection_runs
+           WHERE thread_id = ?1 AND run_id = ?2
+         ) ORDER BY node_id ASC",
+        rusqlite::params![thread_param, run_id],
+    )?;
+    let subagents = query_payloads(
+        conn,
+        "SELECT payload_json FROM orchestration_v2_projection_subagents
+         WHERE thread_id = ?1 AND status NOT IN ('interrupted','failed','cancelled')
+         ORDER BY subagent_id ASC",
+        [thread_param],
+    )?;
+    let provider_threads = query_payloads(
+        conn,
+        "SELECT payload_json FROM orchestration_v2_projection_provider_threads
+         WHERE thread_id = ?1 ORDER BY COALESCE(first_run_ordinal, 0), provider_thread_id ASC",
+        [thread_param],
+    )?;
+    let provider_turns = query_payloads(
+        conn,
+        "SELECT payload_json FROM orchestration_v2_projection_provider_turns
+         WHERE thread_id = ?1 ORDER BY provider_thread_id ASC, ordinal ASC",
+        [thread_param],
+    )?;
+
+    // Scopes are fetched for the nodes that reference one; an empty list matches nothing.
+    let scope_ids: Vec<String> = nodes
+        .iter()
+        .filter_map(|node| {
+            node.checkpoint_scope_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned())
+        })
+        .collect();
+    let scope_sql = format!(
+        "SELECT payload_json FROM orchestration_v2_projection_checkpoint_scopes
+         WHERE thread_id = ?1 AND scope_id IN ({})
+         ORDER BY ordinal_within_parent ASC, scope_id ASC",
+        numbered_placeholders(2, scope_ids.len())
+    );
+    let mut scope_params: Vec<String> = vec![thread_id.as_str().to_owned()];
+    scope_params.extend(scope_ids);
+    let checkpoint_scopes =
+        query_payloads(conn, &scope_sql, params_from_iter(scope_params.iter()))?;
+
+    let context_handoffs = query_payloads(
+        conn,
+        "SELECT payload_json FROM orchestration_v2_projection_context_handoffs
+         WHERE thread_id = ?1 ORDER BY rowid ASC",
+        [thread_param],
+    )?;
+    let context_transfers = query_payloads(
+        conn,
+        "SELECT payload_json FROM orchestration_v2_projection_context_transfers
+         WHERE source_thread_id = ?1 OR target_thread_id = ?1 ORDER BY rowid ASC",
+        [thread_param],
+    )?;
+    let turn_items = query_payloads(
+        conn,
+        "SELECT payload_json FROM orchestration_v2_projection_turn_items
+         WHERE thread_id = ?1 AND run_id = ?2 ORDER BY ordinal ASC, turn_item_id ASC",
+        rusqlite::params![thread_param, run_id],
+    )?;
+    let provider_sessions = query_payloads(
+        conn,
+        "SELECT sessions.payload_json FROM orchestration_v2_projection_provider_sessions AS sessions
+         INNER JOIN orchestration_v2_projection_provider_session_bindings AS bindings
+           ON bindings.provider_session_id = sessions.provider_session_id
+         WHERE bindings.thread_id = ?1
+         ORDER BY sessions.updated_at ASC, sessions.provider_session_id ASC",
+        [thread_param],
+    )?;
+    // Compact retries need their original markers; emptiness is an existence check.
+    let messages = query_payloads(
+        conn,
+        "SELECT payload_json FROM orchestration_v2_projection_messages
+         WHERE thread_id = ?1 AND (
+           message_id IN (SELECT json_extract(payload_json, '$.userMessageId') FROM orchestration_v2_projection_runs
+             WHERE thread_id = ?1 AND run_id = ?2)
+           OR (role = 'user' AND lower(trim(json_extract(payload_json, '$.text'), ?3)) = '/compact')
+         ) ORDER BY created_at ASC, message_id ASC",
+        rusqlite::params![thread_param, run_id, JS_TRIM_WHITESPACE],
+    )?;
+    let has_conversation: i64 = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM orchestration_v2_projection_messages
+           WHERE thread_id = ?1 AND role = 'user'
+             AND (lower(trim(json_extract(payload_json, '$.text'), ?2)) <> '/compact'
+               OR json_array_length(payload_json, '$.attachments') > 0)
+         ) AS present",
+        rusqlite::params![thread_param, JS_TRIM_WHITESPACE],
+        |row| row.get(0),
+    )?;
+
+    Ok(TurnStartContext {
+        has_conversation: has_conversation == 1,
+        thread,
+        runs,
+        attempts,
+        nodes,
+        subagents,
+        provider_sessions,
+        provider_threads,
+        provider_turns,
+        messages,
+        checkpoint_scopes,
+        context_handoffs,
+        context_transfers,
+        turn_items,
+    })
+}
+
+/// `?first` … `?first+count-1`, for an `IN (…)` list after `first - 1` bound values.
+fn numbered_placeholders(first: usize, count: usize) -> String {
+    (first..first + count)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

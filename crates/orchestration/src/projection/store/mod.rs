@@ -656,6 +656,20 @@ impl ProjectionStore {
         .await
     }
 
+    /// `getTurnStartContext`: what a turn start reads for one run.
+    pub async fn get_turn_start_context(
+        &self,
+        thread_id: &ThreadId,
+        run_id: &RunId,
+    ) -> Result<contexts::TurnStartContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let run_id = run_id.as_str().to_owned();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::turn_start_context(conn, &thread, &run_id)
+        })
+        .await
+    }
+
     /// `getRecoveryThreadIds`: threads a boot-time recovery pass of `kind` must visit.
     pub async fn get_recovery_thread_ids(
         &self,

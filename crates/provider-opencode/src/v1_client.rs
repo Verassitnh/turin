@@ -83,7 +83,18 @@ impl V1Client {
                 Some(OPENCODE_HEALTH_TIMEOUT),
             )
             .await?;
-        http_client::decode_json("global.health", &bytes)
+        // Any decode failure, including `healthy: false`, is the upstream health
+        // detail. A raw serde message would not tell the user what to upgrade.
+        serde_json::from_slice(&bytes).map_err(|err| {
+            OpenCodeRuntimeError::new(
+                "global.health",
+                format!(
+                    "OpenCode server returned an invalid health response. T3 Code requires OpenCode v{} or newer.",
+                    crate::version_probe::MINIMUM_OPENCODE_VERSION
+                ),
+            )
+            .with_cause(err)
+        })
     }
 
     pub async fn list_commands(&self) -> Result<Vec<Value>, OpenCodeRuntimeError> {

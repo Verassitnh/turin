@@ -1022,6 +1022,30 @@ done
     }
 
     #[tokio::test]
+    async fn a_health_body_that_cannot_decode_is_an_invalid_health_response() {
+        for body in [
+            r#"{"healthy":false,"version":"1.19.0"}"#,
+            r#"{"healthy":true}"#,
+            r#"{"version":"1.19.0"}"#,
+        ] {
+            let server = crate::test_support::FakeServer::spawn(move |_| {
+                crate::test_support::FakeResponse::json(200, body)
+            })
+            .await;
+            let client = V1Client::new(&server.url, "/work", None).unwrap();
+            let err = verify_open_code_server_version(&client).await.unwrap_err();
+            assert_eq!(err.operation, "global.health");
+            assert_eq!(
+                err.detail,
+                format!(
+                    "OpenCode server returned an invalid health response. T3 Code requires OpenCode v{MINIMUM_OPENCODE_VERSION} or newer."
+                ),
+                "body {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn health_rejects_an_old_server() {
         let server = crate::test_support::FakeServer::spawn(|_| {
             crate::test_support::FakeResponse::json(200, r#"{"healthy":true,"version":"1.0.0"}"#)

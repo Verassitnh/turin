@@ -8,6 +8,7 @@ pub mod git_vcs_driver;
 pub mod git_vcs_driver_core;
 pub mod git_workflow_service;
 pub mod link_created_pull_request;
+pub mod locale_compare;
 pub mod process;
 pub mod remote_refs;
 pub mod shared_git;

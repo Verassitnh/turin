@@ -55,6 +55,9 @@ const PR_LOOKUP_GIT_STATE_TTL: Duration = Duration::from_secs(5 * 60);
 const PR_LOOKUP_CACHE_CAPACITY: usize = 2_048;
 const PR_LOOKUP_FAILURE_BASE: Duration = Duration::from_secs(20);
 const PR_LOOKUP_FAILURE_MAX: Duration = Duration::from_secs(15 * 60);
+/// Pre-commit and commit-msg hooks can run lint or tests, so this is the
+/// 10 minute bound upstream uses instead of the 30s driver default.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 static PR_REPOSITORY_PATH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(.*)(?:/pull/|/-/merge_requests/|/pull-requests/|/pullrequest/)\d+(?:/.*)?$")
@@ -436,6 +439,47 @@ impl<T: Clone> Lru<T> {
     }
 }
 
+/// Consecutive failed PR lookups per cache key. A success clears the key.
+/// Bounded like upstream's `Map`: at capacity a new key evicts the oldest
+/// insertion, and an existing key keeps its place.
+struct FailureStreaks {
+    counts: HashMap<String, u32>,
+    order: VecDeque<String>,
+    capacity: usize,
+}
+
+impl FailureStreaks {
+    fn new(capacity: usize) -> Self {
+        Self {
+            counts: HashMap::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    /// Counts one more failure for `key` and returns the new streak.
+    fn record_failure(&mut self, key: &str) -> u32 {
+        if let Some(count) = self.counts.get_mut(key) {
+            *count += 1;
+            return *count;
+        }
+        if self.counts.len() >= self.capacity
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.counts.remove(&oldest);
+        }
+        self.order.push_back(key.to_owned());
+        self.counts.insert(key.to_owned(), 1);
+        1
+    }
+
+    fn clear(&mut self, key: &str) {
+        if self.counts.remove(key).is_some() {
+            self.order.retain(|item| item != key);
+        }
+    }
+}
+
 #[derive(Clone)]
 enum PrLookup {
     Found(Box<GitBranchPullRequest>),
@@ -455,6 +499,7 @@ pub struct GitManager {
     local_cache: parking_lot::Mutex<Lru<VcsStatusLocalResult>>,
     remote_cache: parking_lot::Mutex<Lru<VcsStatusRemoteResult>>,
     pr_cache: parking_lot::Mutex<Lru<PrLookup>>,
+    pr_failure_streaks: parking_lot::Mutex<FailureStreaks>,
     git_state: parking_lot::Mutex<Lru<String>>,
     pr_epoch: AtomicU64,
     pull_requests: broadcast::Sender<ThreadPullRequestKey>,
@@ -479,6 +524,9 @@ impl GitManager {
             local_cache: parking_lot::Mutex::new(Lru::new(STATUS_CACHE_CAPACITY)),
             remote_cache: parking_lot::Mutex::new(Lru::new(STATUS_CACHE_CAPACITY)),
             pr_cache: parking_lot::Mutex::new(Lru::new(PR_LOOKUP_CACHE_CAPACITY)),
+            pr_failure_streaks: parking_lot::Mutex::new(FailureStreaks::new(
+                PR_LOOKUP_CACHE_CAPACITY,
+            )),
             git_state: parking_lot::Mutex::new(Lru::new(PR_LOOKUP_CACHE_CAPACITY)),
             pr_epoch: AtomicU64::new(0),
             pull_requests: sender,
@@ -639,6 +687,7 @@ impl GitManager {
         }
         match self.lookup_branch_pull_request(cwd, branch).await {
             Ok(Some(found)) => {
+                self.pr_failure_streaks.lock().clear(&key);
                 self.pr_cache.lock().insert(
                     key,
                     PrLookup::Found(Box::new(found.clone())),
@@ -647,13 +696,14 @@ impl GitManager {
                 Ok(Some(found))
             }
             Ok(None) => {
+                self.pr_failure_streaks.lock().clear(&key);
                 self.pr_cache
                     .lock()
                     .insert(key, PrLookup::Missing, PR_LOOKUP_MISSING_TTL);
                 Ok(None)
             }
             Err(error) => {
-                let failures = 1;
+                let failures = self.pr_failure_streaks.lock().record_failure(&key);
                 self.pr_cache.lock().insert(
                     key,
                     PrLookup::Failed(Box::new(error.clone())),
@@ -1083,10 +1133,7 @@ impl GitManager {
                 cwd,
                 &suggested.subject,
                 &suggested.body,
-                GitCommitOptions {
-                    stage: Some(file_paths.unwrap_or(&[]).to_vec()),
-                    ..GitCommitOptions::default()
-                },
+                commit_step_options(file_paths),
             )
             .await
             .map_err(GitManagerServiceError::Command)?;
@@ -1103,8 +1150,13 @@ impl GitManager {
         commit_message: Option<&str>,
         prepared: Option<&crate::git_vcs_driver_core::GitPreparedCommitContext>,
     ) -> Result<SuggestedCommit, GitManagerServiceError> {
-        if let Some(message) = commit_message.and_then(parse_custom_commit_message) {
-            return Ok(sanitize_commit_message(message.0, message.1, None));
+        // A user-written message is committed as typed. Sanitizing is for generated text only.
+        if let Some((subject, body)) = commit_message.and_then(parse_custom_commit_message) {
+            return Ok(SuggestedCommit {
+                subject,
+                body,
+                branch: None,
+            });
         }
         let generated = if let Some(prepared) = prepared {
             self.messages
@@ -1604,6 +1656,14 @@ fn parse_custom_commit_message(raw: &str) -> Option<(String, String)> {
     ))
 }
 
+fn commit_step_options(file_paths: Option<&[String]>) -> GitCommitOptions {
+    GitCommitOptions {
+        timeout: Some(COMMIT_TIMEOUT),
+        stage: Some(file_paths.unwrap_or(&[]).to_vec()),
+        ..GitCommitOptions::default()
+    }
+}
+
 fn format_commit_message(subject: &str, body: &str) -> String {
     if body.trim().is_empty() {
         subject.to_owned()
@@ -1860,6 +1920,57 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn commit_step_waits_for_slow_hooks_like_upstream() {
+        let options = commit_step_options(None);
+        assert_eq!(options.timeout, Some(Duration::from_secs(600)));
+        assert_eq!(options.stage, Some(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn custom_commit_message_is_committed_unchanged() {
+        let manager = GitManager::new(Arc::new(GitVcsDriverCore::new()));
+        let custom = manager
+            .suggest_commit(".", Some("feat: custom summary line"), None)
+            .await
+            .expect("custom message");
+        assert_eq!(custom.subject, "feat: custom summary line");
+        assert_eq!(custom.body, "");
+
+        let long = format!("Fix bug. {}", "x".repeat(90));
+        let body = "Keeps the trailing period.\n\nSecond paragraph.";
+        let custom = manager
+            .suggest_commit(".", Some(&format!("{long}.\n\n{body}")), None)
+            .await
+            .expect("custom message");
+        assert_eq!(custom.subject, format!("{long}."));
+        assert_eq!(custom.body, body);
+    }
+
+    #[test]
+    fn failure_streaks_count_up_per_key_and_clear_on_success() {
+        let mut streaks = FailureStreaks::new(2);
+        assert_eq!(streaks.record_failure("a"), 1);
+        assert_eq!(streaks.record_failure("a"), 2);
+        assert_eq!(streaks.record_failure("b"), 1);
+        // A new key at capacity evicts the oldest insertion ("a").
+        assert_eq!(streaks.record_failure("c"), 1);
+        assert_eq!(streaks.record_failure("a"), 1);
+        streaks.clear("b");
+        assert_eq!(streaks.record_failure("b"), 1);
+    }
+
+    #[test]
+    fn repeated_failures_escalate_the_cached_backoff() {
+        let mut streaks = FailureStreaks::new(PR_LOOKUP_CACHE_CAPACITY);
+        let first = pr_lookup_failure_ttl(streaks.record_failure("branch"));
+        let second = pr_lookup_failure_ttl(streaks.record_failure("branch"));
+        let third = pr_lookup_failure_ttl(streaks.record_failure("branch"));
+        assert_eq!(first, Duration::from_secs(20));
+        assert_eq!(second, Duration::from_secs(40));
+        assert_eq!(third, Duration::from_secs(80));
+    }
+
+    #[test]
     fn backs_off_repeated_pr_lookup_failures() {
         assert_eq!(pr_lookup_failure_ttl(1), Duration::from_millis(20_000));
         assert_eq!(pr_lookup_failure_ttl(2), Duration::from_millis(40_000));
@@ -1991,7 +2102,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.commit.status, GitCommitStepStatus::Created);
-        assert_eq!(result.commit.subject.unwrap().as_str(), "Ship the note");
+        assert_eq!(result.commit.subject.unwrap().as_str(), "Ship the note.");
         assert!(matches!(
             result.toast.cta,
             GitRunStackedActionToastCta::RunAction { .. }
@@ -2002,6 +2113,9 @@ mod tests {
             .args(["log", "-1", "--format=%s"])
             .output()
             .unwrap();
-        assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "Ship the note");
+        assert_eq!(
+            String::from_utf8_lossy(&log.stdout).trim(),
+            "Ship the note."
+        );
     }
 }

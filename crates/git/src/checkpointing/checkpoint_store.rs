@@ -118,6 +118,8 @@ impl CheckpointStore {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    use crate::locale_compare::locale_compare;
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -694,7 +696,7 @@ mod tests {
             file(added_path, None, 2, 0),
             file(renamed_path, Some("rename-old.txt"), 1, 1),
         ];
-        expected_files.sort_by(|left, right| left.path.cmp(&right.path));
+        expected_files.sort_by(|left, right| locale_compare(&left.path, &right.path));
         assert_eq!(first_summary, expected_files);
 
         std::fs::remove_file(dir.path().join("empty.txt")).unwrap();

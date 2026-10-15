@@ -21,6 +21,7 @@ use turin_contracts::vcs::{
     VcsRemote, VcsRepositoryIdentity,
 };
 
+use crate::git_vcs_driver_core::split_null_separated_paths;
 use crate::process::{OutputMode, StdoutChunkCallback};
 use crate::vcs_driver::{
     CheckpointDiffFormat, VcsCaptureCheckpointInput, VcsDeleteCheckpointRefsInput,
@@ -249,7 +250,7 @@ impl VcsDriver for GitVcsDriver {
             ));
         }
         Ok(VcsListWorkspaceFilesResult {
-            paths: split_null_separated(&result.stdout, result.stdout_truncated)
+            paths: split_null_separated_paths(&result.stdout, result.stdout_truncated)
                 .into_iter()
                 .filter_map(|path| TrimmedNonEmptyString::new(path).ok())
                 .collect(),
@@ -372,7 +373,7 @@ impl VcsDriver for GitVcsDriver {
                     },
                 ));
             }
-            ignored.extend(split_null_separated(
+            ignored.extend(split_null_separated_paths(
                 &result.stdout,
                 result.stdout_truncated,
             ));
@@ -410,10 +411,8 @@ impl VcsDriver for GitVcsDriver {
         let common = self.resolve_git_common_dir(&input.cwd).await?;
         let index_id = uuid::Uuid::new_v4();
         let temp_index = PathBuf::from(&common).join(format!("t3-checkpoint-index-{index_id}"));
-        let outcome = self.capture_with_index(input, &temp_index).await;
-        remove_force(&temp_index);
-        remove_force(PathBuf::from(format!("{}.lock", temp_index.display())));
-        outcome
+        let _cleanup = TempIndex(temp_index.clone());
+        self.capture_with_index(input, &temp_index).await
     }
 
     async fn has_checkpoint_ref(&self, input: &VcsHasCheckpointInput) -> Result<bool, VcsError> {
@@ -484,10 +483,7 @@ impl VcsDriver for GitVcsDriver {
             .await?;
         if cleaned.exit_code != 0 {
             let emptied = cleaned.exit_code == 1
-                && cleaned
-                    .stderr
-                    .trim()
-                    .starts_with("warning: failed to remove ./:")
+                && FAILED_TO_REMOVE_WORKSPACE_ROOT.is_match(cleaned.stderr.trim())
                 && std::fs::read_dir(&input.cwd)
                     .map(|entries| entries.count() == 0)
                     .unwrap_or(false);
@@ -1093,7 +1089,7 @@ impl GitVcsDriver {
         if untracked.stdout_truncated {
             return Ok(false);
         }
-        let candidates: Vec<String> = split_null_separated(&untracked.stdout, false)
+        let candidates: Vec<String> = split_null_separated_paths(&untracked.stdout, false)
             .into_iter()
             .filter(|entry| entry.ends_with('/'))
             .collect();
@@ -1127,6 +1123,12 @@ impl GitVcsDriver {
     }
 }
 
+/// Git's "could not remove ./" line from `git clean`, the only stderr that
+/// means "every child was removed". Anything longer or multi-line is a real failure.
+static FAILED_TO_REMOVE_WORKSPACE_ROOT: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^warning: failed to remove \./: [^\n]+$").unwrap()
+    });
 static SPARSE_ADD_HELP: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"--(?:\[no-\])?sparse\b").unwrap());
 
@@ -1231,17 +1233,6 @@ fn exit_error(
     })
 }
 
-pub fn split_null_separated(input: &str, truncated: bool) -> Vec<String> {
-    let mut parts: Vec<String> = input.split('\0').map(str::to_owned).collect();
-    if truncated && parts.last().is_some_and(|part| !part.is_empty()) {
-        parts.pop();
-    }
-    parts
-        .into_iter()
-        .filter(|value| !value.is_empty())
-        .collect()
-}
-
 fn chunk_paths_for_check_ignore(relative_paths: &[String]) -> Vec<Vec<String>> {
     let mut chunks = Vec::new();
     let mut chunk = Vec::new();
@@ -1308,6 +1299,18 @@ fn parse_remote_verbose(output: &str) -> Vec<(String, RemoteVerbose)> {
 
 fn remove_force(path: impl AsRef<Path>) {
     let _ = std::fs::remove_file(path);
+}
+
+/// Removes a checkpoint temp index and its `.lock` when dropped. Upstream's
+/// `cleanupTempIndex` finalizer runs on interruption too, so a capture future
+/// dropped mid-run must not leave them in `.git/`.
+struct TempIndex(PathBuf);
+
+impl Drop for TempIndex {
+    fn drop(&mut self) {
+        remove_force(&self.0);
+        remove_force(PathBuf::from(format!("{}.lock", self.0.display())));
+    }
 }
 
 #[cfg(test)]
@@ -1386,5 +1389,31 @@ mod tests {
         let paths = vec!["a".repeat(100), "b".repeat(100)];
         let chunks = chunk_paths_for_check_ignore(&paths);
         assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn dropping_the_temp_index_guard_removes_the_index_and_its_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("t3-checkpoint-index-test");
+        let lock = PathBuf::from(format!("{}.lock", index.display()));
+        std::fs::write(&index, "index").unwrap();
+        std::fs::write(&lock, "lock").unwrap();
+        drop(TempIndex(index.clone()));
+        assert!(!index.exists());
+        assert!(!lock.exists());
+    }
+
+    #[test]
+    fn only_a_single_line_root_removal_warning_counts_as_emptied() {
+        let root = &FAILED_TO_REMOVE_WORKSPACE_ROOT;
+        assert!(root.is_match("warning: failed to remove ./: Directory not empty"));
+        assert!(!root.is_match("warning: failed to remove ./:"));
+        assert!(!root.is_match("warning: failed to remove ./: "));
+        assert!(
+            !root.is_match(
+                "warning: failed to remove ./: Directory not empty\nfatal: something else"
+            )
+        );
+        assert!(!root.is_match("fatal: warning: failed to remove ./: detail"));
     }
 }

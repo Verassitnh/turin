@@ -209,6 +209,75 @@ mod tests {
     }
 
     #[test]
+    fn yields_nothing_without_a_status_number_url_or_usable_project() {
+        let project = ProjectRepositoryIdentity {
+            host: "github.com".into(),
+            repository: "a/b".into(),
+        };
+        // Upstream: no pull request came out of the action.
+        assert!(
+            created_pull_request_key(
+                &step(
+                    GitPrStepStatus::SkippedNotRequested,
+                    Some(1),
+                    Some("https://github.com/a/b/pull/1")
+                ),
+                Some(&project),
+            )
+            .is_none()
+        );
+        // Upstream: a created pull request needs both a number and a URL.
+        assert!(
+            created_pull_request_key(
+                &step(
+                    GitPrStepStatus::Created,
+                    Some(1),
+                    Some("https://github.com/a/b/pull/1")
+                ),
+                Some(&project),
+            )
+            .is_some()
+        );
+        assert!(
+            created_pull_request_key(
+                &step(
+                    GitPrStepStatus::Created,
+                    None,
+                    Some("https://github.com/a/b/pull/1")
+                ),
+                Some(&project)
+            )
+            .is_none()
+        );
+        assert!(
+            created_pull_request_key(
+                &step(GitPrStepStatus::Created, Some(1), None),
+                Some(&project)
+            )
+            .is_none()
+        );
+        // An unreadable URL can only fall back to a project identity, and it needs both parts.
+        assert!(
+            created_pull_request_key(
+                &step(GitPrStepStatus::Created, Some(1), Some("not a url")),
+                None
+            )
+            .is_none()
+        );
+        let blank = ProjectRepositoryIdentity {
+            host: String::new(),
+            repository: "a/b".into(),
+        };
+        assert!(
+            created_pull_request_key(
+                &step(GitPrStepStatus::Created, Some(1), Some("not a url")),
+                Some(&blank)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn parses_the_hosts_a_thread_link_can_read() {
         let gitlab =
             parse_change_request_url("https://gitlab.example/group/sub/repo/-/merge_requests/42")

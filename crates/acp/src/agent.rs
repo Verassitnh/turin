@@ -16,8 +16,8 @@ use crate::client::{NotifyHandler, RequestHandler};
 use crate::errors::{AcpError, AcpRequestError};
 use crate::meta::{agent, client as client_methods};
 use crate::protocol::{
-    Connection, ConnectionConfig, IncomingNotification, NotificationCallback, RequestCallback,
-    RequestContext,
+    Connection, ConnectionConfig, IncomingNotification, NoConnectionHooks, NotificationCallback,
+    RequestCallback, RequestContext,
 };
 
 #[derive(Default)]
@@ -50,8 +50,9 @@ impl AcpAgent {
             ConnectionConfig {
                 on_request,
                 on_notification,
-                on_termination: Arc::new(|_| {}),
+                hooks: Arc::new(NoConnectionHooks),
                 termination_on_eof: None,
+                termination_on_exit: None,
                 transform_session_update: Arc::new(|value| value),
             },
         );

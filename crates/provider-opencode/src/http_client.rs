@@ -285,6 +285,7 @@ pub fn shared_http() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::limited(10))
+        .no_proxy()
         .build()
         .expect("reqwest client")
 }
@@ -393,5 +394,45 @@ mod tests {
             "Timed out while waiting for the OpenCode server."
         );
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// Child half of [`ignores_proxy_environment_for_loopback`]. The parent sets
+    /// the proxy variables and the server URL; without them this test is a no-op.
+    #[tokio::test]
+    async fn proxy_child() {
+        let Ok(url) = std::env::var("TURIN_PROXY_TEST_URL") else {
+            return;
+        };
+        let status = shared_http()
+            .get(format!("{url}/global/health"))
+            .send()
+            .await
+            .expect("request reached the loopback server without a proxy")
+            .status();
+        assert_eq!(status.as_u16(), 200);
+    }
+
+    /// A proxy in the environment must not capture a loopback request. reqwest
+    /// reads proxy variables when the client is built, so the check runs in a child
+    /// process that carries them; the parent's environment is left alone.
+    #[tokio::test]
+    async fn ignores_proxy_environment_for_loopback() {
+        let server = FakeServer::spawn(|_| FakeResponse::json(200, r#"{"healthy":true}"#)).await;
+        let exe = std::env::current_exe().unwrap();
+        let output = tokio::process::Command::new(exe)
+            .args(["--exact", "http_client::tests::proxy_child", "--nocapture"])
+            .env("TURIN_PROXY_TEST_URL", &server.url)
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

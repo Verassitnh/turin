@@ -28,6 +28,7 @@ use super::thread_sidebar_width::{
     THREAD_SIDEBAR_DEFAULT_WIDTH, THREAD_SIDEBAR_MIN_WIDTH, clamp_thread_sidebar_width,
     resolve_initial_thread_sidebar_width, resolve_thread_sidebar_maximum_width,
 };
+use super::workspace_titlebar::workspace_controls_left;
 use crate::hooks::use_preview_panel_inline_size::{
     PREVIEW_PANEL_DEFAULT_WIDTH, clamp_preview_panel_width, get_preview_panel_max_width,
 };
@@ -47,9 +48,6 @@ actions!(
 );
 
 const KEY_CONTEXT: &str = "AppShell";
-
-/// `--workspace-controls-left` on macOS desktop (`--desktop-window-controls-inset`).
-const DESKTOP_WINDOW_CONTROLS_INSET: f32 = 90.;
 
 /// Upstream default keybindings (packages/shared/src/keybindings.ts) for the
 /// shell's actions.
@@ -292,7 +290,7 @@ impl Render for AppSidebarLayout {
         let sidebar_toggle = div()
             .absolute()
             .top_0()
-            .left(px(DESKTOP_WINDOW_CONTROLS_INSET + 1.))
+            .left(workspace_controls_left(window) + px(1.))
             .h(WORKSPACE_TOPBAR_HEIGHT)
             .flex()
             .items_center()

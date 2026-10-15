@@ -13,15 +13,12 @@ use gpui_kit::{
 
 use crate::assets::T3_WORDMARK;
 use crate::components::drag_region::{DragRegion as _, no_drag};
+use crate::components::workspace_titlebar::workspace_titlebar_content_left;
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::{
     CONTROL_RADIUS, SIDEBAR_CONTENT_INSET, TEXT_SM, WORKSPACE_TOPBAR_HEIGHT,
 };
 use crate::ui::{Icon, IconName, Tooltip};
-
-/// `--workspace-titlebar-content-left` on macOS desktop: the 90px window
-/// controls inset + the 28px sidebar toggle + its 12px gap.
-pub const WORKSPACE_TITLEBAR_CONTENT_LEFT: f32 = 90. + 28. + 12.;
 
 #[derive(IntoElement)]
 pub struct SidebarChromeHeader;
@@ -54,7 +51,7 @@ impl RenderOnce for SidebarChromeHeader {
                     .overflow_hidden()
                     .child(
                         div()
-                            .ml(px(WORKSPACE_TITLEBAR_CONTENT_LEFT))
+                            .ml(workspace_titlebar_content_left(window))
                             .flex()
                             .h_7()
                             .items_center()

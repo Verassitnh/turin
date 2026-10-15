@@ -1169,3 +1169,133 @@ async fn shutdown_kills_descendants_after_the_leader_exited() {
     client.shutdown().await.unwrap();
     assert_descendant_killed(pid).await;
 }
+
+/// Port of schema.test.ts: a failed turn whose error carries a Codex error info variant.
+fn failed_thread(codex_error_info: &str) -> Value {
+    json!({
+        "cliVersion": "0.150.0",
+        "createdAt": 0,
+        "cwd": "/tmp/project",
+        "ephemeral": false,
+        "id": "thread-1",
+        "modelProvider": "openai",
+        "preview": "",
+        "projectId": null,
+        "sessionId": "session-1",
+        "source": "cli",
+        "status": {"type": "idle"},
+        "turns": [{
+            "error": {"codexErrorInfo": codex_error_info, "message": codex_error_info},
+            "id": "turn-1",
+            "items": [],
+            "status": "failed"
+        }],
+        "updatedAt": 0
+    })
+}
+
+#[test]
+fn schema_accepts_rate_limit_and_misalignment_errors_on_failed_turns() {
+    for info in ["rateLimitExceeded", "misalignmentPolicyViolation"] {
+        let thread = failed_thread(info);
+        assert!(
+            schema::validate_type("V2ThreadReadResponse", &json!({"thread": thread})).is_ok(),
+            "read {info}"
+        );
+        let resume_like = json!({
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
+            "cwd": "/tmp/project",
+            "model": "gpt-5.6-sol",
+            "modelProvider": "openai",
+            "sandbox": {"type": "dangerFullAccess"},
+            "thread": thread
+        });
+        assert!(
+            schema::validate_type("V2ThreadResumeResponse", &resume_like).is_ok(),
+            "resume {info}"
+        );
+        assert!(
+            schema::validate_type("V2ThreadForkResponse", &resume_like).is_ok(),
+            "fork {info}"
+        );
+        assert!(
+            schema::validate_type(
+                "V2TurnCompletedNotification",
+                &json!({"threadId": "thread-1", "turn": thread["turns"][0]})
+            )
+            .is_ok(),
+            "turn/completed {info}"
+        );
+    }
+}
+
+/// Port of protocol.test.ts: rate-limit reset credits and the consume request/response.
+#[test]
+fn schema_maps_rate_limit_reset_credits_and_consume_reset() {
+    assert_eq!(
+        meta::method_meta(meta::CLIENT_REQUEST_METHODS, "account/rateLimits/read")
+            .unwrap()
+            .response,
+        Some("V2GetAccountRateLimitsResponse")
+    );
+    let consume = meta::method_meta(
+        meta::CLIENT_REQUEST_METHODS,
+        "account/rateLimitResetCredit/consume",
+    )
+    .unwrap();
+    assert_eq!(
+        consume.params,
+        Some("V2ConsumeAccountRateLimitResetCreditParams")
+    );
+    assert_eq!(
+        consume.response,
+        Some("V2ConsumeAccountRateLimitResetCreditResponse")
+    );
+    let credits_response = json!({
+        "rateLimits": {},
+        "rateLimitResetCredits": {
+            "availableCount": 2,
+            "credits": [
+                {
+                    "id": "RateLimitResetCredit_1",
+                    "resetType": "codexRateLimits",
+                    "status": "available",
+                    "grantedAt": 1781654400,
+                    "expiresAt": 1784246400,
+                    "title": "Full reset",
+                    "description": "Ready to redeem"
+                },
+                {
+                    "id": "RateLimitResetCredit_2",
+                    "resetType": "unknown",
+                    "status": "unknown",
+                    "grantedAt": 1781654401,
+                    "expiresAt": null
+                }
+            ]
+        }
+    });
+    assert!(schema::validate_type("V2GetAccountRateLimitsResponse", &credits_response).is_ok());
+    assert!(
+        schema::validate_type(
+            "V2GetAccountRateLimitsResponse",
+            &json!({"rateLimits": {}, "rateLimitResetCredits": {"availableCount": 2, "credits": null}})
+        )
+        .is_ok()
+    );
+    assert!(
+        schema::validate_type(
+            "V2ConsumeAccountRateLimitResetCreditResponse",
+            &json!({"outcome": "reset"})
+        )
+        .is_ok()
+    );
+    assert!(
+        schema::validate_type(
+            "V2ConsumeAccountRateLimitResetCreditResponse",
+            &json!({"outcome": "not-an-outcome"})
+        )
+        .is_err()
+    );
+}

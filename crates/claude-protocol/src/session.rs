@@ -15,8 +15,8 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    process::{Child, Command},
-    sync::{mpsc, oneshot},
+    process::Command,
+    sync::{Notify, mpsc, oneshot},
     task::JoinSet,
 };
 use tokio_util::codec::{FramedRead, LinesCodec};
@@ -116,13 +116,21 @@ impl InboundControl {
     }
 }
 
+/// Status collected after the CLI process is reaped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessExit {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+}
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum SessionEvent {
     Frame(Frame),
     Stderr(String),
     Error(String),
+    /// Stdout closed. [`SessionEvent::Exit`] carries the reaped status and may arrive before or after this.
     Eof,
+    Exit(ProcessExit),
 }
 enum WriteCommand {
     Json(Value),
@@ -155,10 +163,12 @@ struct Shared {
     unmatched: Mutex<VecDeque<(String, Value)>>,
     inbound: Mutex<HashMap<String, CancellationToken>>,
     handler: Arc<dyn ControlHandler>,
+    exit_status: Mutex<Option<ProcessExit>>,
+    exited: Notify,
+    stderr_tail: Mutex<String>,
 }
 pub struct ClaudeSession {
     state: Arc<Shared>,
-    child: Child,
     pid: Option<u32>,
     events: mpsc::UnboundedReceiver<SessionEvent>,
     tasks: JoinSet<()>,
@@ -200,21 +210,38 @@ impl ClaudeSession {
             unmatched: Mutex::new(VecDeque::new()),
             inbound: Mutex::new(HashMap::new()),
             handler,
+            exit_status: Mutex::new(None),
+            exited: Notify::new(),
+            stderr_tail: Mutex::new(String::new()),
         });
         let mut tasks = JoinSet::new();
+        tasks.spawn(reaper(child, state.clone()));
         tasks.spawn(write_loop(stdin, writes, state.clone()));
         tasks.spawn(read_loop(stdout, state.clone()));
-        tasks.spawn(stderr_loop(stderr, state.events.clone()));
+        tasks.spawn(stderr_loop(stderr, state.clone()));
         let mut session = Self {
             state,
-            child,
             pid,
             events,
             tasks,
             initialization: Value::Null,
         };
         // SDK initializes immediately, before any prompt. system/init is emitted only when a turn begins.
-        session.initialization = session.initialize(options.initialize_request()).await?;
+        session.initialization = match session.initialize(options.initialize_request()).await {
+            Ok(value) => value,
+            Err(error) => {
+                let text = error.to_string();
+                if text.contains("claude process closed")
+                    || text.contains("channel closed")
+                    || text.contains("stdin closed")
+                {
+                    let exit = session.wait_for_exit().await;
+                    let tail = session.state.stderr_tail.lock().unwrap().clone();
+                    anyhow::bail!("{}", exit_error(&exit, &tail));
+                }
+                return Err(error);
+            }
+        };
         Ok(session)
     }
     /// Inner `response` object from the initialize control response (commands, models, account, …).
@@ -228,6 +255,9 @@ impl ClaudeSession {
         self.send_raw(serde_json::to_value(message)?)
     }
     pub fn send_raw(&self, value: Value) -> Result<()> {
+        if self.state.pending.lock().unwrap().closed {
+            anyhow::bail!("claude process closed");
+        }
         self.state
             .writer
             .send(WriteCommand::Json(value))
@@ -352,26 +382,49 @@ impl ClaudeSession {
         self.request(json!({"subtype":"mcp_message","server_name":server_name,"message":message}))
             .await
     }
-    pub async fn shutdown(mut self) -> Result<()> {
+    pub async fn shutdown(mut self) -> Result<ProcessExit> {
         let _ = self.state.writer.send(WriteCommand::Close);
-        if tokio::time::timeout(Duration::from_secs(2), self.child.wait())
+        let exit = self.wait_for_exit_with_signals().await;
+        self.pid = None;
+        self.tasks.abort_all();
+        while self.tasks.join_next().await.is_some() {}
+        Ok(exit)
+    }
+    async fn wait_for_exit(&self) -> ProcessExit {
+        if self.state.exit_status.lock().unwrap().is_none() {
+            let _ =
+                tokio::time::timeout(Duration::from_secs(2), self.state.exited.notified()).await;
+        }
+        self.state
+            .exit_status
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(ProcessExit {
+                code: None,
+                signal: None,
+            })
+    }
+    async fn wait_for_exit_with_signals(&self) -> ProcessExit {
+        if self.state.exit_status.lock().unwrap().is_some() {
+            return self.wait_for_exit().await;
+        }
+        let wait = self.state.exited.notified();
+        tokio::pin!(wait);
+        if tokio::time::timeout(Duration::from_secs(2), &mut wait)
             .await
             .is_err()
         {
             signal_group(self.pid, term_signal());
-            if tokio::time::timeout(Duration::from_secs(5), self.child.wait())
+            if tokio::time::timeout(Duration::from_secs(5), &mut wait)
                 .await
                 .is_err()
             {
                 signal_group(self.pid, kill_signal());
-                let _ = self.child.kill().await;
-                let _ = self.child.wait().await;
+                let _ = tokio::time::timeout(Duration::from_secs(1), &mut wait).await;
             }
         }
-        self.pid = None;
-        self.tasks.abort_all();
-        while self.tasks.join_next().await.is_some() {}
-        Ok(())
+        self.wait_for_exit().await
     }
 }
 fn parse_control_response(response: Value, subtype: &str) -> Result<Value> {
@@ -422,6 +475,63 @@ fn signal_group(pid: Option<u32>, signal: i32) {
 }
 #[cfg(not(unix))]
 fn signal_group(_: Option<u32>, _: i32) {}
+fn process_exit(status: Option<std::process::ExitStatus>) -> ProcessExit {
+    let Some(status) = status else {
+        return ProcessExit {
+            code: None,
+            signal: None,
+        };
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return ProcessExit {
+                code: None,
+                signal: Some(signal),
+            };
+        }
+    }
+    ProcessExit {
+        code: status.code(),
+        signal: None,
+    }
+}
+fn exit_error(exit: &ProcessExit, tail: &str) -> String {
+    let mut message = if let Some(signal) = exit.signal {
+        format!("Claude Code process exited with signal {signal}")
+    } else {
+        format!(
+            "Claude Code process exited with code {}",
+            exit.code.unwrap_or(0)
+        )
+    };
+    let tail = tail.trim();
+    if !tail.is_empty() {
+        message.push_str(". stderr: ");
+        message.push_str(tail);
+    }
+    message
+}
+fn push_stderr_tail(tail: &mut String, chunk: &str) {
+    tail.push_str(chunk);
+    let extra = tail.chars().count().saturating_sub(2048);
+    if extra > 0 {
+        let start = tail
+            .char_indices()
+            .nth(extra)
+            .map(|(index, _)| index)
+            .unwrap_or(tail.len());
+        tail.replace_range(..start, "");
+    }
+}
+async fn reaper(mut child: tokio::process::Child, state: Arc<Shared>) {
+    let status = child.wait().await.ok();
+    let exit = process_exit(status);
+    *state.exit_status.lock().unwrap() = Some(exit.clone());
+    state.exited.notify_one();
+    let _ = state.events.send(SessionEvent::Exit(exit));
+}
 async fn write_loop(
     mut stdin: tokio::process::ChildStdin,
     mut writes: mpsc::UnboundedReceiver<WriteCommand>,
@@ -583,18 +693,15 @@ fn dispatch(value: Value, state: &Arc<Shared>, tasks: &mut JoinSet<()>) {
         let _ = state.writer.send(WriteCommand::Json(response));
     });
 }
-async fn stderr_loop(
-    mut stderr: tokio::process::ChildStderr,
-    events: mpsc::UnboundedSender<SessionEvent>,
-) {
+async fn stderr_loop(mut stderr: tokio::process::ChildStderr, state: Arc<Shared>) {
     let mut chunk = [0_u8; 4096];
     loop {
         match stderr.read(&mut chunk).await {
             Ok(0) => break,
             Ok(n) => {
-                let _ = events.send(SessionEvent::Stderr(
-                    String::from_utf8_lossy(&chunk[..n]).into_owned(),
-                ));
+                let text = String::from_utf8_lossy(&chunk[..n]).into_owned();
+                push_stderr_tail(&mut state.stderr_tail.lock().unwrap(), &text);
+                let _ = state.events.send(SessionEvent::Stderr(text));
             }
             Err(_) => break,
         }
@@ -808,6 +915,77 @@ for line in sys.stdin:
             "{error}"
         );
         session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn spawn_reports_exit_code_when_the_cli_dies_before_initialize() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-exit-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            "#!/usr/bin/env python3\nimport sys\nsys.stderr.write('Error: not logged in\\n')\nsys.stderr.flush()\nraise SystemExit(3)\n",
+        );
+        let error = match ClaudeSession::spawn(options, Arc::new(Accept)).await {
+            Err(error) => error,
+            Ok(_) => panic!("spawn succeeded"),
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("Claude Code process exited with code 3"),
+            "{text}"
+        );
+        assert!(text.contains("Error: not logged in"), "{text}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn exit_event_and_shutdown_surface_the_status_after_init() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-exit7-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        sys.stderr.write("boom\n")
+        sys.stderr.flush()
+        raise SystemExit(7)
+"#,
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        let mut saw_stderr = false;
+        let mut exit = None;
+        let mut saw_eof = false;
+        while !saw_stderr || exit.is_none() || !saw_eof {
+            match tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                SessionEvent::Stderr(text) => {
+                    if text.contains("boom") {
+                        saw_stderr = true;
+                    }
+                }
+                SessionEvent::Exit(status) => exit = Some(status),
+                SessionEvent::Eof => saw_eof = true,
+                SessionEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            exit.unwrap(),
+            ProcessExit {
+                code: Some(7),
+                signal: None
+            }
+        );
+        let status = session.shutdown().await.unwrap();
+        assert_eq!(status.code, Some(7));
         fs::remove_dir_all(dir).unwrap();
     }
 }

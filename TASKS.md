@@ -101,7 +101,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T04c | Apply T04b re-QC corrections to protocol docs | `docs/protocols` | Haiku | done (16/16) → verify QC wf_6497dded-82d |
 | T02c | Persistence: Db drop deadlock + index DDL whitespace (from T02b re-QC) | `crates/persistence` | Haiku | done (merged; test catches bug, 6.5k cycles clean) |
-| T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet → Grok | r3 active (Grok) |
+| T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet → Grok → Haiku | r4 active (Haiku) |
 | T05b | Shared utils, contract-dependent files | `crates/shared` | GLM | todo (after T01) |
 | T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok | r2 active (core execute/parsers/checkpoints done) |
 | T07 | Source control: core + GitHub driver, PR service, review guides, viewed files | `crates/source-control` | GLM → Sonnet | r3 active (resume after Claude limit) |

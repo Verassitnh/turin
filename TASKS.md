@@ -164,7 +164,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T02c | Persistence: Db drop deadlock + index DDL whitespace (from T02b re-QC) | `crates/persistence` | Haiku | done (merged; test catches bug, 6.5k cycles clean) |
 | T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet → Grok → Haiku | **merged to main** (332 tests; QC PASS wf_21d5cc36-fb9, fixes T05ac; markdown files live in T16's app/chat/markdown) |
 | T05b | Shared utils, contract-dependent files | `crates/shared` (new modules only) | Codex | **merged to main** with T05c (765 shared tests; QC PASS wf_a9f9ab79-bba) |
-| T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok → Cursor Auto | done (151 tests) → QC queued |
+| T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok → Cursor Auto | **merged to main** (171 tests; QC FAIL→fixed T06c) |
 | T07 | Source control: core + GitHub driver, PR service, review guides, viewed files | `crates/source-control` | GLM → Sonnet → Cursor Auto | r3 active (from docs/handoff/T07.md) |
 | T08 | Provider core: adapter trait, registry, catalog, model manifests, auth/credentials | `crates/provider-core` | Codex → Sonnet → Grok | **merged to main** (182 tests; QC PASS wf_7e833cf1-e0c, fixes T08c) |
 | T08b | Provider core remainder: subagentProjection, mcpToolPresentation, settings watcher → reconcile, model manifest fetch, NDJSON event log, ProviderHost live wiring | `crates/provider-core` | Codex | active (Codex re-auth) |
@@ -179,12 +179,12 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex | r3 active (Codex re-auth) |
 | T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | done → QC wf_118a9a5d-526 |
 | T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok → Cursor Auto | r3: process leak + unjustified cuts (92 tests) |
-| T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok → Cursor Auto | QC PASS (5 medium, 8 low) → r3 fixes active |
+| T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok → Cursor Auto | **merged to main** (44 tests; QC PASS + r3 + lifetime fixes) |
 | T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok → Cursor Auto | done (26 tests, real provider-core traits) → QC queued |
 | T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex → Sonnet → Cursor Auto | **merged to main** (202 tests; QC PASS wf_3daef7bb-ee4, fixes) |
 | T13b | Orchestrator write side: EventSink/Store, outbox/worker, receipts, command policy, thread lifecycle services | `crates/orchestration/src/pipeline/**` | Codex → Sonnet → Cursor Auto | **merged to main** (QC PASS wf_1d598789-d6c, fixes T13bc) |
 | T13c | Orchestrator core + provider run services (Orchestrator.ts, ProviderSessionManager, RunExecution, ingest, recovery, checkpoints, PR reactors) | `crates/orchestration/src/core/**` | Cursor Auto (Codex when back) | active (base: T13b + T13a + stage) |
-| T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus → Sonnet → Cursor Auto | r3 active (from docs/handoff/T14.md; 451 tests) |
+| T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus → Sonnet → Cursor Auto | **merged to main** (578 tests; QC PASS wf_4c37a398-3ab, fixes T14c) |
 
 ### Wave 4: UI (after T03 + T14)
 
@@ -193,9 +193,9 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T15 | Sidebar (projects, threads, status, snooze, search, drag) | `crates/app/src/components/sidebar` | Opus | done (286 tests) → QC queued |
 | T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/components/chat` | Opus → Haiku (T16c fixes) | QC PASS → T16c fix round active |
 | T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus → Sonnet | built (675 tests, screenshots) → QC running wf_ad0ea466-91d |
-| T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus → Sonnet | active (base: T16) |
+| T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus → Sonnet | built (84 diff tests, screenshots) → QC running wf_ace33b16-0e2 |
 | T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Sonnet | active (Sonnet, base T16 + T14) |
-| T20 | Settings + keybindings UI | `crates/app/src/settings` | Opus | todo |
+| T20 | Settings + keybindings UI | `crates/app/src/settings` | Opus | active (Sonnet, from main) |
 
 ### Wave 5: glue
 

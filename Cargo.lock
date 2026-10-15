@@ -6970,11 +6970,18 @@ name = "turin-claude-protocol"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "futures",
+ "indexmap",
+ "libc",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
+ "unicode-normalization",
+ "uuid",
 ]
 
 [[package]]

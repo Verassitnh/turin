@@ -27,6 +27,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 parking_lot = "0.12"
+percent-encoding = "2"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 rusqlite = { version = "0.37", features = ["bundled", "serde_json"] }

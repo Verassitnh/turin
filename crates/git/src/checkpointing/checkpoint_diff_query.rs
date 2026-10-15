@@ -826,8 +826,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(patch_paths.len() > 1);
-        let flat = patch_paths.into_iter().flatten().collect::<Vec<_>>();
-        assert_eq!(flat, own_paths);
+        // Upstream `assert.sameMembers` ignores order. Numstat sorting is lexical.
+        let mut flat = patch_paths.into_iter().flatten().collect::<Vec<_>>();
+        let mut expected = own_paths.clone();
+        flat.sort();
+        expected.sort();
+        assert_eq!(flat, expected);
     }
 
     #[tokio::test]

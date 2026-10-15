@@ -10,7 +10,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Div, ElementId, FontWeight, Global, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, RenderOnce, SharedString, Stateful, Styled as _, Window, div,
-    px, rems,
+    px, relative, rems,
 };
 
 use crate::theme::color::with_alpha;
@@ -343,7 +343,8 @@ impl RenderOnce for SettingsRow {
                 div()
                     .max_w(rems(36.))
                     .text_size(TEXT_XS.size)
-                    .line_height(rems(1.25))
+                    // `leading-normal`: 1.5 × 12px = 18px.
+                    .line_height(relative(1.5))
                     .text_color(with_alpha(theme.muted_foreground, 0.8))
                     .child(description)
             }))

@@ -7086,6 +7086,7 @@ dependencies = [
  "turin-hooks",
  "turin-persistence",
  "turin-provider-core",
+ "turin-shared",
  "unicode-segmentation",
  "url",
  "uuid",

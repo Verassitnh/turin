@@ -1085,3 +1085,70 @@ fn the_same_model_on_different_instances_is_a_separate_favorite() {
         ])
     );
 }
+
+// cleanup rules and bulk visibility (upstream serverSettings.test.ts 56, 1002)
+
+#[test]
+fn a_cleanup_rule_changes_without_replacing_the_other_rules() {
+    let enabled = apply(
+        &defaults(),
+        json!({"storageCleanup": {"worktreeAfterDays": 8, "worktreeOnMerge": true, "logsAfterDays": 30}}),
+    );
+    let next = apply(
+        &enabled,
+        json!({"storageCleanup": {"worktreeAfterDays": null}}),
+    );
+    assert_eq!(
+        serde_json::to_value(&next.storage_cleanup).unwrap(),
+        json!({
+            "worktreeAfterDays": null,
+            "worktreeOnMerge": true,
+            "worktreeOnDelete": false,
+            "worktreeUnchanged": false,
+            "worktreeKeepWhen": "uncommitted-changes",
+            "browserArtifactsAfterDays": null,
+            "logsAfterDays": 30,
+        })
+    );
+}
+
+#[test]
+fn bulk_visibility_and_order_edits_keep_unrelated_models_and_providers() {
+    let initial = apply(
+        &defaults(),
+        json!({"providerModelPreferences": {
+            "claude_work": {"hiddenModels": ["opus"], "modelOrder": ["sonnet", "opus"]},
+        }}),
+    );
+    let mobile = apply(
+        &initial,
+        json!({"setModelsHidden": [{"provider": "codex_work", "model": "luna", "hidden": true}]}),
+    );
+    let web = apply(
+        &mobile,
+        json!({
+            "setModelsHidden": [
+                {"provider": "codex_work", "model": "astra", "hidden": false},
+                {"provider": "codex_work", "model": "sol", "hidden": true},
+            ],
+            "setProviderModelOrder": {"provider": "codex_work", "modelOrder": ["sol", "luna", "astra"]},
+        }),
+    );
+    let value = serde_json::to_value(&web.provider_model_preferences).unwrap();
+    assert_eq!(
+        value["codex_work"],
+        json!({"hiddenModels": ["luna", "sol"], "modelOrder": ["sol", "luna", "astra"]})
+    );
+    assert_eq!(
+        value["claude_work"],
+        serde_json::to_value(&initial.provider_model_preferences).unwrap()["claude_work"]
+    );
+    let cleared_order = apply(
+        &web,
+        json!({"setProviderModelOrder": {"provider": "codex_work", "modelOrder": []}}),
+    );
+    assert_eq!(
+        serde_json::to_value(&cleared_order.provider_model_preferences).unwrap()["codex_work"],
+        json!({"hiddenModels": ["luna", "sol"], "modelOrder": []})
+    );
+}

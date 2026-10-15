@@ -7327,6 +7327,7 @@ dependencies = [
  "indexmap",
  "markdown",
  "parking_lot",
+ "percent-encoding",
  "pretty_assertions",
  "regex",
  "serde",
@@ -7597,6 +7598,7 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "futures",
+ "getrandom 0.3.4",
  "indexmap",
  "parking_lot",
  "pretty_assertions",
@@ -7670,6 +7672,36 @@ dependencies = [
  "tokio",
  "turin-contracts",
  "turin-git",
+]
+
+[[package]]
+name = "turin-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "dirs 6.0.0",
+ "futures",
+ "getrandom 0.3.4",
+ "indexmap",
+ "libc",
+ "notify",
+ "parking_lot",
+ "pretty_assertions",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "turin-contracts",
+ "turin-persistence",
+ "turin-provider-core",
+ "turin-shared",
+ "uuid",
 ]
 
 [[package]]

@@ -51,6 +51,7 @@ mod derive_rows_wakes;
 mod derive_rows_work_groups;
 mod helpers;
 mod stable_rows;
+mod work_labels;
 
 // ---------------------------------------------------------------------------
 // Timeline entries

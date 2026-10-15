@@ -57,6 +57,7 @@ pub struct ChatComposer {
     pub(super) trigger_bounds: TriggerBounds,
     pub(super) focus: FocusHandle,
     pub(super) attachment_counter: usize,
+    pub(super) menu: super::menu::MenuState,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -103,6 +104,7 @@ impl ChatComposer {
             trigger_bounds: TriggerBounds::default(),
             focus: cx.focus_handle(),
             attachment_counter: 0,
+            menu: Default::default(),
             _subscriptions: subscriptions,
         };
         this.install_key_handler(cx);
@@ -442,12 +444,16 @@ impl Render for ChatComposer {
         let surface = color_mix(MixSpace::Srgb, glass, 0.8, theme.background);
         let outline = if dark { with_alpha(tw::WHITE, 0.05) } else { with_alpha(tw::BLACK, 0.08) };
 
+        if self.menu.is_open() {
+            self.refresh_menu_items(cx);
+        }
+        let menu_drawer = self.render_menu_drawer(window, cx);
         let attachments = self.render_attachments(&vm, cx);
         let footer = self.render_footer(&vm, window, cx);
         let layers = self.render_layers(&vm, window, cx);
         let validation = self.validation.clone();
 
-        div()
+        let frame = div()
             .id("chat-composer")
             .relative()
             .w_full()
@@ -477,7 +483,8 @@ impl Render for ChatComposer {
                     }),
             )
             .child(footer)
-            .children(layers)
+            .children(layers);
+        div().w_full().flex().flex_col().children(menu_drawer).child(frame)
     }
 }
 

@@ -52,6 +52,7 @@ icon_assets!(
         Image,
         Info,
         Lightbulb,
+        GitPullRequest,
         Link,
         Link2,
         ListChecks,

@@ -4,18 +4,13 @@
 //! runs under that workspace's lock, so a capture and a restore for the same
 //! checkout never interleave.
 //!
-//! Turin deviation: upstream derives checkpoint refs under
-//! `refs/t3/orchestration-v2/checkpoints`. turin-git's
-//! `checkpoint_ref_for_scope_ordinal` uses `refs/t3/checkpoints` instead, so
-//! this module computes the ref itself with the upstream prefix.
+//! Checkpoint refs come from turin-git's `checkpoint_ref_for_scope_ordinal`, which
+//! uses the upstream `refs/t3/orchestration-v2/checkpoints` prefix.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use parking_lot::Mutex;
-use sha2::{Digest, Sha256};
 use tokio::sync::OwnedMutexGuard;
 use turin_contracts::base_schemas::{CheckpointRef, TrimmedNonEmptyString};
 use turin_contracts::orchestration_v2::{
@@ -28,11 +23,11 @@ use turin_contracts::{
     UtcDateTime,
 };
 use turin_git::checkpointing::diffs::{is_git_import, parse_turn_diff_files_from_numstat};
+use turin_git::checkpointing::utils::checkpoint_ref_for_scope_ordinal;
 
 use super::checkpoint_git::CheckpointGit;
 use turin_provider_core::id_allocator::IdAllocator;
 
-const CHECKPOINT_REFS_PREFIX: &str = "refs/t3/orchestration-v2/checkpoints";
 const ROOT_CHECKPOINT_SCOPE_NAME: &str = "root";
 
 /// `CheckpointServiceV2Error`. Causes are carried as text: upstream's
@@ -91,22 +86,6 @@ pub struct CaptureInput<'a> {
     pub ordinal_within_scope: u64,
     pub app_run_ordinal: Option<PositiveInt>,
     pub captured_at: UtcDateTime,
-}
-
-/// `checkpointRefForScopeOrdinal`: SHA-256 of the scope id, the first 32 hex
-/// characters of that digest, then base64url of those characters.
-pub fn checkpoint_ref_for_scope_ordinal(
-    scope_id: &CheckpointScopeId,
-    ordinal_within_scope: u64,
-) -> CheckpointRef {
-    let digest = Sha256::digest(scope_id.as_str().as_bytes());
-    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    let scope_key = &hex[..32];
-    let encoded = URL_SAFE_NO_PAD.encode(scope_key.as_bytes());
-    CheckpointRef::new(format!(
-        "{CHECKPOINT_REFS_PREFIX}/{encoded}/ordinal/{ordinal_within_scope}"
-    ))
-    .expect("scope checkpoint ref is non-empty and trimmed")
 }
 
 /// Per-workspace mutexes (`KeyedLock.make<string>()`).

@@ -115,20 +115,90 @@ impl Default for AppearanceFontPreferences {
     }
 }
 
-fn clamp_font_size(value: u32, minimum: u32, maximum: u32) -> u32 {
-    value.clamp(minimum, maximum)
+fn clamp_font_size(value: f64, minimum: u32, maximum: u32, fallback: u32) -> u32 {
+    if !value.is_finite() {
+        return fallback;
+    }
+    // JS Math.round: halves round up.
+    ((value + 0.5).floor() as i64).clamp(minimum as i64, maximum as i64) as u32
 }
 
-pub fn clamp_interface_font_size(value: u32) -> u32 {
-    clamp_font_size(value, MIN_INTERFACE_FONT_SIZE, MAX_INTERFACE_FONT_SIZE)
+pub fn clamp_interface_font_size(value: f64) -> u32 {
+    clamp_font_size(
+        value,
+        MIN_INTERFACE_FONT_SIZE,
+        MAX_INTERFACE_FONT_SIZE,
+        DEFAULT_INTERFACE_FONT_SIZE,
+    )
 }
 
-pub fn clamp_prompt_font_size(value: u32) -> u32 {
-    clamp_font_size(value, MIN_PROMPT_FONT_SIZE, MAX_PROMPT_FONT_SIZE)
+pub fn clamp_prompt_font_size(value: f64) -> u32 {
+    clamp_font_size(
+        value,
+        MIN_PROMPT_FONT_SIZE,
+        MAX_PROMPT_FONT_SIZE,
+        DEFAULT_PROMPT_FONT_SIZE,
+    )
 }
 
-pub fn clamp_code_font_size(value: u32) -> u32 {
-    clamp_font_size(value, MIN_CODE_FONT_SIZE, MAX_CODE_FONT_SIZE)
+pub fn clamp_code_font_size(value: f64) -> u32 {
+    clamp_font_size(
+        value,
+        MIN_CODE_FONT_SIZE,
+        MAX_CODE_FONT_SIZE,
+        DEFAULT_CODE_FONT_SIZE,
+    )
+}
+
+const MONOSPACE_ADVANCE_TOLERANCE: f32 = 0.01;
+
+/// Whether measured glyph advances share one width. Unmeasurable input
+/// (empty, non-finite, non-positive) answers true so a missing measurement
+/// never blocks a legitimate font.
+pub fn are_font_advances_monospace(advances: &[f32]) -> bool {
+    let Some(&reference) = advances.first() else {
+        return true;
+    };
+    if reference <= 0. || advances.iter().any(|a| !a.is_finite() || *a <= 0.) {
+        return true;
+    }
+    advances
+        .iter()
+        .all(|advance| (advance - reference).abs() < MONOSPACE_ADVANCE_TOLERANCE)
+}
+
+/// The first family of a default stack that will actually render - what the
+/// "Default" choice means on this machine. Concrete names are checked with
+/// `is_installed`; generic keywords go to `resolve_generic` (upstream measures
+/// DOM probes; on macOS that names SF Pro / SF Mono). `None` when nothing
+/// can be named.
+pub fn resolve_default_family_label(
+    stack: &str,
+    is_installed: impl Fn(&str) -> bool,
+    resolve_generic: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    for family in split_font_stack(stack) {
+        let generic = matches!(
+            family.to_ascii_lowercase().as_str(),
+            "system-ui"
+                | "sans-serif"
+                | "serif"
+                | "monospace"
+                | "ui-monospace"
+                | "-apple-system"
+                | "blinkmacsystemfont"
+        );
+        if generic {
+            if let Some(resolved) = resolve_generic(&family) {
+                return Some(resolved);
+            }
+            continue;
+        }
+        if is_installed(&family) {
+            return Some(family);
+        }
+    }
+    None
 }
 
 /// Splits a CSS family list into bare names (quotes removed).
@@ -207,9 +277,9 @@ pub fn resolve_appearance_fonts(
         sans,
         mono,
         composer,
-        size_interface: clamp_interface_font_size(preferences.size_interface) as f32,
-        size_prompt: clamp_prompt_font_size(preferences.size_prompt) as f32,
-        size_code: clamp_code_font_size(preferences.size_code) as f32,
+        size_interface: clamp_interface_font_size(preferences.size_interface as f64) as f32,
+        size_prompt: clamp_prompt_font_size(preferences.size_prompt as f64) as f32,
+        size_code: clamp_code_font_size(preferences.size_code as f64) as f32,
     }
 }
 
@@ -217,37 +287,116 @@ pub fn resolve_appearance_fonts(
 mod tests {
     use super::*;
 
+    // describe("areFontAdvancesMonospace")
+
     #[test]
-    fn quotes_families_with_spaces_and_leaves_idents_bare() {
+    fn accepts_a_fixed_advance_and_rejects_any_proportional_glyph() {
+        assert!(are_font_advances_monospace(&[10., 10., 10., 10.]));
+        assert!(!are_font_advances_monospace(&[10., 10., 7., 10.]));
+        assert!(!are_font_advances_monospace(&[10., 10.02]));
+    }
+
+    #[test]
+    fn fails_open_when_canvas_metrics_are_unavailable() {
+        assert!(are_font_advances_monospace(&[]));
+        assert!(are_font_advances_monospace(&[f32::NAN, f32::NAN]));
+    }
+
+    // describe("cssFontFamilies")
+
+    #[test]
+    fn returns_null_for_effectively_empty_input() {
+        assert_eq!(css_font_families(""), None);
+        assert_eq!(css_font_families("   "), None);
+        assert_eq!(css_font_families(" , , "), None);
+    }
+
+    #[test]
+    fn quotes_names_with_spaces_and_keeps_single_idents_bare() {
         assert_eq!(
-            css_font_families("Inter, JetBrains Mono").as_deref(),
-            Some(r#"Inter, "JetBrains Mono""#)
-        );
-        assert_eq!(
-            css_font_families(r#""Fira Code""#).as_deref(),
+            css_font_families("Fira Code").as_deref(),
             Some(r#""Fira Code""#)
         );
-        assert_eq!(css_font_families(" , "), None);
-    }
-
-    #[test]
-    fn custom_families_prepend_the_default_stack() {
+        assert_eq!(css_font_families("monospace").as_deref(), Some("monospace"));
         assert_eq!(
-            appearance_font_stack("Inter", DEFAULT_SANS_FONT_STACK),
-            format!("Inter, {DEFAULT_SANS_FONT_STACK}")
-        );
-        assert_eq!(
-            appearance_font_stack("", DEFAULT_CODE_FONT_STACK),
-            DEFAULT_CODE_FONT_STACK
+            css_font_families(r#""Comic Mono""#).as_deref(),
+            Some(r#""Comic Mono""#)
         );
     }
 
     #[test]
-    fn clamps_sizes_into_range() {
-        assert_eq!(clamp_interface_font_size(4), MIN_INTERFACE_FONT_SIZE);
-        assert_eq!(clamp_prompt_font_size(99), MAX_PROMPT_FONT_SIZE);
-        assert_eq!(clamp_code_font_size(13), 13);
+    fn normalizes_comma_separated_lists_and_strips_embedded_quotes() {
+        assert_eq!(
+            css_font_families(" Fira Code , Menlo ").as_deref(),
+            Some(r#""Fira Code", Menlo"#)
+        );
+        assert_eq!(
+            css_font_families(r#"Bad"Name"#).as_deref(),
+            Some(r#""BadName""#)
+        );
     }
+
+    #[test]
+    fn quotes_names_that_are_not_single_css_idents() {
+        assert_eq!(
+            css_font_families("3270 Nerd Font").as_deref(),
+            Some(r#""3270 Nerd Font""#)
+        );
+        assert_eq!(css_font_families("M+ 1m").as_deref(), Some(r#""M+ 1m""#));
+    }
+
+    // describe("resolveDefaultFamilyLabel")
+
+    #[test]
+    fn skips_generic_keywords_and_returns_null_for_a_stack_of_only_generics() {
+        let none = |_: &str| None;
+        assert_eq!(
+            resolve_default_family_label("system-ui, sans-serif", |_| true, none),
+            None
+        );
+        assert_eq!(
+            resolve_default_family_label("ui-monospace, monospace", |_| true, none),
+            None
+        );
+    }
+
+    // describe("appearanceFontStack")
+
+    #[test]
+    fn prepends_the_custom_family_to_the_default_stack() {
+        assert_eq!(
+            appearance_font_stack("Fira Code", DEFAULT_CODE_FONT_STACK),
+            format!(r#""Fira Code", {DEFAULT_CODE_FONT_STACK}"#)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_default_stack_when_unset() {
+        assert_eq!(
+            appearance_font_stack("", DEFAULT_SANS_FONT_STACK),
+            DEFAULT_SANS_FONT_STACK
+        );
+    }
+
+    // describe("font size clamping")
+
+    #[test]
+    fn keeps_sizes_inside_the_ranges_the_ui_can_absorb() {
+        assert_eq!(clamp_interface_font_size(16.), 16);
+        assert_eq!(clamp_interface_font_size(2.), 12);
+        assert_eq!(clamp_interface_font_size(96.), 20);
+        assert_eq!(clamp_prompt_font_size(40.), 20);
+        assert_eq!(clamp_code_font_size(1.), 10);
+    }
+
+    #[test]
+    fn rounds_fractional_values_and_falls_back_for_unusable_input() {
+        assert_eq!(clamp_code_font_size(13.4), 13);
+        assert_eq!(clamp_interface_font_size(f64::NAN), 16);
+        assert_eq!(clamp_prompt_font_size(f64::INFINITY), 14);
+    }
+
+    // Turin: GPUI family resolution (no upstream counterpart).
 
     #[test]
     fn resolves_defaults_to_system_faces() {

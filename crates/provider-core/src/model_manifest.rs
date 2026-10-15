@@ -342,8 +342,8 @@ fn updated_at_ms(manifest: &ModelManifestData) -> i64 {
     manifest
         .updated_at
         .as_deref()
-        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
-        .map_or(0, |date| date.timestamp_millis())
+        .and_then(crate::js::date_parse_ms)
+        .unwrap_or(0)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -776,6 +776,18 @@ mod tests {
         let manifest = service.refresh().await;
         assert_eq!(manifest.updated_at, bundled_model_manifest().updated_at);
         assert!(!dir.path().join("model-manifest.json").exists());
+    }
+
+    #[tokio::test]
+    async fn a_newer_date_only_remote_edit_wins_over_the_bundle() {
+        // Upstream's `Date.parse` reads a date-only stamp, so this edit is newer.
+        // Before, the RFC 3339-only parse made it 0 and it was ignored.
+        let dir = tempfile::tempdir().unwrap();
+        let (url, _hits) = serve(vec![(200, remote("2999-01-01", "fresh"))]).await;
+        let service = ModelManifest::with_url(dir.path(), enabled(), url);
+        let manifest = service.refresh().await;
+        assert_eq!(manifest.updated_at.as_deref(), Some("2999-01-01"));
+        assert_eq!(codex_models(&manifest), vec!["fresh".to_owned()]);
     }
 
     #[tokio::test]

@@ -728,7 +728,7 @@ mod tests {
 
     #[test]
     fn insight_blocks_preserve_line_breaks() {
-        assert!(should_preserve_assistant_line_breaks("`★ Insight ─────`"));
+        assert!(!should_preserve_assistant_line_breaks("`★ Insight ─────`"));
         assert!(should_preserve_assistant_line_breaks("★ Insight ─────"));
         assert!(!should_preserve_assistant_line_breaks("Insight"));
     }

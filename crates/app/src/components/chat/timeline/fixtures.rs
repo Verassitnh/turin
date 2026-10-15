@@ -21,8 +21,8 @@ use super::turn_item::{
     TurnItemStatus, UserInputAnswerPayload, UserInputQuestion, UserInputQuestionOption,
 };
 use super::types::{
-    CheckpointStatus, PendingApproval, PendingUserInput, ResponseCapability, RunStatus,
-    TimelineLatestRun, TurnDiffSummary,
+    Actor, CheckpointStatus, CreationSource, InputIntent, PendingApproval, PendingUserInput,
+    ResponseCapability, RunStatus, TimelineLatestRun, TurnDiffSummary,
 };
 
 /// One run (turn) recorded by the builder.
@@ -117,6 +117,7 @@ impl ThreadBuilder {
                 thread_id: self.thread.thread_id.clone(),
                 run_id: self.run_id(),
                 node_id: self.run_id().map(|run| format!("{run}-node")),
+                provider_turn_id: self.run_id().map(|run| format!("{run}-provider-turn")),
                 parent_item_id: None,
                 ordinal: self.ordinal,
                 status,
@@ -153,6 +154,12 @@ impl ThreadBuilder {
             TurnItemPayload::UserMessage {
                 message_id,
                 text: text.into(),
+                created_by: Actor::User,
+                creation_source: CreationSource::Web,
+                scheduled_task_id: None,
+                sender_thread_id: None,
+                input_intent: InputIntent::TurnStart,
+                attachments: Vec::new(),
             },
         );
         self
@@ -168,6 +175,7 @@ impl ThreadBuilder {
                 message_id,
                 text: text.into(),
                 streaming: false,
+                attachments: Vec::new(),
             },
         );
         self
@@ -184,6 +192,7 @@ impl ThreadBuilder {
                 message_id,
                 text: text.into(),
                 streaming: true,
+                attachments: Vec::new(),
             },
         );
         self
@@ -249,6 +258,7 @@ impl ThreadBuilder {
                 additions: Some(additions),
                 deletions: Some(deletions),
                 diff: None,
+                changes: None,
             },
         );
         self

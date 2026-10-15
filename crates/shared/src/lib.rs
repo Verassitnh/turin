@@ -37,6 +37,7 @@ pub mod keybindings;
 pub mod keyed_coalescing_worker;
 pub mod keyed_lock;
 pub mod logging;
+pub mod model;
 //TODO pub mod markdown_github_alerts;
 pub mod markdown_links;
 //TODO pub mod markdown_list_indentation;

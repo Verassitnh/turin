@@ -219,6 +219,9 @@ impl ProcessRunner {
             cause: error.to_string(),
         })?;
         let pid = child.id();
+        // Declared after `child` so a cancelled run kills the group before
+        // `kill_on_drop` signals only the leader.
+        let _group = KillGroupGuard(pid);
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let stdin = child.stdin.take();
@@ -476,6 +479,14 @@ async fn kill_tree(pid: Option<u32>, child: &mut Child) {
     kill_group(pid);
     let _ = child.start_kill();
     let _ = child.wait().await;
+}
+
+struct KillGroupGuard(Option<u32>);
+
+impl Drop for KillGroupGuard {
+    fn drop(&mut self) {
+        kill_group(self.0.take());
+    }
 }
 
 fn kill_group(pid: Option<u32>) {

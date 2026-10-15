@@ -1,7 +1,6 @@
 //! `PullRequestService.test.ts` lines 4362-4543: carrying a slice on across repositories, the
 //! chunks a large workspace is searched in, and the fallback to asking each repository on its
-//! own. The search case over two hosts, at 4299, is left out because its second host is GitLab;
-//! see the Deviations table in PORTING.md.
+//! own. The two-host search at 4299 is in part_j.
 
 use std::sync::Arc;
 

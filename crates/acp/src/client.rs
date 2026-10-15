@@ -331,23 +331,24 @@ impl AcpClient {
             }
             prompts.insert(session_id.clone(), (token, tx));
         }
-        if let Err(error) = self
-            .connection
+        // Armed before the first await. A dropped future (timeout, select!,
+        // abort on interrupt) must not leave the session marked busy; upstream
+        // uses Effect.ensuring here.
+        let _active = ActivePrompt {
+            prompts: Arc::clone(&self.prompts),
+            session_id,
+            token,
+        };
+        self.connection
             .rpc_request(agent::SESSION_PROMPT, payload)
-            .await
-        {
-            self.clear_prompt(&session_id, token);
-            return Err(error);
-        }
-        let result = match rx.await {
+            .await?;
+        match rx.await {
             Ok(result) => result,
             Err(_) => Err(self
                 .connection
                 .termination_error()
                 .unwrap_or_else(|| AcpError::transport("ACP prompt completion closed"))),
-        };
-        self.clear_prompt(&session_id, token);
-        result
+        }
     }
 
     pub async fn cancel(&self, payload: Value) -> Result<(), AcpError> {
@@ -603,14 +604,24 @@ impl AcpClient {
             self.connection.rpc_request(method, payload).await
         }
     }
+}
 
-    fn clear_prompt(&self, session_id: &str, token: u64) {
+/// Removes a session's active-prompt entry when the owning `prompt` call ends,
+/// by return, error or drop. The token check keeps a newer prompt's entry.
+struct ActivePrompt {
+    prompts: Arc<Mutex<PromptWaiters>>,
+    session_id: String,
+    token: u64,
+}
+
+impl Drop for ActivePrompt {
+    fn drop(&mut self) {
         let mut prompts = self.prompts.lock();
         if prompts
-            .get(session_id)
-            .is_some_and(|(current, _)| *current == token)
+            .get(&self.session_id)
+            .is_some_and(|(current, _)| *current == self.token)
         {
-            prompts.remove(session_id);
+            prompts.remove(&self.session_id);
         }
     }
 }
@@ -1135,6 +1146,83 @@ mod tests {
         )
         .await;
         assert_eq!(prompt.await.unwrap().unwrap()["stopReason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn aborted_prompt_releases_the_session_for_the_next_prompt() {
+        let (client, mut read, mut write) = pair();
+        let init = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .initialize(InitializeRequest {
+                        protocol_version: 1,
+                        client_capabilities: None,
+                        client_info: None,
+                        meta: None,
+                    })
+                    .await
+            }
+        });
+        let request = read_value(&mut read).await;
+        write_value(
+            &mut write,
+            json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {"protocolVersion": 2, "info": {"name": "mock", "version": "0"}, "capabilities": {}}
+            }),
+        )
+        .await;
+        init.await.unwrap().unwrap();
+        let first = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .prompt(json!({"sessionId": "s1", "prompt": []}))
+                    .await
+            }
+        });
+        let _first_request = read_value(&mut read).await;
+        // Dropping the future is what a timeout, select! or interrupt does.
+        first.abort();
+        let _ = first.await;
+        let second = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .prompt(json!({"sessionId": "s1", "prompt": []}))
+                    .await
+            }
+        });
+        let second_request =
+            tokio::time::timeout(std::time::Duration::from_secs(2), read_value(&mut read))
+                .await
+                .expect("second prompt was rejected before reaching the wire");
+        assert_eq!(second_request["method"], "session/prompt");
+        // v2 prompts complete on the idle state_update, not the RPC reply.
+        write_value(
+            &mut write,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "s1",
+                    "update": {"sessionUpdate": "state_update", "state": "idle", "stopReason": "end_turn"}
+                }
+            }),
+        )
+        .await;
+        write_value(
+            &mut write,
+            json!({"jsonrpc": "2.0", "id": second_request["id"], "result": {}}),
+        )
+        .await;
+        let second = tokio::time::timeout(std::time::Duration::from_secs(2), second)
+            .await
+            .expect("second prompt did not complete")
+            .unwrap();
+        assert_eq!(second.unwrap()["stopReason"], "end_turn");
     }
 
     #[test]

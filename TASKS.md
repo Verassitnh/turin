@@ -204,7 +204,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T21 | Hooks crate (orchestrator wiring later; UI parts → Opus) | `crates/hooks` | GLM → Sonnet | done (merged; re-QC PASS) |
 | T21c | Hooks trust covers all of `.turin/` + docs/test fixes from re-QC | `crates/hooks` | Sonnet | done (merged; security re-QC queued) |
 | T22 | App wiring: runtime bridge, end-to-end smoke with each provider | `crates/app` | Opus | todo |
-| T23 | T3 database import | `crates/persistence` | Grok → Cursor Auto | done (905 threads / 164,813 events decode, 0 errors) → QC queued |
+| T23 | T3 database import | `crates/persistence` | Grok → Cursor Auto | **merged to main** (95 tests; QC PASS wf_42a38ca2-bee, fixes T23c; accepts older DBs like upstream) |
 
 ### Brand
 

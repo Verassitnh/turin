@@ -14,16 +14,9 @@ use turin_contracts::pull_request::{
     PullRequestRef, PullRequestReportStateInput, PullRequestState,
 };
 
-use super::{counter, log, summary_of};
+use super::{counter, log, settle, summary_of};
 use crate::pull_request::service::test_support::*;
 use crate::source_control_core::pull_request_provider::*;
-
-/// Lets spawned collectors and background refreshes run, as the upstream `Effect.yieldNow`s do.
-async fn settle() {
-    for _ in 0..3 {
-        tokio::task::yield_now().await;
-    }
-}
 
 /// A detail in `state`, updated at `updated_at`, for the reads that change what they see.
 fn detail_in(state: PullRequestState, updated_at: &str) -> ProviderChangeRequestDetail {

@@ -11,7 +11,7 @@ use serde_json::json;
 use tokio::sync::Notify;
 use turin_contracts::pull_request::{PullRequestOperationError, PullRequestRef, PullRequestState};
 
-use super::{counter, summary_of};
+use super::{counter, settle, summary_of};
 use crate::pull_request::service::test_support::*;
 use crate::source_control_core::pull_request_provider::*;
 
@@ -20,13 +20,6 @@ fn titled_summary(title: &str, state: PullRequestState) -> ProviderChangeRequest
     let mut summary = summary_of(&change_request(1, "2026-07-02T00:00:00Z"), state);
     summary.title = title.to_owned();
     summary
-}
-
-/// Lets spawned refreshes run, as the upstream `Effect.yieldNow`s do.
-async fn settle() {
-    for _ in 0..3 {
-        tokio::task::yield_now().await;
-    }
 }
 
 #[tokio::test(start_paused = true)]

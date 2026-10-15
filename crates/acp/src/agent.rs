@@ -52,6 +52,7 @@ impl AcpAgent {
                 on_notification,
                 on_termination: Arc::new(|_| {}),
                 termination_on_eof: None,
+                termination_on_exit: None,
                 transform_session_update: Arc::new(|value| value),
             },
         );

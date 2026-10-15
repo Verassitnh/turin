@@ -115,6 +115,9 @@ pub struct ConnectionConfig {
     pub on_notification: NotificationCallback,
     pub on_termination: Arc<dyn Fn(&AcpError) + Send + Sync>,
     pub termination_on_eof: Option<Arc<dyn Fn() -> BoxFuture<'static, AcpError> + Send + Sync>>,
+    /// Resolves when the child process exits. It can end the connection while
+    /// a helper still holds stdout open, which EOF alone would not detect.
+    pub termination_on_exit: Option<BoxFuture<'static, AcpError>>,
     pub transform_session_update: Arc<dyn Fn(Value) -> Value + Send + Sync>,
 }
 
@@ -149,9 +152,16 @@ impl Connection {
             config.transform_session_update,
         ));
         let handlers = tokio::spawn(handler_loop(handler_rx, Arc::clone(&inner)));
+        let mut tasks = vec![writer, reader, handlers];
+        if let Some(exit) = config.termination_on_exit {
+            let inner = Arc::clone(&inner);
+            tasks.push(tokio::spawn(async move {
+                inner.terminate(exit.await);
+            }));
+        }
         Self {
             inner,
-            _tasks: Arc::new(TaskSet(vec![writer, reader, handlers])),
+            _tasks: Arc::new(TaskSet(tasks)),
         }
     }
 
@@ -730,6 +740,7 @@ mod tests {
                 on_notification,
                 on_termination: Arc::new(|_| {}),
                 termination_on_eof: None,
+                termination_on_exit: None,
                 transform_session_update: Arc::new(|value| value),
             },
         );
@@ -1114,6 +1125,7 @@ mod tests {
                     terminations_cb.fetch_add(1, Ordering::SeqCst);
                 }),
                 termination_on_eof: None,
+                termination_on_exit: None,
                 transform_session_update: Arc::new(|_| panic!("normalizer bug")),
             },
         );

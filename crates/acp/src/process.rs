@@ -89,12 +89,74 @@ pub async fn spawn(command: SpawnCommand<'_>) -> Result<AcpClient, AcpError> {
             }
         })
     });
+    let termination_on_exit = Some(exit_watcher(Arc::downgrade(&guard), pid));
     Ok(AcpClient::connect_with(
         stdout,
         stdin,
         Some(termination_on_eof),
+        termination_on_exit,
         Some(guard),
     ))
+}
+
+/// Resolves when the leader exits, without reaping it. The reader only sees
+/// EOF once every holder of stdout closes it, so a helper that keeps the pipe
+/// open would hide the exit. Holds only a `Weak` while it waits, so it never
+/// keeps the guard alive.
+fn exit_watcher(
+    guard: Weak<ProcessGuard>,
+    pid: u32,
+) -> futures::future::BoxFuture<'static, AcpError> {
+    Box::pin(async move {
+        if wait_for_leader_exit(pid).await.is_err() {
+            // The leader was already reaped elsewhere. The reader's EOF path
+            // reports that, so this watcher stays quiet.
+            return std::future::pending().await;
+        }
+        match guard.upgrade() {
+            Some(guard) => guard.exit_error().await,
+            None => AcpError::from(AcpProcessExitedError {
+                code: None,
+                pid: Some(i64::from(pid)),
+                stderr: None,
+                cause: None,
+            }),
+        }
+    })
+}
+
+/// Blocks until the leader exits, leaving it unreaped so its pid and pgid stay
+/// reserved until `exit_error` signals the group.
+#[cfg(unix)]
+async fn wait_for_leader_exit(pid: u32) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        loop {
+            // SAFETY: waitid writes only into the zeroed local `info`.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let rc = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            if rc == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
+#[cfg(not(unix))]
+async fn wait_for_leader_exit(_pid: u32) -> std::io::Result<()> {
+    std::future::pending().await
 }
 
 fn missing_pipe(program: &str, stream: &str) -> AcpError {
@@ -275,6 +337,63 @@ mod tests {
             };
             assert_eq!(error.code, Some(4));
         }
+        let mut gone = false;
+        for _ in 0..150 {
+            // SAFETY: signal 0 only probes the pid.
+            if unsafe { libc::kill(helper, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(gone, "helper {helper} survived the leader's exit");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn leader_exit_fails_pending_requests_even_when_a_helper_holds_stdout() {
+        let dir = std::env::temp_dir().join(format!("turin-acp-exit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("helper.pid");
+        // The helper inherits stdout, so the reader never sees EOF. Only the
+        // exit watcher can fail the pending request.
+        let script = format!(
+            "sleep 30 & echo $! > '{}'; read line; exit 3",
+            pid_file.display()
+        );
+        let client = spawn(SpawnCommand {
+            program: "/bin/sh",
+            args: &["-c", &script],
+            cwd: None,
+        })
+        .await
+        .unwrap();
+        let helper: i32 = {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = text.trim().parse()
+                {
+                    break pid;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "helper never started"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.ext_request("x/test", serde_json::json!({})),
+        )
+        .await
+        .expect("pending request hung after the leader exited");
+        let Err(AcpError::ProcessExited(error)) = result else {
+            panic!("expected a process-exited error");
+        };
+        assert_eq!(error.code, Some(3));
         let mut gone = false;
         for _ in 0..150 {
             // SAFETY: signal 0 only probes the pid.

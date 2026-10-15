@@ -162,7 +162,7 @@ impl AcpClient {
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        Self::connect_with(read, write, None, None)
+        Self::connect_with(read, write, None, None, None)
     }
 
     pub fn connect_with<R, W>(
@@ -171,6 +171,7 @@ impl AcpClient {
         termination_on_eof: Option<
             Arc<dyn Fn() -> futures::future::BoxFuture<'static, AcpError> + Send + Sync>,
         >,
+        termination_on_exit: Option<futures::future::BoxFuture<'static, AcpError>>,
         shutdown: Option<Arc<dyn std::any::Any + Send + Sync>>,
     ) -> Self
     where
@@ -193,6 +194,7 @@ impl AcpClient {
                 on_notification,
                 on_termination: Arc::new(move |error| fail_prompts(&prompts_for_end, error)),
                 termination_on_eof,
+                termination_on_exit,
                 transform_session_update: Arc::new(move |value| {
                     normalize_session_notification(value, *transform_generation.lock())
                 }),

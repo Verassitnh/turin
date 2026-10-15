@@ -59,6 +59,8 @@ through `../.cargo/rustc-throttle` (global slot cap in
 reboot). Build output lives in `../turin-targets.noindex/` (Spotlight skips
 it); each worktree's `target` is a symlink there.
 
+**Merge rule (PM, 2026-10-15):** before a task merges to main, its branch merges `main` and passes its gate in its own worktree (old contracts copies broke main twice). After every merge run `python3 scripts/dedupe-workspace-deps.py`.
+
 ## Storage policy (user, 2026-10-15)
 
 - **Disk guard (2026-10-15 09:50, disk hit 100% again with ~25 targets / 130G):** `../.cargo/disk-guard.sh` (nohup, restart after reboot) prunes `incremental/` caches when free < 30G; log `../.cargo/disk-guard.log`. PM wipes a worktree's `turin-targets.noindex/<task>/*` as soon as the task is idle/merged.
@@ -147,7 +149,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | N10 | Prompt links (keep/cut: user decision) | `crates/app` | — | decide |
 | N11 | Project content search dialog | `crates/app` | Sonnet | todo |
 | DEDUP | Collapse 28 upstream files ported in >1 crate; delete 10 ports of cut files | all | Cursor Auto | todo (after wave merges) |
-| T01 | Port all kept contracts modules | `crates/contracts` | GLM → Sonnet | done (9f37c0a, 545 tests) → QC queued |
+| T01 | Port all kept contracts modules | `crates/contracts` | GLM → Sonnet | **merged to main** (QC PASS wf_0fd743c1-ca2, fixes T01c) |
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | done (merged; QC PASS) |
 | T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | done (merged with T02c) |
 | T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | done (merged; re-QC PASS) |
@@ -160,11 +162,11 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T04c | Apply T04b re-QC corrections to protocol docs | `docs/protocols` | Haiku | done (merged, incl. T04d stale-note fixes) |
 | T02c | Persistence: Db drop deadlock + index DDL whitespace (from T02b re-QC) | `crates/persistence` | Haiku | done (merged; test catches bug, 6.5k cycles clean) |
-| T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet → Grok → Haiku | done (316 tests; markdown files live in T16's app/chat/markdown) → QC queued |
+| T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet → Grok → Haiku | **merged to main** (332 tests; QC PASS wf_21d5cc36-fb9, fixes T05ac; markdown files live in T16's app/chat/markdown) |
 | T05b | Shared utils, contract-dependent files | `crates/shared` (new modules only) | Codex | active (Codex re-auth) |
 | T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok → Cursor Auto | done (151 tests) → QC queued |
 | T07 | Source control: core + GitHub driver, PR service, review guides, viewed files | `crates/source-control` | GLM → Sonnet → Cursor Auto | r3 active (from docs/handoff/T07.md) |
-| T08 | Provider core: adapter trait, registry, catalog, model manifests, auth/credentials | `crates/provider-core` | Codex → Sonnet → Grok | done (stable trait + registries) → QC queued |
+| T08 | Provider core: adapter trait, registry, catalog, model manifests, auth/credentials | `crates/provider-core` | Codex → Sonnet → Grok | **merged to main** (182 tests; QC PASS wf_7e833cf1-e0c, fixes T08c) |
 | T08b | Provider core remainder: subagentProjection, mcpToolPresentation, settings watcher → reconcile, model manifest fetch, NDJSON event log, ProviderHost live wiring | `crates/provider-core` | Codex | active (Codex re-auth) |
 
 ### Wave 3: engines (after wave 2)

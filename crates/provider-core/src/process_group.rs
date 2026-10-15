@@ -26,6 +26,34 @@ pub fn signal_process_group(pid: i64, signal: i32) -> io::Result<()> {
     }
 }
 
+/// Test probe for one pid with `kill(pid, 0)`. A zombie still counts as alive
+/// until its parent reaps it.
+#[cfg(all(test, unix))]
+pub(crate) fn process_exists(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 sends nothing; it only checks that the pid exists.
+    unsafe { kill(pid, 0) == 0 }
+}
+
+/// Waits for `pid` to disappear. A killed orphan is reparented and reaped by
+/// init shortly after its group is signalled, so this polls briefly.
+#[cfg(all(test, unix))]
+pub(crate) async fn assert_process_exits(pid: u32, what: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while process_exists(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what} (pid {pid}) survived"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

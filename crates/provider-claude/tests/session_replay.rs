@@ -135,6 +135,7 @@ impl Harness {
             Some(env),
             None,
             String::new(),
+            String::new(),
         );
         Self { dir, adapter }
     }

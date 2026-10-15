@@ -272,6 +272,7 @@ impl ProviderDriver for ClaudeDriver {
             Some(adapter_environment),
             Some(attachments),
             runtime_instructions(),
+            host.home_directory.clone(),
         )
         .with_usage_limit_hooks(hooks);
 

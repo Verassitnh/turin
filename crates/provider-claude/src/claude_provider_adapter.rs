@@ -15,6 +15,9 @@ use crate::{
     claude_turn_token_usage::normalize_claude_turn_token_usage,
     claude_usage_limits::ClaudeUsageLimitHooks,
 };
+use crate::{
+    claude_skill_dispatch::dispatch_content_blocks, claude_skills::user_invocable_skill_names,
+};
 use async_trait::async_trait;
 use futures::stream;
 use parking_lot::Mutex;
@@ -152,6 +155,8 @@ pub struct ClaudeProviderAdapter {
     environment: Option<std::collections::BTreeMap<String, String>>,
     attachments_dir: Option<PathBuf>,
     runtime_instructions: String,
+    /// `$HOME` for the skill config dir fallback (`~/.claude`).
+    home_directory: String,
     usage_limit_hooks: Option<ClaudeUsageLimitHooks>,
 }
 impl ClaudeProviderAdapter {
@@ -168,6 +173,7 @@ impl ClaudeProviderAdapter {
         environment: Option<std::collections::BTreeMap<String, String>>,
         attachments_dir: Option<PathBuf>,
         runtime_instructions: String,
+        home_directory: String,
     ) -> Self {
         Self {
             instance_id,
@@ -177,6 +183,7 @@ impl ClaudeProviderAdapter {
             environment,
             attachments_dir,
             runtime_instructions,
+            home_directory,
             usage_limit_hooks: None,
         }
     }
@@ -234,6 +241,7 @@ impl ProviderAdapterV2 for ClaudeProviderAdapter {
             environment: self.environment.clone(),
             attachments_dir: self.attachments_dir.clone(),
             runtime_instructions: self.runtime_instructions.clone(),
+            home_directory: self.home_directory.clone(),
             usage_limit_hooks: self.usage_limit_hooks.clone(),
             selection: input.model_selection,
             claude: None,
@@ -465,6 +473,7 @@ struct ClaudeActor {
     environment: Option<std::collections::BTreeMap<String, String>>,
     attachments_dir: Option<PathBuf>,
     runtime_instructions: String,
+    home_directory: String,
     usage_limit_hooks: Option<ClaudeUsageLimitHooks>,
     selection: ModelSelection,
     claude: Option<ClaudeAdapterV2>,
@@ -663,11 +672,36 @@ impl ClaudeActor {
             compiled.prompt_effort.as_deref(),
         );
         let prompt_uuid = uuid::Uuid::new_v4().to_string();
-        self.claude
+        // A `$skill` mention becomes the trailing `/skill` block Claude Code expands.
+        let skill_names = user_invocable_skill_names(
+            &self.settings,
+            input
+                .runtime_policy
+                .cwd
+                .as_ref()
+                .map(PathBuf::from)
+                .as_deref(),
+            &self
+                .environment
+                .as_ref()
+                .map(|environment| {
+                    environment
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            &self.home_directory,
+        );
+        let session = self
+            .claude
             .as_mut()
-            .ok_or_else(|| protocol_error("Claude session is not running"))?
-            .send_prompt(text, Some(prompt_uuid), None)
-            .map_err(|e| protocol_error(e.to_string()))?;
+            .ok_or_else(|| protocol_error("Claude session is not running"))?;
+        match dispatch_content_blocks(&text, &skill_names) {
+            Some(blocks) => session.send_blocks(blocks, Some(prompt_uuid), None),
+            None => session.send_prompt(text, Some(prompt_uuid), None),
+        }
+        .map_err(|e| protocol_error(e.to_string()))?;
         let scope = TurnScope {
             driver: driver(),
             thread_id: input.thread_id.clone(),

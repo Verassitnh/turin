@@ -3,8 +3,8 @@
 //! the workspace snapshot. The SDK capability probe lives in
 //! `claude_capabilities_probe`, and this module consumes it through a resolver.
 //!
-//! Skill discovery (`discoverClaudeSkills`) is not ported yet, so skills are
-//! empty here (see PORTING.md, provider-claude snapshot).
+//! Skills come from `claude_skills`, scanned from the config dir and, for a
+//! workspace snapshot, the workspace's `.claude/skills`.
 use crate::{
     claude_capabilities_probe::{
         ClaudeCapabilitiesProbe, DEFAULT_PROBE_TIMEOUT, dedupe_slash_commands,
@@ -15,6 +15,7 @@ use crate::{
         ClaudeModelCatalog, format_claude_version_upgrade_message, read_custom_model_entries,
         resolve_claude_models_for_version, resolve_claude_update_required_models,
     },
+    claude_skills::discover_claude_skills,
     claude_usage_limits::{
         SharedClaudeScopedLimitNames, claude_usage_response_to_limits, record_claude_usage_response,
     },
@@ -485,6 +486,8 @@ pub async fn check_claude_provider_status(input: ClaudeStatusInput<'_>) -> Serve
         Some(resolve) => resolve().await,
         None => None,
     };
+    // Skills come from the machine's config dir, not a workspace (`cwd` is None here).
+    let skills = discover_claude_skills(settings, None, input.environment, input.home);
     let slash_commands = dedupe_slash_commands(
         std::iter::once(compact_slash_command())
             .chain(
@@ -504,7 +507,7 @@ pub async fn check_claude_provider_status(input: ClaudeStatusInput<'_>) -> Serve
             models,
             update_required_models,
             slash_commands,
-            skills: Vec::new(),
+            skills: skills.clone(),
             probe: probe_result(
                 true,
                 parsed_version,
@@ -528,7 +531,7 @@ pub async fn check_claude_provider_status(input: ClaudeStatusInput<'_>) -> Serve
             models,
             update_required_models,
             slash_commands,
-            skills: Vec::new(),
+            skills: skills.clone(),
             probe: probe_result(
                 true,
                 parsed_version,
@@ -601,7 +604,7 @@ pub async fn check_claude_provider_status(input: ClaudeStatusInput<'_>) -> Serve
         models,
         update_required_models,
         slash_commands,
-        skills: Vec::new(),
+        skills,
         probe,
         maintenance: None,
     })
@@ -676,8 +679,7 @@ pub async fn probe_claude_workspace_snapshot(
             )
             .collect(),
     );
-    // Skill discovery is not ported yet, so the workspace has no skills.
-    provider.draft.skills = Vec::new();
+    provider.draft.skills = discover_claude_skills(settings, Some(cwd), environment, home);
     ProviderWorkspaceSnapshot {
         provider,
         slash_commands_pending: Some(capabilities.is_none()),

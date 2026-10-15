@@ -68,6 +68,9 @@ fn config_dir(options: &TranscriptOptions) -> PathBuf {
         })
 }
 pub fn project_key(dir: &Path) -> String {
+    encode_project_path(&absolute_source(dir))
+}
+fn absolute_source(dir: &Path) -> String {
     let absolute = std::fs::canonicalize(dir).unwrap_or_else(|_| {
         if dir.is_absolute() {
             dir.to_path_buf()
@@ -75,25 +78,29 @@ pub fn project_key(dir: &Path) -> String {
             std::env::current_dir().unwrap_or_default().join(dir)
         }
     });
-    let mut source = absolute.to_string_lossy().into_owned();
+    let source = absolute.to_string_lossy().into_owned();
     // SDK `it`: darwin paths are NFC-normalized before encoding.
     #[cfg(target_os = "macos")]
     {
-        source = source.nfc().collect();
+        return source.nfc().collect();
     }
-    encode_project_path(&source)
+    #[cfg(not(target_os = "macos"))]
+    source
 }
 
 /// `fm`: non-ASCII-alphanumerics become `-` per UTF-16 code unit. Paths longer
 /// than 200 units keep that prefix plus `abs(javaStringHash).toString(36)`.
-pub fn encode_project_path(source: &str) -> String {
-    let key: String = source
+fn dash_encode(source: &str) -> String {
+    source
         .encode_utf16()
         .map(|unit| match char::from_u32(u32::from(unit)) {
             Some(ch) if ch.is_ascii_alphanumeric() => ch,
             _ => '-',
         })
-        .collect();
+        .collect()
+}
+pub fn encode_project_path(source: &str) -> String {
+    let key = dash_encode(source);
     if key.encode_utf16().count() <= 200 {
         return key;
     }
@@ -132,23 +139,208 @@ fn to_base36(mut value: u32) -> String {
 fn projects_dir(options: &TranscriptOptions) -> PathBuf {
     config_dir(options).join("projects")
 }
+const CHUNK_BYTES: usize = 65536;
+fn project_dir_override() -> Option<String> {
+    if std::env::var_os("CLAUDE_CONFIG_DIR").is_none() {
+        return None;
+    }
+    valid_project_dir_name(std::env::var("CLAUDE_CODE_PROJECT_DIR_NAME").ok()?)
+}
+fn valid_project_dir_name(name: String) -> Option<String> {
+    if !(1..=64).contains(&name.len())
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        return None;
+    }
+    let lower = name.to_ascii_lowercase();
+    let reserved = matches!(lower.as_str(), "con" | "prn" | "aux" | "nul")
+        || (lower.len() == 4
+            && (lower.starts_with("com") || lower.starts_with("lpt"))
+            && lower.as_bytes()[3].is_ascii_digit());
+    if reserved { None } else { Some(name) }
+}
+async fn nonempty_transcript(dir: &Path, id: &str) -> Option<PathBuf> {
+    let path = dir.join(format!("{id}.jsonl"));
+    let meta = fs::metadata(&path).await.ok()?;
+    (meta.len() > 0).then_some(path)
+}
+async fn candidate_project_dirs(
+    root: &Path,
+    source: &str,
+    override_name: Option<&str>,
+) -> Vec<PathBuf> {
+    let encoded = encode_project_path(source);
+    let mut dirs = Vec::new();
+    if let Some(name) = override_name {
+        dirs.push(root.join(name));
+        if encoded != dirs[0].file_name().unwrap().to_string_lossy() {
+            dirs.push(root.join(&encoded));
+        }
+        return dirs;
+    }
+    dirs.push(root.join(&encoded));
+    let dashed = dash_encode(source);
+    if dashed.encode_utf16().count() <= 200 {
+        return dirs;
+    }
+    let prefix = format!("{}-", utf16_prefix(&dashed, 200));
+    let mut entries = match fs::read_dir(root).await {
+        Ok(entries) => entries,
+        Err(_) => return dirs,
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&prefix) || name == encoded {
+            continue;
+        }
+        let path = entry.path();
+        if entry
+            .file_type()
+            .await
+            .map(|kind| kind.is_dir())
+            .unwrap_or(false)
+            && cwd_matches(&path, source).await
+        {
+            dirs.push(path);
+        }
+    }
+    dirs
+}
+async fn cwd_matches(project_dir: &Path, source: &str) -> bool {
+    let expected = dash_encode(source);
+    let mut entries = match fs::read_dir(project_dir).await {
+        Ok(entries) => entries,
+        Err(_) => return false,
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some((head, tail)) = head_tail(&path).await else {
+            continue;
+        };
+        let found = last_relocated_cwd(&tail).or_else(|| first_field(&head, "cwd"));
+        if found.is_some_and(|cwd| dash_encode(&normalize_text(&cwd)) == expected) {
+            return true;
+        }
+    }
+    false
+}
+fn normalize_text(value: &str) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        return value.nfc().collect();
+    }
+    #[cfg(not(target_os = "macos"))]
+    value.to_owned()
+}
+async fn head_tail(path: &Path) -> Option<(String, String)> {
+    let bytes = fs::read(path).await.ok()?;
+    let head_end = bytes.len().min(CHUNK_BYTES);
+    let tail_start = bytes.len().saturating_sub(CHUNK_BYTES);
+    let head = String::from_utf8_lossy(&bytes[..head_end]).into_owned();
+    let tail = String::from_utf8_lossy(&bytes[tail_start..]).into_owned();
+    Some((head, tail))
+}
+fn first_field(chunk: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    for line in chunk.lines() {
+        if !line.contains(&needle) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(text) = value.get(key).and_then(Value::as_str) {
+            return Some(text.to_owned());
+        }
+    }
+    None
+}
+fn last_relocated_cwd(chunk: &str) -> Option<String> {
+    let mut found = None;
+    for line in chunk.lines() {
+        if !line.contains("\"relocatedCwd\"") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) == Some("relocated")
+            && let Some(text) = value.get("relocatedCwd").and_then(Value::as_str)
+        {
+            found = Some(text.to_owned());
+        }
+    }
+    found
+}
+async fn git_worktrees(dir: &Path) -> Vec<PathBuf> {
+    let output = tokio::process::Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=",
+            "worktree",
+            "list",
+            "--porcelain",
+        ])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(5), output).await
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(|path| PathBuf::from(normalize_text(path)))
+        .collect()
+}
 async fn session_path(id: &str, options: &TranscriptOptions) -> Option<PathBuf> {
+    session_path_with_override(id, options, project_dir_override().as_deref()).await
+}
+async fn session_path_with_override(
+    id: &str,
+    options: &TranscriptOptions,
+    override_name: Option<&str>,
+) -> Option<PathBuf> {
     if uuid::Uuid::parse_str(id).is_err() {
         return None;
     }
     let root = projects_dir(options);
-    if let Some(dir) = &options.dir {
-        let p = root.join(project_key(dir)).join(format!("{id}.jsonl"));
-        if fs::metadata(&p).await.is_ok() {
-            return Some(p);
+    let Some(dir) = &options.dir else {
+        let mut folders = fs::read_dir(&root).await.ok()?;
+        while let Ok(Some(folder)) = folders.next_entry().await {
+            if let Some(path) = nonempty_transcript(&folder.path(), id).await {
+                return Some(path);
+            }
         }
         return None;
+    };
+    let source = absolute_source(dir);
+    for candidate in candidate_project_dirs(&root, &source, override_name).await {
+        if let Some(path) = nonempty_transcript(&candidate, id).await {
+            return Some(path);
+        }
     }
-    let mut folders = fs::read_dir(root).await.ok()?;
-    while let Ok(Some(folder)) = folders.next_entry().await {
-        let p = folder.path().join(format!("{id}.jsonl"));
-        if fs::metadata(&p).await.is_ok() {
-            return Some(p);
+    for worktree in git_worktrees(Path::new(&source)).await {
+        let worktree_source = absolute_source(&worktree);
+        if worktree_source == source {
+            continue;
+        }
+        for candidate in candidate_project_dirs(&root, &worktree_source, override_name).await {
+            if let Some(path) = nonempty_transcript(&candidate, id).await {
+                return Some(path);
+            }
         }
     }
     None
@@ -1284,5 +1476,95 @@ mod tests {
             format!("{}-feo44x", "-".to_owned() + &"a".repeat(199))
         );
         assert_eq!(encode_project_path("café /tmp"), "caf---tmp");
+    }
+    #[tokio::test]
+    async fn session_lookup_follows_worktrees_overrides_and_long_keys() {
+        let root =
+            std::env::temp_dir().join(format!("turin-claude-lookup-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).await.unwrap();
+        let config = root.join("config");
+        let main = root.join("main");
+        let worktree = root.join("wt");
+        fs::create_dir_all(&main).await.unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_AUTHOR_NAME", "Turin")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "Turin")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init"], &main);
+        git(&["commit", "--allow-empty", "-m", "init"], &main);
+        git(&["worktree", "add", worktree.to_str().unwrap()], &main);
+        let id = uuid::Uuid::new_v4().to_string();
+        let projects = config.join("projects");
+        let main_dir = projects.join(project_key(&main));
+        fs::create_dir_all(&main_dir).await.unwrap();
+        fs::write(main_dir.join(format!("{id}.jsonl")), format!("{}\n", json!({"type":"user","uuid":"u1","sessionId":id,"message":{"role":"user","content":"from-main"}}))).await.unwrap();
+        let worktree_dir = projects.join(project_key(&worktree));
+        fs::create_dir_all(&worktree_dir).await.unwrap();
+        fs::write(worktree_dir.join(format!("{id}.jsonl")), "")
+            .await
+            .unwrap();
+        let options = TranscriptOptions {
+            dir: Some(worktree.clone()),
+            config_dir: Some(config.clone()),
+            ..Default::default()
+        };
+        let messages = get_session_messages(&id, &options).await.unwrap();
+        assert_eq!(messages[0].message["content"], "from-main");
+
+        let mut deep = root.join("deep");
+        fs::create_dir_all(&deep).await.unwrap();
+        while dash_encode(&absolute_source(&deep)).encode_utf16().count() <= 200 {
+            deep.push("a".repeat(40));
+            fs::create_dir_all(&deep).await.unwrap();
+        }
+        let source = absolute_source(&deep);
+        let prefix = utf16_prefix(&dash_encode(&source), 200);
+        let alt = projects.join(format!("{prefix}-altkey"));
+        fs::create_dir_all(&alt).await.unwrap();
+        let long_id = uuid::Uuid::new_v4().to_string();
+        fs::write(alt.join(format!("{long_id}.jsonl")), format!("{}\n", json!({"type":"user","uuid":"u1","cwd":source,"sessionId":long_id,"message":{"role":"user","content":"long"}}))).await.unwrap();
+        let long_options = TranscriptOptions {
+            dir: Some(deep),
+            config_dir: Some(config.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            get_session_messages(&long_id, &long_options).await.unwrap()[0].message["content"],
+            "long"
+        );
+
+        let named = projects.join("customkey");
+        fs::create_dir_all(&named).await.unwrap();
+        let named_id = uuid::Uuid::new_v4().to_string();
+        fs::write(named.join(format!("{named_id}.jsonl")), format!("{}\n", json!({"type":"user","uuid":"u1","sessionId":named_id,"message":{"role":"user","content":"named"}}))).await.unwrap();
+        let named_options = TranscriptOptions {
+            dir: Some(main),
+            config_dir: Some(config),
+            ..Default::default()
+        };
+        assert!(
+            session_path_with_override(&named_id, &named_options, None)
+                .await
+                .is_none()
+        );
+        let found = session_path_with_override(&named_id, &named_options, Some("customkey"))
+            .await
+            .unwrap();
+        assert_eq!(found, named.join(format!("{named_id}.jsonl")));
+        assert_eq!(
+            valid_project_dir_name("custom_key-1".into()).as_deref(),
+            Some("custom_key-1")
+        );
+        assert_eq!(valid_project_dir_name("com1".into()), None);
+        assert_eq!(valid_project_dir_name("a/b".into()), None);
+        fs::remove_dir_all(root).await.unwrap();
     }
 }

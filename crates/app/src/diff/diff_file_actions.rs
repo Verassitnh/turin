@@ -171,8 +171,10 @@ pub fn open_diff_file_primary_action(
     input: OpenDiffFilePrimaryActionInput<'_>,
     targets: &mut dyn DiffFileTargets,
 ) {
+    // `activeCwd ? … : …` upstream: an empty cwd is absent, not a root-relative base.
+    let cwd = input.active_cwd.filter(|cwd| !cwd.is_empty());
     let Some(workspace_file_path) =
-        resolve_diff_path_for_workspace(input.file_path, input.active_cwd, input.repository_root)
+        resolve_diff_path_for_workspace(input.file_path, cwd, input.repository_root)
     else {
         return;
     };
@@ -180,7 +182,7 @@ pub fn open_diff_file_primary_action(
         targets.open_in_thread_file_viewer(thread, &workspace_file_path);
         return;
     }
-    let target = match input.active_cwd {
+    let target = match cwd {
         Some(cwd) => resolve_path_link_target(&workspace_file_path, cwd),
         None => workspace_file_path,
     };
@@ -244,6 +246,24 @@ mod tests {
         assert_eq!(
             targets.editor,
             vec!["/repo/project/apps/web/src/components/DiffPanel.tsx"]
+        );
+    }
+
+    #[test]
+    fn treats_an_empty_cwd_as_absent_when_opening_in_the_editor() {
+        let mut targets = Recorder::default();
+        open_diff_file_primary_action(
+            OpenDiffFilePrimaryActionInput {
+                thread: None,
+                file_path: "apps/web/src/components/DiffPanel.tsx",
+                active_cwd: Some(""),
+                repository_root: None,
+            },
+            &mut targets,
+        );
+        assert_eq!(
+            targets.editor,
+            vec!["apps/web/src/components/DiffPanel.tsx"]
         );
     }
 

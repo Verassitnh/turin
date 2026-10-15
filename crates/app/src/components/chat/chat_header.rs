@@ -53,7 +53,9 @@ impl RenderOnce for ChatHeader {
                             .items_center()
                             .gap(rems(0.375))
                             .text_color(theme.muted_foreground)
-                            .child(ProjectMonogram::new("T", hex(0x155dfc).into()))
+                            .child(
+                                ProjectMonogram::new("T", hex(0x155dfc).into()).size(rems(0.875)),
+                            )
                             .child(div().max_w(rems(10.)).truncate().child(self.project)),
                     )
                     .child(div().text_color(theme.icon_muted).child("/"))

@@ -38,6 +38,7 @@ use crate::composer::views::chrome::BoundsCell;
 use crate::composer::views::prompt_editor::{
     CommandKey, EditorConfig, PromptEditor, PromptEditorEvent,
 };
+use crate::composer::views::queued_run_keys::{QueuedRunKey, queued_run_key};
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::{MixSpace, color_mix, with_alpha};
 use crate::theme::tokens::{self, RADIUS_3XL, TEXT_XS, tw};
@@ -482,6 +483,11 @@ impl ChatComposer {
             self.toggle_interaction_mode(cx);
             return true;
         }
+        if let Some(queued) = queued_run_key(key)
+            && self.on_queued_run_key(snapshot, queued, key.repeat, cx)
+        {
+            return true;
+        }
         if self.layer == Some(Layer::Stash) && self.on_stash_key(key, window, cx) {
             return true;
         }
@@ -528,6 +534,61 @@ impl ChatComposer {
                 .ok();
         });
         true
+    }
+
+    /// `thread.steerQueuedMessage` and `thread.editQueuedMessage` (ChatView.tsx).
+    /// Each declines when it cannot act, so the key keeps its composer meaning.
+    fn on_queued_run_key(
+        &mut self,
+        snapshot: &EditorSnapshot,
+        queued: QueuedRunKey,
+        repeat: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let vm = self.view_model(cx);
+        // A draft has no queue to act on.
+        if vm.is_draft_thread {
+            return false;
+        }
+        let Some(queue) = vm.queue.as_ref() else {
+            return false;
+        };
+        let Some(source) = self.source(cx) else {
+            return false;
+        };
+        match queued {
+            QueuedRunKey::Steer => {
+                // QueuedRunsControl.steerNext: the next run, sent as a steer.
+                let Some(next) = queue.queued.first() else {
+                    return false;
+                };
+                if !repeat && !next.pending {
+                    source.promote_queued_run(&next.run_id, cx);
+                }
+                true
+            }
+            QueuedRunKey::EditLatest => {
+                // Only from the start of the draft: elsewhere the key moves the
+                // caret, so a second press from the first line reaches the queue.
+                if snapshot.selection_start != 0 || snapshot.selection_end != 0 {
+                    return false;
+                }
+                // QueuedRunsControl.editLatest: declines while another queued
+                // message is being edited, so the key keeps moving the caret.
+                let Some(latest) = queue.queued.last() else {
+                    return false;
+                };
+                if queue.editing_run_id.is_some() || latest.pending {
+                    return false;
+                }
+                if !repeat {
+                    self.queue_expanded = true;
+                    source.edit_queued_run(&latest.run_id, cx);
+                    cx.notify();
+                }
+                true
+            }
+        }
     }
 
     /// Plain-text mode has no list nodes, so Enter and Tab continue or indent

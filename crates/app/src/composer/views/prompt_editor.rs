@@ -65,6 +65,8 @@ pub struct CommandKey {
     pub meta: bool,
     pub ctrl: bool,
     pub is_composing: bool,
+    /// Auto-repeat of a held key (`KeyDownEvent::is_held`).
+    pub repeat: bool,
     /// The caret sits on the first / last visual line (for history recall);
     /// only filled for ArrowUp / ArrowDown.
     pub caret_on_first_line: bool,
@@ -81,6 +83,7 @@ impl CommandKey {
             meta: modifiers.platform,
             ctrl: modifiers.control,
             is_composing: false,
+            repeat: event.is_held,
             caret_on_first_line: false,
             caret_on_last_line: false,
         }

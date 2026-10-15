@@ -122,8 +122,7 @@ pub fn get_thread_in(
     }
     Ok(Some(CommandReceipt {
         command_id: row.command_id.clone(),
-        thread_id: ThreadId::new(&row.aggregate_id)
-            .map_err(|err| decode_err(err.to_string()))?,
+        thread_id: ThreadId::new(&row.aggregate_id).map_err(|err| decode_err(err.to_string()))?,
         command_type: row.command_type.clone(),
         accepted_at: accepted_at(&row)?,
         result_sequence: result_sequence(&row)?,
@@ -145,8 +144,7 @@ pub fn get_project_in(
     }
     Ok(Some(ProjectCommandReceipt {
         command_id: row.command_id.clone(),
-        project_id: ProjectId::new(&row.aggregate_id)
-            .map_err(|err| decode_err(err.to_string()))?,
+        project_id: ProjectId::new(&row.aggregate_id).map_err(|err| decode_err(err.to_string()))?,
         command_type: row.command_type.clone(),
         accepted_at: accepted_at(&row)?,
         result_sequence: result_sequence(&row)?,

@@ -102,8 +102,8 @@ pub fn user_facing_dispatch_error_message(cause: &Value) -> Option<String> {
     collect(cause, &mut messages, 0);
     messages
         .into_iter()
-        .filter(|m| !GENERIC.iter().any(|prefix| m.starts_with(prefix)))
-        .last()
+        .rev()
+        .find(|m| !GENERIC.iter().any(|prefix| m.starts_with(prefix)))
 }
 
 #[cfg(test)]

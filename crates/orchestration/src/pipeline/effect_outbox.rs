@@ -1029,7 +1029,12 @@ mod tests {
             EffectStatus::Pending
         );
         // A worker that lost the race cannot settle the cancelled row.
-        assert!(!outbox.succeed("start".into(), "worker".into()).await.unwrap());
+        assert!(
+            !outbox
+                .succeed("start".into(), "worker".into())
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

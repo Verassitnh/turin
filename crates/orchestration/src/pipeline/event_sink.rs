@@ -37,17 +37,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use turin_contracts::orchestration_v2::{
     OrchestrationV2DomainEvent, OrchestrationV2ExecutionNodeStatus, OrchestrationV2ProviderThread,
-    OrchestrationV2ResponseCapability,
-    OrchestrationV2RunStatus, OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
-    OrchestrationV2StoredEvent, OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
+    OrchestrationV2ResponseCapability, OrchestrationV2RunStatus, OrchestrationV2RuntimeRequestKind,
+    OrchestrationV2RuntimeRequestStatus, OrchestrationV2StoredEvent, OrchestrationV2TurnItem,
+    OrchestrationV2TurnItemStatus,
 };
 use turin_contracts::{
     CommandId, EventId, ProjectId, ProviderThreadId, RunAttemptId, RunId, RuntimeRequestId,
     ThreadId, UtcDateTime,
 };
 use turin_persistence::{
-    AggregateKind, AppendAgentEvents, ApplicationStoredEvent, Db, OrchestrationEventStore, PersistenceDecodeError, PersistenceError, ProjectEvent,
-    ProjectEventInput, ReadAgentEvents, ReceiptStatus, StoredAgentEvent, utc_millis_now,
+    AggregateKind, AppendAgentEvents, ApplicationStoredEvent, Db, OrchestrationEventStore,
+    PersistenceDecodeError, PersistenceError, ProjectEvent, ProjectEventInput, ReadAgentEvents,
+    ReceiptStatus, StoredAgentEvent, utc_millis_now,
 };
 
 /// Replay page size when a stream catches up (upstream `catchUp`).
@@ -352,7 +353,9 @@ impl EventSink {
         let mut stale_requests: HashSet<RuntimeRequestId> = HashSet::new();
         let mut stale_nodes = HashSet::new();
         for event in &events {
-            let OrchestrationV2DomainEvent::RuntimeRequestUpdated { thread_id, payload, .. } = event
+            let OrchestrationV2DomainEvent::RuntimeRequestUpdated {
+                thread_id, payload, ..
+            } = event
             else {
                 continue;
             };
@@ -371,7 +374,10 @@ impl EventSink {
                 .map_err(|err| PersistenceError::sql("EventSink.guard-cancellation", &err))?;
             let still_pending = current
                 .and_then(|json| {
-                    serde_json::from_str::<turin_contracts::orchestration_v2::OrchestrationV2RuntimeRequest>(&json).ok()
+                    serde_json::from_str::<
+                        turin_contracts::orchestration_v2::OrchestrationV2RuntimeRequest,
+                    >(&json)
+                    .ok()
                 })
                 .is_some_and(|request| {
                     request.status == OrchestrationV2RuntimeRequestStatus::Pending
@@ -430,7 +436,10 @@ impl EventSink {
                 let run_ordinal = turn_item_run_id(payload)
                     .and_then(|run_id| run_ordinals.get(run_id))
                     .copied();
-                normalized.push(self.projections.normalize_turn_item(tx, event, run_ordinal)?);
+                normalized.push(
+                    self.projections
+                        .normalize_turn_item(tx, event, run_ordinal)?,
+                );
             } else {
                 normalized.push(event);
             }
@@ -744,7 +753,10 @@ impl EventSink {
                 let Some(last) = appended.typed.last() else {
                     return Err(decode_err(
                         "EventSink.commit-command",
-                        format!("Command {} produced no orchestration events.", input.command_id),
+                        format!(
+                            "Command {} produced no orchestration events.",
+                            input.command_id
+                        ),
                     ));
                 };
                 let result_sequence = last.sequence;
@@ -773,15 +785,15 @@ impl EventSink {
             .map_err(|cause| Self::write_error(count, Some(&command_id), cause))?;
         match outcome {
             CommitOutcome::Replayed(receipt) => {
-                let stored_events = self
-                    .read_by_command_id(&command_id)
-                    .await
-                    .map_err(|error| match error {
-                        SinkError::Stream { cause, .. } => {
-                            Self::write_error(count, Some(&command_id), cause)
-                        }
-                        other => other,
-                    })?;
+                let stored_events =
+                    self.read_by_command_id(&command_id)
+                        .await
+                        .map_err(|error| match error {
+                            SinkError::Stream { cause, .. } => {
+                                Self::write_error(count, Some(&command_id), cause)
+                            }
+                            other => other,
+                        })?;
                 debug_assert_eq!(receipt.thread_id, thread_id);
                 Ok(CommitResult {
                     receipt,
@@ -880,10 +892,7 @@ impl EventSink {
                     error: None,
                 };
                 if !insert_if_absent_in(tx, &AnyReceipt::Project(reserved.clone()))? {
-                    return Ok((
-                        Self::existing_project_receipt(tx, &input.command_id)?,
-                        None,
-                    ));
+                    return Ok((Self::existing_project_receipt(tx, &input.command_id)?, None));
                 }
                 let event = append_project_event_in(tx, &input.event)?;
                 projections.apply_project_event(tx, &event)?;
@@ -1045,7 +1054,11 @@ impl StreamState {
             .thread_id
             .as_ref()
             .is_none_or(|wanted| Some(wanted) == thread_id)
-            && self.options.event_type.as_deref().is_none_or(|wanted| wanted == kind)
+            && self
+                .options
+                .event_type
+                .as_deref()
+                .is_none_or(|wanted| wanted == kind)
     }
 
     async fn next(mut self) -> Option<(Result<OrchestrationV2StoredEvent, SinkError>, Self)> {
@@ -1116,9 +1129,7 @@ impl StreamState {
     }
 }
 
-fn latest_application_sequence_in(
-    tx: &Transaction<'_>,
-) -> Result<u64, PersistenceError> {
+fn latest_application_sequence_in(tx: &Transaction<'_>) -> Result<u64, PersistenceError> {
     let sequence: Option<i64> = tx
         .query_row(
             "SELECT MAX(sequence) AS sequence FROM orchestration_events INDEXED BY idx_orchestration_events_application_high_water WHERE aggregate_kind = 'project' OR (application_event_version = 2 AND aggregate_kind = 'thread')",

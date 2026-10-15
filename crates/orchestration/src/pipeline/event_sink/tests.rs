@@ -3,9 +3,7 @@
 //! `ProjectionApplier` that maintains only the rows the sink's guards read.
 
 use super::*;
-use crate::pipeline::domain_event::test_support::{
-    metadata_updated, thread_created, thread_json,
-};
+use crate::pipeline::domain_event::test_support::{metadata_updated, thread_created, thread_json};
 use crate::pipeline::effect_outbox::{EffectRequest, EffectStatus};
 use futures::StreamExt;
 use serde_json::json;
@@ -38,11 +36,7 @@ impl ProjectionApplier for TestProjection {
         Ok(event)
     }
 
-    fn apply_event(
-        &self,
-        tx: &Transaction<'_>,
-        event: &Event,
-    ) -> Result<(), PersistenceError> {
+    fn apply_event(&self, tx: &Transaction<'_>, event: &Event) -> Result<(), PersistenceError> {
         if self.fail.load(Ordering::SeqCst) {
             return Err(decode_err("TestProjection.apply", "projection failed"));
         }
@@ -142,8 +136,10 @@ async fn setup() -> (Db, EventSink, Arc<TestProjection>) {
 
 async fn count(db: &Db, table: &'static str) -> i64 {
     db.read(move |conn| {
-        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
-            .map_err(|err| PersistenceError::sql("test.count", &err))
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .map_err(|err| PersistenceError::sql("test.count", &err))
     })
     .await
     .unwrap()
@@ -179,7 +175,11 @@ async fn command_receipt_event_projection_and_effect_commit_together() {
     let input = commit_input(
         "cmd:sink:test",
         "thread:sink:test",
-        vec![terminal_cleanup(&command_id, &thread_id, "effect:sink:test")],
+        vec![terminal_cleanup(
+            &command_id,
+            &thread_id,
+            "effect:sink:test",
+        )],
     );
     let first = sink.commit_command(input.clone()).await.unwrap();
     assert!(first.committed);
@@ -220,7 +220,10 @@ async fn projection_failure_rolls_back_receipt_event_and_effect() {
             vec![terminal_cleanup(&command_id, &thread_id, "effect:rollback")],
         ))
         .await;
-    assert!(matches!(result, Err(SinkError::Write { event_count: 1, .. })));
+    assert!(matches!(
+        result,
+        Err(SinkError::Write { event_count: 1, .. })
+    ));
     assert_eq!(count(&db, "orchestration_events").await, 0);
     assert_eq!(count(&db, "orchestration_command_receipts").await, 0);
     assert_eq!(count(&db, "orchestration_v2_effect_outbox").await, 0);
@@ -243,7 +246,11 @@ async fn retries_keep_one_durable_effect_and_do_not_wake_claimers() {
     let input = commit_input(
         "cmd:idempotent",
         "thread:idempotent",
-        vec![terminal_cleanup(&command_id, &thread_id, "effect:idempotent")],
+        vec![terminal_cleanup(
+            &command_id,
+            &thread_id,
+            "effect:idempotent",
+        )],
     );
     assert!(sink.commit_command(input.clone()).await.unwrap().committed);
     // The commit's own wakeup is consumed here...
@@ -270,7 +277,12 @@ async fn retries_keep_one_durable_effect_and_do_not_wake_claimers() {
 async fn a_command_id_used_by_a_project_command_is_not_a_thread_replay() {
     let (_, sink, _) = setup().await;
     let project = project_commit("cmd:shared-id", "project:shared");
-    assert!(sink.commit_project_command(project).await.unwrap().committed);
+    assert!(
+        sink.commit_project_command(project)
+            .await
+            .unwrap()
+            .committed
+    );
     let result = sink
         .commit_command(commit_input("cmd:shared-id", "thread:shared", vec![]))
         .await;
@@ -465,7 +477,7 @@ async fn filters_worker_replay_and_live_queues_without_losing_matching_events() 
     let run = |id: &str, thread: &str, status: &str| -> Event {
         serde_json::from_value(json!({
             "type": "run.updated",
-            "id": format!("event:{id}"),
+            "id": format!("event:{id}:{status}"),
             "threadId": thread,
             "runId": id,
             "occurredAt": "2026-06-21T00:00:00.000Z",
@@ -484,7 +496,7 @@ async fn filters_worker_replay_and_live_queues_without_losing_matching_events() 
         .unwrap();
     // Unrelated payloads are skipped in SQL, before decoding, even when a
     // retained row is unreadable.
-    let corrupted = history[0].sequence;
+    let corrupted = history[0].sequence as i64;
     db.write(move |tx| {
         tx.execute(
             "UPDATE orchestration_events SET payload_json = 'unreadable unrelated payload' WHERE sequence = ?1",
@@ -644,7 +656,10 @@ async fn guards_post_terminal_provider_thread_writes_by_attempt_and_run_ordinal(
     sink.write(WriteInput::events(vec![
         thread_created("event:owner:thread", "thread:owner"),
         run_event("run.created", "event:owner:run", run.clone()),
-        provider_thread_event("event:owner:pt", provider_thread_json(1, "idle", bg.clone())),
+        provider_thread_event(
+            "event:owner:pt",
+            provider_thread_json(1, "idle", bg.clone()),
+        ),
     ]))
     .await
     .unwrap();

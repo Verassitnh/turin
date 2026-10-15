@@ -3,6 +3,10 @@
 //! worker, thread services). Projection application is supplied by the read
 //! side through [`event_sink::ProjectionApplier`].
 
+// `PersistenceError` is ~128 bytes and every store call returns it; boxing it
+// would leak into the persistence API this crate does not own.
+#![allow(clippy::result_large_err)]
+
 pub mod command_policy;
 pub mod command_receipt_store;
 pub mod dispatch_mode_limit;

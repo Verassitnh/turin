@@ -84,7 +84,9 @@ pub enum EffectWorkerError {
         #[source]
         cause: PersistenceError,
     },
-    #[error("Orchestration effect worker {operation} failed for {effect_id}: The worker no longer owns the effect lease.")]
+    #[error(
+        "Orchestration effect worker {operation} failed for {effect_id}: The worker no longer owns the effect lease."
+    )]
     LostLease {
         operation: &'static str,
         effect_id: String,
@@ -631,7 +633,8 @@ mod tests {
             will_retry: bool,
         ) -> Result<(), EffectExecutionError> {
             self.calls.lock().push((effect.id.clone(), will_retry));
-            (self.script)(effect, will_retry).map_err(|message| EffectExecutionError::new(effect, message))
+            (self.script)(effect, will_retry)
+                .map_err(|message| EffectExecutionError::new(effect, message))
         }
     }
 
@@ -743,11 +746,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_terminal_interrupt_race_settles_as_succeeded() {
-        let (outbox, worker, _) = harness(
-            Box::new(|_, _| Err("Turn is not active".into())),
-            5,
-        )
-        .await;
+        let (outbox, worker, _) =
+            harness(Box::new(|_, _| Err("Turn is not active".into())), 5).await;
         let command = CommandId::new("cmd").unwrap();
         let thread = ThreadId::new("thread").unwrap();
         outbox

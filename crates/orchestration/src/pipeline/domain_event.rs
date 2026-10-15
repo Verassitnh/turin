@@ -8,10 +8,7 @@ use turin_contracts::{EventId, NodeId, RawEventId, RunId, ThreadId, UtcDateTime}
 use turin_persistence::{AgentEvent, PersistenceDecodeError, PersistenceError, StoredAgentEvent};
 
 fn decode_err(issue: impl Into<String>) -> PersistenceError {
-    PersistenceError::Decode(PersistenceDecodeError::new(
-        "EventSink.domain-event",
-        issue,
-    ))
+    PersistenceError::Decode(PersistenceDecodeError::new("EventSink.domain-event", issue))
 }
 
 fn string_field(value: &Value, name: &str) -> Result<String, PersistenceError> {
@@ -32,7 +29,8 @@ pub fn agent_event_from_domain(
     event: &OrchestrationV2DomainEvent,
 ) -> Result<AgentEvent, PersistenceError> {
     let value = serde_json::to_value(event).map_err(|err| decode_err(err.to_string()))?;
-    let id = EventId::new(string_field(&value, "id")?).map_err(|err| decode_err(err.to_string()))?;
+    let id =
+        EventId::new(string_field(&value, "id")?).map_err(|err| decode_err(err.to_string()))?;
     let thread_id = ThreadId::new(string_field(&value, "threadId")?)
         .map_err(|err| decode_err(err.to_string()))?;
     let occurred_at: UtcDateTime = string_field(&value, "occurredAt")?
@@ -120,7 +118,6 @@ pub(crate) mod test_support {
     //! Event builders shared by this crate's tests.
 
     use super::*;
-    use turin_contracts::orchestration_v2::OrchestrationV2AppThread;
 
     pub fn thread_json(thread_id: &str) -> Value {
         json!({
@@ -146,10 +143,6 @@ pub(crate) mod test_support {
             "lastVisitedAt": null,
             "deletedAt": null,
         })
-    }
-
-    pub fn thread(thread_id: &str) -> OrchestrationV2AppThread {
-        serde_json::from_value(thread_json(thread_id)).expect("test thread decodes")
     }
 
     pub fn thread_event(kind: &str, event_id: &str, thread_id: &str) -> OrchestrationV2DomainEvent {

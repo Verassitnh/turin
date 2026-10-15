@@ -21,6 +21,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+unicode-segmentation = "1"
 url.workspace = true
 
 [dev-dependencies]

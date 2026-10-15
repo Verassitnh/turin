@@ -7082,6 +7082,7 @@ dependencies = [
  "tracing",
  "turin-contracts",
  "turin-persistence",
+ "unicode-segmentation",
  "url",
 ]
 

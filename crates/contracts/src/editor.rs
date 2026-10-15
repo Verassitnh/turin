@@ -650,8 +650,14 @@ mod tests {
     fn launcher_error_union_decodes_by_tag_and_formats_messages() {
         use serde_json::json;
         let samples = [
-            (json!({ "_tag": "ExternalLauncherUnknownEditorError", "editor": "emacs" }), "Unknown editor: emacs"),
-            (json!({ "_tag": "ExternalLauncherUnsupportedEditorError", "editor": "zed" }), "Unsupported editor: zed"),
+            (
+                json!({ "_tag": "ExternalLauncherUnknownEditorError", "editor": "emacs" }),
+                "Unknown editor: emacs",
+            ),
+            (
+                json!({ "_tag": "ExternalLauncherUnsupportedEditorError", "editor": "zed" }),
+                "Unsupported editor: zed",
+            ),
             (
                 json!({ "_tag": "ExternalLauncherCommandNotFoundError", "editor": "zed", "command": "zed" }),
                 "Editor command not found: zed",
@@ -674,18 +680,26 @@ mod tests {
             assert_eq!(error.to_string(), message);
             assert_eq!(serde_json::to_value(&error).unwrap(), sample);
         }
-        assert!(serde_json::from_value::<ExternalLauncherError>(
-            json!({ "_tag": "ExternalLauncherUnsupportedEditorError", "editor": "emacs" })
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<ExternalLauncherError>(
+                json!({ "_tag": "ExternalLauncherUnsupportedEditorError", "editor": "emacs" })
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn launch_input_reveal_is_optional() {
         let input: LaunchEditorInput =
-            serde_json::from_value(serde_json::json!({ "cwd": " /p ", "editor": "file-manager" })).unwrap();
+            serde_json::from_value(serde_json::json!({ "cwd": " /p ", "editor": "file-manager" }))
+                .unwrap();
         assert_eq!(input.cwd.as_str(), "/p");
         assert_eq!(input.reveal, None);
-        assert!(serde_json::from_value::<LaunchEditorInput>(serde_json::json!({ "cwd": "/p", "editor": "emacs" })).is_err());
+        assert!(
+            serde_json::from_value::<LaunchEditorInput>(
+                serde_json::json!({ "cwd": "/p", "editor": "emacs" })
+            )
+            .is_err()
+        );
     }
 }

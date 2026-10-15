@@ -21,4 +21,11 @@ async-trait.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
 indexmap.workspace = true
+regex.workspace = true
+sha2.workspace = true
+uuid.workspace = true
 turin-provider-core.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile.workspace = true

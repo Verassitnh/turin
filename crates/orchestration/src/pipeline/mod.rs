@@ -7,6 +7,8 @@
 // would leak into the persistence API this crate does not own.
 #![allow(clippy::result_large_err)]
 
+pub mod attachment_claims;
+pub mod attachment_store;
 pub mod command_policy;
 pub mod command_receipt_store;
 pub mod dispatch_mode_limit;
@@ -25,4 +27,6 @@ pub mod task;
 pub(crate) mod test_support;
 pub mod thread_command_executor;
 pub mod thread_management_service;
+pub mod thread_message_intake;
 pub mod user_facing_errors;
+pub mod user_input_attachments;

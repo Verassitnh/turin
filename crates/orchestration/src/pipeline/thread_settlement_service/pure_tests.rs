@@ -253,6 +253,10 @@ fn keeps_threads_with_a_pr_from_inactivity_settlement_only_when_asked() {
         )),
         Some(at(-4 * DAY))
     );
+    // Upstream probe: keep=true with a merged PR still settles at the window.
+    let mut merged = input(&thread, Some(merged_pull_request(-1)), Some(3.0), true);
+    merged.keep_pull_requests = true;
+    assert_eq!(resolve_auto_settlement_at(&merged), Some(at(-4 * DAY)));
 }
 
 #[test]

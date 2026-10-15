@@ -603,10 +603,14 @@ pub fn subagent_records(driver: &ProviderDriverKind, call: SubagentCall<'_>) -> 
         },
     );
     let subagent_status = match call.status {
+        OrchestrationV2TurnItemStatus::Idle => OrchestrationV2SubagentStatus::Idle,
         OrchestrationV2TurnItemStatus::Pending => OrchestrationV2SubagentStatus::Pending,
+        OrchestrationV2TurnItemStatus::Waiting => OrchestrationV2SubagentStatus::Waiting,
         OrchestrationV2TurnItemStatus::Completed => OrchestrationV2SubagentStatus::Completed,
         OrchestrationV2TurnItemStatus::Failed => OrchestrationV2SubagentStatus::Failed,
-        _ => OrchestrationV2SubagentStatus::Running,
+        OrchestrationV2TurnItemStatus::Cancelled => OrchestrationV2SubagentStatus::Cancelled,
+        OrchestrationV2TurnItemStatus::Interrupted => OrchestrationV2SubagentStatus::Interrupted,
+        OrchestrationV2TurnItemStatus::Running => OrchestrationV2SubagentStatus::Running,
     };
     let subagent = OrchestrationV2Subagent {
         id: subagent_id.clone(),

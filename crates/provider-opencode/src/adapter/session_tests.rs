@@ -1710,6 +1710,60 @@ async fn v2_subagent_tool_is_a_subagent_node_record_and_item() {
     session.close().await;
 }
 
+/// The opencode2_background fixture: a background launch returns `running` (with the child
+/// session named by its progress), the turn ends, and the child's report settles the item.
+#[tokio::test]
+async fn v2_background_subagent_stays_running_until_its_report_settles_it() {
+    let (script, session, mut events, _offers, thread) = v2_idle_session_with_offers().await;
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    let frames = [
+        json!({"id":"e1","type":"session.tool.input.started","data":{"sessionID":"ses_1","id":"call_bg","name":"subagent"}}),
+        json!({"id":"e2","type":"session.tool.called","data":{"sessionID":"ses_1","id":"call_bg","input":{"agent":"general","description":"Sleep and reply","prompt":"Run sleep","background":true}}}),
+        json!({"id":"e3","type":"session.tool.progress","data":{"sessionID":"ses_1","id":"call_bg","metadata":{"sessionID":"ses_child","status":"running"}}}),
+        json!({"id":"e4","type":"session.tool.success","data":{"sessionID":"ses_1","id":"call_bg","content":[{"type":"text","text":"The subagent is working in the background."}],"metadata":{"status":"running"}}}),
+        json!({"id":"e5","type":"session.execution.succeeded","data":{"sessionID":"ses_1"}}),
+    ];
+    for frame in frames {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let launched = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "running"
+    })
+    .await;
+    assert!(
+        of_type(&launched, "turn_item.updated")
+            .iter()
+            .all(|event| event["turn_item"]["status"] == "running"),
+        "{launched:#?}"
+    );
+    // The turn has ended. The child's report arrives in the parent's inbox and settles the item.
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e6","type":"session.inbox.enqueued","data":{"sessionID":"ses_1","inboxID":"inbox_bg","item":{"type":"synthetic","payload":{"text":"<subagent sessionID=\"ses_child\" state=\"completed\" description=\"Sleep and reply\">\nCHILD_OK\n</subagent>","metadata":{"source":"subagent","childID":"ses_child","state":"completed","description":"Sleep and reply"}}}}}).to_string(),
+        )))
+        .unwrap();
+    let settled = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "completed"
+    })
+    .await;
+    let item = of_type(&settled, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["status"] == "completed")
+        .expect("settled subagent item");
+    assert_eq!(item["turn_item"]["result"], "CHILD_OK");
+    let record = of_type(&settled, "subagent.updated")
+        .into_iter()
+        .last()
+        .expect("settled subagent record");
+    assert_eq!(record["subagent"]["status"], "completed");
+    session.close().await;
+}
+
 /// A v2 session on a queue of continuation offers, with its thread ensured and idle.
 async fn v2_idle_session_with_offers() -> (
     Script,

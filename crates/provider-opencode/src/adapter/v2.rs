@@ -18,8 +18,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use turin_contracts::orchestration_v2::OrchestrationV2NotificationOutcome;
 use turin_contracts::{
-    MessageId, NodeId, PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId,
-    TrimmedNonEmptyString, UtcDateTime,
+    MessageId, NodeId, PositiveInt, ProviderSessionId, ProviderThreadId, ProviderTurnId,
+    RuntimeRequestId, ThreadId, TrimmedNonEmptyString, UtcDateTime,
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2AppThread, OrchestrationV2ConversationMessage,
@@ -161,6 +161,31 @@ struct V2Inner {
     /// Subagent reports waiting in each session's inbox for the next wake.
     reports: HashMap<String, Vec<WakeReport>>,
     wake_seq: u64,
+    /// The tool name each call was first seen with. Later events of a call (progress, success)
+    /// carry no name, so the name comes from here (upstream's `turn.tools` and `state.calls`).
+    tool_names: HashMap<String, String>,
+    /// Calls whose launch returned while they run in the background (upstream `call.background`).
+    background_calls: HashSet<String>,
+    /// Background subagents still running, by child session id. Each stays open until its
+    /// report settles it, past the end of the turn that launched it.
+    background: HashMap<String, OpenSubagent>,
+}
+
+/// A background subagent whose launch returned while it still runs (upstream's background
+/// `SubagentCall`). Its item stays running until its report settles it.
+struct OpenSubagent {
+    /// The child session the report names: the key it is settled by.
+    child_session: String,
+    thread_id: ThreadId,
+    root_node_id: NodeId,
+    provider_thread_id: ProviderThreadId,
+    provider_turn_id: ProviderTurnId,
+    native_item_id: String,
+    ordinal: u64,
+    prompt: String,
+    title: Option<String>,
+    started_at: UtcDateTime,
+    child: Option<(ThreadId, ProviderThreadId)>,
 }
 
 /// A subagent's report waiting in the inbox (upstream's `state.reports`).
@@ -239,6 +264,9 @@ impl OpenCodeV2Session {
                 wakes: HashMap::new(),
                 reports: HashMap::new(),
                 wake_seq: 0,
+                tool_names: HashMap::new(),
+                background_calls: HashSet::new(),
+                background: HashMap::new(),
             }),
             continuation: Mutex::new(Arc::new(ProviderContinuationRequests::dropping())),
             tx,
@@ -398,7 +426,7 @@ impl OpenCodeV2Session {
                     let id = part.get("id").and_then(Value::as_str).unwrap_or("tool");
                     let name = part.get("name").and_then(Value::as_str).unwrap_or("tool");
                     let state = part.get("state").cloned().unwrap_or(Value::Null);
-                    self.emit_tool(session_id, id, name, &state);
+                    self.emit_tool(session_id, "", id, name, &state);
                 }
             }
         }
@@ -580,11 +608,28 @@ impl OpenCodeV2Session {
                     return;
                 }
                 if let Some(session_id) = session_id {
-                    let name = data
-                        .get("name")
-                        .or_else(|| data.get("tool"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool");
+                    let id = str_field(data, "id").or_else(|| str_field(data, "callID"));
+                    // Only the call's first events name the tool; the rest are looked up.
+                    let name = {
+                        let mut guard = self.inner.lock();
+                        match data
+                            .get("name")
+                            .or_else(|| data.get("tool"))
+                            .and_then(Value::as_str)
+                        {
+                            Some(name) => {
+                                if let Some(id) = &id {
+                                    guard.tool_names.insert(id.clone(), name.to_owned());
+                                }
+                                name.to_owned()
+                            }
+                            None => id
+                                .as_ref()
+                                .and_then(|id| guard.tool_names.get(id).cloned())
+                                .unwrap_or_else(|| "tool".to_owned()),
+                        }
+                    };
+                    let name = name.as_str();
                     if (name == "subagent" || name == "task")
                         && let Some(child) = data
                             .pointer("/state/metadata/sessionID")
@@ -594,10 +639,8 @@ impl OpenCodeV2Session {
                     {
                         self.link_child(child, &session_id);
                     }
-                    let id = str_field(data, "id")
-                        .or_else(|| str_field(data, "callID"))
-                        .unwrap_or_else(|| name.to_owned());
-                    self.emit_tool(&session_id, &id, name, data);
+                    let id = id.unwrap_or_else(|| name.to_owned());
+                    self.emit_tool(&session_id, event_type, &id, name, data);
                 }
             }
             "permission.asked" => self.show_permission(data),
@@ -776,7 +819,17 @@ impl OpenCodeV2Session {
         });
     }
 
-    fn emit_tool(&self, session_id: &str, call_id: &str, name: &str, state: &Value) {
+    /// One tool event. OpenCode 2 puts a call's status in `metadata.status` (a success carries
+    /// `completed`, a background launch `running`), so that is read too. Without a status, a
+    /// success is completed and a failure failed, as upstream's `session.tool.success` settles.
+    fn emit_tool(
+        &self,
+        session_id: &str,
+        event_type: &str,
+        call_id: &str,
+        name: &str,
+        state: &Value,
+    ) {
         let mut events = Vec::new();
         {
             let mut guard = self.inner.lock();
@@ -800,13 +853,22 @@ impl OpenCodeV2Session {
             let status_name = state
                 .get("status")
                 .or_else(|| state.pointer("/state/status"))
-                .and_then(Value::as_str)
-                .unwrap_or("running");
+                .or_else(|| state.pointer("/metadata/status"))
+                .or_else(|| state.pointer("/state/metadata/status"))
+                .and_then(Value::as_str);
             let status = match status_name {
-                "completed" | "success" => OrchestrationV2TurnItemStatus::Completed,
-                "error" | "failed" => OrchestrationV2TurnItemStatus::Failed,
-                _ => OrchestrationV2TurnItemStatus::Running,
+                Some("completed" | "success") => OrchestrationV2TurnItemStatus::Completed,
+                Some("error" | "failed") => OrchestrationV2TurnItemStatus::Failed,
+                Some("running") => OrchestrationV2TurnItemStatus::Running,
+                _ => match event_type {
+                    "session.tool.success" => OrchestrationV2TurnItemStatus::Completed,
+                    "session.tool.failed" => OrchestrationV2TurnItemStatus::Failed,
+                    _ => OrchestrationV2TurnItemStatus::Running,
+                },
             };
+            if status != OrchestrationV2TurnItemStatus::Running {
+                inner.tool_names.remove(call_id);
+            }
             let now = UtcDateTime::now();
             let started_at = *turn.tool_started.entry(call_id.to_owned()).or_insert(now);
             let completed_at = matches!(
@@ -869,8 +931,44 @@ impl OpenCodeV2Session {
                         .get(child_session)
                         .map(|child| (child.thread.id.clone(), child.provider_thread.id.clone()));
                 }
+                // A background launch returns while the subagent runs (`input.background`, or a
+                // success whose `metadata.status` is `running`). Its item stays open until the
+                // report settles it, so only a terminal status ends the call here.
+                if input.get("background").and_then(Value::as_bool) == Some(true)
+                    || (event_type == "session.tool.success"
+                        && state.pointer("/metadata/status").and_then(Value::as_str)
+                            == Some("running"))
+                {
+                    inner.background_calls.insert(call_id.to_owned());
+                }
+                let background = inner.background_calls.contains(call_id);
                 let result = output.as_deref().map(subagent_output);
                 let ordinal = item_ordinal(turn, call_id);
+                if status == OrchestrationV2TurnItemStatus::Running && background {
+                    if let Some(child_session) = child_session.filter(|_| is_root) {
+                        inner.background.insert(
+                            child_session.to_owned(),
+                            OpenSubagent {
+                                child_session: child_session.to_owned(),
+                                thread_id: thread_id.clone(),
+                                root_node_id: root_node_id.clone(),
+                                provider_thread_id: provider_thread_id.clone(),
+                                provider_turn_id: provider_turn_id.clone(),
+                                native_item_id: call_id.to_owned(),
+                                ordinal,
+                                prompt: prompt.clone(),
+                                title: title.map(str::to_owned),
+                                started_at,
+                                child: child.clone(),
+                            },
+                        );
+                    }
+                } else {
+                    inner.background_calls.remove(call_id);
+                    inner
+                        .background
+                        .retain(|_, open| open.native_item_id != call_id);
+                }
                 let records = subagent_records(
                     &self.driver,
                     SubagentCall {
@@ -1241,6 +1339,11 @@ impl OpenCodeV2Session {
             ),
             None => (metadata("description").map(str::to_owned), None),
         };
+        // The report is the end of a background subagent: its item settles with it.
+        let settled = guard.background.remove(child);
+        if let Some(open) = &settled {
+            guard.background_calls.remove(&open.native_item_id);
+        }
         guard
             .reports
             .entry(session_id.to_owned())
@@ -1251,6 +1354,68 @@ impl OpenCodeV2Session {
                 child_thread,
                 outcome,
             });
+        drop(guard);
+        if let Some(open) = settled {
+            let status = match outcome {
+                OrchestrationV2NotificationOutcome::Failed => OrchestrationV2TurnItemStatus::Failed,
+                OrchestrationV2NotificationOutcome::Cancelled => {
+                    OrchestrationV2TurnItemStatus::Cancelled
+                }
+                _ => OrchestrationV2TurnItemStatus::Completed,
+            };
+            for event in self.settle_background(open, status, subagent_output(text)) {
+                self.emit(event);
+            }
+        }
+    }
+
+    /// The events that settle a background subagent: its node, record and item, as upstream
+    /// `settleCall` does when its report arrives.
+    fn settle_background(
+        &self,
+        open: OpenSubagent,
+        status: OrchestrationV2TurnItemStatus,
+        result: String,
+    ) -> Vec<ProviderAdapterV2Event> {
+        let now = UtcDateTime::now();
+        let records = subagent_records(
+            &self.driver,
+            SubagentCall {
+                instance_id: &self.instance_id,
+                of: NodeOf {
+                    thread_id: &open.thread_id,
+                    root_node_id: &open.root_node_id,
+                    provider_thread_id: &open.provider_thread_id,
+                    provider_turn_id: &open.provider_turn_id,
+                    native_item_id: &open.native_item_id,
+                    weak_ref: false,
+                },
+                ordinal: open.ordinal,
+                prompt: &open.prompt,
+                title: open.title.as_deref(),
+                status,
+                started_at: open.started_at,
+                completed_at: Some(now),
+                result: Some(result),
+                child_session: Some(&open.child_session),
+                child: open.child,
+                now,
+            },
+        );
+        vec![
+            ProviderAdapterV2Event::NodeUpdated {
+                driver: self.driver.clone(),
+                node: records.node,
+            },
+            ProviderAdapterV2Event::SubagentUpdated {
+                driver: self.driver.clone(),
+                subagent: records.subagent,
+            },
+            ProviderAdapterV2Event::TurnItemUpdated {
+                driver: self.driver.clone(),
+                turn_item: records.item,
+            },
+        ]
     }
 
     /// `emitSubagent`'s child thread: created the first time a task reveals its child session.

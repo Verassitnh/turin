@@ -9,5 +9,8 @@ pub mod markdown_images;
 pub mod media_actions;
 pub mod media_reference;
 pub mod media_source;
+pub mod prompt_links;
+pub mod provider_skills;
 pub mod provider_types;
+pub mod provider_update_required_models;
 pub mod shared_support;

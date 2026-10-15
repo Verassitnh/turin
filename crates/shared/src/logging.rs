@@ -141,7 +141,8 @@ impl RotatingFileSink {
             if self.throw_on_error {
                 return Err(error);
             }
-            self.current_size = self.read_current_size().unwrap_or(self.current_size);
+            // Like upstream, a failed size re-read here surfaces even without throwOnError.
+            self.current_size = self.read_current_size()?;
         }
         Ok(())
     }
@@ -179,7 +180,7 @@ impl RotatingFileSink {
                 if self.throw_on_error {
                     Err(sink_error("rotate", &self.file_path, cause))
                 } else {
-                    self.current_size = self.read_current_size().unwrap_or(self.current_size);
+                    self.current_size = self.read_current_size()?;
                     Ok(())
                 }
             }
@@ -221,10 +222,12 @@ impl RotatingFileSink {
             if index <= self.max_files as i64 {
                 continue;
             }
-            if let Err(cause) = rm_force(&entry.path())
-                && self.throw_on_error
-            {
-                return Err(sink_error("prune", &self.file_path, cause));
+            // Upstream aborts the whole prune on the first failed removal.
+            if let Err(cause) = rm_force(&entry.path()) {
+                if self.throw_on_error {
+                    return Err(sink_error("prune", &self.file_path, cause));
+                }
+                return Ok(());
             }
         }
         Ok(())

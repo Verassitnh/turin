@@ -162,6 +162,10 @@ impl SettingsView {
                 }
             }
             "kb-new" => self.panels.keybindings.adding = true,
+            "add-hub" => self.dialog = Some(super::dialog::Dialog::AddHub),
+            other if other.starts_with("provider:") => {
+                self.panels.providers.selected = Some(other["provider:".len()..].to_owned());
+            }
             _ => self.menus.open(id),
         }
         cx.notify();
@@ -422,7 +426,7 @@ impl Render for SettingsView {
                     .child(div().flex().flex_col().flex_1().min_h_0().child(page)),
             )
             .child(sidebar_toggle)
-            .children(self.render_dialog(cx))
+            .children(self.render_dialog(window, cx))
     }
 }
 

@@ -334,6 +334,29 @@ impl SettingsSource for MockSettingsSource {
         self.publish(cx);
     }
 
+    fn refresh_providers(&self, cx: &mut App) {
+        {
+            let mut state = self.state.borrow_mut();
+            let now = "2026-10-15T10:05:00.000Z";
+            for provider in &mut state.vm.providers {
+                provider.checked_at = now.to_owned();
+            }
+        }
+        self.publish(cx);
+    }
+
+    fn update_provider(&self, instance_id: &str, _target_version: Option<String>, _cx: &mut App) {
+        tracing::info!(instance_id, "mock settings: update provider");
+    }
+
+    fn start_provider_auth(&self, instance_id: &str, _cx: &mut App) {
+        tracing::info!(instance_id, "mock settings: start provider auth");
+    }
+
+    fn logout_provider(&self, instance_id: &str, _cx: &mut App) {
+        tracing::info!(instance_id, "mock settings: provider logout");
+    }
+
     fn set_theme(&self, theme: String, cx: &mut App) {
         self.state.borrow_mut().vm.appearance.theme = theme;
         self.publish(cx);

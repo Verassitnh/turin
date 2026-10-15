@@ -135,6 +135,14 @@ pub trait SettingsSource {
     fn update_server(&self, patch: Value, cx: &mut App);
     fn upsert_keybinding(&self, input: UpsertKeybinding, cx: &mut App);
     fn remove_keybinding(&self, input: RemoveKeybinding, cx: &mut App);
+    /// `refreshServerProviders({ refreshModels: true })`.
+    fn refresh_providers(&self, cx: &mut App);
+    /// `updateProvider`: run the provider CLI's update command.
+    fn update_provider(&self, instance_id: &str, target_version: Option<String>, cx: &mut App);
+    /// Starts / ends the provider account sign-in (the in-app auth flow of
+    /// ProviderAuthenticationSection).
+    fn start_provider_auth(&self, instance_id: &str, cx: &mut App);
+    fn logout_provider(&self, instance_id: &str, cx: &mut App);
     /// `useTheme().setTheme` / `setAppearanceMode`.
     fn set_theme(&self, theme: String, cx: &mut App);
     fn set_appearance_mode(&self, mode: String, cx: &mut App);

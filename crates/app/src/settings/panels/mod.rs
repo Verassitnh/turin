@@ -5,6 +5,7 @@
 mod appearance;
 mod general;
 mod keybindings;
+mod providers;
 
 use gpui_kit::{
     AnyElement, Context, IntoElement, ParentElement as _, SharedString,
@@ -22,6 +23,7 @@ pub struct PanelState {
     pub legacy_open: bool,
     pub typography_advanced: bool,
     pub keybindings: keybindings::KeybindingsState,
+    pub providers: providers::ProvidersState,
 }
 
 /// `max-w-4xl`.
@@ -33,6 +35,7 @@ impl SettingsView {
             SettingsRoute::Section(SettingsPath::General) => self.render_general(window, cx),
             SettingsRoute::Section(SettingsPath::Appearance) => self.render_appearance(window, cx),
             SettingsRoute::Section(SettingsPath::Keybindings) => self.render_keybindings(window, cx),
+            SettingsRoute::Section(SettingsPath::Providers) => self.render_providers(window, cx),
             _ => vec![div()
                 .text_color(cx.app_theme().muted_foreground)
                 .child(SharedString::from(format!(

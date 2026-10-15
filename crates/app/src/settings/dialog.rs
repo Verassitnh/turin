@@ -29,6 +29,8 @@ pub struct ConfirmSpec {
 /// The dialogs the settings pages open.
 pub enum Dialog {
     Confirm(ConfirmSpec),
+    /// `AddUsageLimitSourceDialog`.
+    AddHub,
 }
 
 /// `DialogPopup` chrome around `children` (header / panel / footer).
@@ -125,8 +127,11 @@ pub fn dialog_footer(theme: &AppTheme, children: Vec<AnyElement>) -> AnyElement 
 }
 
 impl SettingsView {
-    pub(super) fn render_dialog(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.app_theme().clone();
+        if matches!(self.dialog, Some(Dialog::AddHub)) {
+            return Some(self.render_add_hub_dialog(window, cx));
+        }
         let Some(Dialog::Confirm(spec)) = &self.dialog else {
             return None;
         };
@@ -175,3 +180,142 @@ impl SettingsView {
     }
 }
 
+
+/// `sourceIdFromUrl`: stable per hub; dots and dashes in the host are kept.
+pub fn usage_source_id_from_url(url: &str) -> String {
+    let host = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for ch in host.to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' {
+            slug.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    format!("cliproxy-{}", if slug.is_empty() { "hub" } else { slug })
+}
+
+impl SettingsView {
+    fn render_add_hub_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.app_theme().clone();
+        let label_text = |text: &'static str| {
+            div()
+                .text_size(TEXT_SM.size)
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.foreground)
+                .child(text)
+        };
+        let url = self.input("hub-url", "", "https://hub.example.ts.net:8318", window, cx, |_, _, _, _| {});
+        let key = self.input("hub-key", "", "", window, cx, |_, _, _, _| {});
+        let label = self.input("hub-label", "", "Defaults to the hub's host name", window, cx, |_, _, _, _| {});
+        let read = |this: &Self, name: &str, cx: &gpui_kit::App| {
+            this.inputs
+                .get(&SharedString::from(name.to_owned()))
+                .map(|state| state.read(cx).value().trim().to_owned())
+                .unwrap_or_default()
+        };
+        let can_save = !read(self, "hub-url", cx).is_empty() && !read(self, "hub-key", cx).is_empty();
+        let close = |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+            for name in ["hub-url", "hub-key", "hub-label"] {
+                if let Some(state) = this.inputs.get(&SharedString::from(name)) {
+                    state.update(cx, |state, cx| state.set_value("", window, cx));
+                }
+            }
+            this.dialog = None;
+            cx.notify();
+        };
+        let dismiss = self.cb(cx, move |this, window, cx| close(this, window, cx));
+        let environment = self.vm(cx).environment.label.clone();
+        let field = |name: &'static str, input: &gpui_kit::Entity<gpui_kit::component::input::InputState>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(label_text(name))
+                .child(super::controls::text_field(input, None, super::controls::FieldSize::Default, false, cx))
+        };
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .px_6()
+            .pb_6()
+            .child(field("Hub URL", &url))
+            .child(field("Management key", &key))
+            .child(field("Label (optional)", &label));
+        dialog_frame(
+            &theme,
+            rems(28.),
+            vec![
+                dialog_header(
+                    "Add a CLIProxyAPI hub",
+                    Some(
+                        format!(
+                            "Show the quota of every account the hub pools, next to the providers on {environment}. The key stays on that server."
+                        )
+                        .into(),
+                    ),
+                    &theme,
+                ),
+                body.into_any_element(),
+                dialog_footer(
+                    &theme,
+                    vec![
+                        Button::new("hub-cancel")
+                            .variant(ButtonVariant::Outline)
+                            .label("Cancel")
+                            .on_click(cx.listener(move |this, _, window, cx| close(this, window, cx)))
+                            .into_any_element(),
+                        Button::new("hub-save")
+                            .label("Add hub")
+                            .disabled(!can_save)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let url = read(this, "hub-url", cx);
+                                let key = read(this, "hub-key", cx);
+                                let label = read(this, "hub-label", cx);
+                                if url.is_empty() || key.is_empty() {
+                                    return;
+                                }
+                                let id = usage_source_id_from_url(&url);
+                                let mut entry = serde_json::json!({
+                                    "kind": "cliproxy",
+                                    "url": url,
+                                    "managementKey": key,
+                                    "enabled": true,
+                                });
+                                if !label.is_empty() {
+                                    entry["label"] = serde_json::Value::String(label);
+                                }
+                                this.update_server(serde_json::json!({ "usageLimitSources": { id: entry } }), cx);
+                                close(this, window, cx);
+                            }))
+                            .into_any_element(),
+                    ],
+                ),
+            ],
+            dismiss,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::usage_source_id_from_url;
+
+    #[test]
+    fn derives_a_stable_id_from_the_host() {
+        assert_eq!(usage_source_id_from_url("https://hub.example.ts.net:8318/x"), "cliproxy-hub.example.ts.net-8318");
+        assert_eq!(usage_source_id_from_url("Foo-Bar.com"), "cliproxy-foo-bar.com");
+        assert_eq!(usage_source_id_from_url("://"), "cliproxy-hub");
+    }
+}

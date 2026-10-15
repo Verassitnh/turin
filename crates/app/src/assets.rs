@@ -70,6 +70,9 @@ impl AssetSource for AppAssets {
         if let Some(bytes) = AppIcons.load(path)? {
             return Ok(Some(bytes));
         }
+        if let Some(bytes) = crate::settings::icons::load_brand(path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
+        }
         if let Some(bytes) = crate::settings::icons::SettingsIcons.load(path)? {
             return Ok(Some(bytes));
         }

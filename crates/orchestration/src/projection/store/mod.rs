@@ -14,6 +14,7 @@ pub mod canonical;
 pub mod shell;
 #[cfg(test)]
 mod shell_tests;
+pub mod unreadable;
 #[cfg(test)]
 mod window_tests;
 
@@ -316,6 +317,12 @@ impl ProjectionStore {
             Ok(shell::read_thread_worktree_paths(conn)?)
         })
         .await
+    }
+
+    /// `getUnreadableThreadIds`: threads whose projection rows fail to decode.
+    /// Runs without a transaction, like upstream.
+    pub async fn get_unreadable_thread_ids(&self) -> Result<Vec<ThreadId>, ProjectionStoreError> {
+        self.read(unreadable::read_unreadable_thread_ids).await
     }
 
     /// `getLimitRecoveryCandidates`.

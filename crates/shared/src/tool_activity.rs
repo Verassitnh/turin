@@ -11,6 +11,8 @@ use regex::Regex;
 use serde_json::{Map, Value};
 use turin_contracts::base_schemas::js_trim;
 
+use crate::js_string::JS_WS;
+
 type Record = Map<String, Value>;
 
 static NULL: Value = Value::Null;
@@ -79,7 +81,7 @@ pub enum DynamicToolSurface {
 
 fn sky_call() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?-u:\b)sky\s*\.").expect("valid regex"))
+    RE.get_or_init(|| Regex::new(&format!(r"(?-u:\b)sky[{JS_WS}]*\.")).expect("valid regex"))
 }
 
 fn sky_import() -> &'static Regex {
@@ -142,8 +144,10 @@ fn normalize_command_value(value: &Value) -> Option<String> {
 fn exit_code_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(?is)^(?P<output>.*?)(?:\s*<exited with exit code [0-9]+>)\s*$")
-            .expect("valid regex")
+        Regex::new(&format!(
+            r"(?is)^(?P<output>.*?)(?:[{JS_WS}]*<exited with exit code [0-9]+>)[{JS_WS}]*$"
+        ))
+        .expect("valid regex")
     })
 }
 
@@ -308,12 +312,15 @@ pub fn merge_tool_activity_data(previous: &Value, next: &Value) -> Option<Record
 fn normalize_equivalent_value(value: Option<&str>) -> Option<String> {
     fn whitespace() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| Regex::new(r"\s+").expect("valid regex"))
+        RE.get_or_init(|| Regex::new(&format!(r"[{JS_WS}]+")).expect("valid regex"))
     }
     fn status_suffix() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
         RE.get_or_init(|| {
-            Regex::new(r"(?i)\s+(?:complete|completed|started)\s*$").expect("valid regex")
+            Regex::new(&format!(
+                r"(?i)[{JS_WS}]+(?:complete|completed|started)[{JS_WS}]*$"
+            ))
+            .expect("valid regex")
         })
     }
     let trimmed = trimmed_str(value)?;
@@ -868,6 +875,25 @@ mod tests {
         assert_eq!(
             dynamic_tool_title(Some("Read"), &json!({"skill": "full-send"}), None),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod qc_regressions {
+    use super::*;
+
+    #[test]
+    fn exit_marker_strip_uses_js_whitespace() {
+        // Node 22: "out﻿<exited with exit code 2>" strips to "out"; U+0085 is text there, so
+        // "out\u0085<exited with exit code 2>" keeps it.
+        assert_eq!(
+            strip_trailing_exit_code(Some("out\u{FEFF}<exited with exit code 2>")).as_deref(),
+            Some("out")
+        );
+        assert_eq!(
+            strip_trailing_exit_code(Some("out\u{85}<exited with exit code 2>")).as_deref(),
+            Some("out\u{85}")
         );
     }
 }

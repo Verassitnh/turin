@@ -24,7 +24,7 @@ use turin_contracts::composer_context::{
 use crate::composer_context_references::{
     element_details, format_composer_context_record_reference,
 };
-use crate::js_string::{JS_WS, replace_js_whitespace_runs};
+use crate::js_string::{JS_DOT, JS_WS, replace_js_whitespace_runs};
 use turin_contracts::base_schemas::js_trim_end;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,7 +34,14 @@ pub struct UpgradedLegacyContext {
 }
 
 const PLACEHOLDER: char = '\u{FFFC}';
-const REVIEW_TOKEN: &str = "\u{E000}";
+/// Basic Multilingual Plane private-use area, the characters a review token can be built from.
+const PRIVATE_USE_COUNT: usize = 0xF8FF - 0xE000 + 1;
+fn private_use_index(ch: char) -> Option<usize> {
+    let code = ch as u32;
+    (0xE000..=0xF8FF)
+        .contains(&code)
+        .then(|| (code - 0xE000) as usize)
+}
 /// `Schema.Int` in upstream is `Number.isSafeInteger`: digit runs past this fail the record.
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 const PREVIEW_FALLBACK_LABEL: &str = "Preview annotation";
@@ -65,14 +72,15 @@ static TRAILING_PREVIEW: LazyLock<FancyRegex> =
 /// because JS word boundaries are ASCII.
 static REVIEW_OR_CONTEXT_BLOCK: LazyLock<FancyRegex> = LazyLock::new(|| {
     FancyRegex::new(
-        r"(?m)<review_comment(?![A-Za-z0-9_])([^>]*)>|^<(terminal_context|element_context|preview_annotation)>\n[\s\S]*?\n</\2>",
+        r"(?m)<review_comment(?![A-Za-z0-9_])([^>]*)>|(?:^|(?<=[\r\x{2028}\x{2029}]))<(terminal_context|element_context|preview_annotation)>\n[\s\S]*?\n</\2>",
     )
     .expect("static regex")
 });
 
 /// Opening fence, or the review closer. `^`/`$` are line anchors.
 static REVIEW_BOUNDARY: LazyLock<FancyRegex> = LazyLock::new(|| {
-    FancyRegex::new(r"(?m)^(`{3,})([^\n]*)$|</review_comment>").expect("static regex")
+    FancyRegex::new(r"(?m)(?:^|(?<=[\r\x{2028}\x{2029}]))(`{3,})([^\n]*)$|</review_comment>")
+        .expect("static regex")
 });
 
 static REVIEW_FENCE: LazyLock<FancyRegex> = LazyLock::new(|| {
@@ -91,7 +99,10 @@ static LEGACY_MARKERS: LazyLock<FancyRegex> = LazyLock::new(|| {
 });
 
 static TERMINAL_HEADER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(.*?) (?:line ([0-9]+)|lines ([0-9]+)-([0-9]+))$").expect("static regex")
+    Regex::new(&format!(
+        r"^({JS_DOT}*?) (?:line ([0-9]+)|lines ([0-9]+)-([0-9]+))$"
+    ))
+    .expect("static regex")
 });
 
 static TERMINAL_LINE_PREFIX: LazyLock<Regex> =
@@ -101,13 +112,14 @@ static ELEMENT_HEADER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^<([^>]+)>").expect("static regex"));
 
 static ELEMENT_FIELD: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^([a-z]+): (.*)$").expect("static regex"));
+    LazyLock::new(|| Regex::new(&format!(r"^([a-z]+): ({JS_DOT}*)$")).expect("static regex"));
 
 static ELEMENT_SECTION_START: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(html|styles):$").expect("static regex"));
 
-static SOURCE_LOCATION: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(.*?)(?::([0-9]+))?(?::([0-9]+))?$").expect("static regex"));
+static SOURCE_LOCATION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r"^({JS_DOT}*?)(?::([0-9]+))?(?::([0-9]+))?$")).expect("static regex")
+});
 
 static URL_PREFIX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^https?://").expect("static regex"));
@@ -584,16 +596,29 @@ pub fn upgrade_legacy_context_message(text: &str) -> UpgradedLegacyContext {
     let mut preview_bodies: Vec<String> = Vec::new();
     let mut reviews: Vec<ComposerContextRecord> = Vec::new();
 
-    // A literal private-use token in the message must never be mistaken for our placeholder.
-    let mut review_token = REVIEW_TOKEN.to_owned();
-    while text.contains(&review_token) {
-        review_token = format!("{review_token}{review_token}");
+    // A literal private-use character in the message must never be mistaken for our placeholder, so
+    // the token is the first private-use character the text does not contain. One character keeps
+    // the patterns a fixed size whatever the message holds. When the text uses every private-use
+    // character, the message is left as it is.
+    let mut private_use_used = [false; PRIVATE_USE_COUNT];
+    for ch in text.chars() {
+        if let Some(index) = private_use_index(ch) {
+            private_use_used[index] = true;
+        }
     }
+    let Some(index) = private_use_used.iter().position(|used| !used) else {
+        return unchanged();
+    };
+    let review_token = char::from_u32(0xE000 + index as u32)
+        .expect("private-use characters are valid scalar values")
+        .to_string();
     let token = regex::escape(&review_token);
-    let review_index = Regex::new(&format!("{token}([0-9]+){token}")).expect("token regex");
-    let trailing_review_tokens =
-        Regex::new(&format!(r"(?:[{JS_WS}]*{token}[0-9]+{token})+[{JS_WS}]*$"))
-            .expect("token regex");
+    let (Ok(review_index), Ok(trailing_review_tokens)) = (
+        Regex::new(&format!("{token}([0-9]+){token}")),
+        Regex::new(&format!(r"(?:[{JS_WS}]*{token}[0-9]+{token})+[{JS_WS}]*$")),
+    ) else {
+        return unchanged();
+    };
 
     // Review blocks become tokens in place first so they neither hide the trailing blocks behind
     // them nor lose their position. Unparseable blocks stay as text.
@@ -1611,5 +1636,61 @@ mod tests {
                 "legacy_review-comment_1",
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod qc_regressions {
+    use super::*;
+
+    #[test]
+    fn a_long_private_use_run_does_not_panic_the_legacy_upgrade() {
+        // The review token used to double until it outgrew the regex size limit, which a run of
+        // about 32k private-use characters reached. The placeholder is now one character.
+        let message = |run: usize| {
+            format!(
+                "{}<element_context>\nhtml: <div>\n</element_context>",
+                "\u{E000}".repeat(run)
+            )
+        };
+        let short = upgrade_legacy_context_message(&message(3));
+        let long = upgrade_legacy_context_message(&message(40_000));
+        assert_eq!(long.records.len(), short.records.len());
+        assert_eq!(
+            long.text.chars().filter(|ch| *ch == '\u{E000}').count(),
+            40_000
+        );
+    }
+
+    #[test]
+    fn a_message_using_every_private_use_character_is_left_unchanged() {
+        let every: String = (0xE000_u32..=0xF8FF).filter_map(char::from_u32).collect();
+        let text = format!("{every}<element_context>\nhtml: <div>\n</element_context>");
+        let upgraded = upgrade_legacy_context_message(&text);
+        assert_eq!(upgraded.text, text);
+        assert!(upgraded.records.is_empty());
+    }
+
+    #[test]
+    fn element_fields_follow_js_dot_across_line_terminators() {
+        // Node 22: /^([a-z]+): (.*)$/.exec("html: <div>\r") is null, and so is one with U+2028.
+        assert!(ELEMENT_FIELD.captures("html: <div>\r").is_none());
+        assert!(ELEMENT_FIELD.captures("html: a\u{2028}b").is_none());
+        let field = ELEMENT_FIELD.captures("html: <div>").unwrap();
+        assert_eq!(field.get(2).unwrap().as_str(), "<div>");
+    }
+
+    #[test]
+    fn source_location_rejects_a_trailing_carriage_return_like_upstream() {
+        // Node 22: /^(.*?)(?::([0-9]+))?(?::([0-9]+))?$/.exec("src/a.ts:3\r") is null.
+        assert!(SOURCE_LOCATION.captures("src/a.ts:3\r").is_none());
+        assert!(SOURCE_LOCATION.captures("src/a.ts:3").is_some());
+    }
+
+    #[test]
+    fn review_fence_is_found_after_a_lone_carriage_return() {
+        // Node 22: "text\r```js\rcode".search(/^(`{3,})([^\n]*)$/m) is 5.
+        let found = REVIEW_BOUNDARY.find("text\r```js\rcode").unwrap().unwrap();
+        assert_eq!(found.start(), 5);
     }
 }

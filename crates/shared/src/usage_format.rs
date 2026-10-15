@@ -25,11 +25,56 @@ pub fn format_usd(value: f64) -> String {
     if value.is_infinite() {
         return if value > 0.0 { "$∞" } else { "-$∞" }.to_string();
     }
-    let fixed = js_to_fixed(value.abs(), 2);
-    let (whole, fraction) = fixed.split_once('.').unwrap_or((&fixed, "00"));
-    let whole: f64 = whole.parse().unwrap_or(0.0);
+    let (whole, fraction) = round_shortest_decimal(value.abs(), 2);
     let sign = if value.is_sign_negative() { "-" } else { "" };
-    format!("{sign}${}.{fraction}", format_integer(whole))
+    format!("{sign}${}.{fraction}", group_thousands(&whole))
+}
+
+/// `Intl` rounds the shortest decimal that reads back as the value, half away from zero, not the
+/// binary value (`toFixed`): `1.005` is `1.01` there and `1.00` under `toFixed`. Returns the whole
+/// part and exactly `digits` fraction digits.
+fn round_shortest_decimal(value: f64, digits: usize) -> (String, String) {
+    // `Display` for f64 is the shortest round-trip decimal, never exponent notation.
+    let shortest = format!("{value}");
+    let (whole, fraction) = shortest.split_once('.').unwrap_or((&shortest, ""));
+    if fraction.len() <= digits {
+        return (whole.to_owned(), format!("{fraction:0<digits$}"));
+    }
+    // Anything at or past the next digit's midpoint rounds up. A `5` with nothing after it is a
+    // tie, and ties go away from zero.
+    let round_up = fraction.as_bytes()[digits] >= b'5';
+    let mut combined = format!("{whole}{}", &fraction[..digits]).into_bytes();
+    if round_up {
+        let mut index = combined.len();
+        loop {
+            if index == 0 {
+                combined.insert(0, b'1');
+                break;
+            }
+            index -= 1;
+            if combined[index] == b'9' {
+                combined[index] = b'0';
+            } else {
+                combined[index] += 1;
+                break;
+            }
+        }
+    }
+    let combined = String::from_utf8(combined).expect("ASCII digits");
+    let split = combined.len() - digits;
+    (combined[..split].to_owned(), combined[split..].to_owned())
+}
+
+/// Thousands separators into a run of ASCII digits.
+fn group_thousands(digits: &str) -> String {
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 /// `new Intl.NumberFormat("en-US").format(Math.round(value))`.
@@ -219,7 +264,7 @@ fn format_integer(value: f64) -> String {
         grouped.push('-');
     }
     for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(digit);
@@ -517,6 +562,23 @@ mod tests {
         assert_eq!(format_usd(-0.5), "-$0.50");
         assert_eq!(format_usd(-0.001), "-$0.00");
         assert_eq!(format_count(1234.4), "1,234");
+    }
+
+    /// Expected strings come from `Intl.NumberFormat("en-US", { style: "currency", currency: "USD",
+    /// minimumFractionDigits: 2, maximumFractionDigits: 2 })` in Node 22.
+    #[test]
+    fn format_usd_rounds_the_shortest_decimal_half_away_from_zero_like_intl() {
+        assert_eq!(format_usd(1.005), "$1.01");
+        assert_eq!(format_usd(0.615), "$0.62");
+        assert_eq!(format_usd(2.675), "$2.68");
+        assert_eq!(format_usd(1234.565), "$1,234.57");
+        assert_eq!(format_usd(0.005), "$0.01");
+        assert_eq!(format_usd(0.0049), "$0.00");
+        assert_eq!(format_usd(-1.005), "-$1.01");
+        assert_eq!(format_usd(-0.001), "-$0.00");
+        assert_eq!(format_usd(9.995), "$10.00");
+        assert_eq!(format_usd(999.995), "$1,000.00");
+        assert_eq!(format_usd(1e21), "$1,000,000,000,000,000,000,000.00");
     }
 
     fn utc(value: &str) -> DateTime<Utc> {

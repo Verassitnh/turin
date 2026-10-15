@@ -148,6 +148,17 @@ fn indent(value: &str) -> String {
         .join("\n")
 }
 
+/// Lines a terminal range covers: `lineEnd - lineStart + 1`, or none when the range is reversed.
+/// Saturating, because a clipboard fragment's line numbers are untrusted u64 values.
+pub(crate) fn terminal_line_count(line_start: u64, line_end: u64) -> usize {
+    if line_end < line_start {
+        return 0;
+    }
+    usize::try_from(line_end - line_start)
+        .unwrap_or(usize::MAX)
+        .saturating_add(1)
+}
+
 fn render_terminal_entry(record: &TerminalContextRecord) -> String {
     let range = if record.line_start == record.line_end {
         format!("line {}", record.line_start)
@@ -155,13 +166,18 @@ fn render_terminal_entry(record: &TerminalContextRecord) -> String {
         format!("lines {}-{}", record.line_start, record.line_end)
     };
     // A trailing newline would otherwise number a line past the range the label declares.
-    let count = (record.line_end as i64 - record.line_start as i64 + 1).max(0) as usize;
+    let count = terminal_line_count(record.line_start, record.line_end);
     let body = record
         .text
         .split('\n')
         .take(count)
         .enumerate()
-        .map(|(index, line)| format!("{} | {line}", record.line_start + index as u64))
+        .map(|(index, line)| {
+            format!(
+                "{} | {line}",
+                record.line_start.saturating_add(index as u64)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     format!(
@@ -518,5 +534,18 @@ mod tests {
         let value = serde_json::to_value(&upgraded.records[0]).unwrap();
         assert_eq!(value["diff"], "````\nnested\n````");
         assert_eq!(value["fenceLanguage"], "md");
+    }
+}
+
+#[cfg(test)]
+mod qc_regressions {
+    use super::*;
+
+    #[test]
+    fn terminal_line_count_saturates_and_treats_a_reversed_range_as_empty() {
+        assert_eq!(terminal_line_count(0, u64::MAX), usize::MAX);
+        assert_eq!(terminal_line_count(5, 4), 0);
+        assert_eq!(terminal_line_count(2, 4), 3);
+        assert_eq!(terminal_line_count(9, 9), 1);
     }
 }

@@ -18,7 +18,7 @@ use turin_contracts::git::{
 use turin_contracts::settings::{BranchNamingMode, BranchNamingOptions};
 use turin_contracts::source_control::SourceControlProviderInfo;
 
-use crate::js_string::JS_WS;
+use crate::js_string::{JS_DOT, JS_WS};
 use crate::source_control::detect_source_control_provider_from_remote_url;
 
 pub const WORKTREE_BRANCH_PREFIX: &str = "t3";
@@ -75,13 +75,13 @@ static GIT_CONFIG_CONTINUATION: LazyLock<Regex> =
 
 static GIT_CONFIG_REMOTE_HEADER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r#"(?i)^\[[{JS_WS}]*remote(?:[{JS_WS}]+"([^"]+)"|\.([^\]{JS_WS}]+))[{JS_WS}]*\](?:[{JS_WS}]*[#;].*)?$"#
+        r#"(?i)^\[[{JS_WS}]*remote(?:[{JS_WS}]+"([^"]+)"|\.([^\]{JS_WS}]+))[{JS_WS}]*\](?:[{JS_WS}]*[#;]{JS_DOT}*)?$"#
     ))
     .expect("static regex")
 });
 
 static GIT_CONFIG_URL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(&format!(r"(?i)^url[{JS_WS}]*=[{JS_WS}]*(.*)$")).expect("static regex")
+    Regex::new(&format!(r"(?i)^url[{JS_WS}]*=[{JS_WS}]*({JS_DOT}*)$")).expect("static regex")
 });
 
 static GITHUB_REMOTE: LazyLock<Regex> = LazyLock::new(|| {

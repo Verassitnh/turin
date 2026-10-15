@@ -21,7 +21,7 @@ use turin_contracts::assistant_citations::{
 use turin_contracts::base_schemas::{is_js_whitespace, js_trim};
 use url::{Url, form_urlencoded};
 
-use crate::js_string::{decode_uri_component, encode_uri_component, utf16_len};
+use crate::js_string::{JS_WS, decode_uri_component, encode_uri_component, utf16_len};
 
 const CITATION_SCHEME: &str = "t3-citation";
 const CITATION_HREF_PREFIX: &str = "t3-citation://v1/";
@@ -149,7 +149,7 @@ pub fn parse_assistant_citation_href(href: &str) -> Option<AssistantCitation> {
 pub fn assistant_citation_label(citation: &AssistantCitation) -> String {
     fn whitespace() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| Regex::new(r"\s+").expect("valid regex"))
+        RE.get_or_init(|| Regex::new(&format!(r"[{JS_WS}]+")).expect("valid regex"))
     }
     let source = citation
         .comment
@@ -872,5 +872,39 @@ mod tests {
         // `CitationVersion` only exists to pin the wire value; the parse path builds it via serde.
         let version: CitationVersion = serde_json::from_value(json!(1)).unwrap();
         assert_eq!(serde_json::to_value(version).unwrap(), json!(1));
+    }
+}
+
+#[cfg(test)]
+mod qc_regressions {
+    use super::*;
+
+    fn with_comment(comment: &str) -> AssistantCitation {
+        serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "environmentId": "env",
+            "threadId": "thread",
+            "messageId": "message",
+            "text": "quoted text",
+            "start": 0,
+            "end": 11,
+            "prefix": "",
+            "suffix": "",
+            "comment": comment,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn chip_labels_collapse_js_whitespace_only() {
+        // Node 22: "one﻿two".replace(/\s+/g, " ") is "one two"; U+0085 is not whitespace there.
+        assert_eq!(
+            assistant_citation_label(&with_comment("one\u{FEFF}two")),
+            "one two"
+        );
+        assert_eq!(
+            assistant_citation_label(&with_comment("one\u{85}two")),
+            "one\u{85}two"
+        );
     }
 }

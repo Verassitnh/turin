@@ -19,6 +19,7 @@ use turin_contracts::composer_context::{
     KnownComposerContextRecord, OrchestrationMessageContext,
 };
 
+use crate::composer_context_legacy_send::terminal_line_count;
 use crate::js_string::{JS_WS, replace_js_whitespace_runs, slice_utf16};
 use turin_contracts::base_schemas::is_js_whitespace;
 
@@ -359,14 +360,14 @@ fn format_provider_payload(record: &KnownComposerContextRecord) -> String {
         ]
         .join("\n"),
         K::Terminal(r) => {
-            let count = (r.line_end as i64 - r.line_start as i64 + 1).max(0) as usize;
+            let count = terminal_line_count(r.line_start, r.line_end);
             let mut lines = vec![format!("terminal: {}", r.terminal_label.as_str())];
             lines.extend(
                 r.text
                     .split('\n')
                     .take(count)
                     .enumerate()
-                    .map(|(index, line)| format!("{} | {line}", r.line_start + index as u64)),
+                    .map(|(index, line)| format!("{} | {line}", r.line_start.saturating_add(index as u64))),
             );
             lines.join("\n")
         }

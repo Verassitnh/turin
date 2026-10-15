@@ -14,7 +14,7 @@ use turin_contracts::chat_attachment::{
     PROVIDER_SEND_TURN_MAX_IMAGE_BYTES, is_provider_send_turn_supported_image_mime_type,
 };
 
-use crate::js_string::utf16_len;
+use crate::js_string::{JS_WS, utf16_len};
 
 const MAX_PARSED_BYTES: i64 = 16_384;
 const MAX_METADATA_BYTES: usize = 8_192;
@@ -269,7 +269,7 @@ pub fn tool_output_indicates_failure(text: &str) -> bool {
                 Regex::new(r"(?i)because it does not exist").expect("valid regex"),
                 Regex::new(r"(?i)is not recognized").expect("valid regex"),
                 Regex::new(r"(?i)the term '").expect("valid regex"),
-                Regex::new(r"(?i)<exited with exit code\s+[1-9][0-9]*\s*>").expect("valid regex"),
+                Regex::new(&format!(r"(?i)<exited with exit code[{JS_WS}]+[1-9][0-9]*[{JS_WS}]*>")).expect("valid regex"),
             ]
         })
     }
@@ -277,8 +277,14 @@ pub fn tool_output_indicates_failure(text: &str) -> bool {
         static PATTERNS: OnceLock<[Regex; 2]> = OnceLock::new();
         PATTERNS.get_or_init(|| {
             [
-                Regex::new(r"(?i)exit(?:ed)? with exit code\s+[1-9][0-9]*").expect("valid regex"),
-                Regex::new(r"(?i)exit code\s*[:\s]\s*[1-9][0-9]*(?-u:\b)").expect("valid regex"),
+                Regex::new(&format!(
+                    r"(?i)exit(?:ed)? with exit code[{JS_WS}]+[1-9][0-9]*"
+                ))
+                .expect("valid regex"),
+                Regex::new(&format!(
+                    r"(?i)exit code[{JS_WS}]*[:{JS_WS}][{JS_WS}]*[1-9][0-9]*(?-u:\b)"
+                ))
+                .expect("valid regex"),
             ]
         })
     }
@@ -723,5 +729,22 @@ mod tests {
                 },
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod qc_regressions {
+    use super::*;
+
+    #[test]
+    fn failure_phrases_read_u_feff_as_whitespace_and_u_0085_as_text_like_js() {
+        // Node 22: /exit code\s*[:\s]\s*[1-9]\d*\b/i matches "exit code﻿1" and not "exit code\u0085 1".
+        assert!(tool_output_indicates_failure("exit code\u{FEFF}1"));
+        assert!(!tool_output_indicates_failure("exit code\u{85}1"));
+        assert!(tool_output_indicates_failure(
+            "<exited with exit code\u{FEFF}2>"
+        ));
+        // Node 22: /exit(?:ed)? with exit code\s+[1-9]\d*/i matches across a carriage return.
+        assert!(tool_output_indicates_failure("exited with exit code\r2"));
     }
 }

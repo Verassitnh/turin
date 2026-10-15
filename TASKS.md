@@ -1,5 +1,7 @@
 # Task board
 
+Resume notes: docs/PM_HANDOFF.md
+
 PM (Claude Opus 5.5) owns this file. Agents don't edit it; they report back.
 
 ## Roster and budget

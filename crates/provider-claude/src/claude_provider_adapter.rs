@@ -13,6 +13,7 @@ use crate::{
         proposed_plan_artifact, tool_call_artifacts,
     },
     claude_turn_token_usage::normalize_claude_turn_token_usage,
+    claude_usage_limits::ClaudeUsageLimitHooks,
 };
 use async_trait::async_trait;
 use futures::stream;
@@ -151,8 +152,15 @@ pub struct ClaudeProviderAdapter {
     environment: Option<std::collections::BTreeMap<String, String>>,
     attachments_dir: Option<PathBuf>,
     runtime_instructions: String,
+    usage_limit_hooks: Option<ClaudeUsageLimitHooks>,
 }
 impl ClaudeProviderAdapter {
+    /// Reports `rate_limit_event` frames through `hooks` (upstream `onUsageLimits`).
+    pub fn with_usage_limit_hooks(mut self, hooks: ClaudeUsageLimitHooks) -> Self {
+        self.usage_limit_hooks = Some(hooks);
+        self
+    }
+
     pub fn new(
         instance_id: ProviderInstanceId,
         settings: ClaudeSettings,
@@ -169,6 +177,7 @@ impl ClaudeProviderAdapter {
             environment,
             attachments_dir,
             runtime_instructions,
+            usage_limit_hooks: None,
         }
     }
 }
@@ -225,6 +234,7 @@ impl ProviderAdapterV2 for ClaudeProviderAdapter {
             environment: self.environment.clone(),
             attachments_dir: self.attachments_dir.clone(),
             runtime_instructions: self.runtime_instructions.clone(),
+            usage_limit_hooks: self.usage_limit_hooks.clone(),
             selection: input.model_selection,
             claude: None,
             host_requests: None,
@@ -455,6 +465,7 @@ struct ClaudeActor {
     environment: Option<std::collections::BTreeMap<String, String>>,
     attachments_dir: Option<PathBuf>,
     runtime_instructions: String,
+    usage_limit_hooks: Option<ClaudeUsageLimitHooks>,
     selection: ModelSelection,
     claude: Option<ClaudeAdapterV2>,
     host_requests: Option<mpsc::UnboundedReceiver<ClaudeHostRequest>>,
@@ -937,6 +948,11 @@ impl ClaudeActor {
             ClaudeAdapterEvent::Assistant(frame) => self.assistant(frame),
             ClaudeAdapterEvent::User(frame) => self.user(frame),
             ClaudeAdapterEvent::Result(frame) => self.result(frame),
+            ClaudeAdapterEvent::RateLimit(frame) => {
+                if let Some(hooks) = &self.usage_limit_hooks {
+                    hooks.emit_rate_limit_event(&frame.raw);
+                }
+            }
             ClaudeAdapterEvent::Error(error) => self.fail_active(&error),
             ClaudeAdapterEvent::Eof => {
                 self.fail_active("Claude Code process exited before turn result")

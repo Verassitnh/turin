@@ -1,6 +1,8 @@
 //! Port of upstream/apps/server/src/provider/claudeUsageLimits.test.ts.
 use super::*;
+use parking_lot::Mutex;
 use serde_json::json;
+use std::sync::Arc;
 
 const CHECKED_AT: &str = "2026-07-18T10:00:00.000Z";
 
@@ -214,4 +216,29 @@ fn record_keeps_the_scoped_names_for_the_event_mapper() {
         CHECKED_AT,
     );
     assert_eq!(names.lock().overage_included.as_deref(), Some("Fable"));
+}
+
+#[test]
+fn a_rate_limit_frame_reaches_the_sink_with_its_window_and_a_checked_time() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let sink_captured = captured.clone();
+    let hooks = ClaudeUsageLimitHooks {
+        scoped_names: SharedClaudeScopedLimitNames::default(),
+        sink: Arc::new(move |update, checked_at| {
+            sink_captured.lock().push((update, checked_at));
+        }),
+    };
+    hooks.emit_rate_limit_event(&json!({
+        "type": "rate_limit_event",
+        "rate_limit_info": {"rateLimitType": "five_hour", "utilization": 0.5, "status": "allowed"}
+    }));
+    // A frame without rate_limit_info is not a usage update.
+    hooks.emit_rate_limit_event(&json!({"type": "rate_limit_event"}));
+
+    let captured = captured.lock();
+    assert_eq!(captured.len(), 1);
+    let (update, checked_at) = &captured[0];
+    assert_eq!(update.windows[0].id.as_str(), "five_hour");
+    assert_eq!(update.windows[0].used_percent, 50.0);
+    assert!(checked_at.ends_with('Z'));
 }

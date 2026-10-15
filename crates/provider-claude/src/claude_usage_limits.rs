@@ -259,6 +259,37 @@ fn read_model_scoped(rate_limits: &Value) -> Vec<&Value> {
         .unwrap_or_default()
 }
 
+/// Receives a streamed usage update and the time it was observed, the
+/// `onUsageLimits` hook upstream passes the adapter.
+pub type UsageLimitsSink = Arc<dyn Fn(ProviderUsageLimitsUpdate, String) + Send + Sync>;
+
+/// What the adapter needs to report `rate_limit_event` frames: the probe's
+/// scoped names and where updates go.
+#[derive(Clone)]
+pub struct ClaudeUsageLimitHooks {
+    pub scoped_names: SharedClaudeScopedLimitNames,
+    pub sink: UsageLimitsSink,
+}
+
+impl ClaudeUsageLimitHooks {
+    /// Maps one `rate_limit_event` frame (`raw` is the whole message) and reports it
+    /// when it names a window the page renders. Frames without `rate_limit_info` are ignored.
+    pub fn emit_rate_limit_event(&self, raw: &Value) {
+        let Some(info) = raw.get("rate_limit_info") else {
+            return;
+        };
+        let Ok(info) = serde_json::from_value::<ClaudeRateLimitInfo>(info.clone()) else {
+            return;
+        };
+        let names = self.scoped_names.lock().clone();
+        let Some(update) = claude_rate_limit_event_to_update(&info, &names) else {
+            return;
+        };
+        let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        (self.sink)(update, checked_at);
+    }
+}
+
 /// `recordClaudeUsageResponse`: maps the response and remembers the scoped
 /// names for the event mapper.
 pub fn record_claude_usage_response(

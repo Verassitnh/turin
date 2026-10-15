@@ -1368,7 +1368,7 @@ mod service {
         assert_eq!(instance["displayName"], json!("Codex Work"));
         assert_eq!(instance["enabled"], json!(true));
         assert_eq!(instance["config"], json!({"homePath": "~/.codex"}));
-        assert!(instance.get("accentColor").map_or(true, Value::is_null));
+        assert!(instance.get("accentColor").is_none_or(Value::is_null));
     }
 
     // Ports of upstream serverSettings.test.ts, lines 1016-1253 (batch 5).
@@ -1721,11 +1721,7 @@ mod service {
         let initial = settings_value(&service.get_settings().await.unwrap());
         assert_eq!(
             initial["providerInstances"]["codex_personal"]["environment"][0]["value"],
-            json!(if duplicate {
-                "inline-test-token"
-            } else {
-                "inline-test-token"
-            })
+            json!("inline-test-token")
         );
 
         let environment = if duplicate {

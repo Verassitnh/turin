@@ -15,12 +15,14 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 use turin_contracts::provider_setup::ProviderCredentialOwner;
 
 use crate::{
@@ -68,9 +70,25 @@ impl SecretStoreError {
         }
     }
 
+    fn detail(&self) -> &str {
+        match self {
+            Self::Secure { detail, .. }
+            | Self::Read { detail, .. }
+            | Self::Persist { detail, .. }
+            | Self::Remove { detail, .. } => detail,
+            Self::AlreadyExists { .. } | Self::ConcurrentRead { .. } => "",
+        }
+    }
+
     fn into_cause(self) -> ProviderFailureCause {
         let tag = self.tag();
-        ProviderFailureCause::tagged(tag).with_message(self.to_string())
+        let detail = self.detail().trim();
+        let message = if detail.is_empty() {
+            self.to_string()
+        } else {
+            format!("{self} {detail}")
+        };
+        ProviderFailureCause::tagged(tag).with_message(message)
     }
 }
 
@@ -188,7 +206,7 @@ impl FileSecretStore {
 impl SecretStore for FileSecretStore {
     async fn get(&self, name: &str) -> Result<Option<Vec<u8>>, SecretStoreError> {
         let path = self.path_for(name);
-        match std::fs::read(&path) {
+        match tokio::fs::read(&path).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(SecretStoreError::Read {
@@ -201,15 +219,15 @@ impl SecretStore for FileSecretStore {
     async fn set(&self, name: &str, value: &[u8]) -> Result<(), SecretStoreError> {
         let path = self.path_for(name);
         let temp = PathBuf::from(format!("{}.{}.tmp", path.display(), uuid::Uuid::new_v4()));
-        let write = (|| -> std::io::Result<()> {
-            std::fs::write(&temp, value)?;
-            set_mode(&temp, 0o600)?;
-            std::fs::rename(&temp, &path)?;
-            set_mode(&path, 0o600)?;
-            Ok(())
-        })();
+        let write = async {
+            tokio::fs::write(&temp, value).await?;
+            set_mode_async(&temp, 0o600).await?;
+            tokio::fs::rename(&temp, &path).await?;
+            set_mode_async(&path, 0o600).await
+        }
+        .await;
         if let Err(error) = write {
-            let _ = std::fs::remove_file(&temp);
+            let _ = tokio::fs::remove_file(&temp).await;
             return Err(SecretStoreError::Persist {
                 resource: format!("secret {name}"),
                 detail: error.to_string(),
@@ -239,7 +257,7 @@ impl SecretStore for FileSecretStore {
 
     async fn remove(&self, name: &str) -> Result<(), SecretStoreError> {
         let path = self.path_for(name);
-        match std::fs::remove_file(&path) {
+        match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(SecretStoreError::Remove {
@@ -275,19 +293,29 @@ impl Default for KeychainSecretStore {
 #[async_trait]
 impl SecretStore for KeychainSecretStore {
     async fn get(&self, name: &str) -> Result<Option<Vec<u8>>, SecretStoreError> {
-        let output = security(&[
-            "find-generic-password",
-            "-s",
-            &self.service,
-            "-a",
-            name,
-            "-w",
-        ])
+        let status = security_status(
+            &[
+                "find-generic-password",
+                "-s",
+                &self.service,
+                "-a",
+                name,
+                "-w",
+            ],
+            None,
+        )
         .await?;
-        let Some(password) = output else {
+        if status.code == Some(SECURITY_ITEM_NOT_FOUND) {
             return Ok(None);
-        };
-        decode_hex(password.trim())
+        }
+        if !status.success() {
+            return Err(SecretStoreError::Read {
+                resource: format!("secret {name}"),
+                detail: status.detail(),
+            });
+        }
+        // `find-generic-password -w` writes the secret to stdout.
+        decode_hex(status.stdout.trim())
             .map(Some)
             .map_err(|detail| SecretStoreError::Read {
                 resource: format!("secret {name}"),
@@ -296,42 +324,52 @@ impl SecretStore for KeychainSecretStore {
     }
 
     async fn set(&self, name: &str, value: &[u8]) -> Result<(), SecretStoreError> {
-        let hex = encode_hex(value);
-        let status = security_status(&[
-            "add-generic-password",
-            "-U",
-            "-s",
-            &self.service,
-            "-a",
-            name,
-            "-X",
-            &hex,
-        ])
-        .await?;
+        // The hex value goes down stdin, never argv, so `ps` cannot show it.
+        let command = keychain_add_command(&self.service, name, &encode_hex(value));
+        let status = security_status(SECURITY_INTERACTIVE_ARGS, Some(command.as_bytes())).await?;
         if !status.success() {
             return Err(SecretStoreError::Persist {
                 resource: format!("secret {name}"),
-                detail: status_detail(&status),
+                detail: status.detail(),
             });
         }
         Ok(())
     }
 
     async fn remove(&self, name: &str) -> Result<(), SecretStoreError> {
-        let status =
-            security_status(&["delete-generic-password", "-s", &self.service, "-a", name]).await?;
-        if status.success() || status.code == Some(44) {
+        let status = security_status(
+            &["delete-generic-password", "-s", &self.service, "-a", name],
+            None,
+        )
+        .await?;
+        if status.success() || status.code == Some(SECURITY_ITEM_NOT_FOUND) {
             return Ok(());
         }
         Err(SecretStoreError::Remove {
             resource: format!("secret {name}"),
-            detail: status_detail(&status),
+            detail: status.detail(),
         })
     }
 }
 
+/// `errSecItemNotFound` as reported by the `security` CLI's exit status.
+const SECURITY_ITEM_NOT_FOUND: i32 = 44;
+
+/// `security -i` reads commands from stdin until EOF.
+const SECURITY_INTERACTIVE_ARGS: &[&str] = &["-i"];
+
+/// Bounds a `security` call. It may block on a keychain access prompt.
+const SECURITY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The `add-generic-password` line `security -i` runs. Service and account
+/// names are restricted to `[A-Za-z0-9_-]`, so they need no quoting.
+fn keychain_add_command(service: &str, name: &str, hex: &str) -> String {
+    format!("add-generic-password -U -s {service} -a {name} -X {hex}\n")
+}
+
 struct CommandStatus {
     code: Option<i32>,
+    stdout: String,
     stderr: String,
 }
 
@@ -339,50 +377,67 @@ impl CommandStatus {
     fn success(&self) -> bool {
         self.code == Some(0)
     }
-}
 
-fn status_detail(status: &CommandStatus) -> String {
-    if status.stderr.is_empty() {
-        format!("security exited with {:?}", status.code)
-    } else {
-        status.stderr.clone()
+    fn detail(&self) -> String {
+        let stderr = self.stderr.trim();
+        if stderr.is_empty() {
+            format!("security exited with {:?}", self.code)
+        } else {
+            stderr.to_owned()
+        }
     }
 }
 
-async fn security(args: &[&str]) -> Result<Option<String>, SecretStoreError> {
-    let status = security_status(args).await?;
-    if status.code == Some(44) {
-        return Ok(None);
-    }
-    if !status.success() {
-        return Err(SecretStoreError::Read {
-            resource: format!("secret {}", args.last().unwrap_or(&"")),
-            detail: status_detail(&status),
-        });
-    }
-    Ok(Some(status.stderr))
+async fn security_status(
+    args: &[&str],
+    stdin: Option<&[u8]>,
+) -> Result<CommandStatus, SecretStoreError> {
+    run_command("security", args, stdin, SECURITY_TIMEOUT).await
 }
 
-async fn security_status(args: &[&str]) -> Result<CommandStatus, SecretStoreError> {
-    let output = tokio::process::Command::new("security")
-        .args(args)
-        .output()
-        .await
-        .map_err(|error| SecretStoreError::Secure {
-            resource: "keychain".to_owned(),
-            detail: error.to_string(),
-        })?;
-    // `find-generic-password -w` writes the secret to stdout.
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    let body = if args.first() == Some(&"find-generic-password") {
-        stdout
-    } else {
-        stderr
+/// Runs `program` and collects its output. The child is `kill_on_drop`, so
+/// when the timeout drops the call the process is killed rather than left
+/// behind.
+async fn run_command(
+    program: &str,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<CommandStatus, SecretStoreError> {
+    let secure = |error: std::io::Error| SecretStoreError::Secure {
+        resource: "keychain".to_owned(),
+        detail: error.to_string(),
     };
+    let mut child = tokio::process::Command::new(program)
+        .args(args)
+        .stdin(if stdin.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(secure)?;
+    let run = async {
+        if let (Some(mut pipe), Some(input)) = (child.stdin.take(), stdin) {
+            // Dropping `pipe` at the end of this block sends EOF.
+            pipe.write_all(input).await?;
+        }
+        child.wait_with_output().await
+    };
+    let output = tokio::time::timeout(timeout, run)
+        .await
+        .map_err(|_| SecretStoreError::Secure {
+            resource: "keychain".to_owned(),
+            detail: format!("{program} did not finish within {timeout:?}"),
+        })?
+        .map_err(secure)?;
     Ok(CommandStatus {
         code: output.status.code(),
-        stderr: body,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
 }
 
@@ -439,11 +494,25 @@ fn create_new_file(path: &Path, value: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Sync because `open` is a constructor, not an async method.
 fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Ok(())
+    }
+}
+
+async fn set_mode_async(path: &Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).await
     }
     #[cfg(not(unix))]
     {
@@ -610,5 +679,97 @@ mod tests {
         store.remove(&name).await.unwrap();
         assert!(store.get(&name).await.unwrap().is_none());
         store.remove(&name).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_store_keeps_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = dir.path().join("secrets");
+        let store = FileSecretStore::open(&secrets).unwrap();
+        store.set("entry", &[1, 2]).await.unwrap();
+
+        let mode = |path: PathBuf| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(secrets.join("entry.bin")), 0o600);
+        assert_eq!(mode(secrets), 0o700);
+    }
+
+    #[test]
+    fn failure_cause_carries_the_store_detail() {
+        let cause = SecretStoreError::Read {
+            resource: "secret provider-auth-x".to_owned(),
+            detail: "User canceled.\n".to_owned(),
+        }
+        .into_cause();
+        assert_eq!(
+            cause,
+            ProviderFailureCause::tagged("SecretStoreReadError")
+                .with_message("Failed to read secret provider-auth-x. User canceled.")
+        );
+    }
+
+    #[test]
+    fn keychain_failure_detail_uses_stderr() {
+        let status = CommandStatus {
+            code: Some(1),
+            stdout: "not the secret".to_owned(),
+            stderr: "security: item not found\n".to_owned(),
+        };
+        assert_eq!(status.detail(), "security: item not found");
+    }
+
+    #[test]
+    fn keychain_set_puts_the_secret_on_stdin_not_argv() {
+        let hex = encode_hex(&[0xde, 0xad, 0xbe, 0xef]);
+        let command = keychain_add_command("turin-provider-auth", "provider-auth-abc", &hex);
+        assert_eq!(
+            command,
+            "add-generic-password -U -s turin-provider-auth -a provider-auth-abc -X deadbeef\n"
+        );
+        // The only argv `set` uses is the interactive flag.
+        assert_eq!(SECURITY_INTERACTIVE_ARGS, &["-i"]);
+    }
+
+    #[tokio::test]
+    async fn stdin_reaches_the_child_and_closes_at_the_end() {
+        // `cat` exits only once it sees EOF, so this also proves the pipe closes.
+        let status = run_command(
+            "/bin/cat",
+            &[],
+            Some(&b"payload"[..]),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert!(status.success());
+        assert_eq!(status.stdout, "payload");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_security_call_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let pid_arg = pid_file.to_str().unwrap();
+        let result = run_command(
+            "/bin/sh",
+            &["-c", "echo $$ > \"$0\"; exec sleep 600", pid_arg],
+            None,
+            Duration::from_secs(1),
+        )
+        .await;
+        let Err(SecretStoreError::Secure { detail, .. }) = result else {
+            panic!("expected a timeout error");
+        };
+        assert!(detail.contains("did not finish"), "{detail}");
+
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        crate::process_group::assert_process_exits(pid, "timed-out security child").await;
     }
 }

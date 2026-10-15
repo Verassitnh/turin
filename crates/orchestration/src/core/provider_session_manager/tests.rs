@@ -5,7 +5,7 @@
 
 use std::{
     collections::VecDeque,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Duration,
 };
 
@@ -25,9 +25,11 @@ use turin_provider_core::provider_adapter::{
     ProviderAdapterV2OpenSessionInput, ProviderAdapterV2RuntimePolicy, ProviderAdapterV2TurnInput,
     ProviderEventStream, ProviderSessionRuntime,
 };
+use turin_provider_core::rt::BoxFuture;
 
 use super::*;
 use crate::projection::test_support::capabilities;
+use turin_contracts::ProviderTurnId;
 
 const T0: &str = "2026-01-01T00:00:00.000Z";
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -189,6 +191,8 @@ struct FakeRuntime {
     events_tx: Mutex<Option<mpsc::UnboundedSender<RuntimeItem>>>,
     events_rx: Mutex<Option<mpsc::UnboundedReceiver<RuntimeItem>>>,
     fail_start: AtomicBool,
+    closes: AtomicUsize,
+    interrupts: AtomicUsize,
 }
 
 impl FakeRuntime {
@@ -199,6 +203,8 @@ impl FakeRuntime {
             events_tx: Mutex::new(Some(tx)),
             events_rx: Mutex::new(Some(rx)),
             fail_start: AtomicBool::new(false),
+            closes: AtomicUsize::new(0),
+            interrupts: AtomicUsize::new(0),
         })
     }
 
@@ -282,7 +288,13 @@ impl ProviderSessionRuntime for FakeRuntime {
         &self,
         _input: turin_provider_core::provider_adapter::ProviderAdapterV2InterruptInput,
     ) -> Result<(), ProviderAdapterV2Error> {
-        unimplemented!("not exercised by session manager tests")
+        self.interrupts.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn close(&self) -> Option<BoxFuture<'_, Result<(), ProviderAdapterV2Error>>> {
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        Some(Box::pin(async { Ok(()) }))
     }
 
     async fn respond_to_runtime_request(
@@ -426,12 +438,41 @@ impl ProviderSessionSink for RecordingSink {
     }
 }
 
+/// Projection reads that report nothing, unless a test sets `turns`.
+#[derive(Default)]
+struct FakeReads {
+    turns: Mutex<Vec<RunningProviderTurn>>,
+}
+
+#[async_trait]
+impl ProviderSessionReads for FakeReads {
+    async fn running_turns(
+        &self,
+        _thread_id: &ThreadId,
+        _provider_session_id: &ProviderSessionId,
+    ) -> Result<Vec<RunningProviderTurn>, BoxError> {
+        Ok(self.turns.lock().clone())
+    }
+
+    async fn pending_background_tasks(
+        &self,
+        _thread_ids: &[ThreadId],
+        _provider_session_id: &ProviderSessionId,
+    ) -> Result<Vec<ReleasedBackgroundTasks>, BoxError> {
+        Ok(Vec::new())
+    }
+}
+
 struct Harness {
     manager: ProviderSessionManager,
     sink: Arc<RecordingSink>,
 }
 
 fn harness(runtimes: Vec<Arc<FakeRuntime>>) -> Harness {
+    harness_with_reads(runtimes, Arc::new(FakeReads::default()))
+}
+
+fn harness_with_reads(runtimes: Vec<Arc<FakeRuntime>>, reads: Arc<FakeReads>) -> Harness {
     let adapter = Arc::new(FakeAdapter {
         instance: serde_json::from_value(json!("codex")).expect("instance fixture"),
         runtimes: Mutex::new(runtimes.iter().cloned().collect()),
@@ -440,6 +481,7 @@ fn harness(runtimes: Vec<Arc<FakeRuntime>>) -> Harness {
     let manager = ProviderSessionManager::new(
         Arc::new(FixedLookup(adapter)),
         Arc::clone(&sink) as Arc<dyn ProviderSessionSink>,
+        reads,
         ProviderSessionManagerOptions {
             idle_timeout: IDLE_TIMEOUT,
             max_idle_pin: Duration::from_secs(4 * 60 * 60),
@@ -899,4 +941,59 @@ fn release_status_matches_upstream_mapping() {
             OrchestrationV2ProviderSessionStatus::Stopped
         );
     }
+}
+
+#[tokio::test]
+async fn release_closes_the_runtime_before_recording() {
+    let runtime = FakeRuntime::new(session("provider-session:1", false));
+    let harness = harness(vec![Arc::clone(&runtime)]);
+    harness
+        .manager
+        .open(open_input("thread:a", "provider-session:1"))
+        .await
+        .expect("open");
+
+    harness
+        .manager
+        .close(&provider_session_id("provider-session:1"))
+        .await
+        .expect("close");
+
+    assert_eq!(runtime.closes.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.sink.releases.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn detach_interrupts_the_threads_running_turns_on_a_shared_session() {
+    let runtime = FakeRuntime::new(session("provider-session:shared", true));
+    let reads = Arc::new(FakeReads::default());
+    reads.turns.lock().push(RunningProviderTurn {
+        provider_thread: provider_thread("thread:a", "provider-session:shared"),
+        provider_turn_id: ProviderTurnId::new("provider-turn:1").expect("fixture id"),
+    });
+    let harness = harness_with_reads(vec![Arc::clone(&runtime)], reads);
+    harness
+        .manager
+        .open(open_input("thread:a", "provider-session:shared"))
+        .await
+        .expect("open");
+
+    harness
+        .manager
+        .detach(
+            &provider_session_id("provider-session:shared"),
+            &ThreadId::new("thread:a").expect("fixture id"),
+            None,
+        )
+        .await
+        .expect("detach");
+
+    assert_eq!(runtime.interrupts.load(Ordering::SeqCst), 1);
+    assert!(
+        harness
+            .manager
+            .get(&provider_session_id("provider-session:shared"))
+            .is_some(),
+        "a shared session stays up after its thread detaches"
+    );
 }

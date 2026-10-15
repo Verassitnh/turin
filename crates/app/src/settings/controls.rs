@@ -133,7 +133,7 @@ fn switch_thumb_offset(checked: bool, mixed: bool) -> f32 {
 }
 
 /// `Switch` (default size at the `sm:` breakpoint): thumb 14px, track
-/// 26×16, `p-[2px]`, `bg-primary` checked / `bg-input` unchecked, thumb
+/// 30×18, `p-[2px]`, `bg-primary` checked / `bg-input` unchecked, thumb
 /// `bg-background shadow-sm/5`. `mixed` centres the thumb on the muted track.
 pub fn switch(
     id: impl Into<ElementId>,
@@ -153,28 +153,22 @@ pub fn switch_state(
     cx: &App,
     on_toggle: impl Fn(bool, &mut Window, &mut App) + 'static,
 ) -> gpui_kit::Stateful<Div> {
-    const THUMB: f32 = 14.;
     let theme = cx.app_theme();
     let track = if checked && !mixed {
         theme.primary
     } else {
         theme.input
     };
-    let offset = if mixed {
-        (THUMB - 4.) / 2.
-    } else if checked {
-        THUMB - 4.
-    } else {
-        0.
-    };
+    let offset = switch_thumb_offset(checked, mixed);
+    let (track_width, track_height) = switch_track_size();
     div()
         .id(id)
         .on_mouse_down(MouseButton::Left, no_drag)
         .flex()
         .flex_shrink_0()
         .items_center()
-        .w(px(THUMB * 2. - 2.))
-        .h(px(THUMB + 2.))
+        .w(px(track_width))
+        .h(px(track_height))
         .p(px(2.))
         .rounded_full()
         .bg(track)
@@ -188,7 +182,7 @@ pub fn switch_state(
         .child(
             div()
                 .ml(px(offset))
-                .size(px(THUMB - 2.))
+                .size(px(SWITCH_THUMB_SIZE - 2.))
                 .flex_shrink_0()
                 .rounded_full()
                 .bg(theme.background)
@@ -531,4 +525,32 @@ pub fn textarea_field(
         .px(px(9.))
         .py(px(6.))
         .child(gpui_kit::component::input::Textarea::new(state))
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn switch_matches_the_default_size_at_sm() {
+        // 16px thumb-size: a 30×18 track, a 14px thumb, 12px checked travel.
+        assert_eq!(switch_track_size(), (30., 18.));
+        assert_eq!(SWITCH_THUMB_SIZE - 2., 14.);
+        assert_eq!(switch_thumb_offset(false, false), 0.);
+        assert_eq!(switch_thumb_offset(true, false), 12.);
+        assert_eq!(switch_thumb_offset(true, true), 6.);
+    }
+
+    #[test]
+    fn redacted_placeholder_matches_upstream() {
+        // Expected values come from upstream's `redactedPlaceholder`.
+        assert_eq!(
+            redacted_placeholder("developer@example.com"),
+            "yvs4jrutu@gyetdne.2j3"
+        );
+        assert_eq!(redacted_placeholder("a_b-c.d"), "s_f-e.u");
+        assert_eq!(redacted_placeholder("x"), "5");
+    }
 }

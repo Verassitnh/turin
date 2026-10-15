@@ -1284,9 +1284,18 @@ pub async fn fork_session(
                 && e.get("isSidechain").and_then(Value::as_bool) != Some(true)
         })
         .collect();
-    anyhow::ensure!(!entries.is_empty(), "session has no messages to fork");
+    let no_messages = || anyhow::anyhow!("Session {id} has no messages to fork");
+    if entries.is_empty() {
+        return Err(no_messages());
+    }
     if let Some(target) = up_to_message_id {
         entries = cut_up_to(entries, target)?;
+    }
+    if entries
+        .iter()
+        .all(|entry| entry.get("type").and_then(Value::as_str) == Some("progress"))
+    {
+        return Err(no_messages());
     }
     let new_id = uuid::Uuid::new_v4().to_string();
     let ids: HashMap<_, _> = entries
@@ -1551,6 +1560,38 @@ mod tests {
         let other =
             json!({"type":"attachment","uuid":"x","attachment":{"type":"other","source_uuid":"t"}});
         assert_eq!(message_index(&[other], "t"), None);
+        fs::remove_dir_all(root).await.unwrap();
+    }
+    #[tokio::test]
+    async fn fork_rejects_a_cut_that_leaves_only_progress() {
+        let (root, options, id, folder) = write_session(&[
+            json!({"type":"progress","uuid":"p1","parentUuid":null,"data":{}}),
+            user("u1", Some("p1"), "first"),
+        ])
+        .await;
+        let error = fork_session(&id, &options, Some("p1"), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("Session {id} has no messages to fork")
+        );
+        let mut files = fs::read_dir(&folder).await.unwrap();
+        let mut count = 0;
+        while files.next_entry().await.unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 1, "no fork file should be written");
+        fs::remove_dir_all(root).await.unwrap();
+
+        let (root, options, id, _) =
+            write_session(&[json!({"type":"progress","uuid":"p1","parentUuid":null,"data":{}})])
+                .await;
+        let error = fork_session(&id, &options, None, None).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("Session {id} has no messages to fork")
+        );
         fs::remove_dir_all(root).await.unwrap();
     }
     #[test]

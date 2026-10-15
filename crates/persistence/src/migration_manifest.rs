@@ -1,4 +1,6 @@
-//! Generated migration scripts. SQL is the upstream template text.
+//! Migration scripts copied from
+//! `upstream/apps/server/src/persistence/Migrations`. No generator is checked
+//! in. SQL is the upstream template text.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MigrationKind {

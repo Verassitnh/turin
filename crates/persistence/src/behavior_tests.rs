@@ -1,5 +1,6 @@
-//! Ports of Sqlite.test.ts, initializeV2Database.test.ts, and the persistence
-//! repository tests that do not depend on the Effect runtime.
+//! Ports of `upstream/apps/server/src/persistence/Sqlite.test.ts`,
+//! `upstream/apps/server/src/persistence/initializeV2Database.test.ts`, and the
+//! persistence repository tests that do not depend on the Effect runtime.
 
 use std::time::Duration;
 

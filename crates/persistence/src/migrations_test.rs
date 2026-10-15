@@ -1,3 +1,5 @@
+//! Port of `upstream/apps/server/src/persistence/Migrations.test.ts`.
+
 use rusqlite::Connection;
 
 use super::*;

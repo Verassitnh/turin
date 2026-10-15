@@ -1,7 +1,6 @@
-//! Port of the migration-50 backfill in
-//! `Migrations/050_ProjectionThreadPullRequests.ts`, including
-//! `legacyThreadPullRequestKey` from `packages/shared/src/threadPullRequests.ts`
-//! and the URL parser it calls.
+//! Port of `upstream/apps/server/src/persistence/Migrations/050_ProjectionThreadPullRequests.ts`
+//! and `legacyThreadPullRequestKey` from
+//! `upstream/packages/shared/src/threadPullRequests.ts`.
 
 use std::sync::OnceLock;
 

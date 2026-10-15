@@ -26,6 +26,8 @@ pub mod task;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod thread_command_executor;
+pub mod thread_fork_service;
+pub mod thread_lifecycle_service;
 pub mod thread_management_service;
 pub mod thread_message_intake;
 pub mod user_facing_errors;

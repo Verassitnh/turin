@@ -54,7 +54,8 @@ when the logic is subtle (state machines, protocol framing, concurrency).
 | Run | Target | Result |
 |---|---|---|
 | wf_c926ef06-3ca | T03 design system + shell (+ look-and-feel) | FAIL: 1 high, 4 medium, 27 low. docs/qc/wf_c926ef06-3ca-T03-design-system.md |
-| wf_9dc37bfd-861 | T04b protocol docs fix round | running |
+| wf_9dc37bfd-861 | T04b protocol docs fix round | FAIL: 5 high, 13 medium, 6 low. docs/qc/wf_9dc37bfd-861-T04b-protocols.md |
+| wf_342ba162-dd7 | T24 icon fix rounds | PASS: 1 low |
 | wf_e8a1a7c1-d53 | T21 hooks (spec, lifecycle, security/trust, process) | FAIL: 2 high, 5 medium, 6 low. docs/qc/wf_e8a1a7c1-d53-T21-hooks.md |
 | wf_d6d58e6c-789 | T24 app icon (visual fidelity, reproducibility) | PASS: 1 medium, 6 low; T scale needs user decision. docs/qc/wf_d6d58e6c-789-T24-icon.md |
 | wf_8b97ef76-9c9 | T02 persistence | PASS: 15 medium, 27 low → T02b. docs/qc/wf_8b97ef76-9c9-T02-persistence.md |
@@ -76,7 +77,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | done (merged; QC PASS) |
 | T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | active |
 | T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | QC FAIL (1 high) → fix round r4 active; sidebar items moved to T15 |
-| T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex | T04b fixes done (18/21; 2,15 partial) → re-QC wf_9dc37bfd-861 |
+| T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex | re-QC wf_9dc37bfd-861 FAIL (3 high: Cursor ext result nesting, OpenCode v1 dir routing, OpenCode auto perms) → T04c (Haiku) + implementers steered |
 
 ### Wave 2: backend leaves (after T01)
 
@@ -101,7 +102,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok | active r2 (Codex usage limit) |
 | T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok | todo |
 | T13 | Orchestrator: event sink/store, projections, run execution, turn services | `crates/orchestration` | Codex (high), split into sub-tasks | todo |
-| T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus | todo |
+| T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus | active (base: T03 + T01) |
 
 ### Wave 4: UI (after T03 + T14)
 
@@ -126,5 +127,5 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T24 | Turin app icon: T3 Code icon with a single T | `assets/**` | Opus | QC PASS; r2 fixes done; user chose T at 1.0× → r3 regenerating, then merge |
+| T24 | Turin app icon: T3 Code icon with a single T | `assets/**` | Opus | done (merged; T at 1.0×). 1 low (--keep-macos-png normalisation) → r4 |
 | T24b | Wire icon: dev Dock icon, bundle .icns/actool, in-app mark | `crates/app` | Opus | todo (after T24 + T03 merge) |

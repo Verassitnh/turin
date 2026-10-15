@@ -14,7 +14,7 @@ use turin_contracts::{
     NodeId, ProviderThreadId, ProviderTurnId, RunId, ThreadId, TrimmedNonEmptyString, TurnItemId,
     UtcDateTime,
     model::{
-        ModelCapabilities, ProviderOptionChoice, ProviderOptionDescriptor,
+        ModelCapabilities, ProviderOptionChoice, ProviderOptionDescriptor, SelectOptionType,
         SelectProviderOptionDescriptor,
     },
     model_selection::ModelSelection,
@@ -173,8 +173,8 @@ const RESTRICTED: [&str; 7] = [
     "doom_loop",
 ];
 
-fn record_string(value: &Value, key: &str) -> Option<&str> {
-    value.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty())
+fn record_string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str).filter(|text| !text.trim().is_empty())
 }
 
 /// Port of `openCodePermissionRules` in `server/adapter.ts`.
@@ -521,7 +521,7 @@ pub fn boundary_after(
         .iter()
         .filter(|turn| {
             &turn.provider_thread_id == provider_thread_id
-                && kept_ordinal.is_none_or(|kept| turn.ordinal > kept)
+                && kept_ordinal.is_none_or(|kept| turn.ordinal.get() > kept)
         })
         .collect();
     later.sort_by_key(|turn| turn.ordinal);
@@ -910,12 +910,13 @@ pub fn open_code_tool_turn_item(
     match open_code_tool_projection_kind(name) {
         "command_execution" => {
             let exit_code = value_i64(metadata, &["exit", "exitCode"]);
+            let command = value_string(input, &["command", "cmd"]).unwrap_or_else(|| stable_json(input));
             tool_item!(base, CommandExecution {
-                input: value_string(input, &["command", "cmd"]).unwrap_or_else(|| stable_json(input)),
+                input: command,
                 output: output.map(str::to_owned),
                 output_omitted: None,
                 output_indicates_failure: None,
-                exit_code,
+                exit_code: exit_code,
             })
         }
         "file_change" => {
@@ -924,13 +925,14 @@ pub fn open_code_tool_turn_item(
                     .then(|| output.filter(|text| !text.trim().is_empty()).map(str::to_owned))
                     .flatten()
             });
-            let file_name = value_string(input, &["filePath", "path", "file"]).unwrap_or_else(|| name.to_owned());
+            let raw_name = value_string(input, &["filePath", "path", "file"]).unwrap_or_else(|| name.to_owned());
+            let file_name = TrimmedNonEmptyString::new(raw_name).unwrap_or_else(|_| {
+                TrimmedNonEmptyString::new(name).unwrap_or_else(|_| {
+                    TrimmedNonEmptyString::new("file").expect("literal")
+                })
+            });
             tool_item!(base, FileChange {
-                file_name: TrimmedNonEmptyString::new(file_name).unwrap_or_else(|_| {
-                    TrimmedNonEmptyString::new(name).unwrap_or_else(|_| {
-                        TrimmedNonEmptyString::new("file").expect("literal")
-                    })
-                }),
+                file_name: file_name,
                 additions: None,
                 deletions: None,
                 diff_str: diff,
@@ -956,7 +958,7 @@ pub fn open_code_tool_turn_item(
                 }]),
                 _ => None,
             };
-            tool_item!(titled, FileSearch { pattern, results })
+            tool_item!(titled, FileSearch { pattern: pattern, results: results })
         }
         "web_search" => {
             let pattern = value_string(input, &["query", "url", "pattern"]);
@@ -968,9 +970,10 @@ pub fn open_code_tool_turn_item(
                     snippet: Some(output.chars().take(SEARCH_PREVIEW_MAX_CHARS).collect()),
                 }]
             });
+            let patterns = pattern.map(|pattern| vec![pattern]);
             tool_item!(base, WebSearch {
-                patterns: pattern.map(|pattern| vec![pattern]),
-                results,
+                patterns: patterns,
+                results: results,
             })
         }
         _ => {
@@ -1083,7 +1086,7 @@ fn select_descriptor(
         id: TrimmedNonEmptyString::new(id).expect("descriptor id"),
         label: TrimmedNonEmptyString::new(label).expect("descriptor label"),
         description: None,
-        type_: Default::default(),
+        type_: SelectOptionType,
         options: options
             .into_iter()
             .map(|(value, is_default)| ProviderOptionChoice {
@@ -1651,6 +1654,7 @@ pub fn v1_rules_as_session(rules: &[V1PermissionRule]) -> Vec<SessionPermissionR
 mod tests {
     use super::*;
     use serde_json::json;
+    use turin_contracts::PositiveInt;
 
     #[test]
     fn admission_holds_stale_idle_until_the_user_message_is_observed() {
@@ -1884,7 +1888,7 @@ mod tests {
             node_id: NodeId::new("node").unwrap(),
             run_attempt_id: None,
             native_turn_ref: native.map(|native| native_ref(native, true)),
-            ordinal,
+            ordinal: PositiveInt::new(ordinal).expect("turn ordinal"),
             status: turin_contracts::orchestration_v2::OrchestrationV2ProviderTurnStatus::Completed,
             started_at: None,
             completed_at: None,

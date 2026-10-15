@@ -24,6 +24,8 @@ pub struct FakeResponse {
     /// Write headers, then these chunks, then hold the socket open.
     pub stream: Option<Vec<Vec<u8>>>,
     pub hold: bool,
+    /// After the initial chunks, write each frame as it arrives. `None` closes the body.
+    pub follow: Option<mpsc::UnboundedReceiver<Option<Vec<u8>>>>,
 }
 
 impl FakeResponse {
@@ -34,6 +36,7 @@ impl FakeResponse {
             body: body.as_bytes().to_vec(),
             stream: None,
             hold: false,
+            follow: None,
         }
     }
 
@@ -44,6 +47,7 @@ impl FakeResponse {
             body: Vec::new(),
             stream: None,
             hold: false,
+            follow: None,
         }
     }
 
@@ -54,6 +58,7 @@ impl FakeResponse {
             body: Vec::new(),
             stream: Some(chunks),
             hold,
+            follow: None,
         }
     }
 }
@@ -189,6 +194,13 @@ async fn handle_conn(
         }
     } else {
         socket.write_all(&response.body).await?;
+    }
+    if let Some(mut follow) = response.follow {
+        while let Some(frame) = follow.recv().await {
+            let Some(frame) = frame else { break };
+            socket.write_all(&frame).await?;
+            socket.flush().await?;
+        }
     }
     if response.hold {
         let _ = socket.read(&mut tmp).await;

@@ -545,6 +545,7 @@ mod tests {
             body: b"<!doctype html>".to_vec(),
             stream: None,
             hold: false,
+            follow: None,
         })
         .await;
         let client = V1Client::new(&server.url, "/work", None).unwrap();
@@ -560,6 +561,7 @@ mod tests {
             body: b"<!doctype html>".to_vec(),
             stream: None,
             hold: false,
+            follow: None,
         })
         .await;
         let client = V1Client::new(&server.url, "/work", None).unwrap();

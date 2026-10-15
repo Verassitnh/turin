@@ -262,6 +262,18 @@ impl V2Client {
         .await
     }
 
+    pub async fn revert_clear(&self, session_id: &str) -> Result<(), OpenCodeRuntimeError> {
+        self.empty(
+            "session.revert.clear",
+            Method::POST,
+            &format!("/api/session/{}/revert/clear", encode(session_id)),
+            &[],
+            None,
+            &[200, 204],
+        )
+        .await
+    }
+
     pub async fn revert_commit(&self, session_id: &str) -> Result<(), OpenCodeRuntimeError> {
         self.empty(
             "session.revert.commit",

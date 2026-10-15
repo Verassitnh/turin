@@ -13,14 +13,16 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, mpsc};
+use parking_lot::Mutex;
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use turin_contracts::{
-    PositiveInt, ProviderSessionId, ProviderThreadId, ProviderTurnId, RuntimeRequestId, ThreadId,
+    PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId,
     UtcDateTime,
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2ConversationMessage,
-        OrchestrationV2ConversationMessageRole, OrchestrationV2ProviderFailureClass,
+        OrchestrationV2ConversationMessageRole, OrchestrationV2CreationSource,
+        OrchestrationV2ProviderFailureClass,
         OrchestrationV2ProviderSession, OrchestrationV2ProviderSessionStatus,
         OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadStatus,
         OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus,
@@ -30,9 +32,8 @@ use turin_contracts::{
         OrchestrationV2TurnItemStatus,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
-    provider_policy::ProviderRequestKind,
 };
-use turin_provider_core::id_allocator::IdAllocator;
+use turin_provider_core::id_allocator::{IdAllocator, derive};
 
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
@@ -135,7 +136,7 @@ impl OpenCodeV1Session {
             reader: Mutex::new(None),
         });
         let this = Arc::clone(&session);
-        *session.reader.lock().await = Some(tokio::spawn(async move {
+        *session.reader.lock() = Some(tokio::spawn(async move {
             this.follow_events().await;
         }));
         Ok(session)
@@ -183,7 +184,7 @@ impl OpenCodeV1Session {
     }
 
     async fn fail_stream(&self, message: &str) {
-        let mut guard = self.inner.lock().await;
+        let mut guard = self.inner.lock();
         guard.stream_dead = Some(message.to_owned());
         guard.session.status = OrchestrationV2ProviderSessionStatus::Error;
         guard.session.last_error = Some(message.to_owned());
@@ -232,7 +233,7 @@ impl OpenCodeV1Session {
     }
 
     async fn on_event(&self, event: V1Event) {
-        let mut guard = self.inner.lock().await;
+        let mut guard = self.inner.lock();
         let props = event.properties;
         match event.event_type.as_str() {
             "server.connected" => {
@@ -481,9 +482,12 @@ impl OpenCodeV1Session {
             let delta = part.get("delta").and_then(Value::as_str).unwrap_or("");
             let field = part.get("field").and_then(Value::as_str).unwrap_or("text");
             if field == "text" || field == "reasoning" {
-                let text = turn.texts.entry(part_id.clone()).or_default();
-                text.push_str(delta);
-                let item = text_item(turn, &self.driver, &part_id, text, field == "reasoning", true);
+                let text = {
+                    let slot = turn.texts.entry(part_id.clone()).or_default();
+                    slot.push_str(delta);
+                    slot.clone()
+                };
+                let item = text_item(turn, &self.driver, &part_id, &text, field == "reasoning", true);
                 self.emit(ProviderAdapterV2Event::TurnItemUpdated {
                     driver: self.driver.clone(),
                     turn_item: item,
@@ -554,16 +558,19 @@ impl OpenCodeV1Session {
             .get(&session_id)
             .cloned()
             .unwrap_or_else(|| session_id.clone());
-        let Some(thread) = guard.threads.get(&owner) else {
-            return;
-        };
-        let Some(turn) = thread.active.as_ref() else { return };
         if guard.pending.contains_key(&native_id) {
             return;
         }
+        let Some((provider_turn_id, thread_id)) = guard.threads.get(&owner).and_then(|thread| {
+            thread.active.as_ref().map(|turn| {
+                (turn.provider_turn.id.clone(), turn.thread_id.clone())
+            })
+        }) else {
+            return;
+        };
         let request_id = IdAllocator.runtime_request(
             &self.driver,
-            Some(&turn.provider_turn.id),
+            Some(&provider_turn_id),
             Some(&native_id),
         );
         let kind = if event_type == "question.asked" {
@@ -577,8 +584,8 @@ impl OpenCodeV1Session {
         let now = UtcDateTime::now();
         let request = OrchestrationV2RuntimeRequest {
             id: request_id.clone(),
-            node_id: IdAllocator.node_from_provider_item(&self.driver, &native_id),
-            provider_turn_id: Some(turn.provider_turn.id.clone()),
+            node_id: derive::node_from_provider_item(&self.driver, &native_id),
+            provider_turn_id: Some(provider_turn_id),
             native_request_ref: Some(native_ref(&native_id, false)),
             kind: match kind {
                 "file-read" => OrchestrationV2RuntimeRequestKind::FileRead,
@@ -608,7 +615,6 @@ impl OpenCodeV1Session {
                 question: props.get("questions").cloned(),
             },
         );
-        let thread_id = turn.thread_id.clone();
         self.emit(ProviderAdapterV2Event::RuntimeRequestUpdated {
             driver: self.driver.clone(),
             thread_id: Some(thread_id),
@@ -646,16 +652,16 @@ impl OpenCodeV1Session {
         }
     }
 
-    fn require_session<'a>(
-        guard: &'a V1Inner,
+    fn require_session(
+        guard: &V1Inner,
         thread: &OrchestrationV2ProviderThread,
-    ) -> Result<&'a str, ProviderAdapterV2Error> {
+    ) -> Result<String, ProviderAdapterV2Error> {
         thread
             .native_thread_ref
             .as_ref()
             .and_then(|native| native.native_id.as_ref())
-            .map(|id| id.as_str())
-            .filter(|id| guard.threads.contains_key(*id))
+            .map(|id| id.as_str().to_owned())
+            .filter(|id| guard.threads.contains_key(id))
             .ok_or_else(|| {
                 ProviderAdapterV2Error::protocol(format!(
                     "Provider thread {} has no OpenCode session id",
@@ -677,22 +683,22 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
         &self.provider_session_id
     }
     fn provider_session(&self) -> OrchestrationV2ProviderSession {
-        self.inner.blocking_lock().session.clone()
+        self.inner.lock().session.clone()
     }
     fn events(&self) -> ProviderEventStream {
-        let rx = self.rx.blocking_lock().take();
+        let rx = self.rx.lock().take();
         match rx {
             Some(rx) => Box::pin(UnboundedReceiverStream::new(rx)),
             None => Box::pin(futures::stream::empty()),
         }
     }
     async fn close(&self) {
-        if let Some(handle) = self.reader.lock().await.take() {
+        if let Some(handle) = self.reader.lock().take() {
             handle.abort();
         }
     }
     fn has_pending_background_work(&self) -> bool {
-        !self.inner.blocking_lock().busy.is_empty()
+        !self.inner.lock().busy.is_empty()
     }
     fn get_model_context_window(&self, _model: &str) -> Option<u64> {
         None
@@ -743,7 +749,6 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
         );
         self.inner
             .lock()
-            .await
             .threads
             .insert(native_id, V1Thread {
                 provider_thread: provider_thread.clone(),
@@ -779,7 +784,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
         thread.provider_session_id = Some(self.provider_session_id.clone());
         thread.status = OrchestrationV2ProviderThreadStatus::Idle;
         thread.updated_at = UtcDateTime::now();
-        self.inner.lock().await.threads.insert(
+        self.inner.lock().threads.insert(
             native_id,
             V1Thread {
                 provider_thread: thread.clone(),
@@ -793,15 +798,13 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
 
     async fn start_turn(&self, input: ProviderAdapterV2TurnInput) -> Result<(), ProviderAdapterV2Error> {
         let session_id = {
-            let guard = self.inner.lock().await;
+            let guard = self.inner.lock();
             if guard.stream_dead.is_some() {
                 return Err(ProviderAdapterV2Error::protocol(
                     "OpenCode event stream has ended; reconnect the provider session before starting another turn.",
                 ));
             }
-            let session_id = self
-                .require_session(&guard, &input.provider_thread)?
-                .to_owned();
+            let session_id = Self::require_session(&guard, &input.provider_thread)?;
             if guard.threads.get(&session_id).and_then(|thread| thread.active.as_ref()).is_some() {
                 return Err(ProviderAdapterV2Error::protocol(format!(
                     "OpenCode provider thread {} already has an active turn",
@@ -817,7 +820,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
         let is_compact = bare && text == "/compact";
         let now = UtcDateTime::now();
         let native_turn = format!("{session_id}:attempt:{}", input.attempt_id);
-        let provider_turn_id = IdAllocator::provider_turn(&self.driver, &native_turn);
+        let provider_turn_id = derive::provider_turn(&self.driver, &native_turn);
         let ordinal = PositiveInt::new(input.provider_turn_ordinal.max(1) as u64)
             .unwrap_or(PositiveInt::new(1).expect("one"));
         let provider_turn = OrchestrationV2ProviderTurn {
@@ -834,7 +837,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
             turn_token_usage: None,
         };
         {
-            let mut guard = self.inner.lock().await;
+            let mut guard = self.inner.lock();
             let thread = guard.threads.get_mut(&session_id).ok_or_else(|| {
                 ProviderAdapterV2Error::protocol(format!("OpenCode session {session_id} is not registered"))
             })?;
@@ -879,7 +882,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
             self.submit_prompt(&session_id, &input, &parsed, &text).await
         };
         if let Err(err) = result {
-            let mut guard = self.inner.lock().await;
+            let mut guard = self.inner.lock();
             self.finish_active(
                 &mut guard,
                 &session_id,
@@ -890,7 +893,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
             return Err(err);
         }
         if !is_compact {
-            let mut guard = self.inner.lock().await;
+            let mut guard = self.inner.lock();
             if let Some(turn) = guard.threads.get_mut(&session_id).and_then(|thread| thread.active.as_mut()) {
                 let action = advance_open_code_prompt_admission(
                     &mut turn.admission,
@@ -901,7 +904,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
                 }
             }
         } else {
-            let mut guard = self.inner.lock().await;
+            let mut guard = self.inner.lock();
             self.finish_active(
                 &mut guard,
                 &session_id,
@@ -920,8 +923,8 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
 
     async fn steer_turn(&self, input: ProviderAdapterV2SteerInput) -> Result<(), ProviderAdapterV2Error> {
         let session_id = {
-            let guard = self.inner.lock().await;
-            self.require_session(&guard, &input.provider_thread)?.to_owned()
+            let guard = self.inner.lock();
+            Self::require_session(&guard, &input.provider_thread)?.to_owned()
         };
         let text = input.message.text.trim().to_owned();
         if text.is_empty() {
@@ -940,8 +943,8 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
 
     async fn interrupt_turn(&self, input: ProviderAdapterV2InterruptInput) -> Result<(), ProviderAdapterV2Error> {
         let session_id = {
-            let guard = self.inner.lock().await;
-            let session_id = self.require_session(&guard, &input.provider_thread)?.to_owned();
+            let guard = self.inner.lock();
+            let session_id = Self::require_session(&guard, &input.provider_thread)?.to_owned();
             if let Some(turn) = guard.threads.get(&session_id).and_then(|thread| thread.active.as_ref()) {
                 if turn.provider_turn.id != input.provider_turn_id {
                     return Ok(());
@@ -950,7 +953,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
             session_id
         };
         {
-            let mut guard = self.inner.lock().await;
+            let mut guard = self.inner.lock();
             if let Some(turn) = guard.threads.get_mut(&session_id).and_then(|thread| thread.active.as_mut()) {
                 turn.interrupted = true;
                 cancel_open_code_prompt_admission(&mut turn.admission);
@@ -958,7 +961,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
         }
         self.client.abort_session(&session_id).await.map_err(http_err)?;
         let children: Vec<String> = {
-            let guard = self.inner.lock().await;
+            let guard = self.inner.lock();
             guard
                 .children
                 .iter()
@@ -977,7 +980,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
         input: ProviderAdapterV2RuntimeRequestResponseInput,
     ) -> Result<(), ProviderAdapterV2Error> {
         let pending = {
-            let guard = self.inner.lock().await;
+            let guard = self.inner.lock();
             guard
                 .pending
                 .values()
@@ -1037,7 +1040,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
         let native = self.client.get_session(&session_id).await.map_err(http_err)?;
         let messages = self.client.session_messages(&session_id).await.map_err(http_err)?;
         let revert = native.pointer("/revert/messageID").and_then(Value::as_str);
-        let guard = self.inner.lock().await;
+        let guard = self.inner.lock();
         let stored = guard.threads.get(&session_id);
         Ok(snapshot_from(
             input.provider_thread,
@@ -1060,7 +1063,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
             .map(|id| id.as_str().to_owned())
             .ok_or_else(|| ProviderAdapterV2Error::protocol("OpenCode rollback has no session"))?;
         {
-            let guard = self.inner.lock().await;
+            let guard = self.inner.lock();
             if guard.threads.get(&session_id).and_then(|thread| thread.active.as_ref()).is_some() {
                 return Err(ProviderAdapterV2Error::protocol(format!(
                     "Cannot roll back OpenCode thread {} while a turn is active",
@@ -1092,7 +1095,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
                 .ok_or_else(|| ProviderAdapterV2Error::protocol("OpenCode fork returned no id"))?;
             retained.native_thread_ref = Some(native_ref(fork_id, false));
             retained.updated_at = UtcDateTime::now();
-            self.inner.lock().await.threads.insert(
+            self.inner.lock().threads.insert(
                 fork_id.to_owned(),
                 V1Thread {
                     provider_thread: retained.clone(),
@@ -1140,7 +1143,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
             None,
             now,
         );
-        self.inner.lock().await.threads.insert(
+        self.inner.lock().threads.insert(
             fork_id.to_owned(),
             V1Thread {
                 provider_thread: thread.clone(),
@@ -1240,7 +1243,7 @@ fn make_thread(
     now: UtcDateTime,
 ) -> OrchestrationV2ProviderThread {
     let mut thread = existing.unwrap_or_else(|| OrchestrationV2ProviderThread {
-        id: IdAllocator::provider_thread(&opencode_driver(), Some(instance_id), native_id),
+        id: derive::provider_thread(&opencode_driver(), Some(instance_id), native_id),
         driver: opencode_driver(),
         provider_instance_id: instance_id.clone(),
         provider_session_id: Some(session_id.clone()),
@@ -1271,10 +1274,10 @@ fn tool_base(turn: &mut V1Turn, driver: &ProviderDriverKind, native_id: &str, st
     let ordinal = turn.next_ordinal;
     turn.next_ordinal += 1;
     ToolItemBase {
-        id: IdAllocator::turn_item_from_provider_item(driver, native_id),
+        id: derive::turn_item_from_provider_item(driver, native_id),
         thread_id: turn.thread_id.clone(),
         run_id: None,
-        node_id: Some(IdAllocator::node_from_provider_item(driver, native_id)),
+        node_id: Some(derive::node_from_provider_item(driver, native_id)),
         provider_thread_id: Some(turn.provider_turn.provider_thread_id.clone()),
         provider_turn_id: Some(turn.provider_turn.id.clone()),
         native_item_ref: Some(native_ref(native_id, false)),
@@ -1302,7 +1305,7 @@ fn text_item(
     let ordinal = turn.next_ordinal;
     turn.next_ordinal += 1;
     let now = UtcDateTime::now();
-    let id = IdAllocator::turn_item_from_provider_item(driver, part_id);
+    let id = derive::turn_item_from_provider_item(driver, part_id);
     if reasoning {
         turin_contracts::orchestration_v2::OrchestrationV2TurnItem::Reasoning {
             tool_non_execution_kind: None,
@@ -1346,7 +1349,7 @@ fn text_item(
             started_at: Some(now),
             completed_at: None,
             updated_at: now,
-            message_id: IdAllocator::message_from_provider_item(driver, part_id),
+            message_id: derive::message_from_provider_item(driver, part_id),
             text: text.to_owned(),
             attachments: None,
             streaming,
@@ -1364,7 +1367,7 @@ fn subagent_for(
 ) -> OrchestrationV2Subagent {
     let now = UtcDateTime::now();
     OrchestrationV2Subagent {
-        id: parent_node.unwrap_or_else(|| IdAllocator::node_from_provider_item(&opencode_driver(), child_session)),
+        id: parent_node.unwrap_or_else(|| derive::node_from_provider_item(&opencode_driver(), child_session)),
         thread_id: thread_id.clone(),
         run_id: None,
         parent_node_id: turn.node_id.clone(),
@@ -1487,7 +1490,7 @@ fn snapshot_from(
             creation_source: OrchestrationV2CreationSource::Provider,
             scheduled_task_id: None,
             sender_thread_id: None,
-            id: IdAllocator::message_from_provider_item(&opencode_driver(), id),
+            id: derive::message_from_provider_item(&opencode_driver(), id),
             thread_id,
             run_id: None,
             node_id: None,
@@ -1518,20 +1521,8 @@ fn snapshot_from(
 
 impl Drop for OpenCodeV1Session {
     fn drop(&mut self) {
-        if let Some(handle) = self.reader.blocking_lock().take() {
+        if let Some(handle) = self.reader.lock().take() {
             handle.abort();
         }
     }
-}
-
-// Silence unused import if a kind helper is only used through the request mapper.
-#[allow(dead_code)]
-fn _request_kind(kind: ProviderRequestKind) -> ProviderRequestKind {
-    kind
-}
-
-// ProviderTurnId is used by the interrupt comparison.
-#[allow(dead_code)]
-fn _turn(id: &ProviderTurnId) -> &ProviderTurnId {
-    id
 }

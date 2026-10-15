@@ -12,7 +12,7 @@ use futures::Stream;
 use serde_json::Value;
 use turin_contracts::{
     CheckpointId, MessageId, NodeId, ProviderSessionId, ProviderThreadId, ProviderTurnId, RunAttemptId,
-    RunId, RuntimeRequestId, ScheduledTaskId, ThreadId, UtcDateTime,
+    RunId, RuntimeRequestId, ScheduledTaskId, ThreadId,
     chat_attachment::ChatAttachment,
     model_selection::ModelSelection,
     orchestration_v2::{

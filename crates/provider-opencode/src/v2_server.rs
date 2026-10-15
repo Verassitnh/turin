@@ -315,6 +315,7 @@ mod tests {
             body: b"<!doctype html>".to_vec(),
             stream: None,
             hold: false,
+            follow: None,
         })
         .await;
         let client = V2Client::connect(&server.url, "pw").unwrap();

@@ -1,10 +1,10 @@
-//! OpenCode transport: version probe, both server generations, and their HTTP/SSE clients.
+//! OpenCode transport and provider adapter.
 //!
-//! The orchestration adapter is a later task. Wire types that belong to
-//! `turin-contracts` are defined in this crate until that crate catches up.
 //! Nested OpenCode documents (sessions, messages, models) stay `serde_json::Value`
-//! inside the exact response envelopes.
+//! inside the exact response envelopes. Fields the adapter reads are named by
+//! the typed structs in `adapter`.
 
+mod adapter;
 mod auth;
 mod error;
 mod events;
@@ -54,6 +54,12 @@ pub use v2_client::{
 pub use v2_server::{
     OpenCode2Config, OpenCode2Connection, OpenCode2Server, generate_password, server_environment,
     verify_server,
+};
+pub use adapter::{
+    OpenCodeAdapter, OpenCodeSettings, OpenCodeV1Session, OpenCodeV2Session, ProviderAdapterV2,
+    ProviderAdapterV2Error,
+    ProviderAdapterV2Event, ProviderSessionRuntime, select_generation, v1_capabilities,
+    v2_capabilities,
 };
 pub use version_probe::{
     MINIMUM_OPENCODE_VERSION, OPENCODE_SERVER_PROBE_TIMEOUT, OPENCODE_VERSION_PROBE_TIMEOUT,

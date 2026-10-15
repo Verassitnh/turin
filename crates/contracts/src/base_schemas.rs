@@ -11,24 +11,19 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fmt, num::NonZeroU64, str::FromStr};
 
-/// ECMAScript WhiteSpace and LineTerminator code points, i.e. what
-/// `String.prototype.trim` strips. Differs from Rust's `char::is_whitespace`:
-/// U+FEFF is included and U+0085 is not.
-fn is_js_whitespace(c: char) -> bool {
-    matches!(
-        c,
-        '\u{0009}'..='\u{000D}'
-            | '\u{0020}'
-            | '\u{00A0}'
-            | '\u{1680}'
-            | '\u{2000}'..='\u{200A}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}'
-            | '\u{FEFF}'
-    )
+/// ECMAScript WhiteSpace and LineTerminator code points, in code point order.
+/// This is what `String.prototype.trim` strips. Differs from Rust's
+/// `char::is_whitespace`: U+FEFF is included and U+0085 is not.
+pub const JS_WHITESPACE_CHARS: [char; 25] = [
+    '\u{0009}', '\u{000a}', '\u{000b}', '\u{000c}', '\u{000d}', '\u{0020}', '\u{00a0}', '\u{1680}',
+    '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}',
+    '\u{2008}', '\u{2009}', '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}',
+    '\u{feff}',
+];
+
+/// JS `\s` test on a `char`: WhiteSpace and LineTerminator.
+pub fn is_js_whitespace(c: char) -> bool {
+    JS_WHITESPACE_CHARS.contains(&c)
 }
 
 /// `String.prototype.trim` exactly. Use this, never `str::trim`, anywhere
@@ -86,6 +81,11 @@ pub mod js_number_nullable {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
         Option::<f64>::deserialize(d)
     }
+}
+
+/// `String.prototype.trimEnd`, with the same whitespace set as [`js_trim`].
+pub fn js_trim_end(value: &str) -> &str {
+    value.trim_end_matches(is_js_whitespace)
 }
 
 #[doc(hidden)]
@@ -1020,6 +1020,8 @@ mod tests {
         assert_eq!(js_trim("\u{0085}a\u{0085}"), "\u{0085}a\u{0085}");
         assert_eq!(js_trim("\u{feff}a\u{feff}"), "a");
         assert_eq!(js_trim("\u{180e}a"), "\u{180e}a");
+        assert_eq!(js_trim_end("a\u{2003}\u{feff}"), "a");
+        assert_eq!(js_trim_end("a\u{0085}"), "a\u{0085}");
     }
 
     #[test]

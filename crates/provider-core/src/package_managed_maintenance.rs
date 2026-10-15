@@ -1110,4 +1110,106 @@ mod tests {
         assert!(debug.contains("OPENAI_API_KEY"), "{debug}");
         assert!(!debug.contains("fixture-key"), "{debug}");
     }
+
+    fn installed_provider() -> ServerProvider {
+        serde_json::from_value(serde_json::json!({
+            "instanceId": "codex",
+            "driver": "codex",
+            "displayName": "codex",
+            "enabled": true,
+            "installed": true,
+            "version": "1.0.0",
+            "status": "ready",
+            "auth": {"status": "authenticated"},
+            "checkedAt": "2026-04-10T00:00:00.000Z",
+            "models": [],
+            "slashCommands": [],
+            "skills": [],
+        }))
+        .expect("installed provider snapshot")
+    }
+
+    #[tokio::test]
+    async fn prefers_the_installers_own_latest_version_over_the_registry() {
+        let mut capabilities =
+            resolve_package_managed_provider_maintenance(&codex_definition(), None).await;
+        capabilities.latest_version = Some(Some("1.2.0".to_owned()));
+        // The registry client is never reached: the installer's answer wins.
+        let latest = resolve_latest_provider_version(
+            &capabilities,
+            &ProviderLatestVersions::default(),
+            &reqwest::Client::new(),
+            false,
+        )
+        .await;
+        assert_eq!(latest.as_deref(), Some("1.2.0"));
+    }
+
+    #[tokio::test]
+    async fn disabled_update_checks_skip_the_latest_version_lookup() {
+        let capabilities =
+            resolve_package_managed_provider_maintenance(&codex_definition(), None).await;
+        // The seeded registry answer would surface if the lookup ran.
+        let latest_versions =
+            ProviderLatestVersions::new([("@openai/codex".to_owned(), Some("9.9.9".to_owned()))]);
+        let client = reqwest::Client::new();
+
+        let enabled = enrich_provider_snapshot_with_version_advisory(
+            installed_provider(),
+            &capabilities,
+            Some(true),
+            &latest_versions,
+            &client,
+        )
+        .await;
+        let disabled = enrich_provider_snapshot_with_version_advisory(
+            installed_provider(),
+            &capabilities,
+            Some(false),
+            &latest_versions,
+            &client,
+        )
+        .await;
+
+        let advisory = |provider: &ServerProvider| {
+            serde_json::to_value(provider.version_advisory.as_ref().expect("advisory"))
+                .expect("advisory json")
+        };
+        assert_eq!(advisory(&enabled)["latestVersion"], "9.9.9");
+        // Upstream's `toMatchObject` on the advisory: these fields, not the rest.
+        let disabled = advisory(&disabled);
+        assert_eq!(disabled["status"], "unknown");
+        assert_eq!(disabled["currentVersion"], "1.0.0");
+        assert_eq!(disabled["latestVersion"], serde_json::Value::Null);
+        assert_eq!(disabled["checkedAt"], "2026-04-10T00:00:00.000Z");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn caches_resolution_until_a_fresh_read_is_requested() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Absent on the first read, so the resolution is manual-only.
+        let entry = dir
+            .path()
+            .join("lib/node_modules/@openai/codex/bin/codex.js");
+        let cache = CachedMaintenanceResolution::new(
+            codex_definition(),
+            Some(entry.to_string_lossy().into_owned()),
+            Some(ProcessEnv::new()),
+            Platform::Darwin,
+        );
+        assert_eq!(cache.get(false).await.update, None);
+
+        // The install now exists and npm owns it, but a cached read keeps the old answer.
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(cache.get(false).await.update, None);
+
+        // A fresh read re-derives ownership, and the new answer is cached.
+        assert!(cache.get(true).await.update.is_some());
+        assert!(cache.get(false).await.update.is_some());
+    }
 }

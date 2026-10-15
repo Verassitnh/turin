@@ -7,6 +7,9 @@ use crate::{
     claude_model_catalog::ClaudeModelCatalog,
     claude_model_options::{apply_claude_prompt_effort_prefix, compile_claude_model_selection},
     claude_permission::ApprovalDecision,
+    claude_plan_items::{
+        PlanBody, PlanState, apply_task_tool, project_plan, task_steps, todo_steps,
+    },
     claude_query_options::{ClaudeQueryOptionsInput, make_claude_query_options},
     claude_turn_items::{
         ItemOrdinals, ToolCall, TurnScope, assistant_artifacts, item_ordinal, new_plan_id,
@@ -229,6 +232,7 @@ impl ProviderAdapterV2 for ClaudeProviderAdapter {
             claude: None,
             host_requests: None,
             active: None,
+            plans: PlanState::default(),
             pending_requests: HashMap::new(),
             commands: command_rx,
             events,
@@ -459,6 +463,7 @@ struct ClaudeActor {
     claude: Option<ClaudeAdapterV2>,
     host_requests: Option<mpsc::UnboundedReceiver<ClaudeHostRequest>>,
     active: Option<ActiveTurn>,
+    plans: PlanState,
     pending_requests: HashMap<RuntimeRequestId, PendingRequest>,
     commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedSender<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>,
@@ -946,7 +951,7 @@ impl ClaudeActor {
     }
     fn assistant(&mut self, frame: turin_claude_protocol::Frame) {
         let events = match self.active.as_mut() {
-            Some(active) => assistant_events(active, &frame),
+            Some(active) => assistant_events(&mut self.plans, active, &frame),
             None => return,
         };
         for event in events {
@@ -955,7 +960,7 @@ impl ClaudeActor {
     }
     fn user(&mut self, frame: turin_claude_protocol::Frame) {
         let events = match self.active.as_mut() {
-            Some(active) => tool_result_events(active, &frame),
+            Some(active) => tool_result_events(&mut self.plans, active, &frame),
             None => return,
         };
         for event in events {
@@ -1130,6 +1135,7 @@ impl ClaudeActor {
 /// Assistant text blocks become a node, message, and turn item. `tool_use`
 /// blocks start a tool call. Thinking blocks are not ported yet.
 fn assistant_events(
+    plans: &mut PlanState,
     active: &mut ActiveTurn,
     frame: &turin_claude_protocol::Frame,
 ) -> Vec<ProviderAdapterV2Event> {
@@ -1189,6 +1195,18 @@ fn assistant_events(
                     .unwrap_or("tool")
                     .to_owned();
                 let input = block.get("input").cloned().unwrap_or(Value::Null);
+                // TodoWrite projects its own list before the call item, as
+                // upstream does. Subagent frames never touch the main list.
+                if name == "TodoWrite" && parent_tool_use_id(frame).is_none() {
+                    events.extend(project_plan(
+                        plans,
+                        &active.scope,
+                        active.input.provider_turn_ordinal,
+                        &mut active.item_ordinals,
+                        native,
+                        PlanBody::TodoList(todo_steps(&input)),
+                    ));
+                }
                 let ordinal = item_ordinal(
                     &mut active.item_ordinals,
                     active.input.provider_turn_ordinal,
@@ -1230,8 +1248,14 @@ fn assistant_events(
     events
 }
 
-/// `tool_result` blocks finish the tracked tool call they answer.
+fn parent_tool_use_id(frame: &turin_claude_protocol::Frame) -> Option<&str> {
+    frame.raw.get("parent_tool_use_id").and_then(Value::as_str)
+}
+
+/// `tool_result` blocks finish the tracked tool call they answer. A finished
+/// task tool updates the thread's task list, which is then re-projected.
 fn tool_result_events(
+    plans: &mut PlanState,
     active: &mut ActiveTurn,
     frame: &turin_claude_protocol::Frame,
 ) -> Vec<ProviderAdapterV2Event> {
@@ -1243,10 +1267,19 @@ fn tool_result_events(
         .unwrap_or_default();
     let now = UtcDateTime::now();
     let mut events = Vec::new();
-    for block in blocks
+    let results: Vec<&Value> = blocks
         .iter()
         .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
-    {
+        .collect();
+    // Upstream prefers the structured `tool_use_result` when the message
+    // carries exactly one tool result.
+    let structured = (results.len() == 1)
+        .then(|| frame.raw.get("tool_use_result"))
+        .flatten();
+    let native_thread = native_id(&active.input.provider_thread)
+        .ok()
+        .map(str::to_owned);
+    for block in results {
         let Some(native) = block.get("tool_use_id").and_then(Value::as_str) else {
             continue;
         };
@@ -1262,6 +1295,7 @@ fn tool_result_events(
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let output = block.get("content").cloned().unwrap_or(Value::Null);
+        let task_output = structured.cloned().unwrap_or_else(|| output.clone());
         let call = ToolCall {
             native_item_id: native,
             tool_name: &tracked.name,
@@ -1281,6 +1315,29 @@ fn tool_result_events(
             driver: driver(),
             turn_item: artifacts.turn_item,
         });
+        // A subagent's task tools must not replace the parent's list.
+        if let Some(native_thread) = native_thread
+            .as_deref()
+            .filter(|_| !failed && parent_tool_use_id(frame).is_none())
+        {
+            let current = plans.task_list(native_thread);
+            if let Some(tasks) =
+                apply_task_tool(&current, call.tool_name, call.input, Some(&task_output))
+            {
+                plans.set_task_list(native_thread, tasks.clone());
+                // One list per turn, updated in place; a later turn supersedes it.
+                let native_item_id =
+                    format!("claude-tasks:{}", active.scope.provider_turn_id.as_str());
+                events.extend(project_plan(
+                    plans,
+                    &active.scope,
+                    active.input.provider_turn_ordinal,
+                    &mut active.item_ordinals,
+                    &native_item_id,
+                    PlanBody::TodoList(task_steps(&tasks)),
+                ));
+            }
+        }
     }
     events
 }

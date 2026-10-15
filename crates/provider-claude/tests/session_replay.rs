@@ -542,3 +542,211 @@ async fn exit_plan_mode_capture_emits_the_plan_and_completes() {
         other => panic!("expected a proposed plan, got {other:?}"),
     }
 }
+
+/// Inline transcript for one prompt: the given frames, then a success result.
+fn one_turn(frames: Vec<Value>) -> Harness {
+    let mut entries = vec![
+        json!({"type": "expect_outbound", "label": "query.open", "frame": {}}),
+        json!({"type": "expect_outbound", "label": "prompt.offer:1", "frame": {}}),
+    ];
+    entries.extend(
+        frames
+            .into_iter()
+            .map(|frame| json!({"type": "emit_inbound", "label": "frame", "frame": frame})),
+    );
+    entries.push(json!({"type": "emit_inbound", "label": "result", "frame": {
+        "type": "result", "subtype": "success", "is_error": false,
+        "result": "tasks done", "terminal_reason": "completed",
+        "session_id": "todo-session", "usage": {},
+        "uuid": "00000000-0000-4000-8000-0000000000ff"
+    }}));
+    entries.push(json!({"type": "runtime_exit", "status": "success"}));
+    Harness::lines(&entries)
+}
+
+fn assistant_tool_use(
+    uuid: &str,
+    parent: Option<&str>,
+    id: &str,
+    name: &str,
+    input: Value,
+) -> Value {
+    json!({
+        "type": "assistant",
+        "message": {"id": format!("msg_{uuid}"), "role": "assistant", "content": [
+            {"type": "tool_use", "id": id, "name": name, "input": input}
+        ]},
+        "uuid": uuid, "session_id": "todo-session", "parent_tool_use_id": parent,
+    })
+}
+
+fn user_tool_result(
+    uuid: &str,
+    parent: Option<&str>,
+    id: &str,
+    text: &str,
+    structured: Value,
+) -> Value {
+    json!({
+        "type": "user",
+        "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": id, "content": text}
+        ]},
+        "uuid": uuid, "session_id": "todo-session", "parent_tool_use_id": parent,
+        "tool_use_result": structured,
+    })
+}
+
+fn todo_plan_values(events: &[ProviderAdapterV2Event]) -> Vec<Value> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::PlanUpdated { plan, .. }
+                if matches!(plan, OrchestrationV2PlanArtifact::TodoList { .. }) =>
+            {
+                serde_json::to_value(plan).ok()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn todo_write_projects_one_todo_list_with_index_ids() {
+    let harness = one_turn(vec![
+        assistant_tool_use(
+            "00000000-0000-4000-8000-000000000011",
+            None,
+            "toolu_todo_1",
+            "TodoWrite",
+            json!({"todos": [
+                {"content": "Read config", "status": "completed", "activeForm": "Reading"},
+                {"content": "Edit default", "status": "in_progress", "activeForm": "Editing"},
+                {"content": "Ship", "status": "pending", "activeForm": "Shipping"},
+            ]}),
+        ),
+        user_tool_result(
+            "00000000-0000-4000-8000-000000000012",
+            None,
+            "toolu_todo_1",
+            "Todos have been modified successfully.",
+            json!({"oldTodos": [], "newTodos": []}),
+        ),
+    ]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Plan with todos"))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+
+    let plans = todo_plan_values(&seen);
+    assert_eq!(plans.len(), 1, "{plans:?}");
+    assert_eq!(plans[0]["status"], "active");
+    assert_eq!(
+        plans[0]["steps"],
+        json!([
+            {"id": "todo-0", "text": "Read config", "status": "completed"},
+            {"id": "todo-1", "text": "Edit default", "status": "running"},
+            {"id": "todo-2", "text": "Ship", "status": "pending"},
+        ])
+    );
+    let todo_items: Vec<_> = turn_items(&seen)
+        .into_iter()
+        .filter(|item| matches!(item, OrchestrationV2TurnItem::TodoList { .. }))
+        .collect();
+    assert_eq!(todo_items.len(), 1);
+}
+
+#[tokio::test]
+async fn task_tools_keep_one_list_and_ignore_subagent_task_calls() {
+    let harness = one_turn(vec![
+        assistant_tool_use(
+            "00000000-0000-4000-8000-000000000021",
+            None,
+            "toolu_create_1",
+            "TaskCreate",
+            json!({"subject": "Write tests", "description": "unit"}),
+        ),
+        user_tool_result(
+            "00000000-0000-4000-8000-000000000022",
+            None,
+            "toolu_create_1",
+            "Task #1 created",
+            json!({"task": {"id": "1", "subject": "Write tests"}}),
+        ),
+        // A subagent's task calls never change the parent's list.
+        assistant_tool_use(
+            "00000000-0000-4000-8000-000000000023",
+            Some("toolu_agent_1"),
+            "toolu_sub_create",
+            "TaskCreate",
+            json!({"subject": "Subagent only"}),
+        ),
+        user_tool_result(
+            "00000000-0000-4000-8000-000000000024",
+            Some("toolu_agent_1"),
+            "toolu_sub_create",
+            "Task #2 created",
+            json!({"task": {"id": "2", "subject": "Subagent only"}}),
+        ),
+        assistant_tool_use(
+            "00000000-0000-4000-8000-000000000025",
+            None,
+            "toolu_update_1",
+            "TaskUpdate",
+            json!({"taskId": "1", "status": "in_progress"}),
+        ),
+        user_tool_result(
+            "00000000-0000-4000-8000-000000000026",
+            None,
+            "toolu_update_1",
+            "Updated task #1",
+            json!({"success": true, "taskId": "1"}),
+        ),
+        assistant_tool_use(
+            "00000000-0000-4000-8000-000000000027",
+            None,
+            "toolu_list_1",
+            "TaskList",
+            json!({}),
+        ),
+        user_tool_result(
+            "00000000-0000-4000-8000-000000000028",
+            None,
+            "toolu_list_1",
+            "#1 [completed] Write tests",
+            json!({"tasks": [{"id": "1", "subject": "Write tests", "status": "completed"}]}),
+        ),
+    ]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Track tasks"))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+
+    // Create, update, and list each re-project the same list (one plan id).
+    let plans = todo_plan_values(&seen);
+    assert_eq!(plans.len(), 3, "{plans:?}");
+    assert!(plans.iter().all(|plan| plan["id"] == plans[0]["id"]));
+    assert_eq!(
+        plans[0]["steps"],
+        json!([{"id": "task-1", "text": "Write tests", "status": "pending"}])
+    );
+    assert_eq!(plans[1]["steps"][0]["status"], "running");
+    let last = plans.last().unwrap();
+    assert_eq!(last["status"], "completed");
+    assert_eq!(
+        last["steps"],
+        json!([{"id": "task-1", "text": "Write tests", "status": "completed"}])
+    );
+}

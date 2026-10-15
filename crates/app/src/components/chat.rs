@@ -4,3 +4,4 @@
 pub mod chat_header;
 pub mod composer_surface;
 pub mod panel_layout_controls;
+pub mod timeline;

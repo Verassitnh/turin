@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -23,6 +23,7 @@ use turin_contracts::provider_usage_limits::{
     UsageLimitSourceAccount, UsageLimitSourceError,
 };
 use turin_contracts::settings::UsageLimitSourceConfig;
+use turin_provider_core::js::date_parse_ms;
 use turin_provider_core::usage_limits::make_unavailable_usage_limits;
 use uuid::Uuid;
 
@@ -203,6 +204,25 @@ fn source_error(detail: impl Into<String>) -> UsageLimitSourceError {
     }
 }
 
+/// A failed hub call. `Malformed` is a response that does not decode. Upstream's
+/// decoders fail with a ParseError rather than a `UsageLimitSourceError`, and
+/// `consume` reports that as its own unexpected-response detail, so the two stay
+/// apart until the public boundary.
+#[derive(Debug)]
+enum HubError {
+    Source(UsageLimitSourceError),
+    Malformed,
+}
+
+impl From<UsageLimitSourceError> for HubError {
+    fn from(error: UsageLimitSourceError) -> Self {
+        Self::Source(error)
+    }
+}
+
+/// The detail `consume` reports for a response it could not use.
+const UNEXPECTED_REDEEM_RESPONSE: &str = "The hub returned an unexpected reset-credit response.";
+
 fn now_iso() -> String {
     Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
@@ -236,7 +256,7 @@ impl CliproxyApi {
         config: &UsageLimitSourceConfig,
         path: &str,
         body: Option<Value>,
-    ) -> Result<Value, UsageLimitSourceError> {
+    ) -> Result<Value, HubError> {
         let url = reqwest::Url::parse(config.url.as_str())
             .and_then(|base| base.join(&format!("/v0/management/{path}")))
             .map_err(|_| source_error("The hub URL is not valid."))?;
@@ -254,20 +274,17 @@ impl CliproxyApi {
             .await
             .and_then(reqwest::Response::error_for_status)
             .map_err(|_| source_error("The hub management request failed."))?;
-        response
+        Ok(response
             .json::<Value>()
             .await
-            .map_err(|_| source_error("The hub management request failed."))
+            .map_err(|_| source_error("The hub management request failed."))?)
     }
 
-    async fn auth_files(
-        &self,
-        config: &UsageLimitSourceConfig,
-    ) -> Result<Vec<AuthFile>, UsageLimitSourceError> {
+    async fn auth_files(&self, config: &UsageLimitSourceConfig) -> Result<Vec<AuthFile>, HubError> {
         let response = self.management(config, "auth-files", None).await?;
         serde_json::from_value::<AuthFiles>(response)
             .map(|files| files.files)
-            .map_err(|_| source_error("The hub management request failed."))
+            .map_err(|_| HubError::Malformed)
     }
 
     /// Calls a provider API through the hub, which holds the account's token.
@@ -277,7 +294,7 @@ impl CliproxyApi {
         account: &AuthFile,
         url: &str,
         data: Option<Value>,
-    ) -> Result<String, UsageLimitSourceError> {
+    ) -> Result<String, HubError> {
         let header = if account.provider == "codex" {
             let mut header = json!({
                 "Authorization": "Bearer $TOKEN$",
@@ -285,10 +302,12 @@ impl CliproxyApi {
                 "OpenAI-Beta": "codex-1",
                 "Originator": "Codex Desktop",
             });
+            // JS truthiness: an empty account id is omitted, not sent as an empty header.
             if let Some(account_id) = account
                 .id_token
                 .as_ref()
                 .and_then(|token| token.chatgpt_account_id.as_ref())
+                .filter(|account_id| !account_id.is_empty())
             {
                 header["Chatgpt-Account-Id"] = json!(account_id);
             }
@@ -307,13 +326,13 @@ impl CliproxyApi {
             body["data"] = json!(data.to_string());
         }
         let raw = self.management(config, "api-call", Some(body)).await?;
-        let response: ApiResponse = serde_json::from_value(raw)
-            .map_err(|_| source_error("The hub management request failed."))?;
+        let response: ApiResponse = serde_json::from_value(raw).map_err(|_| HubError::Malformed)?;
         if !(200.0..300.0).contains(&response.status_code) {
             return Err(source_error(format!(
                 "The provider refused the hub request (HTTP {}).",
                 response.status_code
-            )));
+            ))
+            .into());
         }
         Ok(response.body)
     }
@@ -323,21 +342,23 @@ impl CliproxyApi {
         &self,
         config: &UsageLimitSourceConfig,
         account: &AuthFile,
-    ) -> Result<Vec<Credit>, UsageLimitSourceError> {
+    ) -> Result<Vec<Credit>, HubError> {
         let body = self.api_call(config, account, CREDIT_URL, None).await?;
-        let list: CreditList = serde_json::from_str(&body)
-            .map_err(|_| source_error("The hub management request failed."))?;
+        let list: CreditList = serde_json::from_str(&body).map_err(|_| HubError::Malformed)?;
         let now = Utc::now().timestamp_millis();
-        let mut credits: Vec<Credit> = list
+        // `Date.parse` ordering, as upstream filters and sorts on it.
+        let mut credits: Vec<(i64, Credit)> = list
             .credits
             .into_iter()
-            .filter(|credit| {
-                credit.reset_type == "codex_rate_limits"
-                    && credit.status == "available"
-                    && parse_millis(&credit.expires_at).is_some_and(|expires| expires > now)
+            .filter(|credit| credit.reset_type == "codex_rate_limits")
+            .filter(|credit| credit.status == "available")
+            .filter_map(|credit| {
+                let expires = date_parse_ms(&credit.expires_at)?;
+                (expires > now).then_some((expires, credit))
             })
             .collect();
-        credits.sort_by_key(|credit| parse_millis(&credit.expires_at).unwrap_or(i64::MAX));
+        credits.sort_by_key(|(expires, _)| *expires);
+        let credits = credits.into_iter().map(|(_, credit)| credit).collect();
         Ok(credits)
     }
 
@@ -394,7 +415,7 @@ impl CliproxyApi {
         config: &UsageLimitSourceConfig,
         account: &AuthFile,
         checked_at: &str,
-    ) -> Result<(String, ServerProviderUsageLimits), UsageLimitSourceError> {
+    ) -> Result<(String, ServerProviderUsageLimits), HubError> {
         if account.provider == "claude" {
             let body = self
                 .api_call(
@@ -404,8 +425,8 @@ impl CliproxyApi {
                     None,
                 )
                 .await?;
-            let usage: ClaudeUsage = serde_json::from_str(&body)
-                .map_err(|_| source_error("The hub management request failed."))?;
+            let usage: ClaudeUsage =
+                serde_json::from_str(&body).map_err(|_| HubError::Malformed)?;
             let model_scoped = usage
                 .limits
                 .unwrap_or_default()
@@ -440,8 +461,7 @@ impl CliproxyApi {
         let body = self
             .api_call(config, account, &format!("{CODEX_BASE}/usage"), None)
             .await?;
-        let usage: CodexUsage = serde_json::from_str(&body)
-            .map_err(|_| source_error("The hub management request failed."))?;
+        let usage: CodexUsage = serde_json::from_str(&body).map_err(|_| HubError::Malformed)?;
         let to_window = |window: Option<CodexWindow>| {
             window.map(|window| CodexWindowInput {
                 used_percent: window.used_percent,
@@ -509,6 +529,21 @@ impl CliproxyApi {
         account_id: &str,
         credit_id: &str,
     ) -> Result<ProviderConsumeResetCreditResult, UsageLimitSourceError> {
+        self.redeem(config, account_id, credit_id)
+            .await
+            .map_err(|error| match error {
+                HubError::Source(error) => error,
+                // Upstream maps every non-hub failure of the redemption to this detail.
+                HubError::Malformed => source_error(UNEXPECTED_REDEEM_RESPONSE),
+            })
+    }
+
+    async fn redeem(
+        &self,
+        config: &UsageLimitSourceConfig,
+        account_id: &str,
+        credit_id: &str,
+    ) -> Result<ProviderConsumeResetCreditResult, HubError> {
         let account = self
             .auth_files(config)
             .await?
@@ -519,9 +554,7 @@ impl CliproxyApi {
                 account
             }
             _ => {
-                return Err(source_error(
-                    "The Codex hub account is missing or disabled.",
-                ));
+                return Err(source_error("The Codex hub account is missing or disabled.").into());
             }
         };
         let request_account = account
@@ -540,18 +573,14 @@ impl CliproxyApi {
                 })),
             )
             .await?;
-        let response: ConsumeResponse = serde_json::from_str(&body)
-            .map_err(|_| source_error("The hub returned an unexpected reset-credit response."))?;
+        let response: ConsumeResponse =
+            serde_json::from_str(&body).map_err(|_| HubError::Malformed)?;
         let outcome = match response.code.as_str() {
             "reset" => ProviderConsumeResetCreditOutcome::Reset,
             "nothing_to_reset" => ProviderConsumeResetCreditOutcome::NothingToReset,
             "no_credit" => ProviderConsumeResetCreditOutcome::NoCredit,
             "already_redeemed" => ProviderConsumeResetCreditOutcome::AlreadyRedeemed,
-            _ => {
-                return Err(source_error(
-                    "The hub returned an unexpected reset-credit response.",
-                ));
-            }
+            _ => return Err(HubError::Malformed),
         };
         if !matches!(
             outcome,
@@ -584,10 +613,19 @@ fn trimmed(value: impl AsRef<str>) -> TrimmedNonEmptyString {
         .unwrap_or_else(|_| TrimmedNonEmptyString::new("unknown").expect("non-empty"))
 }
 
-fn parse_millis(text: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(text)
+/// `DateTime.makeUnsafe` for the formatted expiry: a string without an offset
+/// is UTC here, unlike `Date.parse`, which reads it as local time.
+fn parse_utc(text: &str) -> Option<DateTime<Utc>> {
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(text) {
+        return Some(parsed.with_timezone(&Utc));
+    }
+    if let Ok(naive) = NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f") {
+        return Some(naive.and_utc());
+    }
+    NaiveDate::parse_from_str(text, "%Y-%m-%d")
         .ok()
-        .map(|parsed| parsed.timestamp_millis())
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|naive| naive.and_utc())
 }
 
 fn reset_credits(available: &[Credit]) -> ServerProviderResetCredits {
@@ -596,14 +634,8 @@ fn reset_credits(available: &[Credit]) -> ServerProviderResetCredits {
         available_count: available.len() as u64,
         next_credit_id: next.map(|credit| trimmed(&credit.id)),
         next_expires_at: next.and_then(|credit| {
-            DateTime::parse_from_rfc3339(&credit.expires_at)
-                .ok()
-                .map(|parsed| {
-                    parsed
-                        .with_timezone(&Utc)
-                        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                        .to_string()
-                })
+            parse_utc(&credit.expires_at)
+                .map(|parsed| parsed.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
         }),
     }
 }
@@ -1282,5 +1314,141 @@ mod tests {
                 .is_err()
         );
         assert_eq!(hub.requests().len(), 1);
+    }
+
+    fn detail_of(error: UsageLimitSourceError) -> String {
+        match error {
+            UsageLimitSourceError::SourceError { detail } => detail,
+        }
+    }
+
+    /// One Codex account whose id token carries `chatgpt_account_id`.
+    fn single_codex_account(account_id: &str) -> Value {
+        json!({ "files": [{
+            "id": "first.json",
+            "auth_index": "a",
+            "provider": "codex",
+            "id_token": { "chatgpt_account_id": account_id },
+        }] })
+    }
+
+    #[tokio::test]
+    async fn omits_an_empty_chatgpt_account_id_header_as_upstream_does() {
+        let hub = Hub::start(handler(|request| {
+            if request.path.ends_with("/auth-files") {
+                return (200, single_codex_account(""));
+            }
+            (200, upstream(200, default_usage()))
+        }))
+        .await;
+        let api = CliproxyApi::new(Arc::new(RecordingMappers::default()));
+        api.read_accounts(&hub.config()).await.unwrap();
+
+        let usage_call = hub
+            .requests()
+            .into_iter()
+            .find(|request| request.is_api_call())
+            .unwrap();
+        let header = &usage_call.body.as_ref().unwrap()["header"];
+        assert!(header.get("Chatgpt-Account-Id").is_none(), "{header}");
+    }
+
+    #[tokio::test]
+    async fn consume_reports_the_unexpected_response_detail_for_a_malformed_auth_files_envelope() {
+        let hub = Hub::start(handler(|_| (200, json!({ "files": "not-a-list" })))).await;
+        let api = CliproxyApi::new(Arc::new(RecordingMappers::default()));
+        let error = api
+            .consume(&hub.config(), "first.json", "credit")
+            .await
+            .unwrap_err();
+        assert_eq!(detail_of(error), UNEXPECTED_REDEEM_RESPONSE);
+    }
+
+    #[tokio::test]
+    async fn consume_reports_the_unexpected_response_detail_for_a_malformed_api_call_envelope() {
+        let hub = Hub::start(handler(|request| {
+            if request.path.ends_with("/auth-files") {
+                return (200, codex_accounts());
+            }
+            // `status_code` must be a number, so the envelope does not decode.
+            (200, json!({ "status_code": "200", "body": "{}" }))
+        }))
+        .await;
+        let api = CliproxyApi::new(Arc::new(RecordingMappers::default()));
+        let error = api
+            .consume(&hub.config(), "first.json", "credit")
+            .await
+            .unwrap_err();
+        assert_eq!(detail_of(error), UNEXPECTED_REDEEM_RESPONSE);
+    }
+
+    #[tokio::test]
+    async fn consume_keeps_the_refusal_detail_of_a_provider_error() {
+        let hub = Hub::start(handler(|request| {
+            if request.path.ends_with("/auth-files") {
+                return (200, codex_accounts());
+            }
+            (200, upstream(503, json!({})))
+        }))
+        .await;
+        let api = CliproxyApi::new(Arc::new(RecordingMappers::default()));
+        let error = api
+            .consume(&hub.config(), "first.json", "credit")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            detail_of(error),
+            "The provider refused the hub request (HTTP 503)."
+        );
+    }
+
+    #[tokio::test]
+    async fn consume_keeps_the_management_transport_failure_detail() {
+        let hub = Hub::start(handler(|_| (500, json!({})))).await;
+        let api = CliproxyApi::new(Arc::new(RecordingMappers::default()));
+        let error = api
+            .consume(&hub.config(), "first.json", "credit")
+            .await
+            .unwrap_err();
+        assert_eq!(detail_of(error), "The hub management request failed.");
+    }
+
+    #[tokio::test]
+    async fn counts_and_orders_credits_in_every_date_parse_form() {
+        // A date-only expiry and one without an offset must count, as `Date.parse`
+        // reads them. The no-offset one is read as local time, and 23:00 keeps it
+        // after UTC midnight in every zone.
+        let hub = Hub::start(handler(|request| {
+            if request.path.ends_with("/auth-files") {
+                return (200, codex_accounts());
+            }
+            let url = request.upstream_url().unwrap_or_default();
+            let body = if url.ends_with("rate-limit-reset-credits") {
+                json!({ "credits": [
+                    credit("later", "2099-02-01T00:00:00Z", "available"),
+                    credit("naive", "2099-01-01T23:00:00", "available"),
+                    credit("dateonly", "2099-01-01", "available"),
+                ] })
+            } else {
+                default_usage()
+            };
+            (200, upstream(200, body))
+        }))
+        .await;
+        let result = CliproxyApi::new(Arc::new(RecordingMappers::default()))
+            .read_accounts(&hub.config())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            account_by_id(&result, "first.json")
+                .usage_limits
+                .reset_credits,
+            Some(ServerProviderResetCredits {
+                available_count: 3,
+                next_expires_at: Some("2099-01-01T00:00:00.000Z".to_owned()),
+                next_credit_id: Some(TrimmedNonEmptyString::new("dateonly").unwrap()),
+            })
+        );
     }
 }

@@ -35,7 +35,8 @@ when the logic is subtle (state machines, protocol framing, concurrency).
    Script: `scripts/qc/turin-qc.workflow.js` (args: worktree, scope,
    upstream, context, optional dimensions; add a look-and-feel dimension for
    UI branches).
-5. PM merges into `main`, pushes `main` to `origin`
+5. PM merges into `main` with
+   `git merge --no-ff task/<id> -m "merge: <id> <title>" -m "Model: <model of the work> (<provider>)"`, pushes `main` to `origin`
    (github.com/Verassitnh/turin, private), rebases waiting branches. After each wave merges,
    QC runs a cross-crate audit on `main` (seams between crates, duplicated
    logic, drift from upstream).

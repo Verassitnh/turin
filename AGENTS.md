@@ -23,4 +23,7 @@ TASKS.md is the PM's board; don't edit it.
 
   e.g. `git commit -m "feat(contracts): port vcs" -m "Model: gpt-6-sol (codex)"`.
   Use your exact model id and T3 provider instance (`codex`, `claudeAgent`,
-  `cursor`, `opencode`).
+  `cursor`, `opencode`). The hook is installed repo-wide via
+  `git config core.hooksPath scripts/git-hooks` (already set).
+- Pulling in `main` when asked: `git merge main -m "merge: main into <task>" -m "Model: …"`
+  (merge commits need the trailer too).

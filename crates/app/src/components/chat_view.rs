@@ -14,7 +14,7 @@ use gpui_kit::{
 use super::chat::chat_header::ChatHeader;
 use super::chat::composer_surface::ComposerSurface;
 use super::drag_region::DragRegion as _;
-use super::sidebar::sidebar_chrome::WORKSPACE_TITLEBAR_CONTENT_LEFT;
+use super::workspace_titlebar::workspace_titlebar_content_left;
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{CHAT_CONTENT_MAX_WIDTH, TEXT_SM, WORKSPACE_TOPBAR_HEIGHT};
@@ -34,7 +34,7 @@ impl RenderOnce for ChatView {
         let header_left = if self.sidebar_open {
             px(20.)
         } else {
-            px(WORKSPACE_TITLEBAR_CONTENT_LEFT)
+            workspace_titlebar_content_left(window)
         };
         // `.chat-composer-lane` / timeline `padding-inline: 3rem` at ≥640px.
         let lane_inset = rems(3.);

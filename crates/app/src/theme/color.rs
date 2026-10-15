@@ -1,5 +1,6 @@
-//! Port of the color math in upstream/packages/shared/src/themePreview.ts
-//! (`parseOklab`, `oklabToHex`), extended with the CSS `color-mix()` the web
+//! Color math shared by the theme modules: the oklab conversions from
+//! upstream/packages/shared/src/themePreview.ts (`parseOklab`, `oklabToHex`;
+//! the rest of that file is `theme_preview.rs`), extended with the CSS `color-mix()` the web
 //! stylesheet (upstream/apps/web/src/index.css) leans on for derived tokens.
 //!
 //! Upstream lets the browser resolve `oklch(...)`, `color-mix(...)` and alpha

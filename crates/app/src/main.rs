@@ -1,24 +1,18 @@
 //! Turin: t3 fork but without all the bullshit.
 
-// The design system is the shared surface later UI tasks build on; not every
-// token or primitive has a caller yet.
-#[allow(dead_code)]
+mod assets;
+mod branding;
+mod components;
+mod hooks;
 mod theme;
+// The ui primitives are a library: every upstream variant and size is ported
+// ahead of its callers.
 #[allow(dead_code)]
 mod ui;
-
-mod assets;
-// Ported upstream constants and helpers (storage keys, brand-width
-// minimum, statuses) land before their callers.
-#[allow(dead_code)]
-mod components;
-#[allow(dead_code)]
-mod hooks;
 
 use gpui_kit::*;
 
 use components::app_sidebar_layout::{self, AppSidebarLayout};
-use theme::theme_palettes::ThemeAppearance;
 
 /// Upstream's Electron window: 1100×780 default, 840×620 minimum,
 /// `titleBarStyle: "hiddenInset"` with the traffic lights centred in the
@@ -32,7 +26,7 @@ fn window_options(cx: &App) -> WindowOptions {
         ))),
         window_min_size: Some(size(px(840.), px(620.))),
         titlebar: Some(TitlebarOptions {
-            title: Some("Turin".into()),
+            title: Some(branding::APP_BASE_NAME.into()),
             appears_transparent: true,
             traffic_light_position: Some(point(px(16.), px(19.))),
         }),
@@ -42,18 +36,14 @@ fn window_options(cx: &App) -> WindowOptions {
     }
 }
 
-/// Dev overrides for screenshots: `TURIN_APPEARANCE=light|dark` pins the
-/// appearance, `TURIN_RIGHT_PANEL=1` opens the right panel.
+/// Dev overrides for screenshots: `TURIN_APPEARANCE=light|dark|<theme id>` sets
+/// the theme preference, `TURIN_RIGHT_PANEL=1` opens the right panel.
 fn dev_overrides(cx: &mut App) -> bool {
-    let appearance = match std::env::var("TURIN_APPEARANCE").as_deref() {
-        Ok("dark") => Some(ThemeAppearance::Dark),
-        Ok("light") => Some(ThemeAppearance::Light),
-        _ => None,
-    };
-    if appearance.is_some() {
+    // Any ThemePreference: light, dark, system or a theme id.
+    if let Ok(theme) = std::env::var("TURIN_APPEARANCE") {
         theme::set_preferences(
             theme::AppearancePreferences {
-                appearance,
+                theme,
                 ..Default::default()
             },
             cx,

@@ -8,3 +8,5 @@ pub mod project_monogram;
 pub mod right_panel_tabs;
 pub mod sidebar;
 pub mod thread_sidebar_width;
+pub mod workspace_breadcrumb;
+pub mod workspace_titlebar;

@@ -32,6 +32,7 @@ use crate::ui::{Icon, IconName, Separator, scroll_area_hidden};
 pub enum ThreadRowStatus {
     Working,
     Done,
+    #[allow(dead_code)] // placeholder rows don't show a failure; T15 wires real statuses.
     Failed,
 }
 

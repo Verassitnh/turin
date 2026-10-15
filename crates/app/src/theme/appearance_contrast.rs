@@ -61,15 +61,36 @@ mod tests {
     use super::*;
     use crate::theme::color::{hex, to_hex};
 
-    #[test]
-    fn writes_the_same_knobs_as_upstream() {
-        let low = AppearanceContrast::new(80);
-        assert_eq!((low.base, low.boost, low.border_boost), (0.8, 0., 0.));
-        let high = AppearanceContrast::new(160);
-        assert_eq!(high.base, 1.);
-        assert!((high.boost - 0.6).abs() < 1e-6);
-        assert!((high.border_boost - 0.15).abs() < 1e-6);
+    fn knobs(contrast: u32) -> (f32, f32, f32) {
+        let c = AppearanceContrast::new(contrast);
+        // Upstream writes percentages; compare at that precision.
+        let pct = |v: f32| (v * 10000.).round() / 100.;
+        (pct(c.base), pct(c.boost), pct(c.border_boost))
     }
+
+    // describe("applyAppearanceContrast")
+
+    #[test]
+    fn boosts_semantic_contrast_above_the_default() {
+        assert_eq!(knobs(135), (100., 35., 8.75));
+    }
+
+    #[test]
+    fn supports_the_maximum_contrast_boost() {
+        assert_eq!(knobs(200), (100., 100., 25.));
+    }
+
+    #[test]
+    fn softens_semantic_contrast_below_the_default() {
+        assert_eq!(knobs(70), (70., 0., 0.));
+    }
+
+    #[test]
+    fn disables_contrast_mixing_at_the_default() {
+        assert_eq!(knobs(100), (100., 0., 0.));
+    }
+
+    // Turin: the resolved color-mix (no upstream counterpart).
 
     #[test]
     fn default_contrast_is_identity() {

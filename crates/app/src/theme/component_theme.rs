@@ -13,6 +13,7 @@ use gpui_kit::{Hsla, SharedString};
 
 use super::AppTheme;
 use super::color::{MixSpace, TRANSPARENT, color_mix, to_hex, with_alpha};
+use super::theme_palettes::MOBILE_DEFAULT_THEME_ID;
 use super::tokens::tw;
 
 fn s(color: Hsla) -> Option<SharedString> {
@@ -156,7 +157,12 @@ pub fn theme_config(theme: &AppTheme) -> Rc<ThemeConfig> {
     );
     Rc::new(ThemeConfig {
         is_default: false,
-        name: format!("{} {}", theme.theme_id, if dark { "dark" } else { "light" }).into(),
+        name: format!(
+            "{} {}",
+            theme.theme_id.unwrap_or(MOBILE_DEFAULT_THEME_ID),
+            if dark { "dark" } else { "light" }
+        )
+        .into(),
         mode: if dark {
             ThemeMode::Dark
         } else {

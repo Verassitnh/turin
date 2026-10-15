@@ -4,10 +4,65 @@
 //! tables diff cleanly against upstream; [`super::color::parse_color`] resolves
 //! them. Generated from the TS source, keep it that way when re-syncing.
 
+// Ported in full: ported upstream palette data and id sets; the theme picker (T20) consumes the rest.
+#![allow(dead_code)]
+
 pub const BUILT_IN_THEME_IDS: [&str; 5] = ["t3-chat", "grove", "ocean", "ember", "iris"];
 
 /// The standard T3 Code palette, kept separate from the optional built-in theme library.
-pub const DEFAULT_THEME_ID: &str = "t3-code";
+pub const MOBILE_DEFAULT_THEME_ID: &str = "t3-code";
+
+/// Every palette the mobile app can render. Mobile is cut; kept because
+/// theme files and the publish path validate ids against it upstream.
+pub const MOBILE_THEME_IDS: [&str; 6] = [
+    MOBILE_DEFAULT_THEME_ID,
+    "t3-chat",
+    "grove",
+    "ocean",
+    "ember",
+    "iris",
+];
+
+/// Ids a theme may not take: the appearance keywords a stored preference uses,
+/// every built-in, and the legacy aliases older saves still carry. Taking one
+/// would either be shadowed by the built-in or capture clients that never chose
+/// it, so the client library and the publish path both consult this set.
+pub const RESERVED_THEME_IDS: [&str; 13] = [
+    "system",
+    "light",
+    "dark",
+    "t3-chat",
+    "grove",
+    "ocean",
+    "ember",
+    "iris",
+    "t3-chat-dark",
+    "t3-grove",
+    "t3-ocean",
+    "t3-ember",
+    "t3-iris",
+];
+
+/// Additionally closed to a machine publishing a theme: the mobile default is
+/// not a web or desktop built-in, so a saved theme may legitimately carry that
+/// id, but no client that follows published themes can resolve it -- publishing
+/// it would report success and change nothing.
+pub const UNPUBLISHABLE_THEME_IDS: [&str; 14] = [
+    "system",
+    "light",
+    "dark",
+    "t3-chat",
+    "grove",
+    "ocean",
+    "ember",
+    "iris",
+    "t3-chat-dark",
+    "t3-grove",
+    "t3-ocean",
+    "t3-ember",
+    "t3-iris",
+    MOBILE_DEFAULT_THEME_ID,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ThemeAppearance {
@@ -945,20 +1000,6 @@ pub const BUILT_IN_THEMES: [ThemeDefinition; 5] = [
     IRIS_THEME,
 ];
 
-/// The standard T3 Code look as a definition, so callers can treat "no theme"
-/// and a built-in uniformly. Upstream keeps it as two bare color tables.
-pub const T3_CODE_THEME: ThemeDefinition = ThemeDefinition {
-    id: DEFAULT_THEME_ID,
-    label: "T3 Code",
-    appearance: ThemeAppearance::Light,
-    colors: T3_CODE_LIGHT_THEME_COLORS,
-    variants: ThemeVariants {
-        light: None,
-        dark: Some(T3_CODE_DARK_THEME_COLORS),
-    },
-    sidebar_artwork: false,
-};
-
 pub fn get_theme_colors_for_appearance(
     theme: &ThemeDefinition,
     appearance: ThemeAppearance,
@@ -972,14 +1013,6 @@ pub fn get_theme_colors_for_appearance(
     }
 }
 
-/// Resolve a theme id (the standard palette or a built-in).
-pub fn find_theme(id: &str) -> Option<&'static ThemeDefinition> {
-    if id == DEFAULT_THEME_ID {
-        return Some(&T3_CODE_THEME);
-    }
-    BUILT_IN_THEMES.iter().find(|theme| theme.id == id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -987,19 +1020,23 @@ mod tests {
 
     #[test]
     fn every_palette_color_parses() {
-        let mut all = vec![T3_CODE_THEME];
-        all.extend(BUILT_IN_THEMES);
-        for theme in all {
+        let mut palettes = vec![
+            ("t3-code", T3_CODE_LIGHT_THEME_COLORS),
+            ("t3-code", T3_CODE_DARK_THEME_COLORS),
+        ];
+        for theme in BUILT_IN_THEMES {
             for appearance in [ThemeAppearance::Light, ThemeAppearance::Dark] {
                 let colors = get_theme_colors_for_appearance(&theme, appearance)
                     .unwrap_or_else(|| panic!("{} lacks {appearance:?}", theme.id));
-                for (role, value) in colors.entries() {
-                    assert!(
-                        parse_color(value).is_some(),
-                        "{}.{role} = {value} did not parse",
-                        theme.id
-                    );
-                }
+                palettes.push((theme.id, colors));
+            }
+        }
+        for (id, colors) in palettes {
+            for (role, value) in colors.entries() {
+                assert!(
+                    parse_color(value).is_some(),
+                    "{id}.{role} = {value} did not parse"
+                );
             }
         }
     }
@@ -1008,6 +1045,12 @@ mod tests {
     fn built_in_ids_match_definitions() {
         let ids: Vec<_> = BUILT_IN_THEMES.iter().map(|theme| theme.id).collect();
         assert_eq!(ids, BUILT_IN_THEME_IDS);
+        for id in BUILT_IN_THEME_IDS {
+            assert!(RESERVED_THEME_IDS.contains(&id));
+            assert!(MOBILE_THEME_IDS.contains(&id));
+        }
+        assert!(UNPUBLISHABLE_THEME_IDS.contains(&MOBILE_DEFAULT_THEME_ID));
+        assert!(!RESERVED_THEME_IDS.contains(&MOBILE_DEFAULT_THEME_ID));
         assert_eq!(THEME_COLOR_ROLES.len(), 61);
     }
 }

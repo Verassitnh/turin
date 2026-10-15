@@ -151,7 +151,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok | QC FAIL (1 high: requests hang after EOF; exit status not surfaced) → r3 fix (Grok) |
 | T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex | r3 active (Codex re-auth) |
 | T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | done → QC wf_118a9a5d-526 |
-| T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok | active (base: stage) |
+| T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok → Cursor Auto | r3: process leak + unjustified cuts (92 tests) |
 | T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok | done → QC wf_5bf4fe41-dd5 |
 | T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok → Cursor Auto | done (26 tests, real provider-core traits) → QC queued |
 | T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex → Sonnet | r2 active (Codex usage limit again) |

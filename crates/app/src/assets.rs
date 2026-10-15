@@ -13,9 +13,12 @@ icon_assets!(
     pub AppIcons,
     [
         AlarmClock,
+        AlarmClockOff,
+        Archive,
         ArrowDownUp,
         ArrowLeft,
         ArrowRight,
+        ArrowRightLeft,
         ArrowUp,
         ArrowUpRight,
         BookOpen,
@@ -53,6 +56,8 @@ icon_assets!(
         Flag,
         Folder,
         FolderOpen,
+        FolderCode,
+        FolderGit2,
         FolderPlus,
         FolderTree,
         GitBranch,
@@ -63,6 +68,7 @@ icon_assets!(
         GitPullRequestArrow,
         GitPullRequestClosed,
         GitPullRequestDraft,
+        Hash,
         Globe,
         Hammer,
         Hourglass,
@@ -80,6 +86,9 @@ icon_assets!(
         MessageSquareOff,
         MessageSquareText,
         MessageSquareWarning,
+        MailOpen,
+        MessageCircleQuestionMark,
+        MessageSquarePlus,
         Minimize2,
         Minus,
         OctagonAlert,
@@ -91,11 +100,15 @@ icon_assets!(
         PenLine,
         Pilcrow,
         Pin,
+        PinOff,
         Play,
         Plug2,
         Plus,
         Redo2,
         RefreshCw,
+        ShieldQuestionMark,
+        Timer,
+        RotateCw,
         Reply,
         Rocket,
         RotateCcw,
@@ -146,6 +159,19 @@ pub const BRANCH_MARK: &str = "brand/branch-mark.svg";
 /// lucide `smile-plus` (the reaction picker trigger); the gpui-kit icon set ships no `smile` family.
 pub const SMILE_PLUS: &str = "brand/smile-plus.svg";
 
+/// `@pierre/diffs` sprite icons (`dist/sprite.js`), one monochrome SVG each.
+pub mod diff_icons {
+    pub const SYMBOL_ADDED: &str = "diff/symbol-added.svg";
+    pub const SYMBOL_DELETED: &str = "diff/symbol-deleted.svg";
+    pub const SYMBOL_MODIFIED: &str = "diff/symbol-modified.svg";
+    pub const SYMBOL_MOVED: &str = "diff/symbol-moved.svg";
+    pub const ARROW_RIGHT_SHORT: &str = "diff/arrow-right-short.svg";
+    pub const EXPAND: &str = "diff/expand.svg";
+    pub const EXPAND_UP: &str = "diff/expand-up.svg";
+    pub const EXPAND_ALL: &str = "diff/expand-all.svg";
+    pub const PLUS: &str = "diff/plus.svg";
+}
+
 const BRAND: &[(&str, &[u8])] = &[
     (SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg")),
     (
@@ -157,6 +183,39 @@ const BRAND: &[(&str, &[u8])] = &[
         include_bytes!("../assets/brand/branch-mark.svg"),
     ),
     (SMILE_PLUS, include_bytes!("../assets/brand/smile-plus.svg")),
+    (
+        diff_icons::SYMBOL_ADDED,
+        include_bytes!("../assets/diff/symbol-added.svg"),
+    ),
+    (
+        diff_icons::SYMBOL_DELETED,
+        include_bytes!("../assets/diff/symbol-deleted.svg"),
+    ),
+    (
+        diff_icons::SYMBOL_MODIFIED,
+        include_bytes!("../assets/diff/symbol-modified.svg"),
+    ),
+    (
+        diff_icons::SYMBOL_MOVED,
+        include_bytes!("../assets/diff/symbol-moved.svg"),
+    ),
+    (
+        diff_icons::ARROW_RIGHT_SHORT,
+        include_bytes!("../assets/diff/arrow-right-short.svg"),
+    ),
+    (
+        diff_icons::EXPAND,
+        include_bytes!("../assets/diff/expand.svg"),
+    ),
+    (
+        diff_icons::EXPAND_UP,
+        include_bytes!("../assets/diff/expand-up.svg"),
+    ),
+    (
+        diff_icons::EXPAND_ALL,
+        include_bytes!("../assets/diff/expand-all.svg"),
+    ),
+    (diff_icons::PLUS, include_bytes!("../assets/diff/plus.svg")),
 ];
 
 pub struct AppAssets;

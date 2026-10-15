@@ -7331,11 +7331,13 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "similar",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "turin-contracts",
+ "turin-shared",
  "unicode-normalization",
  "url",
 ]
@@ -7460,6 +7462,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "turin-launcher"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "indexmap",
+ "parking_lot",
+ "pretty_assertions",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "turin-contracts",
+ "turin-shared",
+ "uuid",
+]
+
+[[package]]
 name = "turin-orchestration"
 version = "0.1.0"
 dependencies = [
@@ -7509,6 +7533,32 @@ dependencies = [
  "tracing",
  "turin-contracts",
  "url",
+]
+
+[[package]]
+name = "turin-projects"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "indexmap",
+ "parking_lot",
+ "pretty_assertions",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "turin-contracts",
+ "turin-git",
+ "turin-shared",
+ "unicode-normalization",
+ "uuid",
 ]
 
 [[package]]
@@ -7569,13 +7619,24 @@ dependencies = [
 name = "turin-provider-cursor"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "dirs 6.0.0",
+ "futures",
+ "pretty_assertions",
+ "regex",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "turin-acp",
  "turin-contracts",
+ "turin-provider-core",
 ]
 
 [[package]]
@@ -7596,6 +7657,18 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "turin-contracts",
+]
+
+[[package]]
+name = "turin-review"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "turin-contracts",
+ "turin-git",
 ]
 
 [[package]]
@@ -7636,6 +7709,28 @@ dependencies = [
  "tokio",
  "tracing",
  "turin-contracts",
+]
+
+[[package]]
+name = "turin-text-generation"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "libc",
+ "pretty_assertions",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "turin-acp",
+ "turin-contracts",
+ "turin-provider-core",
+ "turin-provider-opencode",
+ "url",
 ]
 
 [[package]]

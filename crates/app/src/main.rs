@@ -3,13 +3,17 @@
 mod assets;
 mod branding;
 mod components;
+mod diff;
 mod hooks;
+mod project_icon_colors;
+mod project_identity;
 mod pull_request;
 // The view-model layer is a library until the orchestrator and views are wired
 // to it; every upstream selector is ported ahead of its callers.
 #[allow(dead_code)]
 mod state;
 mod theme;
+mod timestamp_format;
 // The ui primitives are a library: every upstream variant and size is ported
 // ahead of its callers.
 #[allow(dead_code)]
@@ -26,7 +30,13 @@ fn window_options(cx: &App) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            size(px(1100.), px(780.)),
+            size(
+                px(1100.),
+                px(std::env::var("TURIN_WINDOW_HEIGHT")
+                    .ok()
+                    .and_then(|height| height.parse().ok())
+                    .unwrap_or(780.)),
+            ),
             cx,
         ))),
         window_min_size: Some(size(px(840.), px(620.))),

@@ -1,7 +1,10 @@
 //! Port of upstream/apps/server/src/orchestration-v2/ResourceCleanupService.ts
 //!
-//! Terminals and previews are cut features (PORTING cut list), so their
-//! cleanup is upstream's `defaultValue` no-op; attachment cleanup is real.
+//! Upstream's live layer closes the thread's terminals (with history) and
+//! preview sessions. Terminals and previews are cut features (PORTING cut
+//! list), so here those two cleanups are no-ops; attachment cleanup is real.
+//! The `terminal.cleanup` and `preview.cleanup` effects queued by
+//! `thread_deletion.rs` should complete through these no-ops.
 
 use super::attachment_store::resolve_attachment_path_by_id;
 use futures::{StreamExt, TryStreamExt, stream};
@@ -37,6 +40,8 @@ impl ResourceCleanupService {
         }
     }
 
+    /// Closes the thread's terminals and their history. Terminal is cut, so
+    /// there is nothing to close.
     pub async fn cleanup_terminals(&self, _thread_id: &str) -> Result<(), ResourceCleanupError> {
         Ok(())
     }
@@ -105,5 +110,20 @@ mod tests {
         assert!(dir.path().join(format!("{kept}.txt")).exists());
         service.cleanup_terminals("thread-1").await.unwrap();
         service.cleanup_previews("thread-1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_and_preview_cleanup_are_noops_that_leave_attachments_alone() {
+        // Terminal and preview are cut, so their cleanup closes nothing. The
+        // thread's own attachment must survive the `terminal.cleanup` and
+        // `preview.cleanup` effects that deletion queues for it.
+        let dir = tempfile::tempdir().unwrap();
+        let attachment = create_attachment_id("thread-1", Some("txt")).unwrap();
+        let path = dir.path().join(format!("{attachment}.txt"));
+        std::fs::write(&path, b"data").unwrap();
+        let service = ResourceCleanupService::new(dir.path().to_path_buf());
+        service.cleanup_terminals("thread-1").await.unwrap();
+        service.cleanup_previews("thread-1").await.unwrap();
+        assert!(path.exists());
     }
 }

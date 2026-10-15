@@ -119,7 +119,57 @@ struct StringToken {
     escape: Escape,
 }
 
+/// Where a number token is in the JSON number grammar. Only the states
+/// that can end a number are accepted (see `NumState::accepts`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NumState {
+    /// After `-`: a digit.
+    Sign,
+    /// After a leading `0`: no more integer digits.
+    Zero,
+    /// Integer digits.
+    Int,
+    /// After `.`: a digit.
+    Dot,
+    /// Fraction digits.
+    Frac,
+    /// After `e`/`E`: a sign or a digit.
+    ExpStart,
+    /// After the exponent sign: a digit.
+    ExpSign,
+    /// Exponent digits.
+    ExpDigits,
+}
+
+impl NumState {
+    /// Upstream `JSON.parse` grammar: `-? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?`.
+    fn accepts(self) -> bool {
+        matches!(self, Self::Zero | Self::Int | Self::Frac | Self::ExpDigits)
+    }
+
+    /// The next state for `byte`, or `None` when `byte` does not continue the number.
+    fn step(self, byte: u8) -> Option<Self> {
+        let digit = byte.is_ascii_digit();
+        match self {
+            Self::Sign if byte == b'0' => Some(Self::Zero),
+            Self::Sign if digit => Some(Self::Int),
+            Self::Zero | Self::Int if byte == b'.' => Some(Self::Dot),
+            Self::Int if digit => Some(Self::Int),
+            Self::Zero | Self::Int | Self::Frac if matches!(byte, b'e' | b'E') => {
+                Some(Self::ExpStart)
+            }
+            Self::Dot if digit => Some(Self::Frac),
+            Self::Frac if digit => Some(Self::Frac),
+            Self::ExpStart if matches!(byte, b'+' | b'-') => Some(Self::ExpSign),
+            Self::ExpStart | Self::ExpSign | Self::ExpDigits if digit => Some(Self::ExpDigits),
+            _ => None,
+        }
+    }
+}
+
 struct NumberToken {
+    state: NumState,
+    /// Text of a selected number. Unselected digits are only checked against the grammar.
     buf: Vec<u8>,
     selected: bool,
 }
@@ -224,9 +274,7 @@ impl<'a> TranscriptJsonReader<'a> {
                             _ => return self.fail(),
                         };
                         string.escape = next;
-                        if string.capture {
-                            string.raw.push(byte);
-                        }
+                        self.capture_byte(&mut string, byte)?;
                         self.lex = Lex::Str(string);
                     }
                     Escape::Unicode(remaining) => {
@@ -238,25 +286,19 @@ impl<'a> TranscriptJsonReader<'a> {
                         } else {
                             Escape::Unicode(remaining - 1)
                         };
-                        if string.capture {
-                            string.raw.push(byte);
-                        }
+                        self.capture_byte(&mut string, byte)?;
                         self.lex = Lex::Str(string);
                     }
                     Escape::Normal => match byte {
                         b'"' => return self.end_string(string),
                         b'\\' => {
                             string.escape = Escape::Backslash;
-                            if string.capture {
-                                string.raw.push(byte);
-                            }
+                            self.capture_byte(&mut string, byte)?;
                             self.lex = Lex::Str(string);
                         }
                         0x00..=0x1f => return self.fail(),
                         _ => {
-                            if string.capture {
-                                string.raw.push(byte);
-                            }
+                            self.capture_byte(&mut string, byte)?;
                             self.lex = Lex::Str(string);
                         }
                     },
@@ -264,18 +306,18 @@ impl<'a> TranscriptJsonReader<'a> {
                 Ok(())
             }
             Lex::Num(mut number) => {
-                if matches!(byte, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
-                    number.buf.push(byte);
+                if let Some(next) = number.state.step(byte) {
+                    number.state = next;
+                    self.capture_number_byte(&mut number, byte)?;
                     self.lex = Lex::Num(number);
                     return Ok(());
                 }
                 // The number ends before this byte, which is then read as a token.
-                match serde_json::from_slice::<Value>(&number.buf) {
-                    Ok(value @ Value::Number(_)) => {
-                        self.finish_value(number.selected.then_some(value))?;
-                    }
-                    _ => return self.fail(),
+                if !number.state.accepts() {
+                    return self.fail();
                 }
+                let value = number.selected.then(|| number_value(&number.buf));
+                self.finish_value(value)?;
                 self.token(byte)
             }
             Lex::Lit(mut literal) => {
@@ -359,10 +401,20 @@ impl<'a> TranscriptJsonReader<'a> {
             }
             b'-' | b'0'..=b'9' => {
                 let (_, selected) = self.enter_value()?;
-                self.lex = Lex::Num(NumberToken {
-                    buf: vec![byte],
+                let state = if byte == b'-' {
+                    NumState::Sign
+                } else if byte == b'0' {
+                    NumState::Zero
+                } else {
+                    NumState::Int
+                };
+                let mut number = NumberToken {
+                    state,
+                    buf: Vec::new(),
                     selected,
-                });
+                };
+                self.capture_number_byte(&mut number, byte)?;
+                self.lex = Lex::Num(number);
                 Ok(())
             }
             b't' | b'f' | b'n' => {
@@ -445,10 +497,35 @@ impl<'a> TranscriptJsonReader<'a> {
         self.finish_value(value)
     }
 
-    fn end_string(&mut self, string: StringToken) -> Result<(), TranscriptJsonLimitError> {
+    /// Keep one byte of a captured string or key. Each byte is charged as it
+    /// arrives (2 per byte, upstream's `length * 2`), so an oversized selected
+    /// value is rejected while it streams, not after it is fully buffered.
+    fn capture_byte(
+        &mut self,
+        string: &mut StringToken,
+        byte: u8,
+    ) -> Result<(), TranscriptJsonLimitError> {
         if string.capture {
-            self.reserve(string.raw.len() * 2)?;
+            self.reserve(2)?;
+            string.raw.push(byte);
         }
+        Ok(())
+    }
+
+    /// Keep one byte of a selected number, charged like a captured string byte.
+    fn capture_number_byte(
+        &mut self,
+        number: &mut NumberToken,
+        byte: u8,
+    ) -> Result<(), TranscriptJsonLimitError> {
+        if number.selected {
+            self.reserve(2)?;
+            number.buf.push(byte);
+        }
+        Ok(())
+    }
+
+    fn end_string(&mut self, string: StringToken) -> Result<(), TranscriptJsonLimitError> {
         let text = decode_json_string(&string.raw);
         if string.is_key {
             // Keys are always captured: they decide which children are selected.
@@ -491,6 +568,20 @@ impl<'a> TranscriptJsonReader<'a> {
 /// Decode the body of a JSON string (between the quotes). Escapes were validated
 /// by the reader, so decoding is total. Lone surrogates become U+FFFD: Rust
 /// strings cannot hold them.
+/// Value of a selected number. `serde_json` rejects literals outside its
+/// range (`1e400`), so those fall back to `f64`. JSON has no infinity, so an
+/// out-of-range number becomes `null`; no selected field reads numbers.
+fn number_value(text: &[u8]) -> Value {
+    if let Ok(value @ Value::Number(_)) = serde_json::from_slice::<Value>(text) {
+        return value;
+    }
+    std::str::from_utf8(text)
+        .ok()
+        .and_then(|text| text.parse::<f64>().ok())
+        .and_then(serde_json::Number::from_f64)
+        .map_or(Value::Null, Value::Number)
+}
+
 fn decode_json_string(raw: &[u8]) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut i = 0;
@@ -657,6 +748,97 @@ mod tests {
         assert_eq!(
             read(r#"{"a":"\ud83d"}"#, 3),
             Some(serde_json::json!({"a": "\u{FFFD}"}))
+        );
+    }
+
+    /// A reader whose reserve callback counts bytes and fails past `limit`, like the
+    /// 32 MiB history budget. Returns the reader and the running total.
+    fn budgeted_reader(
+        limit: usize,
+        select: impl Fn(&[JsonPathSegment]) -> bool + Send + 'static,
+    ) -> (
+        TranscriptJsonReader<'static>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&total);
+        let reader = TranscriptJsonReader::new(
+            move |bytes| {
+                let so_far = counted.fetch_add(bytes, std::sync::atomic::Ordering::SeqCst) + bytes;
+                if so_far > limit {
+                    Err(TranscriptJsonLimitError("budget".to_owned()))
+                } else {
+                    Ok(())
+                }
+            },
+            select,
+        );
+        (reader, total)
+    }
+
+    #[test]
+    fn keeps_records_with_unselected_numbers_outside_the_json_range() {
+        let json = r#"{"a":1e400,"b":[-0.5E+3,123456789012345678901234567890],"cwd":"/x"}"#;
+
+        let projected = read_with(json, json.len(), |path| {
+            path.is_empty() || path == [key("cwd")]
+        });
+
+        assert_eq!(projected, Some(serde_json::json!({"cwd": "/x"})));
+    }
+
+    #[test]
+    fn rejects_malformed_number_grammar_even_when_unselected() {
+        for number in ["01", "1.", "-", "1e", "1.e5", "--1", "+1", "1ee5", "-.5"] {
+            let json = format!(r#"{{"a":{number}}}"#);
+            assert_eq!(
+                read_with(&json, 1, |path| path.is_empty()),
+                None,
+                "{number}"
+            );
+        }
+    }
+
+    #[test]
+    fn unselected_numbers_are_not_buffered_or_charged() {
+        let select = |path: &[JsonPathSegment]| path.is_empty() || path == [key("cwd")];
+        let short = format!(r#"{{"a":{},"cwd":"/x"}}"#, "1".repeat(3));
+        let long = format!(r#"{{"a":{},"cwd":"/x"}}"#, "1".repeat(1_000_000));
+
+        let charged = |json: &str| {
+            let (mut reader, total) = budgeted_reader(usize::MAX, select);
+            reader.write(json).expect("within budget");
+            assert!(reader.finish().expect("finish").is_some());
+            total.load(std::sync::atomic::Ordering::SeqCst)
+        };
+
+        assert_eq!(charged(&long), charged(&short));
+    }
+
+    #[test]
+    fn charges_selected_string_bytes_while_streaming() {
+        // 40 MiB of selected string in 1 MiB chunks, against a 32 MiB budget.
+        let mib = "x".repeat(1024 * 1024);
+        let (mut reader, _) = budgeted_reader(32 * 1024 * 1024, |_| true);
+        reader.write(r#"{"cwd":""#).expect("prefix");
+        let mut failed_at = None;
+        for index in 0..40 {
+            if reader.write(&mib).is_err() {
+                failed_at = Some(index);
+                break;
+            }
+        }
+
+        // Rejected while it streams: before the 40th chunk is consumed, and
+        // before the closing quote could be reached.
+        assert!(failed_at.is_some_and(|index| index < 40), "{failed_at:?}");
+    }
+
+    #[test]
+    fn selected_out_of_range_numbers_become_null() {
+        assert_eq!(
+            read_with(r#"{"a":1e400,"b":-1e400}"#, 1, |_| true),
+            Some(serde_json::json!({"a": null, "b": null}))
         );
     }
 }

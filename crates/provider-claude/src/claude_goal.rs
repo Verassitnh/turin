@@ -37,17 +37,19 @@ fn text_of(content: &Value) -> String {
     }
 }
 
+/// A goal with this objective. `None` when the objective is not a trimmed
+/// non-empty string, as the contract requires; the frame then says nothing.
 fn goal(
     objective: &str,
     status: OrchestrationV2ProviderGoalStatus,
     checks: u64,
-) -> OrchestrationV2ProviderGoal {
+) -> Option<OrchestrationV2ProviderGoal> {
     serde_json::from_value(json!({
         "objective": objective,
         "status": status,
         "checks": checks,
     }))
-    .expect("goal matches the contract shape")
+    .ok()
 }
 
 /// The goal after one root frame, or `None` when the frame says nothing about
@@ -90,19 +92,14 @@ fn assistant_goal(
 ) -> Option<Option<OrchestrationV2ProviderGoal>> {
     if let Some(objective) = text.strip_prefix(GOAL_SET_PREFIX) {
         let objective = js_trim(objective);
-        return (!objective.is_empty()).then(|| {
-            Some(goal(
-                objective,
-                OrchestrationV2ProviderGoalStatus::Active,
-                0,
-            ))
-        });
+        return goal(objective, OrchestrationV2ProviderGoalStatus::Active, 0).map(Some);
     }
     if text.starts_with(GOAL_CLEARED_PREFIX) || text.starts_with(NO_GOAL_PREFIX) {
         return Some(None);
     }
     let active = GOAL_ACTIVE.captures(text)?;
     let objective = active.get(1)?.as_str();
+    // A blank objective is not a goal, so the line says nothing (`goal` refuses it).
     let checks: u64 = active
         .get(2)
         .and_then(|turns| turns.as_str().parse().ok())
@@ -110,7 +107,7 @@ fn assistant_goal(
     // The same objective keeps the record it has, its last check included.
     let mut next = match current.filter(|current| current.objective.as_str() == objective) {
         Some(current) => current.clone(),
-        None => goal(objective, OrchestrationV2ProviderGoalStatus::Active, checks),
+        None => goal(objective, OrchestrationV2ProviderGoalStatus::Active, checks)?,
     };
     next.status = OrchestrationV2ProviderGoalStatus::Active;
     next.checks = Some(checks);
@@ -134,6 +131,8 @@ mod tests {
         assert_eq!(set.status, OrchestrationV2ProviderGoalStatus::Active);
         assert_eq!(set.checks, Some(0));
         assert!(next_claude_goal(None, &assistant("Goal set:   ")).is_none());
+        // A blank captured objective must not panic the session; it says nothing.
+        assert!(next_claude_goal(None, &assistant("Goal active:   (not yet evaluated)")).is_none());
         assert_eq!(
             next_claude_goal(Some(&set), &assistant("Goal cleared: done")),
             Some(None)
@@ -146,7 +145,7 @@ mod tests {
 
     #[test]
     fn goal_active_counts_turns_and_keeps_the_same_objectives_record() {
-        let current = goal("ship it", OrchestrationV2ProviderGoalStatus::Active, 1);
+        let current = goal("ship it", OrchestrationV2ProviderGoalStatus::Active, 1).unwrap();
         let evaluated =
             next_claude_goal(Some(&current), &assistant("Goal active: ship it (3 turns)"))
                 .unwrap()
@@ -165,7 +164,7 @@ mod tests {
 
     #[test]
     fn an_unmet_check_is_stop_hook_feedback_for_the_current_goal() {
-        let current = goal("ship it", OrchestrationV2ProviderGoalStatus::Active, 2);
+        let current = goal("ship it", OrchestrationV2ProviderGoalStatus::Active, 2).unwrap();
         let feedback = json!({
             "type": "user", "isSynthetic": true,
             "message": {"content": "Stop hook feedback:\n[ship it]: tests are red\n"},

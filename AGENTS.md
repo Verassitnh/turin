@@ -41,3 +41,10 @@ TASKS.md is the PM's board; don't edit it.
   run one cargo command at a time; a build that waits for a slot is normal —
   don't kill or retry it. `target/` is a symlink into `../turin-targets.noindex/`:
   never `rm -rf target` (use `cargo clean -p <crate>`).
+
+- **Never search the whole disk.** No `find /`, `find ~`, or recursive grep
+  over `/`, `$HOME`, `~/.bun`, `~/Library` (a watchdog kills them after 20s;
+  they pinned the CPU). Upstream's npm dependencies are installed read-only in
+  `./upstream/node_modules` (e.g. `effect`, `@effect/*`, `@pierre/diffs`,
+  `@tiptap/*`): read sources there. Search only inside your worktree,
+  `./upstream`, or `~/.cargo/registry/src` for Rust crates.

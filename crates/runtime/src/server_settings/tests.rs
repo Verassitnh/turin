@@ -111,7 +111,8 @@ mod service {
     use crate::server_settings::decode_settings_json;
     use async_trait::async_trait;
     use serde_json::{Value, json};
-    use turin_contracts::provider_instance::ProviderInstanceMutation;
+    use turin_contracts::provider_instance::{ProviderInstanceId, ProviderInstanceMutation};
+    use turin_contracts::settings::resolve_provider_instance_enabled;
     use turin_contracts::settings::{ServerSettings, ServerSettingsError, ServerSettingsPatch};
     use turin_persistence::Db;
     use turin_provider_core::credential_store::{
@@ -1367,5 +1368,231 @@ mod service {
         assert_eq!(instance["enabled"], json!(true));
         assert_eq!(instance["config"], json!({"homePath": "~/.codex"}));
         assert!(instance.get("accentColor").map_or(true, Value::is_null));
+    }
+
+    // Ports of upstream serverSettings.test.ts, lines 1016-1253 (batch 5).
+
+    /// Upstream `recordProviderUsage`: a thread session row, as provider history reads it.
+    async fn record_provider_usage(db: &Db, provider: &str, instance: Option<&str>) {
+        let thread_id = format!("thread-{}", instance.unwrap_or(provider));
+        let provider = provider.to_owned();
+        let instance = instance.map(str::to_owned);
+        db.write(move |tx| {
+            tx.execute(
+                "INSERT INTO projection_thread_sessions (thread_id, status, provider_name, provider_instance_id, updated_at)
+                 VALUES (?1, 'ready', ?2, ?3, '2026-08-25T00:00:00.000Z')",
+                rusqlite::params![thread_id, provider, instance],
+            )
+            .map_err(|err| turin_persistence::PersistenceError::sql("test.recordProviderUsage", &err))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    fn write_raw_settings(path: &std::path::Path, raw: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, raw).unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_provider_blobs_move_into_default_instances_on_load_and_the_file_is_rewritten_once()
+     {
+        let fx = fixture().await;
+        write_raw_settings(
+            &fx.path,
+            &json!({
+                "addProjectBaseDirectory": "~/Development",
+                "providers": {
+                    "codex": {"binaryPath": "/opt/guard/bin/codex"},
+                    "claudeAgent": {"enabled": false},
+                    "cursor": {"enabled": false},
+                    "grok": {"enabled": false},
+                    "opencode": {"enabled": false},
+                },
+            })
+            .to_string(),
+        );
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let settings = settings_value(&service.get_settings().await.unwrap());
+        assert_eq!(
+            settings["providerInstances"],
+            json!({
+                "codex": {"driver": "codex", "config": {"binaryPath": "/opt/guard/bin/codex"}},
+                "claudeAgent": {"driver": "claudeAgent", "enabled": false, "config": {}},
+            })
+        );
+        let persisted = read_file(&fx.path);
+        assert!(persisted.get("providers").is_none());
+        assert_eq!(persisted["addProjectBaseDirectory"], json!("~/Development"));
+        assert_eq!(
+            persisted["providerInstances"]["codex"],
+            json!({"driver": "codex", "config": {"binaryPath": "/opt/guard/bin/codex"}})
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_default_instance_beats_the_legacy_blob_for_its_driver() {
+        let fx = fixture().await;
+        write_raw_settings(
+            &fx.path,
+            &json!({
+                "providers": {"codex": {"binaryPath": "/legacy/codex"}},
+                "providerInstances": {
+                    "codex": {"driver": "codex", "enabled": true, "config": {"binaryPath": "/explicit/codex"}},
+                },
+            })
+            .to_string(),
+        );
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let settings = settings_value(&service.get_settings().await.unwrap());
+        assert_eq!(
+            settings["providerInstances"]["codex"],
+            json!({"driver": "codex", "enabled": true, "config": {"binaryPath": "/explicit/codex"}})
+        );
+    }
+
+    #[tokio::test]
+    async fn previously_used_optional_providers_are_enabled_while_migrating() {
+        let fx = fixture().await;
+        write_raw_settings(
+            &fx.path,
+            &json!({
+                "providers": {"opencode": {"serverUrl": "http://127.0.0.1:4096"}, "cursor": {}},
+                "providerInstances": {
+                    "cursor_work": {"driver": "cursor", "config": {}},
+                    "opencode_unused": {"driver": "opencode", "config": {}},
+                },
+            })
+            .to_string(),
+        );
+        record_provider_usage(&fx.db, "opencode", None).await;
+        record_provider_usage(&fx.db, "grok", None).await;
+        record_provider_usage(&fx.db, "cursor", Some("cursor_work")).await;
+
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let settings = service.get_settings().await.unwrap();
+        let instances = settings_value(&settings)["providerInstances"].clone();
+        assert_eq!(
+            instances["opencode"],
+            json!({"driver": "opencode", "enabled": true, "config": {"serverUrl": "http://127.0.0.1:4096"}})
+        );
+        // Used without any legacy blob or instance: the slot is created enabled.
+        assert_eq!(instances["grok"]["enabled"], json!(true));
+        assert_eq!(instances["cursor_work"]["enabled"], json!(true));
+        // Using any cursor instance counts as opting into the driver.
+        assert_eq!(instances["cursor"]["enabled"], json!(true));
+        let unused =
+            &settings.provider_instances[&ProviderInstanceId::new("opencode_unused").unwrap()];
+        assert!(!resolve_provider_instance_enabled(unused));
+    }
+
+    #[tokio::test]
+    async fn an_explicit_legacy_disable_survives_provider_history_showing_use() {
+        let fx = fixture().await;
+        write_raw_settings(
+            &fx.path,
+            &json!({"providers": {"grok": {"enabled": false, "binaryPath": "/opt/grok"}}})
+                .to_string(),
+        );
+        record_provider_usage(&fx.db, "grok", None).await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let settings = settings_value(&service.get_settings().await.unwrap());
+        assert_eq!(
+            settings["providerInstances"]["grok"],
+            json!({"driver": "grok", "enabled": false, "config": {"binaryPath": "/opt/grok"}})
+        );
+    }
+
+    #[tokio::test]
+    async fn the_legacy_map_gates_provider_migration_so_a_file_without_it_gets_no_instances() {
+        let fx = fixture().await;
+        write_raw_settings(&fx.path, "{}");
+        record_provider_usage(&fx.db, "grok", None).await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let settings = settings_value(&service.get_settings().await.unwrap());
+        assert_eq!(settings["providerInstances"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn legacy_providers_migrate_from_an_invalid_file_without_rewriting_it() {
+        let fx = fixture().await;
+        let raw = r#"{"addProjectBaseDirectory":42,"continueThreadsAfterServerUpdate":"false","providers":{"codex":{"binaryPath":"/x"}}}"#;
+        write_raw_settings(&fx.path, raw);
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let settings = settings_value(&service.get_settings().await.unwrap());
+        // The readable provider settings still apply, but the file stays for the user to repair.
+        assert_eq!(
+            settings["providerInstances"]["codex"],
+            json!({"driver": "codex", "config": {"binaryPath": "/x"}})
+        );
+        // An unreadable file may hold an opt-out, so threads are not resumed on a guess.
+        assert_eq!(settings["continueThreadsAfterServerUpdate"], json!(false));
+        assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), raw);
+    }
+
+    #[tokio::test]
+    async fn a_disabled_provider_instance_is_skipped_for_the_text_generation_fallback() {
+        let fx = fixture().await;
+        write_raw_settings(
+            &fx.path,
+            r#"{"providerInstances":{"codex":{"driver":"codex","enabled":false,"config":{}}}}"#,
+        );
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let settings = service.get_settings().await.unwrap();
+        assert_eq!(
+            settings
+                .text_generation_model_selection
+                .instance_id
+                .as_str(),
+            "claudeAgent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_default_off_providers_new_instance_stays_disabled_and_sparse_on_disk() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let next = service
+            .update_settings(&patch(json!({
+                "providerInstances": {"grok": {"driver": "grok", "config": {}}},
+            })))
+            .await
+            .unwrap();
+        let grok = &next.provider_instances[&ProviderInstanceId::new("grok").unwrap()];
+        assert!(!resolve_provider_instance_enabled(grok));
+        let persisted = read_file(&fx.path);
+        assert!(persisted.get("providers").is_none());
+        assert!(
+            persisted["providerInstances"]["grok"]
+                .get("enabled")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_legacy_in_config_enabled_flag_folds_into_the_instance_on_load() {
+        let fx = fixture().await;
+        write_raw_settings(
+            &fx.path,
+            r#"{"providerInstances":{"grok":{"driver":"grok","enabled":true,"config":{"enabled":false}},"codex_work":{"driver":"codex","config":{"enabled":true,"homePath":"~/.codex"}},"cursor":{"driver":"cursor","config":{"enabled":"nope"}}}}"#,
+        );
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let settings = settings_value(&service.get_settings().await.unwrap());
+        // An explicit false on either side wins, so a user's disable sticks.
+        assert_eq!(
+            settings["providerInstances"]["grok"],
+            json!({"driver": "grok", "enabled": false, "config": {}})
+        );
+        // A lone in-config flag is lifted to the envelope and stripped.
+        assert_eq!(
+            settings["providerInstances"]["codex_work"],
+            json!({"driver": "codex", "enabled": true, "config": {"homePath": "~/.codex"}})
+        );
+        // A malformed flag is left alone so driver schema validation can surface it.
+        assert_eq!(
+            settings["providerInstances"]["cursor"],
+            json!({"driver": "cursor", "config": {"enabled": "nope"}})
+        );
     }
 }

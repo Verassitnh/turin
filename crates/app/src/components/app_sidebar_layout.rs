@@ -261,6 +261,10 @@ impl AppSidebarLayout {
 
 impl Render for AppSidebarLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // "Open diff" on a turn's changed files card shows the right panel.
+        if crate::diff::take_open_panel_request(cx) {
+            self.right_panel_open = true;
+        }
         let theme = cx.app_theme().clone();
         let viewport_width = f32::from(window.viewport_size().width);
         let sidebar_width = self.effective_sidebar_width(viewport_width);

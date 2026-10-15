@@ -27,6 +27,7 @@ icon_assets!(
         ChevronRight,
         ChevronsDownUp,
         ChevronsUpDown,
+        Columns2,
         CircleAlert,
         CircleCheck,
         CircleDashed,
@@ -40,6 +41,7 @@ icon_assets!(
         FileDiff,
         FileText,
         Folder,
+        FolderTree,
         FolderOpen,
         FolderCode,
         FolderGit2,
@@ -77,10 +79,14 @@ icon_assets!(
         PanelRight,
         Paperclip,
         Pencil,
+        Pilcrow,
         Pin,
         PinOff,
         Plus,
         Redo2,
+        RefreshCw,
+        RotateCw,
+        Rows3,
         Search,
         Settings,
         Shield,
@@ -90,6 +96,7 @@ icon_assets!(
         SquareMenu,
         SquarePen,
         Terminal,
+        Trash,
         TextWrap,
         TriangleAlert,
         Undo2,
@@ -109,12 +116,58 @@ pub const SEND_ARROW: &str = "brand/send-arrow.svg";
 /// stock `IconName::ChevronDown` is stroke 2.
 pub const CHEVRON_DOWN: &str = "brand/chevron-down.svg";
 
+/// `@pierre/diffs` sprite icons (`dist/sprite.js`), one monochrome SVG each.
+pub mod diff_icons {
+    pub const SYMBOL_ADDED: &str = "diff/symbol-added.svg";
+    pub const SYMBOL_DELETED: &str = "diff/symbol-deleted.svg";
+    pub const SYMBOL_MODIFIED: &str = "diff/symbol-modified.svg";
+    pub const SYMBOL_MOVED: &str = "diff/symbol-moved.svg";
+    pub const ARROW_RIGHT_SHORT: &str = "diff/arrow-right-short.svg";
+    pub const EXPAND: &str = "diff/expand.svg";
+    pub const EXPAND_UP: &str = "diff/expand-up.svg";
+    pub const EXPAND_ALL: &str = "diff/expand-all.svg";
+    pub const PLUS: &str = "diff/plus.svg";
+}
+
 const BRAND: &[(&str, &[u8])] = &[
     (SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg")),
     (
         CHEVRON_DOWN,
         include_bytes!("../assets/brand/chevron-down.svg"),
     ),
+    (
+        diff_icons::SYMBOL_ADDED,
+        include_bytes!("../assets/diff/symbol-added.svg"),
+    ),
+    (
+        diff_icons::SYMBOL_DELETED,
+        include_bytes!("../assets/diff/symbol-deleted.svg"),
+    ),
+    (
+        diff_icons::SYMBOL_MODIFIED,
+        include_bytes!("../assets/diff/symbol-modified.svg"),
+    ),
+    (
+        diff_icons::SYMBOL_MOVED,
+        include_bytes!("../assets/diff/symbol-moved.svg"),
+    ),
+    (
+        diff_icons::ARROW_RIGHT_SHORT,
+        include_bytes!("../assets/diff/arrow-right-short.svg"),
+    ),
+    (
+        diff_icons::EXPAND,
+        include_bytes!("../assets/diff/expand.svg"),
+    ),
+    (
+        diff_icons::EXPAND_UP,
+        include_bytes!("../assets/diff/expand-up.svg"),
+    ),
+    (
+        diff_icons::EXPAND_ALL,
+        include_bytes!("../assets/diff/expand-all.svg"),
+    ),
+    (diff_icons::PLUS, include_bytes!("../assets/diff/plus.svg")),
 ];
 
 pub struct AppAssets;

@@ -32,6 +32,15 @@ workflows unlimited. Cheap models still go first on mechanical work. Cheap
 models go first on anything mechanical; escalate to Codex only on failure or
 when the logic is subtle (state machines, protocol framing, concurrency).
 
+## CPU policy (user, 2026-10-15)
+
+Never pin the machine at 100%. `../.cargo/config.toml` routes every rustc
+through `../.cargo/rustc-throttle` (global slot cap in
+`/tmp/turin-rustc-slots/limit`, default 5; nice 10; jobs 4 per cargo).
+`/tmp/.cargo/config.toml` mirrors it for scratch crates (recreate after
+reboot). Build output lives in `../turin-targets.noindex/` (Spotlight skips
+it); each worktree's `target` is a symlink there.
+
 ## Storage policy (user, 2026-10-15)
 
 Disk hit 100% once. Lean dev/test profiles via `../.cargo/config.toml`
@@ -76,8 +85,8 @@ runs. Never keep copies of user databases.
 | wf_9dc37bfd-861 | T04b protocol docs fix round | FAIL: 5 high, 13 medium, 6 low. docs/qc/wf_9dc37bfd-861-T04b-protocols.md |
 | wf_342ba162-dd7 | T24 icon fix rounds | PASS: 1 low (fixed, merged) |
 | wf_4a9d9be1-c7c | T03 fix round re-QC | aborted: Claude session limit → rerun as wf_5a0d0e56-76b |
-| wf_5bf4fe41-dd5 | T12a ACP crate | running |
-| wf_118a9a5d-526 | T11a OpenCode transport | running |
+| wf_5bf4fe41-dd5 | T12a ACP crate | running (resumed after reboot) |
+| wf_118a9a5d-526 | T11a OpenCode transport | running (resumed after reboot) |
 | wf_5a0d0e56-76b | T03 fix round re-QC (Sonnet verify, Opus look-and-feel) | PASS: 6 low → T03c. docs/qc/wf_5a0d0e56-76b-T03-r2-design-system.md |
 | wf_e19abae9-25e | T02b persistence fix round | FAIL: Db drop lost-wakeup deadlock (high) + index whitespace (low). docs/qc/wf_e19abae9-25e-T02b-persistence.md |
 | wf_6497dded-82d | T04c protocol-doc application check (Sonnet/Haiku) | PASS: 3 low. docs/qc/wf_6497dded-82d-T04c-protocols.md |
@@ -100,11 +109,11 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T00 | Foundation fixes from QC wf_6ce02f2f-38c (docs part done by PM; helpers: Codex died on auth expiry → Sonnet r2) | `crates/contracts/src/base_schemas.rs` | Codex → Sonnet | done (merged) |
 | T00c | QC low items: UtcDateTime parse bounds/leap/zone-less, private field; `forward_compatible_*::optional` | `crates/contracts/src/base_schemas.rs` | Sonnet | todo (after T01 merges, to avoid conflicts) |
-| T01 | Port all kept contracts modules | `crates/contracts` | GLM → Sonnet | r3 active (resume after Claude limit; merging t01-aud-a..e) |
+| T01 | Port all kept contracts modules | `crates/contracts` | GLM → Sonnet | done (9f37c0a, 545 tests) → QC queued |
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | done (merged; QC PASS) |
 | T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | done (merged with T02c) |
 | T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | done (merged; re-QC PASS) |
-| T03c | T03 re-QC lows: contrast deviation row, 2 themePalette tests, send tooltip label, etc. | `crates/app/src/theme`, composer_surface | Haiku | active |
+| T03c | T03 re-QC lows: contrast deviation row, 2 themePalette tests, send tooltip label, etc. | `crates/app/src/theme`, composer_surface | Haiku | done (6 commits) → merge to main |
 | T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex → Haiku | done (merged; T04c verify PASS) |
 
 ### Wave 2: backend leaves (after T01)
@@ -141,10 +150,10 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T15 | Sidebar (projects, threads, status, snooze, search, drag) | `crates/app/src/components/sidebar` | Opus | r2 active (resume after Claude limit) |
-| T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/components/chat` | Opus | r2 active (resume; merging task/T16-logic) |
-| T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus | todo |
-| T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus | todo |
+| T15 | Sidebar (projects, threads, status, snooze, search, drag) | `crates/app/src/components/sidebar` | Opus | done (286 tests) → QC queued |
+| T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/components/chat` | Opus | done (294 tests) → QC queued |
+| T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus | active (base: T16) |
+| T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus | active (base: T16) |
 | T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Opus | todo |
 | T20 | Settings + keybindings UI | `crates/app/src/settings` | Opus | todo |
 

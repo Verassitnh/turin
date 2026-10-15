@@ -94,7 +94,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T04c | Apply T04b re-QC corrections to protocol docs | `docs/protocols` | Haiku | active |
+| T04c | Apply T04b re-QC corrections to protocol docs | `docs/protocols` | Haiku | done (16/16) → light verify QC queued |
 | T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet → Grok | r3 active (Grok) |
 | T05b | Shared utils, contract-dependent files | `crates/shared` | GLM | todo (after T01) |
 | T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok | r2 active (core execute/parsers/checkpoints done) |

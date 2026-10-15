@@ -130,6 +130,9 @@ pub mod tw {
     pub const EMERALD_500: Rgba = hex(0x00bc7d);
     pub const EMERALD_700: Rgba = hex(0x007a55);
     pub const RED_300: Rgba = hex(0xffa2a2);
+    pub const RED_400: Rgba = hex(0xff6467);
+    pub const RED_600: Rgba = hex(0xe7000b);
+    pub const EMERALD_600: Rgba = hex(0x009966);
 }
 
 // ── Shadows ─────────────────────────────────────────────────────────────────

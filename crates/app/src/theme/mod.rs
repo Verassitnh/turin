@@ -113,6 +113,10 @@ pub struct AppTheme {
     pub info_foreground: Hsla,
     pub success: Hsla,
     pub success_foreground: Hsla,
+    /// `--diff-addition-foreground` / `--diff-deletion-foreground`
+    /// (`light-dark(emerald-600, emerald-400)`, red likewise).
+    pub diff_addition_foreground: Hsla,
+    pub diff_deletion_foreground: Hsla,
     pub border: Hsla,
     pub input: Hsla,
     pub ring: Hsla,
@@ -247,6 +251,8 @@ impl AppTheme {
             info_foreground: info_foreground.into(),
             success: success.into(),
             success_foreground: success_foreground.into(),
+            diff_addition_foreground: if dark { tw::EMERALD_400 } else { tw::EMERALD_600 }.into(),
+            diff_deletion_foreground: if dark { tw::RED_400 } else { tw::RED_600 }.into(),
             border: line(p.border, p.text),
             input: line(p.input, p.text),
             ring: c(p.focus),

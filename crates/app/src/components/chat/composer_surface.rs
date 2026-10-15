@@ -1,0 +1,162 @@
+//! Port of upstream/apps/web/src/components/chat/ComposerSurface.tsx plus the
+//! static frame of ChatComposer.tsx (body, placeholder, footer controls and
+//! the primary send action from ComposerPrimaryActions.tsx).
+//!
+//! Placeholder only: the prompt editor, model picker and actions are inert
+//! until the composer task. GPUI has no backdrop blur, so the glass layer
+//! is the translucent fill alone.
+
+use gpui_kit::{
+    App, CursorStyle, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    RenderOnce, StatefulInteractiveElement as _, Styled as _, Window, div, px, rems, svg,
+};
+
+use crate::assets::SEND_ARROW;
+use crate::theme::ActiveAppTheme;
+use crate::theme::color::with_alpha;
+use crate::theme::tokens::{self, LEADING_RELAXED, RADIUS_3XL, RADIUS_MD, TEXT_SM, tw};
+use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
+
+/// Composer placeholder copy (ChatComposer.tsx, default state).
+pub const COMPOSER_PLACEHOLDER: &str =
+    "Ask anything, @tag files/folders, $use skills, or / for commands";
+
+/// `ComposerControl size=sm`: `h-7 gap-1.5 px-2.5 font-medium
+/// text-secondary-label text-sm`, hover `bg-accent`, icon `size-4` muted.
+fn composer_control(
+    id: &'static str,
+    icon: IconName,
+    label: &'static str,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.app_theme();
+    div()
+        .id(id)
+        .flex()
+        .h_7()
+        .flex_shrink_0()
+        .items_center()
+        .gap(rems(0.375))
+        .px(rems(0.625))
+        .rounded(RADIUS_MD)
+        .text_size(TEXT_SM.size)
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.secondary_label)
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(theme.accent))
+        .child(Icon::new(icon).color(theme.muted_foreground))
+        .child(label)
+        .child(
+            Icon::new(IconName::ChevronDown)
+                .size(rems(0.75))
+                .color(theme.muted_foreground),
+        )
+}
+
+#[derive(IntoElement)]
+pub struct ComposerSurface;
+
+impl RenderOnce for ComposerSurface {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.app_theme();
+        let dark = theme.is_dark();
+        // Light: `--card` at the 80% glass opacity; dark: `--surface-raised`.
+        let surface = if dark {
+            with_alpha(theme.surface_raised, 0.8)
+        } else {
+            with_alpha(theme.card, 0.8)
+        };
+        let outline = if dark {
+            with_alpha(tw::WHITE, 0.05)
+        } else {
+            with_alpha(tw::BLACK, 0.08)
+        };
+        let prompt_size = theme.fonts.size_prompt;
+
+        div()
+            .relative()
+            .w_full()
+            .rounded(RADIUS_3XL)
+            .bg(surface)
+            .border_1()
+            .border_color(outline)
+            .shadow(if dark {
+                Vec::new()
+            } else {
+                tokens::shadow_composer(false)
+            })
+            .child(
+                // Body: `px-4 pt-4 pb-2`; editor `min-h-19.5 leading-relaxed`.
+                div().px_4().pt_4().pb_2().child(
+                    div()
+                        .min_h(rems(4.875))
+                        .font_family(theme.fonts.composer.clone())
+                        .text_size(px(prompt_size))
+                        .line_height(px(prompt_size * LEADING_RELAXED))
+                        .text_color(with_alpha(theme.placeholder, 0.75))
+                        .child(COMPOSER_PLACEHOLDER),
+                ),
+            )
+            .child(
+                // Footer: `px-4 pb-4`, controls left, actions right.
+                div()
+                    .flex()
+                    .min_w_0()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_4()
+                    .pb_4()
+                    .child(
+                        div()
+                            .flex()
+                            .min_w_0()
+                            .flex_1()
+                            .items_center()
+                            .gap_1()
+                            .ml(rems(-0.625))
+                            .child(composer_control(
+                                "composer-model-picker",
+                                IconName::Bot,
+                                "Model",
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("composer-attach")
+                                    .variant(ButtonVariant::Ghost)
+                                    .size(ButtonSize::IconSm)
+                                    .icon(IconName::Paperclip)
+                                    .tooltip(Tooltip::new("Attach images")),
+                            )
+                            .child(
+                                // Send: 32px round `bg-message-action`, disabled while empty.
+                                div()
+                                    .id("composer-send")
+                                    .flex()
+                                    .size_8()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(theme.message_action)
+                                    .shadow(tokens::shadow_xs(0.05))
+                                    .opacity(0.64)
+                                    .child(
+                                        svg()
+                                            .path(SEND_ARROW)
+                                            .size(px(14.))
+                                            .text_color(theme.message_action_foreground),
+                                    )
+                                    .tooltip(|window, cx| Tooltip::new("Send").build(window, cx)),
+                            ),
+                    ),
+            )
+    }
+}

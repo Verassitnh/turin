@@ -17,6 +17,7 @@ icon_assets!(
         AlarmClock,
         ArrowLeft,
         ArrowUp,
+        Bot,
         ChartNoAxesColumn,
         Check,
         ChevronDown,

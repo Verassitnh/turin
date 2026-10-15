@@ -130,7 +130,9 @@ impl HttpClient {
         last_event_id: Option<&str>,
         silent_timeout: Duration,
     ) -> Result<EventStream<SseFrame>, OpenCodeRuntimeError> {
-        let url = self.url(&Method::GET, path, query, &[]);
+        // The SDK's SSE request skips the interceptor that moves the directory header
+        // into `?directory=`, so the subscription sends the header and no query.
+        let url = self.build_url(path, query, &[], false);
         let mut builder = self
             .http
             .get(url)
@@ -139,7 +141,9 @@ impl HttpClient {
             builder = builder.header("Last-Event-ID", last_event_id);
         }
         builder = self.authorize(builder);
-        builder = self.directory_header(builder, Method::GET);
+        if let Some(directory) = &self.directory {
+            builder = builder.header("x-opencode-directory", encode_uri_component(directory));
+        }
         let response = builder.send().await.map_err(|err| {
             OpenCodeRuntimeError::new(operation, "Couldn't reach the OpenCode server.")
                 .with_cause(err)
@@ -197,12 +201,22 @@ impl HttpClient {
         query: &[(&str, String)],
         extra_query: &[(String, String)],
     ) -> reqwest::Url {
+        // The 1.x SDK copies `x-opencode-directory` onto `?directory=` for GET/HEAD
+        // and leaves the header in place for every other method.
+        let directory_query = matches!(*method, Method::GET | Method::HEAD);
+        self.build_url(path, query, extra_query, directory_query)
+    }
+
+    fn build_url(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        extra_query: &[(String, String)],
+        directory_query: bool,
+    ) -> reqwest::Url {
         let mut url = join_server_path(&self.base, path);
         let mut extra: Vec<(&str, &str)> = Vec::new();
-        let directory = self.directory.clone();
-        if matches!(*method, Method::GET | Method::HEAD)
-            && let Some(directory) = directory.as_deref()
-        {
+        if directory_query && let Some(directory) = self.directory.as_deref() {
             extra.push(("directory", directory));
         }
         if extra.is_empty() && query.is_empty() && extra_query.is_empty() {
@@ -210,8 +224,6 @@ impl HttpClient {
         }
         {
             let mut pairs = url.query_pairs_mut();
-            // The 1.x SDK copies `x-opencode-directory` onto `?directory=` for GET/HEAD
-            // and leaves the header in place for every other method.
             for (key, value) in extra {
                 pairs.append_pair(key, value);
             }

@@ -41,7 +41,8 @@ impl V1Client {
     /// `directory` is the session cwd. An empty value is rejected: the 1.x
     /// server otherwise runs the request in its own cwd and turns never finish.
     /// Non-GET requests send it as `x-opencode-directory` (percent-encoded).
-    /// GET and HEAD send `?directory=` instead.
+    /// GET and HEAD send `?directory=` instead. The `GET /event` subscription
+    /// sends the header, as the SDK's SSE path does.
     pub fn new(
         base_url: &str,
         directory: &str,
@@ -633,13 +634,8 @@ mod tests {
             .with_silent_timeout(Duration::from_millis(200));
         let mut events = client.events().await.unwrap();
         let opened = server.requests.recv().await.unwrap();
-        assert!(opened.target.starts_with("/event?"), "{}", opened.target);
-        assert!(
-            opened.target.contains("directory=%2Fwork"),
-            "{}",
-            opened.target
-        );
-        assert!(opened.directory_header.is_none());
+        assert_eq!(opened.target, "/event");
+        assert_eq!(opened.directory_header.as_deref(), Some("%2Fwork"));
         let event = events.next().await.unwrap().unwrap();
         assert_eq!(event.event_type, "server.connected");
         assert!(events.next().await.is_none());

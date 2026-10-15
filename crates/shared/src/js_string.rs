@@ -12,6 +12,29 @@ pub fn utf16_len(value: &str) -> usize {
     value.chars().map(|c| c.len_utf16()).sum()
 }
 
+/// `.replace(/\s+/g, replacement)`: every run of JS whitespace becomes one `replacement`.
+pub fn replace_js_whitespace_runs(text: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_run = false;
+    for ch in text.chars() {
+        if is_js_whitespace_char(ch) {
+            if !in_run {
+                out.push_str(replacement);
+            }
+            in_run = true;
+        } else {
+            out.push(ch);
+            in_run = false;
+        }
+    }
+    out
+}
+
+/// `String.prototype.trimEnd` (JS whitespace, same set as `trim`).
+pub fn js_trim_end(value: &str) -> &str {
+    value.trim_end_matches(is_js_whitespace_char)
+}
+
 /// `String.prototype.charCodeAt(index)`: the UTF-16 code unit at `index`, if any.
 ///
 /// A surrogate-pair half comes back as the lone surrogate, as in JS.

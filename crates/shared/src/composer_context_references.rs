@@ -14,12 +14,12 @@ use std::sync::LazyLock;
 use regex::Regex;
 use turin_contracts::base_schemas::js_trim;
 use turin_contracts::composer_context::{
-    COMPOSER_CONTEXT_LABEL_MAX_CHARS, ComposerContextId, ComposerContextKind, ComposerContextRecord,
-    ContextAttachmentId, ElementContextDetails, ElementContextRecord, KnownComposerContextRecord,
-    OrchestrationMessageContext,
+    COMPOSER_CONTEXT_LABEL_MAX_CHARS, ComposerContextId, ComposerContextKind,
+    ComposerContextRecord, ContextAttachmentId, ElementContextDetails, ElementContextRecord,
+    KnownComposerContextRecord, OrchestrationMessageContext,
 };
 
-use crate::js_string::{JS_WS, is_js_whitespace_char, slice_utf16};
+use crate::js_string::{JS_WS, is_js_whitespace_char, replace_js_whitespace_runs, slice_utf16};
 
 const COMPOSER_CONTEXT_HREF_PREFIX: &str = "t3-context://v1/";
 const MAX_LINK_LABEL_LENGTH: usize = 512;
@@ -71,24 +71,6 @@ pub fn parse_composer_context_href(href: &str) -> Option<(ComposerContextKind, C
     ))
 }
 
-/// Collapses every run of JS whitespace to one space, as `.replace(/\s+/g, " ")` does.
-fn collapse_js_whitespace(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_run = false;
-    for ch in text.chars() {
-        if is_js_whitespace_char(ch) {
-            if !in_run {
-                out.push(' ');
-            }
-            in_run = true;
-        } else {
-            out.push(ch);
-            in_run = false;
-        }
-    }
-    out
-}
-
 /// Labels must survive a Markdown link: no brackets or line breaks, bounded, never empty.
 pub fn sanitize_composer_context_label(label: &str, kind: &str) -> String {
     let replaced: String = label
@@ -98,7 +80,7 @@ pub fn sanitize_composer_context_label(label: &str, kind: &str) -> String {
             other => other,
         })
         .collect();
-    let collapsed = collapse_js_whitespace(&replaced);
+    let collapsed = replace_js_whitespace_runs(&replaced, " ");
     let cleaned = slice_utf16(js_trim(&collapsed), 0, COMPOSER_CONTEXT_LABEL_MAX_CHARS);
     if cleaned.is_empty() {
         kind.to_owned()
@@ -162,12 +144,8 @@ pub fn collect_composer_context_references(text: &str) -> Vec<ComposerContextRef
         .captures_iter(text)
         .filter_map(|captures| {
             let whole = captures.get(0)?;
-            let (kind, context_id) =
-                parse_composer_context_href(captures.get(3)?.as_str())?;
-            let label = sanitize_composer_context_label(
-                captures.get(2)?.as_str(),
-                kind.as_str(),
-            );
+            let (kind, context_id) = parse_composer_context_href(captures.get(3)?.as_str())?;
+            let label = sanitize_composer_context_label(captures.get(2)?.as_str(), kind.as_str());
             Some(ComposerContextReferenceOccurrence {
                 kind,
                 context_id,
@@ -188,8 +166,13 @@ pub const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT: &str = "[User attached one or more f
 pub fn is_image_references_only(text: &str) -> bool {
     let references = collect_composer_context_references(text);
     !references.is_empty()
-        && references.iter().all(|reference| reference.kind.as_str() == "image")
-        && js_trim(&replace_composer_context_references(text, |_| String::new())).is_empty()
+        && references
+            .iter()
+            .all(|reference| reference.kind.as_str() == "image")
+        && js_trim(&replace_composer_context_references(text, |_| {
+            String::new()
+        }))
+        .is_empty()
 }
 
 pub fn replace_composer_context_references(
@@ -224,7 +207,11 @@ fn kind_display_name(kind: &str) -> String {
 }
 
 /// `[Image: shot.png; ref=ctx_1]`: readable in place, with the id the payload is keyed by.
-pub fn format_composer_context_provider_marker(kind: &str, label: &str, context_id: &str) -> String {
+pub fn format_composer_context_provider_marker(
+    kind: &str,
+    label: &str,
+    context_id: &str,
+) -> String {
     let replaced: String = label
         .chars()
         .map(|ch| match ch {
@@ -232,12 +219,12 @@ pub fn format_composer_context_provider_marker(kind: &str, label: &str, context_
             other => other,
         })
         .collect();
-    let collapsed = collapse_js_whitespace(&replaced);
+    let collapsed = replace_js_whitespace_runs(&replaced, " ");
     let clean_label = js_trim(&collapsed);
     format!(
         "[{}: {}; ref={context_id}]",
         kind_display_name(kind),
-        escape_composer_context_payload_text(&clean_label),
+        escape_composer_context_payload_text(clean_label),
     )
 }
 
@@ -289,8 +276,13 @@ fn indent(text: &str) -> String {
         .join("\n")
 }
 
-fn format_source_location(source: &turin_contracts::composer_context::ElementContextSource) -> Option<String> {
-    let file_name = source.file_name.as_deref().filter(|name| !name.is_empty())?;
+fn format_source_location(
+    source: &turin_contracts::composer_context::ElementContextSource,
+) -> Option<String> {
+    let file_name = source
+        .file_name
+        .as_deref()
+        .filter(|name| !name.is_empty())?;
     match source.line_number {
         None => Some(file_name.to_owned()),
         Some(line) => Some(match source.column_number {
@@ -438,7 +430,11 @@ fn format_provider_payload(record: &KnownComposerContextRecord) -> String {
     }
 }
 
-fn format_envelope_entry(kind: &str, context_id: &ComposerContextId, record: Option<&ComposerContextRecord>) -> String {
+fn format_envelope_entry(
+    kind: &str,
+    context_id: &ComposerContextId,
+    record: Option<&ComposerContextRecord>,
+) -> String {
     let open = format!(
         r#"<{CONTEXT_ENTRY_TAG} kind="{}" id="{}""#,
         escape_attribute(kind),
@@ -666,15 +662,30 @@ mod tests {
         assert_eq!(occurrences[0].source, text);
 
         let long = format!("[{}](t3-context://v1/file/ctx_1)", "x".repeat(300));
-        assert_eq!(collect_composer_context_references(&long)[0].label.len(), 200);
+        assert_eq!(
+            collect_composer_context_references(&long)[0].label.len(),
+            200
+        );
     }
 
     #[test]
     fn sanitizes_labels_without_touching_identity() {
-        assert_eq!(sanitize_composer_context_label("a ] b\nc  [d", "file"), "a b c d");
-        assert_eq!(sanitize_composer_context_label("   ", "terminal"), "terminal");
-        assert_eq!(sanitize_composer_context_label("folder\\", "file"), "folder");
-        assert_eq!(sanitize_composer_context_label(&"x".repeat(500), "file").len(), 200);
+        assert_eq!(
+            sanitize_composer_context_label("a ] b\nc  [d", "file"),
+            "a b c d"
+        );
+        assert_eq!(
+            sanitize_composer_context_label("   ", "terminal"),
+            "terminal"
+        );
+        assert_eq!(
+            sanitize_composer_context_label("folder\\", "file"),
+            "folder"
+        );
+        assert_eq!(
+            sanitize_composer_context_label(&"x".repeat(500), "file").len(),
+            200
+        );
     }
 
     #[test]
@@ -695,7 +706,14 @@ mod tests {
         let occurrences = collect_composer_context_references(text);
         let summary: Vec<_> = occurrences
             .iter()
-            .map(|o| (o.kind.as_str(), o.context_id.as_str(), o.label.as_str(), o.image))
+            .map(|o| {
+                (
+                    o.kind.as_str(),
+                    o.context_id.as_str(),
+                    o.label.as_str(),
+                    o.image,
+                )
+            })
             .collect();
         assert_eq!(
             summary,
@@ -712,7 +730,9 @@ mod tests {
 
     #[test]
     fn ignores_links_whose_href_does_not_parse() {
-        assert!(collect_composer_context_references("[x](t3-context://v1/image/ctx_1?y)").is_empty());
+        assert!(
+            collect_composer_context_references("[x](t3-context://v1/image/ctx_1?y)").is_empty()
+        );
         assert!(collect_composer_context_references("[x](https://example.com)").is_empty());
     }
 
@@ -832,8 +852,10 @@ mod tests {
             "plus [Future](t3-context://v1/future/ctx_u) and [gone](t3-context://v1/file/ctx_missing).",
         ]
         .join("\n");
-        let projected =
-            project_composer_context_for_provider(&text, &[terminal(), image(), skill(), unknown()]);
+        let projected = project_composer_context_for_provider(
+            &text,
+            &[terminal(), image(), skill(), unknown()],
+        );
         let (body, envelope) = projected
             .split_once("\n\n<t3_context version=\"1\">\n")
             .expect("envelope");
@@ -935,12 +957,9 @@ mod tests {
             ]
         }))
         .unwrap();
-        let remapped = remap_composer_context_attachments(
-            Some(&context),
-            &[Some("att_1")],
-            &["thread_att_1"],
-        )
-        .unwrap();
+        let remapped =
+            remap_composer_context_attachments(Some(&context), &[Some("att_1")], &["thread_att_1"])
+                .unwrap();
         let value = serde_json::to_value(&remapped).unwrap();
         assert_eq!(value["records"][0]["attachmentId"], "thread_att_1");
         assert_eq!(value["records"][1]["name"], "x");

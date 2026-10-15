@@ -93,6 +93,7 @@ impl ChatComposer {
             return self.render_provider_unavailable(vm, cx);
         }
         let model = self.render_model_trigger(vm, cx);
+        let traits = self.traits_section_for(vm, cx).map(|section| self.render_traits_trigger(vm, &section, cx));
         let mode = self.render_mode_controls(vm, cx);
         div()
             .flex()
@@ -101,6 +102,7 @@ impl ChatComposer {
             .items_center()
             .gap_1()
             .child(model)
+            .children(traits)
             .child(mode)
             .into_any_element()
     }
@@ -390,6 +392,7 @@ impl ChatComposer {
                 }
             }
             Some(Layer::RuntimeMode) => layers.push(self.runtime_mode_menu(vm, cx)),
+            Some(Layer::Traits) => layers.extend(self.traits_menu(vm, _window, cx)),
             _ => {}
         }
         if self.layer.is_some() {

@@ -6,3 +6,4 @@ mod footer;
 pub mod menu;
 pub mod model_picker_view;
 pub mod prompt_editor;
+mod traits;

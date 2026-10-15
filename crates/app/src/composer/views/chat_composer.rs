@@ -132,6 +132,20 @@ impl ChatComposer {
             let key = "local:thread-1".to_owned();
             self.drafts.set_prompt(&key, prompt);
         }
+        let layer = match scenario.as_str() {
+            "traits" => Some(Layer::Traits),
+            "runtime" => Some(Layer::RuntimeMode),
+            "stash" => Some(Layer::Stash),
+            "queue" => Some(Layer::Queue),
+            "meter" => Some(Layer::ContextMeter),
+            _ => None,
+        };
+        if let Some(layer) = layer {
+            let weak = cx.weak_entity();
+            window.defer(cx, move |_, cx| {
+                weak.update(cx, |this, cx| this.set_layer(Some(layer), cx)).ok();
+            });
+        }
         if scenario == "picker" {
             let weak = cx.weak_entity();
             window.defer(cx, move |window, cx| {

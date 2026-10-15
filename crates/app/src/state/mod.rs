@@ -41,3 +41,8 @@ pub mod thread_state;
 pub mod thread_subagents;
 pub mod thread_workflows;
 pub mod time;
+
+/// The one environment a single-process Turin has: this machine.
+pub fn local_environment_id() -> contracts::EnvironmentId {
+    contracts::EnvironmentId::new("local").expect("static id is non-blank")
+}

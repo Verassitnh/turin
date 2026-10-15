@@ -4,10 +4,11 @@
 
 use std::collections::{HashSet, VecDeque};
 
+use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde::Deserialize;
 use turin_contracts::agent_sessions::{
-    AgentSessionImportSource, AgentSessionScanError, AgentSessionSource,
+    AgentSessionImportSource, AgentSessionScanError, AgentSessionScanResult, AgentSessionSource,
 };
 use turin_contracts::base_schemas::{UtcDateTime, js_trim};
 use turin_contracts::provider_instance::ProviderInstanceId;
@@ -60,10 +61,14 @@ pub enum AgentSessionRecentThread {
     Skipped,
 }
 
-/// Transcript discovery for one workspace. The scanner is best-effort:
-/// unreadable transcripts are `Skipped`, and only a failing read of the
-/// scan itself becomes an error item.
+/// Transcript discovery. The scanner is best-effort: unreadable transcripts
+/// are `Skipped`, and only a failing read of the scan itself becomes an error.
+#[async_trait]
 pub trait AgentSessionScanner: Send + Sync {
+    /// Every directory the configured homes ran a session in, newest first.
+    /// Upstream `scan`.
+    async fn scan(&self) -> Result<AgentSessionScanResult, AgentSessionScanError>;
+
     /// Recent transcripts whose `cwd` is `workspace_root`, newest first.
     /// `completed_sources` are the file identities already imported for it.
     fn recent_threads<'a>(
@@ -76,7 +81,7 @@ pub trait AgentSessionScanner: Send + Sync {
 /// Upstream `MAX_IMPORTED_MESSAGES`: the retained window of a long transcript.
 const MAX_IMPORTED_MESSAGES: usize = 200;
 /// Upstream `MAX_IMPORT_RECORDS`: a transcript with more lines is not imported.
-const MAX_IMPORT_RECORDS: usize = 100_000;
+pub(crate) const MAX_IMPORT_RECORDS: usize = 100_000;
 
 /// What the parser needs besides the transcript text.
 pub struct AgentSessionTranscriptMetadata<'a> {
@@ -89,24 +94,24 @@ pub struct AgentSessionTranscriptMetadata<'a> {
 
 /// Upstream `TranscriptContentBlock`.
 #[derive(Debug, Clone, Deserialize)]
-struct TranscriptContentBlock {
+pub(crate) struct TranscriptContentBlock {
     #[serde(rename = "type")]
-    kind: Option<String>,
-    text: Option<String>,
+    pub(crate) kind: Option<String>,
+    pub(crate) text: Option<String>,
 }
 
 /// A message's `content`: a plain string, or a list of blocks.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
-enum TranscriptMessageContent {
+pub(crate) enum TranscriptMessageContent {
     Text(String),
     Blocks(Vec<TranscriptContentBlock>),
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct TranscriptMessage {
-    content: Option<TranscriptMessageContent>,
-    model: Option<String>,
+pub(crate) struct TranscriptMessage {
+    pub(crate) content: Option<TranscriptMessageContent>,
+    pub(crate) model: Option<String>,
 }
 
 /// Codex `internal_chat_message_metadata_passthrough`, the part that names the turn.
@@ -117,18 +122,19 @@ struct CodexTurnMetadata {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TranscriptPayload {
-    id: Option<String>,
+pub(crate) struct TranscriptPayload {
+    pub(crate) id: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(rename = "session_id")]
-    native_session_id: Option<String>,
+    pub(crate) native_session_id: Option<String>,
     #[serde(rename = "type")]
-    kind: Option<String>,
-    role: Option<String>,
-    message: Option<String>,
-    model: Option<String>,
-    content: Option<Vec<TranscriptContentBlock>>,
+    pub(crate) kind: Option<String>,
+    pub(crate) role: Option<String>,
+    pub(crate) message: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) content: Option<Vec<TranscriptContentBlock>>,
     #[serde(rename = "internal_chat_message_metadata_passthrough")]
-    turn_metadata: Option<serde_json::Value>,
+    pub(crate) turn_metadata: Option<serde_json::Value>,
 }
 
 /// One JSONL record, decoded leniently: unknown keys are ignored, and a
@@ -136,17 +142,18 @@ struct TranscriptPayload {
 /// `Schema.Struct` behaves the same).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TranscriptRecord {
+pub(crate) struct TranscriptRecord {
     #[serde(rename = "type")]
-    kind: Option<String>,
-    timestamp: Option<String>,
-    session_id: Option<String>,
-    ai_title: Option<String>,
+    pub(crate) kind: Option<String>,
+    pub(crate) timestamp: Option<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) ai_title: Option<String>,
     is_sidechain: Option<bool>,
     is_meta: Option<bool>,
     is_compact_summary: Option<bool>,
-    message: Option<TranscriptMessage>,
-    payload: Option<TranscriptPayload>,
+    pub(crate) message: Option<TranscriptMessage>,
+    pub(crate) payload: Option<TranscriptPayload>,
 }
 
 /// A message kept while parsing. `seq` gives it an identity: upstream compares
@@ -345,7 +352,7 @@ pub fn parse_agent_session_transcript(
     parse_records(input, &records)
 }
 
-fn parse_records(
+pub(crate) fn parse_records(
     input: &AgentSessionTranscriptMetadata<'_>,
     records: &[TranscriptRecord],
 ) -> Option<AgentSessionThread> {

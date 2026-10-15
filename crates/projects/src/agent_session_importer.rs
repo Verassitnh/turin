@@ -601,7 +601,19 @@ mod tests {
         recent: Vec<AgentSessionRecentThread>,
     }
 
+    #[async_trait::async_trait]
     impl AgentSessionScanner for FakeScanner {
+        async fn scan(
+            &self,
+        ) -> Result<turin_contracts::agent_sessions::AgentSessionScanResult, AgentSessionScanError>
+        {
+            Ok(turin_contracts::agent_sessions::AgentSessionScanResult {
+                candidates: Vec::new(),
+                scanned_at: "2026-01-01T00:00:00.000Z".to_owned(),
+                truncated: None,
+            })
+        }
+
         fn recent_threads<'a>(
             &'a self,
             _workspace_root: &'a str,

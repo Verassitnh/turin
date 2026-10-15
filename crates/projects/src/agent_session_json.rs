@@ -71,8 +71,8 @@ pub const TRANSCRIPT_JSON_MAX_DEPTH: usize = 128;
 /// Bytes charged per materialized value, on top of its text (upstream: per token).
 const VALUE_CHARGE_BYTES: usize = 64;
 
-type Reserve<'a> = Box<dyn FnMut(usize) -> Result<(), TranscriptJsonLimitError> + 'a>;
-type Select<'a> = Box<dyn Fn(&[JsonPathSegment]) -> bool + 'a>;
+type Reserve<'a> = Box<dyn FnMut(usize) -> Result<(), TranscriptJsonLimitError> + Send + 'a>;
+type Select<'a> = Box<dyn Fn(&[JsonPathSegment]) -> bool + Send + 'a>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Expect {
@@ -157,15 +157,15 @@ pub struct TranscriptJsonReader<'a> {
 
 impl<'a> TranscriptJsonReader<'a> {
     pub fn new(
-        reserve: impl FnMut(usize) -> Result<(), TranscriptJsonLimitError> + 'a,
-        select: impl Fn(&[JsonPathSegment]) -> bool + 'a,
+        reserve: impl FnMut(usize) -> Result<(), TranscriptJsonLimitError> + Send + 'a,
+        select: impl Fn(&[JsonPathSegment]) -> bool + Send + 'a,
     ) -> Self {
         Self::with_max_depth(reserve, select, TRANSCRIPT_JSON_MAX_DEPTH)
     }
 
     pub fn with_max_depth(
-        reserve: impl FnMut(usize) -> Result<(), TranscriptJsonLimitError> + 'a,
-        select: impl Fn(&[JsonPathSegment]) -> bool + 'a,
+        reserve: impl FnMut(usize) -> Result<(), TranscriptJsonLimitError> + Send + 'a,
+        select: impl Fn(&[JsonPathSegment]) -> bool + Send + 'a,
         max_depth: usize,
     ) -> Self {
         Self {
@@ -561,7 +561,7 @@ mod tests {
     fn read_with(
         json: &str,
         size: usize,
-        select: impl Fn(&[JsonPathSegment]) -> bool,
+        select: impl Fn(&[JsonPathSegment]) -> bool + Send,
     ) -> Option<Value> {
         let mut reader = TranscriptJsonReader::new(|_| Ok(()), select);
         let chars: Vec<char> = json.chars().collect();

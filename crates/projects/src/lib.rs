@@ -1,8 +1,10 @@
 //! turin-projects: server-side project services (see PORTING.md for upstream mapping).
 
+pub mod agent_session_discovery;
 pub mod agent_session_importer;
 pub mod agent_session_json;
 pub mod agent_session_scanner;
+pub mod codex_home_layout;
 pub mod keyed_lock;
 pub mod managed_project_folders;
 pub mod project_enrichment_service;

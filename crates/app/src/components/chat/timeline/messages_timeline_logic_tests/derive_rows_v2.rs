@@ -372,3 +372,91 @@ fn collapses_only_output_from_a_superseded_v2_attempt_within_the_active_logical_
         ]
     );
 }
+
+#[test]
+fn hides_the_interruption_request_while_keeping_intervening_work_and_the_result() {
+    let interrupt_event = |id: &str, position: u64, payload: TurnItemPayload| {
+        let at = if position == 0 {
+            "2026-01-01T00:00:01Z"
+        } else {
+            "2026-01-01T00:00:03Z"
+        };
+        event_entry(id, at, projected(position, in_turn_one(id, at, payload)))
+    };
+    let request = || {
+        interrupt_event(
+            "interrupt-request",
+            0,
+            TurnItemPayload::RunInterruptRequest {
+                message: "Stopping".into(),
+            },
+        )
+    };
+    let result = || {
+        interrupt_event(
+            "interrupt-result",
+            2,
+            TurnItemPayload::RunInterruptResult {
+                message: "Stopped".into(),
+            },
+        )
+    };
+    let interrupted = |timeline_entries: Vec<TimelineEntry>| MessagesTimelineRowsInput {
+        latest_run: Some(latest_run(
+            "turn-1",
+            RunStatus::Interrupted,
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:03Z"),
+        )),
+        ..rows_input(timeline_entries, false)
+    };
+
+    let rows = derive(&interrupted(vec![
+        request(),
+        work_entry(
+            "work-entry",
+            "2026-01-01T00:00:02Z",
+            work_log(
+                "work-1",
+                "2026-01-01T00:00:02Z",
+                Some("turn-1"),
+                "Finishing tool output",
+                WorkTone::Tool,
+            ),
+        ),
+        result(),
+    ]));
+    assert_eq!(ids(&rows), vec!["work-entry", "interrupt-result"]);
+    assert!(!has_kind(&rows, MessagesTimelineRowKind::TurnFold));
+
+    // The command the interrupt cut short stays visible with its outcome.
+    let stopped_rows = derive(&interrupted(vec![
+        work_entry(
+            "stopped-command-entry",
+            "2026-01-01T00:00:01Z",
+            WorkLogEntry {
+                item_type: Some(TurnItemType::CommandExecution),
+                command: Some("/bin/bash -lc 'sleep 90 && echo slept'".into()),
+                tool_lifecycle_status: Some(ToolLifecycleStatus::Stopped),
+                ..work_log(
+                    "stopped-command",
+                    "2026-01-01T00:00:01Z",
+                    Some("turn-1"),
+                    "Ran command",
+                    WorkTone::Tool,
+                )
+            },
+        ),
+        result(),
+    ]));
+    assert_eq!(
+        ids(&stopped_rows),
+        vec!["stopped-command-entry", "interrupt-result"]
+    );
+    match &stopped_rows[0].content {
+        Row::Work { display_label, .. } => {
+            assert_eq!(display_label.as_deref(), Some("sleep 90 && echo slept"));
+        }
+        other => panic!("expected a work row, got {other:?}"),
+    }
+}

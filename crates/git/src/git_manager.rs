@@ -1103,8 +1103,13 @@ impl GitManager {
         commit_message: Option<&str>,
         prepared: Option<&crate::git_vcs_driver_core::GitPreparedCommitContext>,
     ) -> Result<SuggestedCommit, GitManagerServiceError> {
-        if let Some(message) = commit_message.and_then(parse_custom_commit_message) {
-            return Ok(sanitize_commit_message(message.0, message.1, None));
+        // A user-written message is committed as typed. Sanitizing is for generated text only.
+        if let Some((subject, body)) = commit_message.and_then(parse_custom_commit_message) {
+            return Ok(SuggestedCommit {
+                subject,
+                body,
+                branch: None,
+            });
         }
         let generated = if let Some(prepared) = prepared {
             self.messages
@@ -1874,6 +1879,26 @@ mod tests {
         assert_eq!(options.stage, Some(Vec::new()));
     }
 
+    #[tokio::test]
+    async fn custom_commit_message_is_committed_unchanged() {
+        let manager = GitManager::new(Arc::new(GitVcsDriverCore::new()));
+        let custom = manager
+            .suggest_commit(".", Some("feat: custom summary line"), None)
+            .await
+            .expect("custom message");
+        assert_eq!(custom.subject, "feat: custom summary line");
+        assert_eq!(custom.body, "");
+
+        let long = format!("Fix bug. {}", "x".repeat(90));
+        let body = "Keeps the trailing period.\n\nSecond paragraph.";
+        let custom = manager
+            .suggest_commit(".", Some(&format!("{long}.\n\n{body}")), None)
+            .await
+            .expect("custom message");
+        assert_eq!(custom.subject, format!("{long}."));
+        assert_eq!(custom.body, body);
+    }
+
     #[test]
     fn backs_off_repeated_pr_lookup_failures() {
         assert_eq!(pr_lookup_failure_ttl(1), Duration::from_millis(20_000));
@@ -2006,7 +2031,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.commit.status, GitCommitStepStatus::Created);
-        assert_eq!(result.commit.subject.unwrap().as_str(), "Ship the note");
+        assert_eq!(result.commit.subject.unwrap().as_str(), "Ship the note.");
         assert!(matches!(
             result.toast.cta,
             GitRunStackedActionToastCta::RunAction { .. }
@@ -2017,6 +2042,6 @@ mod tests {
             .args(["log", "-1", "--format=%s"])
             .output()
             .unwrap();
-        assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "Ship the note");
+        assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "Ship the note.");
     }
 }

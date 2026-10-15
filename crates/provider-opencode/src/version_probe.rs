@@ -312,14 +312,14 @@ async fn probe_one(
     }
 }
 
-struct ProbeState {
-    success: Option<ProbedOpenCode>,
-}
-
 /// One instance's runtime, remembered after the first successful probe.
-/// A failed probe is never stored. `last_success` never probes.
+/// A failed probe is never stored. `last_success` never probes and never waits
+/// on a probe in flight: upstream `Cache.getSuccess` is non-blocking, and this
+/// is read on hot paths.
 pub struct OpenCodeRuntimeProbe<P> {
-    state: Mutex<ProbeState>,
+    /// Single-flights `get` and `refresh`. Held across the probe, never by `last_success`.
+    flight: Mutex<()>,
+    success: parking_lot::Mutex<Option<ProbedOpenCode>>,
     probe: P,
 }
 
@@ -330,38 +330,33 @@ where
 {
     pub fn new(probe: P) -> Self {
         Self {
-            state: Mutex::new(ProbeState { success: None }),
+            flight: Mutex::new(()),
+            success: parking_lot::Mutex::new(None),
             probe,
         }
     }
 
     pub async fn get(&self) -> Result<ProbedOpenCode, OpenCodeRuntimeError> {
-        let mut state = self.state.lock().await;
-        if let Some(success) = &state.success {
-            return Ok(success.clone());
+        let _flight = self.flight.lock().await;
+        if let Some(success) = self.success.lock().clone() {
+            return Ok(success);
         }
-        match (self.probe)().await {
-            Ok(probed) => {
-                state.success = Some(probed.clone());
-                Ok(probed)
-            }
-            Err(err) => Err(err),
-        }
+        self.probe_and_store().await
     }
 
     pub async fn refresh(&self) -> Result<ProbedOpenCode, OpenCodeRuntimeError> {
-        let mut state = self.state.lock().await;
-        match (self.probe)().await {
-            Ok(probed) => {
-                state.success = Some(probed.clone());
-                Ok(probed)
-            }
-            Err(err) => Err(err),
-        }
+        let _flight = self.flight.lock().await;
+        self.probe_and_store().await
     }
 
-    pub async fn last_success(&self) -> Option<ProbedOpenCode> {
-        self.state.lock().await.success.clone()
+    async fn probe_and_store(&self) -> Result<ProbedOpenCode, OpenCodeRuntimeError> {
+        let probed = (self.probe)().await?;
+        *self.success.lock() = Some(probed.clone());
+        Ok(probed)
+    }
+
+    pub fn last_success(&self) -> Option<ProbedOpenCode> {
+        self.success.lock().clone()
     }
 }
 
@@ -616,7 +611,7 @@ mod tests {
             }
         });
         assert!(probe.get().await.is_err());
-        assert!(probe.last_success().await.is_none());
+        assert!(probe.last_success().is_none());
         assert_eq!(
             probe.get().await.unwrap().generation,
             OpenCodeGeneration::V2
@@ -635,6 +630,40 @@ mod tests {
             OpenCodeGeneration::V1
         );
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn last_success_does_not_wait_for_a_probe_in_flight() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_probe = Arc::clone(&calls);
+        let probe = Arc::new(OpenCodeRuntimeProbe::new(move || {
+            let calls_probe = Arc::clone(&calls_probe);
+            async move {
+                calls_probe.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                Ok(ProbedOpenCode {
+                    generation: OpenCodeGeneration::V1,
+                    version: "1.19.0".to_string(),
+                })
+            }
+        }));
+        let refreshing = {
+            let probe = Arc::clone(&probe);
+            tokio::spawn(async move { probe.refresh().await })
+        };
+        // Let the refresh take the single-flight lock and start probing.
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let started = std::time::Instant::now();
+        assert!(probe.last_success().is_none());
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "last_success waited {:?} behind the probe",
+            started.elapsed()
+        );
+        refreshing.await.unwrap().unwrap();
+        assert_eq!(probe.last_success().unwrap().version, "1.19.0");
     }
 
     #[derive(Clone, Copy)]

@@ -106,7 +106,36 @@ impl ChatComposer {
             _subscriptions: subscriptions,
         };
         this.install_key_handler(cx);
+        this.apply_demo(window, cx);
         this
+    }
+
+    /// Debug aid for screenshots: `TURIN_COMPOSER_DEMO=<scenario>` preloads
+    /// the prompt and opens a layer, since synthetic input is unavailable
+    /// to the capture scripts.
+    fn apply_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(scenario) = std::env::var("TURIN_COMPOSER_DEMO") else {
+            return;
+        };
+        let prompt = match scenario.as_str() {
+            "rich" => Some(
+                "Refactor the **parser** and keep `Foo::bar` stable:\n\n- first item\n- second item\n  - nested\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n",
+            ),
+            "slash" => Some("/"),
+            "mention" => Some("look at @src"),
+            "skill" => Some("use $"),
+            _ => None,
+        };
+        if let Some(prompt) = prompt {
+            let key = "local:thread-1".to_owned();
+            self.drafts.set_prompt(&key, prompt);
+        }
+        if scenario == "picker" {
+            let weak = cx.weak_entity();
+            window.defer(cx, move |window, cx| {
+                weak.update(cx, |this, cx| this.open_model_picker(window, cx)).ok();
+            });
+        }
     }
 
     pub fn editor(&self) -> &Entity<PromptEditor> {

@@ -386,7 +386,7 @@ impl ChatComposer {
         match self.layer {
             Some(Layer::ModelPicker) => {
                 if let Some(picker) = self.model_picker.clone() {
-                    layers.push(floating(self.trigger_bounds.model.get(), true, false, picker));
+                    layers.push(floating(self.trigger_bounds.model.get(), true, false, glass_surface(cx).child(picker)));
                 }
             }
             Some(Layer::RuntimeMode) => layers.push(self.runtime_mode_menu(vm, cx)),

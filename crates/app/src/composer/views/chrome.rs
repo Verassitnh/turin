@@ -14,7 +14,7 @@ use gpui_kit::{
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{self, RADIUS_LG, RADIUS_MD, TEXT_SM, TEXT_XS};
-use crate::ui::tooltip::{dropdown_glass_background, dropdown_glass_border};
+use crate::ui::tooltip::dropdown_glass_border;
 use crate::ui::{Icon, IconName};
 
 /// A trigger's last painted bounds.
@@ -90,7 +90,9 @@ pub fn control_separator(size: ControlSize, cx: &App) -> impl IntoElement {
 pub fn glass_surface(cx: &App) -> Div {
     let theme = cx.app_theme();
     div()
-        .bg(dropdown_glass_background(theme))
+        // GPUI has no backdrop blur, so the glass fill would show the composer
+        // text through it; paint it opaque.
+        .bg(theme.popover)
         .border_1()
         .border_color(dropdown_glass_border(theme))
         .rounded(RADIUS_LG)

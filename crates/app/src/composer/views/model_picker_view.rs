@@ -558,11 +558,13 @@ impl Render for ModelPickerView {
                     .child(notice.clone())
             }));
 
+        // The list holds its natural height up to the picker's cap.
+        let estimated = 3.25 + list.rows.len() as f32 * 2.85 + if setup_entries.is_empty() { 0.5 } else { 7. };
         div()
             .flex()
             .flex_row()
             .w(rems(22.5))
-            .max_h(rems(21.625))
+            .h(rems(estimated.max(2. + (list.sidebar_entries.len() as f32 + 1.) * 2.5).clamp(7., 21.625)))
             .overflow_hidden()
             .when_some(sidebar, |this, sidebar| this.child(sidebar))
             .child(main)

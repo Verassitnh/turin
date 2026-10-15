@@ -1196,8 +1196,6 @@ impl Render for PromptEditor {
             .w_full()
             // `-m-1 p-1`: the padding keeps the caret off the clip edge.
             .m(px(-4.))
-            .min_h(rems(self.config.min_height))
-            .max_h(rems(self.config.max_height))
             .overflow_hidden()
             .cursor(CursorStyle::IBeam)
             .font_family(theme.fonts.composer.clone())
@@ -1212,7 +1210,7 @@ impl Render for PromptEditor {
             .child(
                 div()
                     .id("composer-editor-scroll")
-                    .size_full()
+                    .w_full()
                     .min_h(rems(self.config.min_height))
                     .max_h(rems(self.config.max_height))
                     .overflow_y_scroll()

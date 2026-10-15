@@ -7222,6 +7222,7 @@ dependencies = [
  "turin-acp",
  "turin-contracts",
  "turin-provider-core",
+ "turin-provider-opencode",
  "url",
 ]
 

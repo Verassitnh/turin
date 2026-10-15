@@ -498,7 +498,7 @@ impl DiffPanel {
             .absolute()
             .top(rems(1.75))
             .left_0()
-            .min_w(rems(9.))
+            .min_w(rems(10.))
             .child(item("diff-scope-branch", "branch", "Changes", cx))
             .child(item("diff-scope-unstaged", "unstaged", "Uncommitted", cx))
             .child(item("diff-scope-latest", "latest", "Latest turn", cx))
@@ -522,7 +522,7 @@ impl DiffPanel {
             let mut submenu = menu_surface(cx)
                 .absolute()
                 .top(rems(1.75 * 3. + 0.25))
-                .left(rems(9.5))
+                .left(rems(10.5))
                 .min_w(rems(10.))
                 .max_h(rems(18.))
                 .overflow_hidden();

@@ -11,6 +11,9 @@
 
 pub mod apply;
 pub mod canonical;
+#[cfg(test)]
+mod context_tests;
+pub mod contexts;
 pub mod control;
 #[cfg(test)]
 mod control_tests;
@@ -47,6 +50,9 @@ use shell::{
     ShellSnapshotOptions, ShellSnapshotRows, ThreadWorktreePath,
 };
 use turin_contracts::UtcDateTime;
+use turin_contracts::orchestration_v2::{
+    OrchestrationV2ConversationMessage, OrchestrationV2ExecutionNode,
+};
 use turin_contracts::orchestration_v2::{
     OrchestrationV2ThreadShell, OrchestrationV2ThreadShellSnapshot,
 };
@@ -433,6 +439,143 @@ impl ProjectionStore {
         let thread = thread_id.clone();
         self.read_for_thread(thread_id, true, move |conn| {
             runtime_recovery::runtime_recovery_state(conn, &thread)
+        })
+        .await
+    }
+
+    /// `getProviderControlContext`.
+    pub async fn get_provider_control_context(
+        &self,
+        thread_id: &ThreadId,
+        target: contexts::ProviderControlTarget,
+    ) -> Result<contexts::ProviderControlContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::provider_control_context(conn, &thread, &target)
+        })
+        .await
+    }
+
+    /// `getRunningTurnContext`.
+    pub async fn get_running_turn_context(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<contexts::RunningTurnContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::running_turn_context(conn, &thread)
+        })
+        .await
+    }
+
+    /// `getThreadProviderContext`. `target_instance_id` names a provider instance;
+    /// `None` skips the provider thread lookup.
+    pub async fn get_thread_provider_context(
+        &self,
+        thread_id: &ThreadId,
+        target_instance_id: Option<&str>,
+    ) -> Result<contexts::ThreadProviderContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let target_instance_id = target_instance_id.map(str::to_owned);
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::thread_provider_context(conn, &thread, target_instance_id.as_deref())
+        })
+        .await
+    }
+
+    /// `getRuntimeResponseContext`.
+    pub async fn get_runtime_response_context(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+    ) -> Result<contexts::RuntimeResponseContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let request_id = request_id.to_owned();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::runtime_response_context(conn, &thread, &request_id)
+        })
+        .await
+    }
+
+    /// `getCheckpointContext`.
+    pub async fn get_checkpoint_context(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<contexts::CheckpointContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::checkpoint_context(conn, &thread)
+        })
+        .await
+    }
+
+    /// `getCheckpointCaptureContext`.
+    pub async fn get_checkpoint_capture_context(
+        &self,
+        thread_id: &ThreadId,
+        run_id: &str,
+        scope_id: &str,
+    ) -> Result<contexts::CheckpointCaptureContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let run_id = run_id.to_owned();
+        let scope_id = scope_id.to_owned();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::checkpoint_capture_context(conn, &thread, &run_id, &scope_id)
+        })
+        .await
+    }
+
+    /// `getRunMessage`: `None` when the run has no opening message.
+    pub async fn get_run_message(
+        &self,
+        thread_id: &ThreadId,
+        run_id: &str,
+    ) -> Result<Option<OrchestrationV2ConversationMessage>, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let run_id = run_id.to_owned();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::run_message(conn, &thread, &run_id)
+        })
+        .await
+    }
+
+    /// `canStartQueuedRun`.
+    pub async fn can_start_queued_run(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<bool, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::can_start_queued_run(conn, &thread)
+        })
+        .await
+    }
+
+    /// `hasUnpairedRunInterruptRequest`.
+    pub async fn has_unpaired_run_interrupt_request(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+        result_id: &str,
+    ) -> Result<bool, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let request_id = request_id.to_owned();
+        let result_id = result_id.to_owned();
+        self.read_for_thread(thread_id, false, move |conn| {
+            contexts::has_unpaired_run_interrupt_request(conn, &thread, &request_id, &result_id)
+        })
+        .await
+    }
+
+    /// `isNodeStored`: whether the stored node row equals `node`.
+    pub async fn is_node_stored(
+        &self,
+        node: &OrchestrationV2ExecutionNode,
+    ) -> Result<bool, ProjectionStoreError> {
+        let node = node.clone();
+        let thread = node.thread_id.clone();
+        self.read_for_thread(&thread, false, move |conn| {
+            contexts::is_node_stored(conn, &node)
         })
         .await
     }

@@ -53,7 +53,8 @@ when the logic is subtle (state machines, protocol framing, concurrency).
 
 | Run | Target | Result |
 |---|---|---|
-| wf_c926ef06-3ca | T03 design system + shell (+ look-and-feel) | running |
+| wf_c926ef06-3ca | T03 design system + shell (+ look-and-feel) | FAIL: 1 high, 4 medium, 27 low. docs/qc/wf_c926ef06-3ca-T03-design-system.md |
+| wf_d6d58e6c-789 | T24 app icon (visual fidelity, reproducibility) | running |
 | wf_8b97ef76-9c9 | T02 persistence | PASS: 15 medium, 27 low → T02b. docs/qc/wf_8b97ef76-9c9-T02-persistence.md |
 | wf_b2f290b9-219 | T00a fix round (base_schemas helpers) | PASS: 6 low → T00c |
 | wf_42618e43-71a | T04 protocol docs (accuracy, completeness, Rust viability) | FAIL: 7 high, 18 medium → T04b. Cursor via ACP viable. docs/qc/wf_42618e43-71a-T04-protocols.md |
@@ -72,7 +73,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T01 | Port all kept contracts modules | `crates/contracts` | GLM | active |
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | done (merged; QC PASS) |
 | T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | active |
-| T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | review (QC wf_c926ef06-3ca) |
+| T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | QC FAIL (1 high) → fix round r4 active; sidebar items moved to T15 |
 | T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex | QC FAIL → T04b fix round active |
 
 ### Wave 2: backend leaves (after T01)
@@ -123,4 +124,5 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T24 | Turin app icon: T3 Code icon with a single T | `assets/**` | Opus | active |
+| T24 | Turin app icon: T3 Code icon with a single T | `assets/**` | Opus | review (QC wf_d6d58e6c-789) |
+| T24b | Wire icon: dev Dock icon, bundle .icns/actool, in-app mark | `crates/app` | Opus | todo (after T24 + T03 merge) |

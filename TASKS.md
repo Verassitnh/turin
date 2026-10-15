@@ -98,7 +98,7 @@ runs. Never keep copies of user databases.
 | wf_342ba162-dd7 | T24 icon fix rounds | PASS: 1 low (fixed, merged) |
 | wf_4a9d9be1-c7c | T03 fix round re-QC | aborted: Claude session limit → rerun as wf_5a0d0e56-76b |
 | wf_5bf4fe41-dd5 | T12a ACP crate | running (resumed after reboot) |
-| wf_118a9a5d-526 | T11a OpenCode transport | running (resumed after reboot) |
+| wf_118a9a5d-526 | T11a OpenCode transport | see docs/qc/wf_118a9a5d-526-T11a-opencode-runtime.md → fixes in T11 r4 |
 | wf_5a0d0e56-76b | T03 fix round re-QC (Sonnet verify, Opus look-and-feel) | PASS: 6 low → T03c. docs/qc/wf_5a0d0e56-76b-T03-r2-design-system.md |
 | wf_e19abae9-25e | T02b persistence fix round | FAIL: Db drop lost-wakeup deadlock (high) + index whitespace (low). docs/qc/wf_e19abae9-25e-T02b-persistence.md |
 | wf_6497dded-82d | T04c protocol-doc application check (Sonnet/Haiku) | PASS: 3 low. docs/qc/wf_6497dded-82d-T04c-protocols.md |

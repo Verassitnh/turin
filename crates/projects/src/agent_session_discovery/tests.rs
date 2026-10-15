@@ -310,7 +310,7 @@ impl Fixture {
     }
 
     fn scanner(&self) -> AgentSessionDiscovery {
-        self.scanner_with(Arc::new(LocalScannerFileSystem))
+        self.scanner_with(Arc::new(LocalScannerFileSystem::default()))
     }
 
     async fn scan(&self) -> AgentSessionScanResult {
@@ -556,7 +556,7 @@ impl ScannerFileSystem for FsDouble {
         self.inner.stat(target).await
     }
     async fn real_path(&self, path: &str) -> Option<String> {
-        self.inner.real_path(path).await
+        self.inner.real_path(&self.resolve(path)).await
     }
     async fn read_directory(&self, path: &str) -> Vec<String> {
         if let Some(names) = self.listings.get(path) {
@@ -569,8 +569,8 @@ impl ScannerFileSystem for FsDouble {
         }
         self.inner.read_directory(path).await
     }
-    async fn read_file_string(&self, path: &str) -> Option<String> {
-        self.inner.read_file_string(path).await
+    async fn read_file_string(&self, path: &str, max_bytes: u64) -> Option<String> {
+        self.inner.read_file_string(path, max_bytes).await
     }
     async fn open(&self, path: &str) -> Option<Box<dyn ScannerFile>> {
         let open_index = {
@@ -2738,5 +2738,163 @@ async fn keeps_a_second_account_when_the_first_has_5000_newer_files() {
     assert_eq!(
         importable_session_ids(&outcomes),
         vec!["recent-session".to_owned()]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn does_not_read_transcripts_reached_through_a_link_out_of_the_root() {
+    let fixture = Fixture::new();
+    let outside = temp_dir("t3code-outside-");
+    let elsewhere = fixture.workspace("t3code-elsewhere-");
+    let workspace = fixture.workspace("t3code-workspace-");
+    // A real session outside the home: a linked file and a linked project directory.
+    write_transcript(
+        &outside.path().join("file.jsonl"),
+        &claude_session_line(elsewhere.path()),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    write_transcript(
+        &outside.path().join("dir").join("session.jsonl"),
+        &claude_session_line(elsewhere.path()),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    let projects = fixture.claude_home.join("projects");
+    fs::create_dir_all(projects.join("p")).expect("project dir");
+    std::os::unix::fs::symlink(
+        outside.path().join("file.jsonl"),
+        projects.join("p").join("linked.jsonl"),
+    )
+    .expect("file link");
+    std::os::unix::fs::symlink(outside.path().join("dir"), projects.join("linked-dir"))
+        .expect("dir link");
+    // A regular session still counts, so the scan is not simply empty.
+    write_transcript(
+        &fixture.claude_transcript("-regular", "regular.jsonl"),
+        &claude_session_line(workspace.path()),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    let double = fs_double(|_| {});
+
+    let result = fixture
+        .scanner_with(double.clone())
+        .scan()
+        .await
+        .expect("scan");
+
+    assert_eq!(
+        paths(&result),
+        vec![workspace.path().to_string_lossy().into_owned()]
+    );
+    assert_eq!(double.opened(&projects.join("p").join("linked.jsonl")), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reads_transcripts_when_the_home_itself_is_a_symlink() {
+    let mut fixture = Fixture::new();
+    let store = temp_dir("t3code-home-store-");
+    fs::remove_dir(&fixture.claude_home).expect("replace the fixture home");
+    std::os::unix::fs::symlink(store.path(), &fixture.claude_home).expect("home link");
+    let workspace = fixture.workspace("t3code-workspace-");
+    write_transcript(
+        &fixture.claude_transcript("-slug", "a.jsonl"),
+        &claude_session_line(workspace.path()),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    fixture.now_ms = Some(ms("2026-01-02T00:00:00.000Z"));
+
+    let result = fixture.scan().await;
+
+    assert_eq!(
+        paths(&result),
+        vec![workspace.path().to_string_lossy().into_owned()]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_fifo_git_pointer_does_not_hang_the_scan() {
+    let fixture = Fixture::new();
+    let workspace = fixture.workspace("t3code-fifo-workspace-");
+    let fifo = workspace.path().join(".git");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo");
+    assert!(made.success());
+    write_transcript(
+        &fixture.claude_transcript("-fifo", "a.jsonl"),
+        &claude_session_line(workspace.path()),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+
+    let result = tokio::time::timeout(Duration::from_secs(5), fixture.scan())
+        .await
+        .expect("the scan finishes");
+
+    assert_eq!(
+        paths(&result),
+        vec![workspace.path().to_string_lossy().into_owned()]
+    );
+}
+
+#[tokio::test]
+async fn git_metadata_reads_are_bounded_to_the_limit() {
+    let dir = temp_dir("t3code-git-config-");
+    let config = dir.path().join("config");
+    fs::write(&config, "x".repeat(1024 * 1024)).expect("large config");
+
+    let text = LocalScannerFileSystem::default()
+        .read_file_string(&config.to_string_lossy(), GIT_METADATA_MAX_BYTES)
+        .await
+        .expect("read");
+
+    assert_eq!(text.len() as u64, GIT_METADATA_MAX_BYTES);
+}
+
+#[tokio::test]
+async fn directory_listings_keep_at_most_the_entry_cap() {
+    let dir = temp_dir("t3code-listing-");
+    for index in 0..10 {
+        fs::write(dir.path().join(format!("entry-{index}")), "").expect("entry");
+    }
+    let capped = LocalScannerFileSystem {
+        max_directory_entries: 4,
+    };
+
+    let names = capped.read_directory(&dir.path().to_string_lossy()).await;
+
+    assert_eq!(names.len(), 4);
+}
+
+#[tokio::test]
+async fn orders_equally_recent_candidates_by_locale_not_byte_order() {
+    let fixture = Fixture::new();
+    let root = temp_dir("t3code-locale-");
+    let upper = root.path().join("Beta");
+    let lower = root.path().join("alpha");
+    fs::create_dir_all(&upper).expect("upper");
+    fs::create_dir_all(&lower).expect("lower");
+    write_transcript(
+        &fixture.claude_transcript("-upper", "a.jsonl"),
+        &claude_session_line(&upper),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    write_transcript(
+        &fixture.claude_transcript("-lower", "b.jsonl"),
+        &claude_session_line(&lower),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+
+    let result = fixture.scan().await;
+
+    // Byte order would put "Beta" first; locale order puts "alpha" first.
+    assert_eq!(
+        paths(&result),
+        vec![
+            lower.to_string_lossy().into_owned(),
+            upper.to_string_lossy().into_owned(),
+        ]
     );
 }

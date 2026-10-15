@@ -36,6 +36,7 @@ use turin_git::shared_git::{
     normalize_git_remote_url, parse_github_repository_name_with_owner_from_remote_url,
     parse_origin_url_from_git_config,
 };
+use turin_shared::js_string::locale_compare;
 
 use crate::agent_session_json::{
     JsonSelectSchema, TranscriptJsonLimitError, TranscriptJsonReader,
@@ -70,6 +71,10 @@ const MAX_IMPORTED_TRANSCRIPT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORT_HISTORY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_IMPORT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORT_TRANSCRIPTS: usize = 100;
+/// Largest `.git` pointer or `config` read. Real configs are a few KiB.
+const GIT_METADATA_MAX_BYTES: u64 = 64 * 1024;
+/// Default cap on entries kept from one directory listing.
+const MAX_DIRECTORY_ENTRIES: usize = 100_000;
 /// JavaScript `Number.MAX_SAFE_INTEGER`.
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
@@ -98,7 +103,8 @@ pub trait ScannerFileSystem: Send + Sync {
     async fn stat(&self, path: &str) -> Option<FileStat>;
     async fn real_path(&self, path: &str) -> Option<String>;
     async fn read_directory(&self, path: &str) -> Vec<String>;
-    async fn read_file_string(&self, path: &str) -> Option<String>;
+    /// Regular files only, and at most `max_bytes` of them are read.
+    async fn read_file_string(&self, path: &str, max_bytes: u64) -> Option<String>;
     async fn open(&self, path: &str) -> Option<Box<dyn ScannerFile>>;
 }
 
@@ -111,8 +117,19 @@ pub trait ScannerFile: Send + Sync {
 }
 
 /// The host filesystem through `tokio::fs`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct LocalScannerFileSystem;
+#[derive(Debug, Clone, Copy)]
+pub struct LocalScannerFileSystem {
+    /// Entries kept from one directory listing. Upstream keeps all of them.
+    pub max_directory_entries: usize,
+}
+
+impl Default for LocalScannerFileSystem {
+    fn default() -> Self {
+        Self {
+            max_directory_entries: MAX_DIRECTORY_ENTRIES,
+        }
+    }
+}
 
 #[async_trait]
 impl ScannerFileSystem for LocalScannerFileSystem {
@@ -132,14 +149,25 @@ impl ScannerFileSystem for LocalScannerFileSystem {
             return Vec::new();
         };
         let mut names = Vec::new();
-        while let Ok(Some(entry)) = entries.next_entry().await {
+        while names.len() < self.max_directory_entries {
+            let Ok(Some(entry)) = entries.next_entry().await else {
+                break;
+            };
             names.push(entry.file_name().to_string_lossy().into_owned());
         }
         names
     }
 
-    async fn read_file_string(&self, path: &str) -> Option<String> {
-        tokio::fs::read_to_string(path).await.ok()
+    async fn read_file_string(&self, path: &str, max_bytes: u64) -> Option<String> {
+        // Checked before opening: opening a FIFO would block.
+        let metadata = tokio::fs::metadata(path).await.ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let file = tokio::fs::File::open(path).await.ok()?;
+        let mut bytes = Vec::new();
+        file.take(max_bytes).read_to_end(&mut bytes).await.ok()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     async fn open(&self, path: &str) -> Option<Box<dyn ScannerFile>> {
@@ -259,6 +287,8 @@ pub struct AgentSessionDiscovery {
 struct RawTranscript {
     file_path: String,
     mtime_ms: f64,
+    /// Realpath of the `projects/` or `sessions/` root the file was found under.
+    source_root: String,
 }
 
 /// One directory's evidence from one source (upstream `RawCandidate`).
@@ -278,6 +308,7 @@ struct TranscriptCandidate {
     mtime_ms: f64,
     provider_instance_id: ProviderInstanceId,
     size: u64,
+    source_root: String,
 }
 
 struct Discovered {
@@ -373,6 +404,7 @@ struct EligibleTranscript {
     provider_instance_id: ProviderInstanceId,
     file_path: String,
     mtime_ms: f64,
+    source_root: String,
 }
 
 /// State of one `recentThreads` stream (the upstream closure over its budgets).
@@ -472,7 +504,12 @@ impl AgentSessionDiscovery {
         settings: Arc<dyn AgentSessionDiscoverySettings>,
         projects: Arc<dyn ProjectStoreReads>,
     ) -> Self {
-        Self::new(host, Arc::new(LocalScannerFileSystem), settings, projects)
+        Self::new(
+            host,
+            Arc::new(LocalScannerFileSystem::default()),
+            settings,
+            projects,
+        )
     }
 
     /// Upstream `isExcludedProjectPath`.
@@ -523,7 +560,7 @@ impl AgentSessionDiscovery {
         if !git_stats.is_directory {
             let pointer = self
                 .fs
-                .read_file_string(&git_path)
+                .read_file_string(&git_path, GIT_METADATA_MAX_BYTES)
                 .await
                 .unwrap_or_default();
             let target = GITDIR_POINTER
@@ -541,7 +578,7 @@ impl AgentSessionDiscovery {
         }
         let config_text = self
             .fs
-            .read_file_string(&join(&[&git_dir, "config"]))
+            .read_file_string(&join(&[&git_dir, "config"]), GIT_METADATA_MAX_BYTES)
             .await
             .unwrap_or_default();
         let origin_url = parse_origin_url_from_git_config(&config_text);
@@ -685,6 +722,7 @@ impl AgentSessionDiscovery {
         operation_budget: usize,
     ) -> Discovered {
         let projects_dir = join(&[home_path, "projects"]);
+        let source_root = self.source_root(&projects_dir).await;
         let mut budget = DiscoveryBudget::new(operation_budget);
         let mut transcripts = Vec::new();
         let project_directories = self
@@ -702,8 +740,9 @@ impl AgentSessionDiscovery {
                 }
                 let file_path = join(&[&directory, entry]);
                 budget.spend();
-                if let Some(candidate) =
-                    self.stat_transcript(&file_path, provider_instance_id).await
+                if let Some(candidate) = self
+                    .stat_transcript(&file_path, provider_instance_id, &source_root)
+                    .await
                 {
                     transcripts.push(candidate);
                 }
@@ -724,6 +763,7 @@ impl AgentSessionDiscovery {
         operation_budget: usize,
     ) -> Discovered {
         let sessions_dir = join(&[home_path, "sessions"]);
+        let source_root = self.source_root(&sessions_dir).await;
         let mut budget = DiscoveryBudget::new(operation_budget);
         let mut transcripts = Vec::new();
         for year in self
@@ -762,8 +802,9 @@ impl AgentSessionDiscovery {
                         }
                         let file_path = join(&[&directory, &entry]);
                         budget.spend();
-                        if let Some(candidate) =
-                            self.stat_transcript(&file_path, provider_instance_id).await
+                        if let Some(candidate) = self
+                            .stat_transcript(&file_path, provider_instance_id, &source_root)
+                            .await
                         {
                             transcripts.push(candidate);
                         }
@@ -800,13 +841,32 @@ impl AgentSessionDiscovery {
         entries
     }
 
+    /// Realpath of a source root. The containment check compares against it.
+    async fn source_root(&self, directory: &str) -> String {
+        self.fs
+            .real_path(directory)
+            .await
+            .unwrap_or_else(|| lexical_resolve(directory))
+    }
+
+    /// Whether `file_path` resolves to a file under `source_root`. A symlink that
+    /// leaves the root is not a transcript of this home, so it is never read.
+    async fn resolves_within(&self, file_path: &str, source_root: &str) -> bool {
+        let Some(real) = self.fs.real_path(file_path).await else {
+            return false;
+        };
+        let real = Path::new(&real);
+        real != Path::new(source_root) && real.starts_with(source_root)
+    }
+
     async fn stat_transcript(
         &self,
         file_path: &str,
         provider_instance_id: &ProviderInstanceId,
+        source_root: &str,
     ) -> Option<TranscriptCandidate> {
         let stats = self.fs.stat(file_path).await?;
-        if !stats.is_file {
+        if !stats.is_file || !self.resolves_within(file_path, source_root).await {
             return None;
         }
         Some(TranscriptCandidate {
@@ -814,6 +874,7 @@ impl AgentSessionDiscovery {
             mtime_ms: stats.mtime_ms?,
             provider_instance_id: provider_instance_id.clone(),
             size: stats.size,
+            source_root: source_root.to_owned(),
         })
     }
 
@@ -832,6 +893,7 @@ impl AgentSessionDiscovery {
             let raw_transcript = RawTranscript {
                 file_path: transcript.file_path.clone(),
                 mtime_ms: transcript.mtime_ms,
+                source_root: transcript.source_root.clone(),
             };
             let key = format!("{}\0{}", transcript.provider_instance_id.as_str(), cwd);
             match groups.get_mut(&key) {
@@ -990,7 +1052,7 @@ impl AgentSessionDiscovery {
                     .mtime_ms
                     .partial_cmp(&left.mtime_ms)
                     .unwrap_or(Ordering::Equal)
-                    .then_with(|| left.file_path.cmp(&right.file_path))
+                    .then_with(|| locale_compare(&left.file_path, &right.file_path))
             });
             if transcript_candidates.len() > MAX_TRANSCRIPTS_PER_SOURCE {
                 truncated = true;
@@ -1151,11 +1213,11 @@ impl AgentSessionDiscovery {
         candidates.sort_by(
             |left, right| match (&left.last_active_at, &right.last_active_at) {
                 (left_at, right_at) if left_at == right_at => {
-                    left.path.as_str().cmp(right.path.as_str())
+                    locale_compare(left.path.as_str(), right.path.as_str())
                 }
                 (None, _) => Ordering::Greater,
                 (_, None) => Ordering::Less,
-                (Some(left_at), Some(right_at)) => right_at.cmp(left_at),
+                (Some(left_at), Some(right_at)) => locale_compare(right_at, left_at),
             },
         );
 
@@ -1209,6 +1271,7 @@ impl AgentSessionDiscovery {
                     provider_instance_id: candidate.provider_instance_id.clone(),
                     file_path: transcript.file_path.clone(),
                     mtime_ms: transcript.mtime_ms,
+                    source_root: transcript.source_root.clone(),
                 });
             }
         }
@@ -1217,7 +1280,7 @@ impl AgentSessionDiscovery {
                 .mtime_ms
                 .partial_cmp(&left.mtime_ms)
                 .unwrap_or(Ordering::Equal)
-                .then_with(|| left.file_path.cmp(&right.file_path))
+                .then_with(|| locale_compare(&left.file_path, &right.file_path))
         });
 
         let mut completed: HashMap<String, Vec<AgentSessionImportSource>> = HashMap::new();
@@ -1284,6 +1347,13 @@ impl AgentSessionDiscovery {
         else {
             return Some(AgentSessionRecentThread::Skipped);
         };
+        // The file can be replaced by a link out of the root after discovery.
+        if !self
+            .resolves_within(&item.file_path, &item.source_root)
+            .await
+        {
+            return Some(AgentSessionRecentThread::Skipped);
+        }
         let identity = transcript_identity(&item.file_path, &stats);
         let completed_source = state
             .completed

@@ -49,6 +49,7 @@ when the logic is subtle (state machines, protocol framing, concurrency).
 
 | Run | Target | Result |
 |---|---|---|
+| wf_c926ef06-3ca | T03 design system + shell (+ look-and-feel) | running |
 | wf_8b97ef76-9c9 | T02 persistence | running (resumed after restart) |
 | wf_b2f290b9-219 | T00a fix round (base_schemas helpers) | PASS: 6 low → T00c |
 | wf_42618e43-71a | T04 protocol docs (accuracy, completeness, Rust viability) | running (resumed after restart) |
@@ -66,7 +67,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T00c | QC low items: UtcDateTime parse bounds/leap/zone-less, private field; `forward_compatible_*::optional` | `crates/contracts/src/base_schemas.rs` | Sonnet | todo (after T01 merges, to avoid conflicts) |
 | T01 | Port all kept contracts modules | `crates/contracts` | GLM | active |
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | review (QC wf_8b97ef76-9c9) |
-| T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | active (r3: resumed after app restart) |
+| T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | review (QC wf_c926ef06-3ca) |
 | T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex | review (QC wf_42618e43-71a) |
 
 ### Wave 2: backend leaves (after T01)

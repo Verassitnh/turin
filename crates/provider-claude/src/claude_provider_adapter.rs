@@ -844,7 +844,7 @@ impl ClaudeActor {
         let scope = TurnScope {
             driver: driver(),
             thread_id: input.thread_id.clone(),
-            run_id: input.run_id.clone(),
+            run_id: Some(input.run_id.clone()),
             root_node_id: input.root_node_id.clone(),
             provider_thread_id: input.provider_thread.id.clone(),
             provider_turn_id: turn.id.clone(),
@@ -856,6 +856,9 @@ impl ClaudeActor {
             run_id: input.run_id.clone(),
             root_node_id: input.root_node_id.clone(),
             provider_thread_id: input.provider_thread.id.clone(),
+            provider_turn_id: turn.id.clone(),
+            app_thread: input.app_thread.clone(),
+            model_selection: input.model_selection.clone(),
         });
         self.active = Some(ActiveTurn {
             input,
@@ -1239,9 +1242,13 @@ impl ClaudeActor {
                 self.subagents.remember_launch(id, &input, owner.as_deref());
             }
         }
-        // A subagent's frames belong to the subagent. Its text, tool calls and
-        // uuid must not reach the parent turn, or its rollback cursor.
-        if owner.is_some() {
+        // A subagent's frames belong to the subagent. Its text and tool calls go
+        // to its child thread; its uuid must not reach the parent turn's rollback cursor.
+        if let Some(owner) = owner.as_deref() {
+            let now = UtcDateTime::now();
+            for event in self.subagents.child_assistant(owner, &frame.raw, now) {
+                self.emit(event);
+            }
             return;
         }
         let events = match self.active.as_mut() {
@@ -1274,18 +1281,28 @@ impl ClaudeActor {
     /// turn is active, so this does not depend on one.
     fn background(&mut self, frame: turin_claude_protocol::Frame) {
         let now = UtcDateTime::now();
-        let subagent = match frame.raw.get("subtype").and_then(Value::as_str) {
-            Some("task_started") => self.subagents.started(&frame.raw, now),
+        let events = match frame.raw.get("subtype").and_then(Value::as_str) {
+            Some("task_started") => {
+                // A task's turn item is numbered in the turn that is running, if any.
+                let active = &mut self.active;
+                let mut turn_item_ordinal = |native: &str| match active.as_mut() {
+                    Some(active) => item_ordinal(
+                        &mut active.item_ordinals,
+                        active.input.provider_turn_ordinal,
+                        native,
+                    ),
+                    None => 0,
+                };
+                self.subagents
+                    .started(&frame.raw, now, &mut turn_item_ordinal)
+            }
             Some("task_progress") => self.subagents.progress(&frame.raw, now),
             Some("task_updated") => self.subagents.updated(&frame.raw, now),
             Some("task_notification") => self.subagents.notified(&frame.raw, now),
-            _ => None,
+            _ => Vec::new(),
         };
-        if let Some(subagent) = subagent {
-            self.emit(ProviderAdapterV2Event::SubagentUpdated {
-                driver: driver(),
-                subagent,
-            });
+        for event in events {
+            self.emit(event);
         }
     }
     /// Upstream `compact_boundary`: a completed "Context compacted" item. A
@@ -1336,8 +1353,12 @@ impl ClaudeActor {
         }
     }
     fn user(&mut self, frame: turin_claude_protocol::Frame) {
-        // A subagent's tool results answer its own tool calls, which are not tracked here.
-        if parent_tool_use_id(&frame).is_some() {
+        // A subagent's tool results finish its tool calls in its child thread.
+        if let Some(owner) = parent_tool_use_id(&frame).map(str::to_owned) {
+            let now = UtcDateTime::now();
+            for event in self.subagents.child_user(&owner, &frame.raw, now) {
+                self.emit(event);
+            }
             return;
         }
         let mut events = self.workflow_handles(&frame);
@@ -1375,12 +1396,9 @@ impl ClaudeActor {
                     .cloned()
                     .unwrap_or_else(|| block.get("content").cloned().unwrap_or(Value::Null));
                 let handles = parse_claude_workflow_run_handles(&output)?;
-                self.subagents.run_handles(tool_use_id, &handles, now)
+                Some(self.subagents.run_handles(tool_use_id, &handles, now))
             })
-            .map(|subagent| ProviderAdapterV2Event::SubagentUpdated {
-                driver: driver(),
-                subagent,
-            })
+            .flatten()
             .collect()
     }
     fn result(&mut self, frame: turin_claude_protocol::Frame) {

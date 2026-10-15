@@ -8,6 +8,7 @@ pub mod claude_permission;
 pub mod claude_plan_items;
 pub mod claude_provider_adapter;
 pub mod claude_query_options;
+pub mod claude_subagent_threads;
 pub mod claude_subagents;
 pub mod claude_tool_titles;
 pub mod claude_turn_items;

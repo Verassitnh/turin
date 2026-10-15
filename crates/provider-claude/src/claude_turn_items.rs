@@ -36,12 +36,13 @@ pub fn item_ordinal(
 }
 
 /// Where an item sits: the thread, run, root node, and provider turn it
-/// belongs to.
+/// belongs to. A subagent's child thread has no run (`run_id` is `None`), as
+/// upstream's `runId: null` on its items.
 #[derive(Clone)]
 pub struct TurnScope {
     pub driver: ProviderDriverKind,
     pub thread_id: ThreadId,
-    pub run_id: RunId,
+    pub run_id: Option<RunId>,
     pub root_node_id: NodeId,
     pub provider_thread_id: ProviderThreadId,
     pub provider_turn_id: ProviderTurnId,
@@ -392,7 +393,7 @@ mod tests {
         TurnScope {
             driver,
             thread_id: serde_json::from_value(json!("thread-1")).unwrap(),
-            run_id: serde_json::from_value(json!("run-1")).unwrap(),
+            run_id: Some(serde_json::from_value(json!("run-1")).unwrap()),
             root_node_id: serde_json::from_value(json!("node-root")).unwrap(),
             provider_thread_id: serde_json::from_value(json!("provider-thread-1")).unwrap(),
             provider_turn_id: serde_json::from_value::<ProviderTurnId>(json!("provider-turn-1"))

@@ -235,7 +235,7 @@ pub fn project_plan(
     let plan_id = state
         .plan_ids
         .entry(plan_key)
-        .or_insert_with(|| IdAllocator.plan(&scope.thread_id, Some(&scope.run_id), driver))
+        .or_insert_with(|| IdAllocator.plan(&scope.thread_id, scope.run_id.as_ref(), driver))
         .clone();
     let node_id = derive::node_from_provider_item(driver, &projection_id);
     let item_id = derive::turn_item_from_provider_item(driver, &projection_id);

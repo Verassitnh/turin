@@ -1132,8 +1132,41 @@ async fn subagent_frames_stay_out_of_the_parent_turn() {
 
     let (seen, status) = until_terminal(&mut events).await;
     assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
-    let texts = assistant_texts(&seen);
-    assert_eq!(texts, vec!["parent done".to_owned()]);
+    // The parent turn's messages carry its run; the subagent's go to its child thread.
+    let parent_texts: Vec<String> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::MessageUpdated { message, .. } if message.run_id.is_some() => {
+                Some(message.text.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(parent_texts, vec!["parent done".to_owned()]);
+    let child_id = seen
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::SubagentUpdated { subagent, .. } => {
+                subagent.child_thread_id.clone()
+            }
+            _ => None,
+        })
+        .expect("the subagent has a child thread");
+    let child_texts: Vec<(String, String)> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::MessageUpdated { message, .. } if message.run_id.is_none() => {
+                Some((message.thread_id.as_str().to_owned(), message.text.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        child_texts
+            .iter()
+            .any(|(thread, text)| thread == child_id.as_str() && text == "child narration"),
+        "{child_texts:?}"
+    );
     assert!(
         turn_items(&seen)
             .iter()
@@ -1523,5 +1556,10 @@ async fn fixture_nested_subagent_is_parented_to_its_owner() {
             .unwrap_or_default()
             .contains("NESTED_LEAF_OK")
     );
-    assert!(nested["childThreadId"].is_null());
+    // Each subagent has its own child thread, and the nested one is not the outer one's.
+    let outer_child = outer["childThreadId"].as_str().expect("outer child thread");
+    let nested_child = nested["childThreadId"]
+        .as_str()
+        .expect("nested child thread");
+    assert_ne!(outer_child, nested_child);
 }

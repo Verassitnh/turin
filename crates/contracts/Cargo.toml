@@ -9,6 +9,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+regex.workspace = true
+indexmap.workspace = true
 chrono.workspace = true
 
 [dev-dependencies]

@@ -91,6 +91,9 @@ icon_assets!(
 
 /// The composer's send arrow (ComposerPrimaryActions.tsx).
 pub const SEND_ARROW: &str = "brand/send-arrow.svg";
+/// Lucide `chevron-down` at `stroke-width` 2.25 (ComposerControl.tsx); the
+/// stock `IconName::ChevronDown` is stroke 2.
+pub const CHEVRON_DOWN: &str = "brand/chevron-down.svg";
 
 /// `@pierre/diffs` sprite icons (`dist/sprite.js`), one monochrome SVG each.
 pub mod diff_icons {
@@ -107,6 +110,10 @@ pub mod diff_icons {
 
 const BRAND: &[(&str, &[u8])] = &[
     (SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg")),
+    (
+        CHEVRON_DOWN,
+        include_bytes!("../assets/brand/chevron-down.svg"),
+    ),
     (
         diff_icons::SYMBOL_ADDED,
         include_bytes!("../assets/diff/symbol-added.svg"),

@@ -40,7 +40,9 @@ impl RenderOnce for ChatHeader {
             .child(
                 WorkspaceBreadcrumb::new()
                     .child(
-                        WorkspaceBreadcrumbItem::new(false).child(
+                        // `className="shrink"`: the project crumb gives up width
+                        // before the title does.
+                        WorkspaceBreadcrumbItem::new(false).flex_shrink(1.).child(
                             div()
                                 .flex()
                                 .items_center()
@@ -54,7 +56,10 @@ impl RenderOnce for ChatHeader {
                     )
                     .child(WorkspaceBreadcrumbSeparator)
                     .child(
+                        // `min-w-10 flex-1`
                         WorkspaceBreadcrumbItem::new(true)
+                            .min_w(rems(2.5))
+                            .flex_1()
                             .child(workspace_breadcrumb_text(self.title)),
                     ),
             )

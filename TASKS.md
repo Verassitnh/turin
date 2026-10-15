@@ -54,6 +54,7 @@ when the logic is subtle (state machines, protocol framing, concurrency).
 | Run | Target | Result |
 |---|---|---|
 | wf_c926ef06-3ca | T03 design system + shell (+ look-and-feel) | FAIL: 1 high, 4 medium, 27 low. docs/qc/wf_c926ef06-3ca-T03-design-system.md |
+| wf_9dc37bfd-861 | T04b protocol docs fix round | running |
 | wf_e8a1a7c1-d53 | T21 hooks (spec, lifecycle, security/trust, process) | running |
 | wf_d6d58e6c-789 | T24 app icon (visual fidelity, reproducibility) | PASS: 1 medium, 6 low; T scale needs user decision. docs/qc/wf_d6d58e6c-789-T24-icon.md |
 | wf_8b97ef76-9c9 | T02 persistence | PASS: 15 medium, 27 low → T02b. docs/qc/wf_8b97ef76-9c9-T02-persistence.md |
@@ -75,7 +76,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | done (merged; QC PASS) |
 | T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | active |
 | T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | QC FAIL (1 high) → fix round r4 active; sidebar items moved to T15 |
-| T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex | T04b fixes done (18/21; 2,15 partial) → re-QC |
+| T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex | T04b fixes done (18/21; 2,15 partial) → re-QC wf_9dc37bfd-861 |
 
 ### Wave 2: backend leaves (after T01)
 
@@ -85,7 +86,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T05b | Shared utils, contract-dependent files | `crates/shared` | GLM | todo (after T01) |
 | T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok | active (base: T01 branch) |
 | T07 | Source control: core + GitHub driver, PR service, review guides, viewed files | `crates/source-control` | GLM | active (base: T01 branch) |
-| T08 | Provider core: adapter trait, registry, catalog, model manifests, auth/credentials | `crates/provider-core` | Codex | todo |
+| T08 | Provider core: adapter trait, registry, catalog, model manifests, auth/credentials | `crates/provider-core` | Codex | active (base: T01 branch) |
 
 ### Wave 3: engines (after wave 2)
 

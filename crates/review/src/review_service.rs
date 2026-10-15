@@ -11,7 +11,7 @@
 
 #![allow(clippy::result_large_err)]
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -29,7 +29,7 @@ use turin_git::vcs_driver_registry::{VcsDriverRegistry, VcsDriverResolveInput};
 use turin_git::vcs_project_config::RequestedVcsKind;
 
 use crate::worktrees_directory::{
-    WorktreesSettings, is_filesystem_root, managed_worktrees_directories, normalize_lexical,
+    WorktreesSettings, is_filesystem_root, managed_worktrees_directories,
 };
 
 /// `ServerConfig` fields a review cwd is checked against.
@@ -104,7 +104,8 @@ impl ReviewService {
         &self,
         input: &ReviewDiffPreviewInput,
     ) -> Result<ReviewDiffPreviewResult, ReviewDiffPreviewError> {
-        self.assert_workspace_bound_cwd("ReviewService.getDiffPreview", input.cwd.as_str())
+        let candidate = self
+            .assert_workspace_bound_cwd("ReviewService.getDiffPreview", input.cwd.as_str())
             .await
             .map_err(ReviewDiffPreviewError::Vcs)?;
         assert_base_ref_is_not_an_option(
@@ -112,10 +113,16 @@ impl ReviewService {
             input.cwd.as_str(),
             input.base_ref.as_ref(),
         )?;
+        // Every VCS call gets the canonical cwd that was checked, never the raw spelling, which
+        // can name a different directory once symlinks are resolved.
+        let canonical_input = ReviewDiffPreviewInput {
+            cwd: review_cwd(&candidate).map_err(ReviewDiffPreviewError::Vcs)?,
+            ..input.clone()
+        };
 
         let Some(kind) = self
             .vcs
-            .detect_kind(input.cwd.as_str())
+            .detect_kind(canonical_input.cwd.as_str())
             .await
             .map_err(ReviewDiffPreviewError::Vcs)?
         else {
@@ -136,8 +143,13 @@ impl ReviewService {
             )));
         }
         self.git
-            .get_review_diff_preview(input)
+            .get_review_diff_preview(&canonical_input)
             .await
+            // The result reports the cwd the caller sent, as upstream does.
+            .map(|result| ReviewDiffPreviewResult {
+                cwd: input.cwd.clone(),
+                ..result
+            })
             .map_err(ReviewDiffPreviewError::GitCommand)
     }
 
@@ -145,7 +157,8 @@ impl ReviewService {
         &self,
         input: &ReviewDiffFileContentsInput,
     ) -> Result<ReviewDiffFileContentsResult, ReviewDiffPreviewError> {
-        self.assert_workspace_bound_cwd("ReviewService.getDiffFileContents", input.cwd.as_str())
+        let candidate = self
+            .assert_workspace_bound_cwd("ReviewService.getDiffFileContents", input.cwd.as_str())
             .await
             .map_err(ReviewDiffPreviewError::Vcs)?;
         assert_base_ref_is_not_an_option(
@@ -153,10 +166,14 @@ impl ReviewService {
             input.cwd.as_str(),
             input.base_ref.as_ref(),
         )?;
+        let canonical_input = ReviewDiffFileContentsInput {
+            cwd: review_cwd(&candidate).map_err(ReviewDiffPreviewError::Vcs)?,
+            ..input.clone()
+        };
 
         let kind = self
             .vcs
-            .detect_kind(input.cwd.as_str())
+            .detect_kind(canonical_input.cwd.as_str())
             .await
             .map_err(ReviewDiffPreviewError::Vcs)?;
         if kind != Some(VcsDriverKind::Git) {
@@ -170,18 +187,19 @@ impl ReviewService {
             )));
         }
         self.git
-            .get_review_diff_file_contents(input)
+            .get_review_diff_file_contents(&canonical_input)
             .await
             .map_err(ReviewDiffPreviewError::GitCommand)
     }
 
     /// Rejects a cwd outside the workspace root, every managed worktrees directory, and every
     /// registered project root. Upstream attributes the failure to the calling operation.
+    /// Returns the canonical cwd that was checked, which is the one the VCS calls must use.
     async fn assert_workspace_bound_cwd(
         &self,
         operation: &'static str,
         cwd: &str,
-    ) -> Result<(), VcsError> {
+    ) -> Result<PathBuf, VcsError> {
         let settings = self.settings.worktrees_settings().await.unwrap_or_default();
         let candidate = canonicalize_path(Path::new(cwd))?;
         let workspace_root = canonicalize_path(&self.config.workspace_root)?;
@@ -199,7 +217,7 @@ impl ReviewService {
                 .iter()
                 .any(|root| is_within_root(&candidate, root))
         {
-            return Ok(());
+            return Ok(candidate);
         }
 
         // Registered projects can live outside the server cwd, which is the home directory in
@@ -214,7 +232,7 @@ impl ReviewService {
             if let Ok(root) = canonicalize_path(Path::new(&project))
                 && is_within_root(&candidate, &root)
             {
-                return Ok(());
+                return Ok(candidate);
             }
         }
 
@@ -245,38 +263,75 @@ fn assert_base_ref_is_not_an_option(
     base_ref: Option<&TrimmedNonEmptyString>,
 ) -> Result<(), ReviewDiffPreviewError> {
     match base_ref {
-        Some(base_ref) if base_ref.as_str().starts_with('-') => Err(
-            ReviewDiffPreviewError::Vcs(VcsError::RepositoryDetection(
+        Some(base_ref) if base_ref.as_str().starts_with('-') => {
+            Err(ReviewDiffPreviewError::Vcs(VcsError::RepositoryDetection(
                 VcsRepositoryDetectionError::VcsRepositoryDetectionError {
                     operation: operation.to_owned(),
                     cwd: cwd.to_owned(),
                     detail: "Review base ref must not start with '-'.".to_owned(),
                     cause: None,
                 },
-            )),
-        ),
+            )))
+        }
         _ => Ok(()),
     }
 }
 
-/// `path.resolve` followed by `fs.realPath`. A path that does not exist yet keeps its resolved
-/// form; any other failure (such as an interior NUL byte) is reported, not ignored.
+/// `path.resolve` followed by `fs.realPath`, except that each existing prefix is resolved as it is
+/// reached. A `..` after a symlink then climbs from the link's target, as the kernel does, instead
+/// of from the link's spelling (`ws/link/..` must not fold to `ws` when `link` points outside).
+/// A path that does not exist yet keeps its lexical form from that point on; any other failure
+/// (such as an interior NUL byte) is reported, not ignored.
 fn canonicalize_path(value: &Path) -> Result<PathBuf, VcsError> {
     let absolute = std::path::absolute(value).unwrap_or_else(|_| value.to_path_buf());
-    let resolved = normalize_lexical(&absolute);
-    match std::fs::canonicalize(&resolved) {
-        Ok(canonical) => Ok(canonical),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(resolved),
-        Err(error) => Err(VcsError::RepositoryDetection(
-            VcsRepositoryDetectionError::VcsRepositoryDetectionError {
-                operation: "ReviewService.assertWorkspaceBoundCwd.canonicalizePath".to_owned(),
-                cwd: resolved.display().to_string(),
-                detail: "Failed to resolve a path while validating the review workspace."
-                    .to_owned(),
-                cause: Some(serde_json::Value::String(error.to_string())),
-            },
-        )),
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            // `/..` stays `/`, which `pop` already does at the root.
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                resolved.push(component.as_os_str());
+                match std::fs::canonicalize(&resolved) {
+                    Ok(canonical) => resolved = canonical,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(VcsError::RepositoryDetection(
+                            VcsRepositoryDetectionError::VcsRepositoryDetectionError {
+                                operation: "ReviewService.assertWorkspaceBoundCwd.canonicalizePath"
+                                    .to_owned(),
+                                cwd: absolute.display().to_string(),
+                                detail: "Failed to resolve a path while validating the review workspace."
+                                    .to_owned(),
+                                cause: Some(serde_json::Value::String(error.to_string())),
+                            },
+                        ));
+                    }
+                }
+            }
+        }
     }
+    Ok(resolved)
+}
+
+/// The canonical cwd as the `TrimmedNonEmptyString` the VCS inputs carry. A path that is not
+/// UTF-8 cannot be named in the review contracts, so it fails like any other unresolvable path.
+fn review_cwd(path: &Path) -> Result<TrimmedNonEmptyString, VcsError> {
+    path.to_str()
+        .and_then(|value| TrimmedNonEmptyString::new(value).ok())
+        .ok_or_else(|| {
+            VcsError::RepositoryDetection(
+                VcsRepositoryDetectionError::VcsRepositoryDetectionError {
+                    operation: "ReviewService.assertWorkspaceBoundCwd.canonicalizePath".to_owned(),
+                    cwd: path.display().to_string(),
+                    detail: "Failed to resolve a path while validating the review workspace."
+                        .to_owned(),
+                    cause: None,
+                },
+            )
+        })
 }
 
 /// Component-wise containment. Both sides are canonical absolute paths here.
@@ -621,7 +676,41 @@ mod tests {
 
         assert_eq!(result.cwd.as_str(), workspace_cwd);
         assert!(result.sources.is_empty());
-        assert_eq!(vcs.calls(), vec![workspace_cwd.to_owned()]);
+        // VCS detection sees the canonical cwd, not the raw spelling.
+        let canonical_workspace = fixture.workspace.path().canonicalize().unwrap();
+        assert_eq!(
+            vcs.calls(),
+            vec![canonical_workspace.to_str().unwrap().to_owned()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_dot_dot_after_a_symlink_that_leaves_the_workspace() {
+        let fixture = fixture();
+        let outside = TempDir::with_prefix("t3-review-outside-").unwrap();
+        let outside_inner = outside.path().join("inner");
+        std::fs::create_dir(&outside_inner).unwrap();
+        // `<workspace>/link/..` folds to the workspace when read lexically, but the kernel resolves
+        // it to the link target's parent, `outside/`, which is not inside the workspace.
+        let link = fixture.workspace.path().join("link");
+        std::os::unix::fs::symlink(&outside_inner, &link).unwrap();
+        let cwd = link.join("..");
+        let cwd = cwd.to_str().unwrap();
+        let vcs = FakeVcs::new(None);
+
+        let error = service(
+            &fixture,
+            vcs.clone(),
+            WorktreesSettings::default(),
+            Ok(vec![]),
+        )
+        .get_diff_preview(&preview_input(cwd))
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, outside_error("ReviewService.getDiffPreview", cwd));
+        assert!(vcs.calls().is_empty());
     }
 
     #[tokio::test]

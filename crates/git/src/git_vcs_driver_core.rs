@@ -29,15 +29,15 @@ pub(super) const OUTPUT_TRUNCATED_MARKER: &str = "\n\n[truncated]";
 mod driver;
 pub use driver::{
     CreateWorktreeOptions, GitCommitOptions, GitCommitResult, GitDeleteLocalBranchInput,
-    SubmodulesDisabledCallback, SubmodulesFinishedCallback, WorktreeClaimedCallback,
     GitEnsureRemoteInput, GitFetchPullRequestBranchInput, GitFetchPullRequestHeadCommitInput,
     GitFetchRemoteBranchInput, GitFetchRemoteInput, GitFetchRemoteTrackingBranchInput,
     GitLocalStatusOptions, GitPreparedCommitContext, GitPushOptions, GitPushResult, GitPushStatus,
     GitRangeContext, GitRefreshCheckedOutBranchInput, GitRefreshCheckedOutBranchResult,
-    GitRemoteBranchExistsInput, GitRemoteExistsInput, GitRemoteStatusDetails, GitRemoteStatusOptions,
-    GitRenameBranchInput, GitRenameBranchResult, GitResolveCommitInput, GitResolveCommitResult,
-    GitResolveRemoteTrackingCommitInput, GitResolveRemoteTrackingCommitResult,
-    GitSetBranchUpstreamInput, GitStatusDetails,
+    GitRemoteBranchExistsInput, GitRemoteExistsInput, GitRemoteStatusDetails,
+    GitRemoteStatusOptions, GitRenameBranchInput, GitRenameBranchResult, GitResolveCommitInput,
+    GitResolveCommitResult, GitResolveRemoteTrackingCommitInput,
+    GitResolveRemoteTrackingCommitResult, GitSetBranchUpstreamInput, GitStatusDetails,
+    SubmodulesDisabledCallback, SubmodulesFinishedCallback, WorktreeClaimedCallback,
 };
 
 static BRANCH_AB: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\+(\d+)\s+-(\d+)$").unwrap());
@@ -887,7 +887,11 @@ fn next_line_break(buffer: &str) -> Option<(usize, usize)> {
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'\r' {
-            let len = if bytes.get(index + 1) == Some(&b'\n') { 2 } else { 1 };
+            let len = if bytes.get(index + 1) == Some(&b'\n') {
+                2
+            } else {
+                1
+            };
             return Some((index, len));
         }
         if bytes[index] == b'\n' {

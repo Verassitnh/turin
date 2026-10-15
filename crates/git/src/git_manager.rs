@@ -9,8 +9,8 @@
 #![allow(clippy::result_large_err)]
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -21,15 +21,15 @@ use turin_contracts::base_schemas::{PositiveInt, TrimmedNonEmptyString};
 use turin_contracts::environment::WorktreeSubmodules;
 use turin_contracts::git::{
     GitActionProgressEvent, GitActionProgressPhase, GitBranchStepStatus, GitCommandError,
-    GitCommitStepStatus, GitManagerError, GitManagerServiceError, GitPreparePullRequestThreadInput,
-    GitPreparePullRequestThreadResult, GitPrStepStatus, GitPullRequestRefInput,
-    GitPullRequestState, GitPushStepStatus, GitResolvePullRequestResult,
-    GitResolvedPullRequest, GitRunStackedActionInput, GitRunStackedActionResult,
-    GitRunStackedActionToast, GitRunStackedActionToastCta, GitRunStackedActionToastRunAction,
-    GitStackedAction, GitStackedBranchStep, GitStackedCommitStep, GitStackedPrStep,
-    GitStackedPushStep, TextGenerationError, VcsCreateRefInput, VcsCreateWorktreeInput,
-    VcsCreateWorktreeResult, VcsPullResult, VcsStatusChangeRequest, VcsStatusInput,
-    VcsStatusLocalResult, VcsStatusRemoteResult, VcsStatusResult, VcsSwitchRefInput,
+    GitCommitStepStatus, GitManagerError, GitManagerServiceError, GitPrStepStatus,
+    GitPreparePullRequestThreadInput, GitPreparePullRequestThreadResult, GitPullRequestRefInput,
+    GitPullRequestState, GitPushStepStatus, GitResolvePullRequestResult, GitResolvedPullRequest,
+    GitRunStackedActionInput, GitRunStackedActionResult, GitRunStackedActionToast,
+    GitRunStackedActionToastCta, GitRunStackedActionToastRunAction, GitStackedAction,
+    GitStackedBranchStep, GitStackedCommitStep, GitStackedPrStep, GitStackedPushStep,
+    TextGenerationError, VcsCreateRefInput, VcsCreateWorktreeInput, VcsCreateWorktreeResult,
+    VcsPullResult, VcsStatusChangeRequest, VcsStatusInput, VcsStatusLocalResult,
+    VcsStatusRemoteResult, VcsStatusResult, VcsSwitchRefInput,
 };
 use turin_contracts::source_control::{SourceControlProviderError, SourceControlProviderKind};
 use turin_contracts::thread_pull_request::ThreadPullRequestKey;
@@ -39,7 +39,7 @@ use crate::git_vcs_driver_core::{
     GitRemoteStatusOptions as DriverRemoteStatusOptions, GitVcsDriverCore,
 };
 use crate::link_created_pull_request::{
-    created_pull_request_key, CreatedPullRequestKey, ProjectRepositoryIdentity,
+    CreatedPullRequestKey, ProjectRepositoryIdentity, created_pull_request_key,
 };
 use crate::shared_git::{
     merge_git_status_parts, normalize_git_remote_url, resolve_auto_feature_branch_name,
@@ -100,7 +100,11 @@ pub fn repository_path_from_remote_url(url: &str) -> Option<String> {
         return None;
     }
     let path = REPOSITORY_PATH.captures(trimmed)?.get(1)?.as_str().trim();
-    if path.is_empty() { None } else { Some(path.to_owned()) }
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_owned())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -538,7 +542,8 @@ impl GitManager {
         options: GitManagerRemoteStatusOptions,
     ) -> Result<VcsStatusRemoteResult, GitManagerServiceError> {
         let key = cache_key(input.cwd.as_str());
-        let bypass = options.refresh_upstream == Some(false) || options.refresh_missing_pull_request;
+        let bypass =
+            options.refresh_upstream == Some(false) || options.refresh_missing_pull_request;
         if !bypass && let Some(hit) = self.remote_cache.lock().get(&key) {
             return Ok(hit);
         }
@@ -563,7 +568,11 @@ impl GitManager {
             && let Some(branch) = details.branch.as_deref()
         {
             match self
-                .branch_pull_request(input.cwd.as_str(), branch, options.refresh_missing_pull_request)
+                .branch_pull_request(
+                    input.cwd.as_str(),
+                    branch,
+                    options.refresh_missing_pull_request,
+                )
                 .await
             {
                 Ok(Some(found)) => remote.pr = Some(found.change_request),
@@ -861,12 +870,24 @@ impl GitManager {
         }
 
         let file_paths = input.file_paths.as_ref().map(|paths| {
-            paths.iter().map(|path| path.as_str().to_owned()).collect::<Vec<_>>()
+            paths
+                .iter()
+                .map(|path| path.as_str().to_owned())
+                .collect::<Vec<_>>()
         });
         let (branch_step, resolved_message) = if feature_branch {
-            emit_phase(options, input, GitActionProgressPhase::Branch, "Preparing feature branch...")?;
-            self.feature_branch_step(cwd, input.commit_message.as_ref().map(|m| m.as_str()), file_paths.as_deref())
-                .await?
+            emit_phase(
+                options,
+                input,
+                GitActionProgressPhase::Branch,
+                "Preparing feature branch...",
+            )?;
+            self.feature_branch_step(
+                cwd,
+                input.commit_message.as_ref().map(|m| m.as_str()),
+                file_paths.as_deref(),
+            )
+            .await?
         } else {
             (
                 GitStackedBranchStep {
@@ -876,13 +897,20 @@ impl GitManager {
                 input.commit_message.clone(),
             )
         };
-        let current_branch = branch_step
-            .name
-            .clone()
-            .or_else(|| initial.branch.as_deref().and_then(|name| trimmed(name).ok()));
+        let current_branch = branch_step.name.clone().or_else(|| {
+            initial
+                .branch
+                .as_deref()
+                .and_then(|name| trimmed(name).ok())
+        });
 
         let commit = if wants_commit {
-            emit_phase(options, input, GitActionProgressPhase::Commit, "Committing...")?;
+            emit_phase(
+                options,
+                input,
+                GitActionProgressPhase::Commit,
+                "Committing...",
+            )?;
             self.commit_step(
                 cwd,
                 resolved_message.as_ref().map(|message| message.as_str()),
@@ -900,7 +928,11 @@ impl GitManager {
             emit_phase(options, input, GitActionProgressPhase::Push, "Pushing...")?;
             let pushed = self
                 .git
-                .push_current_branch(cwd, current_branch.as_ref().map(|name| name.as_str()), GitPushOptions::default())
+                .push_current_branch(
+                    cwd,
+                    current_branch.as_ref().map(|name| name.as_str()),
+                    GitPushOptions::default(),
+                )
                 .await
                 .map_err(GitManagerServiceError::Command)?;
             if pushed.status == GitPushStatus::Pushed {
@@ -912,7 +944,10 @@ impl GitManager {
                     GitPushStatus::SkippedUpToDate => GitPushStepStatus::SkippedUpToDate,
                 },
                 branch: trimmed(&pushed.branch).ok(),
-                upstream_branch: pushed.upstream_branch.as_deref().and_then(|name| trimmed(name).ok()),
+                upstream_branch: pushed
+                    .upstream_branch
+                    .as_deref()
+                    .and_then(|name| trimmed(name).ok()),
                 set_upstream: pushed.set_upstream,
             }
         } else {
@@ -924,7 +959,12 @@ impl GitManager {
             }
         };
         let pr = if wants_pr {
-            emit_phase(options, input, GitActionProgressPhase::Pr, "Preparing PR...")?;
+            emit_phase(
+                options,
+                input,
+                GitActionProgressPhase::Pr,
+                "Preparing PR...",
+            )?;
             self.pr_step(
                 cwd,
                 current_branch.as_ref().map(|name| name.as_str()),
@@ -982,8 +1022,13 @@ impl GitManager {
                 "Cannot create a feature branch because there are no changes to commit.",
             ));
         }
-        let suggested = self.suggest_commit(cwd, commit_message, prepared.as_ref()).await?;
-        let preferred = suggested.branch.clone().unwrap_or_else(|| suggested.subject.clone());
+        let suggested = self
+            .suggest_commit(cwd, commit_message, prepared.as_ref())
+            .await?;
+        let preferred = suggested
+            .branch
+            .clone()
+            .unwrap_or_else(|| suggested.subject.clone());
         let existing = self
             .git
             .list_local_branch_names(cwd)
@@ -1004,7 +1049,10 @@ impl GitManager {
                 status: GitBranchStepStatus::Created,
                 name: Some(ref_name),
             },
-            Some(trimmed(&format_commit_message(&suggested.subject, &suggested.body))?),
+            Some(trimmed(&format_commit_message(
+                &suggested.subject,
+                &suggested.body,
+            ))?),
         ))
     }
 
@@ -1026,7 +1074,9 @@ impl GitManager {
                 subject: None,
             });
         };
-        let suggested = self.suggest_commit(cwd, commit_message, Some(&prepared)).await?;
+        let suggested = self
+            .suggest_commit(cwd, commit_message, Some(&prepared))
+            .await?;
         let committed = self
             .git
             .commit(
@@ -1065,7 +1115,9 @@ impl GitManager {
             None
         };
         Ok(match generated {
-            Some(suggested) => sanitize_commit_message(suggested.subject, suggested.body, suggested.branch),
+            Some(suggested) => {
+                sanitize_commit_message(suggested.subject, suggested.body, suggested.branch)
+            }
             None => sanitize_commit_message(String::new(), String::new(), None),
         })
     }
@@ -1086,7 +1138,10 @@ impl GitManager {
         if let Some(existing) = self.branch_pull_request(cwd, branch, true).await?
             && existing.change_request.state == GitPullRequestState::Open
         {
-            return Ok(pr_from_host_status(&existing, GitPrStepStatus::OpenedExisting));
+            return Ok(pr_from_host_status(
+                &existing,
+                GitPrStepStatus::OpenedExisting,
+            ));
         }
         let base = self
             .git
@@ -1187,8 +1242,10 @@ impl GitManager {
                 label: trimmed("View PR")?,
                 url: open_url.unwrap_or_default(),
             }
-        } else if matches!(result.action, GitStackedAction::Push | GitStackedAction::CommitPush)
-            && result.push.status == GitPushStepStatus::Pushed
+        } else if matches!(
+            result.action,
+            GitStackedAction::Push | GitStackedAction::CommitPush
+        ) && result.push.status == GitPushStepStatus::Pushed
             && !current_branch_is_default
         {
             GitRunStackedActionToastCta::RunAction {
@@ -1242,7 +1299,9 @@ impl GitManager {
         let exact = branch_ref
             .split('\n')
             .find(|line| line.split('\0').next() == Some(expected.as_str()));
-        let fields: Vec<&str> = exact.map(|line| line.split('\0').collect()).unwrap_or_default();
+        let fields: Vec<&str> = exact
+            .map(|line| line.split('\0').collect())
+            .unwrap_or_default();
         let local_exists = !fields.first().copied().unwrap_or("").is_empty();
         let saved_upstream = fields.get(1).copied().unwrap_or("");
         let saved_remote = fields.get(2).copied().unwrap_or("");
@@ -1352,7 +1411,11 @@ impl GitManager {
             return Ok(None);
         }
         let number = PositiveInt::new(latest.number).ok_or_else(|| {
-            manager("branchPullRequest", cwd, "Pull request number must be at least 1.")
+            manager(
+                "branchPullRequest",
+                cwd,
+                "Pull request number must be at least 1.",
+            )
         })?;
         Ok(Some(GitBranchPullRequest {
             change_request: VcsStatusChangeRequest {
@@ -1372,7 +1435,12 @@ impl GitManager {
         }))
     }
 
-    async fn remember_git<F, Fut>(&self, cwd: &str, name: &str, read: F) -> Result<String, GitManagerServiceError>
+    async fn remember_git<F, Fut>(
+        &self,
+        cwd: &str,
+        name: &str,
+        read: F,
+    ) -> Result<String, GitManagerServiceError>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<String, GitManagerServiceError>>,
@@ -1417,13 +1485,18 @@ fn pr_lookup_result(
     }
 }
 
-fn local_from_details(details: crate::git_vcs_driver_core::GitStatusDetails) -> VcsStatusLocalResult {
+fn local_from_details(
+    details: crate::git_vcs_driver_core::GitStatusDetails,
+) -> VcsStatusLocalResult {
     VcsStatusLocalResult {
         is_repo: details.is_repo,
         source_control_provider: None,
         has_primary_remote: details.has_origin_remote,
         is_default_ref: details.is_default_branch,
-        ref_name: details.branch.as_deref().and_then(|name| trimmed(name).ok()),
+        ref_name: details
+            .branch
+            .as_deref()
+            .and_then(|name| trimmed(name).ok()),
         has_working_tree_changes: details.has_working_tree_changes,
         working_tree: details.working_tree,
         branch_changes: details.branch_changes,
@@ -1448,7 +1521,10 @@ fn skipped_pr() -> GitStackedPrStep {
     }
 }
 
-fn pr_from_host_status(existing: &GitBranchPullRequest, status: GitPrStepStatus) -> GitStackedPrStep {
+fn pr_from_host_status(
+    existing: &GitBranchPullRequest,
+    status: GitPrStepStatus,
+) -> GitStackedPrStep {
     GitStackedPrStep {
         status,
         url: Some(existing.change_request.url.clone()),
@@ -1459,10 +1535,16 @@ fn pr_from_host_status(existing: &GitBranchPullRequest, status: GitPrStepStatus)
     }
 }
 
-fn resolved_from_host(found: &HostChangeRequest) -> Result<GitResolvedPullRequest, GitManagerServiceError> {
+fn resolved_from_host(
+    found: &HostChangeRequest,
+) -> Result<GitResolvedPullRequest, GitManagerServiceError> {
     Ok(GitResolvedPullRequest {
         number: PositiveInt::new(found.number).ok_or_else(|| {
-            manager("resolvePullRequest", "", "Pull request number must be at least 1.")
+            manager(
+                "resolvePullRequest",
+                "",
+                "Pull request number must be at least 1.",
+            )
         })?,
         title: trimmed(&found.title)?,
         url: found.url.clone(),
@@ -1481,13 +1563,22 @@ fn normalize_pull_request_reference(reference: &str) -> String {
         .to_owned()
 }
 
-fn sanitize_commit_message(subject: String, body: String, branch: Option<String>) -> SuggestedCommit {
+fn sanitize_commit_message(
+    subject: String,
+    body: String,
+    branch: Option<String>,
+) -> SuggestedCommit {
     let raw = subject.trim().lines().next().unwrap_or("").trim();
     let stripped = raw.trim_end_matches('.').trim();
     let safe = if stripped.is_empty() {
         "Update project files".to_owned()
     } else {
-        stripped.chars().take(72).collect::<String>().trim_end().to_owned()
+        stripped
+            .chars()
+            .take(72)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
     };
     SuggestedCommit {
         subject: safe,
@@ -1507,7 +1598,10 @@ fn parse_custom_commit_message(raw: &str) -> Option<(String, String)> {
     if subject.is_empty() {
         return None;
     }
-    Some((subject.to_owned(), lines.collect::<Vec<_>>().join("\n").trim().to_owned()))
+    Some((
+        subject.to_owned(),
+        lines.collect::<Vec<_>>().join("\n").trim().to_owned(),
+    ))
 }
 
 fn format_commit_message(subject: &str, body: &str) -> String {
@@ -1535,15 +1629,20 @@ fn summarize_git_action_result(result: &GitRunStackedActionResult) -> (String, O
             .unwrap_or_default();
         return (
             format!("{verb} PR{number}"),
-            result.pr.title.as_ref().map(|title| truncate_text(title.as_str())),
+            result
+                .pr
+                .title
+                .as_ref()
+                .map(|title| truncate_text(title.as_str())),
         );
     }
     if result.push.status == GitPushStepStatus::Pushed {
-        let sha = result
-            .commit
-            .commit_sha
-            .as_ref()
-            .map(|sha| format!(" {}", &sha.as_str()[..sha.as_str().len().min(SHORT_SHA_LENGTH)]));
+        let sha = result.commit.commit_sha.as_ref().map(|sha| {
+            format!(
+                " {}",
+                &sha.as_str()[..sha.as_str().len().min(SHORT_SHA_LENGTH)]
+            )
+        });
         let branch = result
             .push
             .upstream_branch
@@ -1597,7 +1696,10 @@ fn truncate_text(value: &str) -> String {
     shortened
 }
 
-fn emit(progress: Option<&Arc<dyn Fn(GitActionProgressEvent) + Send + Sync>>, event: GitActionProgressEvent) {
+fn emit(
+    progress: Option<&Arc<dyn Fn(GitActionProgressEvent) + Send + Sync>>,
+    event: GitActionProgressEvent,
+) {
     if let Some(progress) = progress {
         progress(event);
     }
@@ -1632,13 +1734,13 @@ fn manager(operation: &str, cwd: &str, detail: &str) -> GitManagerServiceError {
 }
 
 fn trimmed(value: &str) -> Result<TrimmedNonEmptyString, GitManagerServiceError> {
-    TrimmedNonEmptyString::new(value).map_err(|_| manager("gitManager", "", "Expected a non-empty string."))
+    TrimmedNonEmptyString::new(value)
+        .map_err(|_| manager("gitManager", "", "Expected a non-empty string."))
 }
 
 fn trimmed_or(value: &str, fallback: &str) -> TrimmedNonEmptyString {
-    TrimmedNonEmptyString::new(value).unwrap_or_else(|_| {
-        TrimmedNonEmptyString::new(fallback).expect("fallback")
-    })
+    TrimmedNonEmptyString::new(value)
+        .unwrap_or_else(|_| TrimmedNonEmptyString::new(fallback).expect("fallback"))
 }
 
 fn provider_error(operation: &str, cwd: &str, detail: &str) -> SourceControlProviderError {
@@ -1699,7 +1801,11 @@ fn repository_name_from_pull_url(url: &str) -> Option<String> {
         .ok()?
         .captures(url.trim())?;
     let name = caps.get(1)?.as_str().trim();
-    if name.is_empty() { None } else { Some(name.to_owned()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_owned())
+    }
 }
 
 fn normalize_optional(value: Option<&str>) -> Option<String> {
@@ -1728,7 +1834,10 @@ fn parse_http_url(value: &str) -> Option<ParsedHttp> {
         .or_else(|| value.strip_prefix("http://"))?;
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
     let path = path.split(['?', '#']).next().unwrap_or(path);
-    let host = authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority);
+    let host = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
     let hostname = host.split(':').next().unwrap_or(host);
     if hostname.is_empty() {
         return None;
@@ -1788,7 +1897,11 @@ mod tests {
             ("https://github.example.com/team/repository/issues/42", None),
         ];
         for (url, expected) in cases {
-            assert_eq!(pull_request_repository_key(url).as_deref(), expected, "{url}");
+            assert_eq!(
+                pull_request_repository_key(url).as_deref(),
+                expected,
+                "{url}"
+            );
         }
     }
 
@@ -1821,7 +1934,8 @@ mod tests {
             &head,
         ));
         assert_eq!(
-            repository_path_from_remote_url("https://gitlab.example/group/maria/project.git").as_deref(),
+            repository_path_from_remote_url("https://gitlab.example/group/maria/project.git")
+                .as_deref(),
             Some("group/maria/project")
         );
     }
@@ -1852,7 +1966,9 @@ mod tests {
         let manager = GitManager::new(Arc::new(GitVcsDriverCore::new()));
         let cwd_name = trimmed(cwd.to_str().unwrap()).unwrap();
         let status = manager
-            .status(&VcsStatusInput { cwd: cwd_name.clone() })
+            .status(&VcsStatusInput {
+                cwd: cwd_name.clone(),
+            })
             .await
             .unwrap();
         assert!(status.is_repo);

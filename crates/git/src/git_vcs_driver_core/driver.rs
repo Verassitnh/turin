@@ -29,15 +29,15 @@ use turin_contracts::review::{
 };
 
 use super::{
-    classify_git_failure, fetch_failure_detail, filter_branches_for_list_query, git_error,
-    is_missing_worktree_stderr, is_non_repository_git_stderr, is_ref_lock_failure,
-    is_unborn_head_stderr, paginate_branches, parse_branch_ab, parse_default_branch_from_remote_head_ref,
-    parse_git_checkout_progress_line, parse_numstat_entries, parse_porcelain_path,
-    parse_remote_fetch_urls, parse_review_numstat, parse_tracking_branch_by_upstream_ref,
-    parse_upstream_ref_by_first_separator, parse_upstream_ref_with_remote_names,
-    parse_worktree_branch_paths, sanitize_remote_name, split_null_separated_paths,
     CheckoutProgress, ExecuteGitInput, ExecuteGitResult, GitLineCallback, GitVcsDriverCore,
-    OUTPUT_TRUNCATED_MARKER,
+    OUTPUT_TRUNCATED_MARKER, classify_git_failure, fetch_failure_detail,
+    filter_branches_for_list_query, git_error, is_missing_worktree_stderr,
+    is_non_repository_git_stderr, is_ref_lock_failure, is_unborn_head_stderr, paginate_branches,
+    parse_branch_ab, parse_default_branch_from_remote_head_ref, parse_git_checkout_progress_line,
+    parse_numstat_entries, parse_porcelain_path, parse_remote_fetch_urls, parse_review_numstat,
+    parse_tracking_branch_by_upstream_ref, parse_upstream_ref_by_first_separator,
+    parse_upstream_ref_with_remote_names, parse_worktree_branch_paths, sanitize_remote_name,
+    split_null_separated_paths,
 };
 use crate::remote_refs::{
     parse_remote_names, parse_remote_names_in_git_order, parse_remote_ref_with_remote_names,
@@ -59,11 +59,18 @@ const REFS_CAPACITY: usize = 64;
 const STATUS_REFRESH_CAPACITY: usize = 2_048;
 
 pub fn review_diff_args() -> Vec<String> {
-    ["diff", "--find-renames", "--no-color", "--no-ext-diff", "--no-textconv", "--minimal"]
-        .into_iter()
-        .map(str::to_owned)
-        .chain(PATCH_RENDER_PREFIX_ARGS.into_iter().map(str::to_owned))
-        .collect()
+    [
+        "diff",
+        "--find-renames",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--minimal",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .chain(PATCH_RENDER_PREFIX_ARGS.into_iter().map(str::to_owned))
+    .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -736,11 +743,7 @@ fn expand_home(value: &str) -> String {
         return std::env::var("HOME").unwrap_or_else(|_| value.to_owned());
     }
     if let Some(rest) = value.strip_prefix("~/") {
-        return format!(
-            "{}/{}",
-            std::env::var("HOME").unwrap_or_default(),
-            rest
-        );
+        return format!("{}/{}", std::env::var("HOME").unwrap_or_default(), rest);
     }
     value.to_owned()
 }
@@ -977,10 +980,8 @@ impl GitVcsDriverCore {
             )
             .await?;
         let index_path = resolve_path(cwd, index_value.trim());
-        let directory = std::env::temp_dir().join(format!(
-            "t3code-commit-index-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("t3code-commit-index-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).map_err(|error| {
             plain_error(
                 "GitVcsDriver.prepareCommitContext",
@@ -1028,7 +1029,9 @@ impl GitVcsDriverCore {
             argv(&["diff", "--cached", "--name-status"]),
         );
         summary_call.env = env.clone();
-        let staged_summary = stdout_text(&self.git(cwd, summary_call).await?).trim().to_owned();
+        let staged_summary = stdout_text(&self.git(cwd, summary_call).await?)
+            .trim()
+            .to_owned();
         if staged_summary.is_empty() {
             return Ok(None);
         }
@@ -1100,13 +1103,7 @@ impl GitVcsDriverCore {
             self.limited_stdout(
                 "GitVcsDriver.readRangeContext.diffPatch",
                 cwd,
-                argv(&[
-                    "diff",
-                    "--no-ext-diff",
-                    "--patch",
-                    "--minimal",
-                    &diff_range
-                ]),
+                argv(&["diff", "--no-ext-diff", "--patch", "--minimal", &diff_range]),
                 RANGE_DIFF_PATCH_MAX,
             ),
         );
@@ -1165,10 +1162,7 @@ impl GitVcsDriverCore {
         call.allow_non_zero = true;
         let result = self.git(cwd, call).await?;
         if result.exit_code != Some(0) {
-            let remote_name = self
-                .resolve_primary_remote_name(cwd)
-                .await
-                .ok();
+            let remote_name = self.resolve_primary_remote_name(cwd).await.ok();
             if let Some(remote_name) = remote_name
                 && self
                     .remote_branch_exists(&GitRemoteBranchExistsInput {
@@ -1253,7 +1247,11 @@ impl GitVcsDriverCore {
             .git_out(
                 "GitVcsDriver.resolveCommit",
                 &input.cwd,
-                argv(&["rev-parse", "--verify", &format!("{}^{{commit}}", input.revision)]),
+                argv(&[
+                    "rev-parse",
+                    "--verify",
+                    &format!("{}^{{commit}}", input.revision),
+                ]),
                 false,
             )
             .await?;
@@ -1461,7 +1459,11 @@ impl GitVcsDriverCore {
         &self,
         input: &GitDeleteLocalBranchInput,
     ) -> Result<(), GitCommandError> {
-        let flag = if input.force == Some(true) { "-D" } else { "-d" };
+        let flag = if input.force == Some(true) {
+            "-D"
+        } else {
+            "-d"
+        };
         let mut call = GitCall::new(
             "GitVcsDriver.deleteLocalBranch",
             argv(&["branch", flag, "--", &input.ref_name]),

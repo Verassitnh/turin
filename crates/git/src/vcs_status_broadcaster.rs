@@ -28,8 +28,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use turin_contracts::git::{
-    GitCommandError, GitManagerError, GitManagerServiceError, TextGenerationError,
-    VcsPullResult, VcsStatusInput, VcsStatusLocalResult, VcsStatusRemoteResult, VcsStatusResult,
+    GitCommandError, GitManagerError, GitManagerServiceError, TextGenerationError, VcsPullResult,
+    VcsStatusInput, VcsStatusLocalResult, VcsStatusRemoteResult, VcsStatusResult,
     VcsStatusStreamEvent, VcsStatusSubscriptionInput,
 };
 use turin_contracts::source_control::SourceControlProviderError;
@@ -45,7 +45,8 @@ const MAX_FAILURE_DIAGNOSTIC_VALUE_LENGTH: usize = 128;
 /// Methods of upstream `GitWorkflowService` this broadcaster calls.
 #[async_trait]
 pub trait GitWorkflowService: Send + Sync {
-    async fn local_status(&self, cwd: &str) -> Result<VcsStatusLocalResult, GitManagerServiceError>;
+    async fn local_status(&self, cwd: &str)
+    -> Result<VcsStatusLocalResult, GitManagerServiceError>;
     async fn remote_status(
         &self,
         cwd: &str,
@@ -54,7 +55,8 @@ pub trait GitWorkflowService: Send + Sync {
     async fn invalidate_local_status(&self, cwd: &str);
     async fn invalidate_remote_status(&self, cwd: &str);
     async fn invalidate_status(&self, cwd: &str);
-    async fn pull_current_branch(&self, cwd: &str) -> Result<VcsPullResult, GitManagerServiceError>;
+    async fn pull_current_branch(&self, cwd: &str)
+    -> Result<VcsPullResult, GitManagerServiceError>;
 }
 
 /// `BackgroundPolicy.shouldRunScopeWork({ type: "vcs-status", cwd })`.
@@ -273,7 +275,13 @@ impl VcsStatusBroadcaster {
         background: Arc<dyn BackgroundPolicy>,
         auto_pull: Arc<dyn VcsAutoPullPolicy>,
     ) -> Self {
-        Self::build(workflow, background, auto_pull, Arc::new(TokioSleeper), None)
+        Self::build(
+            workflow,
+            background,
+            auto_pull,
+            Arc::new(TokioSleeper),
+            None,
+        )
     }
 
     fn build(
@@ -385,9 +393,17 @@ impl VcsStatusBroadcaster {
             .and_then(|remote| remote.value.clone());
         let include_remote = input.include_remote != Some(false);
         if include_remote {
-            let refresh_immediately = cached.as_ref().map(|item| item.remote.is_none()).unwrap_or(true);
+            let refresh_immediately = cached
+                .as_ref()
+                .map(|item| item.remote.is_none())
+                .unwrap_or(true);
             let options = options.unwrap_or_default();
-            self.retain_poller(&cwd, input.cwd.as_str(), options.interval, refresh_immediately);
+            self.retain_poller(
+                &cwd,
+                input.cwd.as_str(),
+                options.interval,
+                refresh_immediately,
+            );
         }
         Ok(StatusSubscription {
             snapshot: Some(VcsStatusStreamEvent::Snapshot {
@@ -404,11 +420,21 @@ impl VcsStatusBroadcaster {
         })
     }
 
-    fn retain_poller(&self, cwd: &str, demand_cwd: &str, interval: IntervalFn, refresh_immediately: bool) {
+    fn retain_poller(
+        &self,
+        cwd: &str,
+        demand_cwd: &str,
+        interval: IntervalFn,
+        refresh_immediately: bool,
+    ) {
         let mut pollers = self.pollers.pollers.lock();
         if let Some(existing) = pollers.get_mut(cwd) {
             existing.subscriber_count += 1;
-            *existing.demand.lock().entry(demand_cwd.to_owned()).or_insert(0) += 1;
+            *existing
+                .demand
+                .lock()
+                .entry(demand_cwd.to_owned())
+                .or_insert(0) += 1;
             return;
         }
         let demand = Arc::new(Mutex::new(HashMap::from([(demand_cwd.to_owned(), 1usize)])));
@@ -418,7 +444,15 @@ impl VcsStatusBroadcaster {
         let cancel_task = cancel.clone();
         let cwd_owned = cwd.to_owned();
         let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-            remote_refresh_loop(inner, cwd_owned, demand_task, interval, refresh_immediately, cancel_task).await;
+            remote_refresh_loop(
+                inner,
+                cwd_owned,
+                demand_task,
+                interval,
+                refresh_immediately,
+                cancel_task,
+            )
+            .await;
         }));
         pollers.insert(
             cwd.to_owned(),
@@ -473,7 +507,10 @@ impl futures::Stream for StatusSubscription {
 }
 
 impl Inner {
-    async fn get_status(&self, input: &VcsStatusInput) -> Result<VcsStatusResult, GitManagerServiceError> {
+    async fn get_status(
+        &self,
+        input: &VcsStatusInput,
+    ) -> Result<VcsStatusResult, GitManagerServiceError> {
         let cwd = normalize_cwd(input.cwd.as_str()).await;
         if let Some(status) = self.complete_status(&cwd) {
             return Ok(status);
@@ -484,8 +521,13 @@ impl Inner {
             return Ok(status);
         }
         let latest = self.cached(&cwd);
-        let cached_local = latest.as_ref().and_then(|item| item.local.as_ref()).map(|local| local.value.clone());
-        let cached_remote = latest.as_ref().and_then(|item| item.remote.as_ref().map(|remote| remote.value.clone()));
+        let cached_local = latest
+            .as_ref()
+            .and_then(|item| item.local.as_ref())
+            .map(|local| local.value.clone());
+        let cached_remote = latest
+            .as_ref()
+            .and_then(|item| item.remote.as_ref().map(|remote| remote.value.clone()));
         let workflow_local = Arc::clone(&self.workflow);
         let workflow_remote = Arc::clone(&self.workflow);
         let cwd_local = cwd.clone();
@@ -511,25 +553,40 @@ impl Inner {
         Ok(self.update_cached_status(&cwd, local, remote, false))
     }
 
-    async fn refresh_local_status(&self, raw_cwd: &str) -> Result<VcsStatusLocalResult, GitManagerServiceError> {
+    async fn refresh_local_status(
+        &self,
+        raw_cwd: &str,
+    ) -> Result<VcsStatusLocalResult, GitManagerServiceError> {
         let cwd = normalize_cwd(raw_cwd).await;
         self.refresh_local_status_core(&cwd).await
     }
 
-    async fn refresh_local_status_core(&self, cwd: &str) -> Result<VcsStatusLocalResult, GitManagerServiceError> {
+    async fn refresh_local_status_core(
+        &self,
+        cwd: &str,
+    ) -> Result<VcsStatusLocalResult, GitManagerServiceError> {
         self.workflow.invalidate_local_status(cwd).await;
         let local = self.workflow.local_status(cwd).await?;
         Ok(self.update_cached_local(cwd, local, true))
     }
 
-    async fn refresh_status(&self, raw_cwd: &str) -> Result<VcsStatusResult, GitManagerServiceError> {
+    async fn refresh_status(
+        &self,
+        raw_cwd: &str,
+    ) -> Result<VcsStatusResult, GitManagerServiceError> {
         let cwd = normalize_cwd(raw_cwd).await;
         let lock = self.remote_lock(&cwd);
         let _guard = lock.lock().await;
         self.workflow.invalidate_status(&cwd).await;
-        let remote = self.workflow.remote_status(&cwd, GitRemoteStatusOptions::default()).await?;
+        let remote = self
+            .workflow
+            .remote_status(&cwd, GitRemoteStatusOptions::default())
+            .await?;
         let local = self.workflow.local_status(&cwd).await?;
-        if let Some(pulled) = self.maybe_auto_pull(&cwd, remote.as_ref(), &[raw_cwd.to_owned()]).await {
+        if let Some(pulled) = self
+            .maybe_auto_pull(&cwd, remote.as_ref(), &[raw_cwd.to_owned()])
+            .await
+        {
             return Ok(merge_git_status_parts(pulled.local, pulled.remote));
         }
         Ok(self.update_cached_status(&cwd, local, remote, true))
@@ -545,7 +602,10 @@ impl Inner {
         if options.refresh_upstream != Some(false) {
             self.workflow.invalidate_remote_status(cwd).await;
         }
-        let previous = self.cached(cwd).and_then(|item| item.remote).and_then(|remote| remote.value);
+        let previous = self
+            .cached(cwd)
+            .and_then(|item| item.remote)
+            .and_then(|remote| remote.value);
         let remote = self
             .workflow
             .remote_status(
@@ -556,7 +616,10 @@ impl Inner {
                 },
             )
             .await?;
-        if let Some(pulled) = self.maybe_auto_pull(cwd, remote.as_ref(), &options.policy_cwds).await {
+        if let Some(pulled) = self
+            .maybe_auto_pull(cwd, remote.as_ref(), &options.policy_cwds)
+            .await
+        {
             return Ok(pulled.remote);
         }
         if let Some(remote_value) = remote.as_ref()
@@ -635,8 +698,15 @@ impl Inner {
         }))
     }
 
-    async fn get_or_load_local(&self, cwd: &str) -> Result<VcsStatusLocalResult, GitManagerServiceError> {
-        if let Some(local) = self.cached(cwd).and_then(|item| item.local).map(|local| local.value) {
+    async fn get_or_load_local(
+        &self,
+        cwd: &str,
+    ) -> Result<VcsStatusLocalResult, GitManagerServiceError> {
+        if let Some(local) = self
+            .cached(cwd)
+            .and_then(|item| item.local)
+            .map(|local| local.value)
+        {
             return Ok(local);
         }
         let local = self.workflow.local_status(cwd).await?;
@@ -645,30 +715,50 @@ impl Inner {
 
     fn complete_status(&self, cwd: &str) -> Option<VcsStatusResult> {
         let cached = self.cached(cwd)?;
-        Some(merge_git_status_parts(cached.local?.value, cached.remote?.value))
+        Some(merge_git_status_parts(
+            cached.local?.value,
+            cached.remote?.value,
+        ))
     }
 
     fn cached(&self, cwd: &str) -> Option<CachedVcsStatus> {
         self.cache.lock().get(cwd).cloned()
     }
 
-    fn update_cached_local(&self, cwd: &str, local: VcsStatusLocalResult, publish: bool) -> VcsStatusLocalResult {
+    fn update_cached_local(
+        &self,
+        cwd: &str,
+        local: VcsStatusLocalResult,
+        publish: bool,
+    ) -> VcsStatusLocalResult {
         let fingerprint = fingerprint_status(&local);
         let should_publish = {
             let mut cache = self.cache.lock();
             let previous = cache.get(cwd).cloned().unwrap_or_default();
-            let changed = previous.local.as_ref().map(|item| item.fingerprint.as_str()) != Some(fingerprint.as_str());
+            let changed = previous
+                .local
+                .as_ref()
+                .map(|item| item.fingerprint.as_str())
+                != Some(fingerprint.as_str());
             cache.insert(
                 cwd.to_owned(),
                 CachedVcsStatus {
-                    local: Some(CachedValue { fingerprint, value: local.clone() }),
+                    local: Some(CachedValue {
+                        fingerprint,
+                        value: local.clone(),
+                    }),
                     remote: previous.remote,
                 },
             );
             changed
         };
         if publish && should_publish {
-            self.publish(cwd, VcsStatusStreamEvent::LocalUpdated { local: local.clone() });
+            self.publish(
+                cwd,
+                VcsStatusStreamEvent::LocalUpdated {
+                    local: local.clone(),
+                },
+            );
         }
         local
     }
@@ -683,18 +773,30 @@ impl Inner {
         let should_publish = {
             let mut cache = self.cache.lock();
             let previous = cache.get(cwd).cloned().unwrap_or_default();
-            let changed = previous.remote.as_ref().map(|item| item.fingerprint.as_str()) != Some(fingerprint.as_str());
+            let changed = previous
+                .remote
+                .as_ref()
+                .map(|item| item.fingerprint.as_str())
+                != Some(fingerprint.as_str());
             cache.insert(
                 cwd.to_owned(),
                 CachedVcsStatus {
                     local: previous.local,
-                    remote: Some(CachedValue { fingerprint, value: remote.clone() }),
+                    remote: Some(CachedValue {
+                        fingerprint,
+                        value: remote.clone(),
+                    }),
                 },
             );
             changed
         };
         if publish && should_publish {
-            self.publish(cwd, VcsStatusStreamEvent::RemoteUpdated { remote: remote.clone() });
+            self.publish(
+                cwd,
+                VcsStatusStreamEvent::RemoteUpdated {
+                    remote: remote.clone(),
+                },
+            );
         }
         remote
     }
@@ -711,13 +813,27 @@ impl Inner {
         let should_publish = {
             let mut cache = self.cache.lock();
             let previous = cache.get(cwd).cloned().unwrap_or_default();
-            let changed = previous.local.as_ref().map(|item| item.fingerprint.as_str()) != Some(local_fingerprint.as_str())
-                || previous.remote.as_ref().map(|item| item.fingerprint.as_str()) != Some(remote_fingerprint.as_str());
+            let changed = previous
+                .local
+                .as_ref()
+                .map(|item| item.fingerprint.as_str())
+                != Some(local_fingerprint.as_str())
+                || previous
+                    .remote
+                    .as_ref()
+                    .map(|item| item.fingerprint.as_str())
+                    != Some(remote_fingerprint.as_str());
             cache.insert(
                 cwd.to_owned(),
                 CachedVcsStatus {
-                    local: Some(CachedValue { fingerprint: local_fingerprint, value: local.clone() }),
-                    remote: Some(CachedValue { fingerprint: remote_fingerprint, value: remote.clone() }),
+                    local: Some(CachedValue {
+                        fingerprint: local_fingerprint,
+                        value: local.clone(),
+                    }),
+                    remote: Some(CachedValue {
+                        fingerprint: remote_fingerprint,
+                        value: remote.clone(),
+                    }),
                 },
             );
             changed
@@ -725,7 +841,10 @@ impl Inner {
         if publish && should_publish {
             self.publish(
                 cwd,
-                VcsStatusStreamEvent::Snapshot { local: local.clone(), remote: remote.clone() },
+                VcsStatusStreamEvent::Snapshot {
+                    local: local.clone(),
+                    remote: remote.clone(),
+                },
             );
         }
         merge_git_status_parts(local, remote)
@@ -749,7 +868,9 @@ impl Inner {
     }
 
     fn unsubscribe(&self, id: u64) {
-        self.subscribers.lock().retain(|subscriber| subscriber.id != id);
+        self.subscribers
+            .lock()
+            .retain(|subscriber| subscriber.id != id);
     }
 
     fn remote_lock(&self, cwd: &str) -> Arc<AsyncMutex<()>> {
@@ -760,11 +881,17 @@ impl Inner {
             .clone()
     }
 
-    fn log_refresh_failure(&self, cwd: &str, error: &GitManagerServiceError, consecutive_failures: u32, delay: Duration) {
+    fn log_refresh_failure(
+        &self,
+        cwd: &str,
+        error: &GitManagerServiceError,
+        consecutive_failures: u32,
+        delay: Duration,
+    ) {
         let diagnostics = remote_refresh_failure_diagnostics(&RefreshCause {
-            reasons: vec![RefreshCauseReason::Fail(RefreshDiagnosticValue::Service(Box::new(
-                error.clone(),
-            )))],
+            reasons: vec![RefreshCauseReason::Fail(RefreshDiagnosticValue::Service(
+                Box::new(error.clone()),
+            ))],
         });
         let next_delay_ms = delay.as_millis();
         tracing::warn!(
@@ -817,9 +944,7 @@ impl PollerSet {
             }
             Some(_) => true,
         };
-        if remove
-            && let Some(poller) = pollers.remove(cwd)
-        {
+        if remove && let Some(poller) = pollers.remove(cwd) {
             drop(pollers);
             poller.cancel.cancel();
             drop(poller);
@@ -837,7 +962,8 @@ async fn remote_refresh_loop(
 ) {
     let mut consecutive_failures = 0u32;
     let mut needs_initial = refresh_immediately;
-    if !refresh_immediately && !sleep_cancellable(&inner, &cancel, active_interval(&interval)).await {
+    if !refresh_immediately && !sleep_cancellable(&inner, &cancel, active_interval(&interval)).await
+    {
         return;
     }
     loop {
@@ -930,7 +1056,10 @@ async fn sleep_cancellable(inner: &Inner, cancel: &CancellationToken, duration: 
     }
 }
 
-fn divergence_moved(previous: Option<&VcsStatusRemoteResult>, remote: &VcsStatusRemoteResult) -> bool {
+fn divergence_moved(
+    previous: Option<&VcsStatusRemoteResult>,
+    remote: &VcsStatusRemoteResult,
+) -> bool {
     match previous {
         None => true,
         Some(previous) => {
@@ -960,7 +1089,10 @@ fn add_unique(values: &mut Vec<String>, value: Option<String>) {
 }
 
 fn bounded(value: &str) -> String {
-    value.chars().take(MAX_FAILURE_DIAGNOSTIC_VALUE_LENGTH).collect()
+    value
+        .chars()
+        .take(MAX_FAILURE_DIAGNOSTIC_VALUE_LENGTH)
+        .collect()
 }
 
 fn diagnostic_tag(value: &RefreshDiagnosticValue) -> String {
@@ -992,11 +1124,16 @@ fn service_tag(error: &GitManagerServiceError) -> &'static str {
 
 fn service_operation(error: &GitManagerServiceError) -> Option<&str> {
     match error {
-        GitManagerServiceError::Manager(GitManagerError::GitManagerError { operation, .. }) => Some(operation),
-        GitManagerServiceError::Command(GitCommandError::GitCommandError { operation, .. }) => Some(operation),
-        GitManagerServiceError::TextGeneration(TextGenerationError::TextGenerationError { operation, .. }) => {
+        GitManagerServiceError::Manager(GitManagerError::GitManagerError { operation, .. }) => {
             Some(operation)
         }
+        GitManagerServiceError::Command(GitCommandError::GitCommandError { operation, .. }) => {
+            Some(operation)
+        }
+        GitManagerServiceError::TextGeneration(TextGenerationError::TextGenerationError {
+            operation,
+            ..
+        }) => Some(operation),
         GitManagerServiceError::SourceControlProvider(
             SourceControlProviderError::SourceControlProviderError { operation, .. },
         ) => Some(operation),

@@ -58,6 +58,8 @@ pub mod thread_links;
 pub mod thread_pull_requests;
 pub mod thread_reference;
 pub mod thread_search;
+pub mod tool_activity;
+pub mod tool_output;
 pub mod usage_format;
 pub mod usage_limits;
 pub mod usage_merge;

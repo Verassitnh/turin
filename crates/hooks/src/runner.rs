@@ -24,8 +24,12 @@ use turin_contracts::{ProjectId, ThreadId};
 
 use notify::Watcher;
 
-use crate::config::{HookConfigSource, HookCwd, HookPaths, HookSpec, HooksConfig};
+use crate::config::{
+    HookConfigSource, HookCwd, HookPaths, HookSpec, HooksConfig, PendingProjectHooks,
+    ProjectHooksStatus,
+};
 use crate::event::{HookEvent, HookEventKind};
+use crate::trust::{TrustError, TrustStore, sha256_hex};
 
 /// Per-stream output capture limit, mirroring upstream's bounded capture.
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -80,12 +84,36 @@ pub struct HookRunResult {
     pub error: Option<String>,
 }
 
+/// Everything the results channel carries.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum HookUpdate {
+    /// A hook run finished (blocking or not).
+    Run(Box<HookRunResult>),
+    /// Project hooks exist but are not trusted (never approved, or changed
+    /// since approval). Nothing in them runs; the UI offers "Approve" via
+    /// [`HookRunner::trust_project_hooks`].
+    ProjectHooksPending(Box<PendingProjectHooks>),
+}
+
+impl HookUpdate {
+    pub fn as_run(&self) -> Option<&HookRunResult> {
+        match self {
+            Self::Run(run) => Some(run),
+            Self::ProjectHooksPending(_) => None,
+        }
+    }
+}
+
 /// What [`HookRunner::dispatch`] did: awaited results for blocking hooks and
 /// the number of non-blocking runs it spawned into the background.
 #[derive(Debug, Clone, Default)]
 pub struct DispatchSummary {
     pub blocking: Vec<HookRunResult>,
     pub non_blocking_spawned: usize,
+    /// Set when untrusted/changed project hooks subscribe to this event and
+    /// were therefore skipped.
+    pub project_hooks_pending: Option<PendingProjectHooks>,
 }
 
 /// Resolves a hook's working directory. `cwd = "thread"` with no thread cwd
@@ -181,6 +209,22 @@ pub async fn dispatch(
     let config = runner.config();
     let mut summary = DispatchSummary::default();
 
+    if let Some(pending) = config.pending_project_hooks()
+        && pending.hooks.iter().any(|hook| hook.event == event.kind)
+    {
+        tracing::warn!(
+            event = event.kind.as_str(),
+            file = %pending.file.display(),
+            reason = ?pending.reason,
+            "project hooks are not trusted; skipping them until approved"
+        );
+        let _ = runner
+            .inner
+            .results
+            .send(HookUpdate::ProjectHooksPending(Box::new(pending.clone())));
+        summary.project_hooks_pending = Some(pending.clone());
+    }
+
     for spec in config.hooks_for(event.kind) {
         let (should_block, coerced) = resolve_blocking(event.kind, spec.blocking);
         if coerced {
@@ -213,13 +257,16 @@ pub async fn dispatch(
         };
         if should_block {
             let result = run_hook(&plan).await;
-            let _ = runner.inner.results.send(result.clone());
+            let _ = runner
+                .inner
+                .results
+                .send(HookUpdate::Run(Box::new(result.clone())));
             summary.blocking.push(result);
         } else {
             let results = runner.inner.results.clone();
             let spawned = runner.try_spawn(async move {
                 let result = run_hook(&plan).await;
-                let _ = results.send(result);
+                let _ = results.send(HookUpdate::Run(Box::new(result)));
             });
             if spawned {
                 summary.non_blocking_spawned += 1;
@@ -571,14 +618,20 @@ pub struct HookRunner {
     inner: Arc<HookRunnerInner>,
 }
 
+/// The filesystem watcher and the directories it currently watches.
+struct WatchState {
+    watcher: notify::RecommendedWatcher,
+    dirs: Vec<PathBuf>,
+}
+
 struct HookRunnerInner {
     paths: HookPaths,
     config: RwLock<Arc<HooksConfig>>,
     /// Background hook runs and the hot-reload task. `None` after shutdown.
     tasks: Mutex<Option<JoinSet<()>>>,
-    results: broadcast::Sender<HookRunResult>,
+    results: broadcast::Sender<HookUpdate>,
     /// Dropped on shutdown to stop file watching.
-    watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    watcher: Mutex<Option<WatchState>>,
     /// Post-exit output drain, in milliseconds (see [`DRAIN_GRACE`]).
     drain_grace_ms: AtomicU64,
 }
@@ -609,9 +662,10 @@ impl HookRunner {
         runner
     }
 
-    /// Subscribes to every completed hook run (blocking and non-blocking).
-    /// A lagging subscriber loses old results; it never slows hooks down.
-    pub fn subscribe_results(&self) -> broadcast::Receiver<HookRunResult> {
+    /// Subscribes to every completed hook run (blocking and non-blocking) and
+    /// to pending-trust notices. A lagging subscriber loses old updates; it
+    /// never slows hooks down.
+    pub fn subscribe_results(&self) -> broadcast::Receiver<HookUpdate> {
         self.inner.results.subscribe()
     }
 
@@ -640,6 +694,47 @@ impl HookRunner {
     /// automatically when a config file changes on disk.
     pub fn reload(&self) -> Arc<HooksConfig> {
         self.inner.reload_config()
+    }
+
+    /// Approves the project's current `.turin/hooks.toml` and reloads so its
+    /// hooks run from the next event on. `reviewed_hash` is the
+    /// [`PendingProjectHooks::hash`] the user was shown; if the file changed
+    /// since, nothing is approved ([`TrustError::HashMismatch`]) and the UI
+    /// should present the new contents. Approval is keyed on the canonical
+    /// project root and bound to the exact file bytes.
+    pub fn trust_project_hooks(&self, reviewed_hash: &str) -> Result<Arc<HooksConfig>, TrustError> {
+        let paths = &self.inner.paths;
+        let (Some(file), Some(root), Some(store)) = (
+            paths.project.as_deref(),
+            paths.canonical_project_root(),
+            paths.trust_store.as_deref(),
+        ) else {
+            return Err(TrustError::Unavailable);
+        };
+        let bytes =
+            std::fs::read(file).map_err(|_| TrustError::NoProjectHooks(file.to_path_buf()))?;
+        let actual = sha256_hex(&bytes);
+        if actual != reviewed_hash {
+            return Err(TrustError::HashMismatch {
+                expected: reviewed_hash.to_owned(),
+                actual,
+            });
+        }
+        TrustStore::new(store).approve(&root, &actual)?;
+        Ok(self.reload())
+    }
+
+    /// Withdraws the approval for this project's hooks and reloads; they go
+    /// back to pending.
+    pub fn revoke_project_hooks_trust(&self) -> Result<Arc<HooksConfig>, TrustError> {
+        let paths = &self.inner.paths;
+        let (Some(root), Some(store)) =
+            (paths.canonical_project_root(), paths.trust_store.as_deref())
+        else {
+            return Err(TrustError::Unavailable);
+        };
+        TrustStore::new(store).revoke(&root)?;
+        Ok(self.reload())
     }
 
     /// Runs matching hooks. See [`dispatch`].
@@ -706,7 +801,7 @@ impl HookRunner {
             return;
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut watcher = match notify::recommended_watcher(move |event| {
+        let watcher = match notify::recommended_watcher(move |event| {
             let _ = tx.send(event);
         }) {
             Ok(watcher) => watcher,
@@ -715,30 +810,11 @@ impl HookRunner {
                 return;
             }
         };
-        // Watch the parent directories, not the files: editors save
-        // atomically (temp file + rename), which replaces the inode a
-        // file watch points at.
-        let mut watched: Vec<PathBuf> = Vec::new();
-        for path in [&self.inner.paths.global, &self.inner.paths.project]
-            .into_iter()
-            .flatten()
-        {
-            if let Some(parent) = path.parent()
-                && parent.is_dir()
-                && !watched.contains(&parent.to_path_buf())
-            {
-                match watcher.watch(parent, notify::RecursiveMode::NonRecursive) {
-                    Ok(()) => watched.push(parent.to_path_buf()),
-                    Err(err) => {
-                        tracing::warn!(%err, dir = %parent.display(), "hooks hot reload: cannot watch directory")
-                    }
-                }
-            }
-        }
-        if watched.is_empty() {
-            return;
-        }
-        *self.inner.watcher.lock() = Some(watcher);
+        *self.inner.watcher.lock() = Some(WatchState {
+            watcher,
+            dirs: Vec::new(),
+        });
+        self.inner.rearm_watches();
 
         // The reload task holds only a Weak: the JoinSet lives in the inner
         // state, so a strong reference would keep the runner alive forever.
@@ -750,18 +826,27 @@ impl HookRunner {
                 match rx.recv().await {
                     None => return,
                     Some(Ok(event)) => {
-                        if !event.paths.iter().any(|path| paths.contains_file(path)) {
+                        // Reads of our own config files must not trigger reloads.
+                        if matches!(event.kind, notify::EventKind::Access(_))
+                            || !event
+                                .paths
+                                .iter()
+                                .any(|path| paths.is_relevant_event_path(path))
+                        {
                             continue;
                         }
                         // Coalesce bursts (atomic saves emit several events),
                         // then reload once.
                         tokio::time::sleep(RELOAD_DEBOUNCE).await;
                         while rx.try_recv().is_ok() {}
-                        if let Some(inner) = weak.upgrade() {
-                            inner.reload_config();
-                        } else {
+                        let Some(inner) = weak.upgrade() else {
                             return;
-                        }
+                        };
+                        // Re-arm first (a `.turin/` may have appeared or been
+                        // replaced), then read: anything written before the
+                        // new watch existed is picked up by this reload.
+                        inner.rearm_watches();
+                        inner.reload_config();
                     }
                     Some(Err(err)) => {
                         tracing::warn!(%err, "hooks hot reload: filesystem watcher error")
@@ -779,8 +864,62 @@ impl HookRunnerInner {
     fn reload_config(&self) -> Arc<HooksConfig> {
         let fresh = Arc::new(HooksConfig::load(&self.paths));
         log_config(&fresh);
-        *self.config.write() = fresh.clone();
+        let previous = std::mem::replace(&mut *self.config.write(), fresh.clone());
+        // Tell the UI as soon as project hooks become (or stay) untrusted,
+        // not only when the next event happens to subscribe to them.
+        if let ProjectHooksStatus::Pending(pending) = fresh.project_status()
+            && previous.project_status() != fresh.project_status()
+        {
+            tracing::warn!(
+                file = %pending.file.display(),
+                reason = ?pending.reason,
+                "project hooks are not trusted; they stay inert until approved"
+            );
+            let _ = self
+                .results
+                .send(HookUpdate::ProjectHooksPending(pending.clone()));
+        }
         fresh
+    }
+
+    /// Points the watcher at the nearest existing directory above each
+    /// config file: the file's own directory when it exists, otherwise the
+    /// closest ancestor (project root, `$HOME`), so a `.turin/` created later
+    /// is noticed. Watches directories, not files: editors save atomically
+    /// (temp file + rename), which replaces the inode a file watch points at.
+    /// Always re-watches from scratch, because a deleted and recreated
+    /// directory has lost its old watch.
+    fn rearm_watches(&self) {
+        let mut guard = self.watcher.lock();
+        let Some(state) = guard.as_mut() else {
+            return;
+        };
+        for dir in state.dirs.drain(..) {
+            let _ = state.watcher.unwatch(&dir);
+        }
+        for path in [&self.paths.global, &self.paths.project]
+            .into_iter()
+            .flatten()
+        {
+            let Some(dir) = path
+                .parent()
+                .and_then(|parent| parent.ancestors().find(|dir| dir.is_dir()))
+            else {
+                continue;
+            };
+            if state.dirs.iter().any(|watched| watched == dir) {
+                continue;
+            }
+            match state
+                .watcher
+                .watch(dir, notify::RecursiveMode::NonRecursive)
+            {
+                Ok(()) => state.dirs.push(dir.to_path_buf()),
+                Err(err) => {
+                    tracing::warn!(%err, dir = %dir.display(), "hooks hot reload: cannot watch directory")
+                }
+            }
+        }
     }
 }
 
@@ -826,11 +965,60 @@ mod tests {
         (dir, project, config_path)
     }
 
-    fn runner(project_config: &Path) -> HookRunner {
-        HookRunner::with_paths(HookPaths {
+    /// Trust store used by the test runners, outside both the project's
+    /// `.turin/` and anything a hook writes.
+    fn trust_store_for(project_config: &Path) -> PathBuf {
+        project_root_of(project_config)
+            .join(".home")
+            .join("trusted-hooks.json")
+    }
+
+    fn project_root_of(project_config: &Path) -> PathBuf {
+        project_config
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .to_path_buf()
+    }
+
+    fn paths_for(project_config: &Path) -> HookPaths {
+        HookPaths {
             global: None,
             project: Some(project_config.to_path_buf()),
-        })
+            project_root: Some(project_root_of(project_config)),
+            trust_store: Some(trust_store_for(project_config)),
+        }
+    }
+
+    /// Records the file's current bytes as approved, as the UI would.
+    fn approve_file(project_config: &Path) {
+        let bytes = std::fs::read(project_config).unwrap();
+        let root = std::fs::canonicalize(project_root_of(project_config)).unwrap();
+        TrustStore::new(&trust_store_for(project_config))
+            .approve(&root, &sha256_hex(&bytes))
+            .unwrap();
+    }
+
+    /// A runner whose project hooks are already approved.
+    fn runner(project_config: &Path) -> HookRunner {
+        approve_file(project_config);
+        HookRunner::with_paths(paths_for(project_config))
+    }
+
+    /// A runner for a project the user has never approved.
+    fn untrusted_runner(project_config: &Path) -> HookRunner {
+        HookRunner::with_paths(paths_for(project_config))
+    }
+
+    /// Next completed hook run, skipping pending-trust notices.
+    async fn recv_run(
+        rx: &mut broadcast::Receiver<HookUpdate>,
+    ) -> Result<HookRunResult, broadcast::error::RecvError> {
+        loop {
+            if let HookUpdate::Run(run) = rx.recv().await? {
+                return Ok(*run);
+            }
+        }
     }
 
     #[test]
@@ -1058,7 +1246,7 @@ blocking = true
         assert!(summary.blocking[0].blocking);
         assert_eq!(summary.blocking[0].exit_code, Some(0));
         assert!(project.join("out/marker.txt").exists());
-        let published = tokio::time::timeout(Duration::from_secs(5), results.recv())
+        let published = tokio::time::timeout(Duration::from_secs(5), recv_run(&mut results))
             .await
             .expect("blocking result is published")
             .unwrap();
@@ -1086,7 +1274,7 @@ command = "sleep 1; touch out/marker.txt"
         assert_eq!(summary.non_blocking_spawned, 1);
         // Dispatch returned before the hook finished.
         assert!(!project.join("out/marker.txt").exists());
-        let published = tokio::time::timeout(Duration::from_secs(30), results.recv())
+        let published = tokio::time::timeout(Duration::from_secs(30), recv_run(&mut results))
             .await
             .expect("non-blocking result is published")
             .unwrap();
@@ -1117,7 +1305,7 @@ blocking = true
         assert!(summary.blocking.is_empty());
         assert_eq!(summary.non_blocking_spawned, 1);
         assert!(!project.join("out/marker.txt").exists());
-        let published = tokio::time::timeout(Duration::from_secs(30), results.recv())
+        let published = tokio::time::timeout(Duration::from_secs(30), recv_run(&mut results))
             .await
             .expect("coerced result is published")
             .unwrap();
@@ -1140,9 +1328,10 @@ blocking = true
             &project_config,
             "[[hook]]\nevent = \"thread.created\"\ncommand = \"echo project >> out/order.txt\"\nblocking = true\n",
         );
+        approve_file(&project_config);
         let runner = HookRunner::with_paths(HookPaths {
             global: Some(global_path),
-            project: Some(project_config),
+            ..paths_for(&project_config)
         });
         let summary = runner
             .dispatch(
@@ -1256,6 +1445,7 @@ blocking = true
             &config_path,
             "[[hook]]\nevent = \"thread.created\"\ncommand = \"touch out/v2.txt\"\nblocking = true\n",
         );
+        approve_file(&config_path);
         let fresh = runner.reload();
         assert_eq!(fresh.hooks_for(HookEventKind::ThreadCreated).len(), 1);
         assert_eq!(fresh.all_hooks()[0].command, "touch out/v2.txt");
@@ -1268,40 +1458,245 @@ blocking = true
         assert!(project.join("out/v2.txt").exists());
     }
 
+    /// Polls `condition` until true; filesystem event latency varies.
+    async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if condition() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("timed out waiting for: {what}");
+    }
+
+    fn global_only_runner(global: &Path) -> HookRunner {
+        HookRunner::with_paths(HookPaths {
+            global: Some(global.to_path_buf()),
+            project: None,
+            project_root: None,
+            trust_store: None,
+        })
+    }
+
+    fn turn_completed_hooks(runner: &HookRunner) -> usize {
+        runner
+            .config()
+            .hooks_for(HookEventKind::TurnCompleted)
+            .len()
+    }
+
+    const TURN_COMPLETED_ONE: &str =
+        "[[hook]]\nevent = \"turn.completed\"\ncommand = \"touch out/one.txt\"\n";
+    const TURN_COMPLETED_TWO: &str = "[[hook]]\nevent = \"turn.completed\"\ncommand = \"touch out/one.txt\"\n\n[[hook]]\nevent = \"turn.completed\"\ncommand = \"touch out/two.txt\"\n";
+
     #[tokio::test]
     async fn watcher_hot_reloads_on_file_change() {
-        let (_dir, _project, config_path) = project_with_config(
-            "[[hook]]\nevent = \"turn.completed\"\ncommand = \"touch out/one.txt\"\n",
-        );
-        let runner = runner(&config_path);
-        assert_eq!(
-            runner
-                .config()
-                .hooks_for(HookEventKind::TurnCompleted)
-                .len(),
-            1
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("hooks.toml");
+        write_config(&global, TURN_COMPLETED_ONE);
+        let runner = global_only_runner(&global);
+        assert_eq!(turn_completed_hooks(&runner), 1);
+        write_config(&global, TURN_COMPLETED_TWO);
+        wait_until("global edit reloaded", || {
+            turn_completed_hooks(&runner) == 2
+        })
+        .await;
+    }
 
+    #[tokio::test]
+    async fn watcher_arms_when_the_config_directory_appears_later() {
+        // Neither `.turin/` exists when the runner is built (the normal
+        // starting state); the nearest existing ancestor is watched instead.
+        let dir = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(dir.path()).unwrap();
+        let global = home.join("home").join(".turin").join("hooks.toml");
+        std::fs::create_dir_all(home.join("home")).unwrap();
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let project_config = project.join(".turin").join("hooks.toml");
+        let runner = HookRunner::with_paths(HookPaths {
+            global: Some(global.clone()),
+            project: Some(project_config.clone()),
+            project_root: Some(project.clone()),
+            trust_store: Some(home.join("trusted-hooks.json")),
+        });
+        assert_eq!(turn_completed_hooks(&runner), 0);
+
+        // Global (trusted): applies as soon as the file appears.
+        write_config(&global, TURN_COMPLETED_ONE);
+        wait_until("global config created later", || {
+            turn_completed_hooks(&runner) == 1
+        })
+        .await;
+
+        // Project: appears, but only as a pending approval, through the
+        // trust gate.
+        write_config(&project_config, TURN_COMPLETED_TWO);
+        wait_until("project config created later", || {
+            runner.config().pending_project_hooks().is_some()
+        })
+        .await;
+        assert_eq!(turn_completed_hooks(&runner), 1, "project hooks stay inert");
+        let hash = runner
+            .config()
+            .pending_project_hooks()
+            .unwrap()
+            .hash
+            .clone();
+        runner.trust_project_hooks(&hash).unwrap();
+        assert_eq!(turn_completed_hooks(&runner), 3);
+    }
+
+    #[tokio::test]
+    async fn watcher_survives_the_config_directory_being_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .join(".turin")
+            .join("hooks.toml");
+        write_config(&global, TURN_COMPLETED_ONE);
+        let runner = global_only_runner(&global);
+        std::fs::remove_dir_all(global.parent().unwrap()).unwrap();
+        wait_until("deleted directory drops hooks", || {
+            turn_completed_hooks(&runner) == 0
+        })
+        .await;
+        write_config(&global, TURN_COMPLETED_TWO);
+        wait_until("recreated directory is watched again", || {
+            turn_completed_hooks(&runner) == 2
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn deleting_a_config_under_a_symlinked_path_reloads() {
+        // FSEvents reports canonical paths; the configured path is not.
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(dir.path()).unwrap().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let global = link.join("hooks.toml");
+        write_config(&global, TURN_COMPLETED_ONE);
+        let runner = global_only_runner(&global);
+        assert_eq!(turn_completed_hooks(&runner), 1);
+        std::fs::remove_file(&global).unwrap();
+        wait_until("delete reloaded", || turn_completed_hooks(&runner) == 0).await;
+    }
+
+    #[tokio::test]
+    async fn untrusted_project_hooks_do_not_run_and_report_pending() {
+        let (_dir, project, config_path) = project_with_config(
+            "[[hook]]\nevent = \"thread.created\"\ncommand = \"touch out/pwned.txt\"\nblocking = true\n",
+        );
+        let runner = untrusted_runner(&config_path);
+        let mut updates = runner.subscribe_results();
+        let summary = runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        assert!(summary.blocking.is_empty());
+        assert_eq!(summary.non_blocking_spawned, 0);
+        assert!(!project.join("out/pwned.txt").exists());
+        let pending = summary.project_hooks_pending.expect("pending in summary");
+        assert_eq!(pending.reason, crate::PendingReason::Untrusted);
+        assert_eq!(pending.hooks[0].command, "touch out/pwned.txt");
+        match updates.try_recv().expect("pending notice on the channel") {
+            HookUpdate::ProjectHooksPending(notice) => assert_eq!(*notice, pending),
+            other => panic!("unexpected update {other:?}"),
+        }
+        // Events the pending hooks do not subscribe to stay quiet.
+        let quiet = runner
+            .dispatch(
+                HookEvent::turn_failed(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        assert!(quiet.project_hooks_pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn trusting_project_hooks_activates_them() {
+        let (_dir, project, config_path) = project_with_config(
+            "[[hook]]\nevent = \"thread.created\"\ncommand = \"touch out/ran.txt\"\nblocking = true\n",
+        );
+        let runner = untrusted_runner(&config_path);
+        let hash = runner
+            .config()
+            .pending_project_hooks()
+            .expect("pending")
+            .hash
+            .clone();
+        // A stale hash (the file changed after review) approves nothing.
+        assert!(matches!(
+            runner.trust_project_hooks("0000"),
+            Err(TrustError::HashMismatch { .. })
+        ));
+        assert!(runner.config().pending_project_hooks().is_some());
+
+        let config = runner.trust_project_hooks(&hash).unwrap();
+        assert!(config.pending_project_hooks().is_none());
+        let summary = runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        assert_eq!(summary.blocking[0].exit_code, Some(0));
+        assert!(summary.project_hooks_pending.is_none());
+        assert!(project.join("out/ran.txt").exists());
+
+        // The approval is on disk: a fresh runner picks it up.
+        let again = HookRunner::with_paths(paths_for(&config_path));
+        assert_eq!(again.config().all_hooks().len(), 1);
+
+        // And can be withdrawn.
+        let config = runner.revoke_project_hooks_trust().unwrap();
+        assert!(config.all_hooks().is_empty());
+        assert!(config.pending_project_hooks().is_some());
+    }
+
+    #[tokio::test]
+    async fn hot_reload_after_edit_drops_project_hooks_until_reapproved() {
+        let (_dir, project, config_path) = project_with_config(TURN_COMPLETED_ONE);
+        let runner = runner(&config_path);
+        let mut updates = runner.subscribe_results();
+        assert_eq!(turn_completed_hooks(&runner), 1);
+
+        // An agent, `git pull` or branch switch rewrites the file.
         write_config(
             &config_path,
-            "[[hook]]\nevent = \"turn.completed\"\ncommand = \"touch out/one.txt\"\n\n\
-             [[hook]]\nevent = \"turn.completed\"\ncommand = \"touch out/two.txt\"\n",
+            "[[hook]]\nevent = \"turn.completed\"\ncommand = \"touch out/pwned.txt\"\n",
         );
-        // Filesystem event latency varies by platform; poll the snapshot.
-        let mut updated = false;
-        for _ in 0..200 {
-            if runner
-                .config()
-                .hooks_for(HookEventKind::TurnCompleted)
-                .len()
-                == 2
-            {
-                updated = true;
-                break;
+        wait_until("edit flips project hooks to pending", || {
+            runner.config().pending_project_hooks().is_some()
+        })
+        .await;
+        assert_eq!(turn_completed_hooks(&runner), 0, "old and new both inert");
+        assert_eq!(
+            runner.config().pending_project_hooks().unwrap().reason,
+            crate::PendingReason::Changed
+        );
+        match tokio::time::timeout(Duration::from_secs(5), updates.recv())
+            .await
+            .expect("notice published on reload")
+            .unwrap()
+        {
+            HookUpdate::ProjectHooksPending(notice) => {
+                assert_eq!(notice.reason, crate::PendingReason::Changed)
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            other => panic!("unexpected update {other:?}"),
         }
-        assert!(updated, "watcher did not reload the config in time");
+        let summary = runner
+            .dispatch(
+                HookEvent::turn_completed(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        assert_eq!(summary.non_blocking_spawned, 0);
+        assert!(!project.join("out/pwned.txt").exists());
     }
 
     #[tokio::test]
@@ -1339,7 +1734,7 @@ command = "echo $$ > out/hook.pid; sleep 30; touch out/never.txt"
         runner.shutdown().await;
         // The aborted run never completes or publishes a result.
         assert!(
-            tokio::time::timeout(Duration::from_millis(500), results.recv())
+            tokio::time::timeout(Duration::from_millis(500), recv_run(&mut results))
                 .await
                 .is_err(),
             "aborted hook must not publish a result"
@@ -1501,7 +1896,7 @@ blocking = true
                 .dispatch(HookEvent::turn_completed(serde_json::json!({})), &ctx)
                 .await;
             // Wait for the run to finish so the next spawn can reap it.
-            tokio::time::timeout(Duration::from_secs(10), results.recv())
+            tokio::time::timeout(Duration::from_secs(10), recv_run(&mut results))
                 .await
                 .expect("result published")
                 .unwrap();
@@ -1537,7 +1932,7 @@ blocking = false
                 &context(&project, None),
             )
             .await;
-        tokio::time::timeout(Duration::from_secs(10), results.recv())
+        tokio::time::timeout(Duration::from_secs(10), recv_run(&mut results))
             .await
             .unwrap()
             .unwrap();

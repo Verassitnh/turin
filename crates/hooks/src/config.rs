@@ -15,6 +15,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::event::HookEventKind;
+use crate::trust::{TrustStore, sha256_hex};
 
 /// `timeout_secs` for a hook that does not set one.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
@@ -96,28 +97,153 @@ impl std::error::Error for HookConfigError {}
 pub struct HooksConfig {
     hooks: Vec<HookSpec>,
     errors: Vec<HookConfigError>,
+    project: ProjectHooksStatus,
+}
+
+/// Why project hooks are not running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PendingReason {
+    /// The user never approved this project's hooks.
+    Untrusted,
+    /// They were approved, but the file's bytes changed since (git pull,
+    /// branch switch, an agent edit): re-approval required.
+    Changed,
+}
+
+/// A project hooks file that is not trusted. Nothing in it runs. The UI
+/// shows `hooks` for review and calls
+/// [`crate::HookRunner::trust_project_hooks`] with `hash` on "Approve".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingProjectHooks {
+    /// Canonical project root: the key the approval is stored under.
+    pub project_root: PathBuf,
+    pub file: PathBuf,
+    /// SHA-256 (hex) of the exact file bytes `hooks` were parsed from.
+    pub hash: String,
+    pub reason: PendingReason,
+    /// The valid entries in the file, for review. Never executed.
+    pub hooks: Vec<HookSpec>,
+}
+
+/// Trust state of `<project>/.turin/hooks.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum ProjectHooksStatus {
+    /// No project hooks file.
+    #[default]
+    Absent,
+    /// The file matches the approved hash; its hooks are loaded.
+    Trusted { hash: String },
+    /// Not approved or changed since approval; its hooks are inert.
+    Pending(Box<PendingProjectHooks>),
 }
 
 impl HooksConfig {
     /// Loads both files. Missing files are fine (both are optional); broken
     /// files or entries are skipped and reported through [`Self::errors`].
     /// Global hooks run before project hooks, each file in `[[hook]]` order.
+    ///
+    /// The global file is trusted. The project file is **inert** until its
+    /// exact bytes match the hash the user approved (see [`crate::trust`]):
+    /// otherwise its hooks are parsed only to be shown for review, and the
+    /// result is reported through [`Self::project_status`].
     pub fn load(paths: &HookPaths) -> Self {
         let mut hooks = Vec::new();
         let mut errors = Vec::new();
-        for (path, source) in [
-            (paths.global.as_deref(), HookConfigSource::Global),
-            (paths.project.as_deref(), HookConfigSource::Project),
-        ] {
-            let Some(path) = path else { continue };
-            if !path.is_file() {
-                continue;
+        if let Some(path) = paths.global.as_deref()
+            && path.is_file()
+        {
+            match std::fs::read_to_string(path) {
+                Ok(text) => {
+                    let (file_hooks, file_errors) =
+                        parse_text(path, &text, HookConfigSource::Global);
+                    hooks.extend(file_hooks);
+                    errors.extend(file_errors);
+                }
+                Err(err) => errors.push(HookConfigError {
+                    file: path.to_path_buf(),
+                    hook_index: None,
+                    message: format!("cannot read hooks config: {err}"),
+                }),
             }
-            let (file_hooks, file_errors) = parse_file(path, source);
-            hooks.extend(file_hooks);
-            errors.extend(file_errors);
         }
-        Self { hooks, errors }
+
+        let mut project = ProjectHooksStatus::Absent;
+        if let Some(path) = paths.project.as_deref()
+            && path.is_file()
+        {
+            // Hash and parse the same bytes: the hash that gates execution
+            // must describe exactly what runs.
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    let hash = sha256_hex(&bytes);
+                    let (file_hooks, file_errors) = match String::from_utf8(bytes) {
+                        Ok(text) => parse_text(path, &text, HookConfigSource::Project),
+                        Err(_) => (
+                            Vec::new(),
+                            vec![HookConfigError {
+                                file: path.to_path_buf(),
+                                hook_index: None,
+                                message: "hooks config is not valid UTF-8".to_owned(),
+                            }],
+                        ),
+                    };
+                    errors.extend(file_errors);
+                    let root = paths.canonical_project_root();
+                    let approved = root.as_deref().and_then(|root| {
+                        paths
+                            .trust_store
+                            .as_deref()
+                            .and_then(|store| TrustStore::new(store).lookup(root))
+                    });
+                    match approved {
+                        Some(approved) if approved == hash => {
+                            hooks.extend(file_hooks);
+                            project = ProjectHooksStatus::Trusted { hash };
+                        }
+                        other => {
+                            project = ProjectHooksStatus::Pending(Box::new(PendingProjectHooks {
+                                project_root: root.unwrap_or_default(),
+                                file: path.to_path_buf(),
+                                hash,
+                                reason: if other.is_some() {
+                                    PendingReason::Changed
+                                } else {
+                                    PendingReason::Untrusted
+                                },
+                                hooks: file_hooks,
+                            }));
+                        }
+                    }
+                }
+                Err(err) => errors.push(HookConfigError {
+                    file: path.to_path_buf(),
+                    hook_index: None,
+                    message: format!("cannot read hooks config: {err}"),
+                }),
+            }
+        }
+        Self {
+            hooks,
+            errors,
+            project,
+        }
+    }
+
+    /// Whether the project's hooks file is absent, trusted, or waiting for
+    /// the user's approval.
+    pub fn project_status(&self) -> &ProjectHooksStatus {
+        &self.project
+    }
+
+    /// The project hooks that are inert until approved, when there are any.
+    pub fn pending_project_hooks(&self) -> Option<&PendingProjectHooks> {
+        match &self.project {
+            ProjectHooksStatus::Pending(pending) => Some(pending),
+            _ => None,
+        }
     }
 
     /// The hooks subscribed to `event`, global ones first, in file order.
@@ -155,7 +281,11 @@ struct HookToml {
     timeout_secs: Option<u64>,
 }
 
-fn parse_file(path: &Path, source: HookConfigSource) -> (Vec<HookSpec>, Vec<HookConfigError>) {
+fn parse_text(
+    path: &Path,
+    text: &str,
+    source: HookConfigSource,
+) -> (Vec<HookSpec>, Vec<HookConfigError>) {
     let mut hooks = Vec::new();
     let mut errors = Vec::new();
     let file_error = |message: String| HookConfigError {
@@ -164,14 +294,7 @@ fn parse_file(path: &Path, source: HookConfigSource) -> (Vec<HookSpec>, Vec<Hook
         message,
     };
 
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) => {
-            errors.push(file_error(format!("cannot read hooks config: {err}")));
-            return (hooks, errors);
-        }
-    };
-    let value = match toml::from_str::<toml::Value>(&text) {
+    let value = match toml::from_str::<toml::Value>(text) {
         Ok(value) => value,
         Err(err) => {
             errors.push(file_error(format!("invalid TOML: {err}")));
@@ -237,13 +360,19 @@ fn parse_entry(entry: &toml::Value) -> Result<HookSpec, String> {
     })
 }
 
-/// Locations of the two hooks config files.
+/// Locations of the two hooks config files and the trust store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookPaths {
-    /// `~/.turin/hooks.toml`, or `$TURIN_HOME/hooks.toml` when set.
+    /// `~/.turin/hooks.toml`, or `$TURIN_HOME/hooks.toml` when set. Trusted.
     pub global: Option<PathBuf>,
-    /// `<project>/.turin/hooks.toml`.
+    /// `<project>/.turin/hooks.toml`. Inert until approved.
     pub project: Option<PathBuf>,
+    /// The project root the approval is keyed on. Without it the project
+    /// file can never be approved.
+    pub project_root: Option<PathBuf>,
+    /// `~/.turin/trusted-hooks.json` (or under `$TURIN_HOME`): canonical
+    /// project root → SHA-256 of the approved `hooks.toml`.
+    pub trust_store: Option<PathBuf>,
 }
 
 impl HookPaths {
@@ -251,41 +380,73 @@ impl HookPaths {
         Self {
             global: default_global_path(),
             project: Some(project_root.join(".turin").join("hooks.toml")),
+            project_root: Some(project_root.to_path_buf()),
+            trust_store: crate::trust::default_trust_store_path(),
         }
     }
 
-    /// Whether `path` names one of the config files (direct or canonicalized
-    /// comparison, so events fired by an atomic-save rename still match).
-    pub(crate) fn contains_file(&self, path: &Path) -> bool {
-        [self.global.as_deref(), self.project.as_deref()]
-            .iter()
-            .flatten()
-            .any(|target| paths_match(path, target))
+    /// The project root as the trust store keys it (symlinks resolved).
+    pub(crate) fn canonical_project_root(&self) -> Option<PathBuf> {
+        let root = self.project_root.as_deref()?;
+        Some(std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()))
     }
+
+    /// Whether a filesystem event at `path` can change what the config
+    /// files say: the files themselves or any directory above them (a
+    /// `.turin/` that appears or disappears). Paths are compared both as
+    /// configured and with symlinks resolved, because FSEvents reports
+    /// canonical paths even for a non-canonical watch.
+    pub(crate) fn is_relevant_event_path(&self, path: &Path) -> bool {
+        [self.global.as_deref(), self.project.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|target| target.starts_with(path) || resolve_canonical(target).starts_with(path))
+    }
+}
+
+/// Canonical form of a path that may not exist yet: the nearest existing
+/// ancestor is canonicalized and the missing tail is appended unchanged.
+pub(crate) fn resolve_canonical(path: &Path) -> PathBuf {
+    let mut existing = path;
+    let mut tail = Vec::new();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(existing) {
+            return tail
+                .iter()
+                .rev()
+                .fold(canonical, |acc, part| acc.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name);
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// Turin's home directory: `$TURIN_HOME` when set, else `~/.turin`; `None`
+/// when no home directory can be found.
+pub(crate) fn default_turin_home() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("TURIN_HOME")
+        && !home.is_empty()
+    {
+        return Some(PathBuf::from(home));
+    }
+    dirs::home_dir().map(|home| home.join(".turin"))
 }
 
 /// Global config path: `$TURIN_HOME/hooks.toml` when `TURIN_HOME` is set,
 /// else `~/.turin/hooks.toml`; `None` when no home directory can be found.
 pub fn default_global_path() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("TURIN_HOME")
-        && !home.is_empty()
-    {
-        return Some(PathBuf::from(home).join("hooks.toml"));
-    }
-    dirs::home_dir().map(|home| home.join(".turin").join("hooks.toml"))
-}
-
-fn paths_match(a: &Path, b: &Path) -> bool {
-    a == b
-        || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => false,
-        }
+    default_turin_home().map(|home| home.join("hooks.toml"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trust::TrustStore;
     use pretty_assertions::assert_eq;
 
     fn write_config(path: &Path, body: &str) {
@@ -293,11 +454,194 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
+    /// Loads with the project file (if any) already approved, so these
+    /// tests exercise parsing, not trust.
     fn load(global: Option<&Path>, project: Option<&Path>) -> HooksConfig {
-        HooksConfig::load(&HookPaths {
+        let paths = trusted_paths(global, project);
+        HooksConfig::load(&paths)
+    }
+
+    fn trusted_paths(global: Option<&Path>, project: Option<&Path>) -> HookPaths {
+        let root = project.map(|file| file.parent().unwrap().to_path_buf());
+        let store = root.as_ref().map(|root| root.join("trusted-hooks.json"));
+        if let (Some(file), Some(root), Some(store)) = (project, &root, &store)
+            && file.is_file()
+        {
+            let bytes = std::fs::read(file).unwrap();
+            TrustStore::new(store)
+                .approve(&std::fs::canonicalize(root).unwrap(), &sha256_hex(&bytes))
+                .unwrap();
+        }
+        HookPaths {
             global: global.map(Path::to_path_buf),
             project: project.map(Path::to_path_buf),
-        })
+            project_root: root,
+            trust_store: store,
+        }
+    }
+
+    fn pending_reason(config: &HooksConfig) -> Option<PendingReason> {
+        config.pending_project_hooks().map(|pending| pending.reason)
+    }
+
+    const PROJECT_HOOK: &str = "[[hook]]\nevent = \"turn.started\"\ncommand = \"project-cmd\"\n";
+
+    fn project_fixture() -> (tempfile::TempDir, HookPaths) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let file = root.join(".turin").join("hooks.toml");
+        write_config(&file, PROJECT_HOOK);
+        let paths = HookPaths {
+            global: None,
+            project: Some(file),
+            project_root: Some(root.clone()),
+            trust_store: Some(root.join("home").join("trusted-hooks.json")),
+        };
+        (dir, paths)
+    }
+
+    fn approve(paths: &HookPaths) {
+        let bytes = std::fs::read(paths.project.as_ref().unwrap()).unwrap();
+        TrustStore::new(paths.trust_store.as_ref().unwrap())
+            .approve(
+                &paths.canonical_project_root().unwrap(),
+                &sha256_hex(&bytes),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn untrusted_project_hooks_are_inert_and_pending() {
+        let (_dir, paths) = project_fixture();
+        let config = HooksConfig::load(&paths);
+        assert!(config.all_hooks().is_empty(), "nothing may run");
+        assert!(config.hooks_for(HookEventKind::TurnStarted).is_empty());
+        assert_eq!(pending_reason(&config), Some(PendingReason::Untrusted));
+        let pending = config.pending_project_hooks().unwrap();
+        assert_eq!(pending.hooks.len(), 1, "parsed for review only");
+        assert_eq!(pending.hooks[0].command, "project-cmd");
+        assert_eq!(pending.hash, sha256_hex(PROJECT_HOOK.as_bytes()));
+        assert_eq!(pending.file, *paths.project.as_ref().unwrap());
+        assert_eq!(
+            pending.project_root,
+            paths.canonical_project_root().unwrap()
+        );
+    }
+
+    #[test]
+    fn trusted_project_hooks_load() {
+        let (_dir, paths) = project_fixture();
+        approve(&paths);
+        let config = HooksConfig::load(&paths);
+        assert_eq!(config.hooks_for(HookEventKind::TurnStarted).len(), 1);
+        assert!(config.pending_project_hooks().is_none());
+        assert_eq!(
+            config.project_status(),
+            &ProjectHooksStatus::Trusted {
+                hash: sha256_hex(PROJECT_HOOK.as_bytes())
+            }
+        );
+    }
+
+    #[test]
+    fn project_hooks_edited_after_trust_go_inert_as_changed() {
+        let (_dir, paths) = project_fixture();
+        approve(&paths);
+        assert_eq!(HooksConfig::load(&paths).all_hooks().len(), 1);
+        // A single appended byte is enough: the hash covers the exact bytes.
+        let file = paths.project.as_ref().unwrap();
+        let mut edited = std::fs::read_to_string(file).unwrap();
+        edited.push('\n');
+        std::fs::write(file, edited).unwrap();
+        let config = HooksConfig::load(&paths);
+        assert!(config.all_hooks().is_empty());
+        assert_eq!(pending_reason(&config), Some(PendingReason::Changed));
+        // Re-approving the new bytes restores it.
+        approve(&paths);
+        assert_eq!(HooksConfig::load(&paths).all_hooks().len(), 1);
+    }
+
+    #[test]
+    fn global_hooks_stay_active_while_project_hooks_are_pending() {
+        let (dir, paths) = project_fixture();
+        let global = dir.path().join("global.toml");
+        write_config(
+            &global,
+            "[[hook]]\nevent = \"turn.started\"\ncommand = \"global-cmd\"\n",
+        );
+        let config = HooksConfig::load(&HookPaths {
+            global: Some(global),
+            ..paths
+        });
+        let commands: Vec<&str> = config
+            .all_hooks()
+            .iter()
+            .map(|hook| hook.command.as_str())
+            .collect();
+        assert_eq!(commands, ["global-cmd"]);
+        assert!(config.pending_project_hooks().is_some());
+    }
+
+    #[test]
+    fn approval_is_per_project_root() {
+        let (_dir, paths) = project_fixture();
+        approve(&paths);
+        // Same bytes, different root: still untrusted.
+        let other = tempfile::tempdir().unwrap();
+        let other_file = other.path().join(".turin").join("hooks.toml");
+        write_config(&other_file, PROJECT_HOOK);
+        let config = HooksConfig::load(&HookPaths {
+            global: None,
+            project: Some(other_file),
+            project_root: Some(other.path().to_path_buf()),
+            trust_store: paths.trust_store.clone(),
+        });
+        assert_eq!(pending_reason(&config), Some(PendingReason::Untrusted));
+    }
+
+    #[test]
+    fn project_hooks_without_a_trust_store_stay_pending() {
+        let (_dir, mut paths) = project_fixture();
+        paths.trust_store = None;
+        let config = HooksConfig::load(&paths);
+        assert!(config.all_hooks().is_empty());
+        assert_eq!(pending_reason(&config), Some(PendingReason::Untrusted));
+    }
+
+    #[test]
+    fn symlinked_project_root_shares_the_canonical_approval() {
+        let (dir, paths) = project_fixture();
+        approve(&paths);
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+        let config = HooksConfig::load(&HookPaths {
+            global: None,
+            project: Some(link.join(".turin").join("hooks.toml")),
+            project_root: Some(link),
+            trust_store: paths.trust_store.clone(),
+        });
+        assert_eq!(config.all_hooks().len(), 1);
+    }
+
+    #[test]
+    fn relevant_event_paths_cover_files_and_their_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(dir.path()).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let paths = HookPaths {
+            global: None,
+            project: Some(link.join(".turin").join("hooks.toml")),
+            project_root: None,
+            trust_store: None,
+        };
+        // The file as configured, as canonical FSEvents reports it, and the
+        // not-yet-existing `.turin` directory above it.
+        assert!(paths.is_relevant_event_path(&link.join(".turin").join("hooks.toml")));
+        assert!(paths.is_relevant_event_path(&real.join(".turin").join("hooks.toml")));
+        assert!(paths.is_relevant_event_path(&real.join(".turin")));
+        assert!(!paths.is_relevant_event_path(&real.join("other.txt")));
+        assert!(!paths.is_relevant_event_path(&real.join(".turin").join("other.toml")));
     }
 
     #[test]

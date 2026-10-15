@@ -9,9 +9,10 @@ use turin_contracts::model_selection::ModelSelection;
 use turin_contracts::thread_pull_request::{ThreadLinkedPullRequest, ThreadPullRequestLink};
 
 use super::provider_types::{ServerProvider, ServerProviderAvailability, ServerProviderState};
-use super::shared_support::{
-    PromptLinkPullRequest, PromptLinkRepository, ThreadPullRequestKeySource,
-    resolve_selectable_model, thread_pull_request_key_of, thread_pull_requests_of,
+use super::shared_support::{PromptLinkPullRequest, PromptLinkRepository};
+use crate::state::support::model::resolve_selectable_model;
+use crate::state::support::thread_pull_requests::{
+    ThreadPullRequestKeySource, thread_pull_request_key_of, thread_pull_requests_of,
     visible_thread_pull_requests,
 };
 

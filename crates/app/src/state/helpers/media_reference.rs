@@ -5,7 +5,8 @@ use std::sync::LazyLock;
 use regex::Regex;
 use url::Url;
 
-use super::shared_support::{is_windows_absolute_path, safe_decode_uri_component};
+use super::shared_support::safe_decode_uri_component;
+use crate::state::support::path::is_windows_absolute_path;
 
 static WINDOWS_ROOT_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     // `/^(?:[a-z]:\/|\/\/[^/]+\/[^/]+(?:\/|$))/i`; the only letters are the drive's.

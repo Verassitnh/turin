@@ -19,10 +19,8 @@ use turin_contracts::pull_request::{
 use turin_contracts::source_control::SourceControlProviderKind;
 use url::Url;
 
-use super::shared_support::{
-    ChangeRequestLink, JS_NOT_LINE_TERMINATOR_CLASS, JS_WS_CLASS, encode_uri_component,
-    url_host_with_port,
-};
+use super::shared_support::{JS_NOT_LINE_TERMINATOR_CLASS, JS_WS_CLASS, encode_uri_component};
+use crate::state::support::change_request_url::{ChangeRequestLink, url_host_with_port};
 
 /// What a host calls a change request, e.g. `MR` and `merge request` on GitLab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -9,9 +9,10 @@ use super::media_reference::{
     MediaReference, media_file_reference, media_reference_file_name, media_url_reference,
 };
 use super::shared_support::{
-    file_basename, media_mime_type, media_mime_type_from_extension, split_file_path_position,
+    media_mime_type, media_mime_type_from_extension, split_file_path_position,
     split_markdown_link_search_and_hash,
 };
+use crate::state::support::path::file_basename;
 
 /// `Extract<AssetResource, { _tag: "media-file" }>`. The `AssetResource` contract is on the
 /// cut list (`assets`), so only the one variant this helper builds exists.

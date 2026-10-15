@@ -3,7 +3,9 @@
 use turin_contracts::environment::ExecutionEnvironmentCapabilities;
 use turin_contracts::{ProjectId, ThreadId};
 
-use super::shared_support::{ThreadPullRequestKeySource, normalize_thread_pull_request_key};
+use crate::state::support::thread_pull_requests::{
+    ThreadPullRequestKeySource, normalize_thread_pull_request_key,
+};
 
 /// How an environment lets a client link pull requests to a thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

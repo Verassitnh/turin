@@ -7,7 +7,7 @@ use regex::Regex;
 use crate::state::contracts::OrchestrationV2TurnItemStatus;
 use crate::state::subagent_runtime::{RuntimeSubagentStatus, is_terminal_subagent_status};
 use crate::state::support::model::{
-    SelectableModelOption, format_model_slug_name, resolve_selectable_model,
+    SelectableModel, format_model_slug_name, resolve_selectable_model,
 };
 use crate::state::support::path::file_basename;
 
@@ -168,16 +168,16 @@ pub fn resolve_subagent_metadata(input: &ResolveSubagentMetadataInput<'_>) -> Su
     let model = input.model.map(crate::state::contracts::js_trim);
     let slug: Option<String> = match &input.provider {
         Some(provider) => {
-            let options: Vec<SelectableModelOption> = provider
+            let options: Vec<SelectableModel> = provider
                 .models
                 .iter()
-                .map(|model| SelectableModelOption {
+                .map(|model| SelectableModel {
                     slug: model.slug.clone(),
                     name: model.name.clone(),
                     aliases: model.aliases.clone(),
                 })
                 .collect();
-            resolve_selectable_model(provider.driver, model, &options)
+            resolve_selectable_model(provider.driver, model, &options).map(str::to_owned)
         }
         None => model.map(str::to_owned),
     };

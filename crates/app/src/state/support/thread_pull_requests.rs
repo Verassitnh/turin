@@ -1,5 +1,6 @@
-//! Port of upstream/packages/shared/src/threadPullRequests.ts (GitHub only;
-//! the Azure selector paths are kept because they are pure string handling).
+//! Port of upstream/packages/shared/src/threadPullRequests.ts, with the source-control key helpers
+//! of upstream/packages/shared/src/sourceControl.ts. Every host shape upstream reads is kept (see
+//! `change_request_url.rs`). This is the one copy in the app state; see PORTING.md, DEDUP.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -11,7 +12,7 @@ use crate::state::contracts::{
 };
 use regex::Regex;
 
-use super::change_request_url::parse_change_request_url;
+use super::change_request_url::{parse_change_request_url, url_host_with_port};
 use crate::state::time::parse_ms;
 
 /// `canonicalRepositoryKey` (packages/shared/src/sourceControl.ts).
@@ -329,7 +330,7 @@ pub fn legacy_linked_pull_request_of(
                 if let Ok(remote) = url::Url::parse(identity.locator.remote_url.as_str())
                     && (remote.scheme() == "http" || remote.scheme() == "https")
                 {
-                    let remote_host = remote_host_with_port(&remote);
+                    let remote_host = url_host_with_port(&remote);
                     return authority == remote_host
                         && parsed
                             .as_ref()
@@ -355,14 +356,6 @@ pub fn legacy_linked_pull_request_of(
         number: link.number,
         url: link.url.clone(),
     })
-}
-
-fn remote_host_with_port(url: &url::Url) -> String {
-    match (url.host_str(), url.port()) {
-        (Some(host), Some(port)) => format!("{host}:{port}"),
-        (Some(host), None) => host.to_owned(),
-        _ => String::new(),
-    }
 }
 
 /// `legacyThreadPullRequestKey` for a full link (it satisfies the `Pick`).
@@ -686,3 +679,53 @@ pub fn apply_thread_pull_request_link_update(
 
 #[allow(dead_code)]
 type KeyDocs = ThreadPullRequestKey;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn canonicalizes_azure_repository_keys() {
+        assert_eq!(
+            canonical_repository_key("ssh.dev.azure.com/v3/org/project/web"),
+            "dev.azure.com/org/project/_git/web"
+        );
+        assert_eq!(
+            canonical_repository_key("org.visualstudio.com/defaultcollection/project/_git/web"),
+            "dev.azure.com/org/project/_git/web"
+        );
+        assert_eq!(
+            canonical_repository_key("github.com/acme/web"),
+            "github.com/acme/web"
+        );
+    }
+
+    #[test]
+    fn a_forgejo_port_gives_one_key_on_every_path() {
+        // The stored link names the host without its port; its URL carries the port.
+        let url = "http://git.example.com:3000/o/r/pulls/7";
+        let stored = ThreadPullRequestKeySource {
+            host: "git.example.com",
+            repository: "o/r",
+            number: 7,
+            authority: None,
+            url: Some(url),
+        };
+        let linked: ThreadLinkedPullRequest = serde_json::from_value(json!({
+            "projectId": "project-1",
+            "repository": "o/r",
+            "number": 7,
+            "url": url,
+        }))
+        .expect("fixture decodes");
+
+        let key = "git.example.com:3000/o/r#7";
+        assert_eq!(thread_pull_request_key_of(&stored), key);
+        let legacy = legacy_thread_pull_request_key(&linked, Some("git.example.com"));
+        assert_eq!(
+            format!("{}/{}#{}", legacy.host, legacy.repository, legacy.number),
+            key
+        );
+    }
+}

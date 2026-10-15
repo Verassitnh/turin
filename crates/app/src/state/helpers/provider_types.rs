@@ -9,7 +9,7 @@
 use turin_contracts::TrimmedNonEmptyString;
 use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceId};
 
-use super::shared_support::SelectableModelOption;
+use crate::state::support::model::SelectableModelOption;
 
 /// `ServerProviderState`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

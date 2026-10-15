@@ -1,0 +1,17 @@
+# QC wf_342ba162-dd7 — T24 icon re-QC
+
+Reviewer: Claude Opus 5.5 QC workflow (dimension reviewers, 2 skeptics per finding).
+Confirmed: 1 · refuted: 0
+
+## Lead report
+
+1. LOW, assets/export-icons.py:350 (build_icns) and assets/export-icons.py:487-490 (export()). Problem: `--keep-macos-png` skips colour normalisation for the macOS PNG. `build_icns` copies the 1024 member (ic10) with `shutil.copy(macos_png, iconset / name)`, while every other member goes through `srgb_png(to_srgb8(...))` (line 354). `export()` only normalises the macOS PNG on the derived path (`if not keep_macos_png`). README.md:99-103 tells users to export from Icon Composer 27 and pass `--keep-macos-png`. On that path, a 16-bit Display P3 export (iCCP+cICP) stays 16-bit P3, both in the kept PNG and in ic10. The other icns members are 8-bit sRGB, so the icns mixes bit depths and colour spaces. That breaks README.md:70 ("Every raster, including each ICO and ICNS member, is 8-bit RGBA sRGB"), which was prior QC item 3. The committed derived outputs are fine (all bd8 with an sRGB chunk), so this only affects the optional native path. Required fix: in `build_icns`, write the 1024 member as `(iconset / name).write_bytes(srgb_png(to_srgb8(macos_png.read_bytes())))` instead of using `shutil.copy`. In `export()`, when `keep_macos_png` is set, also rewrite the kept PNG in place as `srgb_png(to_srgb8(png.read_bytes()))`, so the kept file and ic10 both end up 8-bit RGBA sRGB. Re-run the export and confirm the committed derived outputs come out byte-identical. If you choose not to normalise this path, qualify README.md:70 for `--keep-macos-png` and log it in the PORTING.md Deviations log.
+
+Verdict: PASS (no critical or high findings; one low finding to fix)
+
+## Confirmed findings (raw)
+
+### [low] --keep-macos-png ships a native Icon Composer 27 export unnormalised: the PNG and the icns 1024 member (ic10) stay 16-bit Display P3
+- `assets/export-icons.py:350` · dimension: fix-verification · upheld 2/2
+- Evidence: Every other icns member goes through `srgb_png(to_srgb8(...))` (line 354), but the 1024 member is copied raw with `shutil.copy(macos_png, iconset / name)` (line 350). With `--keep-macos-png`, lines 487-490 also skip normalising the kept PNG itself. I tested this in a temp copy (/tmp/qc-t24/copy): I put an Icon Composer 27 render (16-bit, iCCP+cICP Display P3, which is what this toolchain's exporter writes) at prod/black-macos-1024.png and ran `uv run --locked export-icons.py --keep-macos-png`. Result: black-macos-1024.png stayed `1024x1024 bd16 ct6 chunks=['IHDR','iCCP','cICP','eXIf','IEND']`, and turin-black.icns had `ic10 827623 1024x1024 bd16 ... iCCP, cICP` while ic07/ic08/ic09/ic11-14 were bd8 with an sRGB chunk. README.md:70 says "Every raster, including each ICO and ICNS member, is 8-bit RGBA sRGB". README.md:99-103 tells users to make exactly this native export and then always pass --keep-macos-png. So item 3's normalisation does not hold on the documented native path, and the icns ends up with mixed bit depths and colour spaces. The committed derived output is fine: every member is bd8 with an sRGB chunk.
+- Fix: Normalise the macOS PNG before using it. In export(), when keep_macos_png is set, rewrite the file as `srgb_png(to_srgb8(png.read_bytes()))`, or at least normalise into a temp file. In build_icns, write the 1024 member as `srgb_png(to_srgb8(macos_png.read_bytes()))` instead of using shutil.copy. Alternatively, qualify README:70 for the --keep-macos-png path.

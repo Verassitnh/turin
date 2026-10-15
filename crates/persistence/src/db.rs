@@ -200,8 +200,17 @@ impl Db {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        self.checkpoint_notify.stop.store(true, Ordering::SeqCst);
-        self.checkpoint_notify.cv.notify_one();
+        {
+            // Set `stop` under the lock, as `kick` does, so the wakeup cannot
+            // land between the worker's check and its condvar wait.
+            let _guard = self
+                .checkpoint_notify
+                .lock
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            self.checkpoint_notify.stop.store(true, Ordering::SeqCst);
+            self.checkpoint_notify.cv.notify_all();
+        }
         // `checkpoint` is dropped first by field order only if declared first.
         // Take it explicitly so its thread joins before the connections close.
         drop(self.checkpoint.lock().take());
@@ -465,8 +474,9 @@ fn checkpoint_loop(conn: Connection, notify: Arc<CheckpointNotify>) {
     };
     while !notify.stop.load(Ordering::SeqCst) {
         while !notify.pending.load(Ordering::SeqCst) && !notify.stop.load(Ordering::SeqCst) {
-            guard = match notify.cv.wait(guard) {
-                Ok(guard) => guard,
+            // Timed, so a missed wakeup costs at most one idle interval.
+            guard = match notify.cv.wait_timeout(guard, CHECKPOINT_IDLE) {
+                Ok((guard, _)) => guard,
                 Err(_) => {
                     mark_checkpoint_failed(&notify);
                     return;
@@ -563,5 +573,42 @@ impl CheckpointNotify {
         let _guard = self.lock.lock().unwrap_or_else(|err| err.into_inner());
         self.pending.store(true, Ordering::SeqCst);
         self.cv.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::*;
+
+    /// Opening and dropping a file database right away used to deadlock:
+    /// `Inner::drop` raised `stop` without the checkpoint lock, so the worker
+    /// could miss the wakeup and `Checkpoint::drop` joined it forever.
+    #[test]
+    fn repeated_open_and_drop_of_file_db_does_not_hang() {
+        const ITERATIONS: usize = 500;
+        const DEADLINE: Duration = Duration::from_secs(60);
+
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("reopen.sqlite");
+            runtime.block_on(async {
+                for _ in 0..ITERATIONS {
+                    let db = Db::open(&path).await.unwrap();
+                    drop(db);
+                }
+            });
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(DEADLINE)
+            .expect("open/drop loop did not finish; Db drop deadlocked");
     }
 }

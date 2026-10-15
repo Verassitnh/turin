@@ -113,6 +113,7 @@ impl DesktopProviderHost {
             .retain(|sender| sender.send(next.clone()).is_ok());
     }
 
+    #[allow(clippy::result_large_err)]
     pub async fn settings(&self) -> Result<ServerSettings, ServerSettingsError> {
         self.host.get_settings().await
     }

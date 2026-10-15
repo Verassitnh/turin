@@ -42,6 +42,7 @@ impl ProviderInstanceRegistryHydration {
     /// Subscribes before the initial read, so a write between the two is
     /// picked up by the first reconcile instead of being lost. A failed
     /// initial read fails construction, like upstream's layer build.
+    #[allow(clippy::result_large_err)]
     pub async fn new(
         drivers: Vec<Arc<dyn ProviderDriver>>,
         host: &ProviderHost,

@@ -41,6 +41,7 @@ pub mod thread_state;
 pub mod thread_subagents;
 pub mod thread_workflows;
 pub mod time;
+pub mod turn_item_presentation;
 
 /// The one environment a single-process Turin has: this machine.
 pub fn local_environment_id() -> contracts::EnvironmentId {

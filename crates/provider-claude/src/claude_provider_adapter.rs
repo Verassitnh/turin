@@ -481,6 +481,26 @@ const THINKING_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_m
 /// Upstream `subagentStopOutcomes`: how long a Stop waits for the CLI's outcome.
 const SUBAGENT_STOP_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Upstream bounds its control waits at 10 seconds (the interrupt's close wait and
+/// fork). Upstream runs them in caller fibers; this actor runs them in turn, so a
+/// CLI that never answers a control request must not hold every later command.
+const CONTROL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Awaits one control request for at most `CONTROL_REQUEST_TIMEOUT`. A timeout is an
+/// error for the caller, and the request stays unanswered in the CLI.
+async fn bounded_control<T, E: std::fmt::Display>(
+    what: &str,
+    request: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, ProviderAdapterV2Error> {
+    match tokio::time::timeout(CONTROL_REQUEST_TIMEOUT, request).await {
+        Ok(result) => result.map_err(|error| protocol_error(error.to_string())),
+        Err(_) => Err(protocol_error(format!(
+            "Claude {what} was not answered within {} seconds",
+            CONTROL_REQUEST_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
 /// allocation per call for no lasting size win.
 #[allow(clippy::large_enum_variant)]
 enum Command {
@@ -761,8 +781,9 @@ struct ClaudeActor {
     plans: PlanState,
     /// Session-scoped: a background subagent reports after its turn has settled.
     subagents: SubagentRegistry,
-    /// Stops waiting for the native outcome of a task, by CLI task id.
-    stop_waiters: HashMap<String, Vec<StopReply>>,
+    /// Stops waiting for the native outcome of a task, by CLI task id. Each keeps
+    /// the `started_at` its Stop was sent for.
+    stop_waiters: HashMap<String, Vec<(Option<UtcDateTime>, StopReply)>>,
     /// Background work that is not a subagent (upstream `pendingBackgroundTasksByNativeThread`).
     roster: Roster,
     /// The tool_use ids of Monitor calls, and the task ids they started.
@@ -862,10 +883,7 @@ impl ClaudeActor {
             }
             Command::StopTask(input, reply) => {
                 let result = match self.claude.as_ref() {
-                    Some(c) => c
-                        .stop_task(&input.task_id)
-                        .await
-                        .map_err(|e| protocol_error(e.to_string())),
+                    Some(c) => bounded_control("stop_task", c.stop_task(&input.task_id)).await,
                     None => Err(protocol_error("Claude session is not running")),
                 };
                 let _ = reply.send(result);
@@ -930,6 +948,8 @@ impl ClaudeActor {
                 disallowed_tools: vec![],
                 runtime_instructions: &self.runtime_instructions,
             });
+            // The subagents running now belong to the process being replaced.
+            self.subagents.begin_query_process();
             let mut claude = ClaudeAdapterV2::open(options, true)
                 .await
                 .map_err(|e| protocol_error(e.to_string()))?;
@@ -941,12 +961,11 @@ impl ClaudeActor {
         } else if self.selection != input.model_selection {
             // Upstream applies a changed selection to the live query.
             let compiled = compile_claude_model_selection(&input.model_selection, &self.catalog);
-            self.claude
+            let claude = self
+                .claude
                 .as_ref()
-                .ok_or_else(|| protocol_error("Claude session is not running"))?
-                .set_model(Some(&compiled.api_model_id))
-                .await
-                .map_err(|e| protocol_error(e.to_string()))?;
+                .ok_or_else(|| protocol_error("Claude session is not running"))?;
+            bounded_control("set_model", claude.set_model(Some(&compiled.api_model_id))).await?;
             self.selection = input.model_selection.clone();
         }
         // Upstream: a continuation is offered by the adapter and has no prompt of its own.
@@ -1117,16 +1136,28 @@ impl ClaudeActor {
             let _ = reply.send(Ok(Some(confirmed)));
             return;
         }
-        let Some(claude) = self.claude.as_ref() else {
+        // A task from an earlier process is not the live query's to stop.
+        let claude = self
+            .claude
+            .as_ref()
+            .filter(|_| !self.subagents.is_from_earlier_process(&task_id));
+        let Some(claude) = claude else {
             let _ = reply.send(Err(protocol_error(
                 "Claude subagent has no live owning query with task stopping support.",
             )));
             return;
         };
-        match claude.stop_task(&task_id).await {
-            Ok(()) => self.stop_waiters.entry(task_id).or_default().push(reply),
+        match bounded_control("stop_task", claude.stop_task(&task_id)).await {
+            Ok(()) => {
+                // The Stop is for the run that is live now. Its outcome answers
+                // only while that run is still the task's (see `stop_answer`).
+                self.stop_waiters
+                    .entry(task_id)
+                    .or_default()
+                    .push((state.started_at, reply));
+            }
             Err(error) => {
-                let _ = reply.send(Err(protocol_error(error.to_string())));
+                let _ = reply.send(Err(error));
             }
         }
     }
@@ -1135,8 +1166,12 @@ impl ClaudeActor {
         let Some(outcome) = self.subagents.confirmed_outcome(task_id) else {
             return;
         };
-        for waiter in self.stop_waiters.remove(task_id).unwrap_or_default() {
-            let _ = waiter.send(Ok(Some(outcome.clone())));
+        let current = self
+            .subagents
+            .stop_state(task_id)
+            .and_then(|state| state.started_at);
+        for (sent_for, waiter) in self.stop_waiters.remove(task_id).unwrap_or_default() {
+            let _ = waiter.send(Ok(stop_answer(sent_for, current, &outcome)));
         }
     }
     fn steer(&mut self, input: ProviderAdapterV2SteerInput) -> Result<(), ProviderAdapterV2Error> {
@@ -1176,12 +1211,11 @@ impl ClaudeActor {
             ));
         }
         active.interrupted = true;
-        self.claude
+        let claude = self
+            .claude
             .as_ref()
-            .ok_or_else(|| protocol_error("Claude session is not running"))?
-            .interrupt()
-            .await
-            .map_err(|e| protocol_error(e.to_string()))?;
+            .ok_or_else(|| protocol_error("Claude session is not running"))?;
+        bounded_control("interrupt", claude.interrupt()).await?;
         Ok(())
     }
     fn respond(
@@ -2843,6 +2877,17 @@ fn parent_tool_use_id(frame: &turin_claude_protocol::Frame) -> Option<&str> {
 }
 
 /// Upstream `claudeContextWindow`: the window a selection resolves to, when the catalog knows it.
+/// Upstream `stopSubagent`'s last step: the confirmed outcome answers the Stop only
+/// while the task is still the run the Stop was sent for. A task restarted in the
+/// meantime has its own outcome to come, so the Stop answers `None`.
+fn stop_answer<T: Clone>(
+    sent_for: Option<UtcDateTime>,
+    current: Option<UtcDateTime>,
+    outcome: &T,
+) -> Option<T> {
+    (sent_for == current).then(|| outcome.clone())
+}
+
 fn context_window(catalog: &ClaudeModelCatalog, selection: &ModelSelection) -> Option<u64> {
     resolve_claude_catalog_context_window_tokens(catalog, Some(selection))
         .map(|tokens| tokens as u64)
@@ -3050,5 +3095,14 @@ mod tests {
         ] {
             assert!(!claude_writes_updates_as_thinking(model), "{model}");
         }
+    }
+
+    #[test]
+    fn a_stop_is_answered_only_for_the_run_it_was_sent_for() {
+        let at: UtcDateTime = serde_json::from_value(json!("2026-10-15T00:00:00.000Z")).unwrap();
+        let later: UtcDateTime = serde_json::from_value(json!("2026-10-15T00:00:01.000Z")).unwrap();
+        assert_eq!(stop_answer(Some(at), Some(at), &7), Some(7));
+        assert_eq!(stop_answer(Some(at), Some(later), &7), None);
+        assert_eq!(stop_answer(None, None, &7), Some(7));
     }
 }

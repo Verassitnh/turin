@@ -26,7 +26,7 @@ use crate::{
     },
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use turin_contracts::model::{
     ProviderOptionDescriptor, ProviderOptionSelection, ProviderOptionSelectionValue,
 };
@@ -134,6 +134,9 @@ pub struct SubagentRegistry {
     tasks: HashMap<String, Task>,
     /// A run's Agent call (its launch, or a later SendMessage resume) to the task it started.
     task_by_run_tool_use: HashMap<String, String>,
+    /// Running tasks that the current query process did not start (upstream
+    /// `subagentsFromEarlierProcesses`). A task_started for one replaces it.
+    earlier_process: HashSet<String>,
 }
 
 fn text(value: &Value, key: &str) -> Option<String> {
@@ -548,11 +551,29 @@ impl SubagentRegistry {
                 now,
             ));
         }
+        self.earlier_process.remove(&task_id);
         self.tasks.insert(task_id, task);
         events
     }
 
     /// Whether the registry has the task, from this process or a recovery.
+    /// A query process is about to open. Its running subagents belong to the
+    /// process before it, and only a fresh task_started makes one its own.
+    pub fn begin_query_process(&mut self) {
+        self.earlier_process = self
+            .tasks
+            .iter()
+            .filter(|(_, task)| task.subagent.status == OrchestrationV2SubagentStatus::Running)
+            .map(|(id, _)| id.clone())
+            .collect();
+    }
+
+    /// Whether the task was running when the current query process opened.
+    /// The process cannot stop it (upstream `subagentsFromEarlierProcesses`).
+    pub fn is_from_earlier_process(&self, task_id: &str) -> bool {
+        self.earlier_process.contains(task_id)
+    }
+
     pub fn knows(&self, task_id: &str) -> bool {
         self.tasks.contains_key(task_id)
     }
@@ -603,6 +624,7 @@ impl SubagentRegistry {
         let child = ChildThread::new(ids.child_thread_id.clone(), ids.child_root_node_id.clone());
         self.task_by_run_tool_use
             .insert(launch_tool_use_id.to_owned(), task_id.to_owned());
+        self.earlier_process.remove(task_id);
         self.tasks.insert(
             task_id.to_owned(),
             Task {
@@ -1511,5 +1533,29 @@ mod tests {
         );
         let updated = subagent_of(&changed).expect("the model change lands");
         assert_eq!(updated.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn a_task_from_an_earlier_process_is_its_own_once_it_starts_again() {
+        let mut registry = SubagentRegistry::default();
+        registry.set_scope(scope());
+        let now = UtcDateTime::now();
+        started_task(
+            &mut registry,
+            json!({"task_id": "task_e", "tool_use_id": "toolu_e", "task_type": "local_agent", "description": "E"}),
+        );
+        registry.begin_query_process();
+        assert!(registry.is_from_earlier_process("task_e"));
+        assert!(!registry.is_from_earlier_process("task_new"));
+        // The task ends, then starts again under this process.
+        registry.notified(
+            &json!({"task_id": "task_e", "status": "completed", "summary": "done"}),
+            now,
+        );
+        started_task(
+            &mut registry,
+            json!({"task_id": "task_e", "tool_use_id": "toolu_e2", "task_type": "local_agent", "description": "E"}),
+        );
+        assert!(!registry.is_from_earlier_process("task_e"));
     }
 }

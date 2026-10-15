@@ -103,6 +103,9 @@ for line in sys.stdin:
         # Tests read the control requests the CLI received from this log.
         with open(os.environ["FAKE_ARGV"] + ".control", "a") as log:
             log.write(json.dumps(request) + "\n")
+        # FAKE_SILENT names control subtypes the CLI never answers.
+        if request.get("subtype") in os.environ.get("FAKE_SILENT", "").split(","):
+            continue
         body = {"models": [], "commands": [], "account": {}} if request.get("subtype") == "initialize" else {}
         emit({"type": "control_response", "response": {"subtype": "success", "request_id": message["request_id"], "response": body}})
         # An interrupt or a task stop is followed by the frames the CLI sends for it.
@@ -510,6 +513,41 @@ async fn failed_turn_stops_and_settles_the_workflow_it_follows() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// A CLI that never answers `interrupt` holds only that request. The interrupt
+/// fails at its bound instead of blocking the session for good.
+#[tokio::test]
+async fn an_unanswered_interrupt_fails_at_its_bound() {
+    let harness = Harness::lines_with_env(
+        &[
+            json!({"type": "expect_outbound", "label": "query.open", "frame": {}}),
+            json!({"type": "expect_outbound", "label": "prompt.offer:1", "frame": {}}),
+        ],
+        &[("FAKE_SILENT", "interrupt".into())],
+        None,
+    );
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread.clone(), "Never answered."))
+        .await
+        .expect("start turn");
+    let turn = started_turn(&mut events).await;
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(30),
+        runtime.interrupt_turn(ProviderAdapterV2InterruptInput {
+            provider_thread: thread,
+            provider_turn_id: turn.id,
+            request_runtime_restart: None,
+        }),
+    )
+    .await
+    .expect("the interrupt fails at its own bound")
+    .expect_err("an unanswered interrupt is an error");
+    assert!(format!("{error:?}").contains("not answered"), "{error:?}");
 }
 
 /// A `tool_use` whose id is blank names no call. The block is skipped, and the

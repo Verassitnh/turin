@@ -29,8 +29,8 @@ use crate::cursor::{
 use crate::errors::{AcpError, AcpRequestError, SchemaIssue};
 use crate::meta::{self, agent, client as client_methods, v1_agent, v1_client};
 use crate::protocol::{
-    Connection, ConnectionConfig, IncomingNotification, NotificationCallback, RequestCallback,
-    RequestContext,
+    Connection, ConnectionConfig, ConnectionHooks, IncomingNotification, NotificationCallback,
+    RequestCallback, RequestContext,
 };
 use crate::schema::is_create_elicitation_request;
 
@@ -139,12 +139,60 @@ fn claim_drain(state: &mut ReplayState) -> bool {
     true
 }
 
+type TerminationHook = Arc<dyn Fn(&AcpError) + Send + Sync>;
+type IncomingRequestHook = Arc<dyn Fn(&str, &str, &Value) + Send + Sync>;
+type OutgoingResponseHook = Arc<dyn Fn(&str) + Send + Sync>;
+type OutgoingResponseFailureHook = Arc<dyn Fn(&str, &AcpError) + Send + Sync>;
+
+/// Connection hooks for one client. Active prompts are always failed on
+/// termination. The public `on_*` setters fill the optional slots.
+#[derive(Default)]
+struct ClientHooks {
+    prompts: Arc<Mutex<PromptWaiters>>,
+    termination: Mutex<Option<TerminationHook>>,
+    incoming_request: Mutex<Option<IncomingRequestHook>>,
+    outgoing_response: Mutex<Option<OutgoingResponseHook>>,
+    outgoing_response_failure: Mutex<Option<OutgoingResponseFailureHook>>,
+}
+
+impl ConnectionHooks for ClientHooks {
+    fn on_termination(&self, error: &AcpError) {
+        fail_prompts(&self.prompts, error);
+        let hook = self.termination.lock().clone();
+        if let Some(hook) = hook {
+            hook(error);
+        }
+    }
+
+    fn on_incoming_request(&self, request_id: &str, method: &str, params: &Value) {
+        let hook = self.incoming_request.lock().clone();
+        if let Some(hook) = hook {
+            hook(request_id, method, params);
+        }
+    }
+
+    fn on_outgoing_response(&self, request_id: &str) {
+        let hook = self.outgoing_response.lock().clone();
+        if let Some(hook) = hook {
+            hook(request_id);
+        }
+    }
+
+    fn on_outgoing_response_failure(&self, request_id: &str, error: &AcpError) {
+        let hook = self.outgoing_response_failure.lock().clone();
+        if let Some(hook) = hook {
+            hook(request_id, error);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AcpClient {
     connection: Connection,
     handlers: Arc<Mutex<Handlers>>,
     generation: Arc<Mutex<Option<ProtocolGeneration>>>,
     prompts: Arc<Mutex<PromptWaiters>>,
+    hooks: Arc<ClientHooks>,
     next_prompt: Arc<AtomicU64>,
     shutdown: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
@@ -184,7 +232,10 @@ impl AcpClient {
         let on_request = client_request_callback(Arc::clone(&handlers));
         let on_notification =
             client_notification_callback(Arc::clone(&handlers), Arc::clone(&prompts));
-        let prompts_for_end = Arc::clone(&prompts);
+        let hooks = Arc::new(ClientHooks {
+            prompts: Arc::clone(&prompts),
+            ..ClientHooks::default()
+        });
         let transform_generation = Arc::clone(&generation);
         let connection = Connection::start(
             read,
@@ -192,7 +243,7 @@ impl AcpClient {
             ConnectionConfig {
                 on_request,
                 on_notification,
-                on_termination: Arc::new(move |error| fail_prompts(&prompts_for_end, error)),
+                hooks: Arc::clone(&hooks) as Arc<dyn ConnectionHooks>,
                 termination_on_eof,
                 termination_on_exit,
                 transform_session_update: Arc::new(move |value| {
@@ -205,9 +256,49 @@ impl AcpClient {
             handlers,
             generation,
             prompts,
+            hooks,
             next_prompt: Arc::new(AtomicU64::new(1)),
             shutdown,
         }
+    }
+
+    /// Runs once when the connection ends, after active prompts have failed.
+    /// Replaces any earlier hook.
+    pub fn on_termination<F>(&self, handler: F)
+    where
+        F: Fn(&AcpError) + Send + Sync + 'static,
+    {
+        *self.hooks.termination.lock() = Some(Arc::new(handler));
+    }
+
+    /// The error that ended the connection, if it has ended.
+    pub fn termination_error(&self) -> Option<AcpError> {
+        self.connection.termination_error()
+    }
+
+    /// Observes each inbound request before it is dispatched: request id,
+    /// method, params. A panic here ends the connection.
+    pub fn on_incoming_request<F>(&self, handler: F)
+    where
+        F: Fn(&str, &str, &Value) + Send + Sync + 'static,
+    {
+        *self.hooks.incoming_request.lock() = Some(Arc::new(handler));
+    }
+
+    /// Runs after a response to an inbound request has been written.
+    pub fn on_outgoing_response<F>(&self, handler: F)
+    where
+        F: Fn(&str) + Send + Sync + 'static,
+    {
+        *self.hooks.outgoing_response.lock() = Some(Arc::new(handler));
+    }
+
+    /// Runs when writing a response to an inbound request fails.
+    pub fn on_outgoing_response_failure<F>(&self, handler: F)
+    where
+        F: Fn(&str, &AcpError) + Send + Sync + 'static,
+    {
+        *self.hooks.outgoing_response_failure.lock() = Some(Arc::new(handler));
     }
 
     pub async fn initialize(
@@ -1343,6 +1434,59 @@ mod tests {
         }
         let order = seen.lock().clone();
         assert_eq!(order, (0..2_050).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn client_hooks_observe_inbound_requests_responses_and_termination() {
+        let (client, mut read, mut write) = pair();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        client.on_incoming_request({
+            let seen = Arc::clone(&seen);
+            move |id, method, _params| seen.lock().push(format!("in:{id}:{method}"))
+        });
+        client.on_outgoing_response({
+            let seen = Arc::clone(&seen);
+            move |id| seen.lock().push(format!("out:{id}"))
+        });
+        client.on_termination({
+            let seen = Arc::clone(&seen);
+            move |_error| seen.lock().push("terminated".to_owned())
+        });
+        client.on_ext_request("x/ping", |_params, _ctx| async {
+            Ok::<Value, AcpError>(json!({"pong": true}))
+        });
+        write_value(
+            &mut write,
+            json!({"jsonrpc": "2.0", "id": 5, "method": "x/ping", "params": {}}),
+        )
+        .await;
+        let reply = read_value(&mut read).await;
+        assert_eq!(reply["result"]["pong"], true);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while seen.lock().len() < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "outgoing hook never ran"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            *seen.lock(),
+            vec![
+                "in:$t3:jsonrpc:number:5:x/ping".to_owned(),
+                "out:$t3:jsonrpc:number:5".to_owned(),
+            ]
+        );
+        assert!(client.termination_error().is_none());
+        drop(write);
+        while !seen.lock().iter().any(|entry| entry == "terminated") {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "termination hook never ran"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(client.termination_error().is_some());
     }
 
     #[test]

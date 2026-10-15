@@ -71,6 +71,35 @@ impl Drop for TaskSet {
     }
 }
 
+/// Connection lifecycle observers. Mirrors upstream's `onTermination`,
+/// `onIncomingRequest`, `onOutgoingResponse` and `onOutgoingResponseFailure`
+/// options (protocol.ts). Each hook has a default no-op body.
+pub trait ConnectionHooks: Send + Sync {
+    fn on_termination(&self, _error: &AcpError) {}
+    /// Runs for every inbound request before it is dispatched. Like upstream,
+    /// a panic here ends the reader (see `ReaderUnwindGuard`).
+    fn on_incoming_request(&self, _request_id: &str, _method: &str, _params: &Value) {}
+    /// Runs after a response to an inbound request is written.
+    fn on_outgoing_response(&self, _request_id: &str) {}
+    /// Runs when writing a response to an inbound request fails.
+    fn on_outgoing_response_failure(&self, _request_id: &str, _error: &AcpError) {}
+}
+
+/// Hooks that do nothing.
+#[derive(Default)]
+pub struct NoConnectionHooks;
+
+impl ConnectionHooks for NoConnectionHooks {}
+
+/// Runs a connection hook so a panic is logged rather than unwinding the task
+/// that called it. Used where unwinding would cost more: a double panic while
+/// the reader unwinds would abort the process.
+fn isolate_hook(name: &'static str, hook: impl FnOnce()) {
+    if std::panic::catch_unwind(AssertUnwindSafe(hook)).is_err() {
+        tracing::error!(hook = name, "ACP connection hook panicked");
+    }
+}
+
 struct ConnectionInner {
     state: Mutex<State>,
     write_tx: mpsc::UnboundedSender<WriteJob>,
@@ -78,7 +107,7 @@ struct ConnectionInner {
     notify_waiters: Notify,
     on_request: RequestCallback,
     on_notification: NotificationCallback,
-    on_termination: Arc<dyn Fn(&AcpError) + Send + Sync>,
+    hooks: Arc<dyn ConnectionHooks>,
 }
 
 struct State {
@@ -113,7 +142,7 @@ struct InboundRequest {
 pub struct ConnectionConfig {
     pub on_request: RequestCallback,
     pub on_notification: NotificationCallback,
-    pub on_termination: Arc<dyn Fn(&AcpError) + Send + Sync>,
+    pub hooks: Arc<dyn ConnectionHooks>,
     pub termination_on_eof: Option<Arc<dyn Fn() -> BoxFuture<'static, AcpError> + Send + Sync>>,
     /// Resolves when the child process exits. It can end the connection while
     /// a helper still holds stdout open, which EOF alone would not detect.
@@ -141,7 +170,7 @@ impl Connection {
             notify_waiters: Notify::new(),
             on_request: config.on_request,
             on_notification: config.on_notification,
-            on_termination: config.on_termination,
+            hooks: config.hooks,
         });
         let writer = tokio::spawn(writer_loop(write, write_rx, Arc::clone(&inner)));
         let reader = tokio::spawn(reader_loop(
@@ -337,7 +366,7 @@ impl ConnectionInner {
             let _ = pending.tx.send(Err(error.clone()));
         }
         self.notify_waiters.notify_waiters();
-        (self.on_termination)(&error);
+        isolate_hook("on_termination", || self.hooks.on_termination(&error));
     }
 
     fn push_notification(&self, notification: IncomingNotification) {
@@ -545,6 +574,9 @@ async fn route_message(
         request_id: acp_request_identity(&id),
         method: method.clone(),
     };
+    inner
+        .hooks
+        .on_incoming_request(&context.request_id, &method, &params);
     handler_tx
         .send(InboundRequest {
             id_value: id.to_value(),
@@ -685,7 +717,26 @@ async fn handler_loop(
         {
             return;
         }
-        let _ = ack_rx.await;
+        let request_id = &request.context.request_id;
+        match ack_rx.await {
+            Ok(Ok(())) => {
+                isolate_hook("on_outgoing_response", || {
+                    inner.hooks.on_outgoing_response(request_id);
+                });
+            }
+            Ok(Err(error)) => {
+                isolate_hook("on_outgoing_response_failure", || {
+                    inner.hooks.on_outgoing_response_failure(request_id, &error);
+                });
+            }
+            // The writer dropped the job unacknowledged, which only happens while the connection is ending.
+            Err(_) => {
+                let error = AcpError::transport("ACP response was not written");
+                isolate_hook("on_outgoing_response_failure", || {
+                    inner.hooks.on_outgoing_response_failure(request_id, &error);
+                });
+            }
+        }
     }
 }
 
@@ -738,7 +789,7 @@ mod tests {
             ConnectionConfig {
                 on_request,
                 on_notification,
-                on_termination: Arc::new(|_| {}),
+                hooks: Arc::new(NoConnectionHooks),
                 termination_on_eof: None,
                 termination_on_exit: None,
                 transform_session_update: Arc::new(|value| value),
@@ -1111,8 +1162,7 @@ mod tests {
 
     #[tokio::test]
     async fn transform_defect_terminates_the_connection_and_fails_pending_requests() {
-        let terminations = Arc::new(AtomicUsize::new(0));
-        let terminations_cb = Arc::clone(&terminations);
+        let hooks = Arc::new(RecordingHooks::default());
         let (client_read, mut agent_write) = duplex(1 << 20);
         let (mut agent_read, client_write) = duplex(1 << 20);
         let connection = Connection::start(
@@ -1121,9 +1171,7 @@ mod tests {
             ConnectionConfig {
                 on_request: noop_request(),
                 on_notification: noop_notification(),
-                on_termination: Arc::new(move |_| {
-                    terminations_cb.fetch_add(1, Ordering::SeqCst);
-                }),
+                hooks: Arc::clone(&hooks) as Arc<dyn ConnectionHooks>,
                 termination_on_eof: None,
                 termination_on_exit: None,
                 transform_session_update: Arc::new(|_| panic!("normalizer bug")),
@@ -1145,7 +1193,91 @@ mod tests {
         };
         assert_eq!(error.operation, Some(TransportOperation::ReadInputStream));
         assert!(connection.termination_error().is_some());
-        assert_eq!(terminations.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.terminations.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Default)]
+    struct RecordingHooks {
+        incoming: Mutex<Vec<(String, String, Value)>>,
+        responses: Mutex<Vec<String>>,
+        failures: Mutex<Vec<String>>,
+        terminations: AtomicUsize,
+    }
+
+    impl ConnectionHooks for RecordingHooks {
+        fn on_termination(&self, _error: &AcpError) {
+            self.terminations.fetch_add(1, Ordering::SeqCst);
+        }
+        fn on_incoming_request(&self, request_id: &str, method: &str, params: &Value) {
+            self.incoming
+                .lock()
+                .push((request_id.to_owned(), method.to_owned(), params.clone()));
+        }
+        fn on_outgoing_response(&self, request_id: &str) {
+            self.responses.lock().push(request_id.to_owned());
+        }
+        fn on_outgoing_response_failure(&self, request_id: &str, _error: &AcpError) {
+            self.failures.lock().push(request_id.to_owned());
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_hooks_observe_requests_responses_and_termination() {
+        let hooks = Arc::new(RecordingHooks::default());
+        let (client_read, mut agent_write) = duplex(1 << 20);
+        let (mut agent_read, client_write) = duplex(1 << 20);
+        let _connection = Connection::start(
+            client_read,
+            client_write,
+            ConnectionConfig {
+                on_request: Arc::new(|_method, _params, _ctx| {
+                    Box::pin(async { Ok(json!({"ok": true})) })
+                }),
+                on_notification: noop_notification(),
+                hooks: Arc::clone(&hooks) as Arc<dyn ConnectionHooks>,
+                termination_on_eof: None,
+                termination_on_exit: None,
+                transform_session_update: Arc::new(|value| value),
+            },
+        );
+        write_value(
+            &mut agent_write,
+            json!({"jsonrpc": "2.0", "id": 7, "method": "x/ask", "params": {"q": 1}}),
+        )
+        .await;
+        let reply = read_value(&mut agent_read).await;
+        assert_eq!(reply["id"], 7);
+        assert_eq!(reply["result"]["ok"], true);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while hooks.responses.lock().is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no outgoing-response hook"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            *hooks.incoming.lock(),
+            vec![(
+                "$t3:jsonrpc:number:7".to_owned(),
+                "x/ask".to_owned(),
+                json!({"q": 1})
+            )]
+        );
+        assert_eq!(
+            *hooks.responses.lock(),
+            vec!["$t3:jsonrpc:number:7".to_owned()]
+        );
+        assert!(hooks.failures.lock().is_empty());
+        drop(agent_write);
+        while hooks.terminations.load(Ordering::SeqCst) == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no termination hook"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(hooks.terminations.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

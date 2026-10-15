@@ -8,12 +8,14 @@ PM (Claude Opus 5.5) owns this file. Agents don't edit it; they report back.
 |---|---|---|---|
 | PM | Claude Opus 5.5 | $$$$ | Planning, briefs, merges, conflict calls. No implementation. |
 | Codex | gpt-6-sol (medium; high only for orchestrator/adapters) | $$$ | Hardest ports: orchestrator core, provider adapters, protocol work |
-| Claude | Sonnet 5.5 (high) | $$ | GPUI UI ports (look and feel) |
+| UI | Claude Opus 5.5 (high) | $$$$ | **All UI** (every task that touches `crates/app`). User rule: no other model writes UI. |
+| QC | Claude Opus 5.5 (QC workflow) | $$$$ | Quality-control gate on every branch before merge, plus foundation audits. |
+| Claude | Sonnet 5.5 (high) | $$ | Backend overflow when Codex is saturated; never UI |
 | Grok | grok-4.7 via Cursor (fast) | $ | Mid-size self-contained crates: persistence, git, source-control |
 | GLM | glm-5.3 via OpenCode | ¢ | Bulk mechanical translation: contracts, shared utils, reducers, test ports |
 | Haiku | Claude Haiku 5.5 | ¢ | Small fixes, clippy/fmt cleanups, review passes |
 
-Rules of thumb: at most 2 Codex tasks and 2 Sonnet tasks in flight. Cheap
+Rules of thumb: at most 2 Codex tasks and 2 Opus UI tasks in flight. Cheap
 models go first on anything mechanical; escalate to Codex only on failure or
 when the logic is subtle (state machines, protocol framing, concurrency).
 
@@ -25,7 +27,14 @@ when the logic is subtle (state machines, protocol framing, concurrency).
 3. Agent runs `scripts/check.sh -p <crates>` until green, commits on its branch,
    appends rows to the Deviations table in PORTING.md, reports back:
    what was ported, what was skipped and why, bugs found/fixed, open questions.
-4. PM reviews, merges into `main`, rebases waiting branches.
+4. **QC gate (Opus 5.5).** PM runs the QC workflow on the branch: parallel
+   reviewers per dimension (upstream fidelity, correctness, JSON/DB
+   compatibility, concurrency/perf, tests, conventions), each finding
+   adversarially verified. Confirmed findings go back to the task's agent as
+   a fix round (same model; new round id). Repeat until QC returns clean.
+5. PM merges into `main`, rebases waiting branches. After each wave merges,
+   QC runs a cross-crate audit on `main` (seams between crates, duplicated
+   logic, drift from upstream).
 
 ## Waves
 
@@ -37,7 +46,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T01 | Port all kept contracts modules | `crates/contracts` | GLM | active |
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | active |
-| T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Sonnet | active |
+| T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | active |
 | T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex | active |
 
 ### Wave 2: backend leaves (after T01)
@@ -58,23 +67,23 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T11 | OpenCode provider | `crates/provider-opencode` | Grok | todo |
 | T12 | Cursor provider | `crates/provider-cursor` | Grok | todo |
 | T13 | Orchestrator: event sink/store, projections, run execution, turn services | `crates/orchestration` | Codex (high), split into sub-tasks | todo |
-| T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | GLM | todo |
+| T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus | todo |
 
 ### Wave 4: UI (after T03 + T14)
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T15 | Sidebar (projects, threads, status, snooze, search, drag) | `crates/app/src/sidebar` | Sonnet | todo |
-| T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/chat` | Sonnet | todo |
-| T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Sonnet | todo |
-| T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Grok | todo |
-| T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Sonnet | todo |
-| T20 | Settings + keybindings UI | `crates/app/src/settings` | GLM | todo |
+| T15 | Sidebar (projects, threads, status, snooze, search, drag) | `crates/app/src/sidebar` | Opus | todo |
+| T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/chat` | Opus | todo |
+| T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus | todo |
+| T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus | todo |
+| T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Opus | todo |
+| T20 | Settings + keybindings UI | `crates/app/src/settings` | Opus | todo |
 
 ### Wave 5: glue
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T21 | Hooks crate + orchestrator wiring | `crates/hooks` | GLM | todo |
-| T22 | App wiring: runtime bridge, end-to-end smoke with each provider | `crates/app` | Codex | todo |
+| T21 | Hooks crate + orchestrator wiring (UI parts → Opus) | `crates/hooks` | GLM | todo |
+| T22 | App wiring: runtime bridge, end-to-end smoke with each provider | `crates/app` | Opus | todo |
 | T23 | T3 database import | `crates/persistence` | Grok | todo |

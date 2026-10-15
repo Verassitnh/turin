@@ -6706,6 +6706,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "turin-acp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "turin-claude-protocol"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "turin-codex-app-server"
 version = "0.1.0"
 dependencies = [

@@ -13,6 +13,8 @@
 
 use serde_json::Value;
 
+use super::types::{Actor, ChatAttachment, CreationSource, InputIntent};
+
 /// `OrchestrationV2TurnItemStatus`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TurnItemStatus {
@@ -281,6 +283,16 @@ pub struct CheckpointFileSummary {
     pub deletions: u64,
 }
 
+/// `OrchestrationV2FileChangeDetail`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileChangeDetail {
+    pub operation: String,
+    pub path: String,
+    pub old_path: Option<String>,
+    pub file_type: Option<String>,
+    pub mime_type: Option<String>,
+}
+
 /// The variant-specific half of an `OrchestrationV2TurnItem`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TurnItemPayload {
@@ -293,11 +305,21 @@ pub enum TurnItemPayload {
     UserMessage {
         message_id: String,
         text: String,
+        /// `OrchestrationV2CreationFields.createdBy`.
+        created_by: Actor,
+        /// `OrchestrationV2CreationFields.creationSource`.
+        creation_source: CreationSource,
+        scheduled_task_id: Option<String>,
+        sender_thread_id: Option<String>,
+        input_intent: InputIntent,
+        attachments: Vec<ChatAttachment>,
     },
     AssistantMessage {
         message_id: String,
         text: String,
         streaming: bool,
+        /// Upstream `attachments?:`; absent is empty.
+        attachments: Vec<ChatAttachment>,
     },
     Reasoning {
         text: String,
@@ -322,7 +344,10 @@ pub enum TurnItemPayload {
         file_name: String,
         additions: Option<u64>,
         deletions: Option<u64>,
+        /// Upstream `diffStr`.
         diff: Option<String>,
+        /// Upstream `changes?:` (multi-file edits).
+        changes: Option<Vec<FileChangeDetail>>,
     },
     CommandExecution {
         input: String,
@@ -442,6 +467,8 @@ pub struct TurnItem {
     pub thread_id: String,
     pub run_id: Option<String>,
     pub node_id: Option<String>,
+    /// Groups subagent cards launched by one provider turn.
+    pub provider_turn_id: Option<String>,
     pub parent_item_id: Option<String>,
     pub ordinal: u64,
     pub status: TurnItemStatus,
@@ -456,6 +483,36 @@ pub struct TurnItem {
 }
 
 impl TurnItem {
+    /// An item with only the required fields set; every optional base field
+    /// is `None` and `ordinal` is 0. Fixtures fill the rest with struct
+    /// update syntax.
+    pub fn new(
+        id: impl Into<String>,
+        thread_id: impl Into<String>,
+        status: TurnItemStatus,
+        updated_at: impl Into<String>,
+        payload: TurnItemPayload,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            thread_id: thread_id.into(),
+            run_id: None,
+            node_id: None,
+            provider_turn_id: None,
+            parent_item_id: None,
+            ordinal: 0,
+            status,
+            title: None,
+            started_at: None,
+            completed_at: None,
+            updated_at: updated_at.into(),
+            tool_surface: None,
+            tool_icon: None,
+            tool_source: None,
+            payload,
+        }
+    }
+
     pub fn item_type(&self) -> TurnItemType {
         self.payload.item_type()
     }

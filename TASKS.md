@@ -54,6 +54,7 @@ when the logic is subtle (state machines, protocol framing, concurrency).
 | Run | Target | Result |
 |---|---|---|
 | wf_c926ef06-3ca | T03 design system + shell (+ look-and-feel) | FAIL: 1 high, 4 medium, 27 low. docs/qc/wf_c926ef06-3ca-T03-design-system.md |
+| wf_e8a1a7c1-d53 | T21 hooks (spec, lifecycle, security/trust, process) | running |
 | wf_d6d58e6c-789 | T24 app icon (visual fidelity, reproducibility) | running |
 | wf_8b97ef76-9c9 | T02 persistence | PASS: 15 medium, 27 low → T02b. docs/qc/wf_8b97ef76-9c9-T02-persistence.md |
 | wf_b2f290b9-219 | T00a fix round (base_schemas helpers) | PASS: 6 low → T00c |
@@ -82,8 +83,8 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T05a | Shared utils, contract-free files | `crates/shared` | GLM | active |
 | T05b | Shared utils, contract-dependent files | `crates/shared` | GLM | todo (after T01) |
-| T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok | todo |
-| T07 | Source control: core + GitHub driver, PR service, review guides, viewed files | `crates/source-control` | Grok | todo |
+| T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok | active (base: T01 branch) |
+| T07 | Source control: core + GitHub driver, PR service, review guides, viewed files | `crates/source-control` | GLM | active (base: T01 branch) |
 | T08 | Provider core: adapter trait, registry, catalog, model manifests, auth/credentials | `crates/provider-core` | Codex | todo |
 
 ### Wave 3: engines (after wave 2)
@@ -116,7 +117,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T21 | Hooks crate (orchestrator wiring later; UI parts → Opus) | `crates/hooks` | GLM | active |
+| T21 | Hooks crate (orchestrator wiring later; UI parts → Opus) | `crates/hooks` | GLM | review (QC wf_e8a1a7c1-d53) |
 | T22 | App wiring: runtime bridge, end-to-end smoke with each provider | `crates/app` | Opus | todo |
 | T23 | T3 database import | `crates/persistence` | Grok | todo |
 

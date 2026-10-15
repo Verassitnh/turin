@@ -8,7 +8,9 @@
 //! Upstream's asset also carries `cwd`, which this fetch never reads, so it is not carried here.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -35,6 +37,23 @@ const CREDENTIALED_HOSTS: [&str; 4] = [
 
 /// GitHub answers an asset request with a 302 to a signed object URL that needs no credential.
 const MAX_REDIRECTS: usize = 3;
+/// How long a hop may take to connect, and then to send its headers. The streamed body is not
+/// timed: a large asset takes as long as it takes. Upstream's media fetch has no timeout at all.
+const MEDIA_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MEDIA_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A hop that did not connect, or did not send headers, in time. The redirect chain treats it as
+/// a broken hop, which is a 502, rather than as a failure of the route.
+#[derive(Debug)]
+struct HopTimeout;
+
+impl fmt::Display for HopTimeout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("The media host did not answer in time.")
+    }
+}
+
+impl std::error::Error for HopTimeout {}
 /// Passed through so a seek in a long video costs one upstream range request, not a full download.
 const FORWARDED_REQUEST_HEADERS: [&str; 2] = ["range", "if-range"];
 const FORWARDED_RESPONSE_HEADERS: [&str; 6] = [
@@ -129,12 +148,17 @@ async fn fetch_following_redirects(
         if let Some(authorization) = authorization {
             request_headers.push(("authorization".to_owned(), authorization));
         }
-        let response = http
+        let response = match http
             .get(GitHubMediaRequest {
                 url: target.clone(),
                 headers: request_headers,
             })
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if error.is::<HopTimeout>() => return Ok(None),
+            Err(error) => return Err(error),
+        };
         if !(300..400).contains(&response.status) {
             return Ok(Some(response));
         }
@@ -260,15 +284,25 @@ pub async fn github_media_response(
 #[derive(Debug, Clone)]
 pub struct ReqwestGitHubMediaHttp {
     client: reqwest::Client,
+    header_timeout: Duration,
 }
 
 impl ReqwestGitHubMediaHttp {
     pub fn new() -> Self {
+        Self::with_header_timeout(MEDIA_HEADER_TIMEOUT)
+    }
+
+    /// Like [`Self::new`], with a different bound on each hop's connect and headers.
+    pub fn with_header_timeout(header_timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(MEDIA_CONNECT_TIMEOUT)
             .build()
             .expect("the GitHub media client builds");
-        Self { client }
+        Self {
+            client,
+            header_timeout,
+        }
     }
 }
 
@@ -285,10 +319,13 @@ impl GitHubMediaHttp for ReqwestGitHubMediaHttp {
         for (name, value) in &request.headers {
             builder = builder.header(name, value);
         }
-        let response = builder
-            .send()
-            .await
-            .map_err(|error| Arc::new(error) as Cause)?;
+        // Only the wait for headers is bounded here; the body is streamed below without a deadline.
+        let response = match tokio::time::timeout(self.header_timeout, builder.send()).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) if error.is_timeout() => return Err(Arc::new(HopTimeout) as Cause),
+            Ok(Err(error)) => return Err(Arc::new(error) as Cause),
+            Err(_elapsed) => return Err(Arc::new(HopTimeout) as Cause),
+        };
         let status = response.status().as_u16();
         let mut headers: HashMap<String, String> = HashMap::new();
         for (name, value) in response.headers() {
@@ -589,5 +626,35 @@ mod tests {
                 .contains(&("range".to_owned(), "bytes=0-99".to_owned()))
         );
         assert!(!sent[0].headers.iter().any(|(name, _)| name == "cookie"));
+    }
+
+    /// A host that accepts the connection and never answers: the hop is broken, so the answer is a
+    /// 502 and the request ends, rather than holding the connection open.
+    #[tokio::test]
+    async fn a_hop_that_never_sends_headers_is_a_broken_hop_not_a_hang() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let silent = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            // Hold the socket open without a word, as a stalled host does.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            drop(socket);
+        });
+        let http = ReqwestGitHubMediaHttp::with_header_timeout(Duration::from_millis(50));
+        let asset = GitHubMediaAsset {
+            url: format!("http://{address}/attachment.png"),
+            expires_at: NOW + 60_000,
+        };
+
+        let answer = tokio::time::timeout(
+            Duration::from_secs(10),
+            github_media_response(&SignedIn, &http, &*ManualClock::new(NOW), &asset, &[]),
+        )
+        .await
+        .expect("the request ends")
+        .unwrap();
+
+        assert_eq!(answer.status, 502);
+        silent.abort();
     }
 }

@@ -40,6 +40,8 @@ use crate::source_control_core::source_control_provider::{
 /// The synchronous RPC (older clients, mobile) keeps a deadline: nothing else tells the user a
 /// clone stalled. The tracked path disables it and relies on progress and Cancel instead.
 const CLONE_TIMEOUT: Duration = Duration::from_millis(120_000);
+/// The deadline the git driver gives a command that names none (upstream `DEFAULT_TIMEOUT_MS`).
+const GIT_DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Retry budget for removing a partial clone: `Schedule.spaced("200 millis")`, five times.
 const DISCARD_RETRIES: usize = 5;
 const DISCARD_RETRY_SPACING: Duration = Duration::from_millis(200);
@@ -659,7 +661,7 @@ impl SourceControlRepositoryService {
                     "--verify".to_owned(),
                     "HEAD".to_owned(),
                 ],
-                timeout: None,
+                timeout: Some(GIT_DEFAULT_TIMEOUT),
                 env: Vec::new(),
                 on_stderr_line: None,
             })
@@ -876,6 +878,8 @@ mod tests {
         clones: Mutex<Vec<(String, Vec<String>)>>,
         remotes: Mutex<Vec<(String, String, String)>>,
         pushes: Mutex<Vec<(String, String)>>,
+        /// The deadline each `rev-parse` (the head check) was given.
+        head_timeouts: Mutex<Vec<Option<Duration>>>,
     }
 
     impl FakeGit {
@@ -893,6 +897,7 @@ mod tests {
                 clones: Mutex::new(Vec::new()),
                 remotes: Mutex::new(Vec::new()),
                 pushes: Mutex::new(Vec::new()),
+                head_timeouts: Mutex::new(Vec::new()),
             }
         }
     }
@@ -901,6 +906,7 @@ mod tests {
     impl RepositoryGit for FakeGit {
         async fn execute(&self, command: GitCommand) -> Result<(), Cause> {
             if command.args.first().map(String::as_str) == Some("rev-parse") {
+                self.head_timeouts.lock().push(command.timeout);
                 return if self.head_exists {
                     Ok(())
                 } else {
@@ -1309,6 +1315,18 @@ mod tests {
         assert_eq!(
             *git.pushes.lock(),
             vec![("/workspace".to_owned(), "origin-1".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_head_check_runs_under_the_drivers_default_deadline_not_no_deadline() {
+        let git = Arc::new(FakeGit::new());
+        ok(service(Arc::new(FakeProvider::default()), git.clone())
+            .publish_repository(publish_input("origin"))
+            .await);
+        assert_eq!(
+            *git.head_timeouts.lock(),
+            vec![Some(Duration::from_secs(30))]
         );
     }
 

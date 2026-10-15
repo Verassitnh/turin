@@ -257,6 +257,8 @@ impl Render for HoverCardView {
                             div()
                                 .min_w_0()
                                 .truncate()
+                                // `leading-tight` (1.25 × 12px), not the 1rem row height.
+                                .line_height(px(15.))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.foreground)
                                 .child(card.title.clone()),

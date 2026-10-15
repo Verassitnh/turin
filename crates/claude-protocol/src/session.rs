@@ -676,17 +676,17 @@ fn route_control_response(state: &Arc<Shared>, response: Value, tasks: &mut Join
     }
     let _ = entry.sender.send(response);
 }
+/// Each pending list carries one subtype, as in sdk.mjs `processPendingPermissionRequests` (only
+/// `can_use_tool`) and `processPendingUserDialogRequests` (only `request_user_dialog`). An item in
+/// the wrong list is not dispatched.
 fn replay_pending(response: &Value, state: &Arc<Shared>, tasks: &mut JoinSet<()>) {
-    for name in [
-        "pending_permission_requests",
-        "pending_user_dialog_requests",
+    for (name, subtype) in [
+        ("pending_permission_requests", "can_use_tool"),
+        ("pending_user_dialog_requests", "request_user_dialog"),
     ] {
         if let Some(items) = response.get(name).and_then(Value::as_array) {
             for item in items {
-                if matches!(
-                    item.pointer("/request/subtype").and_then(Value::as_str),
-                    Some("can_use_tool" | "request_user_dialog")
-                ) {
+                if item.pointer("/request/subtype").and_then(Value::as_str) == Some(subtype) {
                     dispatch(item.clone(), state, tasks);
                 }
             }
@@ -1242,6 +1242,52 @@ for line in sys.stdin:
             .expect("request hung after a non-UTF-8 line")
             .unwrap();
         assert_eq!(reply, json!({}));
+        session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    struct Recorder(mpsc::UnboundedSender<String>);
+    impl ControlHandler for Recorder {
+        fn handle(&self, request: ControlRequest, _: CancellationToken) -> HandlerFuture {
+            let _ = self.0.send(request.request_id);
+            Box::pin(async { Ok(Some(json!({}))) })
+        }
+    }
+    /// The initialize reply lists a request under each pending list, with one misfiled item per list.
+    /// Only the items whose subtype matches their list may reach the handler.
+    #[tokio::test]
+    async fn replay_dispatches_each_pending_list_only_for_its_own_subtype() {
+        let dir =
+            std::env::temp_dir().join(format!("turin-claude-replay-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]},
+            "pending_permission_requests":[
+                {"type":"control_request","request_id":"perm-ok","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{},"tool_use_id":"t1"}},
+                {"type":"control_request","request_id":"perm-misfiled","request":{"subtype":"request_user_dialog","dialog_kind":"x","payload":{}}}],
+            "pending_user_dialog_requests":[
+                {"type":"control_request","request_id":"dialog-ok","request":{"subtype":"request_user_dialog","dialog_kind":"x","payload":{}}},
+                {"type":"control_request","request_id":"dialog-misfiled","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{},"tool_use_id":"t2"}}]
+        }}),flush=True)
+"#,
+        );
+        let (tx, mut dispatched) = mpsc::unbounded_channel();
+        let session = ClaudeSession::spawn(options, Arc::new(Recorder(tx)))
+            .await
+            .unwrap();
+        let mut seen = vec![];
+        while let Ok(Some(id)) =
+            tokio::time::timeout(Duration::from_millis(500), dispatched.recv()).await
+        {
+            seen.push(id);
+        }
+        seen.sort();
+        assert_eq!(seen, ["dialog-ok", "perm-ok"]);
         session.shutdown().await.unwrap();
         fs::remove_dir_all(dir).unwrap();
     }

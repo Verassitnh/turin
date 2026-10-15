@@ -21,6 +21,7 @@ use turin_contracts::vcs::{
     VcsRemote, VcsRepositoryIdentity,
 };
 
+use crate::git_vcs_driver_core::split_null_separated_paths;
 use crate::process::{OutputMode, StdoutChunkCallback};
 use crate::vcs_driver::{
     CheckpointDiffFormat, VcsCaptureCheckpointInput, VcsDeleteCheckpointRefsInput,
@@ -249,7 +250,7 @@ impl VcsDriver for GitVcsDriver {
             ));
         }
         Ok(VcsListWorkspaceFilesResult {
-            paths: split_null_separated(&result.stdout, result.stdout_truncated)
+            paths: split_null_separated_paths(&result.stdout, result.stdout_truncated)
                 .into_iter()
                 .filter_map(|path| TrimmedNonEmptyString::new(path).ok())
                 .collect(),
@@ -372,7 +373,7 @@ impl VcsDriver for GitVcsDriver {
                     },
                 ));
             }
-            ignored.extend(split_null_separated(
+            ignored.extend(split_null_separated_paths(
                 &result.stdout,
                 result.stdout_truncated,
             ));
@@ -1088,7 +1089,7 @@ impl GitVcsDriver {
         if untracked.stdout_truncated {
             return Ok(false);
         }
-        let candidates: Vec<String> = split_null_separated(&untracked.stdout, false)
+        let candidates: Vec<String> = split_null_separated_paths(&untracked.stdout, false)
             .into_iter()
             .filter(|entry| entry.ends_with('/'))
             .collect();
@@ -1230,17 +1231,6 @@ fn exit_error(
         stderr_length: None,
         stderr_truncated: None,
     })
-}
-
-pub fn split_null_separated(input: &str, truncated: bool) -> Vec<String> {
-    let mut parts: Vec<String> = input.split('\0').map(str::to_owned).collect();
-    if truncated && parts.last().is_some_and(|part| !part.is_empty()) {
-        parts.pop();
-    }
-    parts
-        .into_iter()
-        .filter(|value| !value.is_empty())
-        .collect()
 }
 
 fn chunk_paths_for_check_ignore(relative_paths: &[String]) -> Vec<Vec<String>> {

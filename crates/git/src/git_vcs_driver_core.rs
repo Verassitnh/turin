@@ -975,6 +975,29 @@ mod tests {
     use turin_contracts::base_schemas::TrimmedNonEmptyString;
 
     #[test]
+    fn drops_an_unterminated_path_from_truncated_null_separated_output() {
+        assert_eq!(
+            split_null_separated_paths("complete.txt\0partial", true),
+            ["complete.txt"]
+        );
+        // A trailing NUL means the last path was complete, so truncation drops nothing.
+        assert_eq!(
+            split_null_separated_paths("complete.txt\0final.txt\0", true),
+            ["complete.txt", "final.txt"]
+        );
+    }
+
+    #[test]
+    fn keeps_the_final_path_when_null_separated_output_is_complete() {
+        assert_eq!(
+            split_null_separated_paths("complete.txt\0final.txt", false),
+            ["complete.txt", "final.txt"]
+        );
+        assert!(split_null_separated_paths("", false).is_empty());
+        assert!(split_null_separated_paths("", true).is_empty());
+    }
+
+    #[test]
     fn streamed_lines_keep_a_character_split_across_reads() {
         let lines = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
         let sink = lines.clone();

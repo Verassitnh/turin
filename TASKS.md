@@ -97,6 +97,7 @@ runs. Never keep copies of user databases.
 | wf_9dc37bfd-861 | T04b protocol docs fix round | FAIL: 5 high, 13 medium, 6 low. docs/qc/wf_9dc37bfd-861-T04b-protocols.md |
 | wf_342ba162-dd7 | T24 icon fix rounds | PASS: 1 low (fixed, merged) |
 | wf_4a9d9be1-c7c | T03 fix round re-QC | aborted: Claude session limit → rerun as wf_5a0d0e56-76b |
+| wf_1f8bff22-abb | T16 thread view (Haiku-only: logic fidelity, look-and-feel) | running |
 | wf_0fd743c1-ca2 | T01 contracts (Haiku-only: wire fidelity, tests/rules) | running |
 | wf_5bf4fe41-dd5 | T12a ACP crate | see docs/qc/wf_5bf4fe41-dd5-T12a-acp.md → T12a r3 fixes |
 | wf_118a9a5d-526 | T11a OpenCode transport | see docs/qc/wf_118a9a5d-526-T11a-opencode-runtime.md → fixes in T11 r4 |
@@ -167,7 +168,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex | r3 active (Codex re-auth) |
 | T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | done → QC wf_118a9a5d-526 |
 | T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok → Cursor Auto | r3: process leak + unjustified cuts (92 tests) |
-| T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok | done → QC wf_5bf4fe41-dd5 |
+| T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok → Cursor Auto | QC PASS (5 medium, 8 low) → r3 fixes active |
 | T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok → Cursor Auto | done (26 tests, real provider-core traits) → QC queued |
 | T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex → Sonnet → Cursor Auto | r3 active (from docs/handoff/T13a.md; ~124 tests) |
 | T13b | Orchestrator write side: EventSink/Store, outbox/worker, receipts, command policy, thread lifecycle services | `crates/orchestration/src/pipeline/**` | Codex → Sonnet → Cursor Auto | r3 active (from docs/handoff/T13b.md) |

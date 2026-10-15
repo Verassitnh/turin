@@ -14,6 +14,7 @@ pub mod codex_file_citations;
 //TODO pub mod codex_markdown_directives;
 pub mod composer_context_clipboard;
 pub mod composer_context_legacy;
+pub mod composer_context_legacy_send;
 pub mod composer_context_references;
 pub mod composer_inline_tokens;
 pub mod composer_pull_request_matches;

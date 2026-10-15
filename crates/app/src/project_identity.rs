@@ -2,8 +2,8 @@
 //!
 //! The generated monogram and color for a project without an icon.
 
-use crate::state::models::ProjectIconColor;
 use crate::project_icon_colors::PROJECT_ICON_COLORS;
+use crate::state::models::ProjectIconColor;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectIdentity {

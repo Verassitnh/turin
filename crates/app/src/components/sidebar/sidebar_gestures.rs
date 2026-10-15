@@ -16,7 +16,6 @@ use gpui_kit::{
 };
 
 use super::Sidebar;
-use crate::state::models::EnvironmentThreadShell;
 use super::sidebar_drag::{
     CollisionArgs, Rect, STATIONARY, SidebarCollisionDetection, SidebarSortingStrategy, SortLayout,
     SortingStrategyInput, Transform, restrict_below_sidebar_label,
@@ -30,6 +29,7 @@ use super::sidebar_logic::{
 use super::sidebar_pointer::{Point, PointerSensorHandler, SidebarPointerSensor};
 use super::sidebar_sections::OptimisticDrop;
 use super::view_model::ThreadRef;
+use crate::state::models::EnvironmentThreadShell;
 use crate::timestamp_format::now_iso;
 
 /// Pointer travel before a press on a row starts a drag, or a press on its

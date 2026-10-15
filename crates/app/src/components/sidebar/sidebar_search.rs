@@ -14,7 +14,6 @@ use gpui_kit::{
 };
 
 use super::Sidebar;
-use crate::state::models::{EnvironmentThreadShell, thread_pull_request_search_terms};
 use super::sidebar_logic::{
     pull_request_matches_search_query, search_sidebar_threads, thread_search_match_key,
 };
@@ -22,6 +21,7 @@ use super::sidebar_thread_row::thread_time_label;
 use super::thread_hover_card::SidebarThreadTooltip;
 use crate::components::project_favicon::ProjectFavicon;
 use crate::components::thread_search_match::ThreadSearchMatchExcerpt;
+use crate::state::models::{EnvironmentThreadShell, thread_pull_request_search_terms};
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_MD, TEXT_SM, TEXT_XS};

@@ -15,7 +15,6 @@ use gpui_kit::{
     div, px, rems,
 };
 
-use crate::state::models::EnvironmentThreadShell;
 use super::sidebar_logic::{
     SidebarListItem, SidebarListMarker, SidebarSection, resolve_sidebar_drop_verb,
     resolve_sidebar_row_accessibility, sidebar_list_item_id,
@@ -25,6 +24,7 @@ use super::sidebar_thread_row::{CARD_ROW_HEIGHT, RowInput, SLIM_ROW_HEIGHT};
 use super::view_model::{Shelf, SidebarDraft};
 use super::{Sidebar, SidebarEvent, SidebarRoute};
 use crate::components::project_favicon::ProjectFavicon;
+use crate::state::models::EnvironmentThreadShell;
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{

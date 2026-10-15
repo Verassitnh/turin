@@ -13,13 +13,13 @@ use gpui_kit::{
     ParentElement as _, Render, SharedString, Styled as _, Window, div, px, rems,
 };
 
+use super::thread_status_indicators::pull_request_state_presentation;
+use super::view_model::SidebarSnapshot;
+use crate::components::project_favicon::ProjectFavicon;
 use crate::state::models::{
     EnvironmentProject, EnvironmentThreadShell, ProviderFailureClass, PullRequestState,
     ThreadPullRequestLink,
 };
-use super::thread_status_indicators::pull_request_state_presentation;
-use super::view_model::SidebarSnapshot;
-use crate::components::project_favicon::ProjectFavicon;
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{self, RADIUS_MD, TEXT_XS};

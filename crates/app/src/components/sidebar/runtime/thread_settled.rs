@@ -400,10 +400,10 @@ pub fn resolve_snooze_presets_now(timestamp_format: TimestampFormat) -> Vec<Snoo
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::state::models::fixtures::run_id;
     use crate::state::models::fixtures::{runtime, shell};
     use crate::state::models::{PendingSubagentRequest, ThreadRunSummary};
-    use super::*;
     use chrono::{FixedOffset, NaiveDateTime};
 
     const NOW: &str = "2026-04-10T12:00:00.000Z";

@@ -49,7 +49,6 @@ use gpui_kit::{
     actions, div,
 };
 
-use crate::state::models::{EnvironmentThreadShell, SettledOverride};
 use self::runtime::thread_inbox::InboxReturnTracker;
 use self::sidebar_chrome::{SidebarChromeFooter, SidebarChromeHeader};
 use self::sidebar_gestures::{DragSession, SweepSession};
@@ -68,6 +67,7 @@ use self::view_model::{
     SharedSidebarBackend, SidebarSnapshot, SidebarStore, SidebarStoreChanged, ThreadRef,
     ThreadSearchMatch,
 };
+use crate::state::models::{EnvironmentThreadShell, SettledOverride};
 use crate::theme::ActiveAppTheme;
 use crate::timestamp_format::now_iso;
 use crate::ui::sidebar::{SidebarContent, SidebarGroup};

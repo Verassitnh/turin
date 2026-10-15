@@ -20,7 +20,6 @@ use gpui_kit::{
     App, AppContext as _, ClipboardItem, Context, IntoElement as _, Task, WeakEntity, Window,
 };
 
-use crate::state::models::{EnvironmentThreadShell, SettledOverride, thread_runtime_can_archive};
 use super::runtime::thread_settled::can_snooze;
 use super::sidebar_logic::{
     CommandOutcome, ContextMenuItem, ParkAction, build_bulk_title_regeneration_context_menu_item,
@@ -35,6 +34,7 @@ use crate::components::thread_action_menu_logic::{
     ProjectFilterState, ThreadActionMenuState, ThreadActionSupports, build_draft_action_menu_items,
     build_thread_action_menu_items, thread_action_requires_operate,
 };
+use crate::state::models::{EnvironmentThreadShell, SettledOverride, thread_runtime_can_archive};
 use crate::timestamp_format::now_iso;
 
 /// Where parking the open thread moves the user.

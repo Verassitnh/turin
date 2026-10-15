@@ -9,8 +9,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::collate::locale_compare;
-use crate::state::models::{EnvironmentThreadShell, InteractionMode, RunStatus, thread_runtime_is_active};
 use super::thread_sort::to_sortable_timestamp;
+use crate::state::models::{
+    EnvironmentThreadShell, InteractionMode, RunStatus, thread_runtime_is_active,
+};
 use crate::timestamp_format::now_ms;
 
 /// `isThreadWorking`: a running run, or one stopped with background work
@@ -151,9 +153,9 @@ impl InboxReturnTracker {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::state::models::ThreadRunSummary;
     use crate::state::models::fixtures::{run_id, runtime, shell};
-    use super::*;
 
     fn thread(id: &str, working: bool) -> EnvironmentThreadShell {
         let mut thread = shell(id);

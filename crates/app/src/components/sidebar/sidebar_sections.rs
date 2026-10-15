@@ -6,7 +6,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::state::models::{EnvironmentThreadShell, SettledOverride};
 use super::runtime::thread_inbox::InboxReturnTracker;
 use super::runtime::thread_settled::effective_snoozed;
 use super::runtime::thread_sort::sort_settled_threads;
@@ -17,6 +16,7 @@ use super::sidebar_logic::{
     sort_pinned_threads_for_sidebar, sort_threads_for_sidebar, sort_working_threads_by_send,
 };
 use super::view_model::SidebarSnapshot;
+use crate::state::models::{EnvironmentThreadShell, SettledOverride};
 
 /// Settled-tail paging: recent history is the common lookup; the deep tail
 /// stays behind an explicit Show more.

@@ -18,9 +18,6 @@ use gpui_kit::{
     RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px, rems,
 };
 
-use crate::state::models::{
-    EnvironmentThreadShell, SettledOverride, resolve_thread_provider_stack,
-};
 use super::runtime::thread_settled::{can_snooze, snooze_wake_label, thread_woke_at};
 use super::runtime::thread_sort::resolve_settled_thread_timestamp;
 use super::sidebar_gestures::SweepAction;
@@ -39,6 +36,9 @@ use super::view_model::ThreadRef;
 use super::{Sidebar, SidebarEvent, jump_shortcut_label};
 use crate::components::drag_region::no_drag;
 use crate::components::project_favicon::ProjectFavicon;
+use crate::state::models::{
+    EnvironmentThreadShell, SettledOverride, resolve_thread_provider_stack,
+};
 use crate::theme::color::{hex, with_alpha};
 use crate::theme::tokens::{
     self, RADIUS_MD, RADIUS_SM, SIDEBAR_CONTENT_INSET, SIDEBAR_ROW_CONTENT_INSET, TEXT_2XS,

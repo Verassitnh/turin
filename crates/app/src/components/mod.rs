@@ -7,6 +7,7 @@ pub mod chat_view;
 pub mod command_block;
 pub mod command_palette;
 pub mod drag_region;
+pub mod git_actions_control;
 pub mod project_favicon;
 pub mod project_monogram;
 pub mod right_panel_tabs;

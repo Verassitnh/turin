@@ -8,6 +8,7 @@ pub mod markdown;
 pub mod message_copy_button;
 pub mod messages_timeline;
 pub mod panel_layout_controls;
+pub mod thread_details_control;
 // The ported timeline read model keeps upstream's full helper surface; the
 // view and T14's reducers call into it piecemeal.
 #[allow(dead_code)]

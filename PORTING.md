@@ -99,6 +99,13 @@ Revised after QC `wf_6ce02f2f-38c` (docs/qc/). Helpers live in
 **Rules:** never do a bounded `send().await` or any `.await` while holding a
 DB transaction or a sync lock.
 
+**Async-first (user rule).** Everything that can be async is async: all IO
+(processes, network, SQLite via `Db`, filesystem scans, git) runs on tokio or
+gpui's background executor, never on the UI thread; independent work runs
+concurrently (`join!`/`buffer_unordered` per the table above) instead of in
+sequence unless upstream's ordering is semantically required. UI renders from
+cached view models and never awaits.
+
 Async runtime: tokio for all backend work. The GPUI app spawns a multi-thread
 tokio runtime at startup and bridges results into entities via channels.
 
@@ -184,12 +191,34 @@ timeout_secs = 300
 ```
 
 Hooks get event JSON on stdin and `TURIN_*` env vars (`TURIN_EVENT`,
-`TURIN_PROJECT_ID`, `TURIN_THREAD_ID`, `TURIN_CWD`, …).
+`TURIN_PROJECT_ID`, `TURIN_THREAD_ID`, `TURIN_CWD`, …); inherited `TURIN_*`
+vars are scrubbed first.
+
+**Trust (QC wf_e8a1a7c1-d53).** Global `~/.turin/hooks.toml` is trusted.
+Project `.turin/hooks.toml` never runs until the user approves it: approval is
+stored outside the repo (`~/.turin/trusted-hooks.json`: canonical project root
+→ SHA-256 of the exact file bytes). Any change (git pull, branch switch, an
+agent editing the file) invalidates it; hot reload re-checks the hash and drops
+untrusted project hooks while keeping global ones. Untrusted/changed project
+hooks surface as a pending status the UI shows with an "Approve" action.
+Rationale: upstream never auto-runs repo-supplied commands (`t3.json` scripts
+are import-only).
+
+**Return protocol.** A blocking `thread.created` hook may print, as its last
+stdout line, a JSON object `{"worktreePath": "...", "branch": "..."}` (both
+optional). The orchestrator then binds the new thread to that workspace, which
+is how hooks replace upstream's launch-into-worktree flow. Malformed or absent
+output = no change.
+
+**Environment.** Hooks inherit the app's environment; PATH hydration from the
+login shell (upstream `fixPath` / `readEnvironmentFromLoginShell`) happens once
+at app startup (T05b/T22), not per hook.
 
 ## Deviations
 
 | File | Upstream | Turin | Why |
 |---|---|---|---|
+| `provider-cursor` (ACP model selection) | SDK sends `{id, params}` per send; no global side effects | ACP `set_config_option`/`set_model` with `parameterizedModelPicker`; Cursor CLI persists the choice to `~/.cursor/cli-config.json` + `acp-config.json` and syncs all sessions in the process | ACP is the only stable transport. Mitigation: one `cursor-agent acp` process per thread; snapshot/restore user config if the side effect proves visible. QC wf_42618e43-71a item 14 |
 | `provider-cursor` | runs `@cursor/sdk` local executor in-process (Node) | `cursor-agent acp` subprocess over ACP | Rust can't host the JS SDK and it has no stable wire protocol; ACP is Cursor's supported external protocol. Gains interactive approvals; loses SDK-only features (autoReview, run recovery via listRuns, per-send `{id,params}` model selection). QC wf_42618e43-71a |
 | `contracts/base_schemas.rs` | `TrimmedNonEmptyString` trims only on decode/encode | trims at construction | no untrimmed state can exist, so `" "` can never encode to `""` |
 | `contracts/base_schemas.rs` | `UnknownUnionMember { tag, value }` | adds `raw: Value` | lets callers render/log unknown members without re-reading the row |

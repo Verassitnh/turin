@@ -61,7 +61,8 @@ pub struct OpenCodeCommandResult {
     pub code: i32,
 }
 
-/// Runs `opencode --version`. The runtime implements this; tests substitute it.
+/// Runs `opencode --version`. `SystemOpenCodeBinary` is the real implementation;
+/// tests substitute their own.
 pub trait OpenCodeBinary: Send + Sync {
     fn run_version<'a>(
         &'a self,

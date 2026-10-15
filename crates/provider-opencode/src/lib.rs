@@ -8,6 +8,7 @@
 #[allow(clippy::result_large_err)]
 mod adapter;
 mod auth;
+mod command;
 mod error;
 mod events;
 mod http_client;
@@ -38,6 +39,7 @@ pub use adapter::{
     v1_rules_as_session, v2_capabilities,
 };
 pub use auth::{OPENCODE_USERNAME, basic_authorization, encode_uri_component};
+pub use command::{SystemOpenCodeBinary, run_open_code_command};
 pub use error::{
     EventStreamError, OpenCodeRuntimeError, SilentStreamError, open_code_runtime_error_detail,
 };

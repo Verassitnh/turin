@@ -5,7 +5,6 @@
 //! Opening a session waits for a probe. A failed probe stays on 1.x. Only an
 //! explicit 2.x probe selects the v2 adapter. Installed 1.19.0 is v1.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -19,6 +18,7 @@ use crate::adapter::api::*;
 use crate::adapter::logic::{opencode_driver, select_generation, v1_capabilities, v2_capabilities};
 use crate::adapter::v1::OpenCodeV1Session;
 use crate::adapter::v2::OpenCodeV2Session;
+use crate::command::SystemOpenCodeBinary;
 use crate::error::OpenCodeRuntimeError;
 use crate::ledger::OpenCodeServerLedger;
 use crate::runtime::{
@@ -26,10 +26,7 @@ use crate::runtime::{
 };
 use crate::v2_client::V2Client;
 use crate::v2_server::{OpenCode2Config, OpenCode2Server, ServerLoan};
-use crate::version_probe::{
-    OpenCodeBinary, OpenCodeCommandResult, OpenCodeGeneration, ProbeSettings,
-    probe_open_code_runtime,
-};
+use crate::version_probe::{OpenCodeGeneration, ProbeSettings, probe_open_code_runtime};
 
 /// Settings the OpenCode driver reads. Mirrors `OpenCodeSettings` in
 /// `server/settings.ts`: enabled, binary path, external server URL, password.
@@ -186,37 +183,6 @@ fn host_cwd() -> String {
         .unwrap_or_else(|_| ".".to_owned())
 }
 
-struct CommandBinary;
-
-impl OpenCodeBinary for CommandBinary {
-    #[allow(clippy::manual_async_fn)]
-    fn run_version<'a>(
-        &'a self,
-        binary_path: &'a str,
-        environment: Option<&'a BTreeMap<String, String>>,
-    ) -> impl Future<Output = Result<OpenCodeCommandResult, OpenCodeRuntimeError>> + Send + 'a {
-        async move {
-            let mut command = tokio::process::Command::new(binary_path);
-            command.arg("--version").kill_on_drop(true);
-            if let Some(environment) = environment {
-                command.env_clear();
-                for (key, value) in environment {
-                    command.env(key, value);
-                }
-            }
-            let output = command
-                .output()
-                .await
-                .map_err(|err| OpenCodeRuntimeError::new("probeOpenCodeBinary", err.to_string()))?;
-            Ok(OpenCodeCommandResult {
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                code: output.status.code().unwrap_or(1),
-            })
-        }
-    }
-}
-
 #[async_trait::async_trait]
 impl ProviderAdapterV2 for OpenCodeAdapter {
     fn instance_id(&self) -> &ProviderInstanceId {
@@ -267,7 +233,7 @@ impl ProviderAdapterV2 for OpenCodeAdapter {
         let http = reqwest::Client::new();
         let probed = probe_open_code_runtime(
             &http,
-            &CommandBinary,
+            &SystemOpenCodeBinary,
             &ProbeSettings {
                 binary_path: self.settings.binary_path.clone(),
                 server_url: self.settings.server_url.clone(),

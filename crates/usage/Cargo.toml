@@ -1,0 +1,24 @@
+[package]
+name = "turin-usage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+turin-contracts.workspace = true
+turin-provider-core.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+indexmap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid = { workspace = true, features = ["v5"] }
+gethostname = "1"
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile.workspace = true

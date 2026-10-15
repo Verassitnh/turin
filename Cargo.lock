@@ -7205,6 +7205,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "turin-usage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gethostname",
+ "indexmap",
+ "pretty_assertions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "turin-contracts",
+ "turin-provider-core",
+ "uuid",
+]
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -6,7 +6,10 @@ license.workspace = true
 
 [dependencies]
 turin-contracts.workspace = true
+turin-persistence.workspace = true
 anyhow.workspace = true
+rusqlite.workspace = true
+base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

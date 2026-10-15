@@ -12,7 +12,8 @@ use crate::{
     },
     claude_query_options::{ClaudeQueryOptionsInput, make_claude_query_options},
     claude_turn_items::{
-        ItemOrdinals, ToolCall, TurnScope, assistant_artifacts, item_ordinal, tool_call_artifacts,
+        ItemOrdinals, ToolCall, TurnScope, assistant_artifacts, compaction_item, item_ordinal,
+        reasoning_item, tool_call_artifacts,
     },
     claude_turn_token_usage::normalize_claude_turn_token_usage,
 };
@@ -551,6 +552,8 @@ struct ActiveTurn {
     /// The uuid of the latest assistant message. It is the turn's native ref,
     /// so a later rollback or fork can resume at it.
     native_message_cursor: Option<String>,
+    /// Thinking blocks seen per assistant message id, for their item ids.
+    thinking_blocks: HashMap<String, u64>,
     last_assistant: Option<OrchestrationV2ConversationMessage>,
     scope: TurnScope,
     item_ordinals: ItemOrdinals,
@@ -816,6 +819,7 @@ impl ClaudeActor {
             steer_pending: false,
             interrupted: false,
             native_message_cursor: None,
+            thinking_blocks: HashMap::new(),
             last_assistant: None,
             scope,
             item_ordinals: ItemOrdinals::new(),
@@ -1157,6 +1161,7 @@ impl ClaudeActor {
         match event {
             ClaudeAdapterEvent::Assistant(frame) => self.assistant(frame),
             ClaudeAdapterEvent::User(frame) => self.user(frame),
+            ClaudeAdapterEvent::Compaction(frame) => self.compaction(frame),
             ClaudeAdapterEvent::Result(frame) => self.result(frame),
             ClaudeAdapterEvent::Error(error) => self.fail_active(&error),
             ClaudeAdapterEvent::Eof => {
@@ -1175,6 +1180,53 @@ impl ClaudeActor {
             }
             None => return,
         };
+        for event in events {
+            self.emit(event);
+        }
+    }
+    /// Upstream `compact_boundary`: a completed "Context compacted" item. A
+    /// positive post-compaction size also becomes the turn's used tokens.
+    fn compaction(&mut self, frame: turin_claude_protocol::Frame) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        let Some(native) = frame.raw.get("uuid").and_then(Value::as_str) else {
+            return;
+        };
+        let now = UtcDateTime::now();
+        let metadata = frame.raw.get("compact_metadata");
+        let before = metadata
+            .and_then(|m| m.get("pre_tokens"))
+            .and_then(Value::as_u64);
+        let after = metadata
+            .and_then(|m| m.get("post_tokens"))
+            .and_then(Value::as_f64)
+            .filter(|n| n.is_finite() && *n > 0.0)
+            .map(f64::round)
+            .map(|n| n as u64);
+        let mut events = vec![];
+        if let Some(used) = after {
+            // The context window is not resolved here yet, so `maxTokens` is null.
+            let mut turn = active.turn.clone();
+            turn.token_usage = serde_json::from_value(json!({
+                "usedTokens": used, "maxTokens": null, "updatedAt": now,
+            }))
+            .ok();
+            events.push(ProviderAdapterV2Event::ProviderTurnUpdated {
+                driver: driver(),
+                thread_id: Some(active.input.thread_id.clone()),
+                provider_turn: turn,
+            });
+        }
+        let ordinal = item_ordinal(
+            &mut active.item_ordinals,
+            active.input.provider_turn_ordinal,
+            native,
+        );
+        events.push(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: driver(),
+            turn_item: compaction_item(&active.scope, native, ordinal, before, after, now),
+        });
         for event in events {
             self.emit(event);
         }
@@ -1365,7 +1417,7 @@ impl ClaudeActor {
 }
 
 /// Assistant text blocks become a node, message, and turn item. `tool_use`
-/// blocks start a tool call. Thinking blocks are not ported yet.
+/// blocks start a tool call. Completed thinking blocks become reasoning items.
 fn assistant_events(
     plans: &mut PlanState,
     active: &mut ActiveTurn,
@@ -1415,6 +1467,35 @@ fn assistant_events(
                 events.push(ProviderAdapterV2Event::TurnItemUpdated {
                     driver: driver(),
                     turn_item: artifacts.turn_item,
+                });
+            }
+            Some("thinking") => {
+                // Subagent narration belongs to the subagent, not this log.
+                if parent_tool_use_id(frame).is_some() {
+                    continue;
+                }
+                let index = active
+                    .thinking_blocks
+                    .entry(message_id.clone())
+                    .or_insert(0);
+                let block_index = *index;
+                *index += 1;
+                let text = block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if text.is_empty() {
+                    continue;
+                }
+                let native = format!("{message_id}:thinking:{block_index}");
+                let ordinal = item_ordinal(
+                    &mut active.item_ordinals,
+                    active.input.provider_turn_ordinal,
+                    &native,
+                );
+                events.push(ProviderAdapterV2Event::TurnItemUpdated {
+                    driver: driver(),
+                    turn_item: reasoning_item(&active.scope, &native, ordinal, text, now),
                 });
             }
             Some("tool_use") => {

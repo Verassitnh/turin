@@ -147,6 +147,63 @@ pub fn tool_output_text(content: &Value) -> Option<String> {
     }
 }
 
+/// Upstream `reasoning` turn item for one completed thinking block, titled
+/// "Thinking". Upstream streams the text first. Turin emits the block once
+/// it completes, so the item is never streaming.
+pub fn reasoning_item(
+    scope: &TurnScope,
+    native_item_id: &str,
+    ordinal: u64,
+    text: &str,
+    at: turin_contracts::UtcDateTime,
+) -> OrchestrationV2TurnItem {
+    let driver = &scope.driver;
+    decode(json!({
+        "type": "reasoning",
+        "id": derive::turn_item_from_provider_item(driver, native_item_id),
+        "threadId": scope.thread_id, "runId": scope.run_id,
+        "nodeId": scope.root_node_id, "providerThreadId": scope.provider_thread_id,
+        "providerTurnId": scope.provider_turn_id,
+        "nativeItemRef": native_ref(driver, native_item_id),
+        "parentItemId": null, "ordinal": ordinal, "status": "completed",
+        "title": "Thinking", "startedAt": at, "completedAt": at, "updatedAt": at,
+        "text": text, "streaming": false,
+    }))
+}
+
+/// Upstream `compaction` turn item for a `compact_boundary` message. Its
+/// native id is the message uuid.
+pub fn compaction_item(
+    scope: &TurnScope,
+    native_item_id: &str,
+    ordinal: u64,
+    before_tokens: Option<u64>,
+    after_tokens: Option<u64>,
+    at: turin_contracts::UtcDateTime,
+) -> OrchestrationV2TurnItem {
+    let driver = &scope.driver;
+    let mut item = json!({
+        "type": "compaction",
+        "id": derive::turn_item_from_provider_item(driver, native_item_id),
+        "threadId": scope.thread_id, "runId": scope.run_id,
+        "nodeId": scope.root_node_id, "providerThreadId": scope.provider_thread_id,
+        "providerTurnId": scope.provider_turn_id,
+        "nativeItemRef": native_ref(driver, native_item_id),
+        "parentItemId": null, "ordinal": ordinal, "status": "completed",
+        "title": "Context compacted", "startedAt": at, "completedAt": at, "updatedAt": at,
+        "driver": driver,
+    });
+    if let Some(map) = item.as_object_mut() {
+        if let Some(before) = before_tokens {
+            map.insert("beforeTokenCount".into(), json!(before));
+        }
+        if let Some(after) = after_tokens {
+            map.insert("afterTokenCount".into(), json!(after));
+        }
+    }
+    decode(item)
+}
+
 pub struct ToolCallArtifacts {
     pub node: OrchestrationV2ExecutionNode,
     pub turn_item: OrchestrationV2TurnItem,

@@ -881,3 +881,97 @@ async fn rollback_resumes_the_next_turn_at_the_recorded_cursor() {
         launches[1]
     );
 }
+
+#[tokio::test]
+async fn thinking_block_becomes_a_reasoning_item_before_the_answer() {
+    let thinking = json!({
+        "type": "assistant",
+        "message": {"id": "msg_think", "role": "assistant", "content": [
+            {"type": "thinking", "thinking": "Answer directly.", "signature": "sig"}
+        ]},
+        "uuid": "00000000-0000-4000-8000-0000000000e1", "session_id": "reasoning-session",
+    });
+    let harness = one_turn(vec![
+        thinking,
+        json!({
+            "type": "assistant",
+            "message": {"id": "msg_think", "role": "assistant", "content": [
+                {"type": "text", "text": "done"}
+            ]},
+            "uuid": "00000000-0000-4000-8000-0000000000e2", "session_id": "reasoning-session",
+        }),
+    ]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Think first"))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    let reasoning: Vec<_> = turn_items(&seen)
+        .into_iter()
+        .filter_map(|item| match item {
+            OrchestrationV2TurnItem::Reasoning {
+                text,
+                title,
+                status,
+                streaming,
+                native_item_ref,
+                ..
+            } => Some((text, title, status, streaming, native_item_ref)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning.len(), 1, "{reasoning:?}");
+    let (text, title, status, streaming, native) = &reasoning[0];
+    assert_eq!(text, "Answer directly.");
+    assert_eq!(title.as_deref(), Some("Thinking"));
+    assert_eq!(*status, OrchestrationV2TurnItemStatus::Completed);
+    assert!(!streaming);
+    assert_eq!(
+        native
+            .as_ref()
+            .and_then(|r| r.native_id.as_ref())
+            .map(|id| id.as_str()),
+        Some("msg_think:thinking:0")
+    );
+}
+
+#[tokio::test]
+async fn compact_boundary_becomes_a_context_compacted_item() {
+    let harness = one_turn(vec![json!({
+        "type": "system", "subtype": "compact_boundary",
+        "compact_metadata": {"trigger": "auto", "pre_tokens": 1000, "post_tokens": 250},
+        "uuid": "00000000-0000-4000-8000-0000000000f1", "session_id": "compact-session",
+    })]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Compact"))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    let compaction = turn_items(&seen)
+        .into_iter()
+        .find_map(|item| match item {
+            OrchestrationV2TurnItem::Compaction {
+                title,
+                before_token_count,
+                after_token_count,
+                status,
+                ..
+            } => Some((title, before_token_count, after_token_count, status)),
+            _ => None,
+        })
+        .expect("compaction item");
+    assert_eq!(compaction.0.as_deref(), Some("Context compacted"));
+    assert_eq!(compaction.1, Some(1000));
+    assert_eq!(compaction.2, Some(250));
+    assert_eq!(compaction.3, OrchestrationV2TurnItemStatus::Completed);
+}

@@ -9,6 +9,7 @@
 
 pub mod runtime;
 pub mod sidebar_chrome;
+pub mod sidebar_drag;
 pub mod sidebar_logic;
 pub mod sidebar_thread_header;
 

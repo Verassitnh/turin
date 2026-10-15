@@ -23,7 +23,9 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::sync::CancellationToken;
 
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<Option<Value>>> + Send>>;
-/// Return None to deliberately leave a dialog unanswered, as the SDK does when no renderer is registered.
+/// `Ok(None)` means "no callback registered" and gets the SDK's default reply for the
+/// subtype. Only `request_user_dialog` stays unanswered; `elicitation` is declined and
+/// every other subtype gets an error response so the CLI never waits forever.
 pub trait ControlHandler: Send + Sync + 'static {
     fn handle(&self, request: ControlRequest, cancel: CancellationToken) -> HandlerFuture;
 }
@@ -686,7 +688,7 @@ fn dispatch(value: Value, state: &Arc<Shared>, tasks: &mut JoinSet<()>) {
         state.inbound.lock().unwrap().remove(&id);
         // A cancel aborts the handler's token. The SDK still writes whatever the
         // handler settled (including an error). Only an explicit None stays silent.
-        let response = match outcome {
+        let outcome = match outcome {
             Ok(Some(mut payload)) => {
                 if subtype == "can_use_tool"
                     && let Some(tool_id) = body.get("tool_use_id").and_then(Value::as_str)
@@ -694,12 +696,49 @@ fn dispatch(value: Value, state: &Arc<Shared>, tasks: &mut JoinSet<()>) {
                 {
                     object.insert("toolUseID".into(), tool_id.into());
                 }
-                json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":payload}}) },
-            Ok(None) => return,
-            Err(e) => json!({"type":"control_response","response":{"subtype":"error","request_id":id,"error":e.to_string()}}),
+                Ok(payload)
+            }
+            Ok(None) => match unhandled_reply(&body) {
+                Some(reply) => reply,
+                None => return,
+            },
+            Err(e) => Err(e.to_string()),
+        };
+        let response = match outcome {
+            Ok(payload) => json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":payload}}),
+            Err(error) => json!({"type":"control_response","response":{"subtype":"error","request_id":id,"error":error}}),
         };
         let _ = state.writer.send(WriteCommand::Json(response));
     });
+}
+/// The SDK's reply when no callback is registered for a subtype. `None` means stay silent.
+fn unhandled_reply(body: &Value) -> Option<Result<Value, String>> {
+    let field = |key: &str| body.get(key).and_then(Value::as_str).unwrap_or("undefined");
+    let error = |message: String| Some(Err(message));
+    match body.get("subtype").and_then(Value::as_str) {
+        Some("request_user_dialog") => None,
+        Some("elicitation") => Some(Ok(json!({"action": "decline"}))),
+        Some("can_use_tool") => error("canUseTool callback is not provided.".into()),
+        Some("hook_callback") => error(format!(
+            "No hook callback found for ID: {}",
+            field("callback_id")
+        )),
+        Some("mcp_message") => error(format!(
+            "SDK MCP server not found: {}",
+            field("server_name")
+        )),
+        Some("oauth_token_refresh") => error("getOAuthToken callback is not provided.".into()),
+        Some("host_auth_token_refresh") => {
+            error("getHostAuthToken callback is not provided.".into())
+        }
+        Some("remote_control_work_secret") => {
+            error("refreshWorkSecret callback is not provided.".into())
+        }
+        _ => error(format!(
+            "Unsupported control request subtype: {}",
+            field("subtype")
+        )),
+    }
 }
 async fn stderr_loop(mut stderr: tokio::process::ChildStderr, state: Arc<Shared>) {
     let mut chunk = [0_u8; 4096];
@@ -921,6 +960,107 @@ for line in sys.stdin:
         assert!(
             error.to_string().contains("claude process closed"),
             "{error}"
+        );
+        session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    /// A fake CLI that sends `requests` after initialize and echoes each control_response
+    /// back as a `system` frame so the test can read the replies.
+    fn replier(dir: &std::path::Path, requests: Value) -> LaunchOptions {
+        script(
+            dir,
+            &format!(
+                r#"#!/usr/bin/env python3
+import json,sys
+requests=json.loads({:?})
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({{"type":"control_response","response":{{"subtype":"success","request_id":value["request_id"],"response":{{"models":[]}}}}}}),flush=True)
+        for request in requests:
+            print(json.dumps(request),flush=True)
+    elif value.get("type")=="control_response":
+        print(json.dumps({{"type":"system","subtype":"status","reply":value["response"]}}),flush=True)
+"#,
+                requests.to_string()
+            ),
+        )
+    }
+    async fn replies(session: &mut ClaudeSession, count: usize) -> HashMap<String, Value> {
+        let mut replies = HashMap::new();
+        while replies.len() < count {
+            match tokio::time::timeout(Duration::from_secs(3), session.next_event())
+                .await
+                .expect("control request left unanswered")
+                .unwrap()
+            {
+                SessionEvent::Frame(frame) => {
+                    let reply = frame.raw["reply"].clone();
+                    replies.insert(reply["request_id"].as_str().unwrap().to_owned(), reply);
+                }
+                SessionEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        replies
+    }
+    fn control(id: &str, request: Value) -> Value {
+        json!({"type":"control_request","request_id":id,"request":request})
+    }
+    struct Silent;
+    impl ControlHandler for Silent {
+        fn handle(&self, _: ControlRequest, _: CancellationToken) -> HandlerFuture {
+            Box::pin(async { Ok(None) })
+        }
+    }
+    #[tokio::test]
+    async fn unanswered_control_requests_get_sdk_default_replies() {
+        let dir =
+            std::env::temp_dir().join(format!("turin-claude-defaults-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = replier(
+            &dir,
+            json!([
+                control(
+                    "d1",
+                    json!({"subtype":"request_user_dialog","dialog_kind":"x","payload":{}})
+                ),
+                control(
+                    "e1",
+                    json!({"subtype":"elicitation","mcp_server_name":"s","message":"m"})
+                ),
+                control("f1", json!({"subtype":"future_thing"})),
+                control(
+                    "c1",
+                    json!({"subtype":"can_use_tool","tool_name":"Bash","input":{},"tool_use_id":"t"})
+                ),
+                control(
+                    "h1",
+                    json!({"subtype":"hook_callback","callback_id":"cb9","input":{}})
+                ),
+            ]),
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Silent))
+            .await
+            .unwrap();
+        let replies = replies(&mut session, 4).await;
+        assert_eq!(replies["e1"]["subtype"], "success");
+        assert_eq!(replies["e1"]["response"], json!({"action":"decline"}));
+        assert_eq!(replies["f1"]["subtype"], "error");
+        assert_eq!(
+            replies["f1"]["error"],
+            "Unsupported control request subtype: future_thing"
+        );
+        assert_eq!(
+            replies["c1"]["error"],
+            "canUseTool callback is not provided."
+        );
+        assert_eq!(replies["h1"]["error"], "No hook callback found for ID: cb9");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), session.next_event())
+                .await
+                .is_err(),
+            "request_user_dialog must stay unanswered"
         );
         session.shutdown().await.unwrap();
         fs::remove_dir_all(dir).unwrap();

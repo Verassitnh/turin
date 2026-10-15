@@ -299,10 +299,12 @@ pub struct NewThreadLinkInput<'a> {
     pub origin: Option<&'a str>,
 }
 
-pub fn build_new_thread_link(input: NewThreadLinkInput<'_>) -> String {
+/// Upstream `new URL("/new", origin)`: the path is replaced, so a trailing
+/// slash or a path on the origin is dropped. An unparseable origin is an error,
+/// as it is upstream (which throws), not a fallback to the hosted app.
+pub fn build_new_thread_link(input: NewThreadLinkInput<'_>) -> Result<String, url::ParseError> {
     let origin = input.origin.unwrap_or(DEFAULT_HOSTED_APP_URL);
-    let mut url = Url::parse(&format!("{origin}/new"))
-        .unwrap_or_else(|_| Url::parse("https://app.t3.codes/new").expect("hosted new url"));
+    let mut url = Url::parse(origin)?.join("/new")?;
     {
         let mut query = url.query_pairs_mut();
         query.clear();
@@ -317,7 +319,7 @@ pub fn build_new_thread_link(input: NewThreadLinkInput<'_>) -> String {
             }
         }
     }
-    url.to_string()
+    Ok(url.to_string())
 }
 
 fn js_search(url: &Url) -> String {
@@ -548,6 +550,43 @@ mod tests {
     }
 
     #[test]
+    fn new_thread_link_resolves_the_new_path_against_the_origin() {
+        let link = |origin| {
+            build_new_thread_link(NewThreadLinkInput {
+                prompt: "hi",
+                repository: None,
+                provider: None,
+                model: None,
+                origin,
+            })
+            .unwrap()
+        };
+        // `new URL("/new", origin)` replaces the path, so the origin's own path
+        // and any trailing slash drop out.
+        assert_eq!(
+            link(Some("https://app.t3.codes/")),
+            "https://app.t3.codes/new?prompt=hi"
+        );
+        assert_eq!(
+            link(Some("http://localhost:5173/app/x")),
+            "http://localhost:5173/new?prompt=hi"
+        );
+        assert_eq!(link(None), "https://app.t3.codes/new?prompt=hi");
+    }
+
+    #[test]
+    fn new_thread_link_rejects_an_unparseable_origin() {
+        let result = build_new_thread_link(NewThreadLinkInput {
+            prompt: "hi",
+            repository: None,
+            provider: None,
+            model: None,
+            origin: Some("not a url"),
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn builds_a_link_that_parses_back_to_the_same_prompt() {
         let repository = PromptLinkRepository {
             owner: "pingdotgg".to_owned(),
@@ -559,7 +598,8 @@ mod tests {
             provider: Some("claudeAgent"),
             model: Some("opus"),
             origin: None,
-        });
+        })
+        .unwrap();
         let parsed_url = Url::parse(&link).unwrap();
         let search = format!("?{}", parsed_url.query().unwrap_or_default());
         let path = prompt_link_app_path(&link, None).unwrap();

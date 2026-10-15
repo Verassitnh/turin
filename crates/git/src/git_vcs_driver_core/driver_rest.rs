@@ -210,6 +210,7 @@ impl GitVcsDriverCore {
         let Some(base_ref) = base_ref else {
             return Ok((None, "HEAD".to_owned()));
         };
+        reject_option_like_ref("GitVcsDriver.resolveReviewMergeBase", cwd, &base_ref)?;
         let args = argv(&["merge-base", &base_ref, "HEAD"]);
         let mut call = GitCall::new("GitVcsDriver.resolveReviewMergeBase", args.clone());
         call.allow_non_zero = true;
@@ -527,6 +528,11 @@ impl GitVcsDriverCore {
         let old_contents = if input.change_type == ReviewDiffFileChangeType::New {
             String::new()
         } else {
+            reject_option_like_ref(
+                "GitVcsDriver.getReviewDiffFileContents.revision",
+                input.cwd.as_str(),
+                &old_revision,
+            )?;
             let mut call = GitCall::new(
                 "GitVcsDriver.getReviewDiffFileContents.revision",
                 argv(&["show", &format!("{old_revision}:{}", input.old_path.as_str())]),

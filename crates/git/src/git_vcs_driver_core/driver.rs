@@ -857,6 +857,26 @@ fn within_root(root: &Path, candidate: &Path) -> bool {
     !relative.starts_with("..")
 }
 
+/// Refs reach `git merge-base` and `git show` as bare arguments, where a leading
+/// `-` is read as an option. Upstream guards only its `rev-parse` call with
+/// `--end-of-options`, so these sites reject the ref instead. No valid branch
+/// name or revision starts with `-`.
+fn reject_option_like_ref(
+    operation: &str,
+    cwd: &str,
+    reference: &str,
+) -> Result<(), GitCommandError> {
+    if reference.starts_with('-') {
+        return Err(plain_error(
+            operation,
+            cwd,
+            &[],
+            &format!("Ref '{reference}' cannot start with '-'."),
+        ));
+    }
+    Ok(())
+}
+
 impl GitVcsDriverCore {
     async fn git(&self, cwd: &str, call: GitCall) -> Result<ExecuteGitResult, GitCommandError> {
         let mut env = call.env;
@@ -1595,3 +1615,119 @@ impl WithCause for GitCommandError {
 
 include!("driver_body.rs");
 include!("driver_rest.rs");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use turin_contracts::base_schemas::TrimmedNonEmptyString;
+    use turin_contracts::review::{
+        ReviewDiffFileChangeType, ReviewDiffFileContentsInput, ReviewDiffPreviewSourceKind,
+    };
+
+    fn init_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        dir
+    }
+
+    fn contents_input(
+        cwd: &str,
+        source_kind: ReviewDiffPreviewSourceKind,
+        change_type: ReviewDiffFileChangeType,
+        base_ref: Option<&str>,
+        path: &str,
+    ) -> ReviewDiffFileContentsInput {
+        ReviewDiffFileContentsInput {
+            cwd: TrimmedNonEmptyString::new(cwd).unwrap(),
+            source_kind,
+            change_type,
+            base_ref: base_ref.map(|value| TrimmedNonEmptyString::new(value).unwrap()),
+            head_ref: None,
+            old_path: TrimmedNonEmptyString::new(path).unwrap(),
+            new_path: TrimmedNonEmptyString::new(path).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_option_like_refs_before_git_reads_them() {
+        let dir = init_repo();
+        let cwd = dir.path().display().to_string();
+        let driver = GitVcsDriverCore::new();
+
+        // A branch range resolves the base through `git merge-base`.
+        let merge_base_error = driver
+            .get_review_diff_file_contents(&contents_input(
+                &cwd,
+                ReviewDiffPreviewSourceKind::BranchRange,
+                ReviewDiffFileChangeType::Change,
+                Some("--output=pwned"),
+                "a.txt",
+            ))
+            .await
+            .expect_err("option-like base");
+        let GitCommandError::GitCommandError { detail, .. } = merge_base_error;
+        assert_eq!(detail, "Ref '--output=pwned' cannot start with '-'.");
+
+        // A working-tree diff passes the base straight to `git show <ref>:<path>`.
+        let show_error = driver
+            .get_review_diff_file_contents(&contents_input(
+                &cwd,
+                ReviewDiffPreviewSourceKind::WorkingTree,
+                ReviewDiffFileChangeType::Change,
+                Some("-p"),
+                "a.txt",
+            ))
+            .await
+            .expect_err("option-like revision");
+        let GitCommandError::GitCommandError { detail, .. } = show_error;
+        assert_eq!(detail, "Ref '-p' cannot start with '-'.");
+    }
+
+    #[tokio::test]
+    async fn reads_a_working_tree_file_and_refuses_paths_outside_the_repo() {
+        let dir = init_repo();
+        let cwd = dir.path().display().to_string();
+        std::fs::write(dir.path().join("new.txt"), "hello\n").unwrap();
+        let driver = GitVcsDriverCore::new();
+
+        let contents = driver
+            .get_review_diff_file_contents(&contents_input(
+                &cwd,
+                ReviewDiffPreviewSourceKind::WorkingTree,
+                ReviewDiffFileChangeType::New,
+                None,
+                "new.txt",
+            ))
+            .await
+            .expect("working tree file");
+        assert_eq!(contents.new_contents, "hello\n");
+
+        let escaped = driver
+            .get_review_diff_file_contents(&contents_input(
+                &cwd,
+                ReviewDiffPreviewSourceKind::WorkingTree,
+                ReviewDiffFileChangeType::New,
+                None,
+                "../outside.txt",
+            ))
+            .await;
+        assert!(escaped.is_err());
+
+        let directory = driver
+            .get_review_diff_file_contents(&contents_input(
+                &cwd,
+                ReviewDiffPreviewSourceKind::WorkingTree,
+                ReviewDiffFileChangeType::New,
+                None,
+                ".",
+            ))
+            .await
+            .expect_err("a directory is not a file");
+        let GitCommandError::GitCommandError { detail, .. } = directory;
+        assert_eq!(detail, "Diff path '.' is not a file.");
+    }
+}

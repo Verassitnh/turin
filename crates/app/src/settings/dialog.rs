@@ -260,7 +260,8 @@ impl SettingsView {
             cx,
             |_, _, _, _| {},
         );
-        let key = self.input("hub-key", "", "", window, cx, |_, _, _, _| {});
+        // `SecretInput`: the management key is write-only, like the provider secrets.
+        let key = self.secret_input("hub-key", "Not set", window, cx);
         let label = self.input(
             "hub-label",
             "",

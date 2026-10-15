@@ -296,6 +296,9 @@ fn runtime_policy(
         interaction_mode: policy.interaction_mode,
         approval_policy: policy.approval_policy.clone(),
         sandbox_policy: policy.sandbox_policy.clone(),
+        // The provider-core runtime policy does not yet carry whether the
+        // t3-code MCP server is attached or app context, so turns send neither.
+        turn_context: Default::default(),
     }
 }
 fn option<'a>(selection: &'a ModelSelection, key: &str) -> Option<&'a str> {

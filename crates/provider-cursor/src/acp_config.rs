@@ -46,11 +46,7 @@ pub fn restore_user_config(
     cursor_home: &Path,
     snapshot: &CursorUserConfigSnapshot,
 ) -> Result<(), CursorError> {
-    restore_file(
-        &cursor_home.join(ACP_CONFIG),
-        &snapshot.acp,
-        &[VARIANT_KEY],
-    )?;
+    restore_file(&cursor_home.join(ACP_CONFIG), &snapshot.acp, &[VARIANT_KEY])?;
     restore_file(&cursor_home.join(CLI_CONFIG), &snapshot.cli, CLI_KEYS)?;
     Ok(())
 }
@@ -116,31 +112,46 @@ fn remove_keys_or_file(path: &Path, keys: &[&str]) -> Result<(), CursorError> {
     }
 }
 
-fn merge_keys(path: &Path, original: &Map<String, Value>, keys: &[&str]) -> Result<(), CursorError> {
-    let mut current = match fs::read(path) {
+fn merge_keys(
+    path: &Path,
+    original: &Map<String, Value>,
+    keys: &[&str],
+) -> Result<(), CursorError> {
+    // Start from the snapshot so a full rewrite cannot drop theme or other
+    // unrelated keys. Non-model keys the CLI still has, including edits, win.
+    let current = match fs::read(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Map::new(),
         Err(error) => return Err(io_error(error)),
         Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
             Ok(Value::Object(object)) => object,
-            _ => original.clone(),
+            _ => Map::new(),
         },
     };
+    let mut merged = original.clone();
+    for (key, value) in current {
+        if !keys.contains(&key.as_str()) {
+            merged.insert(key, value);
+        }
+    }
     for key in keys {
         match original.get(*key) {
             Some(value) => {
-                current.insert((*key).to_owned(), value.clone());
+                merged.insert((*key).to_owned(), value.clone());
             }
             None => {
-                current.remove(*key);
+                merged.remove(*key);
             }
         }
     }
-    write_json(path, &Value::Object(current))
+    write_json(path, &Value::Object(merged))
 }
 
 fn write_json(path: &Path, value: &Value) -> Result<(), CursorError> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
-        CursorError::new(CursorOperation::Config, format!("Could not encode Cursor config: {error}"))
+        CursorError::new(
+            CursorOperation::Config,
+            format!("Could not encode Cursor config: {error}"),
+        )
     })?;
     write_bytes(path, &bytes)
 }
@@ -238,7 +249,8 @@ mod tests {
             .unwrap();
             fs::write(
                 home.join(CLI_CONFIG),
-                serde_json::to_vec(&json!({"model": "gpt-5.5", "permissions": {"allow": []}})).unwrap(),
+                serde_json::to_vec(&json!({"model": "gpt-5.5", "permissions": {"allow": []}}))
+                    .unwrap(),
             )
             .unwrap();
             Ok(())

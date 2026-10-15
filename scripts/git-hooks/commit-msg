@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Every Turin commit must say which model wrote it.
+# Required trailer:  Model: <model-id> (<provider>)
+#   e.g.  Model: claude-opus-5-5 (claudeAgent)
+#         Model: gpt-6-sol (codex)
+#         Model: grok-4.7 (cursor)
+#         Model: openrouter/z-ai/glm-5.3 (opencode)
+#         Model: human (jackson)
+msg_file="$1"
+if ! git interpret-trailers --parse "$msg_file" | grep -qE '^Model: [^ ]+ \([^)]+\)$'; then
+  cat >&2 <<'MSG'
+commit rejected: missing model trailer.
+Add a final trailer line to the commit message, separated by a blank line:
+
+    Model: <model-id> (<provider>)
+
+e.g. `git commit -m "feat(contracts): port vcs" -m "Model: gpt-6-sol (codex)"`
+See AGENTS.md.
+MSG
+  exit 1
+fi

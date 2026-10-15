@@ -3,6 +3,7 @@ pub mod adapter;
 pub mod approvals;
 pub mod cli_args;
 pub mod codex_auth_callback_page;
+pub mod codex_chatgpt_auth;
 pub mod codex_chatgpt_models;
 pub mod codex_chatgpt_session_lock;
 pub mod codex_developer_instructions;

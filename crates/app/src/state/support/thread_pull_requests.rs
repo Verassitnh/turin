@@ -305,9 +305,8 @@ pub fn legacy_linked_pull_request_of(
     let host = crate::state::contracts::pull_request_host_of(
         Some(&crate::state::contracts::RepositoryIdentityLike {
             canonical_key: Some(identity.canonical_key.as_str()),
-            remote_url: Some(identity.locator.remote_url.as_str()),
         }),
-        provider,
+        &provider,
     );
     let repository = source_control_repository_selector(identity)?;
     let azure_key = if identity.provider.as_ref().map(|p| p.as_str()) == Some("azure-devops") {

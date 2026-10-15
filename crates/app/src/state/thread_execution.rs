@@ -208,7 +208,6 @@ pub fn derive_reported_model_selection(projection: &ThreadProjection) -> Option<
                 && candidate.provider_instance_id == projection.thread.model_selection.instance_id
         })
         .and_then(|thread| thread.native_metadata.as_ref())
-        .and_then(|metadata| metadata.as_ref())
         .and_then(|metadata| metadata.model_selection.as_ref())
 }
 

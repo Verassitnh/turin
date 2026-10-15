@@ -27,7 +27,7 @@ to stay under the Claude session limit (hit once on 2026-10-14 ~20:45).
 **Throughput rule (user, 2026-10-14): run the maximum number of agents the
 dependency graph allows, everything async.** Never wait on a merge when a
 dependent can branch from the in-flight branch it needs (rebase later; QC fix
-rounds merge in). Caps: Codex 4, Opus UI 4, Grok 3, GLM 3, Sonnet 2. **Outages (2026-10-14 ~20:15): GLM out of OpenRouter credits, Codex at ChatGPT subscription usage limit → Sonnet cap 5, Grok cap 6 until they return.** QC
+rounds merge in). Caps: Codex 4, Opus UI 4, Grok 3, GLM 3, Sonnet 2. **Outages (2026-10-14 ~20:15): GLM out of OpenRouter credits, Codex at ChatGPT subscription usage limit → Sonnet cap 5, Grok cap 6 until they return.** Grok cap lowered to 4 after a burst of 'Provider turn failed' with 6 concurrent (2026-10-15 ~05:00). QC
 workflows unlimited. Cheap models still go first on mechanical work. Cheap
 models go first on anything mechanical; escalate to Codex only on failure or
 when the logic is subtle (state machines, protocol framing, concurrency).
@@ -68,7 +68,7 @@ when the logic is subtle (state machines, protocol framing, concurrency).
 | wf_9dc37bfd-861 | T04b protocol docs fix round | FAIL: 5 high, 13 medium, 6 low. docs/qc/wf_9dc37bfd-861-T04b-protocols.md |
 | wf_342ba162-dd7 | T24 icon fix rounds | PASS: 1 low (fixed, merged) |
 | wf_4a9d9be1-c7c | T03 fix round re-QC | aborted: Claude session limit → rerun pending |
-| wf_e19abae9-25e | T02b persistence fix round | running (Sonnet/Haiku) |
+| wf_e19abae9-25e | T02b persistence fix round | FAIL: Db drop lost-wakeup deadlock (high) + index whitespace (low). docs/qc/wf_e19abae9-25e-T02b-persistence.md |
 | wf_54f7c42f-d77 | T10a Claude protocol (SDK fidelity, correctness) | running |
 | wf_44e1924e-b5c | T21b hooks fix round | PASS: 1 medium (script files unhashed), 1 low → T21c. docs/qc/wf_44e1924e-b5c-T21b-hooks.md |
 | wf_e8a1a7c1-d53 | T21 hooks (spec, lifecycle, security/trust, process) | FAIL: 2 high, 5 medium, 6 low. docs/qc/wf_e8a1a7c1-d53-T21-hooks.md |
@@ -90,7 +90,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T00c | QC low items: UtcDateTime parse bounds/leap/zone-less, private field; `forward_compatible_*::optional` | `crates/contracts/src/base_schemas.rs` | Sonnet | todo (after T01 merges, to avoid conflicts) |
 | T01 | Port all kept contracts modules | `crates/contracts` | GLM → Sonnet | r3 active (resume after Claude limit; merging t01-aud-a..e) |
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | done (merged; QC PASS) |
-| T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | done (23/23) → re-QC wf_e19abae9-25e |
+| T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | re-QC FAIL (1 high: Db drop deadlock) → T02c (Haiku) |
 | T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | QC FAIL (1 high) → fix round r4 active; sidebar items moved to T15 |
 | T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex | re-QC wf_9dc37bfd-861 FAIL (3 high: Cursor ext result nesting, OpenCode v1 dir routing, OpenCode auto perms) → T04c (Haiku) + implementers steered |
 

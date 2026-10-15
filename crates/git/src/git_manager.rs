@@ -55,6 +55,9 @@ const PR_LOOKUP_GIT_STATE_TTL: Duration = Duration::from_secs(5 * 60);
 const PR_LOOKUP_CACHE_CAPACITY: usize = 2_048;
 const PR_LOOKUP_FAILURE_BASE: Duration = Duration::from_secs(20);
 const PR_LOOKUP_FAILURE_MAX: Duration = Duration::from_secs(15 * 60);
+/// Pre-commit and commit-msg hooks can run lint or tests, so this is the
+/// 10 minute bound upstream uses instead of the 30s driver default.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 static PR_REPOSITORY_PATH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(.*)(?:/pull/|/-/merge_requests/|/pull-requests/|/pullrequest/)\d+(?:/.*)?$")
@@ -1083,10 +1086,7 @@ impl GitManager {
                 cwd,
                 &suggested.subject,
                 &suggested.body,
-                GitCommitOptions {
-                    stage: Some(file_paths.unwrap_or(&[]).to_vec()),
-                    ..GitCommitOptions::default()
-                },
+                commit_step_options(file_paths),
             )
             .await
             .map_err(GitManagerServiceError::Command)?;
@@ -1604,6 +1604,14 @@ fn parse_custom_commit_message(raw: &str) -> Option<(String, String)> {
     ))
 }
 
+fn commit_step_options(file_paths: Option<&[String]>) -> GitCommitOptions {
+    GitCommitOptions {
+        timeout: Some(COMMIT_TIMEOUT),
+        stage: Some(file_paths.unwrap_or(&[]).to_vec()),
+        ..GitCommitOptions::default()
+    }
+}
+
 fn format_commit_message(subject: &str, body: &str) -> String {
     if body.trim().is_empty() {
         subject.to_owned()
@@ -1858,6 +1866,13 @@ fn cache_key(cwd: &str) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn commit_step_waits_for_slow_hooks_like_upstream() {
+        let options = commit_step_options(None);
+        assert_eq!(options.timeout, Some(Duration::from_secs(600)));
+        assert_eq!(options.stage, Some(Vec::new()));
+    }
 
     #[test]
     fn backs_off_repeated_pr_lookup_failures() {

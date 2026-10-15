@@ -126,5 +126,5 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T24 | Turin app icon: T3 Code icon with a single T | `assets/**` | Opus | QC PASS; fix round r2 + 1.0× vs 1.25× comparison for user |
+| T24 | Turin app icon: T3 Code icon with a single T | `assets/**` | Opus | QC PASS; r2 fixes done; user chose T at 1.0× → r3 regenerating, then merge |
 | T24b | Wire icon: dev Dock icon, bundle .icns/actool, in-app mark | `crates/app` | Opus | todo (after T24 + T03 merge) |

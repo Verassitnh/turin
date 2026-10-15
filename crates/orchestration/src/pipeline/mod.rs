@@ -1,0 +1,10 @@
+//! Write-side orchestration. Projection application is supplied by the read side.
+
+pub mod command_policy;
+pub mod dispatch_mode_limit;
+pub mod effect_outbox;
+pub mod effect_worker;
+pub mod event_sink;
+pub mod notification_mailbox;
+pub mod runtime_policy;
+pub mod user_facing_errors;

@@ -7065,12 +7065,18 @@ name = "turin-orchestration"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "chrono",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
  "turin-contracts",
+ "turin-hooks",
+ "turin-persistence",
 ]
 
 [[package]]

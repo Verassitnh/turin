@@ -136,6 +136,9 @@ pub struct RuntimeState {
     /// Native subagent threads, keyed by native thread id. A child's `turn/started`
     /// opens a child turn here, so the thread is the lookup from frame to subagent.
     pub subagents: HashMap<String, SubagentThread>,
+    /// Turns that completed with background work still running, keyed by native turn
+    /// id. Their late item frames project until that work is done.
+    pub settled: HashMap<String, TurnState>,
 }
 
 fn group_of(kind: TextKind) -> usize {
@@ -513,6 +516,9 @@ pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderA
     }
     let now = UtcDateTime::now();
     if !state.turns.contains_key(&native_turn) {
+        if state.settled.contains_key(&native_turn) {
+            return project_settled(&raw, &thread, &native_turn, state, now);
+        }
         // A subagent's first `turn/started` opens its child turn. Other frames for
         // a turn that is not registered are dropped here.
         if raw.method == "turn/started" && subagent::opens_child_turn(state, &thread, &native_turn)
@@ -602,6 +608,38 @@ pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderA
         _ => vec![],
     };
     state.turns.insert(native_turn, turn);
+    events
+}
+
+/// Whether a settled turn still has work its late item frames complete: a running
+/// command, or a persistent dynamic tool. Upstream's `turnHasRetainedBackgroundWork`.
+pub fn has_retained_work(turn: &TurnState) -> bool {
+    !turn.running_commands.is_empty() || turn.running_tools.iter().any(is_persistent_tool)
+}
+
+/// A frame for a turn that completed with background work still running. Upstream
+/// keeps such a turn's context, so its late item frames still project. Only item
+/// frames project here. The turn is released once it has no work left.
+fn project_settled(
+    raw: &CodexEvent,
+    thread: &str,
+    native_turn: &str,
+    state: &mut RuntimeState,
+    now: UtcDateTime,
+) -> Vec<ProviderAdapterV2Event> {
+    if !matches!(raw.method.as_str(), "item/started" | "item/completed") {
+        return vec![];
+    }
+    let Some(mut turn) = state.settled.remove(native_turn) else {
+        return vec![];
+    };
+    let events = match raw.method.as_str() {
+        "item/started" => item_started(&raw.params, thread, &mut turn, state, now),
+        _ => item_completed(&raw.params, thread, &mut turn, state, now),
+    };
+    if has_retained_work(&turn) {
+        state.settled.insert(native_turn.to_owned(), turn);
+    }
     events
 }
 
@@ -1011,8 +1049,13 @@ fn turn_completed(
         OrchestrationV2ProviderTurnStatus::Interrupted | OrchestrationV2ProviderTurnStatus::Failed
     );
     let mut events = flush_turn(state, turn, stopped_early);
-    // Commands still running when an interrupted or failed turn ends were stopped with it.
-    let stopped = std::mem::take(&mut turn.running_commands);
+    // Commands still running when an interrupted or failed turn ends were stopped with
+    // it. A completed turn keeps the commands it still runs, so their completion lands.
+    let stopped = if stopped_early {
+        std::mem::take(&mut turn.running_commands)
+    } else {
+        vec![]
+    };
     if stopped_early {
         let (node_status, item_status) = match status {
             OrchestrationV2ProviderTurnStatus::Interrupted => (
@@ -1047,13 +1090,13 @@ fn turn_completed(
         }
     }
     // Upstream `terminalizeRunningDynamicTools`: a persistent tool keeps running only
-    // when the turn ended cleanly. Turin drops the turn state here, so a persistent
-    // tool left running stays running (see the Deviations table).
+    // when the turn ended cleanly. The turn is then retained, so the tool completes later.
     let (tool_node_status, tool_item_status) = stopped_item_statuses(status);
-    for tool in std::mem::take(&mut turn.running_tools) {
-        if !stopped_early && is_persistent_tool(&tool) {
-            continue;
-        }
+    let (kept, stopped_tools): (Vec<Value>, Vec<Value>) = std::mem::take(&mut turn.running_tools)
+        .into_iter()
+        .partition(|tool| !stopped_early && is_persistent_tool(tool));
+    turn.running_tools = kept;
+    for tool in stopped_tools {
         let mut artifacts = items::dynamic_tool(turn, &tool, now);
         artifacts.node.status = tool_node_status;
         artifacts.node.completed_at = Some(now);
@@ -1086,6 +1129,10 @@ fn turn_completed(
         thread_id: Some(turn.input.thread_id.clone()),
         provider_turn: provider,
     });
+    // A clean end with background work keeps the turn, so its late item frames land.
+    if status == OrchestrationV2ProviderTurnStatus::Completed && has_retained_work(turn) {
+        state.settled.insert(turn.native_turn.clone(), turn.clone());
+    }
     // A child turn settles its subagent. Only a top-level turn ends a run.
     if turn.subagent.is_some() {
         events.extend(subagent::finish_child_turn(

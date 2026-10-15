@@ -319,6 +319,7 @@ fn admitted(item: &Parked, state: &RuntimeState) -> bool {
         None => true,
         Some(turn) => {
             state.turns.contains_key(turn)
+                || state.settled.contains_key(turn)
                 || match item {
                     Parked::Event(event) => {
                         let thread = event

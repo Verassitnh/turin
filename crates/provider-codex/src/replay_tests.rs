@@ -3,7 +3,12 @@
 //! `CodexReplayFixtures.integration.test.ts` checks orchestration output.
 //! Outbound frames are checked by the replay driver; the turn counts and
 //! approval counts mirror `scenarioExpectations` there.
-use crate::{orchestration_adapter::CodexProviderAdapter, runtime::CodexRuntimeConfig};
+use crate::{
+    adapter::CodexEvent,
+    orchestration_adapter::CodexProviderAdapter,
+    projection::{RuntimeState, TurnState, project_event},
+    runtime::CodexRuntimeConfig,
+};
 use futures::StreamExt;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -12,6 +17,7 @@ use turin_codex_app_server::replay::{
     ReplayDriver, ReplayEntry, ReplayTranscript, make_replay_client,
 };
 use turin_contracts::{
+    NodeId,
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2AppThread, OrchestrationV2CreationSource,
@@ -1843,4 +1849,173 @@ async fn subagent_v2_nested_approval_replay_asks_on_the_root_under_the_top_subag
         "the grandchild runs its command after approval"
     );
     replay.driver.verify_complete().unwrap();
+}
+
+/// A running turn with no replay behind it, for projection rules that no fixture reaches.
+fn detached_turn(native_turn: &str) -> TurnState {
+    let provider_thread: OrchestrationV2ProviderThread = serde_json::from_value(json!({
+        "id": "provider-thread-1",
+        "driver": "codex",
+        "providerInstanceId": "codex",
+        "status": "idle",
+        "handoffIds": [],
+        "pendingBackgroundTasks": [],
+        "createdAt": "2026-10-15T00:00:00.000Z",
+        "updatedAt": "2026-10-15T00:00:00.000Z",
+    }))
+    .expect("provider thread fixture");
+    TurnState::new(
+        native_turn.into(),
+        ProviderAdapterV2TurnInput {
+            app_thread: app_thread("gpt-6-luna"),
+            thread_id: id("thread-1"),
+            run_id: id("run-1"),
+            run_ordinal: 1,
+            native_thread_has_turns: None,
+            provider_turn_ordinal: 1,
+            restart_continuation_of_run_id: None,
+            attempt_id: id("attempt-1"),
+            root_node_id: id("root-1"),
+            provider_thread,
+            message: ProviderAdapterV2TurnMessage {
+                message_id: id("message-1"),
+                text: "run a tool".into(),
+                attachments: vec![],
+                created_by: OrchestrationV2Actor::User,
+                creation_source: OrchestrationV2CreationSource::Web,
+                scheduled_task_id: None,
+                sender_thread_id: None,
+            },
+            model_selection: selection("gpt-6-luna"),
+            runtime_policy: policy(
+                RuntimeMode::FullAccess,
+                ProviderInteractionMode::Default,
+                None,
+                None,
+            ),
+            app_context: None,
+        },
+    )
+}
+
+/// Feeds one Codex notification through the projection, as the pump does.
+fn notify(state: &mut RuntimeState, method: &str, params: Value) -> Vec<ProviderAdapterV2Event> {
+    project_event(CodexEvent::from_notification(method.into(), params), state)
+}
+
+/// The id of the node a native item projects to.
+fn item_node(native: &str) -> NodeId {
+    turin_provider_core::id_allocator::derive::node_from_provider_item(
+        &crate::orchestration_adapter::driver(),
+        native,
+    )
+}
+
+/// The node statuses a projection step reported for one node id.
+fn node_status_of(
+    events: &[ProviderAdapterV2Event],
+    node: &NodeId,
+) -> Vec<OrchestrationV2ExecutionNodeStatus> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::NodeUpdated { node: updated, .. } if updated.id == *node => {
+                Some(updated.status)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn persistent_dynamic_tool_outlives_a_clean_turn_and_completes_later() {
+    let mut state = RuntimeState::default();
+    state
+        .turns
+        .insert("native-turn-1".into(), detached_turn("native-turn-1"));
+    let tool = json!({
+        "type": "dynamicToolCall",
+        "id": "tool-1",
+        "tool": "watch_build",
+        "arguments": {"persistent": true},
+        "status": "inProgress",
+    });
+    let node = item_node("tool-1");
+    notify(
+        &mut state,
+        "item/started",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "startedAtMs": 1, "item": tool}),
+    );
+
+    let ended = notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-1", "status": "completed", "completedAt": 2}}),
+    );
+    assert!(
+        node_status_of(&ended, &node).is_empty(),
+        "a persistent tool is not terminalized by a clean turn end"
+    );
+    assert!(
+        state.settled.contains_key("native-turn-1"),
+        "the turn is retained"
+    );
+
+    let mut done = tool.clone();
+    done["status"] = json!("completed");
+    let completed = notify(
+        &mut state,
+        "item/completed",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "item": done}),
+    );
+    assert_eq!(
+        node_status_of(&completed, &node),
+        vec![OrchestrationV2ExecutionNodeStatus::Completed]
+    );
+    assert!(
+        !state.settled.contains_key("native-turn-1"),
+        "the turn is released once its tool completes"
+    );
+}
+
+#[test]
+fn running_command_outlives_a_clean_turn_and_completes_later() {
+    let mut state = RuntimeState::default();
+    state
+        .turns
+        .insert("native-turn-1".into(), detached_turn("native-turn-1"));
+    let command = json!({
+        "type": "commandExecution",
+        "id": "cmd-1",
+        "command": "sleep 5",
+        "status": "inProgress",
+        "aggregatedOutput": null,
+    });
+    let node = item_node("cmd-1");
+    notify(
+        &mut state,
+        "item/started",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "startedAtMs": 1, "item": command}),
+    );
+    let ended = notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-1", "status": "completed", "completedAt": 2}}),
+    );
+    assert!(node_status_of(&ended, &node).is_empty());
+    assert!(state.settled.contains_key("native-turn-1"));
+
+    let mut done = command.clone();
+    done["status"] = json!("completed");
+    done["exitCode"] = json!(0);
+    let completed = notify(
+        &mut state,
+        "item/completed",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "item": done}),
+    );
+    assert_eq!(
+        node_status_of(&completed, &node),
+        vec![OrchestrationV2ExecutionNodeStatus::Completed]
+    );
+    assert!(!state.settled.contains_key("native-turn-1"));
 }

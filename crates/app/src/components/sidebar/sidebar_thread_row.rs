@@ -18,7 +18,7 @@ use gpui_kit::{
     RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px, rems,
 };
 
-use super::runtime::models::{
+use crate::state::models::{
     EnvironmentThreadShell, SettledOverride, resolve_thread_provider_stack,
 };
 use super::runtime::thread_settled::{can_snooze, snooze_wake_label, thread_woke_at};
@@ -513,7 +513,7 @@ impl Sidebar {
             .cloned()
             .collect();
         let pr_badge =
-            super::runtime::models::resolve_thread_current_pull_request_link(&thread.pull_requests)
+            crate::state::models::resolve_thread_current_pull_request_link(&thread.pull_requests)
                 .cloned()
                 .map(|link| {
                     let others = visible_prs.len().saturating_sub(1);

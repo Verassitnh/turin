@@ -13,7 +13,7 @@ use gpui_kit::{
     ParentElement as _, Render, SharedString, Styled as _, Window, div, px, rems,
 };
 
-use super::runtime::models::{
+use crate::state::models::{
     EnvironmentProject, EnvironmentThreadShell, ProviderFailureClass, PullRequestState,
     ThreadPullRequestLink,
 };

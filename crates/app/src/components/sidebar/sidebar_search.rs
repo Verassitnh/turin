@@ -14,7 +14,7 @@ use gpui_kit::{
 };
 
 use super::Sidebar;
-use super::runtime::models::{EnvironmentThreadShell, thread_pull_request_search_terms};
+use crate::state::models::{EnvironmentThreadShell, thread_pull_request_search_terms};
 use super::sidebar_logic::{
     pull_request_matches_search_query, search_sidebar_threads, thread_search_match_key,
 };

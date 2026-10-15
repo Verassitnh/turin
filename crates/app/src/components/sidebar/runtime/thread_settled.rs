@@ -11,7 +11,7 @@ use chrono::{
     DateTime, Datelike, Duration, Local, MappedLocalTime, NaiveDate, NaiveTime, TimeZone, Timelike,
 };
 
-use super::models::{EnvironmentThreadShell, RunStatus};
+use crate::state::models::{EnvironmentThreadShell, RunStatus};
 use crate::timestamp_format::{
     TimestampFormat, format_time_of_day, parse_timestamp_ms, to_iso_string,
 };
@@ -400,9 +400,9 @@ pub fn resolve_snooze_presets_now(timestamp_format: TimestampFormat) -> Vec<Snoo
 
 #[cfg(test)]
 mod tests {
-    use super::super::models::fixtures::run_id;
-    use super::super::models::fixtures::{runtime, shell};
-    use super::super::models::{PendingSubagentRequest, ThreadRunSummary};
+    use crate::state::models::fixtures::run_id;
+    use crate::state::models::fixtures::{runtime, shell};
+    use crate::state::models::{PendingSubagentRequest, ThreadRunSummary};
     use super::*;
     use chrono::{FixedOffset, NaiveDateTime};
 

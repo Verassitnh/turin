@@ -9,7 +9,7 @@ use gpui_kit::{
 };
 
 use super::project_monogram::ProjectMonogram;
-use super::sidebar::runtime::models::{EnvironmentProject, ProjectIcon};
+use crate::state::models::{EnvironmentProject, ProjectIcon};
 use crate::project_icon_colors::project_icon_color;
 use crate::project_identity::derive_project_identity;
 use crate::theme::ActiveAppTheme;

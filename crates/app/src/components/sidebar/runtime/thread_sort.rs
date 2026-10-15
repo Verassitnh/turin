@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use super::collate::locale_compare;
-use super::models::{EnvironmentThreadShell, ThreadRunSummary};
+use crate::state::models::{EnvironmentThreadShell, ThreadRunSummary};
 use crate::timestamp_format::parse_timestamp_ms;
 
 /// `SidebarThreadSortOrder` / the non-manual `SidebarProjectSortOrder`s.
@@ -527,8 +527,8 @@ pub fn sort_active_threads_by_order_key<T: SortableThread>(threads: Vec<T>) -> V
 
 #[cfg(test)]
 mod tests {
-    use super::super::models::fixtures::run_id;
-    use super::super::models::{RunStatus, ThreadRunSummary};
+    use crate::state::models::fixtures::run_id;
+    use crate::state::models::{RunStatus, ThreadRunSummary};
     use super::*;
 
     #[derive(Clone, Debug, PartialEq)]

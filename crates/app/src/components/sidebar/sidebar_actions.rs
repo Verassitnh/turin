@@ -20,7 +20,7 @@ use gpui_kit::{
     App, AppContext as _, ClipboardItem, Context, IntoElement as _, Task, WeakEntity, Window,
 };
 
-use super::runtime::models::{EnvironmentThreadShell, SettledOverride, thread_runtime_can_archive};
+use crate::state::models::{EnvironmentThreadShell, SettledOverride, thread_runtime_can_archive};
 use super::runtime::thread_settled::can_snooze;
 use super::sidebar_logic::{
     CommandOutcome, ContextMenuItem, ParkAction, build_bulk_title_regeneration_context_menu_item,

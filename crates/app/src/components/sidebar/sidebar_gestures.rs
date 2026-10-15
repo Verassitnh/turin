@@ -16,7 +16,7 @@ use gpui_kit::{
 };
 
 use super::Sidebar;
-use super::runtime::models::EnvironmentThreadShell;
+use crate::state::models::EnvironmentThreadShell;
 use super::sidebar_drag::{
     CollisionArgs, Rect, STATIONARY, SidebarCollisionDetection, SidebarSortingStrategy, SortLayout,
     SortingStrategyInput, Transform, restrict_below_sidebar_label,
@@ -585,7 +585,7 @@ impl Sidebar {
                         active_pinned: Some(source.pinned_at.is_some()),
                         active_settled: Some(
                             source.settled_override
-                                == Some(super::runtime::models::SettledOverride::Settled),
+                                == Some(crate::state::models::SettledOverride::Settled),
                         ),
                         supports_settlement,
                         target: &target,
@@ -767,7 +767,7 @@ impl Sidebar {
             active_section,
             active_pinned: Some(thread.pinned_at.is_some()),
             active_settled: Some(
-                thread.settled_override == Some(super::runtime::models::SettledOverride::Settled),
+                thread.settled_override == Some(crate::state::models::SettledOverride::Settled),
             ),
             supports_settlement: snapshot
                 .capabilities(&thread.environment_id)

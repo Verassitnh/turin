@@ -8,7 +8,7 @@
 
 use gpui_kit::Hsla;
 
-use crate::components::sidebar::runtime::models::ProjectIconColor;
+use crate::state::models::ProjectIconColor;
 use crate::theme::color::hex;
 
 pub struct ProjectIconColorEntry {

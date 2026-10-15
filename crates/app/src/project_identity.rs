@@ -2,7 +2,7 @@
 //!
 //! The generated monogram and color for a project without an icon.
 
-use crate::components::sidebar::runtime::models::ProjectIconColor;
+use crate::state::models::ProjectIconColor;
 use crate::project_icon_colors::PROJECT_ICON_COLORS;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

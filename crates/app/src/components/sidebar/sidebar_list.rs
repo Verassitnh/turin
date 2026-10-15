@@ -15,7 +15,7 @@ use gpui_kit::{
     div, px, rems,
 };
 
-use super::runtime::models::EnvironmentThreadShell;
+use crate::state::models::EnvironmentThreadShell;
 use super::sidebar_logic::{
     SidebarListItem, SidebarListMarker, SidebarSection, resolve_sidebar_drop_verb,
     resolve_sidebar_row_accessibility, sidebar_list_item_id,

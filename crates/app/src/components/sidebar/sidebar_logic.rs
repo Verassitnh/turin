@@ -16,7 +16,7 @@ use std::future::Future;
 
 // Re-exports upstream keeps on Sidebar.logic so the view has one import site.
 use super::runtime::collate::locale_compare;
-use super::runtime::models::{
+use crate::state::models::{
     EnvironmentThreadShell, GoalStatus, InteractionMode, PendingSubagentRequest,
     ProviderFailureClass, RunStatus, SettledOverride, ThreadRelationship, ThreadRunSummary,
     ThreadRuntimeSummary, background_work_holds_completion, is_latest_run_settled,
@@ -772,7 +772,7 @@ pub fn filter_sidebar_v2_visible_threads<'a>(
 
 /// `getSidebarForkParentThreadId`.
 pub fn get_sidebar_fork_parent_thread_id(thread: &EnvironmentThreadShell) -> Option<ThreadId> {
-    use super::runtime::models::ForkedFrom;
+    use crate::state::models::ForkedFrom;
     if thread.lineage.relationship_to_parent != Some(ThreadRelationship::Fork) {
         return None;
     }
@@ -1577,10 +1577,10 @@ pub fn working_label(thread: &EnvironmentThreadShell) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::super::runtime::models::fixtures::{
+    use crate::state::models::fixtures::{
         env, project_id, run_id, runtime, shell, thread_id,
     };
-    use super::super::runtime::models::{
+    use crate::state::models::{
         BackgroundTaskKind, ForkedFrom, PendingBackgroundTask, ThreadLineage,
     };
     use super::*;

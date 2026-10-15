@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::runtime::models::{EnvironmentThreadShell, SettledOverride};
+use crate::state::models::{EnvironmentThreadShell, SettledOverride};
 use super::runtime::thread_inbox::InboxReturnTracker;
 use super::runtime::thread_settled::effective_snoozed;
 use super::runtime::thread_sort::sort_settled_threads;

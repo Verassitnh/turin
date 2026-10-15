@@ -15,7 +15,7 @@ use gpui_kit::{
     Styled as _, Window, div, rems,
 };
 
-use super::runtime::models::{PullRequestState, ThreadPullRequestLink};
+use crate::state::models::{PullRequestState, ThreadPullRequestLink};
 use crate::components::drag_region::no_drag;
 use crate::theme::color::{hex, with_alpha};
 use crate::theme::tokens::TEXT_XS;

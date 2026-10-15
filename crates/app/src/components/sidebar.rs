@@ -49,7 +49,7 @@ use gpui_kit::{
     actions, div,
 };
 
-use self::runtime::models::{EnvironmentThreadShell, SettledOverride};
+use crate::state::models::{EnvironmentThreadShell, SettledOverride};
 use self::runtime::thread_inbox::InboxReturnTracker;
 use self::sidebar_chrome::{SidebarChromeFooter, SidebarChromeHeader};
 use self::sidebar_gestures::{DragSession, SweepSession};
@@ -338,11 +338,11 @@ impl Sidebar {
                 thread.runtime.as_ref().is_some_and(|runtime| {
                     matches!(
                         runtime.status,
-                        runtime::models::RunStatus::Running
-                            | runtime::models::RunStatus::Preparing
-                            | runtime::models::RunStatus::Starting
-                            | runtime::models::RunStatus::Queued
-                            | runtime::models::RunStatus::Waiting
+                        crate::state::models::RunStatus::Running
+                            | crate::state::models::RunStatus::Preparing
+                            | crate::state::models::RunStatus::Starting
+                            | crate::state::models::RunStatus::Queued
+                            | crate::state::models::RunStatus::Waiting
                     )
                 }) || thread.snoozed_until.is_some()
             })

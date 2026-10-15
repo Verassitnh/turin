@@ -15,7 +15,7 @@ use std::rc::Rc;
 use gpui_kit::{App, Context, EventEmitter, Task};
 use turin_contracts::{EnvironmentId, ProjectId, ThreadId};
 
-use super::runtime::models::{EnvironmentProject, EnvironmentThreadShell};
+use crate::state::models::{EnvironmentProject, EnvironmentThreadShell};
 use super::sidebar_logic::{CommandOutcome, ProjectSortOrder};
 use crate::components::thread_search_match::SearchMatchSource;
 use crate::timestamp_format::TimestampFormat;
@@ -225,7 +225,7 @@ pub struct ThreadRef {
 
 impl ThreadRef {
     pub fn key(&self) -> String {
-        super::runtime::models::scoped_thread_key(&self.environment_id, &self.thread_id)
+        crate::state::models::scoped_thread_key(&self.environment_id, &self.thread_id)
     }
 
     pub fn of(thread: &EnvironmentThreadShell) -> Self {

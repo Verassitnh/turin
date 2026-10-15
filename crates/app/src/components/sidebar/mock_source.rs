@@ -14,7 +14,7 @@ use std::rc::Rc;
 use gpui_kit::{App, AppContext as _, Entity, Task, WeakEntity};
 use turin_contracts::{EnvironmentId, ProjectId, RunId, ThreadId};
 
-use super::runtime::models::{
+use crate::state::models::{
     BackgroundTaskKind, DiffStat, EnvironmentProject, EnvironmentThreadShell, GoalStatus,
     InteractionMode, ModelSelection, PendingBackgroundTask, ProjectIcon, ProjectIconColor,
     ProviderFailureClass, PullRequestState, RunStatus, SettledOverride, ThreadPullRequestLink,
@@ -48,6 +48,9 @@ fn project(id: &str, title: &str, root: &str, icon: Option<ProjectIcon>) -> Envi
         project_icon: icon,
         created_at: Some(to_iso_string(now_ms() - 30 * DAY)),
         updated_at: Some(to_iso_string(now_ms() - 30 * DAY)),
+        // The fixture has no scratch root and no contract row behind it.
+        is_scratch: false,
+        source: None,
     }
 }
 
@@ -367,7 +370,7 @@ pub fn mock_snapshot() -> SidebarSnapshot {
 
     // A hidden subagent (lineage) never shows in the sidebar.
     let mut t = f.thread("subagent", "turin", "Subagent: read upstream", 3 * HOUR);
-    t.lineage.relationship_to_parent = Some(super::runtime::models::ThreadRelationship::Subagent);
+    t.lineage.relationship_to_parent = Some(crate::state::models::ThreadRelationship::Subagent);
     threads.push(t);
 
     SidebarSnapshot {

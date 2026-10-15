@@ -1084,3 +1084,57 @@ async fn checkpoint_worker_starts_on_a_file_database() {
         WRITER_BACKSTOP_FRAMES
     );
 }
+
+#[tokio::test]
+async fn unknown_event_types_are_rejected_before_insert() {
+    let store = memory_store().await;
+    let err = store
+        .append_project_event(ProjectEventInput {
+            event_id: event_id("evt-unknown"),
+            aggregate_id: "project-unknown".into(),
+            event_type: "project.nope".into(),
+            occurred_at: NOW.into(),
+            command_id: None,
+            causation_event_id: None,
+            correlation_id: None,
+            payload: serde_json::json!({"title": "Nope"}),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("appendProjectEvent:decode"), "{message}");
+    assert!(message.contains("unknown event type"));
+    let count: i64 = store
+        .db()
+        .read(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM orchestration_events", [], |row| {
+                row.get(0)
+            })
+            .map_err(sql_err)
+        })
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+
+    let err = store
+        .append_agent_events(AppendAgentEvents {
+            command_id: None,
+            events: vec![AgentEvent {
+                id: event_id("evt-agent-unknown"),
+                thread_id: thread_id("thread-unknown"),
+                event_type: "thread.nope".into(),
+                occurred_at: NOW.into(),
+                payload: serde_json::json!({"title": "Nope"}),
+                run_id: None,
+                node_id: None,
+                driver: None,
+                provider_instance_id: None,
+                raw_event_id: None,
+            }],
+        })
+        .await
+        .unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("appendAgentEvents:decode"), "{message}");
+}

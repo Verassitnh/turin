@@ -460,6 +460,12 @@ pub(crate) fn append_project_event(
     conn: &Connection,
     event: &ProjectEventInput,
 ) -> Result<ProjectEvent, PersistenceError> {
+    if !is_known_project_event_type(&event.event_type) {
+        return Err(decode_err(
+            "OrchestrationEventStore.appendProjectEvent:decode",
+            format!("unknown event type {}", event.event_type),
+        ));
+    }
     let payload_json = serde_json::to_string(&event.payload).map_err(|err| {
         PersistenceError::Decode(PersistenceDecodeError::new(
             "OrchestrationEventStore.appendProjectEvent:decode",
@@ -544,6 +550,12 @@ fn append_agent_events(
 ) -> Result<Vec<StoredAgentEvent>, PersistenceError> {
     let mut stored = Vec::with_capacity(input.events.len());
     for event in &input.events {
+        if !is_known_v2_event_type(&event.event_type) {
+            return Err(decode_err(
+                "OrchestrationEventStore.appendAgentEvents:decode",
+                format!("unknown event type {}", event.event_type),
+            ));
+        }
         let payload_json = serde_json::to_string(&event.payload).map_err(|err| {
             PersistenceError::Decode(PersistenceDecodeError::new(
                 "OrchestrationEventStore.appendAgentEvents:decode",
@@ -786,7 +798,11 @@ pub fn read_agent_events(
         let n = rows.len() as i64;
         let last = rows.last().map(|row| row.sequence);
         for row in rows {
-            if keep_row(&row, query.skip_unknown_event_types)? {
+            if keep_row(
+                &row,
+                query.skip_unknown_event_types,
+                "OrchestrationEventStore.readAgentEvents:decode",
+            )? {
                 out.push(row_to_agent(
                     &row,
                     "OrchestrationEventStore.readAgentEvents:decode",
@@ -833,8 +849,15 @@ fn read_application_page(
     let last_sequence = rows.last().map(|row| row.sequence);
     let mut events = Vec::with_capacity(rows.len());
     for row in rows {
-        if keep_row(&row, skip_unknown_event_types)? {
-            events.push(row_to_application(&row)?);
+        if keep_row(
+            &row,
+            skip_unknown_event_types,
+            "OrchestrationEventStore.readApplicationEvents:decode",
+        )? {
+            events.push(row_to_application(
+                &row,
+                "OrchestrationEventStore.readApplicationEvents:decode",
+            )?);
         }
     }
     Ok(ApplicationPage {
@@ -867,8 +890,15 @@ pub fn read_application_events(
         let n = rows.len() as i64;
         let last = rows.last().map(|row| row.sequence);
         for row in rows {
-            if keep_row(&row, query.skip_unknown_event_types)? {
-                out.push(row_to_application(&row)?);
+            if keep_row(
+                &row,
+                query.skip_unknown_event_types,
+                "OrchestrationEventStore.readApplicationEvents:decode",
+            )? {
+                out.push(row_to_application(
+                    &row,
+                    "OrchestrationEventStore.readApplicationEvents:decode",
+                )?);
             }
         }
         let Some(last) = last else { break };
@@ -969,7 +999,11 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
     })
 }
 
-fn keep_row(row: &EventRow, skip_unknown: bool) -> Result<bool, PersistenceError> {
+fn keep_row(
+    row: &EventRow,
+    skip_unknown: bool,
+    operation: &'static str,
+) -> Result<bool, PersistenceError> {
     let known = if row.aggregate_kind == "project" {
         is_known_project_event_type(&row.event_type)
     } else {
@@ -986,24 +1020,21 @@ fn keep_row(row: &EventRow, skip_unknown: bool) -> Result<bool, PersistenceError
             return Ok(false);
         }
         return Err(decode_err(
-            "OrchestrationEventStore.readApplicationEvents:decode",
+            operation,
             format!("unknown event type {}", row.event_type),
         ));
     }
     Ok(true)
 }
 
-fn row_to_application(row: &EventRow) -> Result<ApplicationStoredEvent, PersistenceError> {
+fn row_to_application(
+    row: &EventRow,
+    operation: &'static str,
+) -> Result<ApplicationStoredEvent, PersistenceError> {
     if row.aggregate_kind == "project" {
-        Ok(ApplicationStoredEvent::Project(row_to_project(
-            row,
-            "OrchestrationEventStore.appendProjectEvent:decode",
-        )?))
+        Ok(ApplicationStoredEvent::Project(row_to_project(row, operation)?))
     } else {
-        Ok(ApplicationStoredEvent::Agent(row_to_agent(
-            row,
-            "OrchestrationEventStore.readAgentEvents:decode",
-        )?))
+        Ok(ApplicationStoredEvent::Agent(row_to_agent(row, operation)?))
     }
 }
 
@@ -1025,14 +1056,8 @@ fn row_to_project(
             new_event_id,
         )?,
         correlation_id: parse_brand_opt(operation, row.correlation_id.as_deref(), new_command_id)?,
-        payload: parse_known_payload(
-            "OrchestrationEventStore.appendProjectEvent:decode",
-            &row.payload_json,
-        )?,
-        metadata: parse_json(
-            "OrchestrationEventStore.appendProjectEvent:decode",
-            &row.metadata_json,
-        )?,
+        payload: parse_known_payload(operation, &row.payload_json)?,
+        metadata: parse_json(operation, &row.metadata_json)?,
     })
 }
 
@@ -1040,14 +1065,8 @@ fn row_to_agent(
     row: &EventRow,
     operation: &'static str,
 ) -> Result<StoredAgentEvent, PersistenceError> {
-    let payload = parse_known_payload(
-        "OrchestrationEventStore.readAgentEvents:decode",
-        &row.payload_json,
-    )?;
-    let metadata = parse_json(
-        "OrchestrationEventStore.readAgentEvents:decode",
-        &row.metadata_json,
-    )?;
+    let payload = parse_known_payload(operation, &row.payload_json)?;
+    let metadata = parse_json(operation, &row.metadata_json)?;
     let field = |name: &str| {
         metadata
             .get(name)

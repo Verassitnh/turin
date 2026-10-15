@@ -235,7 +235,12 @@ impl AppTheme {
             error_foreground: c(p.error_foreground),
             error_surface: c(p.error_surface),
             tool_error_icon: if theme.id == DEFAULT_THEME_ID {
-                if dark { tw::RED_300.into() } else { c(p.error) }
+                if dark {
+                    // index.css dark `--tool-error-icon: #fca5a5` (a literal).
+                    color::hex(0xfca5a5).into()
+                } else {
+                    c(p.error)
+                }
             } else {
                 c(p.error_foreground)
             },

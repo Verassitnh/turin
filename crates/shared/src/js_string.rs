@@ -122,10 +122,10 @@ const COLLATION_PUNCTUATION: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
 /// `locale_compare` ranks them by position so all whitespace sorts before
 /// punctuation, whatever the script.
 const JS_WHITESPACE_CHARS: [char; 25] = [
-    '\u{0009}', '\u{000a}', '\u{000b}', '\u{000c}', '\u{000d}', '\u{0020}', '\u{00a0}',
-    '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}',
-    '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200a}', '\u{2028}', '\u{2029}',
-    '\u{202f}', '\u{205f}', '\u{3000}', '\u{feff}',
+    '\u{0009}', '\u{000a}', '\u{000b}', '\u{000c}', '\u{000d}', '\u{0020}', '\u{00a0}', '\u{1680}',
+    '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}',
+    '\u{2008}', '\u{2009}', '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}',
+    '\u{feff}',
 ];
 
 /// Approximates `String.prototype.localeCompare` in the default en-US locale
@@ -373,7 +373,10 @@ mod tests {
         assert_eq!(locale_compare("\u{2003}x", "-x"), Less);
         assert_eq!(locale_compare("\u{2003}x", "9x"), Less);
         assert_eq!(locale_compare("ax", "\u{2003}x"), Greater);
-        assert_eq!(locale_compare("\u{2003}", "\u{2003}"), std::cmp::Ordering::Equal);
+        assert_eq!(
+            locale_compare("\u{2003}", "\u{2003}"),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]

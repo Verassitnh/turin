@@ -16,6 +16,7 @@ use crate::state::thread_history_merge::{
     ThreadHistoryMeta, apply_history_page_meta, clear_active_history_loading,
     is_active_history_request_cursor, merge_older_history_into_projection,
 };
+use crate::state::thread_lifecycle::OptimisticThreads;
 use crate::state::thread_shell::{ShellView, ShellViewBuilder};
 use crate::state::thread_state::{EnvironmentThreadState, EnvironmentThreadStatus};
 
@@ -99,6 +100,7 @@ pub struct ClientStateCore {
     shell_views: ShellViewBuilder,
     scratch_workspace_root: Option<String>,
     threads: HashMap<ThreadId, ThreadSlot>,
+    optimistic: OptimisticThreads,
     published: Arc<ClientState>,
     revision: u64,
 }
@@ -119,6 +121,7 @@ impl ClientStateCore {
             shell_views: ShellViewBuilder::new(),
             scratch_workspace_root: None,
             threads: HashMap::new(),
+            optimistic: OptimisticThreads::default(),
             published,
             revision: 0,
         }
@@ -132,7 +135,22 @@ impl ClientStateCore {
     /// [`Self::publish`] after a batch).
     pub fn apply(&mut self, event: ClientStateEvent) -> bool {
         match event {
-            ClientStateEvent::Shell(items) => self.shell.apply_items(items),
+            ClientStateEvent::Shell(items) => {
+                let changed = self.shell.apply_items(items);
+                let reconciled = self.optimistic.reconcile(self.shell_sequence());
+                changed || reconciled
+            }
+            ClientStateEvent::OptimisticBegin {
+                id,
+                thread_id,
+                update,
+                now,
+            } => self.optimistic.begin(id, thread_id, update, now),
+            ClientStateEvent::OptimisticConfirm { id, sequence } => {
+                let snapshot_sequence = self.shell_sequence();
+                self.optimistic.confirm(id, sequence, snapshot_sequence)
+            }
+            ClientStateEvent::OptimisticDiscard { id } => self.optimistic.discard(id),
             ClientStateEvent::ShellFeed(status) => {
                 let before = self.shell.clone();
                 match status {
@@ -244,10 +262,24 @@ impl ClientStateCore {
         Some(cursor)
     }
 
+    fn shell_sequence(&self) -> Option<u64> {
+        self.shell
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.snapshot_sequence)
+    }
+
     /// Rebuilds the published snapshot from the current state and returns it.
+    /// The published shell is the visible one: the source snapshot with the
+    /// pending lifecycle previews applied.
     pub fn publish(&mut self) -> Arc<ClientState> {
         self.revision += 1;
-        let shell_view = self.shell.snapshot.as_ref().map(|snapshot| {
+        let mut shell = self.shell.clone();
+        shell.snapshot = shell
+            .snapshot
+            .as_ref()
+            .map(|snapshot| self.optimistic.overlay(snapshot));
+        let shell_view = shell.snapshot.as_ref().map(|snapshot| {
             self.shell_views.build(
                 &self.environment_id,
                 snapshot,
@@ -262,7 +294,7 @@ impl ClientStateCore {
         self.published = Arc::new(ClientState {
             revision: self.revision,
             environment_id: self.environment_id.clone(),
-            shell: self.shell.clone(),
+            shell,
             shell_view,
             threads: Arc::new(threads),
         });
@@ -507,6 +539,44 @@ mod tests {
             history.error.as_deref(),
             Some("Could not load earlier activity.")
         );
+    }
+
+    #[test]
+    fn lifecycle_previews_overlay_the_shell_until_it_catches_up() {
+        use crate::state::thread_lifecycle::{OptimisticThreadUpdate, OptimisticUpdateId};
+        let mut core = ClientStateCore::new(env());
+        core.apply(ClientStateEvent::Shell(vec![shell_snapshot(1)]));
+        let source = core.publish();
+        let id = OptimisticUpdateId::next();
+        let previewed = apply_and_publish(
+            &mut core,
+            ClientStateEvent::OptimisticBegin {
+                id,
+                thread_id: thread_id(),
+                update: OptimisticThreadUpdate::Unpin,
+                now: crate::state::contracts::UtcDateTime::now(),
+            },
+        );
+        let thread = &previewed.shell.snapshot.as_ref().unwrap().threads[0];
+        assert_eq!(thread.pinned_at, Some(None));
+        assert!(Arc::ptr_eq(
+            &source.shell_view.as_ref().unwrap().projects,
+            &previewed.shell_view.as_ref().unwrap().projects
+        ));
+        // Accepted at 2: the preview stays while the shell is at 1.
+        assert!(core.apply(ClientStateEvent::OptimisticConfirm { id, sequence: 2 }));
+        assert_eq!(
+            core.publish().shell.snapshot.as_ref().unwrap().threads[0].pinned_at,
+            Some(None)
+        );
+        // The shell reaches 2: the preview is dropped.
+        core.apply(ClientStateEvent::Shell(vec![shell_snapshot(2)]));
+        let caught_up = core.publish();
+        assert_eq!(
+            caught_up.shell.snapshot.as_ref().unwrap().threads[0].pinned_at,
+            v2_thread_shell().pinned_at
+        );
+        assert!(!core.apply(ClientStateEvent::OptimisticDiscard { id }));
     }
 
     #[test]

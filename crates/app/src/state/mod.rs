@@ -32,6 +32,7 @@ pub mod thread_detail;
 pub mod thread_execution;
 pub mod thread_feedback;
 pub mod thread_history_merge;
+pub mod thread_lifecycle;
 pub mod thread_projection;
 pub mod thread_relationships;
 pub mod thread_requests;

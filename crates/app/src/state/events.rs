@@ -15,9 +15,10 @@
 
 use tokio::sync::mpsc;
 
-use crate::state::contracts::ThreadId;
+use crate::state::contracts::{ThreadId, UtcDateTime};
 use crate::state::shell_reducer::ShellStreamItem;
 use crate::state::thread_history_merge::ThreadHistoryPageMeta;
+use crate::state::thread_lifecycle::{OptimisticThreadUpdate, OptimisticUpdateId};
 use crate::state::thread_projection::VisibleTurnItem;
 use crate::state::thread_state::ThreadStreamItem;
 
@@ -65,6 +66,23 @@ pub enum ClientStateEvent {
     ForgetThread(ThreadId),
     /// The Scratch project folder (`ServerConfig.scratchWorkspaceRoot`), if any.
     ScratchWorkspaceRoot(Option<String>),
+    /// A lifecycle command started: show `update` on the thread's shell row
+    /// until the command fails or the shell reaches its sequence.
+    OptimisticBegin {
+        id: OptimisticUpdateId,
+        thread_id: ThreadId,
+        update: OptimisticThreadUpdate,
+        now: UtcDateTime,
+    },
+    /// The command was accepted at `sequence`.
+    OptimisticConfirm {
+        id: OptimisticUpdateId,
+        sequence: u64,
+    },
+    /// The command failed or was dropped.
+    OptimisticDiscard {
+        id: OptimisticUpdateId,
+    },
 }
 
 /// What the UI asks the orchestrator-side adapter for.

@@ -25,7 +25,7 @@ use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, CursorStyle, Entity,
-    EventEmitter as _, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity,
     Window, div, px, rems,
 };
@@ -50,11 +50,11 @@ use super::presentation_view::{
     PullRequestActorLabel, PullRequestDiffStat, PullRequestStateGlyph, Spinner, tone_color,
 };
 use super::pull_request_detail_logic::{
-    PULL_REQUEST_MERGE_METHOD_LABELS, PullRequestPrimaryControl, PullRequestPrimaryControlInput,
-    allowed_pull_request_merge_methods, is_pull_request_conflicting, is_pull_request_not_found,
+    PULL_REQUEST_MERGE_METHOD_LABELS, PullRequestPrimaryControl,
+    allowed_pull_request_merge_methods, is_pull_request_conflicting,
     latest_pull_request_review_outcomes, loading_pull_request_checkout_command,
     pull_request_action_menu_has_group, pull_request_action_needs_host_refresh,
-    pull_request_checkout_command, readable_failure, resolve_base_freshness,
+    pull_request_checkout_command, resolve_base_freshness,
     resolve_pull_request_merge_method, resolve_pull_request_primary_control,
     PullRequestReviewOutcome,
 };
@@ -63,7 +63,7 @@ use super::pull_request_editing_logic::{
     open_on_host_label,
 };
 use super::pull_request_presentation::{
-    pull_request_checks_state, pull_request_checks_state_presentation,
+    pull_request_checks_state,
     pull_request_review_outcome_tone_class_name, resolve_pull_request_state,
     summarize_pull_request_checks,
 };
@@ -204,6 +204,17 @@ pub fn core_detail(view: &PullRequestDetailView) -> PullRequestDetail {
         auto_merge_enabled: view.auto_merge_enabled,
         auto_merge_method: view.auto_merge_method,
         workflow_approvals_required: view.workflow_approvals_required,
+    }
+}
+
+/// The facts `canEditPullRequestChangeRequest` / `canEditPullRequestComment` read. A reader who
+/// may not write the host sees no edit controls (the panel zeroes `capabilities.edit` then).
+pub fn editing_subject(detail: &PullRequestDetailView, can_write: bool) -> EditingSubject<'_> {
+    EditingSubject {
+        author: detail.author.as_ref(),
+        capabilities: &detail.capabilities,
+        viewer: if can_write { detail.viewer.as_ref().map(|viewer| viewer.as_str()) } else { None },
+        viewer_permissions: &detail.viewer_permissions,
     }
 }
 
@@ -862,32 +873,22 @@ impl Render for PullRequestDetailPanel {
             }
             Loadable::Failed(error) => {
                 let weak = weak.clone();
-                let not_found = false;
-                let _ = not_found;
-                root.child(
-                    div().flex().flex_1().min_h_0().child(
-                        PullRequestsUnavailableState::new(error)
-                            .title("Could not load this pull request")
-                            .on_retry(Rc::new(move |_, _, cx| {
-                                weak.update(cx, |panel, cx| panel.refresh(cx)).ok();
-                            })),
-                    ),
-                )
-                .into_any_element()
+                let mut unavailable = PullRequestsUnavailableState::new(error)
+                    .title("Could not load this pull request");
+                unavailable.on_retry = Some(Rc::new(move |_, _, cx| {
+                    weak.update(cx, |panel, cx| panel.refresh(cx)).ok();
+                }));
+                root.child(div().flex().flex_1().min_h_0().child(unavailable))
+                    .into_any_element()
             }
             Loadable::Ready(detail) => self.render_ready(root, detail, window, cx),
         }
     }
 }
 
-/// What the list already knows of the pull request, shown while the detail arrives.
-#[derive(Clone)]
-pub struct ListSeed {
-    pub entry: super::pull_request_list_logic::EnvironmentPullRequestEntry,
-}
-
 impl PullRequestDetailPanel {
-    fn list_seed(&self, cx: &App) -> Option<ListSeed> {
+    /// What the list already knows of the pull request, shown while the detail arrives.
+    fn list_seed(&self, cx: &App) -> Option<super::pull_request_list_logic::EnvironmentPullRequestEntry> {
         let store = self.ctx.store.read(cx);
         store
             .entries()
@@ -900,7 +901,6 @@ impl PullRequestDetailPanel {
                         .eq_ignore_ascii_case(self.ctx.reference.repository.as_str())
             })
             .cloned()
-            .map(|entry| ListSeed { entry })
     }
 
     fn render_ready(
@@ -1006,6 +1006,7 @@ impl PullRequestDetailPanel {
                 .child(number_button)
                 .child(
                     div()
+                        .id("pr-condensed-title")
                         .min_w_0()
                         .truncate()
                         .font_weight(FontWeight::MEDIUM)
@@ -1014,8 +1015,7 @@ impl PullRequestDetailPanel {
                         .tooltip({
                             let title = detail.title.as_str().to_owned();
                             move |window, cx| Tooltip::new(title.clone()).build(window, cx)
-                        })
-                        .id("pr-condensed-title"),
+                        }),
                 )
         } else {
             div()
@@ -1028,11 +1028,8 @@ impl PullRequestDetailPanel {
         };
 
         // ── Title and author lines ─────────────────────────────────────────────────────────────
-        let can_edit_title = can_write
-            && can_edit_pull_request_change_request(&EditingSubject {
-                capabilities: &detail.capabilities,
-                viewer_permissions: &detail.viewer_permissions,
-            });
+        let can_edit_title =
+            can_write && can_edit_pull_request_change_request(&editing_subject(&detail, can_write));
         let title_element: AnyElement = match self.title_edit.clone() {
             None => {
                 let weak_edit = weak.clone();
@@ -1190,7 +1187,6 @@ impl PullRequestDetailPanel {
                 div()
                     .flex()
                     .min_w_0()
-                    .flex_shrink()
                     .items_center()
                     .gap(rems(0.375))
                     .overflow_hidden()
@@ -2077,11 +2073,4 @@ mod tests {
         assert_eq!(TimelineOrder::Oldest.toggled(), TimelineOrder::Newest);
     }
 
-    #[allow(dead_code)]
-    fn _unused(_: PullRequestPrimaryControlInput, _: Option<bool>) {
-        let _ = is_pull_request_not_found;
-        let _ = readable_failure;
-        let _ = pull_request_checks_state_presentation;
-        let _ = EditingSubject::default;
-    }
 }

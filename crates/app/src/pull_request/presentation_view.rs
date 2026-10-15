@@ -472,6 +472,12 @@ impl PullRequestLabelChip {
         self
     }
 
+    /// `className="max-w-48"`: the widest the pill may grow before the name is cut.
+    pub fn max_width(mut self, width: Pixels) -> Self {
+        self.max_width = Some(width);
+        self
+    }
+
     /// Children ride after the name, for an overflow count.
     pub fn trailing(mut self, text: impl Into<SharedString>) -> Self {
         self.trailing = Some(text.into());

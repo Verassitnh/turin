@@ -527,8 +527,24 @@ impl Render for PullRequestsPage {
             });
 
         let _ = (state_tabs, involvement_tabs, Anchor::TopLeft, RADIUS_MD);
+        // `@container/pr-list`: the column measures itself so `@lg` (32rem) can decide whether the
+        // search takes a row of its own.
+        let measure = {
+            let page = cx.entity().downgrade();
+            gpui_kit::canvas(
+                move |bounds, _, cx| {
+                    let width = f32::from(bounds.size.width);
+                    page.update(cx, |page, cx| page.set_column_width(width, cx)).ok();
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full()
+        };
+        let narrow = self.column_width < 512.;
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -536,6 +552,7 @@ impl Render for PullRequestsPage {
             .min_h_0()
             .overflow_hidden()
             .bg(theme.background)
+            .child(measure)
             .child(
                 div()
                     .id("pr-list-header")
@@ -576,7 +593,14 @@ impl Render for PullRequestsPage {
                                     .flex_wrap()
                                     .items_center()
                                     .gap_2()
-                                    .child(self.search_input(cx))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .min_w_0()
+                                            .when(narrow, |this| this.w_full())
+                                            .when(!narrow, |this| this.flex_1())
+                                            .child(self.search_input(cx)),
+                                    )
                                     .children(sort_menu)
                                     .child(filters)
                                     .children(provider_menu)

@@ -20,6 +20,8 @@ icon_assets!(
         ArrowRight,
         ArrowRightLeft,
         ArrowUp,
+        Blocks,
+        Bookmark,
         ArrowUpRight,
         BookOpen,
         Bot,
@@ -35,20 +37,24 @@ icon_assets!(
         ChevronsDownUp,
         ChevronsUpDown,
         ChevronUp,
-        Circle,
         CircleAlert,
         CircleCheck,
         CircleDashed,
-        CircleDot,
+        CircleGauge,
         CircleX,
+        Clock3,
+        Circle,
+        CircleDot,
         Clock,
         Code,
         Columns2,
         Copy,
-        CornerDownRight,
+        CornerUpRight,
         Ellipsis,
-        ExternalLink,
         Eye,
+        File,
+        CornerDownRight,
+        ExternalLink,
         FileCode,
         FileDiff,
         Files,
@@ -71,14 +77,21 @@ icon_assets!(
         Hash,
         Globe,
         Hammer,
+        Image,
         Hourglass,
         Info,
         Layers,
         Lightbulb,
+        GitPullRequest,
+        GripVertical,
         Link,
         Link2,
         ListChecks,
         ListFilter,
+        ListOrdered,
+        ListPlus,
+        Lock,
+        LockOpen,
         LoaderCircle,
         Maximize2,
         MessageCircle,
@@ -86,22 +99,25 @@ icon_assets!(
         MessageSquareOff,
         MessageSquareText,
         MessageSquareWarning,
+        MessagesSquare,
         MailOpen,
         MessageCircleQuestionMark,
         MessageSquarePlus,
         Minimize2,
         Minus,
         OctagonAlert,
+        Package,
         PanelLeft,
         PanelLeftClose,
         PanelRight,
         Paperclip,
-        Pencil,
         PenLine,
+        Pencil,
+        PencilRuler,
         Pilcrow,
         Pin,
-        PinOff,
         Play,
+        PinOff,
         Plug2,
         Plus,
         Redo2,
@@ -126,6 +142,7 @@ icon_assets!(
         SquareCheck,
         SquareMenu,
         SquarePen,
+        Star,
         Tag,
         Terminal,
         TextWrap,
@@ -133,14 +150,14 @@ icon_assets!(
         Trash,
         TriangleAlert,
         Undo2,
+        UserRound,
+        Wrench,
         Unlink2,
         UserCheck,
         UserLock,
         UserPlus,
-        UserRound,
         UserRoundX,
         Users,
-        Wrench,
         X,
         Zap,
     ]
@@ -151,6 +168,22 @@ pub const SEND_ARROW: &str = "brand/send-arrow.svg";
 /// Lucide `chevron-down` at `stroke-width` 2.25 (ComposerControl.tsx); the
 /// stock `IconName::ChevronDown` is stroke 2.
 pub const CHEVRON_DOWN: &str = "brand/chevron-down.svg";
+
+/// Provider marks (components/Icons.tsx), keyed by driver kind in
+/// [`provider_icon_path`].
+pub const PROVIDER_OPENAI: &str = "brand/openai.svg";
+pub const PROVIDER_CLAUDE: &str = "brand/claude.svg";
+pub const PROVIDER_CURSOR: &str = "brand/cursor.svg";
+
+/// The bundled mark for a provider driver kind, if upstream has one inline.
+pub fn provider_icon_path(driver_kind: &str) -> Option<&'static str> {
+    match driver_kind {
+        "codex" => Some(PROVIDER_OPENAI),
+        "claudeAgent" => Some(PROVIDER_CLAUDE),
+        "cursor" => Some(PROVIDER_CURSOR),
+        _ => None,
+    }
+}
 
 /// The pull request list's empty-state drawing: a branch stopped short of the base line
 /// (PullRequestListEmptyState.tsx `BranchMark`, unjoined).
@@ -177,6 +210,18 @@ const BRAND: &[(&str, &[u8])] = &[
     (
         CHEVRON_DOWN,
         include_bytes!("../assets/brand/chevron-down.svg"),
+    ),
+    (
+        PROVIDER_OPENAI,
+        include_bytes!("../assets/brand/openai.svg"),
+    ),
+    (
+        PROVIDER_CLAUDE,
+        include_bytes!("../assets/brand/claude.svg"),
+    ),
+    (
+        PROVIDER_CURSOR,
+        include_bytes!("../assets/brand/cursor.svg"),
     ),
     (
         BRANCH_MARK,

@@ -99,6 +99,13 @@ Revised after QC `wf_6ce02f2f-38c` (docs/qc/). Helpers live in
 **Rules:** never do a bounded `send().await` or any `.await` while holding a
 DB transaction or a sync lock.
 
+**Async-first (user rule).** Everything that can be async is async: all IO
+(processes, network, SQLite via `Db`, filesystem scans, git) runs on tokio or
+gpui's background executor, never on the UI thread; independent work runs
+concurrently (`join!`/`buffer_unordered` per the table above) instead of in
+sequence unless upstream's ordering is semantically required. UI renders from
+cached view models and never awaits.
+
 Async runtime: tokio for all backend work. The GPUI app spawns a multi-thread
 tokio runtime at startup and bridges results into entities via channels.
 

@@ -27,12 +27,12 @@ use turin_contracts::{
 };
 use turin_provider_core::provider_adapter::{
     ProviderAdapterV2, ProviderAdapterV2EnsureThreadInput, ProviderAdapterV2Event,
-    ProviderAdapterV2InterruptInput, ProviderAdapterV2OpenSessionInput,
-    ProviderAdapterV2ResumeThreadInput, ProviderAdapterV2RollbackTarget,
-    ProviderAdapterV2RollbackThreadInput, ProviderAdapterV2RuntimePolicy,
-    ProviderAdapterV2RuntimeRequestResponseInput, ProviderAdapterV2SteerInput,
-    ProviderAdapterV2TurnInput, ProviderAdapterV2TurnMessage, ProviderAdapterV2TurnTerminalStatus,
-    ProviderEventStream, ProviderSessionRuntime,
+    ProviderAdapterV2ForkThreadInput, ProviderAdapterV2InterruptInput,
+    ProviderAdapterV2OpenSessionInput, ProviderAdapterV2ResumeThreadInput,
+    ProviderAdapterV2RollbackTarget, ProviderAdapterV2RollbackThreadInput,
+    ProviderAdapterV2RuntimePolicy, ProviderAdapterV2RuntimeRequestResponseInput,
+    ProviderAdapterV2SteerInput, ProviderAdapterV2TurnInput, ProviderAdapterV2TurnMessage,
+    ProviderAdapterV2TurnTerminalStatus, ProviderEventStream, ProviderSessionRuntime,
 };
 
 const CLIENT_VERSION: &str = "0.0.44";
@@ -938,6 +938,168 @@ async fn thread_rollback_to_stopped_turn_reverts_turns_after_boundary() {
         replay.finish_turn().await,
         ProviderAdapterV2TurnTerminalStatus::Completed
     );
+    replay.driver.verify_complete().unwrap();
+}
+
+/// Forks `replay`'s thread at `boundary`, as the orchestration does for a native fork.
+async fn fork_at(
+    replay: &Replay,
+    turns: &[OrchestrationV2ProviderTurn],
+    boundary: &OrchestrationV2ProviderTurn,
+    target: &str,
+    policy: &ProviderAdapterV2RuntimePolicy,
+) -> OrchestrationV2ProviderThread {
+    replay
+        .runtime
+        .fork_thread(ProviderAdapterV2ForkThreadInput {
+            source_provider_thread: replay.thread.clone(),
+            source_provider_turns: Some(turns.to_vec()),
+            provider_turn_id: Some(boundary.id.clone()),
+            target_thread_id: id(target),
+            owner_node_id: None,
+            model_selection: Some(selection(&replay.model)),
+            runtime_policy: Some(policy.clone()),
+        })
+        .await
+        .unwrap()
+}
+
+/// A fork at a native turn continues on its own thread. Both turns after the fork
+/// run on the fork, and the source is not written to again.
+#[tokio::test]
+async fn thread_fork_native_continue_runs_turns_on_fork() {
+    let transcript = fixture("thread_fork_native_continue");
+    let policy = recorded_policy(&transcript, RuntimeMode::FullAccess);
+    let mut replay = open(transcript.clone()).await;
+    replay
+        .start(&recorded_text(&transcript, 0), policy.clone())
+        .await;
+    let turns = vec![last_provider_turn(&replay.next_until(is_terminal).await)];
+
+    replay.thread = fork_at(&replay, &turns, &turns[0], "thread-2", &policy).await;
+    replay
+        .start(&recorded_text(&transcript, 1), policy.clone())
+        .await;
+    assert_eq!(
+        replay.finish_turn().await,
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    replay.start(&recorded_text(&transcript, 2), policy).await;
+    assert_eq!(
+        replay.finish_turn().await,
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+/// Two forks from the same source turn are independent: each runs its own turn.
+#[tokio::test]
+async fn thread_fork_native_siblings_keep_forks_separate() {
+    let transcript = fixture("thread_fork_native_siblings");
+    let policy = recorded_policy(&transcript, RuntimeMode::FullAccess);
+    let mut replay = open(transcript.clone()).await;
+    replay
+        .start(&recorded_text(&transcript, 0), policy.clone())
+        .await;
+    let turns = vec![last_provider_turn(&replay.next_until(is_terminal).await)];
+    let source = replay.thread.clone();
+
+    replay.thread = fork_at(&replay, &turns, &turns[0], "thread-2", &policy).await;
+    replay
+        .start(&recorded_text(&transcript, 1), policy.clone())
+        .await;
+    assert_eq!(
+        replay.finish_turn().await,
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+
+    replay.thread = source;
+    replay.thread = fork_at(&replay, &turns, &turns[0], "thread-3", &policy).await;
+    replay.start(&recorded_text(&transcript, 2), policy).await;
+    assert_eq!(
+        replay.finish_turn().await,
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+/// Merge-back: the fork runs a turn, then the source runs the handoff text that
+/// carries the fork's delta, then the source answers the final question.
+#[tokio::test]
+async fn thread_merge_back_continue_hands_fork_delta_to_source() {
+    let transcript = fixture("thread_merge_back_continue");
+    let policy = recorded_policy(&transcript, RuntimeMode::FullAccess);
+    let mut replay = open(transcript.clone()).await;
+    replay
+        .start(&recorded_text(&transcript, 0), policy.clone())
+        .await;
+    let turns = vec![last_provider_turn(&replay.next_until(is_terminal).await)];
+    let source = replay.thread.clone();
+
+    replay.thread = fork_at(&replay, &turns, &turns[0], "thread-2", &policy).await;
+    replay
+        .start(&recorded_text(&transcript, 1), policy.clone())
+        .await;
+    assert_eq!(
+        replay.finish_turn().await,
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+
+    replay.thread = source;
+    for n in 2..4 {
+        replay
+            .start(&recorded_text(&transcript, n), policy.clone())
+            .await;
+        assert_eq!(
+            replay.finish_turn().await,
+            ProviderAdapterV2TurnTerminalStatus::Completed
+        );
+    }
+    replay.driver.verify_complete().unwrap();
+}
+
+/// Merge-back from two siblings: each fork's delta is handed back to the source in turn,
+/// and the source answers with both markers.
+#[tokio::test]
+async fn thread_merge_back_siblings_hands_both_forks_back() {
+    let transcript = fixture("thread_merge_back_siblings");
+    let policy = recorded_policy(&transcript, RuntimeMode::FullAccess);
+    let mut replay = open(transcript.clone()).await;
+    replay
+        .start(&recorded_text(&transcript, 0), policy.clone())
+        .await;
+    let turns = vec![last_provider_turn(&replay.next_until(is_terminal).await)];
+    let source = replay.thread.clone();
+
+    replay.thread = fork_at(&replay, &turns, &turns[0], "thread-2", &policy).await;
+    replay
+        .start(&recorded_text(&transcript, 1), policy.clone())
+        .await;
+    assert_eq!(
+        replay.finish_turn().await,
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+
+    replay.thread = source.clone();
+    replay.thread = fork_at(&replay, &turns, &turns[0], "thread-3", &policy).await;
+    replay
+        .start(&recorded_text(&transcript, 2), policy.clone())
+        .await;
+    assert_eq!(
+        replay.finish_turn().await,
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+
+    replay.thread = source;
+    for n in 3..6 {
+        replay
+            .start(&recorded_text(&transcript, n), policy.clone())
+            .await;
+        assert_eq!(
+            replay.finish_turn().await,
+            ProviderAdapterV2TurnTerminalStatus::Completed
+        );
+    }
     replay.driver.verify_complete().unwrap();
 }
 

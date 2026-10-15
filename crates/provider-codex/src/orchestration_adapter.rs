@@ -502,6 +502,46 @@ fn rollback_turn_count(input: &ProviderAdapterV2RollbackThreadInput) -> Result<u
     }
 }
 
+/// Upstream `resolveCodexForkBoundary`. A native turn boundary forks at that turn:
+/// `lastTurnId` is inclusive on the Codex side, so later turns are omitted. A
+/// boundary without a native ref needs fork-then-revert, which is not ported, so
+/// it is refused rather than forking the whole thread. Upstream's
+/// `resolveCodexForkRollbackTurnCount` errors for a boundary the source thread does
+/// not have.
+fn fork_last_turn(input: &ProviderAdapterV2ForkThreadInput) -> Result<Option<String>, String> {
+    let (Some(target), Some(turns)) = (&input.provider_turn_id, &input.source_provider_turns)
+    else {
+        return Ok(None);
+    };
+    let source_turns: Vec<&OrchestrationV2ProviderTurn> = turns
+        .iter()
+        .filter(|turn| turn.provider_thread_id == input.source_provider_thread.id)
+        .collect();
+    let Some(boundary) = source_turns.iter().find(|turn| turn.id == *target) else {
+        return Err(format!(
+            "Cannot fork Codex thread from provider turn {target}: source turn was not found in provider thread {}.",
+            input.source_provider_thread.id,
+        ));
+    };
+    if let Some(native) = boundary
+        .native_turn_ref
+        .as_ref()
+        .and_then(|r| r.native_id.as_ref())
+    {
+        return Ok(Some(native.as_str().to_owned()));
+    }
+    let later = source_turns
+        .iter()
+        .filter(|turn| turn.ordinal > boundary.ordinal && is_terminal_turn(turn))
+        .count();
+    if later == 0 {
+        return Ok(None);
+    }
+    Err(format!(
+        "Cannot fork Codex thread from provider turn {target}: the turn has no native reference and {later} turn(s) follow it. Fork-then-rollback is not ported."
+    ))
+}
+
 fn snapshot(
     thread: OrchestrationV2ProviderThread,
     payload: Option<Value>,
@@ -875,14 +915,17 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
             input.model_selection.as_ref().map(|m| m.model.as_str()),
         );
         params["threadId"] = json!(native);
-        if let (Some(target), Some(turns)) = (&input.provider_turn_id, &input.source_provider_turns)
-            && let Some(turn) = turns.iter().find(|turn| &turn.id == target)
-            && let Some(id) = turn
-                .native_turn_ref
-                .as_ref()
-                .and_then(|r| r.native_id.as_ref())
-        {
-            params["lastTurnId"] = json!(id.as_str());
+        let last_turn = fork_last_turn(&input).map_err(|cause| {
+            error(
+                ProviderAdapterErrorKind::ForkThread {
+                    driver: self.driver.clone(),
+                    provider_thread_id: input.source_provider_thread.id.clone(),
+                },
+                cause,
+            )
+        })?;
+        if let Some(last_turn) = last_turn {
+            params["lastTurnId"] = json!(last_turn);
         }
         let response = self
             .session

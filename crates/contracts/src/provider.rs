@@ -2,7 +2,7 @@
 
 use crate::base_schemas::{
     ApprovalRequestId, EventId, IsoDateTime, ProviderItemId, ThreadId, TrimmedNonEmptyString,
-    TurnId,
+    TurnId, js_len,
 };
 use crate::chat_attachment::{ChatAttachment, PROVIDER_SEND_TURN_MAX_INPUT_CHARS};
 use crate::model_selection::ModelSelection;
@@ -104,7 +104,7 @@ mod attachment_bounds {
         if let Some(text) = &value
             &&
             // `Schema.isMaxLength` counts UTF-16 code units.
-            text.as_str().encode_utf16().count() > PROVIDER_SEND_TURN_MAX_INPUT_CHARS
+            js_len(text.as_str()) > PROVIDER_SEND_TURN_MAX_INPUT_CHARS
         {
             return Err(serde::de::Error::custom(format!(
                 "turn input can be at most {PROVIDER_SEND_TURN_MAX_INPUT_CHARS} chars"

@@ -1,6 +1,6 @@
 //! Port of upstream/packages/shared/src/githubMedia.ts
 
-use crate::js_string::decode_uri_component;
+use crate::js_string::{JS_DOT, decode_uri_component};
 use url::Url;
 
 const RAW_HOST: &str = "raw.githubusercontent.com";
@@ -23,7 +23,8 @@ fn legacy_attachment_path(pathname: &str) -> bool {
 
 fn repository_file(pathname: &str) -> Option<(String, String, String)> {
     static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^/([^/]+)/([^/]+)/(?:raw|blob)/(.*[^/])$").expect("repo file")
+        regex::Regex::new(&format!(r"^/([^/]+)/([^/]+)/(?:raw|blob)/({JS_DOT}*[^/])$"))
+            .expect("repo file")
     });
     let captures = PATTERN.captures(pathname)?;
     Some((

@@ -839,7 +839,11 @@ mod tests {
         foreign_repository.repository = Tne::new("acme/other").unwrap();
         for foreign in [foreign_host, foreign_repository] {
             assert_eq!(
-                legacy_linked_pull_request_of(&[foreign.clone()], &project, Some(&github)),
+                legacy_linked_pull_request_of(
+                    std::slice::from_ref(&foreign),
+                    &project,
+                    Some(&github)
+                ),
                 None
             );
             assert_eq!(

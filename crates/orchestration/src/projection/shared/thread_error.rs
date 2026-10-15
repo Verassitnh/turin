@@ -105,7 +105,8 @@ impl RunEnd for OrchestrationV2Run {
         self.ordinal.get()
     }
     fn completed_at_millis(&self) -> Option<i64> {
-        self.completed_at.map(|at| at.0.timestamp_millis())
+        self.completed_at
+            .map(|at| at.as_datetime().timestamp_millis())
     }
 }
 

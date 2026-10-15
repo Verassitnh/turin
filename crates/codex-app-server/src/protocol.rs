@@ -223,12 +223,16 @@ impl Protocol {
         let read_state = state.clone();
         let read_task = tokio::spawn(async move {
             let mut exit = exit;
-            let mut lines = BufReader::new(reader).lines();
+            let mut reader = BufReader::new(reader);
+            // Raw bytes per line, decoded lossily: upstream's Stream.decodeText substitutes
+            // U+FFFD, so one bad byte must not end the session. The buffer lives outside the
+            // select so a line interrupted by the stop signal keeps whatever was read.
+            let mut buffer = Vec::new();
             loop {
                 if *stop_rx.borrow() {
                     break;
                 }
-                let line = tokio::select! {
+                let read = tokio::select! {
                     biased;
                     changed = stop_rx.changed() => {
                         if changed.is_err() || *stop_rx.borrow() {
@@ -236,50 +240,12 @@ impl Protocol {
                         }
                         continue;
                     }
-                    line = lines.next_line() => line,
+                    read = reader.read_until(b'\n', &mut buffer) => read,
                 };
-                match line {
-                    Ok(Some(line)) => {
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-                        read_state.log(ProtocolLogEvent {
-                            direction: Direction::Incoming,
-                            stage: Stage::Raw,
-                            payload: Value::String(line.clone()),
-                        });
-                        match serde_json::from_str::<Value>(&line) {
-                            Ok(value) => {
-                                read_state.log(ProtocolLogEvent {
-                                    direction: Direction::Incoming,
-                                    stage: Stage::Decoded,
-                                    payload: value.clone(),
-                                });
-                                if let Err(error) = route(&read_state, value).await {
-                                    read_state.log(ProtocolLogEvent {
-                                        direction: Direction::Incoming,
-                                        stage: Stage::DecodeFailed,
-                                        payload: json!({ "operation": error_operation(&error) }),
-                                    });
-                                    read_state.fail(error);
-                                    break;
-                                }
-                            }
-                            Err(error) => {
-                                read_state.log(ProtocolLogEvent {
-                                    direction: Direction::Incoming,
-                                    stage: Stage::DecodeFailed,
-                                    payload: json!({"operation":"decode-wire-message"}),
-                                });
-                                read_state.fail(AppServerError::protocol_parse(
-                                    "decode-wire-message",
-                                    error.to_string(),
-                                ));
-                                break;
-                            }
-                        }
-                    }
-                    Ok(None) => {
+                let line = match read {
+                    // End of input with nothing left over. A final line without a newline is
+                    // still processed below; the next read then reports this.
+                    Ok(0) if buffer.is_empty() => {
                         let error = if let Some(exit) = exit.as_mut() {
                             loop {
                                 if *stop_rx.borrow() {
@@ -308,11 +274,50 @@ impl Protocol {
                         read_state.fail(error);
                         break;
                     }
+                    Ok(_) => take_line(&mut buffer),
                     Err(error) => {
                         read_state.fail(AppServerError::Transport {
                             operation: "read-input-stream",
                             detail: error.to_string(),
                         });
+                        break;
+                    }
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                read_state.log(ProtocolLogEvent {
+                    direction: Direction::Incoming,
+                    stage: Stage::Raw,
+                    payload: Value::String(line.clone()),
+                });
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(value) => {
+                        read_state.log(ProtocolLogEvent {
+                            direction: Direction::Incoming,
+                            stage: Stage::Decoded,
+                            payload: value.clone(),
+                        });
+                        if let Err(error) = route(&read_state, value).await {
+                            read_state.log(ProtocolLogEvent {
+                                direction: Direction::Incoming,
+                                stage: Stage::DecodeFailed,
+                                payload: json!({ "operation": error_operation(&error) }),
+                            });
+                            read_state.fail(error);
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        read_state.log(ProtocolLogEvent {
+                            direction: Direction::Incoming,
+                            stage: Stage::DecodeFailed,
+                            payload: json!({"operation":"decode-wire-message"}),
+                        });
+                        read_state.fail(AppServerError::protocol_parse(
+                            "decode-wire-message",
+                            error.to_string(),
+                        ));
                         break;
                     }
                 }
@@ -594,4 +599,18 @@ fn error_operation(error: &AppServerError) -> &'static str {
         AppServerError::ProtocolParse(info) => info.operation,
         _ => "route-wire-message",
     }
+}
+
+/// Splits one line off the raw read buffer, dropping the `\n` and a preceding `\r`. Invalid
+/// UTF-8 becomes U+FFFD, the same substitution upstream's `Stream.decodeText` makes.
+fn take_line(buffer: &mut Vec<u8>) -> String {
+    if buffer.last() == Some(&b'\n') {
+        buffer.pop();
+    }
+    if buffer.last() == Some(&b'\r') {
+        buffer.pop();
+    }
+    let line = String::from_utf8_lossy(buffer).into_owned();
+    buffer.clear();
+    line
 }

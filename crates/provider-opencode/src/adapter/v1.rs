@@ -4,8 +4,9 @@
 //! instructions in `system`. `/name` that matches the command list is
 //! `session.command`; a bare `/compact` is `session.summarize`. Permission
 //! replies use `once` / `always` / `reject`. A clean event-stream EOF breaks
-//! the session. Transport errors resubscribe with the 3s→30s backoff and do
-//! not backfill message history.
+//! the session. Transport errors resubscribe like the 1.x SDK's SSE client:
+//! `Last-Event-ID`, the server's `retry:`, and an uncapped attempt count with
+//! the 3s→30s backoff. Message history is not backfilled.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -36,12 +37,18 @@ use turin_provider_core::id_allocator::{IdAllocator, derive};
 
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
-use crate::error::EventStreamError;
 use crate::events::V1Event;
 use crate::v1_client::{PermissionReply, QuestionReply, V1Client};
 
 const RECONNECT_BASE: Duration = Duration::from_secs(3);
 const RECONNECT_CAP: Duration = Duration::from_secs(30);
+
+/// `createSseClient`'s backoff: the delay doubles per attempt since the
+/// stream was first opened, capped at 30s. The attempt count never resets.
+fn reconnect_backoff(retry: Duration, attempt: u32) -> Duration {
+    let doubled = retry.saturating_mul(1u32 << attempt.saturating_sub(1).min(16));
+    doubled.min(RECONNECT_CAP)
+}
 
 struct V1Turn {
     provider_turn: OrchestrationV2ProviderTurn,
@@ -154,44 +161,35 @@ impl OpenCodeV1Session {
     }
 
     async fn follow_events(self: Arc<Self>) {
-        let mut delay = RECONNECT_BASE;
-        let mut attempts = 0u32;
+        let mut last_event_id: Option<String> = None;
+        let mut retry = RECONNECT_BASE;
+        let mut attempt = 0u32;
         loop {
-            let stream = match self.client.events().await {
-                Ok(stream) => stream,
-                Err(err) => {
-                    attempts += 1;
-                    if attempts >= V1_RECONNECT_ATTEMPTS {
-                        self.fail_stream(&err.detail).await;
-                        return;
-                    }
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(RECONNECT_CAP);
-                    continue;
-                }
-            };
-            attempts = 0;
-            delay = RECONNECT_BASE;
-            let mut stream = stream;
-            loop {
-                match stream.next().await {
-                    Some(Ok(event)) => self.on_event(event).await,
-                    Some(Err(EventStreamError::Silent)) | Some(Err(_)) => break,
-                    None => {
-                        self.fail_stream("OpenCode event stream ended unexpectedly.")
-                            .await;
-                        return;
+            attempt = attempt.saturating_add(1);
+            if let Ok(mut stream) = self.client.events_from(last_event_id.as_deref()).await {
+                loop {
+                    match stream.next().await {
+                        Some(Ok(frame)) => {
+                            if let Some(id) = frame.id {
+                                last_event_id = Some(id);
+                            }
+                            if let Some(ms) = frame.retry {
+                                retry = Duration::from_millis(ms);
+                            }
+                            if let Some(event) = frame.event {
+                                self.on_event(event).await;
+                            }
+                        }
+                        Some(Err(_)) => break,
+                        None => {
+                            self.fail_stream("OpenCode event stream ended unexpectedly.")
+                                .await;
+                            return;
+                        }
                     }
                 }
             }
-            attempts += 1;
-            if attempts >= V1_RECONNECT_ATTEMPTS {
-                self.fail_stream("The OpenCode event stream was lost and could not reconnect.")
-                    .await;
-                return;
-            }
-            tokio::time::sleep(delay).await;
-            delay = (delay * 2).min(RECONNECT_CAP);
+            tokio::time::sleep(reconnect_backoff(retry, attempt)).await;
         }
     }
 
@@ -1715,5 +1713,26 @@ impl Drop for OpenCodeV1Session {
         if let Some(handle) = self.reader.lock().take() {
             handle.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_per_attempt_from_the_retry_delay_and_caps_at_30s() {
+        assert_eq!(reconnect_backoff(RECONNECT_BASE, 1), Duration::from_secs(3));
+        assert_eq!(reconnect_backoff(RECONNECT_BASE, 2), Duration::from_secs(6));
+        assert_eq!(
+            reconnect_backoff(RECONNECT_BASE, 4),
+            Duration::from_secs(24)
+        );
+        assert_eq!(reconnect_backoff(RECONNECT_BASE, 5), RECONNECT_CAP);
+        assert_eq!(reconnect_backoff(RECONNECT_BASE, 400), RECONNECT_CAP);
+        assert_eq!(
+            reconnect_backoff(Duration::from_millis(10), 1),
+            Duration::from_millis(10)
+        );
     }
 }

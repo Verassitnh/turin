@@ -14,6 +14,7 @@ pub struct Recorded {
     pub directory_header: Option<String>,
     #[allow(dead_code)]
     pub accept: Option<String>,
+    pub last_event_id: Option<String>,
     pub body: String,
 }
 
@@ -26,6 +27,9 @@ pub struct FakeResponse {
     pub hold: bool,
     /// After the initial chunks, write each frame as it arrives. `None` closes the body.
     pub follow: Option<mpsc::UnboundedReceiver<Option<Vec<u8>>>>,
+    /// Declares a longer streamed body than is written, so closing the socket
+    /// is a transport error instead of a clean end.
+    pub truncated: bool,
 }
 
 impl FakeResponse {
@@ -37,6 +41,7 @@ impl FakeResponse {
             stream: None,
             hold: false,
             follow: None,
+            truncated: false,
         }
     }
 
@@ -48,6 +53,7 @@ impl FakeResponse {
             stream: None,
             hold: false,
             follow: None,
+            truncated: false,
         }
     }
 
@@ -59,6 +65,7 @@ impl FakeResponse {
             stream: Some(chunks),
             hold,
             follow: None,
+            truncated: false,
         }
     }
 }
@@ -134,6 +141,7 @@ async fn handle_conn(
     let mut authorization = None;
     let mut directory_header = None;
     let mut accept = None;
+    let mut last_event_id = None;
     let mut content_length = 0usize;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
@@ -146,6 +154,8 @@ async fn handle_conn(
             directory_header = Some(value.to_string());
         } else if name.eq_ignore_ascii_case("accept") {
             accept = Some(value.to_string());
+        } else if name.eq_ignore_ascii_case("last-event-id") {
+            last_event_id = Some(value.to_string());
         } else if name.eq_ignore_ascii_case("content-length") {
             content_length = value.parse().unwrap_or(0);
         }
@@ -167,6 +177,7 @@ async fn handle_conn(
         authorization,
         directory_header,
         accept,
+        last_event_id,
         body,
     };
     let _ = tx.send(recorded.clone());
@@ -184,6 +195,8 @@ async fn handle_conn(
     }
     if response.stream.is_none() {
         head.push_str(&format!("Content-Length: {}\r\n", response.body.len()));
+    } else if response.truncated {
+        head.push_str("Content-Length: 1048576\r\n");
     }
     head.push_str("Connection: close\r\n\r\n");
     socket.write_all(head.as_bytes()).await?;

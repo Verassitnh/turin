@@ -299,6 +299,26 @@ impl V1Client {
         Pin<Box<dyn Stream<Item = Result<V1Event, crate::error::EventStreamError>> + Send>>,
         OpenCodeRuntimeError,
     > {
+        use futures::StreamExt;
+        let frames = self.events_from(None).await?;
+        Ok(Box::pin(frames.filter_map(|frame| async move {
+            match frame {
+                Ok(frame) => frame.event.map(Ok),
+                Err(err) => Some(Err(err)),
+            }
+        })))
+    }
+
+    /// `GET /event` with the SDK's `Last-Event-ID` resume header. Every frame
+    /// comes through, with or without an event, so the caller can track `id:`
+    /// and `retry:` the way the SDK's SSE client does.
+    pub async fn events_from(
+        &self,
+        last_event_id: Option<&str>,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<V1Frame, crate::error::EventStreamError>> + Send>>,
+        OpenCodeRuntimeError,
+    > {
         if self.event_open.swap(true, Ordering::AcqRel) {
             return Err(OpenCodeRuntimeError::new(
                 "event.subscribe",
@@ -307,7 +327,13 @@ impl V1Client {
         }
         let frames = match self
             .http
-            .open_event_stream("event.subscribe", "/event", &[], self.silent_timeout)
+            .open_event_stream(
+                "event.subscribe",
+                "/event",
+                &[],
+                last_event_id,
+                self.silent_timeout,
+            )
             .await
         {
             Ok(frames) => frames,
@@ -317,7 +343,13 @@ impl V1Client {
             }
         };
         Ok(Box::pin(Subscribed {
-            inner: Box::pin(filter_frames(frames, events::decode_v1_event)),
+            inner: Box::pin(filter_frames(frames, |frame| {
+                Some(V1Frame {
+                    id: frame.id.clone(),
+                    retry: frame.retry,
+                    event: events::decode_v1_event(frame),
+                })
+            })),
             flag: Arc::clone(&self.event_open),
         }))
     }
@@ -405,6 +437,14 @@ pub fn permission_reply_path(request_id: &str) -> String {
 
 fn encode(value: &str) -> String {
     crate::auth::encode_uri_component(value)
+}
+
+/// One 1.x SSE frame: its cursor fields and the event it carried, if any.
+#[derive(Debug, Clone, PartialEq)]
+pub struct V1Frame {
+    pub id: Option<String>,
+    pub retry: Option<u64>,
+    pub event: Option<V1Event>,
 }
 
 struct Subscribed<S> {
@@ -546,6 +586,7 @@ mod tests {
             stream: None,
             hold: false,
             follow: None,
+            truncated: false,
         })
         .await;
         let client = V1Client::new(&server.url, "/work", None).unwrap();
@@ -562,6 +603,7 @@ mod tests {
             stream: None,
             hold: false,
             follow: None,
+            truncated: false,
         })
         .await;
         let client = V1Client::new(&server.url, "/work", None).unwrap();

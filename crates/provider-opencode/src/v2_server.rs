@@ -475,6 +475,7 @@ mod tests {
             stream: None,
             hold: false,
             follow: None,
+            truncated: false,
         })
         .await;
         let client = V2Client::connect(&server.url, "pw").unwrap();

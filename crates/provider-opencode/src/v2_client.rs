@@ -556,7 +556,13 @@ impl V2Client {
     > {
         let frames = self
             .http
-            .open_event_stream("event.subscribe", "/api/event", &[], self.silent_timeout)
+            .open_event_stream(
+                "event.subscribe",
+                "/api/event",
+                &[],
+                None,
+                self.silent_timeout,
+            )
             .await?;
         Ok(Box::pin(filter_frames(frames, events::decode_v2_event)))
     }

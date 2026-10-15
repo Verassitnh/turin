@@ -52,7 +52,6 @@ pub const INSTRUCTIONS_KEY: &str = "t3-code";
 pub const OPENCODE_2_STILL_STOPPING: &str =
     "OpenCode is still stopping the previous turn. Send the message again in a moment.";
 pub const RECONNECT_ATTEMPTS: u32 = 5;
-pub const V1_RECONNECT_ATTEMPTS: u32 = 5;
 pub const SEARCH_PREVIEW_MAX_CHARS: usize = 8_000;
 
 static COMMAND_RE: LazyLock<Regex> =

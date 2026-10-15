@@ -732,3 +732,50 @@ async fn adapter_live_smoke_creates_a_session_without_a_prompt() {
     );
     drop(runtime);
 }
+
+#[tokio::test]
+async fn v1_resubscribes_with_last_event_id_after_a_transport_error() {
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&opens);
+    let mut server = FakeServer::spawn(move |request| {
+        if request.method == "GET" && request.target.starts_with("/event") {
+            if counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                let mut response = FakeResponse::sse(
+                    vec![
+                        b"retry: 10\nid: 41\ndata: {\"type\":\"server.connected\",\"properties\":{}}\n\n"
+                            .to_vec(),
+                    ],
+                    false,
+                );
+                response.truncated = true;
+                return response;
+            }
+            return FakeResponse::sse(
+                vec![sse(r#"{"type":"server.connected","properties":{}}"#)],
+                true,
+            );
+        }
+        if request.method == "POST" && request.target.contains("/session") {
+            return FakeResponse::json(200, r#"{"id":"ses_1"}"#);
+        }
+        FakeResponse::json(200, "{}")
+    })
+    .await;
+    let session = OpenCodeV1Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        &server.url,
+        None,
+        Some("openai/gpt"),
+    )
+    .await
+    .unwrap();
+    let is_subscribe =
+        |request: &Recorded| request.method == "GET" && request.target.starts_with("/event");
+    let first = await_request(&mut server, is_subscribe).await;
+    assert_eq!(first.last_event_id, None);
+    let second = await_request(&mut server, is_subscribe).await;
+    assert_eq!(second.last_event_id.as_deref(), Some("41"));
+    session.close().await;
+}

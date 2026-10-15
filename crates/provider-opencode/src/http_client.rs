@@ -120,6 +120,7 @@ impl HttpClient {
         operation: &str,
         path: &str,
         query: &[(&str, String)],
+        last_event_id: Option<&str>,
         silent_timeout: Duration,
     ) -> Result<EventStream<SseFrame>, OpenCodeRuntimeError> {
         let url = self.url(&Method::GET, path, query, &[]);
@@ -127,6 +128,9 @@ impl HttpClient {
             .http
             .get(url)
             .header(reqwest::header::ACCEPT, "text/event-stream");
+        if let Some(last_event_id) = last_event_id {
+            builder = builder.header("Last-Event-ID", last_event_id);
+        }
         builder = self.authorize(builder);
         builder = self.directory_header(builder, Method::GET);
         let response = builder.send().await.map_err(|err| {

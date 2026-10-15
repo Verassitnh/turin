@@ -1770,3 +1770,33 @@ mod mapping {
         assert_eq!(*hosts.lock(), vec!["github.com", "ghe.example.com"]);
     }
 }
+
+/// Port of upstream/apps/server/src/pullRequest/PullRequestProviderRateLimit.test.ts, its GitHub
+/// cases. GitLab, Azure DevOps and Bitbucket are cut with their hosts.
+#[cfg(test)]
+mod upstream_rate_limit {
+    use super::*;
+
+    #[test]
+    fn classifies_a_github_rate_limit_as_rate_limited() {
+        let failure = github_provider_failure(&api_error(GitHubApiRateLimitError {
+            host: "github.com".into(),
+            operation: "execute".into(),
+            retry_at: None,
+        }));
+        assert_eq!(failure.reason, PullRequestProviderErrorReason::RateLimited);
+        assert_eq!(failure.retry_at, None);
+    }
+
+    #[test]
+    fn keeps_githubs_exact_retry_time() {
+        let paused = SourceControlRateLimitPausedError {
+            provider: SourceControlProviderKind::new("github").unwrap(),
+            host: "github.com".into(),
+            retry_at: 1_786_802_400_000,
+        };
+        let failure = github_provider_failure(&api_error(GitHubApiError::Paused(paused)));
+        assert_eq!(failure.reason, PullRequestProviderErrorReason::RateLimited);
+        assert_eq!(failure.retry_at, Some(1_786_802_400_000));
+    }
+}

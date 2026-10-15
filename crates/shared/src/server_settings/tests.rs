@@ -507,6 +507,185 @@ fn usage_limit_sources_upsert_and_remove_per_entry() {
     assert!(value.get("gamma").is_some());
 }
 
+// writer selection with a project override
+
+#[test]
+fn writer_falls_back_for_a_project_that_turned_the_instance_off_and_keeps_it_elsewhere() {
+    let instance = ProviderInstanceId::new("codex_writer").unwrap();
+    let project = ProjectId::new("project-a").unwrap();
+    let writer = selection("codex_writer", "gpt-5.4-mini", None);
+    let settings = apply(
+        &defaults(),
+        json!({
+            "providerInstances": { "codex_writer": { "driver": "codex", "enabled": true, "config": {} } },
+            "projectSettingsOverrides": {
+                "project-a": { "providerInstances": { "codex_writer": { "enabled": false } } },
+            },
+            "sourceControlWriterModelSelection": writer,
+        }),
+    );
+    let providers = [Provider {
+        instance_id: instance,
+        enabled: true,
+        available: true,
+        text_capable: true,
+    }];
+    assert_eq!(
+        resolve_source_control_writer_model_selection(&settings, Some(&providers), Some(&project)),
+        settings.text_generation_model_selection
+    );
+    assert_eq!(
+        resolve_source_control_writer_model_selection(&settings, Some(&providers), None)
+            .instance_id
+            .as_str(),
+        "codex_writer"
+    );
+}
+
+#[test]
+fn writer_keeps_an_instance_the_project_turned_on_while_the_machine_has_it_off() {
+    let instance = ProviderInstanceId::new("codex_writer").unwrap();
+    let project = ProjectId::new("project-a").unwrap();
+    let settings = apply(
+        &defaults(),
+        json!({
+            "providerInstances": { "codex_writer": { "driver": "codex", "enabled": false, "config": {} } },
+            "projectSettingsOverrides": {
+                "project-a": { "providerInstances": { "codex_writer": { "enabled": true } } },
+            },
+            "sourceControlWriterModelSelection": selection("codex_writer", "gpt-5.4-mini", None),
+        }),
+    );
+    let providers = [Provider {
+        instance_id: instance,
+        enabled: true,
+        available: true,
+        text_capable: true,
+    }];
+    assert_eq!(
+        resolve_source_control_writer_model_selection(&settings, Some(&providers), Some(&project))
+            .instance_id
+            .as_str(),
+        "codex_writer"
+    );
+    assert_eq!(
+        resolve_source_control_writer_model_selection(&settings, Some(&providers), None),
+        settings.text_generation_model_selection
+    );
+}
+
+// source control hosts and provider instance overrides
+
+#[test]
+fn a_patched_source_control_host_field_replaces_the_saved_one() {
+    let pinned = apply(
+        &defaults(),
+        json!({
+            "sourceControlHosts": {
+                "github": { "hosts": { "github.com": { "account": "work", "enabled": true } }, "tokens": {} },
+            },
+        }),
+    );
+    let unpinned = apply(
+        &pinned,
+        json!({
+            "sourceControlHosts": { "github": { "hosts": { "github.com": { "enabled": false } } } },
+        }),
+    );
+    assert_eq!(
+        serde_json::to_value(&unpinned.source_control_hosts["github"]).unwrap(),
+        json!({ "hosts": { "github.com": { "enabled": false } }, "tokens": {} })
+    );
+}
+
+#[test]
+fn a_project_provider_instance_override_is_cleared_by_an_empty_map() {
+    let project = ProjectId::new("project-1").unwrap();
+    let stored = apply(
+        &defaults(),
+        json!({
+            "projectSettingsOverrides": {
+                "project-1": { "providerInstances": { "codex_work": { "enabled": false } } },
+            },
+        }),
+    );
+    let cleared = apply(
+        &stored,
+        json!({
+            "projectSettingsOverrides": { "project-1": { "providerInstances": {} } },
+        }),
+    );
+    let entry = &cleared.project_settings_overrides[&project];
+    assert_eq!(
+        entry.provider_instances.as_ref().map(|map| map.len()),
+        Some(0)
+    );
+}
+
+// usage prices
+
+#[test]
+fn usage_prices_are_replaced_and_removed_per_model() {
+    let price = |input: f64| {
+        json!({
+            "inputCostPerMillionTokens": input,
+            "outputCostPerMillionTokens": 2.0,
+        })
+    };
+    let first = apply(
+        &defaults(),
+        json!({ "usagePriceOverrides": { "model-a": price(1.0), "model-b": price(3.0) } }),
+    );
+    let next = apply(
+        &first,
+        json!({ "usagePriceOverrides": { "model-a": price(5.0), "model-b": null } }),
+    );
+    let value = serde_json::to_value(&next.usage_price_overrides).unwrap();
+    assert_eq!(
+        value["model-a"]["inputCostPerMillionTokens"].as_f64(),
+        Some(5.0)
+    );
+    assert!(value.get("model-b").is_none());
+}
+
+// model preferences
+
+#[test]
+fn replacing_visibility_records_clears_entries_that_were_removed() {
+    let initial = apply(
+        &defaults(),
+        json!({ "providerModelPreferences": legacy_preferences() }),
+    );
+    let cleared = apply(&initial, json!({ "providerModelPreferences": {} }));
+    assert_eq!(
+        serde_json::to_value(&cleared.provider_model_preferences).unwrap(),
+        json!({})
+    );
+}
+
+#[test]
+fn explicit_edits_win_when_the_same_patch_carries_a_legacy_migration() {
+    let migration = model_preferences_migration_patch(
+        Some(&Value::Null),
+        Some(&Value::Null),
+        Some(&legacy_favorites()),
+        Some(&legacy_preferences()),
+    )
+    .expect("migration patch");
+    let mut combined = serde_json::to_value(&migration).unwrap();
+    combined["favorites"] = json!([]);
+    combined["providerModelPreferences"] = json!({});
+    let edited = apply(&defaults(), combined);
+    let (favorites, preferences) = resolve_model_preferences(
+        serde_json::to_value(&edited.favorites).ok(),
+        serde_json::to_value(&edited.provider_model_preferences).ok(),
+        Some(legacy_favorites()),
+        Some(legacy_preferences()),
+    );
+    assert_eq!(favorites, json!([]));
+    assert_eq!(preferences, json!({}));
+}
+
 // worktreesDirectory
 
 #[test]

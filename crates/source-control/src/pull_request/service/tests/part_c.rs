@@ -14,16 +14,10 @@ use turin_contracts::pull_request::{
     PullRequestActor, PullRequestChecks, PullRequestRef, PullRequestState,
 };
 
-use super::{counter, log, rows, summary_of};
-use crate::pull_request::service::PullRequestService;
+use super::{counter, list_json, log, rows, summary_of};
 use crate::pull_request::service::test_support::*;
 use crate::source_control_core::clock::Clock;
 use crate::source_control_core::pull_request_provider::*;
-
-/// `service.list(input)` as JSON, the shape every assertion below reads.
-async fn list_json(service: &PullRequestService, value: serde_json::Value) -> serde_json::Value {
-    serde_json::to_value(service.list(&input(value)).await.unwrap()).unwrap()
-}
 
 #[tokio::test(start_paused = true)]
 async fn stops_new_reads_after_a_rate_limit_while_leaving_manual_actions_available() {

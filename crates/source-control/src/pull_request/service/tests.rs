@@ -9,6 +9,8 @@ use parking_lot::Mutex;
 use serde_json::Value;
 use turin_contracts::pull_request::PullRequestState;
 
+use crate::pull_request::service::PullRequestService;
+use crate::pull_request::service::test_support::input;
 use crate::source_control_core::pull_request_provider::{
     ProviderChangeRequest, ProviderChangeRequestSummary,
 };
@@ -16,6 +18,8 @@ use crate::source_control_core::pull_request_provider::{
 mod part_a;
 mod part_b;
 mod part_c;
+mod part_d;
+mod part_e;
 
 pub(super) fn counter() -> Arc<AtomicUsize> {
     Arc::new(AtomicUsize::new(0))
@@ -70,4 +74,9 @@ pub(super) fn summary_of(
         mergeability: None,
         stack: None,
     }
+}
+
+/// `service.list(input)` as JSON, the shape every listing assertion reads.
+pub(super) async fn list_json(service: &PullRequestService, value: Value) -> Value {
+    serde_json::to_value(service.list(&input(value)).await.unwrap()).unwrap()
 }

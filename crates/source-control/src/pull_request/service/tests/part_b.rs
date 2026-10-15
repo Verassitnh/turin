@@ -18,17 +18,11 @@ use turin_contracts::pull_request::{
 };
 use turin_contracts::source_control::SourceControlProviderInfo;
 
-use super::{counter, drain_sorted, log, rows, summary_of};
+use super::{counter, drain_sorted, list_json, log, rows, summary_of};
 use crate::pull_request::read_cache::PullRequestReadError as PullRequestError;
-use crate::pull_request::service::PullRequestService;
 use crate::pull_request::service::test_support::*;
 use crate::source_control_core::pull_request_provider::*;
 use crate::source_control_core::source_control_provider::SourceControlProviderContext;
-
-/// `service.list(input)` as JSON, the shape every assertion below reads.
-async fn list_json(service: &PullRequestService, value: Value) -> Value {
-    serde_json::to_value(service.list(&input(value)).await.unwrap()).unwrap()
-}
 
 #[tokio::test(start_paused = true)]
 async fn lists_github_enterprise_prs_for_a_stored_unknown_repository_after_host_discovery() {

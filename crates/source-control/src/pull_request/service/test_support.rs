@@ -721,7 +721,7 @@ impl PullRequestProjectSource for Projects {
     }
 }
 
-type ResolveHandle = Arc<
+pub type ResolveHandle = Arc<
     dyn Fn(
             &str,
             &SourceControlProviderContext,
@@ -746,7 +746,7 @@ impl ResolveProviderContext for Refinement {
     }
 }
 
-type ResolveIdentity = Arc<dyn Fn(&str) -> Option<RepositoryIdentity> + Send + Sync>;
+pub type ResolveIdentity = Arc<dyn Fn(&str) -> Option<RepositoryIdentity> + Send + Sync>;
 
 struct Identities(Option<ResolveIdentity>);
 

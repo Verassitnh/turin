@@ -1,8 +1,8 @@
-//! `PullRequestService.test.ts` lines 1-1480: preview and detail caching, host discovery and
-//! refinement, listing continuations, and viewer resolution.
+//! `PullRequestService.test.ts` lines 128-460: preview and detail caching, and how a preview
+//! and a detail read share the cache and the provider.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::Ordering::SeqCst;
 
 use parking_lot::Mutex;
 use pretty_assertions::assert_eq;
@@ -10,23 +10,9 @@ use serde_json::json;
 use tokio::sync::Notify;
 use turin_contracts::pull_request::PullRequestState;
 
+use super::{counter, drain_sorted, log};
 use crate::pull_request::service::test_support::*;
 use crate::source_control_core::pull_request_provider::*;
-
-fn counter() -> Arc<AtomicUsize> {
-    Arc::new(AtomicUsize::new(0))
-}
-
-fn log() -> Arc<Mutex<Vec<String>>> {
-    Arc::new(Mutex::new(Vec::new()))
-}
-
-/// `reads.splice(0).toSorted()`
-fn drain_sorted(reads: &Mutex<Vec<String>>) -> Vec<String> {
-    let mut drained = std::mem::take(&mut *reads.lock());
-    drained.sort();
-    drained
-}
 
 fn hosted_with(number: u64, state: PullRequestState) -> ProviderChangeRequestDetail {
     let hosted = hosted_change_request("Description", 1);

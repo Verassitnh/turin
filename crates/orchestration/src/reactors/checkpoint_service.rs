@@ -19,8 +19,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::OwnedMutexGuard;
 use turin_contracts::base_schemas::{CheckpointRef, TrimmedNonEmptyString};
 use turin_contracts::orchestration_v2::{
-    OrchestrationV2Checkpoint, OrchestrationV2CheckpointFileSummary, OrchestrationV2CheckpointScope,
-    OrchestrationV2CheckpointScopeKind, OrchestrationV2CheckpointStatus,
+    OrchestrationV2Checkpoint, OrchestrationV2CheckpointFileSummary,
+    OrchestrationV2CheckpointScope, OrchestrationV2CheckpointScopeKind,
+    OrchestrationV2CheckpointStatus,
 };
 use turin_contracts::{
     CheckpointId, CheckpointScopeId, NodeId, PositiveInt, ProviderThreadId, RunId, ThreadId,
@@ -339,7 +340,10 @@ impl CheckpointService {
         previous_ref: &CheckpointRef,
         checkpoint_ref: &CheckpointRef,
     ) -> Vec<OrchestrationV2CheckpointFileSummary> {
-        let numstat = self.git.diff_numstat(cwd, previous_ref, checkpoint_ref).await;
+        let numstat = self
+            .git
+            .diff_numstat(cwd, previous_ref, checkpoint_ref)
+            .await;
         // Upstream's `listAuthoredPaths` catch yields `null`, which keeps every file.
         let authored_paths = match self
             .git

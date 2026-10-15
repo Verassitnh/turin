@@ -180,3 +180,6 @@ impl CheckpointGit for TurinCheckpointGit {
             .await
     }
 }
+
+#[cfg(test)]
+mod tests;

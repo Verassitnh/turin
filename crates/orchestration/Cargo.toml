@@ -8,6 +8,7 @@ license.workspace = true
 turin-contracts.workspace = true
 turin-persistence.workspace = true
 turin-hooks.workspace = true
+turin-git.workspace = true
 turin-provider-core.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true

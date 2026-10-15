@@ -1973,6 +1973,96 @@ mod tests {
         peer.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn runtime_trait_binds_the_native_session_and_refuses_fork() {
+        use futures::StreamExt;
+        use turin_contracts::provider_policy::{ProviderInteractionMode, RuntimeMode};
+        use turin_provider_core::provider_adapter::ProviderAdapterV2RuntimePolicy;
+
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            let init = read_frame(&mut read).await;
+            write_frame(&mut write, v1_initialized(&init["id"])).await;
+            let created = read_frame(&mut read).await;
+            assert_eq!(created["method"], "session/new");
+            assert_eq!(created["params"]["cwd"], "/work");
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": created["id"], "result": {"sessionId": "sess-7"}}),
+            )
+            .await;
+            let models = read_frame(&mut read).await;
+            assert_eq!(models["method"], "cursor/list_available_models");
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": models["id"], "result": {"models": []}}),
+            )
+            .await;
+            let config = read_frame(&mut read).await;
+            assert_eq!(config["params"]["configId"], "model");
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": config["id"], "result": {}}),
+            )
+            .await;
+        });
+
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        let runtime: Arc<dyn ProviderSessionRuntime> = Arc::new(session.clone());
+        let mut events = runtime.events();
+        let thread_id = ThreadId::new("thread-1").unwrap();
+        let input = ProviderAdapterV2EnsureThreadInput {
+            thread_id: thread_id.clone(),
+            title: None,
+            model_selection: ModelSelection {
+                instance_id: ProviderInstanceId::new("cursor").unwrap(),
+                model: TrimmedNonEmptyString::new("gpt-5.5").unwrap(),
+                options: None,
+            },
+            runtime_policy: ProviderAdapterV2RuntimePolicy {
+                runtime_mode: RuntimeMode::ApprovalRequired,
+                interaction_mode: ProviderInteractionMode::Default,
+                cwd: Some("/work".to_owned()),
+                approval_policy: None,
+                sandbox_policy: None,
+                reasoning_effort: None,
+            },
+            provider_session_id: None,
+            existing_provider_thread: None,
+        };
+        let thread = runtime.ensure_thread(input.clone()).await.unwrap();
+        assert_eq!(native_session_id(&thread).as_deref(), Some("sess-7"));
+        assert_eq!(thread.app_thread_id.as_ref(), Some(&thread_id));
+        assert_eq!(runtime.ensure_thread(input).await.unwrap().id, thread.id);
+
+        match events.next().await.unwrap().unwrap() {
+            ProviderAdapterV2Event::ProviderThreadUpdated {
+                provider_thread, ..
+            } => assert_eq!(provider_thread.id, thread.id),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(runtime.events().next().await.unwrap().is_err());
+
+        let fork = runtime
+            .fork_thread(ProviderAdapterV2ForkThreadInput {
+                source_provider_thread: thread.clone(),
+                source_provider_turns: None,
+                provider_turn_id: None,
+                target_thread_id: ThreadId::new("thread-2").unwrap(),
+                owner_node_id: None,
+                model_selection: None,
+                runtime_policy: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            fork.kind,
+            ProviderAdapterErrorKind::ForkThread { .. }
+        ));
+        peer.await.unwrap();
+    }
+
     #[test]
     fn launch_never_passes_force_or_yolo() {
         assert!(auth::launch_is_unforced(auth::ACP_ARGS));

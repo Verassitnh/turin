@@ -102,43 +102,49 @@ impl OpenCode2Server {
         }
     }
 
+    /// Runs `use_connection` with the server borrowed for its whole duration.
+    /// The idle timer starts only after `use_connection` settles, like upstream
+    /// `OpenCode2Server.withConnection` running `use(latest)` inside `withServer`.
     pub async fn with_connection<T, E, F, Fut>(&self, use_connection: F) -> Result<T, E>
     where
         E: From<OpenCodeRuntimeError>,
         F: FnOnce(OpenCode2Connection) -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
-        let connection = match &self.mode {
+        match &self.mode {
             Mode::External {
                 url,
                 password,
                 cached,
             } => {
-                let mut slot = cached.lock().await;
-                if slot.is_none() {
-                    let client = V2Client::connect(url, password)?;
-                    let version = verify_server(&client).await?;
-                    *slot = Some(OpenCode2Connection {
-                        url: url.clone(),
-                        version,
-                        external: true,
-                        client,
-                    });
-                }
-                slot.as_ref()
-                    .expect("cached after a successful verify")
-                    .clone()
+                let connection = {
+                    let mut slot = cached.lock().await;
+                    if slot.is_none() {
+                        let client = V2Client::connect(url, password)?;
+                        let version = verify_server(&client).await?;
+                        *slot = Some(OpenCode2Connection {
+                            url: url.clone(),
+                            version,
+                            external: true,
+                            client,
+                        });
+                    }
+                    slot.as_ref()
+                        .expect("cached after a successful verify")
+                        .clone()
+                };
+                use_connection(connection).await
             }
             Mode::Spawned { owner, cached } => {
                 let cached = Arc::clone(cached);
                 owner
                     .with_server(move |server| async move {
-                        lent_connection(&cached, &server.url).await
+                        let connection = lent_connection(&cached, &server.url).await?;
+                        use_connection(connection).await
                     })
-                    .await?
+                    .await
             }
-        };
-        use_connection(connection).await
+        }
     }
 
     /// Lends the server to a session until the loan drops. A spawned server
@@ -463,6 +469,25 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(crate::process_group::process_group_exists(pgid));
         drop(loan);
+        assert!(gone(pgid).await, "idle timer left process group {pgid}");
+    }
+
+    #[tokio::test]
+    async fn a_use_longer_than_the_idle_ttl_keeps_the_server_alive() {
+        let spawned = spawned(Duration::from_millis(100));
+        let pid_file = spawned.pid_file.clone();
+        let during = spawned
+            .server
+            .with_connection(|connection| async move {
+                assert_eq!(connection.version, "2.0.18");
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let pgid = read_pid(&pid_file);
+                Ok::<_, OpenCodeRuntimeError>(crate::process_group::process_group_exists(pgid))
+            })
+            .await
+            .unwrap();
+        assert!(during, "idle timer closed the server while it was in use");
+        let pgid = read_pid(&spawned.pid_file);
         assert!(gone(pgid).await, "idle timer left process group {pgid}");
     }
 

@@ -447,6 +447,13 @@ impl ClaudeAdapterV2 {
             .stop_task(task_id)
             .await
     }
+    /// `stop_task` without awaiting the answer (see `ClaudeSession::stop_task_detached`).
+    pub fn stop_task_detached(&self, task_id: &str) -> Result<()> {
+        self.session
+            .as_ref()
+            .context("Claude session closed")?
+            .stop_task_detached(task_id)
+    }
     pub async fn close(&mut self) -> Result<()> {
         if let Some(session) = self.session.take() {
             session.shutdown().await?;

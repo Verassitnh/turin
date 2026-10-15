@@ -631,6 +631,23 @@ impl SubagentRegistry {
         })
     }
 
+    /// The running workflows of `run_id`, sorted by task id. A turn of the run
+    /// that does not complete stops and settles each one (upstream `finalizeActiveTurn`).
+    pub fn running_workflows(&self, run_id: &RunId) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .tasks
+            .iter()
+            .filter(|(_, task)| {
+                task.subagent.workflow.is_some()
+                    && task.subagent.status == OrchestrationV2SubagentStatus::Running
+                    && task.subagent.run_id.as_ref() == Some(run_id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
     /// What `stopSubagent` needs to know about a task. `None` for an unknown task.
     pub fn stop_state(&self, task_id: &str) -> Option<StopState> {
         let task = self.tasks.get(task_id)?;
@@ -898,7 +915,8 @@ impl SubagentRegistry {
     /// Status is monotone: a terminal subagent keeps its status. A result
     /// that arrives after the status (task_updated comes before
     /// task_notification) is still recorded, as its own child message.
-    fn settle(
+    /// `status` is a terminal CLI status; a non-terminal one only records the result.
+    pub fn settle(
         &mut self,
         task_id: &str,
         status: &str,

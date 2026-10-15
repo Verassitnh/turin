@@ -369,6 +369,16 @@ impl ClaudeSession {
             .await
             .map(|_| ())
     }
+    /// Sends `stop_task` without waiting for the CLI's answer. Its response is
+    /// buffered as unmatched and never read, so this suits a best-effort stop
+    /// that must not hold its caller.
+    pub fn stop_task_detached(&self, task_id: &str) -> Result<()> {
+        self.send_raw(json!({
+            "type": "control_request",
+            "request_id": uuid::Uuid::new_v4().to_string(),
+            "request": {"subtype": "stop_task", "task_id": task_id},
+        }))
+    }
     pub async fn set_mcp_servers(&self, servers: Value) -> Result<Value> {
         self.request(json!({"subtype":"mcp_set_servers","servers":servers}))
             .await

@@ -50,7 +50,8 @@ use tokio::{
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use turin_contracts::{
-    PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId, TrimmedNonEmptyString, UtcDateTime,
+    PositiveInt, ProviderSessionId, RunId, RuntimeRequestId, ThreadId, TrimmedNonEmptyString,
+    UtcDateTime,
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2ConversationMessage, OrchestrationV2CreationSource,
@@ -2278,6 +2279,13 @@ impl ClaudeActor {
     }
     /// Ends the active turn with `status`, reading the native `result` frame for usage and failure.
     fn finish_turn(&mut self, status: ProviderAdapterV2TurnTerminalStatus, result: &Value) {
+        if let Some(run_id) = self
+            .active
+            .as_ref()
+            .map(|active| active.input.run_id.clone())
+        {
+            self.stop_run_workflows(&run_id, status);
+        }
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -2391,6 +2399,32 @@ impl ClaudeActor {
         });
         self.active = None;
     }
+    /// Upstream `finalizeActiveTurn` for a turn that does not complete: the run
+    /// stops following its workflows, so each one still running is stopped and
+    /// settled, failed for a failed turn and cancelled otherwise. The stop is
+    /// sent without waiting, so an unanswered request cannot hold the turn open.
+    fn stop_run_workflows(&mut self, run_id: &RunId, status: ProviderAdapterV2TurnTerminalStatus) {
+        if status == ProviderAdapterV2TurnTerminalStatus::Completed {
+            return;
+        }
+        let settled = if status == ProviderAdapterV2TurnTerminalStatus::Failed {
+            "failed"
+        } else {
+            "cancelled"
+        };
+        let now = UtcDateTime::now();
+        for task_id in self.subagents.running_workflows(run_id) {
+            if let Some(claude) = self.claude.as_ref()
+                && let Err(error) = claude.stop_task_detached(&task_id)
+            {
+                tracing::warn!(%error, %task_id, "Claude workflow stop was not sent");
+            }
+            let events = self.subagents.settle(&task_id, settled, None, now);
+            for event in events {
+                self.emit(event);
+            }
+        }
+    }
     /// The CLI went away before a result. An interrupt that was asked for
     /// ends the turn as interrupted, and the process is reusable only then.
     fn fail_active(&mut self, error: &str) {
@@ -2424,6 +2458,7 @@ impl ClaudeActor {
                 OrchestrationV2ProviderThreadDisposition::Broken,
             )
         };
+        self.stop_run_workflows(&active.input.run_id, status);
         let closing = finish_running_tools(&mut active, terminal_item_status(status));
         for event in closing {
             self.emit(event);

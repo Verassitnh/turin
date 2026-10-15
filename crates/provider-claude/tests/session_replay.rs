@@ -14,7 +14,8 @@ use turin_contracts::{
         OrchestrationV2Actor, OrchestrationV2AppThread, OrchestrationV2CreationSource,
         OrchestrationV2ExecutionNodeKind, OrchestrationV2PlanArtifact,
         OrchestrationV2ProviderThread, OrchestrationV2ProviderTurn,
-        OrchestrationV2ProviderTurnStatus, OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
+        OrchestrationV2ProviderTurnStatus, OrchestrationV2SubagentStatus, OrchestrationV2TurnItem,
+        OrchestrationV2TurnItemStatus,
     },
     provider_instance::ProviderInstanceId,
     provider_policy::{ProviderInteractionMode, RuntimeMode},
@@ -99,6 +100,9 @@ for line in sys.stdin:
         consume("prompt.offer", message)
     elif message.get("type") == "control_request":
         request = message.get("request") or {}
+        # Tests read the control requests the CLI received from this log.
+        with open(os.environ["FAKE_ARGV"] + ".control", "a") as log:
+            log.write(json.dumps(request) + "\n")
         body = {"models": [], "commands": [], "account": {}} if request.get("subtype") == "initialize" else {}
         emit({"type": "control_response", "response": {"subtype": "success", "request_id": message["request_id"], "response": body}})
         # An interrupt or a task stop is followed by the frames the CLI sends for it.
@@ -450,6 +454,62 @@ async fn exit_before_result_fails_the_turn() {
     // The session reports end of stream and the exit status as two events. Which one
     // lands first decides the message, and both name the exit.
     assert!(text.contains("Claude Code process exited"), "{text}");
+}
+
+/// Upstream `stops the run's live workflow after root result api_error`: a
+/// failed root turn stops the workflow it follows and settles it failed.
+#[tokio::test]
+async fn failed_turn_stops_and_settles_the_workflow_it_follows() {
+    let entries = vec![
+        json!({"type": "expect_outbound", "label": "query.open", "frame": {}}),
+        json!({"type": "expect_outbound", "label": "prompt.offer:1", "frame": {}}),
+        json!({"type": "emit_inbound", "label": "frame", "frame": {
+            "type": "system", "subtype": "task_started", "task_id": "task_wf",
+            "tool_use_id": "toolu_wf", "description": "Run the alpha workflow",
+            "task_type": "local_workflow", "workflow_name": "probe-wf",
+            "session_id": "todo-session", "uuid": "00000000-0000-4000-8000-000000000601",
+        }}),
+        json!({"type": "emit_inbound", "label": "result", "frame": {
+            "type": "result", "subtype": "success", "is_error": true,
+            "result": "API Error", "terminal_reason": "api_error",
+            "session_id": "todo-session", "usage": {},
+            "uuid": "00000000-0000-4000-8000-000000000602"
+        }}),
+    ];
+    let harness = Harness::lines(&entries);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Run the workflow."))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Failed);
+    let settled = seen.iter().any(|event| {
+        matches!(
+            event,
+            ProviderAdapterV2Event::SubagentUpdated { subagent, .. }
+                if subagent.status == OrchestrationV2SubagentStatus::Failed
+        )
+    });
+    assert!(settled, "the running workflow settles to failed: {seen:?}");
+
+    // The stop is sent without waiting, so the CLI may log it a moment after the turn ends.
+    let control = harness.dir.join("argv.log.control");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let body = std::fs::read_to_string(&control).unwrap_or_default();
+        if body.contains("\"stop_task\"") && body.contains("task_wf") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the CLI received a stop for the workflow: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]

@@ -17,6 +17,9 @@ pub mod contexts;
 pub mod control;
 #[cfg(test)]
 mod control_tests;
+pub mod history;
+#[cfg(test)]
+mod history_tests;
 #[cfg(test)]
 mod read_tests;
 pub mod recovery;
@@ -33,7 +36,8 @@ use std::sync::Arc;
 use rusqlite::Connection;
 use turin_contracts::orchestration_v2::{
     OrchestrationV2AppThread, OrchestrationV2DomainEvent, OrchestrationV2PlanArtifact,
-    OrchestrationV2RuntimeRequest, OrchestrationV2ThreadProjection, OrchestrationV2TurnItem,
+    OrchestrationV2RuntimeRequest, OrchestrationV2ThreadHistoryPage,
+    OrchestrationV2ThreadProjection, OrchestrationV2TurnItem,
 };
 use turin_contracts::{ProviderTurnId, RunId, ThreadId, TurnItemId};
 use turin_persistence::Db;
@@ -576,6 +580,78 @@ impl ProjectionStore {
         let thread = node.thread_id.clone();
         self.read_for_thread(&thread, false, move |conn| {
             contexts::is_node_stored(conn, &node)
+        })
+        .await
+    }
+
+    /// `getThreadHistoryPage`. Errors with `ThreadNotFound` when the thread is deleted.
+    pub async fn get_thread_history_page(
+        &self,
+        thread_id: &ThreadId,
+        cursor: &str,
+        through_entry_id: Option<&str>,
+        conversation_only: bool,
+    ) -> Result<OrchestrationV2ThreadHistoryPage, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let cursor = cursor.to_owned();
+        let through_entry_id = through_entry_id.map(str::to_owned);
+        self.read_for_thread(thread_id, true, move |conn| {
+            history::thread_history_page(
+                conn,
+                &thread,
+                &cursor,
+                through_entry_id.as_deref(),
+                conversation_only,
+            )
+        })
+        .await
+    }
+
+    /// `getTimelinePage`.
+    pub async fn get_timeline_page(
+        &self,
+        thread_id: &ThreadId,
+        options: history::TimelinePageOptions,
+    ) -> Result<history::ProjectionTimelinePage, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            history::timeline_page(conn, &thread, &options)
+        })
+        .await
+    }
+
+    /// `getMessageCount`.
+    pub async fn get_message_count(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<u64, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, false, move |conn| {
+            history::message_count(conn, &thread)
+        })
+        .await
+    }
+
+    /// `getNextTurnItemOrdinal`.
+    pub async fn get_next_turn_item_ordinal(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<u64, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, false, move |conn| {
+            history::next_turn_item_ordinal(conn, &thread)
+        })
+        .await
+    }
+
+    /// `getThreadAttachmentIds`, message half only (see `history::message_attachment_ids`).
+    pub async fn get_thread_attachment_ids(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<String>, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, false, move |conn| {
+            history::message_attachment_ids(conn, &thread)
         })
         .await
     }

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 turin-contracts.workspace = true
+turin-provider-core.workspace = true
 anyhow.workspace = true
 indexmap.workspace = true
 chrono.workspace = true

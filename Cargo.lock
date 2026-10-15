@@ -7196,6 +7196,7 @@ dependencies = [
  "tokio",
  "tracing",
  "turin-contracts",
+ "turin-provider-core",
  "unicode-normalization",
  "url",
 ]

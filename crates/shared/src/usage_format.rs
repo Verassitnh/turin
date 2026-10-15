@@ -143,7 +143,7 @@ fn trim(value: f64) -> String {
 
 /// JS `Math.round`: halves round towards +infinity (`f64::round` rounds them
 /// away from zero), and a result of zero keeps the input's sign (`-0.4` → `-0`).
-fn js_math_round(value: f64) -> f64 {
+pub(crate) fn js_math_round(value: f64) -> f64 {
     let floor = value.floor();
     // `value - floor` is the exact fractional part for every finite double.
     let rounded = if value - floor >= 0.5 {

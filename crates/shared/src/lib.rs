@@ -59,4 +59,6 @@ pub mod thread_pull_requests;
 pub mod thread_reference;
 pub mod thread_search;
 pub mod usage_format;
+pub mod usage_limits;
+pub mod usage_merge;
 pub mod video;

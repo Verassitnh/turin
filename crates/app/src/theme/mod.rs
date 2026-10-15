@@ -17,6 +17,7 @@ pub mod appearance_contrast;
 pub mod appearance_fonts;
 pub mod color;
 pub mod component_theme;
+pub mod sidebar_scope;
 pub mod theme_palettes;
 pub mod tokens;
 
@@ -26,6 +27,7 @@ use gpui_kit::{App, Global, Hsla, Rgba, Window, WindowAppearance, px};
 use appearance_contrast::AppearanceContrast;
 use appearance_fonts::{AppearanceFontPreferences, ResolvedFonts, resolve_appearance_fonts};
 use color::{MixSpace, color, color_mix, with_alpha};
+use sidebar_scope::SidebarScope;
 use theme_palettes::{
     DEFAULT_THEME_ID, ThemeAppearance, ThemeColors, ThemeDefinition, find_theme,
     get_theme_colors_for_appearance,
@@ -139,6 +141,8 @@ pub struct AppTheme {
     /// `--app-scrollbar-thumb` / `--app-scrollbar-thumb-hover`.
     pub scrollbar_thumb: Hsla,
     pub scrollbar_thumb_hover: Hsla,
+    /// Tokens inside the sidebar (`[data-app-sidebar]`); see [`Self::sidebar_scope`].
+    sidebar_scope: SidebarScope,
 }
 
 impl Global for AppTheme {}
@@ -283,7 +287,21 @@ impl AppTheme {
             sidebar_icon_color,
             scrollbar_thumb,
             scrollbar_thumb_hover,
+            sidebar_scope: SidebarScope::resolve(
+                p,
+                theme.id == DEFAULT_THEME_ID,
+                Some(theme.id),
+                dark,
+                contrast,
+            ),
         }
+    }
+
+    /// The `[data-app-sidebar]` token scope: what `text-foreground`,
+    /// `text-muted-foreground`, `bg-accent`, `border-border`, … resolve to
+    /// for anything rendered inside the sidebar.
+    pub fn sidebar_scope(&self) -> &SidebarScope {
+        &self.sidebar_scope
     }
 
     pub fn is_dark(&self) -> bool {

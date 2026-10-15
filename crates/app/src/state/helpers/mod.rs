@@ -4,6 +4,7 @@
 pub mod composer_thread_items;
 pub mod delayed_status;
 pub mod diff_count;
+pub mod git_actions;
 pub mod handoff;
 pub mod markdown_images;
 pub mod media_actions;
@@ -23,3 +24,6 @@ pub mod usage;
 pub mod usage_access;
 pub mod usage_progress;
 pub mod user_message;
+pub mod vcs;
+pub mod vcs_ref;
+pub mod vcs_ref_invalidation;

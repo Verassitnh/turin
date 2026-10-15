@@ -116,13 +116,15 @@ pub fn bundled_claude_model_catalog() -> &'static ClaudeModelCatalog {
 /// `readCustomModelEntries` from `@t3tools/shared/model`: trimmed, non-empty,
 /// first occurrence wins, and a bare slug has no capabilities.
 #[derive(Debug, Clone)]
-struct CustomModelDefinition {
-    slug: String,
-    name: String,
-    capabilities: Option<ModelCapabilities>,
+pub(crate) struct CustomModelDefinition {
+    pub(crate) slug: String,
+    pub(crate) name: String,
+    pub(crate) capabilities: Option<ModelCapabilities>,
 }
 
-fn read_custom_model_entries(values: &[CustomModelSetting]) -> Vec<CustomModelDefinition> {
+pub(crate) fn read_custom_model_entries(
+    values: &[CustomModelSetting],
+) -> Vec<CustomModelDefinition> {
     let mut entries = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for value in values {

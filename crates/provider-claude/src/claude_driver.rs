@@ -1,14 +1,16 @@
 //! Port of upstream/apps/server/src/provider/Drivers/ClaudeDriver.ts: the
 //! `ProviderDriver` that builds one `ProviderInstance` per Claude instance.
 //!
-//! Unlike the earlier SPI-only driver, `create` needs nothing but the instance
-//! settings and the host process. The model catalog comes from the bundled
-//! manifest, the attachments directory from `$TURIN_HOME`, and the runtime
-//! instruction text from provider-core.
+//! The driver owns the process-wide services (`ClaudeSharedServices`): the
+//! remote model manifest, the latest-version cache, and the reset-credit
+//! coordinator. Each instance reads the catalog from the manifest service at
+//! create time and shares the rest. The attachments directory comes from
+//! `$TURIN_HOME`, and the runtime instruction text from provider-core.
 use crate::{
     claude_home::make_claude_continuation_group_key,
-    claude_managed_provider::{ClaudeInstanceProbes, ClaudeManagedProvider},
-    claude_model_catalog::bundled_claude_model_catalog,
+    claude_managed_provider::{ClaudeInstanceProbes, ClaudeManagedProvider, ClaudeSharedServices},
+    claude_model_catalog::resolve_claude_model_catalog,
+    claude_model_manifest::resolve_claude_provider_catalog,
     claude_provider_adapter::ClaudeProviderAdapter,
     claude_usage_limits::{
         ClaudeScopedLimitNames, ClaudeUsageLimitHooks, SharedClaudeScopedLimitNames,
@@ -37,6 +39,7 @@ use turin_provider_core::{
     instance_environment::merge_provider_instance_environment,
     path_expansion::expand_home_path,
     provider_adapter::ProviderAdapterV2,
+    provider_host::ProviderHost,
     rt::BoxFuture,
     runtime_instructions::{RuntimeInfo, build_runtime_instructions},
     server_provider::{ProviderWorkspaceSnapshot, ServerProvider},
@@ -54,20 +57,26 @@ const DRIVER_NAME: &str = "claudeAgent";
 pub struct ClaudeDriver {
     kind: ProviderDriverKind,
     metadata: ProviderDriverMetadata,
-}
-
-impl Default for ClaudeDriver {
-    fn default() -> Self {
-        Self::new()
-    }
+    services: Arc<ClaudeSharedServices>,
 }
 
 impl ClaudeDriver {
-    pub fn new() -> Self {
+    /// The driver with the bundled manifest's remote refresh, cached under the
+    /// host's state directory.
+    pub fn new(host: Arc<ProviderHost>) -> Self {
+        Self::with_services(Arc::new(ClaudeSharedServices::new(host)))
+    }
+
+    pub fn with_services(services: Arc<ClaudeSharedServices>) -> Self {
         Self {
             kind: ProviderDriverKind::new(DRIVER_NAME).expect("valid Claude driver"),
             metadata: ProviderDriverMetadata::new("Claude"),
+            services,
         }
+    }
+
+    pub fn services(&self) -> &Arc<ClaudeSharedServices> {
+        &self.services
     }
 }
 
@@ -217,7 +226,10 @@ impl ProviderDriver for ClaudeDriver {
             &host.home_directory,
         ));
 
-        let catalog = Arc::new(bundled_claude_model_catalog().clone());
+        let manifest = self.services.model_manifest.current().await;
+        let catalog = Arc::new(resolve_claude_model_catalog(
+            resolve_claude_provider_catalog(&manifest).as_ref(),
+        ));
         let continuation_key = make_claude_continuation_group_key(
             settings.home_path.as_str(),
             Some(&environment),
@@ -236,12 +248,13 @@ impl ProviderDriver for ClaudeDriver {
             settings.clone(),
             environment,
             host.home_directory.clone(),
-            catalog.clone(),
             scoped_names.clone(),
+            self.services.clone(),
         ));
         let managed = Arc::new(ClaudeManagedProvider::new(
             probes.clone(),
             self.kind.clone(),
+            &catalog,
         ));
 
         // Rate-limit frames fold into the published snapshot on the adapter's event path.
@@ -330,33 +343,172 @@ impl ProviderDriver for ClaudeDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use turin_provider_core::driver::ProviderInstanceScope;
+    use crate::claude_managed_provider::provider_update_checks;
+    use std::net::SocketAddr;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    use turin_provider_core::{
+        driver::ProviderInstanceScope, model_manifest::ModelManifest,
+        provider_host_live::DesktopProviderHost,
+    };
 
-    /// The registry needs only the driver and its settings: no catalog, path, or
-    /// instruction wiring from the host.
+    /// The bundled manifest with one extra current Claude model and a newer
+    /// `updatedAt`, so a fetch of it replaces the bundle.
+    fn remote_manifest_json() -> String {
+        let mut manifest: Value =
+            serde_json::from_str(include_str!("../../provider-core/model-manifest.json"))
+                .expect("bundled manifest is JSON");
+        manifest["updatedAt"] = json!("2026-10-15T00:00:00Z");
+        manifest["providers"]["claudeAgent"]["models"]
+            .as_array_mut()
+            .expect("claude models")
+            .push(
+                json!({"slug": "claude-remote-test", "name": "Remote Test", "status": "current"}),
+            );
+        manifest.to_string()
+    }
+
+    /// Serves `body` to every request. Returns the base URL.
+    async fn serve_manifest(body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address: SocketAddr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    let _ = socket.read(&mut buffer).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{address}/model-manifest.json")
+    }
+
+    fn host(dir: &std::path::Path, settings: Value) -> Arc<ProviderHost> {
+        let settings: turin_contracts::settings::ServerSettings =
+            serde_json::from_value(settings).expect("server settings decode");
+        let should_run: turin_provider_core::provider_host_live::ShouldRunBackgroundWork =
+            Arc::new(|_scope| Box::pin(async { true }));
+        let desktop =
+            DesktopProviderHost::new(dir, dir, settings, should_run).expect("desktop host opens");
+        Arc::new(desktop.host)
+    }
+
+    fn create_input(scope: Arc<ProviderInstanceScope>, config: Value) -> ProviderDriverCreateInput {
+        ProviderDriverCreateInput {
+            instance_id: ProviderInstanceId::new("claudeAgent").expect("instance id"),
+            display_name: None,
+            accent_color: None,
+            environment: Default::default(),
+            enabled: true,
+            config,
+            scope,
+        }
+    }
+
     #[tokio::test]
     async fn builds_an_instance_from_settings_and_host_env_alone() {
-        let driver = ClaudeDriver::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let driver = ClaudeDriver::new(host(dir.path(), json!({})));
         assert_eq!(driver.driver_kind().as_str(), "claudeAgent");
         let config = driver
             .decode_config(&json!({"binaryPath": "/nonexistent/claude-for-test", "homePath": ""}))
             .expect("config decodes");
         let scope = ProviderInstanceScope::new();
         let instance = driver
-            .create(ProviderDriverCreateInput {
-                instance_id: ProviderInstanceId::new("claudeAgent").expect("instance id"),
-                display_name: None,
-                accent_color: None,
-                environment: Default::default(),
-                enabled: true,
-                config,
-                scope: scope.clone(),
-            })
+            .create(create_input(scope.clone(), config))
             .await
             .expect("instance creates");
         assert_eq!(instance.driver_kind.as_str(), "claudeAgent");
         assert!(instance.snapshot_for_cwd.is_some());
         assert!(instance.consume_reset_credit.is_some());
+        scope.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_refresh_publishes_the_remote_manifest_catalog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let url = serve_manifest(remote_manifest_json()).await;
+        let host = host(dir.path(), json!({"enableProviderUpdateChecks": true}));
+        let manifest =
+            ModelManifest::with_url(dir.path(), provider_update_checks(host.clone()), url);
+        let services = Arc::new(ClaudeSharedServices::with_model_manifest(host, manifest));
+        let driver = ClaudeDriver::with_services(services.clone());
+        let config = driver
+            .decode_config(&json!({"binaryPath": "/nonexistent/claude-for-test"}))
+            .expect("config decodes");
+        let scope = ProviderInstanceScope::new();
+        let instance = driver
+            .create(create_input(scope.clone(), config))
+            .await
+            .expect("instance creates");
+
+        // The TTL-gated refresh is what the status check starts; force it here so the test does not race the fetch.
+        let fetched = services.model_manifest.force_refresh().await;
+        assert!(
+            fetched
+                .providers
+                .as_ref()
+                .and_then(|providers| providers.get("claudeAgent"))
+                .is_some_and(|catalog| {
+                    catalog
+                        .models
+                        .iter()
+                        .any(|m| m.slug.as_str() == "claude-remote-test")
+                })
+        );
+
+        let snapshot = instance.snapshot.refresh().await;
+        let slugs: Vec<&str> = snapshot
+            .draft
+            .models
+            .iter()
+            .map(|m| m.slug.as_str())
+            .collect();
+        assert!(slugs.contains(&"claude-remote-test"), "{slugs:?}");
+        scope.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_manifest_keeps_the_bundled_catalog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let host = host(dir.path(), json!({"enableProviderUpdateChecks": true}));
+        // Port 9 has no listener here, so the fetch fails and the bundle stays.
+        let manifest = ModelManifest::with_url(
+            dir.path(),
+            provider_update_checks(host.clone()),
+            "http://127.0.0.1:9/model-manifest.json",
+        );
+        let services = Arc::new(ClaudeSharedServices::with_model_manifest(host, manifest));
+        let driver = ClaudeDriver::with_services(services.clone());
+        let config = driver
+            .decode_config(&json!({"binaryPath": "/nonexistent/claude-for-test"}))
+            .expect("config decodes");
+        let scope = ProviderInstanceScope::new();
+        let instance = driver
+            .create(create_input(scope.clone(), config))
+            .await
+            .expect("instance creates");
+        services.model_manifest.force_refresh().await;
+        let snapshot = instance.snapshot.refresh().await;
+        let slugs: Vec<&str> = snapshot
+            .draft
+            .models
+            .iter()
+            .map(|m| m.slug.as_str())
+            .collect();
+        assert!(slugs.contains(&"claude-fable-5-1"), "{slugs:?}");
+        assert!(!slugs.contains(&"claude-remote-test"));
         scope.close().await;
     }
 }

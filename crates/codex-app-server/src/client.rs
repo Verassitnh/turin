@@ -97,13 +97,18 @@ impl Client {
                 };
                 let result = handler(params).await.map_err(|error| match error {
                     AppServerError::Request { error, .. } => *error,
-                    other => ProtocolError {
-                        code: -32603,
-                        message: format!(
-                            "Codex App Server request handler failed for method '{method}'"
-                        ),
-                        data: Some(Value::String(other.to_string())),
-                    },
+                    // Upstream keeps the cause local (internalError with no data), so the
+                    // peer only sees the generic message and the detail goes to the log.
+                    other => {
+                        tracing::warn!(%method, error = %other, "Codex App Server request handler failed");
+                        ProtocolError {
+                            code: -32603,
+                            message: format!(
+                                "Codex App Server request handler failed for method '{method}'"
+                            ),
+                            data: None,
+                        }
+                    }
                 })?;
                 validate_known(&method, entry.response, result.as_ref()).map_err(invalid_params)?;
                 Ok(result)

@@ -942,3 +942,50 @@ async fn notification_handlers_stop_after_the_first_failure() {
         .unwrap();
     assert_eq!(second_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn handler_failure_replies_internal_error_without_the_cause() {
+    let (client, peer_reader, mut peer_writer) = client_pair();
+    client.handle_server_request("item/tool/requestUserInput", |_params| async {
+        Err(AppServerError::Transport {
+            operation: "read-input-stream",
+            detail: "socket closed with local path /private/secret".into(),
+        })
+    });
+    let mut lines = BufReader::new(peer_reader).lines();
+    write_frame(
+        &mut peer_writer,
+        json!({"id":4,"method":"item/tool/requestUserInput","params":serde_json::from_str::<Value>(TOOL_INPUT_PARAMS).unwrap()}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":4,"error":{"code":-32603,"message":"Codex App Server request handler failed for method 'item/tool/requestUserInput'"}})
+    );
+}
+
+#[tokio::test]
+async fn handler_request_error_is_passed_through_unchanged() {
+    let (client, peer_reader, mut peer_writer) = client_pair();
+    client.handle_server_request("item/tool/requestUserInput", |_params| async {
+        Err(AppServerError::Request {
+            method: "item/tool/requestUserInput".into(),
+            request_id: "5".into(),
+            error: Box::new(ProtocolError {
+                code: -32000,
+                message: "approval expired".into(),
+                data: Some(json!({"reason":"timeout"})),
+            }),
+        })
+    });
+    let mut lines = BufReader::new(peer_reader).lines();
+    write_frame(
+        &mut peer_writer,
+        json!({"id":5,"method":"item/tool/requestUserInput","params":serde_json::from_str::<Value>(TOOL_INPUT_PARAMS).unwrap()}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":5,"error":{"code":-32000,"message":"approval expired","data":{"reason":"timeout"}}})
+    );
+}

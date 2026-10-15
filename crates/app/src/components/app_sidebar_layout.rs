@@ -1,7 +1,9 @@
-//! Port of upstream/apps/web/src/components/AppSidebarLayout.tsx with the
-//! desktop parts of components/ui/sidebar.tsx (`SidebarProvider`,
-//! `Sidebar collapsible="offcanvas"`, `SidebarRail`, `SidebarTrigger`) and
-//! the chat-column + inline right panel row from ChatView.tsx.
+//! Port of upstream/apps/web/src/components/AppSidebarLayout.tsx, built on
+//! the ui/sidebar.tsx primitives (`SidebarProvider`, `Sidebar
+//! collapsible="offcanvas"`, `SidebarRail`, `SidebarTrigger`, `SidebarInset`)
+//! and the chat-column + inline right panel row from ChatView.tsx. It owns
+//! the sidebar view, forwards its keyboard commands, and routes its
+//! selection into the main view.
 //!
 //! The window root: a flush (non-inset) sidebar with a right border, the
 //! main column, the inline right panel, and the titlebar controls that
@@ -16,14 +18,16 @@
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, Context, CursorStyle, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div, px, rems,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, Styled as _,
+    Subscription, Window, actions, div, px, rems,
 };
 
 use super::chat::panel_layout_controls::PanelLayoutControls;
 use super::chat_view::ChatView;
 use super::right_panel_tabs::RightPanelTabs;
-use super::sidebar::Sidebar;
+use super::sidebar::mock_source::mock_sidebar;
+use super::sidebar::view_model::SidebarStore;
+use super::sidebar::{self as thread_sidebar, Sidebar, SidebarEvent, SidebarRoute};
 use super::thread_sidebar_width::{
     THREAD_SIDEBAR_DEFAULT_WIDTH, THREAD_SIDEBAR_MIN_WIDTH, clamp_thread_sidebar_width,
     resolve_initial_thread_sidebar_width, resolve_thread_sidebar_maximum_width,
@@ -35,7 +39,13 @@ use crate::hooks::use_preview_panel_inline_size::{
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{WORKSPACE_CONTROLS_INSET, WORKSPACE_TOPBAR_HEIGHT};
 use crate::theme::{self, ActiveAppTheme};
-use crate::ui::{Button, ButtonSize, ButtonVariant, IconName, Tooltip};
+use crate::ui::Tooltip;
+use crate::ui::sidebar::{
+    Sidebar as SidebarColumn, SidebarInset, SidebarProvider, SidebarRail, SidebarTrigger,
+};
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::notification::Notification;
+use gpui_kit::{AppContext as _, Entity, SharedString};
 
 actions!(
     turin,
@@ -56,6 +66,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-b", ToggleSidebar, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, Some(KEY_CONTEXT)),
     ]);
+    thread_sidebar::bind_keys(cx, KEY_CONTEXT);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,7 +100,10 @@ pub struct AppSidebarLayout {
     /// The last drag moved past [`RESIZE_CLICK_SLOP`]; the rail's
     /// double-click reset ignores it, as useResizeDrag suppresses the click.
     last_drag_moved: bool,
+    sidebar: Entity<Sidebar>,
+    store: Entity<SidebarStore>,
     _appearance: Subscription,
+    _sidebar_events: Subscription,
 }
 
 impl AppSidebarLayout {
@@ -101,6 +115,11 @@ impl AppSidebarLayout {
         });
         theme::follow_system_appearance(window, cx);
         let viewport_width = f32::from(window.viewport_size().width);
+        // T14 replaces the mock store/backend with the client view model.
+        let (store, backend) = mock_sidebar(cx);
+        let sidebar = cx.new(|cx| Sidebar::new(store.clone(), backend, window, cx));
+        let sidebar_events = cx.subscribe_in(&sidebar, window, Self::on_sidebar_event);
+        sidebar.update(cx, |sidebar, cx| sidebar.apply_dev_overrides(window, cx));
         Self {
             focus_handle,
             sidebar_open: true,
@@ -110,8 +129,60 @@ impl AppSidebarLayout {
             right_panel_width: PREVIEW_PANEL_DEFAULT_WIDTH,
             resizing: None,
             last_drag_moved: false,
+            sidebar,
+            store,
             _appearance: appearance,
+            _sidebar_events: sidebar_events,
         }
+    }
+
+    fn on_sidebar_event(
+        &mut self,
+        _: &Entity<Sidebar>,
+        event: &SidebarEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SidebarEvent::Navigate(_) => cx.notify(),
+            SidebarEvent::OpenPullRequests(_) => {
+                self.right_panel_open = true;
+                cx.notify();
+            }
+            // Screens owned by later tasks (composer, settings, PRs, usage).
+            other => {
+                let label = match other {
+                    SidebarEvent::NewThread { .. } => "New thread",
+                    SidebarEvent::AddProject => "Add project",
+                    SidebarEvent::OpenProjectSettings(_) => "Project settings",
+                    SidebarEvent::OpenSettings => "Settings",
+                    SidebarEvent::OpenPullRequestsPage => "Pull requests",
+                    SidebarEvent::OpenUsage => "Usage",
+                    _ => "",
+                };
+                window.push_notification(
+                    Notification::info(format!("{label} is not available yet.")),
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// `(project, title)` of the routed thread for the chat header.
+    fn routed_thread(&self, cx: &App) -> Option<(SharedString, SharedString)> {
+        let Some(SidebarRoute::Thread(key)) = self.sidebar.read(cx).route() else {
+            return None;
+        };
+        let snapshot = self.store.read(cx).snapshot();
+        let thread = snapshot
+            .threads
+            .iter()
+            .find(|thread| &thread.key() == key)?;
+        let project = snapshot
+            .project_group_for(&thread.project_key())
+            .map(|group| group.display_name.clone())
+            .unwrap_or_default();
+        Some((project.into(), thread.title.clone().into()))
     }
 
     /// Opens the right panel; used by the screenshot harness (`TURIN_SHELL_RIGHT_PANEL`).
@@ -190,6 +261,10 @@ impl AppSidebarLayout {
 
 impl Render for AppSidebarLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // "Open diff" on a turn's changed files card shows the right panel.
+        if crate::diff::take_open_panel_request(cx) {
+            self.right_panel_open = true;
+        }
         let theme = cx.app_theme().clone();
         let viewport_width = f32::from(window.viewport_size().width);
         let sidebar_width = self.effective_sidebar_width(viewport_width);
@@ -201,52 +276,43 @@ impl Render for AppSidebarLayout {
         let right_panel_open = self.right_panel_open;
         let maximized = right_panel_open && self.right_panel_maximized;
         let resizing = self.resizing.map(|drag| drag.target);
+        let routed_thread = self.routed_thread(cx);
 
-        // SidebarRail: a 16px hit area centred on the sidebar's right edge,
-        // showing a 2px `sidebar-border` line on hover. Laid over the main
-        // column so its right half stays hittable.
-        let sidebar_rail = div()
-            .id("sidebar-rail")
-            .group("sidebar-rail")
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left(px(sidebar_width - 8.))
-            .w(px(16.))
-            .cursor(CursorStyle::ResizeLeftRight)
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(px(7.))
-                    .w(px(2.))
-                    .when(resizing == Some(ResizeTarget::Sidebar), |this| {
-                        this.bg(theme.sidebar_border)
-                    })
-                    .group_hover("sidebar-rail", |style| style.bg(theme.sidebar_border)),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.last_drag_moved = false;
-                    this.resizing = Some(ResizeDrag {
-                        target: ResizeTarget::Sidebar,
-                        start_x: f32::from(event.position.x),
-                        start_width: sidebar_width,
-                    });
+        let sidebar_rail = SidebarRail::new(px(sidebar_width))
+            .active(resizing == Some(ResizeTarget::Sidebar))
+            .on_mouse_down({
+                let entity = cx.entity().downgrade();
+                move |event, _, cx| {
                     cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .on_click(cx.listener(|this, event: &gpui_kit::ClickEvent, _, cx| {
-                // Double-click resets to the default width.
-                if event.click_count() == 2 && !this.last_drag_moved {
-                    this.sidebar_width = THREAD_SIDEBAR_DEFAULT_WIDTH;
-                    cx.notify();
+                    entity
+                        .update(cx, |this, cx| {
+                            this.last_drag_moved = false;
+                            this.resizing = Some(ResizeDrag {
+                                target: ResizeTarget::Sidebar,
+                                start_x: f32::from(event.position.x),
+                                start_width: sidebar_width,
+                            });
+                            cx.notify();
+                        })
+                        .ok();
                 }
-            }))
-            .tooltip(|window, cx| Tooltip::new("Drag to resize sidebar").build(window, cx));
+            })
+            .on_click({
+                let entity = cx.entity().downgrade();
+                move |event, _, cx| {
+                    // Double-click resets to the default width.
+                    if event.click_count() == 2 {
+                        entity
+                            .update(cx, |this, cx| {
+                                if !this.last_drag_moved {
+                                    this.sidebar_width = THREAD_SIDEBAR_DEFAULT_WIDTH;
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                    }
+                }
+            });
 
         // RightPanelResizeHandle: 8px hit area over the panel's left border;
         // 1px line, `bg-border` on hover, `bg-primary/60` while dragging.
@@ -295,14 +361,7 @@ impl Render for AppSidebarLayout {
             .flex()
             .items_center()
             .child(
-                Button::new("sidebar-trigger")
-                    .variant(ButtonVariant::Ghost)
-                    .size(ButtonSize::IconSm)
-                    .icon(if sidebar_open {
-                        IconName::PanelLeftClose
-                    } else {
-                        IconName::PanelLeft
-                    })
+                SidebarTrigger::new(sidebar_open)
                     .tooltip(Tooltip::new("Toggle main sidebar").shortcut("⌘B"))
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(ToggleSidebar), cx);
@@ -342,6 +401,14 @@ impl Render for AppSidebarLayout {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_right_panel))
+            .on_modifiers_changed(cx.listener(
+                |this, event: &gpui_kit::ModifiersChangedEvent, _, cx| {
+                    let modifiers = event.modifiers;
+                    this.sidebar
+                        .update(cx, |sidebar, cx| sidebar.modifiers_changed(&modifiers, cx));
+                },
+            ))
+            .map(|this| forward_sidebar_actions(this, cx))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(
                 MouseButton::Left,
@@ -363,54 +430,44 @@ impl Render for AppSidebarLayout {
             .when(resizing.is_some(), |this| {
                 this.cursor(CursorStyle::ResizeLeftRight)
             })
-            .when(sidebar_open, |this| {
-                this.child(
-                    div()
-                        .relative()
-                        .flex_shrink_0()
-                        .h_full()
-                        .w(px(sidebar_width))
-                        .bg(theme.sidebar)
-                        .border_r_1()
-                        .border_color(theme.sidebar_border)
-                        .text_color(theme.sidebar_foreground)
-                        .child(Sidebar),
-                )
-            })
             .child(
-                div()
-                    .relative()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .bg(theme.background)
-                    .when(!maximized, |this| {
-                        this.child(ChatView {
-                            sidebar_open,
-                            right_panel_open,
-                        })
-                    })
-                    .when(right_panel_open, |this| {
-                        this.child(
-                            div()
-                                .relative()
-                                .h_full()
-                                .min_h_0()
-                                .min_w_0()
-                                .border_l_1()
-                                .border_color(theme.border)
-                                .map(|this| {
-                                    if maximized {
-                                        this.flex_1()
-                                    } else {
-                                        this.flex_shrink_0().w(px(right_panel_width))
-                                    }
+                SidebarProvider::new()
+                    .with(|this| this.size_full())
+                    .child(
+                        SidebarColumn::new(sidebar_open)
+                            .width(px(sidebar_width))
+                            .child(self.sidebar.clone()),
+                    )
+                    .child(
+                        SidebarInset::new()
+                            .with(|this| this.flex_row().h_full())
+                            .when(!maximized, |this| {
+                                this.child(ChatView {
+                                    sidebar_open,
+                                    right_panel_open,
+                                    thread: routed_thread.clone(),
                                 })
-                                .child(RightPanelTabs),
-                        )
-                    }),
+                            })
+                            .when(right_panel_open, |this| {
+                                this.child(
+                                    div()
+                                        .relative()
+                                        .h_full()
+                                        .min_h_0()
+                                        .min_w_0()
+                                        .border_l_1()
+                                        .border_color(theme.border)
+                                        .map(|this| {
+                                            if maximized {
+                                                this.flex_1()
+                                            } else {
+                                                this.flex_shrink_0().w(px(right_panel_width))
+                                            }
+                                        })
+                                        .child(RightPanelTabs),
+                                )
+                            }),
+                    ),
             )
             .when(sidebar_open, |this| this.child(sidebar_rail))
             .when(right_panel_open && !maximized, |this| {
@@ -419,4 +476,37 @@ impl Render for AppSidebarLayout {
             .child(sidebar_toggle)
             .child(layout_controls)
     }
+}
+
+/// The sidebar's keyboard commands bind in the shell's context; forward
+/// them to the sidebar view.
+fn forward_sidebar_actions(
+    root: gpui_kit::Stateful<gpui_kit::Div>,
+    cx: &mut Context<AppSidebarLayout>,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    macro_rules! forward {
+        ($root:expr, $($action:ident),*) => {
+            $root$(.on_action(cx.listener(|this, action: &thread_sidebar::$action, window, cx| {
+                this.sidebar.update(cx, |sidebar, cx| sidebar.handle_action(action, window, cx));
+            })))*
+        };
+    }
+    forward!(
+        root,
+        ThreadPrevious,
+        ThreadNext,
+        SettleThread,
+        PinThread,
+        NewThread,
+        NewThreadInProject,
+        ThreadJump1,
+        ThreadJump2,
+        ThreadJump3,
+        ThreadJump4,
+        ThreadJump5,
+        ThreadJump6,
+        ThreadJump7,
+        ThreadJump8,
+        ThreadJump9
+    )
 }

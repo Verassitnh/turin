@@ -7,6 +7,7 @@ pub mod background_scope;
 pub mod collect_stream_text;
 pub mod command_path;
 pub mod credential_store;
+pub mod custom_models;
 pub mod driver;
 pub mod errors;
 pub mod failure;

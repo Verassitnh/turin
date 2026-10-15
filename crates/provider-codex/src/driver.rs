@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use turin_codex_app_server::errors::AppServerError;
 use turin_contracts::UtcDateTime;
 use turin_contracts::git::TextGenerationError;
+use turin_contracts::model::CustomModelSetting;
 use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceId};
 use turin_contracts::provider_usage_limits::ProviderUsageLimitsUpdate;
 use turin_contracts::settings::CodexSettings;
@@ -51,6 +52,9 @@ use turin_provider_core::text_generation::{
 use crate::{
     cli_args::tokenize_cli_args,
     codex_launch_args::resolve_codex_launch_args,
+    codex_model::{
+        append_custom_codex_models, apply_preferred_codex_default_model, parse_codex_model,
+    },
     codex_provider::{now_ms, probe},
     orchestration_adapter::CodexProviderAdapter,
     runtime::CodexRuntimeConfig,
@@ -117,12 +121,19 @@ impl ProviderDriver for CodexDriver {
         let config = runtime_config(&settings, &input);
         let enabled = settings.enabled && input.enabled;
         let maintenance = make_manual_only_provider_maintenance_capabilities(self.kind.clone());
+        let custom_models = settings.custom_models.clone();
         let snapshot = Arc::new(CodexSnapshot {
             kind: self.kind.clone(),
             instance_id: input.instance_id.clone(),
             enabled,
             config: config.clone(),
-            current: RwLock::new(pending_provider(&self.kind, &input.instance_id, enabled)),
+            custom_models: custom_models.clone(),
+            current: RwLock::new(pending_provider(
+                &self.kind,
+                &input.instance_id,
+                enabled,
+                &custom_models,
+            )),
             maintenance,
         });
         Ok(ProviderInstance {
@@ -225,11 +236,13 @@ fn provider_with(
     }
 }
 
-/// `makePendingCodexProvider`: the snapshot before the first probe.
+/// `makePendingCodexProvider`: the snapshot before the first probe. Custom
+/// models show up before the first probe, as upstream's `emptyCodexModelsFromSettings` does.
 fn pending_provider(
     kind: &ProviderDriverKind,
     instance_id: &ProviderInstanceId,
     enabled: bool,
+    custom_models: &[CustomModelSetting],
 ) -> ServerProvider {
     let message = if enabled {
         NOT_CHECKED_MESSAGE
@@ -240,7 +253,7 @@ fn pending_provider(
         kind,
         instance_id,
         enabled,
-        Vec::new(),
+        append_custom_codex_models(&[], custom_models),
         ProviderProbeResult {
             installed: false,
             version: None,
@@ -257,6 +270,7 @@ struct CodexSnapshot {
     instance_id: ProviderInstanceId,
     enabled: bool,
     config: CodexRuntimeConfig,
+    custom_models: Vec<CustomModelSetting>,
     current: RwLock<ServerProvider>,
     maintenance: ProviderMaintenanceCapabilities,
 }
@@ -265,7 +279,7 @@ impl CodexSnapshot {
     /// `checkCodexProviderStatus`, minus usage limits and skills (not ported).
     async fn check(&self) -> ServerProvider {
         if !self.enabled {
-            return pending_provider(&self.kind, &self.instance_id, false);
+            return pending_provider(&self.kind, &self.instance_id, false, &self.custom_models);
         }
         let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
         let checked = tokio::time::timeout(AUTH_PROBE_TIMEOUT, self.probe(&home)).await;
@@ -292,11 +306,14 @@ impl CodexSnapshot {
             Ok(snapshot) => snapshot,
             Err(error) => return self.spawn_or_probe_failure(&error),
         };
-        let models = snapshot
-            .models
-            .iter()
-            .filter_map(model_from_probe)
-            .collect::<Vec<_>>();
+        let models = apply_preferred_codex_default_model(append_custom_codex_models(
+            &snapshot
+                .models
+                .iter()
+                .filter_map(parse_codex_model)
+                .collect::<Vec<_>>(),
+            &self.custom_models,
+        ));
         let account = account_probe(&snapshot.account);
         provider_with(
             &self.kind,
@@ -340,7 +357,7 @@ impl CodexSnapshot {
             &self.kind,
             &self.instance_id,
             self.enabled,
-            Vec::new(),
+            append_custom_codex_models(&[], &self.custom_models),
             ProviderProbeResult {
                 installed,
                 version: None,
@@ -426,31 +443,6 @@ fn plan_label(plan: Option<&str>) -> Option<&'static str> {
         "edu" | "edu_plus" | "edu_pro" => "ChatGPT Edu Subscription",
         "unknown" => "ChatGPT Subscription",
         _ => return None,
-    })
-}
-
-/// Maps one raw `model/list` entry. Capabilities and custom models are not
-/// ported yet (PORTING.md).
-fn model_from_probe(model: &Value) -> Option<ServerProviderModel> {
-    let slug = model
-        .get("model")
-        .or_else(|| model.get("id"))
-        .and_then(Value::as_str)?;
-    let name = model
-        .get("displayName")
-        .and_then(Value::as_str)
-        .unwrap_or(slug);
-    Some(ServerProviderModel {
-        slug: tne(slug)?,
-        name: tne(name)?,
-        short_name: None,
-        sub_provider: None,
-        aliases: None,
-        badge: None,
-        is_custom: false,
-        is_default: model.get("isDefault").and_then(Value::as_bool),
-        is_legacy: None,
-        capabilities: None,
     })
 }
 
@@ -576,18 +568,6 @@ mod tests {
         let open = account_probe(&json!({"account": null, "requiresOpenaiAuth": false}));
         assert_eq!(open.status, ServerProviderState::Ready);
         assert_eq!(open.auth.status, ServerProviderAuthStatus::Unknown);
-    }
-
-    #[test]
-    fn model_entries_map_slug_name_and_default() {
-        let model = model_from_probe(&json!({
-            "model": "gpt-x", "displayName": "GPT X", "isDefault": true
-        }))
-        .unwrap();
-        assert_eq!(model.slug.as_str(), "gpt-x");
-        assert_eq!(model.name.as_str(), "GPT X");
-        assert_eq!(model.is_default, Some(true));
-        assert!(model_from_probe(&json!({"displayName": "no slug"})).is_none());
     }
 
     #[test]

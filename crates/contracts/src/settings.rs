@@ -6,8 +6,16 @@
 //! the combinators that omit keys on encode (`optionalKey`,
 //! `ForwardCompatibleOptional`, `OmittedWhenNull`) skip serialization.
 //!
-//! Cut-module fields (device hosts, auth scopes, in-app preview browser
-//! defaults, browser profiles) are dropped; see the task's deviation report.
+//! Fields and helpers tied to cut modules are dropped (device hosts, auth
+//! scope helpers, preview browser defaults, browser profiles, the Antigravity
+//! provider settings); see the Deviations table in PORTING.md.
+//!
+//! Optionality follows PORTING.md: `optionalKey(X)` is `Option<X>` with the
+//! file-local `optional_key` codec (explicit `null` is rejected, as upstream
+//! does), `optionalKey(NullOr(X))` is `double_option`, and
+//! `withDecodingDefault` is a non-`Option` field with `default = "..."` and no
+//! `skip_serializing_if`. `Schema.Number` fields are written without a `.0`
+//! like `JSON.stringify` does (`js_number`).
 
 use crate::base_schemas::{ContractError, ProjectId, ThreadId, TrimmedNonEmptyString, TrimmedString};
 use crate::environment::{EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules};
@@ -27,8 +35,76 @@ use crate::usage_limit_source_id::UsageLimitSourceId;
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
-use std::sync::LazyLock;
 use std::time::Duration;
+
+// ── Local serde helpers ────────────────────────────────────────
+
+/// `Schema.optionalKey(X)` / `Schema.optional(X)` for a non-nullable `X`: the
+/// key may be absent, but an explicit `null` is an invalid value, not "absent"
+/// (plain serde `Option<T>` silently turns `null` into `None`, so a patch like
+/// `{ "wordWrap": null }` would decode instead of being rejected as upstream
+/// does). Use as `#[serde(default, skip_serializing_if = "Option::is_none",
+/// with = "optional_key")]`. Nullable keys use `double_option` instead.
+mod optional_key {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer, T: Serialize>(
+        value: &Option<T>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+        d: D,
+    ) -> Result<Option<T>, D::Error> {
+        T::deserialize(d).map(Some)
+    }
+}
+
+/// Largest integer a JS number holds exactly (`Number.MAX_SAFE_INTEGER`).
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// Writes a `Schema.Number` the way `JSON.stringify` does: a whole number has
+/// no fractional part (`2`, not `2.0`), so re-saved settings files stay
+/// byte-identical to the ones the TS server writes.
+fn serialize_js_number<S: Serializer>(value: f64, s: S) -> Result<S::Ok, S::Error> {
+    if value.is_finite() && value.fract() == 0.0 && value.abs() <= MAX_SAFE_INTEGER {
+        s.serialize_i64(value as i64)
+    } else {
+        s.serialize_f64(value)
+    }
+}
+
+/// `Schema.Number` field codec (see [`serialize_js_number`]); decodes any JSON
+/// number.
+mod js_number {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &f64, s: S) -> Result<S::Ok, S::Error> {
+        super::serialize_js_number(*value, s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        f64::deserialize(d)
+    }
+}
+
+/// `Schema.NullOr(Schema.Number)` field codec: `None` encodes `null`.
+mod js_number_nullable {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(value) => super::serialize_js_number(*value, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+        Option::<f64>::deserialize(d)
+    }
+}
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -163,7 +239,7 @@ impl fmt::Display for SidebarAutoSettleAfterDays {
 
 impl Serialize for SidebarAutoSettleAfterDays {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_f64(self.0)
+        serialize_js_number(self.0, s)
     }
 }
 
@@ -709,9 +785,9 @@ pub struct FontFamilyPreference(String);
 impl FontFamilyPreference {
     const MAX_LENGTH: usize = 200;
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
-        if value.as_ref().chars().count() > Self::MAX_LENGTH {
+        if value.as_ref().encode_utf16().count() > Self::MAX_LENGTH {
             return Err(ContractError {
-                expected: "a font family of at most 200 chars",
+                expected: "a font family of at most 200 UTF-16 code units",
                 got: value.as_ref().to_owned(),
             });
         }
@@ -757,9 +833,9 @@ pub struct DefaultThemePreference(String);
 impl DefaultThemePreference {
     const MAX_LENGTH: usize = 64;
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
-        if value.as_ref().chars().count() > Self::MAX_LENGTH {
+        if value.as_ref().encode_utf16().count() > Self::MAX_LENGTH {
             return Err(ContractError {
-                expected: "a theme id of at most 64 chars",
+                expected: "a string of at most 64 UTF-16 code units",
                 got: value.as_ref().to_owned(),
             });
         }
@@ -798,12 +874,39 @@ impl<'de> Deserialize<'de> for DefaultThemePreference {
 pub const DEFAULT_BROWSER_AUTO_SHOW_FLOATING_PREVIEW: bool = true;
 pub const BROWSER_RECORDING_FRAME_RATES: &[i64] = &[30, 60];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `Schema.Literals([30, 60])`: numeric literals, so they travel as JSON
+/// numbers (`30`), not strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BrowserRecordingFrameRate {
-    #[serde(rename = "30")]
     Thirty,
-    #[serde(rename = "60")]
     Sixty,
+}
+
+impl BrowserRecordingFrameRate {
+    pub fn get(self) -> i64 {
+        match self {
+            Self::Thirty => 30,
+            Self::Sixty => 60,
+        }
+    }
+}
+
+impl Serialize for BrowserRecordingFrameRate {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_i64(self.get())
+    }
+}
+
+impl<'de> Deserialize<'de> for BrowserRecordingFrameRate {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match i64::deserialize(d)? {
+            30 => Ok(Self::Thirty),
+            60 => Ok(Self::Sixty),
+            other => Err(serde::de::Error::custom(format!(
+                "expected 30 or 60, got {other}"
+            ))),
+        }
+    }
 }
 pub const DEFAULT_BROWSER_RECORDING_FRAME_RATE: BrowserRecordingFrameRate =
     BrowserRecordingFrameRate::Thirty;
@@ -915,10 +1018,6 @@ pub struct ModelPreferences {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_false() -> bool {
-    false
 }
 
 fn default_notification_mode() -> NotificationMode {
@@ -1269,7 +1368,7 @@ impl fmt::Display for UsageModelTokenPrice {
 
 impl Serialize for UsageModelTokenPrice {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_f64(self.0)
+        serialize_js_number(self.0, s)
     }
 }
 
@@ -1285,16 +1384,19 @@ impl<'de> Deserialize<'de> for UsageModelTokenPrice {
 pub struct UsageModelPriceOverride {
     pub input_cost_per_million_tokens: UsageModelTokenPrice,
     pub output_cost_per_million_tokens: UsageModelTokenPrice,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub cache_read_cost_per_million_tokens: Option<UsageModelTokenPrice>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub cache_write_cost_per_million_tokens: Option<UsageModelTokenPrice>,
 }
 
 /// `makeBinaryPathSetting(fallback)`: a binary path setting that decodes empty
 /// input to the provider's default executable. Encoding is the plain encoding,
-/// and the field's decoding default is the fallback itself.
-fn decode_binary_path_setting<'de, D>(d: D, fallback: &str) -> Result<TrimmedString, D::Error>
+/// and the field's decoding default is the fallback itself. serde `with`
+/// modules cannot take a parameter, so each provider settings struct wraps this
+/// in a two-line module (see `codex_binary_path`) and pairs it with
+/// `#[serde(default = "...")]` returning the same fallback.
+pub fn decode_binary_path_setting<'de, D>(d: D, fallback: &str) -> Result<TrimmedString, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -1355,16 +1457,16 @@ pub struct ProviderSettingsFormOption {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSettingsFormAnnotation {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub control: Option<ProviderSettingsFormControl>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub placeholder: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub hidden: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub clear_when_empty: Option<ClearWhenEmpty>,
     /** Choices for a `select` control. The first entry is the default. */
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub options: Option<Vec<ProviderSettingsFormOption>>,
 }
 
@@ -1379,7 +1481,7 @@ pub enum ClearWhenEmpty {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSettingsFormSchemaAnnotation {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub order: Option<Vec<String>>,
 }
 
@@ -1402,7 +1504,7 @@ pub enum CodexSetupMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexSettings {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub setup_mode: Option<CodexSetupMode>,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -1497,68 +1599,137 @@ pub struct ClaudeSettings {
     pub auto_compact_window: AutoCompactWindow,
 }
 
-/**
- * Antigravity ACP auth methods. Personal and Enterprise open a Google sign-in
- * in the browser. The API key and Agent Platform methods take credentials from
- * the instance config and never open a browser.
- */
-pub static ANTIGRAVITY_AUTH_METHODS: LazyLock<Vec<ProviderSettingsFormOption>> =
-    LazyLock::new(|| {
-        vec![
-            ProviderSettingsFormOption {
-                value: "oauth-personal".to_owned(),
-                label: "Google account".to_owned(),
-            },
-            ProviderSettingsFormOption {
-                value: "oauth-business".to_owned(),
-                label: "Gemini Enterprise".to_owned(),
-            },
-            ProviderSettingsFormOption {
-                value: "gemini-api-key".to_owned(),
-                label: "Gemini API key".to_owned(),
-            },
-            ProviderSettingsFormOption {
-                value: "agent-platform".to_owned(),
-                label: "Agent Platform (Vertex AI)".to_owned(),
-            },
-        ]
-    });
+/// `secretSettingsFields(CodexSettings)`: neither built-in provider schema has
+/// a `secretSetting` field.
+pub const CODEX_SECRET_SETTINGS_FIELDS: &[&str] = &[];
+/// `secretSettingsFields(ClaudeSettings)`.
+pub const CLAUDE_SECRET_SETTINGS_FIELDS: &[&str] = &[];
+/// `secretSettingsFields(UsageLimitSourceConfig)`: stored in the secret store
+/// and redacted before reaching a client.
+pub const USAGE_LIMIT_SOURCE_SECRET_SETTINGS_FIELDS: &[&str] = &["managementKey"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum AntigravityAuthMethod {
-    #[serde(rename = "oauth-personal")]
-    OauthPersonal,
-    #[serde(rename = "oauth-business")]
-    OauthBusiness,
-    #[serde(rename = "gemini-api-key")]
-    GeminiApiKey,
-    #[serde(rename = "agent-platform")]
-    AgentPlatform,
+/// Order the settings form renders `CodexSettings` fields in
+/// (`makeProviderSettingsSchema` options).
+pub const CODEX_SETTINGS_FORM_ORDER: &[&str] =
+    &["binaryPath", "homePath", "shadowHomePath", "launchArgs"];
+/// Order the settings form renders `ClaudeSettings` fields in.
+pub const CLAUDE_SETTINGS_FORM_ORDER: &[&str] =
+    &["binaryPath", "homePath", "autoCompactWindow", "launchArgs"];
+
+/// The `Schema.annotateKey` metadata upstream attaches to one provider
+/// settings field: its title, description and `providerSettingsForm`
+/// annotation. The settings UI renders its form from these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSettingsFormField {
+    pub field: &'static str,
+    pub title: Option<&'static str>,
+    pub description: Option<&'static str>,
+    pub annotation: ProviderSettingsFormAnnotation,
 }
 
-fn default_antigravity_auth_method() -> AntigravityAuthMethod {
-    AntigravityAuthMethod::OauthPersonal
+fn hidden_form_field(field: &'static str) -> ProviderSettingsFormField {
+    ProviderSettingsFormField {
+        field,
+        title: None,
+        description: None,
+        annotation: ProviderSettingsFormAnnotation {
+            hidden: Some(true),
+            ..Default::default()
+        },
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AntigravitySettings {
-    #[serde(default = "default_false")]
-    pub enabled: bool,
-    #[serde(default = "default_antigravity_auth_method")]
-    pub auth_method: AntigravityAuthMethod,
-    // `secretSetting`: stored separately on the host and redacted before it
-    // reaches a client.
-    #[serde(default)]
-    pub api_key: TrimmedString,
-    #[serde(default)]
-    pub gcp_project: TrimmedString,
-    #[serde(default)]
-    pub gcp_location: TrimmedString,
-    #[serde(default)]
-    pub binary_path: TrimmedString,
-    #[serde(default)]
-    pub custom_models: Vec<CustomModelSetting>,
+fn form_field(
+    field: &'static str,
+    title: &'static str,
+    description: &'static str,
+    placeholder: Option<&'static str>,
+    clear_when_empty: Option<ClearWhenEmpty>,
+) -> ProviderSettingsFormField {
+    ProviderSettingsFormField {
+        field,
+        title: Some(title),
+        description: Some(description),
+        annotation: ProviderSettingsFormAnnotation {
+            placeholder: placeholder.map(str::to_owned),
+            clear_when_empty,
+            ..Default::default()
+        },
+    }
+}
+
+/// Annotations of `CodexSettings`, in declaration order.
+pub fn codex_settings_form_fields() -> Vec<ProviderSettingsFormField> {
+    vec![
+        hidden_form_field("setupMode"),
+        hidden_form_field("enabled"),
+        form_field(
+            "binaryPath",
+            "Binary path",
+            "Path to the Codex binary used by this instance.",
+            Some("codex"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+        form_field(
+            "homePath",
+            "CODEX_HOME path",
+            "Custom Codex home and config directory.",
+            Some("~/.codex"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+        form_field(
+            "shadowHomePath",
+            "Shadow home path",
+            "Account-specific Codex home. Keeps auth.json separate while sharing state from CODEX_HOME.",
+            Some("~/.codex-t3/personal"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+        // No `providerSettingsForm` annotation, only a title and description.
+        form_field(
+            "launchArgs",
+            "Launch arguments",
+            "Additional CLI arguments passed to codex app-server on session start.",
+            None,
+            None,
+        ),
+        hidden_form_field("customModels"),
+    ]
+}
+
+/// Annotations of `ClaudeSettings`, in declaration order.
+pub fn claude_settings_form_fields() -> Vec<ProviderSettingsFormField> {
+    vec![
+        hidden_form_field("enabled"),
+        form_field(
+            "binaryPath",
+            "Binary path",
+            "Path to the Claude binary used by this instance.",
+            Some("claude"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+        form_field(
+            "homePath",
+            "CLAUDE_CONFIG_DIR path",
+            "Custom Claude home and config directory. Keeps .claude.json and .claude separate.",
+            Some("~/.claude"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+        hidden_form_field("customModels"),
+        form_field(
+            "launchArgs",
+            "Launch arguments",
+            "Additional CLI arguments passed on session start.",
+            Some("e.g. --chrome"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+        form_field(
+            "autoCompactWindow",
+            "Auto-compact after",
+            "Compact after 100,000 to 1,000,000 tokens. Leave empty to use Claude's default.",
+            Some("e.g. 300000"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+    ]
 }
 
 string_literal!(
@@ -1577,7 +1748,7 @@ string_literal!(
 #[serde(rename_all = "camelCase")]
 pub struct UsageLimitSourceConfig {
     pub kind: CliproxyKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub label: Option<TrimmedNonEmptyString>,
     pub url: TrimmedNonEmptyString,
     // `secretSetting`: stored separately on the host.
@@ -1736,23 +1907,23 @@ pub enum BackgroundActivityProfileSelection {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundActivityOverrides {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub automatic_git_fetch_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub provider_health_refresh_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub host_power_monitor_active_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub host_power_monitor_idle_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub idle_client_ttl: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub pause_when_host_locked: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub pause_when_host_low_power: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub pause_when_client_low_power: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub pause_when_on_battery: Option<bool>,
 }
 
@@ -1777,7 +1948,7 @@ pub struct BackgroundActivitySettings {
     pub schema_version: BackgroundActivitySchemaVersion,
     #[serde(default = "default_background_activity_profile_selection")]
     pub profile: BackgroundActivityProfileSelection,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub base_profile: Option<BackgroundActivityProfile>,
     #[serde(default)]
     pub overrides: BackgroundActivityOverrides,
@@ -1915,7 +2086,7 @@ pub const PROJECT_SCOPED_SERVER_SETTING_KEYS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectProviderInstanceOverride {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub enabled: Option<bool>,
 }
 
@@ -1948,11 +2119,11 @@ pub struct ProjectSettingsOverrides {
         with = "crate::base_schemas::double_option"
     )]
     pub default_model_selection: Option<Option<ModelSelection>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub default_runtime_mode: Option<RuntimeMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub default_thread_env_mode: Option<ThreadEnvMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub new_worktrees_start_from_origin: Option<bool>,
     #[serde(
         default,
@@ -1960,15 +2131,15 @@ pub struct ProjectSettingsOverrides {
         with = "crate::base_schemas::forward_compatible_optional"
     )]
     pub worktree_submodules: Option<WorktreeSubmodules>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub default_auto_pull: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub default_project_scripts: Option<Vec<ProjectScript>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub enable_agent_browser_access: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub enable_agent_device_access: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub text_generation_model_selection: Option<ModelSelection>,
     #[serde(
         default,
@@ -1982,17 +2153,17 @@ pub struct ProjectSettingsOverrides {
         with = "crate::base_schemas::double_option"
     )]
     pub review_guide_model_selection: Option<Option<ModelSelection>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub review_guide_instructions: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub source_control_writing_style: Option<SourceControlWritingStyleSettings>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub remove_agent_credits_on_merge: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub branch_naming_mode: Option<BranchNamingMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub branch_name_prefix: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub branch_name_instructions: Option<TrimmedString>,
     #[serde(
         default,
@@ -2000,7 +2171,7 @@ pub struct ProjectSettingsOverrides {
         with = "crate::base_schemas::double_option"
     )]
     pub pull_request_merge_method: Option<Option<PullRequestMergeMethod>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub sidebar_auto_settle_on_merge: Option<bool>,
     #[serde(
         default,
@@ -2008,13 +2179,13 @@ pub struct ProjectSettingsOverrides {
         with = "crate::base_schemas::double_option"
     )]
     pub sidebar_auto_settle_after_days: Option<Option<SidebarAutoSettleAfterDays>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub sidebar_auto_settle_keep_pull_requests: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub continue_threads_after_server_update: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub response_streaming_mode: Option<ResponseStreamingMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub provider_instances: Option<IndexMap<ProviderInstanceId, ProjectProviderInstanceOverride>>,
 }
 
@@ -2066,9 +2237,9 @@ pub struct StorageCleanupReportEntry {
     pub path: Option<String>,
     pub thread_id: Option<ThreadId>,
     pub thread_title: Option<String>,
-    #[serde(default)]
+    #[serde(default, with = "js_number_nullable")]
     pub bytes: Option<f64>,
-    #[serde(default)]
+    #[serde(default, with = "js_number_nullable")]
     pub files: Option<f64>,
 }
 
@@ -2082,8 +2253,11 @@ pub enum StorageCleanupReportTrigger {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageCleanupCounts {
+    #[serde(with = "js_number")]
     pub removed: f64,
+    #[serde(with = "js_number")]
     pub kept: f64,
+    #[serde(with = "js_number")]
     pub failed: f64,
 }
 
@@ -2095,8 +2269,9 @@ pub struct StorageCleanupReport {
     pub finished_at: String,
     pub entries: Vec<StorageCleanupReportEntry>,
     pub counts: StorageCleanupCounts,
+    #[serde(with = "js_number")]
     pub omitted_count: f64,
-    #[serde(default)]
+    #[serde(default, with = "js_number")]
     pub bytes_freed: f64,
 }
 
@@ -2107,6 +2282,7 @@ fn default_storage_cleanup() -> StorageCleanupSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageCleanupSettings {
+    #[serde(default = "default_worktree_keep_when")]
     pub worktree_keep_when: WorktreeKeepWhen,
     #[serde(default)]
     pub worktree_after_days: Option<StorageRetentionDays>,
@@ -2587,13 +2763,13 @@ pub enum ServerSettingsError {
     ServerSettingsError {
         settings_path: String,
         operation: ServerSettingsOperation,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
         provider_instance_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
         environment_variable: Option<String>,
         // Validation failures (e.g. a create colliding with an existing
         // instance) originate without an upstream defect.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
         cause: Option<serde_json::Value>,
     },
 }
@@ -2660,9 +2836,9 @@ pub fn default_unified_settings() -> UnifiedSettings {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSelectionPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub instance_id: Option<ProviderInstanceId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub model: Option<TrimmedNonEmptyString>,
     #[serde(
         default,
@@ -2721,16 +2897,16 @@ pub struct SetProviderModelOrder {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrateModelPreferences {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub favorites: Option<ModelFavorites>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub provider_model_preferences: Option<ProviderModelPreferences>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeCleanupRulesPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub worktree_keep_when: Option<WorktreeKeepWhen>,
     #[serde(
         default,
@@ -2738,11 +2914,11 @@ pub struct WorktreeCleanupRulesPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub worktree_after_days: Option<Option<StorageRetentionDays>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub worktree_on_merge: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub worktree_on_delete: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub worktree_unchanged: Option<bool>,
 }
 
@@ -2761,7 +2937,7 @@ pub enum WorktreeCleanupPatch {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageCleanupSettingsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub worktree_keep_when: Option<WorktreeKeepWhen>,
     #[serde(
         default,
@@ -2769,11 +2945,11 @@ pub struct StorageCleanupSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub worktree_after_days: Option<Option<StorageRetentionDays>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub worktree_on_merge: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub worktree_on_delete: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub worktree_unchanged: Option<bool>,
     #[serde(
         default,
@@ -2789,79 +2965,60 @@ pub struct StorageCleanupSettingsPatch {
     pub logs_after_days: Option<Option<StorageRetentionDays>>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BackgroundActivityOverridesPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub automatic_git_fetch_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_health_refresh_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_power_monitor_active_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_power_monitor_idle_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idle_client_ttl: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_when_host_locked: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_when_host_low_power: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_when_client_low_power: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_when_on_battery: Option<bool>,
-}
+/// Upstream's patch reuses `BackgroundActivityOverrides` (every key is already
+/// optional).
+pub type BackgroundActivityOverridesPatch = BackgroundActivityOverrides;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundActivitySettingsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub schema_version: Option<BackgroundActivitySchemaVersion>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub profile: Option<BackgroundActivityProfileSelection>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub base_profile: Option<BackgroundActivityProfile>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub overrides: Option<BackgroundActivityOverridesPatch>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceControlWritingStyleSettingsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub mode: Option<SourceControlWritingStyleMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub custom_instructions: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub follow_change_request_templates: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservabilitySettingsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub otlp_traces_url: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub otlp_metrics_url: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub otlp_logs_url: Option<TrimmedString>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerSettingsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub set_model_favorites: Option<Vec<SetModelFavorite>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub set_models_hidden: Option<Vec<SetModelHidden>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub set_provider_model_order: Option<SetProviderModelOrder>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub favorites: Option<ModelFavorites>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub provider_model_preferences: Option<ProviderModelPreferences>,
     // Applied under the settings service's write lock, only while still unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub migrate_model_preferences: Option<MigrateModelPreferences>,
     #[serde(
         default,
@@ -2869,28 +3026,28 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub worktree_cleanup: Option<Option<WorktreeCleanupPatch>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub storage_cleanup: Option<StorageCleanupSettingsPatch>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub worktrees_directory: Option<TrimmedString>,
     // Server settings
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub response_streaming_mode: Option<ResponseStreamingMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub enable_provider_update_checks: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub continue_threads_after_server_update: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub enable_agent_browser_access: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub project_agent_browser_access_overrides: Option<IndexMap<ProjectId, Option<bool>>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub default_auto_pull: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub default_project_scripts: Option<Vec<ProjectScript>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub project_script_overrides: Option<IndexMap<ProjectId, Option<Vec<ProjectScript>>>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub project_auto_pull_overrides: Option<IndexMap<ProjectId, Option<bool>>>,
     #[serde(
         default,
@@ -2898,7 +3055,7 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub default_model_selection: Option<Option<ModelSelection>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub default_runtime_mode: Option<RuntimeMode>,
     /**
      * Per-project entry replacement: each entry replaces that project's whole
@@ -2912,13 +3069,13 @@ pub struct ServerSettingsPatch {
      * that field existed cannot wipe it by editing another key. Clearing every
      * provider override for a project means sending `providerInstances: {}`.
      */
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub project_settings_overrides: Option<IndexMap<ProjectId, Option<ProjectSettingsOverrides>>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub enable_agent_device_access: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub enable_device_support: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub device_onboarding_completed: Option<bool>,
     #[serde(
         default,
@@ -2926,21 +3083,21 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub sidebar_auto_settle_after_days: Option<Option<SidebarAutoSettleAfterDays>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub sidebar_auto_settle_keep_pull_requests: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub sidebar_auto_settle_on_merge: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub auto_resume_limited_threads: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub snooze_limited_threads: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub background_activity: Option<BackgroundActivitySettingsPatch>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub automatic_git_fetch_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub provider_health_refresh_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub background_activity_profile: Option<BackgroundActivityProfile>,
     #[serde(
         default,
@@ -2954,7 +3111,7 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub default_thread_env_mode: Option<Option<ThreadEnvMode>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub new_worktrees_start_from_origin: Option<bool>,
     #[serde(
         default,
@@ -2962,19 +3119,19 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub worktree_submodules: Option<Option<WorktreeSubmodules>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub add_project_base_directory: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub text_generation_model_selection: Option<ModelSelectionPatch>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub branch_naming_mode: Option<BranchNamingMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub branch_name_prefix: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub branch_name_instructions: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub remove_agent_credits_on_merge: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub source_control_writing_style: Option<SourceControlWritingStyleSettingsPatch>,
     #[serde(
         default,
@@ -2982,7 +3139,7 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub source_control_writer_model_selection: Option<Option<ModelSelection>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub review_guides_enabled: Option<bool>,
     #[serde(
         default,
@@ -2990,7 +3147,7 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub review_guide_model_selection: Option<Option<ModelSelection>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub review_guide_instructions: Option<TrimmedString>,
     #[serde(
         default,
@@ -2998,34 +3155,34 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub pull_request_merge_method: Option<Option<PullRequestMergeMethod>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub observability: Option<ObservabilitySettingsPatch>,
     /**
      * Merges per host: a patched field replaces the saved one, so a client sends a per-server-host
      * map whole, with the redaction marker for each saved secret it keeps. An empty or omitted
      * secret is removed from the secret store.
      */
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub source_control_hosts: Option<IndexMap<String, SourceControlHostSettings>>,
     // Whole-map replacement for the new instance config. Patching individual
     // entries is intentionally out of scope: the map is small, and partial
     // patches risk leaving driver-specific config in a half-merged state.
     // The web UI sends a fully-formed map every time it edits this field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub provider_instances: Option<ProviderInstanceConfigMap>,
     // Per-entry, unlike `providerInstances`: a client only ever adds or removes
     // one source, and sending the whole map races another edit that has not
     // echoed back yet. `null` removes; the server merges into its current map.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub usage_limit_sources: Option<IndexMap<UsageLimitSourceId, Option<UsageLimitSourceConfig>>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub cursor_keychain_usage_enabled: Option<bool>,
     /** Each entry replaces one model's rates; `null` restores automatic pricing. */
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub usage_price_overrides:
         Option<IndexMap<TrimmedNonEmptyString, Option<UsageModelPriceOverride>>>,
     /** Each entry replaces one model's mapping; `null` removes it. */
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub usage_model_aliases:
         Option<IndexMap<TrimmedNonEmptyString, Option<TrimmedNonEmptyString>>>,
 }
@@ -3033,49 +3190,49 @@ pub struct ServerSettingsPatch {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientSettingsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub notification_mode: Option<NotificationMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub in_app_notifications_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub diff_color_scheme: Option<DiffColorScheme>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub chat_width: Option<ChatWidth>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub load_balancing_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub load_balancing_weights: Option<LoadBalancingWeights>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub appearance_contrast: Option<AppearanceContrast>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub panel_animation_duration_ms: Option<PanelAnimationDurationMs>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub browser_recording_frame_rate: Option<BrowserRecordingFrameRate>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub browser_recording_show_key_presses: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub browser_recording_show_mouse_presses: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub browser_link_target: Option<BrowserLinkTarget>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub browser_auto_show_floating_preview: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub confirm_quit: Option<QuitConfirmationMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub confirm_thread_archive: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub confirm_thread_delete: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub confirm_thread_unpin: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub diff_files_collapsed: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub diff_ignore_whitespace: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub diff_layout: Option<DiffLayout>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub environment_identification_mode: Option<EnvironmentIdentificationMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub glass_opacity: Option<GlassOpacity>,
     #[serde(
         default,
@@ -3083,80 +3240,80 @@ pub struct ClientSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub onboarding_completed_at: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub font_size_interface: Option<InterfaceFontSize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub font_size_prompt: Option<PromptFontSize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub font_size_code: Option<CodeFontSize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub font_size_terminal: Option<TerminalFontSize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub font_family_code: Option<FontFamilyPreference>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub font_family_composer: Option<FontFamilyPreference>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub font_family_sans: Option<FontFamilyPreference>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub font_family_terminal: Option<FontFamilyPreference>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub font_smoothing: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub persist_composer_context_strip: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub favorites: Option<ModelFavorites>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub provider_model_preferences: Option<ProviderModelPreferences>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub pull_request_merge_method_overrides: Option<IndexMap<TrimmedNonEmptyString, PullRequestMergeMethod>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub plan_mode_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub context_window_meter_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub composer_collapse_on_scroll: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub composer_rich_text_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub send_shortcut: Option<SendShortcut>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub follow_up_behavior: Option<FollowUpBehavior>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub proactive_panels_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub show_skills_in_slash_menu: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub legacy_sidebar_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub sidebar_working_shelf_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub sidebar_project_grouping_mode: Option<SidebarProjectGroupingMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub sidebar_project_grouping_overrides:
         Option<IndexMap<TrimmedNonEmptyString, SidebarProjectGroupingMode>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub sidebar_project_sort_order: Option<SidebarProjectSortOrder>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub sidebar_thread_sort_order: Option<SidebarThreadSortOrder>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub sidebar_thread_preview_count: Option<SidebarThreadPreviewCount>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub timestamp_format: Option<TimestampFormat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub snap_shot_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub snap_shot_include_accessibility: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub snap_shot_shortcut: Option<SnapShotShortcut>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub snap_shot_play_sound: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub snap_shot_sound: Option<SnapShotSound>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub snap_shot_flash: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub snap_shot_animations: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_key")]
     pub word_wrap: Option<bool>,
 }
 
@@ -3474,8 +3631,8 @@ mod tests {
             encoded["usagePriceOverrides"],
             json!({
                 "vendor/example-model": {
-                    "inputCostPerMillionTokens": 2.0,
-                    "outputCostPerMillionTokens": 8.0
+                    "inputCostPerMillionTokens": 2,
+                    "outputCostPerMillionTokens": 8
                 }
             })
         );

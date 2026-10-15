@@ -1056,29 +1056,56 @@ impl ClaudeActor {
         });
         self.active = None;
     }
+    /// The CLI went away before a result. An interrupt that was asked for
+    /// ends the turn as interrupted, and the process is reusable only then.
     fn fail_active(&mut self, error: &str) {
         let Some(active) = self.active.take() else {
             return;
         };
-        let failure = make_provider_failure(ProviderFailureInput {
-            cause: None,
-            message: Some(error),
-            code: None,
-            class: None,
-            retryable: None,
-            reset_at: None,
+        let run_ordinal = PositiveInt::new(active.input.run_ordinal.max(1) as u64).unwrap();
+        let (status, failure, disposition) = if active.interrupted {
+            (
+                ProviderAdapterV2TurnTerminalStatus::Interrupted,
+                None,
+                OrchestrationV2ProviderThreadDisposition::Reusable,
+            )
+        } else {
+            (
+                ProviderAdapterV2TurnTerminalStatus::Failed,
+                Some(make_provider_failure(ProviderFailureInput {
+                    cause: None,
+                    message: Some(error),
+                    code: None,
+                    class: None,
+                    retryable: None,
+                    reset_at: None,
+                })),
+                OrchestrationV2ProviderThreadDisposition::Broken,
+            )
+        };
+        let mut turn = active.turn;
+        turn.status = if status == ProviderAdapterV2TurnTerminalStatus::Interrupted {
+            OrchestrationV2ProviderTurnStatus::Interrupted
+        } else {
+            OrchestrationV2ProviderTurnStatus::Failed
+        };
+        turn.completed_at = Some(UtcDateTime::now());
+        self.emit(ProviderAdapterV2Event::ProviderTurnUpdated {
+            driver: driver(),
+            thread_id: Some(active.input.thread_id.clone()),
+            provider_turn: turn.clone(),
         });
         self.emit(ProviderAdapterV2Event::TurnTerminal {
             driver: driver(),
-            provider_thread_id: active.turn.provider_thread_id,
-            provider_turn_id: active.turn.id,
-            run_ordinal: PositiveInt::new(active.input.run_ordinal.max(1) as u64).unwrap(),
-            status: ProviderAdapterV2TurnTerminalStatus::Failed,
-            failure: Some(failure),
+            provider_thread_id: turn.provider_thread_id,
+            provider_turn_id: turn.id,
+            run_ordinal,
+            status,
+            failure,
             failure_item_ordinal: None,
             retry: None,
             retry_started_at: None,
-            thread_disposition: OrchestrationV2ProviderThreadDisposition::Broken,
+            thread_disposition: disposition,
         });
     }
 }

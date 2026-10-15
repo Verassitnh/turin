@@ -1,6 +1,7 @@
 //! Port of upstream/packages/effect-codex-app-server.
 pub mod client;
 pub mod errors;
+pub mod extensions;
 pub mod generated;
 pub mod protocol;
 pub mod replay;

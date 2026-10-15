@@ -6556,6 +6556,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",
@@ -6789,10 +6790,12 @@ dependencies = [
  "jsonschema",
  "libc",
  "parking_lot",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

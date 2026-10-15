@@ -22,8 +22,8 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     process::Command,
     sync::watch,
-    task::JoinHandle,
 };
+use tokio_util::task::AbortOnDropHandle;
 
 type ServerRequestHandler = Arc<
     dyn Fn(Option<Value>) -> BoxFuture<'static, Result<Option<Value>, AppServerError>>
@@ -45,8 +45,8 @@ pub struct Client {
     pub raw: Protocol,
     handlers: Arc<Handlers>,
     child_pid: Arc<AtomicU32>,
-    child_task: Option<JoinHandle<()>>,
-    stderr_task: Option<JoinHandle<()>>,
+    child_task: Option<AbortOnDropHandle<()>>,
+    stderr_task: Option<AbortOnDropHandle<()>>,
 }
 
 impl Client {
@@ -191,14 +191,14 @@ impl Client {
         let (exit_tx, exit_rx) = watch::channel(None);
         let mut client = Self::from_io_with_exit(stdout, stdin, Some(exit_rx), options);
         if let Some(mut stderr) = child.stderr.take() {
-            client.stderr_task = Some(tokio::spawn(async move {
+            client.stderr_task = Some(AbortOnDropHandle::new(tokio::spawn(async move {
                 let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
-            }));
+            })));
         }
         let terminator = client.raw.termination_handle();
         client.child_pid.store(pid, Ordering::Release);
         let child_pid = client.child_pid.clone();
-        client.child_task = Some(tokio::spawn(async move {
+        client.child_task = Some(AbortOnDropHandle::new(tokio::spawn(async move {
             let error = match child.wait().await {
                 Ok(status) => AppServerError::ProcessExited(status.code()),
                 Err(error) => AppServerError::Transport {
@@ -209,7 +209,7 @@ impl Client {
             let _ = exit_tx.send(Some(error.clone()));
             terminator.terminate(error);
             child_pid.store(0, Ordering::Release);
-        }));
+        })));
         Ok(client)
     }
     pub fn spawn_codex(cwd: Option<&Path>) -> Result<Self, AppServerError> {
@@ -314,10 +314,13 @@ fn known_method(
     })
 }
 fn validate_known(
-    _method: &str,
+    method: &str,
     schema_name: Option<&str>,
     payload: Option<&Value>,
 ) -> Result<(), String> {
+    if method == "turn/start" && schema_name == Some("V2TurnStartParams") {
+        return crate::extensions::validate_turn_start_params(payload);
+    }
     schema::validate_optional(schema_name, payload)
 }
 fn invalid_params(detail: String) -> ProtocolError {
@@ -335,11 +338,7 @@ impl Drop for Client {
                 libc::kill(-(pid as i32), libc::SIGKILL);
             }
         }
-        if let Some(task) = self.child_task.take() {
-            task.abort();
-        }
-        if let Some(task) = self.stderr_task.take() {
-            task.abort();
-        }
+        drop(self.child_task.take());
+        drop(self.stderr_task.take());
     }
 }

@@ -1,5 +1,5 @@
 //! Port of upstream/packages/effect-codex-app-server/src/protocol.ts
-use crate::errors::{AppServerError, ProtocolError};
+use crate::errors::{AppServerError, ProtocolError, payload_kind};
 use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
@@ -13,8 +13,9 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     sync::{Notify, mpsc, oneshot, watch},
-    task::{JoinHandle, JoinSet},
+    task::JoinSet,
 };
+use tokio_util::task::AbortOnDropHandle;
 
 type Reply = Result<Option<Value>, AppServerError>;
 pub type RequestHandler = Arc<
@@ -103,6 +104,7 @@ struct State {
     notifications: Arc<SlidingQueue>,
     requests: Arc<SlidingQueue>,
     options: ProtocolOptions,
+    stop: watch::Sender<bool>,
 }
 
 impl State {
@@ -116,6 +118,7 @@ impl State {
             let _ = sender.send(Err(error.clone()));
         }
         self.handlers.lock().abort_all();
+        let _ = self.stop.send(true);
         drop(failure);
         if let Some(callback) = &self.options.on_termination {
             callback(error);
@@ -152,7 +155,7 @@ pub struct Protocol {
     state: Arc<State>,
     notifications: Arc<SlidingQueue>,
     requests: Arc<SlidingQueue>,
-    tasks: Vec<JoinHandle<()>>,
+    _tasks: Vec<AbortOnDropHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -200,6 +203,7 @@ impl Protocol {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (outgoing, mut output) = mpsc::unbounded_channel::<Value>();
+        let (stop, mut stop_rx) = watch::channel(false);
         let notifications = Arc::new(SlidingQueue::new());
         let requests = Arc::new(SlidingQueue::new());
         let state = Arc::new(State {
@@ -214,13 +218,27 @@ impl Protocol {
             notifications: notifications.clone(),
             requests: requests.clone(),
             options,
+            stop,
         });
         let read_state = state.clone();
         let read_task = tokio::spawn(async move {
             let mut exit = exit;
             let mut lines = BufReader::new(reader).lines();
             loop {
-                match lines.next_line().await {
+                if *stop_rx.borrow() {
+                    break;
+                }
+                let line = tokio::select! {
+                    biased;
+                    changed = stop_rx.changed() => {
+                        if changed.is_err() || *stop_rx.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                    line = lines.next_line() => line,
+                };
+                match line {
                     Ok(Some(line)) => {
                         if line.trim().is_empty() {
                             continue;
@@ -237,11 +255,11 @@ impl Protocol {
                                     stage: Stage::Decoded,
                                     payload: value.clone(),
                                 });
-                                if let Err(error) = route(&read_state, value) {
+                                if let Err(error) = route(&read_state, value).await {
                                     read_state.log(ProtocolLogEvent {
                                         direction: Direction::Incoming,
                                         stage: Stage::DecodeFailed,
-                                        payload: json!({"operation":"route-wire-message"}),
+                                        payload: json!({ "operation": error_operation(&error) }),
                                     });
                                     read_state.fail(error);
                                     break;
@@ -253,10 +271,10 @@ impl Protocol {
                                     stage: Stage::DecodeFailed,
                                     payload: json!({"operation":"decode-wire-message"}),
                                 });
-                                read_state.fail(AppServerError::ProtocolParse {
-                                    operation: "decode-wire-message",
-                                    detail: error.to_string(),
-                                });
+                                read_state.fail(AppServerError::protocol_parse(
+                                    "decode-wire-message",
+                                    error.to_string(),
+                                ));
                                 break;
                             }
                         }
@@ -264,11 +282,24 @@ impl Protocol {
                     Ok(None) => {
                         let error = if let Some(exit) = exit.as_mut() {
                             loop {
+                                if *stop_rx.borrow() {
+                                    break read_state
+                                        .failure
+                                        .lock()
+                                        .clone()
+                                        .unwrap_or(AppServerError::InputStreamEnded);
+                                }
                                 if let Some(error) = exit.borrow().clone() {
                                     break error;
                                 }
-                                if exit.changed().await.is_err() {
-                                    break AppServerError::InputStreamEnded;
+                                tokio::select! {
+                                    biased;
+                                    _ = stop_rx.changed() => {}
+                                    changed = exit.changed() => {
+                                        if changed.is_err() {
+                                            break AppServerError::InputStreamEnded;
+                                        }
+                                    }
                                 }
                             }
                         } else {
@@ -294,10 +325,10 @@ impl Protocol {
                 let mut bytes = match serde_json::to_vec(&value) {
                     Ok(bytes) => bytes,
                     Err(error) => {
-                        write_state.fail(AppServerError::ProtocolParse {
-                            operation: "encode-wire-message",
-                            detail: error.to_string(),
-                        });
+                        write_state.fail(AppServerError::protocol_parse(
+                            "encode-wire-message",
+                            error.to_string(),
+                        ));
                         break;
                     }
                 };
@@ -314,13 +345,17 @@ impl Protocol {
                     });
                     break;
                 }
+                let _ = writer.flush().await;
             }
         });
         Self {
             state,
             notifications,
             requests,
-            tasks: vec![read_task, write_task],
+            _tasks: vec![
+                AbortOnDropHandle::new(read_task),
+                AbortOnDropHandle::new(write_task),
+            ],
         }
     }
     pub fn set_request_handler(&self, handler: RequestHandler) {
@@ -410,9 +445,6 @@ impl Drop for PendingGuard<'_> {
 impl Drop for Protocol {
     fn drop(&mut self) {
         self.state.fail(AppServerError::Cancelled);
-        for task in &self.tasks {
-            task.abort();
-        }
     }
 }
 
@@ -423,13 +455,13 @@ fn id_key(id: &Value) -> Option<String> {
         _ => None,
     }
 }
-fn route(state: &Arc<State>, value: Value) -> Result<(), AppServerError> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| AppServerError::ProtocolParse {
-            operation: "route-wire-message",
-            detail: "expected object".into(),
-        })?;
+async fn route(state: &Arc<State>, value: Value) -> Result<(), AppServerError> {
+    if state.failure.lock().is_some() {
+        return Ok(());
+    }
+    let Some(object) = value.as_object() else {
+        return Err(unroutable(&value));
+    };
     let id = object.get("id");
     let method = object.get("method").and_then(Value::as_str);
     if let Some(method) = method {
@@ -438,27 +470,23 @@ fn route(state: &Arc<State>, value: Value) -> Result<(), AppServerError> {
             params: object.get("params").cloned(),
             id: id.cloned(),
         };
-        if let Some(id) = id {
+        if object.contains_key("id") {
+            let Some(id) = id else {
+                return Err(unroutable(&value));
+            };
             if id_key(id).is_none() {
-                return Err(AppServerError::ProtocolParse {
-                    operation: "route-wire-message",
-                    detail: "invalid request id".into(),
-                });
+                return Err(unroutable(&value));
             }
             state.requests.push(message.clone());
-            if let Some(handler) = state.request_handler.lock().clone() {
-                if state.active_handlers.fetch_add(1, Ordering::AcqRel)
-                    >= MAX_ACTIVE_REQUEST_HANDLERS
-                {
-                    state.active_handlers.fetch_sub(1, Ordering::AcqRel);
-                    state.send(json!({"id": id, "error": ProtocolError::overloaded()}))?;
-                } else {
-                    let state = state.clone();
+            let handler = state.request_handler.lock().clone();
+            if let Some(handler) = handler {
+                if let Some(guard) = ActiveGuard::try_new(state) {
                     let handler_state = state.clone();
                     let id = id.clone();
                     let mut handlers = state.handlers.lock();
                     while handlers.try_join_next().is_some() {}
                     handlers.spawn(async move {
+                        let _guard = guard;
                         let reply = handler(message.method, message.params).await;
                         let frame = match reply {
                             Ok(Some(result)) => json!({"id": id, "result": result}),
@@ -468,34 +496,31 @@ fn route(state: &Arc<State>, value: Value) -> Result<(), AppServerError> {
                         if let Err(error) = handler_state.send(frame) {
                             handler_state.fail(error);
                         }
-                        handler_state.active_handlers.fetch_sub(1, Ordering::AcqRel);
                     });
+                } else {
+                    state.send(json!({"id": id, "error": ProtocolError::overloaded()}))?;
                 }
             }
         } else {
             state.notifications.push(message.clone());
-            if let Some(handler) = state.notification_handler.lock().clone() {
-                let mut handlers = state.handlers.lock();
-                while handlers.try_join_next().is_some() {}
-                handlers.spawn(async move {
-                    handler(message.method, message.params).await;
-                });
+            let handler = state.notification_handler.lock().clone();
+            if let Some(handler) = handler {
+                handler(message.method, message.params).await;
             }
         }
         return Ok(());
     }
     if let Some(id) = id.and_then(id_key) {
-        let parsed_error = object
-            .get("error")
-            .map(|value| {
-                serde_json::from_value::<ProtocolError>(value.clone()).map_err(|error| {
-                    AppServerError::ProtocolParse {
-                        operation: "route-wire-message",
-                        detail: error.to_string(),
-                    }
-                })
-            })
-            .transpose()?;
+        if object.contains_key("method") {
+            return Err(unroutable(&value));
+        }
+        let parsed_error = match object.get("error") {
+            Some(error_value) => Some(
+                serde_json::from_value::<ProtocolError>(error_value.clone())
+                    .map_err(|_| unroutable(&value))?,
+            ),
+            None => None,
+        };
         if let Some((method, tx)) = state.pending.lock().remove(&id) {
             let reply = match parsed_error {
                 Some(error) => Err(AppServerError::Request {
@@ -509,8 +534,64 @@ fn route(state: &Arc<State>, value: Value) -> Result<(), AppServerError> {
         }
         return Ok(());
     }
-    Err(AppServerError::ProtocolParse {
+    Err(unroutable(&value))
+}
+
+struct ActiveGuard(Arc<State>);
+
+impl ActiveGuard {
+    fn try_new(state: &Arc<State>) -> Option<Self> {
+        let previous = state.active_handlers.fetch_add(1, Ordering::AcqRel);
+        if previous >= MAX_ACTIVE_REQUEST_HANDLERS {
+            state.active_handlers.fetch_sub(1, Ordering::AcqRel);
+            None
+        } else {
+            Some(Self(state.clone()))
+        }
+    }
+}
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.0.active_handlers.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn unroutable(value: &Value) -> AppServerError {
+    let kind = payload_kind(value);
+    let Some(object) = value.as_object() else {
+        return AppServerError::ProtocolParse(Box::new(crate::errors::ProtocolParseInfo {
+            operation: "route-wire-message",
+            detail: String::new(),
+            method: None,
+            request_id: None,
+            payload_kind: Some(kind),
+            present_fields: None,
+        }));
+    };
+    const FIELDS: [&str; 5] = ["id", "method", "params", "result", "error"];
+    let present_fields = FIELDS
+        .into_iter()
+        .filter(|field| object.contains_key(*field))
+        .collect();
+    let method = object
+        .get("method")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let request_id = object.get("id").and_then(id_key);
+    AppServerError::ProtocolParse(Box::new(crate::errors::ProtocolParseInfo {
         operation: "route-wire-message",
-        detail: "unroutable message".into(),
-    })
+        detail: String::new(),
+        method,
+        request_id,
+        payload_kind: Some(kind),
+        present_fields: Some(present_fields),
+    }))
+}
+
+fn error_operation(error: &AppServerError) -> &'static str {
+    match error {
+        AppServerError::ProtocolParse(info) => info.operation,
+        _ => "route-wire-message",
+    }
 }

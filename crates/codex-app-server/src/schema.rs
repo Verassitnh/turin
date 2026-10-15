@@ -80,7 +80,11 @@ pub fn validate_type(name: &str, value: &Value) -> Result<(), String> {
         cache.lock().insert(name.into(), compiled.clone());
         compiled
     };
-    validator.validate(value).map_err(|e| e.to_string())
+    // `masked` keeps the keyword and path but replaces the instance, so a
+    // rejected secret cannot leak into a protocol error or log line.
+    validator
+        .validate(value)
+        .map_err(|error| error.masked().to_string())
 }
 
 pub fn validate_optional(name: Option<&str>, value: Option<&Value>) -> Result<(), String> {

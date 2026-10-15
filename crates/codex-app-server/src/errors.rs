@@ -1,6 +1,7 @@
 //! Port of upstream/packages/effect-codex-app-server/src/errors.ts
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProtocolError {
@@ -55,34 +56,118 @@ impl ProtocolError {
     }
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProtocolParseInfo {
+    pub operation: &'static str,
+    pub detail: String,
+    pub method: Option<String>,
+    pub request_id: Option<String>,
+    pub payload_kind: Option<&'static str>,
+    pub present_fields: Option<Vec<&'static str>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum AppServerError {
-    #[error("failed to spawn Codex App Server process: {0}")]
     Spawn(String),
-    #[error("Codex App Server process exited with code {0:?}")]
     ProcessExited(Option<i32>),
-    #[error("Codex App Server protocol operation '{operation}' failed: {detail}")]
-    ProtocolParse {
-        operation: &'static str,
-        detail: String,
-    },
-    #[error("Codex App Server transport operation '{operation}' failed: {detail}")]
+    ProtocolParse(Box<ProtocolParseInfo>),
     Transport {
         operation: &'static str,
         detail: String,
     },
-    #[error("Codex App Server request {method} ({request_id}) failed: {error:?}")]
     Request {
         method: String,
         request_id: String,
         error: Box<ProtocolError>,
     },
-    #[error("Codex App Server input stream ended")]
     InputStreamEnded,
-    #[error("failed to generate Codex App Server identifier for {purpose}: {detail}")]
-    IdentifierGeneration { purpose: String, detail: String },
-    #[error("invalid Codex App Server payload for {method}: {detail}")]
-    InvalidPayload { method: String, detail: String },
-    #[error("Codex App Server request was cancelled")]
+    IdentifierGeneration {
+        purpose: String,
+        detail: String,
+    },
+    InvalidPayload {
+        method: String,
+        detail: String,
+    },
     Cancelled,
+}
+
+impl AppServerError {
+    pub(crate) fn protocol_parse(operation: &'static str, detail: impl Into<String>) -> Self {
+        Self::ProtocolParse(Box::new(ProtocolParseInfo {
+            operation,
+            detail: detail.into(),
+            method: None,
+            request_id: None,
+            payload_kind: None,
+            present_fields: None,
+        }))
+    }
+
+    /// JSON-RPC `error.message` when this is a peer request failure.
+    pub fn request_message(&self) -> Option<&str> {
+        match self {
+            Self::Request { error, .. } => Some(error.message.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for AppServerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Spawn(detail) => {
+                write!(f, "failed to spawn Codex App Server process: {detail}")
+            }
+            Self::ProcessExited(code) => {
+                write!(f, "Codex App Server process exited with code {code:?}")
+            }
+            Self::ProtocolParse(info) => {
+                let operation = info.operation;
+                let method = info.method.as_deref();
+                write!(
+                    f,
+                    "Codex App Server protocol operation '{operation}' failed"
+                )?;
+                if let Some(method) = method {
+                    write!(f, " for method '{method}'")?;
+                }
+                f.write_str(".")
+            }
+            Self::Transport { operation, detail } => write!(
+                f,
+                "Codex App Server transport operation '{operation}' failed: {detail}"
+            ),
+            Self::Request {
+                method,
+                request_id,
+                error,
+            } => write!(
+                f,
+                "Codex App Server request {method} ({request_id}) failed: {error:?}"
+            ),
+            Self::InputStreamEnded => f.write_str("Codex App Server input stream ended"),
+            Self::IdentifierGeneration { purpose, detail } => write!(
+                f,
+                "failed to generate Codex App Server identifier for {purpose}: {detail}"
+            ),
+            Self::InvalidPayload { method, detail } => {
+                write!(f, "invalid Codex App Server payload for {method}: {detail}")
+            }
+            Self::Cancelled => f.write_str("Codex App Server request was cancelled"),
+        }
+    }
+}
+
+impl std::error::Error for AppServerError {}
+
+pub(crate) fn payload_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Array(_) => "array",
+        Value::String(_) => "string",
+        Value::Number(_) => "number",
+        Value::Bool(_) => "boolean",
+        Value::Object(_) => "object",
+    }
 }

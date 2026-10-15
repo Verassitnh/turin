@@ -13,6 +13,10 @@
 //! right-click "Copy full path" menu (copying is on the row's right-click)
 //! and the panel test's machine-choice case.
 
+// A faithful port keeps upstream's whole API (PORTING rule 3); the hosts wire
+// the rest as the composer, thread details and settings tasks land.
+#![allow(dead_code)]
+
 pub mod backend;
 pub mod branch_selector;
 pub mod branch_toolbar_logic;
@@ -320,6 +324,7 @@ impl BranchToolbar {
 
     // ── Rendering ───────────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     fn workspace_menu_row(
         &self,
         id: &'static str,

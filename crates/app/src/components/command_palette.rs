@@ -21,6 +21,10 @@
 //! reducer is ported in full and those modes render a placeholder until their
 //! tasks land.
 
+// A faithful port keeps upstream's whole API (PORTING rule 3); the hosts wire
+// the rest as the composer, thread details and settings tasks land.
+#![allow(dead_code)]
+
 pub mod command_palette_content;
 pub mod command_palette_logic;
 pub mod command_palette_results;

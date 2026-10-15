@@ -10,6 +10,10 @@
 //! Previous worktree): choosing New worktree sets the draft's env mode, and
 //! the launch itself is the hooks' concern (PORTING.md cut list).
 
+// A faithful port keeps upstream's whole API (PORTING rule 3); the hosts wire
+// the rest as the composer, thread details and settings tasks land.
+#![allow(dead_code)]
+
 use gpui_kit::{AnyElement, IntoElement, ParentElement as _, Styled as _, div, rems};
 use turin_contracts::environment::EnvironmentMachineKind;
 

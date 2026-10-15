@@ -6,6 +6,10 @@
 //! strip's label collapse animation is replaced by an instant swap (see
 //! Deviations).
 
+// A faithful port keeps upstream's whole API (PORTING rule 3); the hosts wire
+// the rest as the composer, thread details and settings tasks land.
+#![allow(dead_code)]
+
 use std::rc::Rc;
 
 use gpui_kit::component::Selectable;

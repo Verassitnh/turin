@@ -24,6 +24,7 @@ use crate::ui::middle_truncate::MiddleTruncate;
 /// - `FaviconWorkspace`: same without harness
 /// - `FaviconBranchHarness`: GitBranch for local, FolderGit2 for worktrees, + harness
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum ThreadCommandSubtitleVariant {
     #[default]
     FaviconWorkspaceHarness,

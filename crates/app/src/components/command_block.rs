@@ -3,6 +3,10 @@
 //! A shell command to copy and run elsewhere: `$ command` in a bordered mono
 //! box with a copy button that flips to a check for 1.5s.
 
+// A faithful port keeps upstream's whole API (PORTING rule 3); the hosts wire
+// the rest as the composer, thread details and settings tasks land.
+#![allow(dead_code)]
+
 use std::time::Duration;
 
 use gpui_kit::prelude::FluentBuilder as _;

@@ -588,6 +588,7 @@ pub fn reduce_command_palette_ui_state(
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum CommandPaletteRow {
     Label {
         key: String,
@@ -738,6 +739,7 @@ pub fn build_command_palette_project_metadata(
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub struct BuildProjectActionItemsInput<'a> {
     pub projects: &'a [CommandPaletteProject],
     pub value_prefix: &'a str,
@@ -820,6 +822,7 @@ impl PaletteThread for EnvironmentThreadShell {
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub struct BuildThreadActionItemsInput<'a, T: PaletteThread> {
     pub threads: &'a [T],
     pub active_thread_id: Option<&'a ThreadId>,

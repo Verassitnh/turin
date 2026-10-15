@@ -11,6 +11,10 @@
 //! `AuthOrchestrationOperateScope`) went with the auth scopes: one process has
 //! no sessions, so every action is permitted.
 
+// A faithful port keeps upstream's whole API (PORTING rule 3); the hosts wire
+// the rest as the composer, thread details and settings tasks land.
+#![allow(dead_code)]
+
 use std::rc::Rc;
 
 use gpui_kit::{App, Task};

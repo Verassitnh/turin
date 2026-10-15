@@ -3,6 +3,10 @@
 //! state: `dirty` (default), `ahead`, `clean`, `behind`, `no-remote`,
 //! `not-repo`, `default-ref`, `pr-open`, `detached`, `running`.
 
+// A faithful port keeps upstream's whole API (PORTING rule 3); the hosts wire
+// the rest as the composer, thread details and settings tasks land.
+#![allow(dead_code)]
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;

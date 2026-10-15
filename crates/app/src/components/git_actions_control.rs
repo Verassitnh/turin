@@ -13,6 +13,10 @@
 //! write-scope gates (no sessions in one process) and the provider choice in
 //! Publish (GitHub is the one host Turin ships).
 
+// A faithful port keeps upstream's whole API (PORTING rule 3); the hosts wire
+// the rest as the composer, thread details and settings tasks land.
+#![allow(dead_code)]
+
 pub mod backend;
 pub mod commit_dialog;
 pub mod default_branch_dialog;

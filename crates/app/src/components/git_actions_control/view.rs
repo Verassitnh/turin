@@ -142,6 +142,7 @@ impl GitActionsControl {
     }
 
     /// One `MenuItem` of the chevron menu.
+    #[allow(clippy::too_many_arguments)]
     fn menu_row(
         &self,
         id: impl Into<gpui_kit::ElementId>,

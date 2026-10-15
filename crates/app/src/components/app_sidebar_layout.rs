@@ -260,6 +260,7 @@ impl AppSidebarLayout {
     }
 
     /// `openCommandPalette(detail)` for the rest of the app.
+    #[allow(dead_code)]
     pub fn open_command_palette(
         &mut self,
         detail: CommandPaletteOpenDetail,

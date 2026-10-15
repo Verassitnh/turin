@@ -401,7 +401,7 @@ impl CommandPalette {
                         .flex()
                         .items_center()
                         .gap_1()
-                        .children(previews.iter().map(|preview| theme_preview_circle(preview))),
+                        .children(previews.iter().map(theme_preview_circle)),
                 )
                 .into_any_element(),
         }

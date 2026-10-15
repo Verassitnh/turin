@@ -11,6 +11,10 @@
 //! failure; the right-click "Copy branch name" menu is a copy on
 //! right-click without a native menu.
 
+// A faithful port keeps upstream's whole API (PORTING rule 3); the hosts wire
+// the rest as the composer, thread details and settings tasks land.
+#![allow(dead_code)]
+
 use gpui_kit::component::Selectable as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -22,7 +26,7 @@ use gpui_kit::{
     AnyElement, AppContext as _, Context, CursorStyle, Entity, EventEmitter, FontWeight,
     InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, ScrollHandle,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    WeakEntity, Window, div, rems,
+    Window, div, rems,
 };
 use turin_contracts::git::{VcsRef, VcsStatusResult};
 use turin_contracts::{EnvironmentId, ThreadId};

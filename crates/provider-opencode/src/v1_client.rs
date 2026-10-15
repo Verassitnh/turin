@@ -320,13 +320,14 @@ impl V1Client {
         Pin<Box<dyn Stream<Item = Result<V1Frame, crate::error::EventStreamError>> + Send>>,
         OpenCodeRuntimeError,
     > {
-        if self.event_open.swap(true, Ordering::AcqRel) {
-            return Err(OpenCodeRuntimeError::new(
+        let claim = EventClaim::take(&self.event_open).ok_or_else(|| {
+            OpenCodeRuntimeError::new(
                 "event.subscribe",
                 "An OpenCode event subscription is already open for this client.",
-            ));
-        }
-        let frames = match self
+            )
+        })?;
+        // `claim` is released on an error, and on cancellation while the headers are awaited.
+        let frames = self
             .http
             .open_event_stream(
                 "event.subscribe",
@@ -335,14 +336,7 @@ impl V1Client {
                 last_event_id,
                 self.silent_timeout,
             )
-            .await
-        {
-            Ok(frames) => frames,
-            Err(err) => {
-                self.event_open.store(false, Ordering::Release);
-                return Err(err);
-            }
-        };
+            .await?;
         Ok(Box::pin(Subscribed {
             inner: Box::pin(filter_frames(frames, |frame| {
                 Some(V1Frame {
@@ -351,7 +345,7 @@ impl V1Client {
                     event: events::decode_v1_event(frame),
                 })
             })),
-            flag: Arc::clone(&self.event_open),
+            _claim: claim,
         }))
     }
 
@@ -450,12 +444,24 @@ pub struct V1Frame {
 
 struct Subscribed<S> {
     inner: S,
-    flag: Arc<AtomicBool>,
+    /// Freed with the stream; never read.
+    _claim: EventClaim,
 }
 
-impl<S> Drop for Subscribed<S> {
+/// The client's one subscription slot. Dropping it frees the slot, so a
+/// cancelled or failed open does not leave the client refusing every later
+/// subscribe.
+struct EventClaim(Arc<AtomicBool>);
+
+impl EventClaim {
+    fn take(flag: &Arc<AtomicBool>) -> Option<Self> {
+        (!flag.swap(true, Ordering::AcqRel)).then(|| Self(Arc::clone(flag)))
+    }
+}
+
+impl Drop for EventClaim {
     fn drop(&mut self) {
-        self.flag.store(false, Ordering::Release);
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -680,6 +686,32 @@ mod tests {
             .await
             .unwrap();
         assert!(replied);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_open_frees_the_subscription_slot() {
+        // Accepts connections and never answers, so the open is still waiting for headers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let client = V1Client::new(&url, "/work", None).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), client.events())
+                .await
+                .is_err()
+        );
+        // The second open must wait on the server like the first did, not fail as "already open".
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), client.events())
+                .await
+                .is_err(),
+            "a cancelled open left the client refusing subscriptions"
+        );
     }
 
     #[tokio::test]

@@ -218,15 +218,84 @@ impl SettingsView {
     }
 }
 
-/// `sourceIdFromUrl`: stable per hub; dots and dashes in the host are kept.
+/// `new URL(url).host` for the shapes a hub URL takes, or `None` where the WHATWG
+/// parser throws. The scheme and `//` authority are read as the parser reads them,
+/// userinfo is dropped and a default port is omitted. IDNA and percent-decoding
+/// are not applied (PORTING.md Deviations).
+fn url_host(input: &str) -> Option<String> {
+    let input = input.trim_matches(|c: char| c <= ' ');
+    let (scheme, rest) = input.split_once(':')?;
+    let mut chars = scheme.chars();
+    let valid_scheme = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    if !valid_scheme {
+        return None;
+    }
+    let scheme = scheme.to_ascii_lowercase();
+    let special = matches!(
+        scheme.as_str(),
+        "http" | "https" | "ws" | "wss" | "ftp" | "file"
+    );
+    let after_slashes = if special {
+        rest.trim_start_matches(['/', '\\'])
+    } else if let Some(authority) = rest.strip_prefix("//") {
+        authority
+    } else {
+        // An opaque path such as `hub.example.ts.net:8318` has no host.
+        return Some(String::new());
+    };
+    let end = after_slashes
+        .find(|c| matches!(c, '/' | '?' | '#') || (special && c == '\\'))
+        .unwrap_or(after_slashes.len());
+    let authority = &after_slashes[..end];
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let (host, port) = if authority.starts_with('[') {
+        let close = authority.find(']')?;
+        let (host, after) = authority.split_at(close + 1);
+        match after {
+            "" => (host, None),
+            _ => (host, Some(after.strip_prefix(':')?)),
+        }
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
+    let host = host.to_ascii_lowercase();
+    if host.is_empty() && special {
+        return None;
+    }
+    let port = match port {
+        None | Some("") => None,
+        Some(port) if port.bytes().all(|b| b.is_ascii_digit()) => {
+            let port: u16 = port.parse().ok()?;
+            (default_port(&scheme) != Some(port)).then_some(port)
+        }
+        Some(_) => return None,
+    };
+    Some(match port {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    })
+}
+
+fn default_port(scheme: &str) -> Option<u16> {
+    match scheme {
+        "http" | "ws" => Some(80),
+        "https" | "wss" => Some(443),
+        "ftp" => Some(21),
+        _ => None,
+    }
+}
+
+/// `sourceIdFromUrl`: stable per hub; dots and dashes in the host are kept, and
+/// anything else (a port's colon, a path) folds to a dash. Input that does not
+/// parse keeps its raw text, which the server reports on the row.
 pub fn usage_source_id_from_url(url: &str) -> String {
-    let host = url
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(url)
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("");
+    let host = url_host(url).unwrap_or_else(|| url.to_owned());
     let mut slug = String::new();
     let mut last_dash = false;
     for ch in host.to_lowercase().chars() {
@@ -369,6 +438,8 @@ impl SettingsView {
 
 #[cfg(test)]
 mod tests {
+    use pretty_assertions::assert_eq;
+
     use super::usage_source_id_from_url;
 
     #[test]
@@ -382,5 +453,34 @@ mod tests {
             "cliproxy-foo-bar.com"
         );
         assert_eq!(usage_source_id_from_url("://"), "cliproxy-hub");
+    }
+
+    #[test]
+    fn reads_the_host_the_way_the_url_parser_does() {
+        // A scheme-less `host:port` parses as an opaque URL with an empty host.
+        assert_eq!(
+            usage_source_id_from_url("hub.example.ts.net:8318"),
+            "cliproxy-hub"
+        );
+        // Userinfo is not part of the host.
+        assert_eq!(
+            usage_source_id_from_url("https://u:p@host"),
+            "cliproxy-host"
+        );
+        // A default port is not part of the host.
+        assert_eq!(
+            usage_source_id_from_url("HTTPS://Hub.Example.com:443/"),
+            "cliproxy-hub.example.com"
+        );
+        // Unparseable input keeps its raw text, path included.
+        assert_eq!(
+            usage_source_id_from_url("hub.example.ts.net/path"),
+            "cliproxy-hub.example.ts.net-path"
+        );
+        // An empty host on a special scheme throws, so the raw text is slugged.
+        assert_eq!(
+            usage_source_id_from_url("https://:8318"),
+            "cliproxy-https-8318"
+        );
     }
 }

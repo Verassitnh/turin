@@ -33,6 +33,7 @@ pub mod image;
 pub mod image_dimensions;
 pub mod inline_skills;
 pub mod js_string;
+pub mod keybindings;
 pub mod keyed_coalescing_worker;
 pub mod keyed_lock;
 pub mod logging;

@@ -23,7 +23,9 @@ pub use icon::{Icon, IconName};
 #[allow(unused_imports)]
 pub use kbd::{Kbd, KbdGroup};
 #[allow(unused_imports)]
-pub use popover::{PopoverPadding, popover, popover_title};
+pub use popover::{
+    PopoverOptions, PopoverPadding, PopoverVariant, PopoverWidth, popover, popover_title,
+};
 #[allow(unused_imports)]
 pub use scroll_area::{scroll_area, scroll_area_hidden};
 #[allow(unused_imports)]

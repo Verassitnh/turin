@@ -334,20 +334,20 @@ fn form_urlencoded(pairs: &[(&str, &str)]) -> String {
 /// for editors without remote deep-link support.
 pub fn build_remote_open_url(editor: EditorId, host: &str, absolute_path: &str) -> Option<String> {
     let scheme = remote_scheme_for_editor(editor)?;
-    if let Some(definition) = editor_definition(editor) {
-        if let Some(product_code) = definition.jetbrains_product_code {
-            // Like the VS Code link, no user or port: the SSH config entry
-            // for `host` supplies them. A bare product code lets Toolbox pick
-            // the backend build.
-            let project_hint = absolute_path.replace('\\', "/");
-            let query = form_urlencoded(&[
-                ("h", host),
-                ("launchIde", "true"),
-                ("ideHint", product_code),
-                ("projectHint", &project_hint),
-            ]);
-            return Some(format!("{scheme}://gateway/ssh/environment?{query}"));
-        }
+    if let Some(definition) = editor_definition(editor)
+        && let Some(product_code) = definition.jetbrains_product_code
+    {
+        // Like the VS Code link, no user or port: the SSH config entry
+        // for `host` supplies them. A bare product code lets Toolbox pick
+        // the backend build.
+        let project_hint = absolute_path.replace('\\', "/");
+        let query = form_urlencoded(&[
+            ("h", host),
+            ("launchIde", "true"),
+            ("ideHint", product_code),
+            ("projectHint", &project_hint),
+        ]);
+        return Some(format!("{scheme}://gateway/ssh/environment?{query}"));
     }
     // Windows server paths (`C:\...`) appear as `/C:/...` in vscode-remote URIs.
     let posix_path = absolute_path.replace('\\', "/");
@@ -565,6 +565,34 @@ pub enum ExternalLauncherError {
     EditorSpawn(ExternalLauncherEditorSpawnError),
 }
 
+impl std::fmt::Display for EditorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Cursor => "cursor",
+            Self::Trae => "trae",
+            Self::Kiro => "kiro",
+            Self::Vscode => "vscode",
+            Self::VscodeInsiders => "vscode-insiders",
+            Self::Vscodium => "vscodium",
+            Self::Zed => "zed",
+            Self::Antigravity => "antigravity",
+            Self::Idea => "idea",
+            Self::Aqua => "aqua",
+            Self::Clion => "clion",
+            Self::Datagrip => "datagrip",
+            Self::Dataspell => "dataspell",
+            Self::Goland => "goland",
+            Self::Phpstorm => "phpstorm",
+            Self::Pycharm => "pycharm",
+            Self::Rider => "rider",
+            Self::Rubymine => "rubymine",
+            Self::Rustrover => "rustrover",
+            Self::Webstorm => "webstorm",
+            Self::FileManager => "file-manager",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,32 +645,61 @@ mod tests {
         assert_eq!(uri_component("a b/c"), "a%20b%2Fc");
         assert_eq!(uri_component("ü"), "%C3%BC");
     }
-}
 
-impl std::fmt::Display for EditorId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Cursor => "cursor",
-            Self::Trae => "trae",
-            Self::Kiro => "kiro",
-            Self::Vscode => "vscode",
-            Self::VscodeInsiders => "vscode-insiders",
-            Self::Vscodium => "vscodium",
-            Self::Zed => "zed",
-            Self::Antigravity => "antigravity",
-            Self::Idea => "idea",
-            Self::Aqua => "aqua",
-            Self::Clion => "clion",
-            Self::Datagrip => "datagrip",
-            Self::Dataspell => "dataspell",
-            Self::Goland => "goland",
-            Self::Phpstorm => "phpstorm",
-            Self::Pycharm => "pycharm",
-            Self::Rider => "rider",
-            Self::Rubymine => "rubymine",
-            Self::Rustrover => "rustrover",
-            Self::Webstorm => "webstorm",
-            Self::FileManager => "file-manager",
-        })
+    #[test]
+    fn launcher_error_union_decodes_by_tag_and_formats_messages() {
+        use serde_json::json;
+        let samples = [
+            (
+                json!({ "_tag": "ExternalLauncherUnknownEditorError", "editor": "emacs" }),
+                "Unknown editor: emacs",
+            ),
+            (
+                json!({ "_tag": "ExternalLauncherUnsupportedEditorError", "editor": "zed" }),
+                "Unsupported editor: zed",
+            ),
+            (
+                json!({ "_tag": "ExternalLauncherCommandNotFoundError", "editor": "zed", "command": "zed" }),
+                "Editor command not found: zed",
+            ),
+            (
+                json!({ "_tag": "ExternalLauncherUnsupportedTargetError", "editor": "cursor" }),
+                "cursor cannot open a path containing line breaks or double quotes",
+            ),
+            (
+                json!({ "_tag": "ExternalLauncherBrowserSpawnError", "command": "open", "args": ["-a", "x"], "cause": "e", "target": "https://a" }),
+                "Failed to launch browser target 'https://a' with 'open -a x'",
+            ),
+            (
+                json!({ "_tag": "ExternalLauncherEditorSpawnError", "command": "code", "args": ["--goto"], "cause": null, "editor": "vscode", "target": "/p" }),
+                "Failed to launch '/p' in vscode with 'code --goto'",
+            ),
+        ];
+        for (sample, message) in samples {
+            let error: ExternalLauncherError = serde_json::from_value(sample.clone()).unwrap();
+            assert_eq!(error.to_string(), message);
+            assert_eq!(serde_json::to_value(&error).unwrap(), sample);
+        }
+        assert!(
+            serde_json::from_value::<ExternalLauncherError>(
+                json!({ "_tag": "ExternalLauncherUnsupportedEditorError", "editor": "emacs" })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn launch_input_reveal_is_optional() {
+        let input: LaunchEditorInput =
+            serde_json::from_value(serde_json::json!({ "cwd": " /p ", "editor": "file-manager" }))
+                .unwrap();
+        assert_eq!(input.cwd.as_str(), "/p");
+        assert_eq!(input.reveal, None);
+        assert!(
+            serde_json::from_value::<LaunchEditorInput>(
+                serde_json::json!({ "cwd": "/p", "editor": "emacs" })
+            )
+            .is_err()
+        );
     }
 }

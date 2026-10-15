@@ -4,19 +4,18 @@
 //! branch), so the pieces these helpers need are written here, each tagged with the upstream file
 //! it comes from. Once the app depends on `turin-shared`, replace the matching section with a
 //! `use`.
+//!
+//! The path, model, change-request URL, thread pull-request and source-control key helpers are
+//! not here: each has exactly one copy under `state/support/` (see PORTING.md, DEDUP).
 
-use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::sync::LazyLock;
 
 use regex::Regex;
-use turin_contracts::model::model_slug_aliases_by_provider;
-use turin_contracts::thread_pull_request::{
-    ThreadLinkedPullRequest, ThreadPullRequestKey, ThreadPullRequestLink,
-    ThreadPullRequestLinkSource,
-};
-use turin_contracts::{TrimmedNonEmptyString, js_trim};
+use turin_contracts::js_trim;
 use url::Url;
+
+use crate::state::support::path::strip_slash_prefixed_windows_drive;
 
 /// The members of JS `\s` (ECMAScript WhiteSpace and LineTerminator), as the inside of a regex
 /// character class. Rust's `\s` differs: it has U+0085 and lacks U+FEFF.
@@ -41,56 +40,6 @@ pub fn is_js_whitespace(c: char) -> bool {
             | '\u{3000}'
             | '\u{FEFF}'
     )
-}
-
-// ---------------------------------------------------------------------------------------------
-// upstream: packages/shared/src/path.ts
-// ---------------------------------------------------------------------------------------------
-
-/// `/^[a-zA-Z]:([/\\]|$)/`
-pub fn is_windows_drive_path(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() >= 2
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes.len() == 2 || bytes[2] == b'/' || bytes[2] == b'\\')
-}
-
-pub fn is_unc_path(value: &str) -> bool {
-    value.starts_with("\\\\")
-}
-
-pub fn is_windows_absolute_path(value: &str) -> bool {
-    is_unc_path(value) || is_windows_drive_path(value)
-}
-
-/// Browser URL parsers write `C:/foo` as `/C:/foo` for file URLs.
-/// (`/^\/[A-Za-z]:[\\/]/`)
-pub fn strip_slash_prefixed_windows_drive(path: &str) -> &str {
-    let bytes = path.as_bytes();
-    if bytes.len() >= 4
-        && bytes[0] == b'/'
-        && bytes[1].is_ascii_alphabetic()
-        && bytes[2] == b':'
-        && (bytes[3] == b'\\' || bytes[3] == b'/')
-    {
-        &path[1..]
-    } else {
-        path
-    }
-}
-
-pub fn file_basename(path: &str) -> &str {
-    // A trailing separator is a valid way to write a directory. Trim it before
-    // taking the final segment so the label is never empty.
-    let trimmed = path.trim_end_matches(['/', '\\']);
-    if trimmed.is_empty() {
-        return path;
-    }
-    match trimmed.rfind(['/', '\\']) {
-        Some(index) => &trimmed[index + 1..],
-        None => trimmed,
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -269,7 +218,9 @@ pub fn split_file_path_position(path: &str, hash: &str) -> FilePathPosition {
 }
 
 // ---------------------------------------------------------------------------------------------
-// upstream: packages/shared/src/{filePreview,video,image}.ts
+// upstream: packages/shared/src/{video,image}.ts (mime types only; `filePreview.ts` is not
+// ported here: `decodeFilePreviewText` and `FILE_TEXT_PREVIEW_MAX_BYTES` live in turin-shared's
+// `file_preview.rs`, see PORTING.md DEDUP)
 // ---------------------------------------------------------------------------------------------
 
 fn image_mime_type_by_extension(extension: &str) -> Option<&'static str> {
@@ -511,74 +462,6 @@ pub fn compare_semver_versions(left: &str, right: &str) -> Ordering {
 }
 
 // ---------------------------------------------------------------------------------------------
-// upstream: packages/shared/src/model.ts
-// ---------------------------------------------------------------------------------------------
-
-/// `SelectableModelOption`: what `resolve_selectable_model` reads from a model entry.
-pub trait SelectableModelOption {
-    fn slug(&self) -> &str;
-    fn name(&self) -> &str;
-    fn aliases(&self) -> Option<&[String]>;
-}
-
-/// Custom model identifiers are provider-owned, so only trim them; never expand aliases.
-pub fn normalize_custom_model_slug(model: Option<&str>) -> Option<&str> {
-    model.map(js_trim).filter(|trimmed| !trimmed.is_empty())
-}
-
-pub fn normalize_model_slug<'a>(model: Option<&'a str>, provider: &str) -> Option<Cow<'a, str>> {
-    let trimmed = normalize_custom_model_slug(model)?;
-    let aliased = model_slug_aliases_by_provider(provider).and_then(|aliases| {
-        aliases
-            .iter()
-            .find(|(alias, _)| *alias == trimmed)
-            .map(|(_, canonical)| *canonical)
-    });
-    Some(match aliased {
-        Some(canonical) => Cow::Borrowed(canonical),
-        None => Cow::Borrowed(trimmed),
-    })
-}
-
-pub fn resolve_selectable_model<'a, T: SelectableModelOption>(
-    provider: &str,
-    value: Option<&str>,
-    options: &'a [T],
-) -> Option<&'a str> {
-    let trimmed = js_trim(value?);
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Some(direct) = options.iter().find(|option| option.slug() == trimmed) {
-        return Some(direct.slug());
-    }
-
-    let lowered = trimmed.to_lowercase();
-    if let Some(by_name) = options
-        .iter()
-        .find(|option| option.name().to_lowercase() == lowered)
-    {
-        return Some(by_name.slug());
-    }
-
-    let by_alias = options.iter().find(|option| {
-        option
-            .aliases()
-            .is_some_and(|aliases| aliases.iter().any(|alias| alias.to_lowercase() == lowered))
-    });
-    if let Some(by_alias) = by_alias {
-        return Some(by_alias.slug());
-    }
-
-    let normalized = normalize_model_slug(Some(trimmed), provider)?;
-    options
-        .iter()
-        .find(|option| option.slug() == normalized)
-        .map(|option| option.slug())
-}
-
-// ---------------------------------------------------------------------------------------------
 // upstream: packages/shared/src/inlineSkills.ts
 // ---------------------------------------------------------------------------------------------
 
@@ -616,312 +499,6 @@ pub struct PromptLinkPullRequest {
     pub owner: String,
     pub name: String,
     pub number: u64,
-}
-
-// ---------------------------------------------------------------------------------------------
-// upstream: packages/shared/src/changeRequestUrl.ts
-// ---------------------------------------------------------------------------------------------
-
-/// A change request named the way a thread link names one: the host below which the repository
-/// is addressed, the repository path as that host writes it, and the number.
-///
-/// The two strings are what `pullRequestHostOf` and the project's `repositoryIdentity` produce
-/// from a git remote: lower case, no port, the full path below the host. Links are matched
-/// against those, so anything else matches nothing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChangeRequestLink {
-    pub host: String,
-    pub repository: String,
-    pub number: u64,
-    /// Forgejo's HTTP host and port, separate from the portless repository identity.
-    pub authority: Option<String>,
-}
-
-/// The host itself, one of its subdomains, or an install named after the provider.
-fn is_host_of(hostname: &str, apex: &str, label: Option<&str>) -> bool {
-    if hostname == apex || hostname.ends_with(&format!(".{apex}")) {
-        return true;
-    }
-    label.is_some_and(|label| hostname.split('.').any(|part| part == label))
-}
-
-fn path_regex(pattern: &str) -> Regex {
-    Regex::new(pattern).expect("valid regex")
-}
-
-static GITCAFE_PATH: LazyLock<Regex> =
-    LazyLock::new(|| path_regex(r"^/([^/]+/[^/]+)/pulls/([0-9]+)(?:/|$)"));
-static GITHUB_PATH: LazyLock<Regex> =
-    LazyLock::new(|| path_regex(r"^/([^/]+/[^/]+)/pull/([0-9]+)(?:/|$)"));
-static FORGEJO_PATH: LazyLock<Regex> =
-    LazyLock::new(|| path_regex(r"^/([^/]+(?:/[^/]+)+)/pulls/([0-9]+)(?:/|$)"));
-static GITLAB_PATH: LazyLock<Regex> =
-    LazyLock::new(|| path_regex(r"^/([^/]+(?:/[^/]+)+)/-/merge_requests/([0-9]+)(?:/|$)"));
-static BITBUCKET_PATH: LazyLock<Regex> =
-    LazyLock::new(|| path_regex(r"^/([^/]+/[^/]+)/pull-requests/([0-9]+)(?:/|$)"));
-static AZURE_PATH: LazyLock<Regex> =
-    LazyLock::new(|| path_regex(r"^/((?:[^/]+/)*_git/[^/]+)/pullrequest/([0-9]+)(?:/|$)"));
-
-/// JS `URL.host`: the hostname plus the port when it is not the scheme's default.
-pub fn url_host_with_port(url: &Url) -> String {
-    let hostname = url.host_str().unwrap_or("");
-    match url.port() {
-        Some(port) => format!("{hostname}:{port}"),
-        None => hostname.to_owned(),
-    }
-}
-
-/// The repository and number behind a change request URL on a host this can read, or `None` for
-/// anything else: an issue, a commit, a repository root, a host this cannot tell apart from an
-/// ordinary link. A doubtful match is worse than no match, so nothing here guesses.
-///
-/// Each host is recognised by the path shape it alone uses, guarded by a hostname it could
-/// plausibly be served from, since self-hosted installs are named whatever their admin chose:
-/// GitLab's `/-/` marker is unique enough to trust on any hostname, while `/pull/` is generic
-/// enough that it is only believed from a GitHub-ish host.
-///
-/// Nothing here tries to tell a lookalike hostname from a real one: `github.com.evil.test` and
-/// the rest are an open set, and blocking spellings of it costs real hosts (`gitlab.com.br` is a
-/// registrable domain). What a claim is worth is decided where it is used.
-pub fn parse_change_request_url(target_url: &str) -> Option<ChangeRequestLink> {
-    let url = Url::parse(target_url).ok()?;
-    // `javascript:`, `mailto:` and friends have no host to speak of and nothing to open.
-    if url.scheme() != "https" && url.scheme() != "http" {
-        return None;
-    }
-    let host = url.host_str().unwrap_or("").to_lowercase();
-    let pathname = url.path();
-
-    // GitCafe, only on its own two hosts: /{owner}/{repo}/pulls/{n}
-    if host == "git.cafe" || host == "staging.git.cafe" {
-        return claim(&host, GITCAFE_PATH.captures(pathname));
-    }
-    // GitHub, and any Enterprise install: /{owner}/{repo}/pull/{n}
-    if is_host_of(&host, "github.com", Some("github"))
-        && let Some(captures) = GITHUB_PATH.captures(pathname)
-    {
-        return claim(&host, Some(captures));
-    }
-    // Forgejo and Gitea use /pulls/ on arbitrary self-hosted domains.
-    if let Some(forgejo) = FORGEJO_PATH.captures(pathname) {
-        return claim(&host, Some(forgejo)).map(|link| ChangeRequestLink {
-            authority: Some(url_host_with_port(&url).to_lowercase()),
-            ..link
-        });
-    }
-    // GitLab, self-hosted included: /{group}/[{subgroup}/...]{repo}/-/merge_requests/{n}. The `/-/`
-    // separator is GitLab's own, so the hostname is not asked about.
-    if let Some(gitlab) = GITLAB_PATH.captures(pathname) {
-        return claim(&host, Some(gitlab));
-    }
-    // Bitbucket Cloud: /{workspace}/{repo}/pull-requests/{n}
-    if is_host_of(&host, "bitbucket.org", Some("bitbucket")) {
-        return claim(&host, BITBUCKET_PATH.captures(pathname));
-    }
-    // Azure DevOps, both the current host and the per-organisation one it replaced. `_git` is part
-    // of the repository path there, as it is in the remote URL the identity is read from.
-    if is_host_of(&host, "dev.azure.com", None) || host.ends_with(".visualstudio.com") {
-        return claim(&host, AZURE_PATH.captures(pathname));
-    }
-    None
-}
-
-fn claim(host: &str, captures: Option<regex::Captures<'_>>) -> Option<ChangeRequestLink> {
-    let captures = captures?;
-    let repository = captures
-        .get(1)
-        .map(|m| m.as_str())
-        .filter(|s| !s.is_empty())?;
-    let number: u64 = captures.get(2)?.as_str().parse().ok()?;
-    // `Number.isSafeInteger(number) && number > 0`
-    (number > 0 && number <= 9_007_199_254_740_991).then(|| ChangeRequestLink {
-        host: host.to_owned(),
-        repository: repository.to_lowercase(),
-        number,
-        authority: None,
-    })
-}
-
-// ---------------------------------------------------------------------------------------------
-// upstream: packages/shared/src/sourceControl.ts
-// ---------------------------------------------------------------------------------------------
-
-static AZURE_SSH_KEY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?:ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)/v3/([^/]+)/([^/]+)/([^/]+)$")
-        .expect("valid regex")
-});
-static AZURE_LEGACY_KEY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^([^.]+)\.visualstudio\.com/(?:defaultcollection/)?([^/]+)/_git/([^/]+)$")
-        .expect("valid regex")
-});
-
-pub fn canonical_repository_key(key: &str) -> String {
-    let first = AZURE_SSH_KEY.replace(key, "dev.azure.com/${1}/${2}/_git/${3}");
-    AZURE_LEGACY_KEY
-        .replace(&first, "dev.azure.com/${1}/${2}/_git/${3}")
-        .into_owned()
-}
-
-// ---------------------------------------------------------------------------------------------
-// upstream: packages/shared/src/threadPullRequests.ts (the key helpers)
-// ---------------------------------------------------------------------------------------------
-
-/// `ThreadPullRequestKey & { authority?, url? }`.
-#[derive(Debug, Clone, Copy)]
-pub struct ThreadPullRequestKeySource<'a> {
-    pub host: &'a str,
-    pub repository: &'a str,
-    pub number: u64,
-    pub authority: Option<&'a str>,
-    pub url: Option<&'a str>,
-}
-
-impl<'a> From<&'a ThreadPullRequestLink> for ThreadPullRequestKeySource<'a> {
-    fn from(link: &'a ThreadPullRequestLink) -> Self {
-        Self {
-            host: link.host.as_str(),
-            repository: link.repository.as_str(),
-            number: link.number.get(),
-            authority: None,
-            url: Some(link.url.as_str()),
-        }
-    }
-}
-
-impl<'a> From<&'a ThreadPullRequestKey> for ThreadPullRequestKeySource<'a> {
-    fn from(key: &'a ThreadPullRequestKey) -> Self {
-        Self {
-            host: key.host.as_str(),
-            repository: key.repository.as_str(),
-            number: key.number.get(),
-            authority: None,
-            url: None,
-        }
-    }
-}
-
-/// A normalized `ThreadPullRequestKey`. Plain strings: normalizing can in principle yield a part
-/// the contract's non-empty type would refuse, and comparing keys must never fail.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NormalizedThreadPullRequestKey {
-    pub host: String,
-    pub repository: String,
-    pub number: u64,
-}
-
-/// Normalize stored links, recovering Forgejo HTTP ports from old links' URLs.
-pub fn normalize_thread_pull_request_key(
-    key: &ThreadPullRequestKeySource<'_>,
-) -> NormalizedThreadPullRequestKey {
-    let parsed = key.url.and_then(parse_change_request_url);
-    let authority: Option<String> = match key.authority {
-        Some(authority) => Some(authority.to_owned()),
-        None => parsed
-            .as_ref()
-            .filter(|parsed| {
-                parsed.repository == js_trim(key.repository).to_lowercase()
-                    && parsed.number == key.number
-            })
-            .and_then(|parsed| parsed.authority.clone()),
-    };
-    let canonical = canonical_repository_key(&format!(
-        "{}/{}",
-        js_trim(authority.as_deref().unwrap_or(key.host)).to_lowercase(),
-        js_trim(key.repository).to_lowercase()
-    ));
-    let separator = canonical.find('/').unwrap_or(canonical.len());
-    NormalizedThreadPullRequestKey {
-        host: canonical[..separator].to_owned(),
-        repository: canonical.get(separator + 1..).unwrap_or("").to_owned(),
-        number: key.number,
-    }
-}
-
-/// Legacy Azure selectors omit the organization and project; recover those from the PR URL.
-pub fn legacy_thread_pull_request_key(
-    linked: &ThreadLinkedPullRequest,
-    fallback_host: Option<&str>,
-) -> NormalizedThreadPullRequestKey {
-    if let Some(parsed) = parse_change_request_url(linked.url.as_str())
-        && parsed.number == linked.number.get()
-    {
-        let canonical = canonical_repository_key(&format!("{}/{}", parsed.host, parsed.repository));
-        if parsed.authority.is_some() || canonical.starts_with("dev.azure.com/") {
-            return normalize_thread_pull_request_key(&ThreadPullRequestKeySource {
-                host: &parsed.host,
-                repository: &parsed.repository,
-                number: parsed.number,
-                authority: parsed.authority.as_deref(),
-                url: None,
-            });
-        }
-    }
-    let host: String = match fallback_host {
-        Some(host) => host.to_owned(),
-        None => match Url::parse(linked.url.as_str()) {
-            Ok(url) => url.host_str().unwrap_or("").to_owned(),
-            Err(_) => "unknown".to_owned(),
-        },
-    };
-    let host = js_trim(&host).to_lowercase();
-    NormalizedThreadPullRequestKey {
-        host: if host.is_empty() {
-            "unknown".to_owned()
-        } else {
-            host
-        },
-        repository: js_trim(linked.repository.as_str()).to_lowercase(),
-        number: linked.number.get(),
-    }
-}
-
-pub fn thread_pull_request_key_of(key: &ThreadPullRequestKeySource<'_>) -> String {
-    let normalized = normalize_thread_pull_request_key(key);
-    format!(
-        "{}/{}#{}",
-        normalized.host, normalized.repository, normalized.number
-    )
-}
-
-/// Links a user should see. Tombstoned stack members stay in the array only so the
-/// sync reactor does not re-add them.
-pub fn visible_thread_pull_requests(
-    links: &[ThreadPullRequestLink],
-) -> Vec<&ThreadPullRequestLink> {
-    links
-        .iter()
-        .filter(|link| link.source != ThreadPullRequestLinkSource::StackDismissed)
-        .collect()
-}
-
-/// Older V2 event payloads stored one link; an explicit empty array means it was unlinked.
-pub fn thread_pull_requests_of<'a>(
-    pull_requests: Option<&'a [ThreadPullRequestLink]>,
-    linked_pull_request: Option<&ThreadLinkedPullRequest>,
-) -> Cow<'a, [ThreadPullRequestLink]> {
-    if let Some(pull_requests) = pull_requests {
-        return Cow::Borrowed(pull_requests);
-    }
-    let Some(linked) = linked_pull_request else {
-        return Cow::Borrowed(&[]);
-    };
-    let key = legacy_thread_pull_request_key(linked, None);
-    // The legacy key's parts are non-empty by construction; a link that still cannot be built is
-    // dropped rather than invented.
-    let link = (|| {
-        Some(ThreadPullRequestLink {
-            host: TrimmedNonEmptyString::new(&key.host).ok()?,
-            repository: TrimmedNonEmptyString::new(&key.repository).ok()?,
-            number: linked.number,
-            url: linked.url.clone(),
-            source: ThreadPullRequestLinkSource::Manual,
-            linked_at: "1970-01-01T00:00:00.000Z".to_owned(),
-            snapshot: None,
-            stack: None,
-            watch: None,
-        })
-    })();
-    Cow::Owned(link.into_iter().collect())
 }
 
 #[cfg(test)]
@@ -962,49 +539,6 @@ mod tests {
         assert_eq!(compare_semver_versions("2.1.0-beta", "2.1.0-beta.1"), Less);
         // `split("-", 2)` drops everything past the second piece.
         assert_eq!(normalize_semver_version("1.0.0-beta-1"), "1.0.0-beta");
-    }
-
-    #[test]
-    fn parses_change_request_urls_by_host_shape() {
-        let link = |url: &str| {
-            parse_change_request_url(url).map(|l| (l.host, l.repository, l.number, l.authority))
-        };
-        assert_eq!(
-            link("https://github.com/Acme/Web/pull/7/files"),
-            Some(("github.com".into(), "acme/web".into(), 7, None))
-        );
-        assert_eq!(
-            link("http://forge.example:3000/team/repo/pulls/7"),
-            Some((
-                "forge.example".into(),
-                "team/repo".into(),
-                7,
-                Some("forge.example:3000".into())
-            ))
-        );
-        assert_eq!(
-            link("https://gitlab.com/g/s/r/-/merge_requests/3"),
-            Some(("gitlab.com".into(), "g/s/r".into(), 3, None))
-        );
-        assert_eq!(link("https://github.com/acme/web/issues/7"), None);
-        assert_eq!(link("javascript:alert(1)"), None);
-        assert_eq!(link("https://github.com/acme/web/pull/0"), None);
-    }
-
-    #[test]
-    fn canonicalizes_azure_repository_keys() {
-        assert_eq!(
-            canonical_repository_key("ssh.dev.azure.com/v3/org/project/web"),
-            "dev.azure.com/org/project/_git/web"
-        );
-        assert_eq!(
-            canonical_repository_key("org.visualstudio.com/defaultcollection/project/_git/web"),
-            "dev.azure.com/org/project/_git/web"
-        );
-        assert_eq!(
-            canonical_repository_key("github.com/acme/web"),
-            "github.com/acme/web"
-        );
     }
 
     #[test]

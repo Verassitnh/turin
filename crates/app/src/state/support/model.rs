@@ -1,5 +1,6 @@
 //! Ports of the slice of upstream/packages/shared/src/model.ts the view-model
-//! layer reads (model labels and catalog resolution).
+//! layer reads (model labels and catalog resolution). The one copy in the app
+//! state; see PORTING.md, DEDUP.
 
 use std::sync::LazyLock;
 
@@ -7,12 +8,33 @@ use regex::Regex;
 
 use turin_contracts::model::model_slug_aliases_by_provider;
 
-/// `SelectableModelOption`.
+/// What `resolve_selectable_model` reads from a model entry (upstream's
+/// `SelectableModelOption`). Implemented by provider model rows so resolution
+/// borrows them instead of copying each catalog per call.
+pub trait SelectableModelOption {
+    fn slug(&self) -> &str;
+    fn name(&self) -> &str;
+    fn aliases(&self) -> Option<&[String]>;
+}
+
+/// A plain selectable model, for callers that have no catalog row type of their own.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SelectableModelOption {
+pub struct SelectableModel {
     pub slug: String,
     pub name: String,
     pub aliases: Vec<String>,
+}
+
+impl SelectableModelOption for SelectableModel {
+    fn slug(&self) -> &str {
+        &self.slug
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn aliases(&self) -> Option<&[String]> {
+        Some(&self.aliases)
+    }
 }
 
 /// `formatCodexModelName`.
@@ -85,39 +107,38 @@ pub fn normalize_model_slug(model: Option<&str>, driver: &str) -> Option<String>
     Some(aliased.map_or(trimmed, |(_, canonical)| (*canonical).to_owned()))
 }
 
-/// `resolveSelectableModel`.
-pub fn resolve_selectable_model(
+/// `resolveSelectableModel`: the option's slug for a typed slug, name, alias or known alias.
+pub fn resolve_selectable_model<'a, T: SelectableModelOption>(
     driver: &str,
     value: Option<&str>,
-    options: &[SelectableModelOption],
-) -> Option<String> {
+    options: &'a [T],
+) -> Option<&'a str> {
     let trimmed = turin_contracts::js_trim(value?);
     if trimmed.is_empty() {
         return None;
     }
-    if let Some(direct) = options.iter().find(|option| option.slug == trimmed) {
-        return Some(direct.slug.clone());
+    if let Some(direct) = options.iter().find(|option| option.slug() == trimmed) {
+        return Some(direct.slug());
     }
     let lower = trimmed.to_lowercase();
     if let Some(by_name) = options
         .iter()
-        .find(|option| option.name.to_lowercase() == lower)
+        .find(|option| option.name().to_lowercase() == lower)
     {
-        return Some(by_name.slug.clone());
+        return Some(by_name.slug());
     }
     if let Some(by_alias) = options.iter().find(|option| {
         option
-            .aliases
-            .iter()
-            .any(|alias| alias.to_lowercase() == lower)
+            .aliases()
+            .is_some_and(|aliases| aliases.iter().any(|alias| alias.to_lowercase() == lower))
     }) {
-        return Some(by_alias.slug.clone());
+        return Some(by_alias.slug());
     }
     let normalized = normalize_model_slug(Some(trimmed), driver)?;
     options
         .iter()
-        .find(|option| option.slug == normalized)
-        .map(|option| option.slug.clone())
+        .find(|option| option.slug() == normalized)
+        .map(|option| option.slug())
 }
 
 #[cfg(test)]
@@ -142,18 +163,17 @@ mod tests {
 
     #[test]
     fn resolves_selectable_models() {
-        let options = vec![SelectableModelOption {
+        let options = vec![SelectableModel {
             slug: "claude-haiku-4-5".into(),
             name: "Claude Haiku 4.5".into(),
             aliases: vec!["claude-haiku-4-5-20251001".into()],
         }];
         assert_eq!(
-            resolve_selectable_model("claudeAgent", Some("claude-haiku-4-5-20251001"), &options)
-                .as_deref(),
+            resolve_selectable_model("claudeAgent", Some("claude-haiku-4-5-20251001"), &options),
             Some("claude-haiku-4-5")
         );
         assert_eq!(
-            resolve_selectable_model("claudeAgent", Some("CLAUDE HAIKU 4.5"), &options).as_deref(),
+            resolve_selectable_model("claudeAgent", Some("CLAUDE HAIKU 4.5"), &options),
             Some("claude-haiku-4-5")
         );
         assert_eq!(resolve_selectable_model("codex", Some(" "), &options), None);

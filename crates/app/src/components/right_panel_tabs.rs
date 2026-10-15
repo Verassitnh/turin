@@ -32,6 +32,7 @@ fn surface_tab(
     let theme = cx.app_theme().clone();
     let tab = div()
         .id(id)
+        .group(id)
         .on_mouse_down(MouseButton::Left, no_drag)
         .flex()
         .h_6()
@@ -45,6 +46,8 @@ fn surface_tab(
         .text_size(TEXT_XS.size)
         .cursor(CursorStyle::PointingHand)
         // PanelTabCloseButton slot: a `size-4` box around the `size-3` surface icon.
+        // The icon turns foreground with the tab (`group-hover/tab`); upstream
+        // swaps it for an X there, which is cut with the close action.
         .child(
             div()
                 .flex()
@@ -52,11 +55,16 @@ fn surface_tab(
                 .size(rems(1.))
                 .items_center()
                 .justify_center()
-                .child(Icon::new(icon).size(rems(0.75)).color(if active {
-                    theme.foreground
-                } else {
-                    theme.muted_foreground
-                })),
+                .child(
+                    Icon::new(icon)
+                        .size(rems(0.75))
+                        .color(if active {
+                            theme.foreground
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .group_hover_color(id, theme.foreground),
+                ),
         )
         .child(div().min_w_0().truncate().child(label));
     if active {

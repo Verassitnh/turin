@@ -11,13 +11,13 @@ pub enum SqlValue {
 }
 
 impl SqlValue {
-    pub fn text(value: impl Into<String>) -> Self {
-        Self::Text(value.into())
+    pub fn text(value: impl AsRef<str>) -> Self {
+        Self::Text(value.as_ref().to_owned())
     }
 
-    pub fn opt_text(value: Option<String>) -> Self {
+    pub fn opt_text(value: Option<impl AsRef<str>>) -> Self {
         match value {
-            Some(value) => Self::Text(value),
+            Some(value) => Self::text(value),
             None => Self::Null,
         }
     }

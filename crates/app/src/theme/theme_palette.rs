@@ -310,6 +310,114 @@ mod tests {
     }
 
     #[test]
+    fn keeps_the_t3_chat_palette_faithful_and_readable() {
+        expect_theme_colors(
+            &T3_CHAT_THEME.colors,
+            &[
+                ("canvas", "#fdf7fd"),
+                ("chrome", "#fdf7fd"),
+                ("toolbar_border", "#efbdeb"),
+                ("toolbar_control", "#f3e6f5"),
+                ("toolbar_control_hover", "#eccfe3"),
+                ("surface_raised", "#fdfafd"),
+                ("input", "#e7c1dc"),
+                ("focus", "#db2777"),
+                ("message_surface", "#f7def2"),
+                ("code_background", "#f5ecf9"),
+                ("code_foreground", "#673c8b"),
+                ("accent_surface", "#f3e6f5"),
+                ("sidebar", "#f2e1f4"),
+            ],
+        );
+        expect_theme_colors(
+            &T3_CHAT_THEME.variants.dark.expect("dark variant"),
+            &[
+                ("canvas", "#1f1a24"),
+                ("chrome", "#1f1a24"),
+                ("surface", "#29232d"),
+                ("surface_raised", "#2c2631"),
+                ("input", "#302029"),
+                ("focus", "#db2777"),
+                ("message_surface", "#2b2431"),
+                ("code_background", "#1f1a24"),
+                ("sidebar", "#171018"),
+                ("sidebar_border", "#322028"),
+            ],
+        );
+
+        for mode in [ThemeAppearance::Light, ThemeAppearance::Dark] {
+            let colors = get_theme_colors_for_mode(&T3_CHAT_THEME, mode).expect("both halves");
+            assert!(contrast_ratio(colors.text, colors.canvas) >= 7.);
+            assert!(contrast_ratio(colors.text_muted, colors.canvas) >= 4.5);
+            assert!(contrast_ratio(colors.message_foreground, colors.message_surface) >= 4.5);
+            assert!(contrast_ratio(colors.secondary_foreground, colors.secondary) >= 4.5);
+            assert!(contrast_ratio(colors.sidebar_foreground, colors.sidebar) >= 4.5);
+            assert!(contrast_ratio(colors.accent_foreground, colors.accent) >= 4.5);
+        }
+    }
+
+    #[test]
+    fn includes_the_dual_mode_maintainer_themes() {
+        for theme in [
+            &T3_CHAT_THEME,
+            &GROVE_THEME,
+            &OCEAN_THEME,
+            &EMBER_THEME,
+            &IRIS_THEME,
+        ] {
+            assert_eq!(get_theme_definition(theme.id), Some(theme));
+            assert_eq!(
+                get_theme_modes(theme),
+                vec![ThemeAppearance::Light, ThemeAppearance::Dark]
+            );
+            assert!(theme.sidebar_artwork);
+            assert!(theme_allows_sidebar_artwork(theme.id));
+            assert!(theme.colors.accent.starts_with("oklch("));
+            assert!(
+                theme
+                    .variants
+                    .dark
+                    .is_some_and(|dark| dark.accent.starts_with("oklch("))
+            );
+
+            for mode in [ThemeAppearance::Light, ThemeAppearance::Dark] {
+                let colors = get_theme_colors_for_mode(theme, mode).expect("both halves");
+                assert!(contrast_ratio(colors.text, colors.canvas) >= 4.5);
+                assert!(contrast_ratio(colors.text_muted, colors.canvas) >= 4.5);
+                if theme.id != T3_CHAT_THEME.id {
+                    let muted = contrast_ratio(colors.text_muted, colors.canvas);
+                    assert!(muted < 5.5);
+                    let expected = if mode == ThemeAppearance::Dark {
+                        5.082
+                    } else {
+                        4.705
+                    };
+                    // `toBeCloseTo(expected, 1)`: within 0.05.
+                    assert!((muted - expected).abs() < 0.05, "{}: {muted}", theme.id);
+                }
+                assert!(contrast_ratio(colors.accent_foreground, colors.accent) >= 4.5);
+                assert!(
+                    contrast_ratio(colors.toolbar_control_foreground, colors.toolbar_control)
+                        >= 4.5
+                );
+                assert!(contrast_ratio(colors.message_foreground, colors.message_surface) >= 4.5);
+                assert!(
+                    contrast_ratio(colors.message_action_foreground, colors.message_action) >= 4.5
+                );
+                assert!(
+                    contrast_ratio(
+                        colors.message_action_foreground,
+                        colors.message_action_hover
+                    ) >= 4.5
+                );
+                assert!(contrast_ratio(colors.muted_foreground, colors.muted) >= 4.5);
+                assert!(contrast_ratio(colors.placeholder, colors.surface_raised) >= 4.5);
+            }
+        }
+        assert!(!theme_allows_sidebar_artwork("my-custom-theme"));
+    }
+
+    #[test]
     fn keeps_a_single_mode_theme_on_its_only_palette() {
         let theme = ThemeDefinition {
             id: "midnight-slate",

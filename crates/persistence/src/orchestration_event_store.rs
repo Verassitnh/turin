@@ -7,14 +7,20 @@
 //!
 //! `publish_committed` is in-memory and must run after `Db::write` returns.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+
+use indexmap::IndexMap;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params_from_iter};
 use tokio::sync::mpsc;
 
+use turin_contracts::{CommandId, EventId, NodeId, RawEventId, RunId, ThreadId, UtcDateTime};
+
 use crate::db::{AbortOnDrop, Db};
-use crate::errors::{PersistenceDecodeError, PersistenceError};
+use crate::errors::{PersistenceDecodeError, PersistenceError, PersistenceSqlError};
 use crate::sql_value::SqlValue;
 
 const READ_PAGE_SIZE: i64 = 500;
@@ -41,49 +47,50 @@ END
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectEvent {
     pub sequence: i64,
-    pub event_id: String,
+    pub event_id: EventId,
     pub event_type: String,
     pub aggregate_kind: String,
+    /// Upstream `ProjectId` for project rows. Left as text so a non-project aggregate can round-trip.
     pub aggregate_id: String,
     pub occurred_at: String,
-    pub command_id: Option<String>,
-    pub causation_event_id: Option<String>,
-    pub correlation_id: Option<String>,
+    pub command_id: Option<CommandId>,
+    pub causation_event_id: Option<EventId>,
+    pub correlation_id: Option<CommandId>,
     pub payload: serde_json::Value,
     pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectEventInput {
-    pub event_id: String,
+    pub event_id: EventId,
     pub aggregate_id: String,
     pub event_type: String,
     pub occurred_at: String,
-    pub command_id: Option<String>,
-    pub causation_event_id: Option<String>,
-    pub correlation_id: Option<String>,
+    pub command_id: Option<CommandId>,
+    pub causation_event_id: Option<EventId>,
+    pub correlation_id: Option<CommandId>,
     pub payload: serde_json::Value,
     pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentEvent {
-    pub id: String,
-    pub thread_id: String,
+    pub id: EventId,
+    pub thread_id: ThreadId,
     pub event_type: String,
-    pub occurred_at: String,
+    pub occurred_at: UtcDateTime,
     pub payload: serde_json::Value,
-    pub run_id: Option<String>,
-    pub node_id: Option<String>,
+    pub run_id: Option<RunId>,
+    pub node_id: Option<NodeId>,
     pub driver: Option<String>,
     pub provider_instance_id: Option<String>,
-    pub raw_event_id: Option<String>,
+    pub raw_event_id: Option<RawEventId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredAgentEvent {
     pub sequence: i64,
-    pub command_id: Option<String>,
+    pub command_id: Option<CommandId>,
     pub event: AgentEvent,
 }
 
@@ -104,7 +111,7 @@ impl ApplicationStoredEvent {
 
 #[derive(Debug, Clone)]
 pub struct AppendAgentEvents {
-    pub command_id: Option<String>,
+    pub command_id: Option<CommandId>,
     pub events: Vec<AgentEvent>,
 }
 
@@ -112,8 +119,8 @@ pub struct AppendAgentEvents {
 pub struct ReadAgentEvents {
     pub after_sequence: Option<i64>,
     pub through_sequence: Option<i64>,
-    pub thread_id: Option<String>,
-    pub command_id: Option<String>,
+    pub thread_id: Option<ThreadId>,
+    pub command_id: Option<CommandId>,
     pub event_type: Option<String>,
     pub limit: Option<u64>,
     pub skip_unknown_event_types: bool,
@@ -141,8 +148,7 @@ pub struct AgentReplayStats {
 
 #[derive(Clone, Default)]
 struct PromptHints {
-    order: VecDeque<String>,
-    values: HashMap<String, i64>,
+    values: IndexMap<String, i64>,
 }
 
 impl PromptHints {
@@ -151,15 +157,10 @@ impl PromptHints {
     }
 
     fn remember(&mut self, key: String, sequence: i64) {
-        if self.values.contains_key(&key) {
-            self.order.retain(|existing| existing != &key);
-        }
-        self.order.push_back(key.clone());
+        self.values.shift_remove(&key);
         self.values.insert(key, sequence);
         while self.values.len() > PROMPT_HINT_CAP {
-            if let Some(oldest) = self.order.pop_front() {
-                self.values.remove(&oldest);
-            }
+            self.values.shift_remove_index(0);
         }
     }
 }
@@ -247,10 +248,10 @@ impl OrchestrationEventStore {
 
     pub async fn latest_agent_sequence(
         &self,
-        thread_id: Option<String>,
+        thread_id: Option<ThreadId>,
     ) -> Result<i64, PersistenceError> {
         self.db
-            .read(move |conn| latest_agent_sequence(conn, thread_id.as_deref()))
+            .read(move |conn| latest_agent_sequence(conn, thread_id.as_ref().map(ThreadId::as_str)))
             .await
     }
 
@@ -293,23 +294,114 @@ impl OrchestrationEventStore {
         self.hub.publish(events);
     }
 
+    #[cfg(test)]
+    pub fn live_subscriber_count(&self) -> usize {
+        self.hub
+            .subs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .len()
+    }
+
     pub fn stream_application_events(&self, after_sequence: i64) -> EventSubscription {
         let (tx, rx) = mpsc::channel(1);
         let db = self.db.clone();
         let hub = Arc::clone(&self.hub);
         let sub = hub.subscribe();
+        let unregister = Unregister {
+            id: sub.id,
+            hub: Arc::clone(&hub),
+        };
+        #[cfg(test)]
+        let replay_pages = Arc::new(ReplayPages::default());
+        #[cfg(test)]
+        let replay_pages_task = Arc::clone(&replay_pages);
         let task = AbortOnDrop::new(tokio::spawn(async move {
-            if let Err(err) = drive_stream(db, sub, after_sequence, tx.clone()).await {
+            if let Err(err) = drive_stream(
+                db,
+                sub,
+                after_sequence,
+                tx.clone(),
+                #[cfg(test)]
+                replay_pages_task,
+            )
+            .await
+            {
                 let _ = tx.send(Err(err)).await;
             }
         }));
-        EventSubscription { rx, _task: task }
+        EventSubscription {
+            rx,
+            _unregister: unregister,
+            _task: task,
+            #[cfg(test)]
+            replay_pages,
+        }
     }
 }
 
 pub struct EventSubscription {
     pub rx: mpsc::Receiver<Result<ApplicationStoredEvent, PersistenceError>>,
+    /// Dropped before the drive task so a closed stream leaves the hub immediately.
+    _unregister: Unregister,
     _task: AbortOnDrop<()>,
+    #[cfg(test)]
+    replay_pages: Arc<ReplayPages>,
+}
+
+#[cfg(test)]
+impl EventSubscription {
+    /// `(max pages alive at once, max events in one page, page fetches)`.
+    pub fn replay_page_stats(&self) -> (usize, usize, usize) {
+        (
+            self.replay_pages.max_live.load(Ordering::SeqCst),
+            self.replay_pages.max_len.load(Ordering::SeqCst),
+            self.replay_pages.fetches.load(Ordering::SeqCst),
+        )
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ReplayPages {
+    live: AtomicUsize,
+    max_live: AtomicUsize,
+    max_len: AtomicUsize,
+    fetches: AtomicUsize,
+}
+
+#[cfg(test)]
+struct ReplayPageGuard<'a> {
+    pages: &'a ReplayPages,
+}
+
+#[cfg(test)]
+impl ReplayPages {
+    fn enter(&self, len: usize) -> ReplayPageGuard<'_> {
+        self.fetches.fetch_add(1, Ordering::SeqCst);
+        self.max_len.fetch_max(len, Ordering::SeqCst);
+        let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_live.fetch_max(live, Ordering::SeqCst);
+        ReplayPageGuard { pages: self }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ReplayPageGuard<'_> {
+    fn drop(&mut self) {
+        self.pages.live.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct Unregister {
+    id: u64,
+    hub: Arc<LiveHub>,
+}
+
+impl Drop for Unregister {
+    fn drop(&mut self) {
+        self.hub.unsubscribe(self.id);
+    }
 }
 
 async fn drive_stream(
@@ -317,25 +409,33 @@ async fn drive_stream(
     sub: LiveSub,
     after_sequence: i64,
     tx: mpsc::Sender<Result<ApplicationStoredEvent, PersistenceError>>,
+    #[cfg(test)] replay_pages: Arc<ReplayPages>,
 ) -> Result<(), PersistenceError> {
     let high = db.read(latest_application_sequence).await?;
     sub.fail_if_over_budget()?;
-    let replay = db
-        .read(move |conn| {
-            read_application_events(
-                conn,
-                &ReadApplicationEvents {
-                    after_sequence,
-                    through_sequence: high,
-                    skip_unknown_event_types: false,
-                },
-            )
-        })
-        .await?;
-    for event in replay {
-        tx.send(Ok(event))
-            .await
-            .map_err(|_| PersistenceError::Closed)?;
+    let mut cursor = after_sequence;
+    loop {
+        let page_after = cursor;
+        let page = db
+            .read(move |conn| read_application_page(conn, page_after, high, false))
+            .await?;
+        let Some(last) = page.last_sequence else {
+            break;
+        };
+        let done = page.raw_len < READ_PAGE_SIZE || last >= high;
+        {
+            #[cfg(test)]
+            let _guard = replay_pages.enter(page.events.len());
+            for event in page.events {
+                tx.send(Ok(event))
+                    .await
+                    .map_err(|_| PersistenceError::Closed)?;
+            }
+        }
+        if done {
+            break;
+        }
+        cursor = last;
     }
     loop {
         sub.fail_if_over_budget()?;
@@ -356,6 +456,12 @@ pub(crate) fn append_project_event(
     conn: &Connection,
     event: &ProjectEventInput,
 ) -> Result<ProjectEvent, PersistenceError> {
+    if !is_known_project_event_type(&event.event_type) {
+        return Err(decode_err(
+            "OrchestrationEventStore.appendProjectEvent:decode",
+            format!("unknown event type {}", event.event_type),
+        ));
+    }
     let payload_json = serde_json::to_string(&event.payload).map_err(|err| {
         PersistenceError::Decode(PersistenceDecodeError::new(
             "OrchestrationEventStore.appendProjectEvent:decode",
@@ -370,7 +476,7 @@ pub(crate) fn append_project_event(
     })?;
     let actor = infer_actor_kind(event);
     let mut stmt = conn
-        .prepare(
+        .prepare_cached(
             "
             INSERT INTO orchestration_events (
               event_id, aggregate_kind, stream_id, stream_version, event_type,
@@ -425,9 +531,12 @@ pub(crate) fn append_project_event(
                 &rusqlite::Error::QueryReturnedNoRows,
             )
         })?;
-    row_to_project(&map_row(row).map_err(|err| {
-        PersistenceError::sql("OrchestrationEventStore.appendProjectEvent:insert", &err)
-    })?)
+    row_to_project(
+        &map_row(row).map_err(|err| {
+            PersistenceError::sql("OrchestrationEventStore.appendProjectEvent:insert", &err)
+        })?,
+        "OrchestrationEventStore.appendProjectEvent:decode",
+    )
 }
 
 fn append_agent_events(
@@ -437,6 +546,12 @@ fn append_agent_events(
 ) -> Result<Vec<StoredAgentEvent>, PersistenceError> {
     let mut stored = Vec::with_capacity(input.events.len());
     for event in &input.events {
+        if !is_known_v2_event_type(&event.event_type) {
+            return Err(decode_err(
+                "OrchestrationEventStore.appendAgentEvents:decode",
+                format!("unknown event type {}", event.event_type),
+            ));
+        }
         let payload_json = serde_json::to_string(&event.payload).map_err(|err| {
             PersistenceError::Decode(PersistenceDecodeError::new(
                 "OrchestrationEventStore.appendAgentEvents:decode",
@@ -460,14 +575,14 @@ fn append_agent_events(
         };
         let (sql, params) = agent_insert_sql(
             event,
-            input.command_id.as_deref(),
+            input.command_id.as_ref().map(CommandId::as_str),
             actor,
             &payload_json,
             &metadata_json,
             hint,
             prompt.as_ref().map(|(_, text)| text.as_str()),
         );
-        let mut stmt = conn.prepare(&sql).map_err(|err| {
+        let mut stmt = conn.prepare_cached(&sql).map_err(|err| {
             PersistenceError::sql("OrchestrationEventStore.appendAgentEvents:insert", &err)
         })?;
         let mut rows = stmt.query(params_from_iter(params)).map_err(|err| {
@@ -524,7 +639,7 @@ fn agent_insert_sql(
         SqlValue::text(&event.id),
         SqlValue::text(&event.thread_id),
         SqlValue::text(&event.event_type),
-        SqlValue::text(&event.occurred_at),
+        SqlValue::text(event.occurred_at.to_string()),
         SqlValue::opt_text(command_id.map(str::to_owned)),
         SqlValue::text(actor),
         SqlValue::text(payload_json),
@@ -589,10 +704,16 @@ fn subagent_prompt(event: &AgentEvent) -> Option<(String, String)> {
 fn metadata_for_v2(event: &AgentEvent) -> serde_json::Value {
     let mut meta = serde_json::Map::new();
     if let Some(run_id) = &event.run_id {
-        meta.insert("runId".into(), serde_json::Value::String(run_id.clone()));
+        meta.insert(
+            "runId".into(),
+            serde_json::Value::String(run_id.as_str().to_owned()),
+        );
     }
     if let Some(node_id) = &event.node_id {
-        meta.insert("nodeId".into(), serde_json::Value::String(node_id.clone()));
+        meta.insert(
+            "nodeId".into(),
+            serde_json::Value::String(node_id.as_str().to_owned()),
+        );
     }
     if let Some(driver) = &event.driver {
         meta.insert("driver".into(), serde_json::Value::String(driver.clone()));
@@ -604,7 +725,10 @@ fn metadata_for_v2(event: &AgentEvent) -> serde_json::Value {
         );
     }
     if let Some(raw) = &event.raw_event_id {
-        meta.insert("rawEventId".into(), serde_json::Value::String(raw.clone()));
+        meta.insert(
+            "rawEventId".into(),
+            serde_json::Value::String(raw.as_str().to_owned()),
+        );
     }
     serde_json::Value::Object(meta)
 }
@@ -612,15 +736,15 @@ fn metadata_for_v2(event: &AgentEvent) -> serde_json::Value {
 fn infer_actor_kind(event: &ProjectEventInput) -> &'static str {
     if event
         .command_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with("provider:"))
+        .as_ref()
+        .is_some_and(|id| id.as_str().starts_with("provider:"))
     {
         return "provider";
     }
     if event
         .command_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with("server:"))
+        .as_ref()
+        .is_some_and(|id| id.as_str().starts_with("server:"))
     {
         return "server";
     }
@@ -660,8 +784,8 @@ pub fn read_agent_events(
             RowFilter {
                 after: cursor,
                 through: query.through_sequence,
-                thread_id: query.thread_id.as_deref(),
-                command_id: query.command_id.as_deref(),
+                thread_id: query.thread_id.as_ref().map(ThreadId::as_str),
+                command_id: query.command_id.as_ref().map(CommandId::as_str),
                 event_type: query.event_type.as_deref(),
                 only_agent: true,
                 limit: page_limit,
@@ -670,8 +794,15 @@ pub fn read_agent_events(
         let n = rows.len() as i64;
         let last = rows.last().map(|row| row.sequence);
         for row in rows {
-            if keep_row(&row, query.skip_unknown_event_types)? {
-                out.push(row_to_agent(&row)?);
+            if keep_row(
+                &row,
+                query.skip_unknown_event_types,
+                "OrchestrationEventStore.readAgentEvents:decode",
+            )? {
+                out.push(row_to_agent(
+                    &row,
+                    "OrchestrationEventStore.readAgentEvents:decode",
+                )?);
             }
         }
         let Some(last) = last else { break };
@@ -683,6 +814,53 @@ pub fn read_agent_events(
         cursor = last;
     }
     Ok(out)
+}
+
+struct ApplicationPage {
+    events: Vec<ApplicationStoredEvent>,
+    last_sequence: Option<i64>,
+    raw_len: i64,
+}
+
+fn read_application_page(
+    conn: &Connection,
+    after_sequence: i64,
+    through_sequence: i64,
+    skip_unknown_event_types: bool,
+) -> Result<ApplicationPage, PersistenceError> {
+    let rows = query_rows(
+        conn,
+        "OrchestrationEventStore.readApplicationEvents:query",
+        RowFilter {
+            after: after_sequence,
+            through: Some(through_sequence),
+            thread_id: None,
+            command_id: None,
+            event_type: None,
+            only_agent: false,
+            limit: READ_PAGE_SIZE,
+        },
+    )?;
+    let raw_len = rows.len() as i64;
+    let last_sequence = rows.last().map(|row| row.sequence);
+    let mut events = Vec::with_capacity(rows.len());
+    for row in rows {
+        if keep_row(
+            &row,
+            skip_unknown_event_types,
+            "OrchestrationEventStore.readApplicationEvents:decode",
+        )? {
+            events.push(row_to_application(
+                &row,
+                "OrchestrationEventStore.readApplicationEvents:decode",
+            )?);
+        }
+    }
+    Ok(ApplicationPage {
+        events,
+        last_sequence,
+        raw_len,
+    })
 }
 
 pub fn read_application_events(
@@ -708,8 +886,15 @@ pub fn read_application_events(
         let n = rows.len() as i64;
         let last = rows.last().map(|row| row.sequence);
         for row in rows {
-            if keep_row(&row, query.skip_unknown_event_types)? {
-                out.push(row_to_application(&row)?);
+            if keep_row(
+                &row,
+                query.skip_unknown_event_types,
+                "OrchestrationEventStore.readApplicationEvents:decode",
+            )? {
+                out.push(row_to_application(
+                    &row,
+                    "OrchestrationEventStore.readApplicationEvents:decode",
+                )?);
             }
         }
         let Some(last) = last else { break };
@@ -785,7 +970,7 @@ fn query_rows(
         "
     );
     let mut stmt = conn
-        .prepare(&sql)
+        .prepare_cached(&sql)
         .map_err(|err| PersistenceError::sql(operation, &err))?;
     let rows = stmt
         .query_map(params_from_iter(params), map_row)
@@ -810,7 +995,11 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
     })
 }
 
-fn keep_row(row: &EventRow, skip_unknown: bool) -> Result<bool, PersistenceError> {
+fn keep_row(
+    row: &EventRow,
+    skip_unknown: bool,
+    operation: &'static str,
+) -> Result<bool, PersistenceError> {
     let known = if row.aggregate_kind == "project" {
         is_known_project_event_type(&row.event_type)
     } else {
@@ -827,52 +1016,55 @@ fn keep_row(row: &EventRow, skip_unknown: bool) -> Result<bool, PersistenceError
             return Ok(false);
         }
         return Err(decode_err(
-            "OrchestrationEventStore.readApplicationEvents:decode",
+            operation,
             format!("unknown event type {}", row.event_type),
         ));
     }
     Ok(true)
 }
 
-fn row_to_application(row: &EventRow) -> Result<ApplicationStoredEvent, PersistenceError> {
+fn row_to_application(
+    row: &EventRow,
+    operation: &'static str,
+) -> Result<ApplicationStoredEvent, PersistenceError> {
     if row.aggregate_kind == "project" {
-        Ok(ApplicationStoredEvent::Project(row_to_project(row)?))
+        Ok(ApplicationStoredEvent::Project(row_to_project(
+            row, operation,
+        )?))
     } else {
-        Ok(ApplicationStoredEvent::Agent(row_to_agent(row)?))
+        Ok(ApplicationStoredEvent::Agent(row_to_agent(row, operation)?))
     }
 }
 
-fn row_to_project(row: &EventRow) -> Result<ProjectEvent, PersistenceError> {
+fn row_to_project(
+    row: &EventRow,
+    operation: &'static str,
+) -> Result<ProjectEvent, PersistenceError> {
     Ok(ProjectEvent {
         sequence: row.sequence,
-        event_id: row.event_id.clone(),
+        event_id: parse_brand(operation, &row.event_id, new_event_id)?,
         event_type: row.event_type.clone(),
         aggregate_kind: row.aggregate_kind.clone(),
         aggregate_id: row.stream_id.clone(),
         occurred_at: row.occurred_at.clone(),
-        command_id: row.command_id.clone(),
-        causation_event_id: row.causation_event_id.clone(),
-        correlation_id: row.correlation_id.clone(),
-        payload: parse_known_payload(
-            "OrchestrationEventStore.appendProjectEvent:decode",
-            &row.payload_json,
+        command_id: parse_brand_opt(operation, row.command_id.as_deref(), new_command_id)?,
+        causation_event_id: parse_brand_opt(
+            operation,
+            row.causation_event_id.as_deref(),
+            new_event_id,
         )?,
-        metadata: parse_json(
-            "OrchestrationEventStore.appendProjectEvent:decode",
-            &row.metadata_json,
-        )?,
+        correlation_id: parse_brand_opt(operation, row.correlation_id.as_deref(), new_command_id)?,
+        payload: parse_known_payload(operation, &row.payload_json)?,
+        metadata: parse_json(operation, &row.metadata_json)?,
     })
 }
 
-fn row_to_agent(row: &EventRow) -> Result<StoredAgentEvent, PersistenceError> {
-    let payload = parse_known_payload(
-        "OrchestrationEventStore.readAgentEvents:decode",
-        &row.payload_json,
-    )?;
-    let metadata = parse_json(
-        "OrchestrationEventStore.readAgentEvents:decode",
-        &row.metadata_json,
-    )?;
+fn row_to_agent(
+    row: &EventRow,
+    operation: &'static str,
+) -> Result<StoredAgentEvent, PersistenceError> {
+    let payload = parse_known_payload(operation, &row.payload_json)?;
+    let metadata = parse_json(operation, &row.metadata_json)?;
     let field = |name: &str| {
         metadata
             .get(name)
@@ -881,20 +1073,63 @@ fn row_to_agent(row: &EventRow) -> Result<StoredAgentEvent, PersistenceError> {
     };
     Ok(StoredAgentEvent {
         sequence: row.sequence,
-        command_id: row.command_id.clone(),
+        command_id: parse_brand_opt(operation, row.command_id.as_deref(), new_command_id)?,
         event: AgentEvent {
-            id: row.event_id.clone(),
-            thread_id: row.stream_id.clone(),
+            id: parse_brand(operation, &row.event_id, new_event_id)?,
+            thread_id: parse_brand(operation, &row.stream_id, new_thread_id)?,
             event_type: row.event_type.clone(),
-            occurred_at: row.occurred_at.clone(),
+            occurred_at: row.occurred_at.parse().map_err(
+                |err: turin_contracts::ContractError| decode_err(operation, err.to_string()),
+            )?,
             payload,
-            run_id: field("runId"),
-            node_id: field("nodeId"),
+            run_id: parse_brand_opt(operation, field("runId").as_deref(), new_run_id)?,
+            node_id: parse_brand_opt(operation, field("nodeId").as_deref(), new_node_id)?,
             driver: field("driver"),
             provider_instance_id: field("providerInstanceId"),
-            raw_event_id: field("rawEventId"),
+            raw_event_id: parse_brand_opt(
+                operation,
+                field("rawEventId").as_deref(),
+                new_raw_event_id,
+            )?,
         },
     })
+}
+
+fn new_event_id(value: &str) -> Result<EventId, turin_contracts::ContractError> {
+    EventId::new(value)
+}
+fn new_command_id(value: &str) -> Result<CommandId, turin_contracts::ContractError> {
+    CommandId::new(value)
+}
+fn new_thread_id(value: &str) -> Result<ThreadId, turin_contracts::ContractError> {
+    ThreadId::new(value)
+}
+fn new_run_id(value: &str) -> Result<RunId, turin_contracts::ContractError> {
+    RunId::new(value)
+}
+fn new_node_id(value: &str) -> Result<NodeId, turin_contracts::ContractError> {
+    NodeId::new(value)
+}
+fn new_raw_event_id(value: &str) -> Result<RawEventId, turin_contracts::ContractError> {
+    RawEventId::new(value)
+}
+
+fn parse_brand<T>(
+    operation: &'static str,
+    value: &str,
+    make: fn(&str) -> Result<T, turin_contracts::ContractError>,
+) -> Result<T, PersistenceError> {
+    make(value).map_err(|err| decode_err(operation, err.to_string()))
+}
+
+fn parse_brand_opt<T>(
+    operation: &'static str,
+    value: Option<&str>,
+    make: fn(&str) -> Result<T, turin_contracts::ContractError>,
+) -> Result<Option<T>, PersistenceError> {
+    value
+        .map(|value| parse_brand(operation, value, make))
+        .transpose()
 }
 
 fn parse_json(operation: &'static str, json: &str) -> Result<serde_json::Value, PersistenceError> {
@@ -982,7 +1217,10 @@ pub fn agent_replay_stats(
     through_sequence: i64,
     max_events: u64,
 ) -> Result<AgentReplayStats, PersistenceError> {
-    let limit = i64::try_from(max_events).unwrap_or(i64::MAX).max(0) + 1;
+    let limit = i64::try_from(max_events)
+        .unwrap_or(MAX_SAFE_INTEGER)
+        .clamp(0, MAX_SAFE_INTEGER)
+        .saturating_add(1);
     let sql = format!(
         "
         SELECT
@@ -1125,8 +1363,13 @@ struct LiveSub {
     notify: Arc<tokio::sync::Notify>,
 }
 
+struct SizedEvent {
+    event: Arc<ApplicationStoredEvent>,
+    bytes: usize,
+}
+
 struct LiveBuf {
-    items: VecDeque<ApplicationStoredEvent>,
+    items: VecDeque<SizedEvent>,
     bytes: usize,
     failed: Option<PersistenceError>,
 }
@@ -1155,34 +1398,46 @@ impl LiveHub {
         sub
     }
 
+    fn unsubscribe(&self, id: u64) {
+        self.subs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .retain(|sub| sub.id != id);
+    }
+
     fn publish(&self, events: Vec<ApplicationStoredEvent>) {
+        let sized: Vec<SizedEvent> = events
+            .into_iter()
+            .map(|event| {
+                let bytes = wire_event_bytes(&event);
+                SizedEvent {
+                    event: Arc::new(event),
+                    bytes,
+                }
+            })
+            .collect();
         let mut subs = self.subs.lock().unwrap_or_else(|err| err.into_inner());
         subs.retain(|sub| {
             let mut state = sub.state.lock().unwrap_or_else(|err| err.into_inner());
             if state.failed.is_some() {
                 return false;
             }
-            for event in &events {
-                let size = serde_json::to_string(event)
-                    .map(|json| json.len())
-                    .unwrap_or(0);
+            for event in &sized {
                 if state.items.len() + 1 > LIVE_STREAM_MAX_ITEMS
-                    || state.bytes + size > LIVE_STREAM_MAX_BYTES
+                    || state.bytes + event.bytes > LIVE_STREAM_MAX_BYTES
                 {
-                    state.failed = Some(PersistenceError::Sql(crate::errors::sql_error(
-                        "OrchestrationEventStore.streamApplicationEvents:buffer",
-                        &rusqlite::Error::SqliteFailure(
-                            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOMEM),
-                            Some(
-                                "The live event buffer is full. Resume from the last received sequence."
-                                    .into(),
-                            ),
-                        ),
-                    )));
+                    state.failed = Some(PersistenceError::Sql(PersistenceSqlError {
+                        operation: "OrchestrationEventStore.streamApplicationEvents:buffer".into(),
+                        detail: None,
+                        correlation: None,
+                    }));
                     break;
                 }
-                state.bytes += size;
-                state.items.push_back(event.clone());
+                state.bytes += event.bytes;
+                state.items.push_back(SizedEvent {
+                    event: Arc::clone(&event.event),
+                    bytes: event.bytes,
+                });
             }
             sub.notify.notify_one();
             true
@@ -1217,10 +1472,10 @@ impl LiveSub {
     fn drain_after(&self, high: i64) -> Vec<ApplicationStoredEvent> {
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         let mut out = Vec::new();
-        while let Some(event) = state.items.pop_front() {
-            state.bytes = state.bytes.saturating_sub(event_bytes(&event));
-            if event.sequence() > high {
-                out.push(event);
+        while let Some(item) = state.items.pop_front() {
+            state.bytes = state.bytes.saturating_sub(item.bytes);
+            if item.event.sequence() > high {
+                out.push(Arc::try_unwrap(item.event).unwrap_or_else(|event| (*event).clone()));
             }
         }
         out
@@ -1231,40 +1486,80 @@ impl LiveSub {
     }
 }
 
-fn event_bytes(event: &ApplicationStoredEvent) -> usize {
-    serde_json::to_string(event)
+/// Byte length of the upstream wire object (`JSON.stringify` of the whole event).
+fn wire_event_bytes(event: &ApplicationStoredEvent) -> usize {
+    serde_json::to_string(&wire_event(event))
         .map(|json| json.len())
         .unwrap_or(0)
 }
 
-impl serde::Serialize for ApplicationStoredEvent {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Project(event) => event.serialize(serializer),
-            Self::Agent(event) => event.serialize(serializer),
+fn wire_event(event: &ApplicationStoredEvent) -> serde_json::Value {
+    match event {
+        ApplicationStoredEvent::Project(event) => serde_json::json!({
+            "sequence": event.sequence,
+            "eventId": event.event_id,
+            "aggregateKind": event.aggregate_kind,
+            "aggregateId": event.aggregate_id,
+            "occurredAt": event.occurred_at,
+            "commandId": event.command_id,
+            "causationEventId": event.causation_event_id,
+            "correlationId": event.correlation_id,
+            "metadata": event.metadata,
+            "type": event.event_type,
+            "payload": event.payload,
+        }),
+        ApplicationStoredEvent::Agent(stored) => {
+            let event = &stored.event;
+            let mut body = serde_json::Map::new();
+            body.insert(
+                "id".into(),
+                serde_json::Value::String(event.id.as_str().to_owned()),
+            );
+            body.insert(
+                "threadId".into(),
+                serde_json::Value::String(event.thread_id.as_str().to_owned()),
+            );
+            if let Some(run_id) = &event.run_id {
+                body.insert(
+                    "runId".into(),
+                    serde_json::Value::String(run_id.as_str().to_owned()),
+                );
+            }
+            if let Some(node_id) = &event.node_id {
+                body.insert(
+                    "nodeId".into(),
+                    serde_json::Value::String(node_id.as_str().to_owned()),
+                );
+            }
+            if let Some(driver) = &event.driver {
+                body.insert("driver".into(), serde_json::Value::String(driver.clone()));
+            }
+            if let Some(instance) = &event.provider_instance_id {
+                body.insert(
+                    "providerInstanceId".into(),
+                    serde_json::Value::String(instance.clone()),
+                );
+            }
+            if let Some(raw) = &event.raw_event_id {
+                body.insert(
+                    "rawEventId".into(),
+                    serde_json::Value::String(raw.as_str().to_owned()),
+                );
+            }
+            body.insert(
+                "occurredAt".into(),
+                serde_json::Value::String(event.occurred_at.to_string()),
+            );
+            body.insert(
+                "type".into(),
+                serde_json::Value::String(event.event_type.clone()),
+            );
+            body.insert("payload".into(), event.payload.clone());
+            serde_json::json!({
+                "sequence": stored.sequence,
+                "commandId": stored.command_id,
+                "event": body,
+            })
         }
-    }
-}
-
-impl serde::Serialize for ProjectEvent {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut out = serializer.serialize_struct("ProjectEvent", 4)?;
-        out.serialize_field("sequence", &self.sequence)?;
-        out.serialize_field("eventId", &self.event_id)?;
-        out.serialize_field("type", &self.event_type)?;
-        out.serialize_field("payload", &self.payload)?;
-        out.end()
-    }
-}
-
-impl serde::Serialize for StoredAgentEvent {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut out = serializer.serialize_struct("StoredAgentEvent", 3)?;
-        out.serialize_field("sequence", &self.sequence)?;
-        out.serialize_field("commandId", &self.command_id)?;
-        out.serialize_field("type", &self.event.event_type)?;
-        out.end()
     }
 }

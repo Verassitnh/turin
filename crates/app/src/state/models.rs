@@ -5,21 +5,22 @@
 //!
 //! The field set is the one T15 (sidebar) and T16 (thread view) read, with
 //! upstream's names and nullability. Everything else upstream carries on the
-//! shell (`providerInstanceId`, `runtimeMode`, `itemCount`, `limitRecovery`,
-//! `linkedPullRequest`, …) is reached through [`EnvironmentThreadShell::source`],
-//! the contract row the shell was presented from (upstream's `source`).
+//! shell (`providerInstanceId`, `runtimeMode`, `activeProviderThreadId`, …) is
+//! reached through [`EnvironmentThreadShell::source`], the contract row the
+//! shell was presented from (upstream's `source`). PORTING.md Deviations lists
+//! the omitted fields.
 
 use std::sync::Arc;
 
 pub use crate::state::contracts::ProjectIconColor;
 use crate::state::contracts::{
     EnvironmentId, OrchestrationProjectShell, OrchestrationV2ActivityRunStatus,
-    OrchestrationV2ForkSource, OrchestrationV2LineageRelationship,
+    OrchestrationV2ForkSource, OrchestrationV2LimitRecovery, OrchestrationV2LineageRelationship,
     OrchestrationV2PendingBackgroundTask, OrchestrationV2ProviderFailureClass,
-    OrchestrationV2ProviderGoalStatus, OrchestrationV2RunStatus, OrchestrationV2SettleOverride,
+    OrchestrationV2ProviderGoal, OrchestrationV2RunStatus, OrchestrationV2SettleOverride,
     OrchestrationV2ShellThreadStatus, OrchestrationV2ThreadShell, ProjectId,
     ProviderInteractionMode, PullRequestState as ContractPullRequestState, RunId, ThreadId,
-    ThreadPullRequestLink as ContractLink, ThreadPullRequestLinkSource,
+    ThreadLinkedPullRequest, ThreadPullRequestLink as ContractLink, ThreadPullRequestLinkSource,
 };
 use crate::state::support::background_work::background_work_holds_completion as contract_background_work_holds_completion;
 use crate::state::support::thread_pull_requests::thread_pull_requests_of;
@@ -142,12 +143,6 @@ pub struct ModelSelection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GoalStatus {
-    Active,
-    Other,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettledOverride {
     Settled,
     Active,
@@ -174,43 +169,6 @@ pub struct ThreadPullRequestLink {
     pub is_draft: bool,
     /// `source === "stack-dismissed"`: hidden from every list.
     pub dismissed: bool,
-}
-
-/// Port of `threadPullRequestSearchTerms` (packages/shared/src/threadPullRequests.ts)
-/// for the link shape above.
-pub fn thread_pull_request_search_terms(pull_requests: &[ThreadPullRequestLink]) -> Vec<String> {
-    pull_requests
-        .iter()
-        .filter(|link| !link.dismissed)
-        .flat_map(|link| {
-            [
-                format!("#{}", link.number),
-                format!("{}#{}", link.repository, link.number),
-                link.url.clone(),
-                link.title.clone().unwrap_or_default(),
-            ]
-        })
-        .collect()
-}
-
-/// Port of `resolveThreadCurrentPullRequestLink`, without stack chains
-/// (T19): the only open link, else the newest visible one. Unsynced links
-/// (no state yet) count as open.
-pub fn resolve_thread_current_pull_request_link(
-    pull_requests: &[ThreadPullRequestLink],
-) -> Option<&ThreadPullRequestLink> {
-    let visible: Vec<&ThreadPullRequestLink> = pull_requests
-        .iter()
-        .filter(|link| !link.dismissed)
-        .collect();
-    let open: Vec<&&ThreadPullRequestLink> = visible
-        .iter()
-        .filter(|link| matches!(link.state, None | Some(PullRequestState::Open)))
-        .collect();
-    if open.len() == 1 {
-        return Some(open[0]);
-    }
-    open.last().map(|link| **link).or(visible.last().copied())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,7 +202,11 @@ pub struct EnvironmentThreadShell {
     pub pending_background_tasks: Vec<PendingBackgroundTask>,
     /// Provider instances that have owned the root conversation, oldest first.
     pub provider_instance_history: Vec<String>,
-    pub goal: Option<GoalStatus>,
+    /// The provider-native goal (`goal: thread.goal ?? null`), in full.
+    pub goal: Option<OrchestrationV2ProviderGoal>,
+    /// Message counts for the thread (`itemCount`, `visibleItemCount`).
+    pub item_count: u64,
+    pub visible_item_count: u64,
     pub created_at: String,
     pub updated_at: String,
     pub archived_at: Option<String>,
@@ -253,14 +215,21 @@ pub struct EnvironmentThreadShell {
     pub unsettled_at: Option<String>,
     pub snoozed_until: Option<String>,
     pub snoozed_at: Option<String>,
+    pub limit_recovery: Option<OrchestrationV2LimitRecovery>,
     pub pinned_at: Option<String>,
     pub auto_settle_disabled_at: Option<String>,
     pub pin_order_key: Option<String>,
     pub active_order_key: Option<String>,
     pub pull_requests: Vec<ThreadPullRequestLink>,
+    /// `linkedPullRequest`. `pull_requests` only folds it in for threads
+    /// without a `pullRequests` list, so status readers need this field too.
+    pub linked_pull_request: Option<ThreadLinkedPullRequest>,
+    /// `branchPullRequest`: the pull request found on the thread's branch.
+    pub branch_pull_request: Option<ThreadLinkedPullRequest>,
     /// Server-tracked visited watermark; `None` = server predates tracking.
     pub last_visited_at: Option<Option<String>>,
     pub title_regeneration: Option<TitleRegeneration>,
+    pub deleted_at: Option<String>,
     /// Insertions/deletions of the latest run. Upstream shells don't carry
     /// checkpoint summaries yet (`latestRunDiff` returns null); the row keeps
     /// the slot as a seam, and so does this field.
@@ -309,6 +278,8 @@ impl EnvironmentThreadShell {
             pending_background_tasks: Vec::new(),
             provider_instance_history: Vec::new(),
             goal: None,
+            item_count: 0,
+            visible_item_count: 0,
             updated_at: created_at.clone(),
             created_at,
             archived_at: None,
@@ -317,13 +288,17 @@ impl EnvironmentThreadShell {
             unsettled_at: None,
             snoozed_until: None,
             snoozed_at: None,
+            limit_recovery: None,
             pinned_at: None,
             auto_settle_disabled_at: None,
             pin_order_key: None,
             active_order_key: None,
             pull_requests: Vec::new(),
+            linked_pull_request: None,
+            branch_pull_request: None,
             last_visited_at: None,
             title_regeneration: None,
+            deleted_at: None,
             latest_run_diff: None,
             source: None,
         }
@@ -799,17 +774,9 @@ pub fn present_thread_shell(
             .iter()
             .map(|id| id.as_str().to_owned())
             .collect(),
-        goal: thread
-            .goal
-            .as_ref()
-            .and_then(|goal| goal.as_ref())
-            .map(|goal| {
-                if goal.status == OrchestrationV2ProviderGoalStatus::Active {
-                    GoalStatus::Active
-                } else {
-                    GoalStatus::Other
-                }
-            }),
+        goal: thread.goal.clone().flatten(),
+        item_count: thread.item_count,
+        visible_item_count: thread.visible_item_count,
         created_at: iso(&thread.created_at),
         updated_at,
         archived_at: nullable_iso(thread.archived_at.as_ref()),
@@ -821,6 +788,7 @@ pub fn present_thread_shell(
         unsettled_at: nullable_iso(thread.unsettled_at.flatten().as_ref()),
         snoozed_until: nullable_iso(thread.snoozed_until.flatten().as_ref()),
         snoozed_at: nullable_iso(thread.snoozed_at.flatten().as_ref()),
+        limit_recovery: thread.limit_recovery.clone().flatten(),
         pinned_at: nullable_iso(thread.pinned_at.flatten().as_ref()),
         auto_settle_disabled_at: nullable_iso(thread.auto_settle_disabled_at.flatten().as_ref()),
         pin_order_key: thread
@@ -834,6 +802,8 @@ pub fn present_thread_shell(
             .flatten()
             .map(|key| key.as_str().to_owned()),
         pull_requests,
+        linked_pull_request: linked.cloned(),
+        branch_pull_request: thread.branch_pull_request.clone().flatten(),
         last_visited_at: thread
             .last_visited_at
             .as_ref()
@@ -846,6 +816,7 @@ pub fn present_thread_shell(
                 request_id: regeneration.request_id.as_str().to_owned(),
                 started_at: iso(&regeneration.started_at),
             }),
+        deleted_at: nullable_iso(thread.deleted_at.as_ref()),
         source: Some(SourceRef(Arc::clone(thread))),
         latest_run_diff: None,
     }
@@ -969,5 +940,75 @@ mod tests {
         let mut queued = runtime(RunStatus::Queued);
         queued.active_run_id = Some(run_id("r"));
         assert!(!thread_runtime_can_archive(Some(&queued)));
+    }
+
+    #[test]
+    fn presented_row_carries_the_contract_fields_the_sidebar_reads() {
+        use crate::state::test_fixtures::{V2_NOW, from_json, v2_thread_shell};
+        use serde_json::json;
+
+        let linked = json!({
+            "projectId": "project-v2",
+            "repository": "o/r",
+            "number": 3,
+            "url": "https://github.com/o/r/pull/3",
+        });
+        let branch = json!({
+            "projectId": "project-v2",
+            "repository": "o/r",
+            "number": 7,
+            "url": "https://github.com/o/r/pull/7",
+        });
+        let goal = json!({
+            "objective": "Ship the sidebar",
+            "status": "paused",
+            "tokensUsed": 42,
+            "tokenBudget": 1000,
+            "timeUsedSeconds": 7,
+            "checks": 2,
+            "lastCheck": "not done",
+        });
+        let mut value = serde_json::to_value(v2_thread_shell()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.insert("linkedPullRequest".into(), linked.clone());
+        object.insert("branchPullRequest".into(), branch.clone());
+        object.insert("goal".into(), goal.clone());
+        object.insert("itemCount".into(), json!(5));
+        object.insert("visibleItemCount".into(), json!(3));
+        object.insert(
+            "limitRecovery".into(),
+            json!({ "runId": "run-1", "resetAt": V2_NOW, "autoResume": true }),
+        );
+        object.insert("deletedAt".into(), json!(V2_NOW));
+
+        let thread: OrchestrationV2ThreadShell = from_json(value);
+        let row = present_thread_shell(&env("environment-local"), &Arc::new(thread), None);
+
+        assert_eq!(row.linked_pull_request, Some(from_json(linked)));
+        assert_eq!(row.branch_pull_request, Some(from_json(branch)));
+        assert_eq!(row.goal, Some(from_json(goal)));
+        assert_eq!(row.item_count, 5);
+        assert_eq!(row.visible_item_count, 3);
+        assert_eq!(
+            row.limit_recovery
+                .as_ref()
+                .map(|recovery| recovery.auto_resume),
+            Some(true)
+        );
+        assert_eq!(row.deleted_at.as_deref(), Some(V2_NOW));
+    }
+
+    #[test]
+    fn presented_row_leaves_the_pull_request_fields_empty_when_the_contract_has_none() {
+        use crate::state::test_fixtures::v2_thread_shell;
+
+        let thread = Arc::new(v2_thread_shell());
+        let row = present_thread_shell(&env("environment-local"), &thread, None);
+
+        assert_eq!(row.linked_pull_request, None);
+        assert_eq!(row.branch_pull_request, None);
+        assert_eq!(row.goal, None);
+        assert_eq!(row.limit_recovery, None);
+        assert_eq!(row.deleted_at, None);
     }
 }

@@ -104,6 +104,19 @@ impl CodexAdapter {
         let (broker, requests) = RequestBroker::new();
         broker.install(&client);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        // A protocol-known notification reaches only its registered handlers, so every
+        // known method gets a forwarding handler, and unknown ones take the fallback.
+        for entry in turin_codex_app_server::generated::meta::SERVER_NOTIFICATION_METHODS {
+            let tx = event_tx.clone();
+            let method = entry.method.to_owned();
+            client.handle_server_notification(entry.method, move |params| {
+                let _ = tx.send(CodexEvent::from_notification(
+                    method.clone(),
+                    params.unwrap_or(Value::Null),
+                ));
+                async { Ok(()) }
+            });
+        }
         client.handle_unknown_server_notification(Arc::new(move |method, params| {
             let tx = event_tx.clone();
             Box::pin(async move {

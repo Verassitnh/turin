@@ -52,10 +52,11 @@ use turin_provider_core::{
         ProviderAdapterV2Error, ProviderAdapterV2Event, ProviderAdapterV2ForkThreadInput,
         ProviderAdapterV2InterruptInput, ProviderAdapterV2OpenSessionInput,
         ProviderAdapterV2ReadThreadSnapshotInput, ProviderAdapterV2ResumeThreadInput,
-        ProviderAdapterV2RollbackThreadInput, ProviderAdapterV2RuntimeRequestResponseInput,
-        ProviderAdapterV2SteerInput, ProviderAdapterV2StopTaskInput,
-        ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2TurnInput,
-        ProviderAdapterV2TurnTerminalStatus, ProviderEventStream, ProviderSessionRuntime,
+        ProviderAdapterV2RollbackTarget, ProviderAdapterV2RollbackThreadInput,
+        ProviderAdapterV2RuntimeRequestResponseInput, ProviderAdapterV2SteerInput,
+        ProviderAdapterV2StopTaskInput, ProviderAdapterV2ThreadSnapshot,
+        ProviderAdapterV2TurnInput, ProviderAdapterV2TurnTerminalStatus, ProviderEventStream,
+        ProviderSessionRuntime,
     },
     rt::BoxFuture,
     selection_transition::{ProviderSelectionTransitionInput, ProviderSelectionTransitionPlan},
@@ -64,7 +65,7 @@ use turin_provider_core::{
 pub fn claude_provider_capabilities_v2() -> OrchestrationV2ProviderCapabilities {
     serde_json::from_value(json!({
         "sessions":{"supportsMultipleProviderThreadsPerSession":false,"supportsModelSwitchInSession":true,"supportsProviderSwitchingViaHandoff":true,"supportsRuntimeModeSwitchInSession":false,"pendingRequestsSurviveRestart":false},
-        "threads":{"canCreateEmptyThread":true,"canReadThreadSnapshot":false,"canRollbackThread":false,"canForkThread":true,"canForkFromTurn":true,"canForkFromSubagentThread":false,"exposesNativeThreadId":true},
+        "threads":{"canCreateEmptyThread":true,"canReadThreadSnapshot":false,"canRollbackThread":true,"canForkThread":true,"canForkFromTurn":true,"canForkFromSubagentThread":false,"exposesNativeThreadId":true},
         "turns":{"exposesNativeTurnId":false,"emitsTurnStarted":true,"emitsTurnCompleted":true,"supportsInterrupt":true,"supportsActiveSteering":true,"activeSteeringInterruptsTools":true,"supportsSteeringByInterruptRestart":false,"supportsQueuedMessages":true,"terminalStatusQuality":"strong"},
         "streaming":{"streamsAssistantText":true,"streamsReasoning":true,"streamsToolOutput":false,"streamsPlanText":false,"emitsMessageCompleted":true},
         "tools":{"exposesToolItemIds":true,"emitsToolStarted":true,"emitsToolCompleted":true,"emitsToolOutput":true,"supportsMcpTools":true,"supportsDynamicToolCallbacks":true},
@@ -103,6 +104,133 @@ fn native_id(thread: &OrchestrationV2ProviderThread) -> Result<&str, ProviderAda
                 thread.id
             ))
         })
+}
+fn weak_native_ref(id: &str) -> OrchestrationV2ProviderRef {
+    OrchestrationV2ProviderRef {
+        driver: driver(),
+        native_id: Some(tne(id)),
+        strength: OrchestrationV2NativeRefStrength::Weak,
+        fingerprint: None,
+        ordinal: None,
+    }
+}
+fn is_synthetic_turn_id(native: &str) -> bool {
+    native.starts_with("turn:")
+}
+fn is_terminal_turn(turn: &OrchestrationV2ProviderTurn) -> bool {
+    matches!(
+        turn.status,
+        OrchestrationV2ProviderTurnStatus::Completed
+            | OrchestrationV2ProviderTurnStatus::Interrupted
+            | OrchestrationV2ProviderTurnStatus::Failed
+            | OrchestrationV2ProviderTurnStatus::Cancelled
+    )
+}
+fn thread_snapshot(
+    provider_thread: OrchestrationV2ProviderThread,
+) -> ProviderAdapterV2ThreadSnapshot {
+    ProviderAdapterV2ThreadSnapshot {
+        provider_thread,
+        provider_turns: vec![],
+        messages: vec![],
+        runtime_requests: vec![],
+        provider_payload: None,
+    }
+}
+/// Upstream `getNativeConversationHeadId`: the cursor a rollback recorded.
+fn head_native_id(
+    thread: &OrchestrationV2ProviderThread,
+) -> Result<Option<String>, ProviderAdapterV2Error> {
+    let Some(head) = thread.native_conversation_head_ref.as_ref() else {
+        return Ok(None);
+    };
+    if head.driver != driver() {
+        return Err(protocol_error(format!(
+            "Provider thread {} has a non-Claude native conversation head reference.",
+            thread.id
+        )));
+    }
+    head.native_id
+        .as_ref()
+        .map(|id| Some(id.as_str().to_owned()))
+        .ok_or_else(|| {
+            protocol_error(format!(
+                "Provider thread {} has a Claude native conversation head reference without a native id.",
+                thread.id
+            ))
+        })
+}
+/// Upstream `resolveClaudeRollbackResumeSessionAt` for a provider turn target.
+/// A turn with no recorded cursor can only be the head when nothing ran after it.
+fn rollback_resume_cursor(
+    input: &ProviderAdapterV2RollbackThreadInput,
+    target: &OrchestrationV2ProviderTurn,
+) -> Result<Option<String>, ProviderAdapterV2Error> {
+    if target.provider_thread_id != input.provider_thread.id {
+        return Err(protocol_error(format!(
+            "Cannot roll back Claude thread {} to provider turn {}: target turn belongs to provider thread {}.",
+            input.provider_thread.id, target.id, target.provider_thread_id
+        )));
+    }
+    if let Some(native) = target
+        .native_turn_ref
+        .as_ref()
+        .filter(|r| r.driver == driver())
+        .and_then(|r| r.native_id.as_ref())
+        .map(TrimmedNonEmptyString::as_str)
+        .filter(|native| !is_synthetic_turn_id(native))
+    {
+        return Ok(Some(native.to_owned()));
+    }
+    let later_terminal = input
+        .provider_thread_turns
+        .iter()
+        .any(|turn| turn.ordinal > target.ordinal && is_terminal_turn(turn));
+    if later_terminal {
+        return Err(protocol_error(format!(
+            "Cannot roll back Claude thread {} to provider turn {}: no SDK assistant message cursor was recorded for that turn.",
+            input.provider_thread.id, target.id
+        )));
+    }
+    Ok(None)
+}
+/// Upstream `resolveClaudeForkUpToMessageId`: the cursor of the fork boundary.
+fn fork_up_to_message_id(
+    input: &ProviderAdapterV2ForkThreadInput,
+) -> Result<Option<String>, ProviderAdapterV2Error> {
+    let (Some(turn_id), Some(turns)) = (&input.provider_turn_id, &input.source_provider_turns)
+    else {
+        return Ok(None);
+    };
+    let mut source: Vec<&OrchestrationV2ProviderTurn> = turns
+        .iter()
+        .filter(|turn| turn.provider_thread_id == input.source_provider_thread.id)
+        .collect();
+    source.sort_by_key(|turn| turn.ordinal);
+    let Some(boundary) = source.iter().position(|turn| &turn.id == turn_id) else {
+        return Err(protocol_error(format!(
+            "Cannot fork Claude thread from provider turn {turn_id}: source turn was not found in provider thread {}.",
+            input.source_provider_thread.id
+        )));
+    };
+    if let Some(native) = source[boundary]
+        .native_turn_ref
+        .as_ref()
+        .and_then(|r| r.native_id.as_ref())
+        .map(TrimmedNonEmptyString::as_str)
+        .filter(|native| !is_synthetic_turn_id(native))
+    {
+        return Ok(Some(native.to_owned()));
+    }
+    if source[boundary + 1..]
+        .iter()
+        .any(|turn| is_terminal_turn(turn))
+    {
+        return Err(protocol_error(format!(
+            "Cannot fork Claude thread from prior provider turn {turn_id}: no SDK assistant message cursor was recorded for that turn."
+        )));
+    }
+    Ok(None)
 }
 fn native_ref(id: &str) -> OrchestrationV2ProviderRef {
     OrchestrationV2ProviderRef {
@@ -304,6 +432,10 @@ enum Command {
         ProviderAdapterV2ForkThreadInput,
         oneshot::Sender<Result<OrchestrationV2ProviderThread, ProviderAdapterV2Error>>,
     ),
+    Rollback(
+        ProviderAdapterV2RollbackThreadInput,
+        oneshot::Sender<Result<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>>,
+    ),
 }
 async fn ask<T>(
     commands: &mpsc::UnboundedSender<Command>,
@@ -391,13 +523,7 @@ impl ProviderSessionRuntime for ClaudeSessionRuntime {
         &self,
         input: ProviderAdapterV2RollbackThreadInput,
     ) -> Result<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error> {
-        Err(ProviderAdapterV2Error::new(
-            ProviderAdapterErrorKind::RollbackThread {
-                driver: driver(),
-                provider_thread_id: input.provider_thread.id,
-                checkpoint_id: None,
-            },
-        ))
+        ask(&self.commands, |tx| Command::Rollback(input, tx)).await
     }
     async fn fork_thread(
         &self,
@@ -422,6 +548,9 @@ struct ActiveTurn {
     earlier_usage: Vec<Value>,
     steer_pending: bool,
     interrupted: bool,
+    /// The uuid of the latest assistant message. It is the turn's native ref,
+    /// so a later rollback or fork can resume at it.
+    native_message_cursor: Option<String>,
     last_assistant: Option<OrchestrationV2ConversationMessage>,
     scope: TurnScope,
     item_ordinals: ItemOrdinals,
@@ -552,6 +681,10 @@ impl ClaudeActor {
                 let result = self.fork(input).await;
                 let _ = reply.send(result);
             }
+            Command::Rollback(input, reply) => {
+                let result = self.rollback(input).await;
+                let _ = reply.send(result);
+            }
         }
     }
     async fn start(
@@ -573,13 +706,19 @@ impl ClaudeActor {
                     .await
                     .map_err(|e| protocol_error(e.to_string()))?;
             }
-            let resume = input.native_thread_has_turns.unwrap_or(false);
+            let resume_session_at = head_native_id(&input.provider_thread)?;
+            // A rollback head resumes the session even if the thread has no
+            // persisted turn count.
+            let resume = resume_session_at.is_some()
+                || input
+                    .native_thread_has_turns
+                    .unwrap_or(input.provider_turn_ordinal > 1);
             let options = make_claude_query_options(ClaudeQueryOptionsInput {
                 model_selection: &input.model_selection,
                 catalog: &self.catalog,
                 native_thread_id: &native,
                 resume,
-                resume_session_at: None,
+                resume_session_at: resume_session_at.as_deref(),
                 cwd: input.runtime_policy.cwd.as_ref().map(PathBuf::from),
                 attachments_dir: self.attachments_dir.clone(),
                 settings: Some(&self.settings),
@@ -676,6 +815,7 @@ impl ClaudeActor {
             earlier_usage: vec![],
             steer_pending: false,
             interrupted: false,
+            native_message_cursor: None,
             last_assistant: None,
             scope,
             item_ordinals: ItemOrdinals::new(),
@@ -801,6 +941,70 @@ impl ClaudeActor {
         }
         Ok(())
     }
+    /// Upstream `rollbackThread`. Rolling back does not rewrite the transcript.
+    /// It records the cursor the next turn resumes at, and closes the live
+    /// query so that turn reopens with it.
+    async fn rollback(
+        &mut self,
+        input: ProviderAdapterV2RollbackThreadInput,
+    ) -> Result<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error> {
+        if let Some(active) = self.active.as_ref() {
+            return Err(protocol_error(format!(
+                "Cannot roll back Claude provider thread {} while provider turn {} is active.",
+                input.provider_thread.id, active.turn.id
+            )));
+        }
+        let native = native_id(&input.provider_thread)?.to_owned();
+        if self.claude.as_ref().and_then(|c| c.session_id()) == Some(native.as_str()) {
+            self.close_live().await?;
+        }
+        let now = UtcDateTime::now();
+        match &input.target {
+            ProviderAdapterV2RollbackTarget::ThreadStart { .. } => {
+                let app_thread_id =
+                    input.provider_thread.app_thread_id.clone().ok_or_else(|| {
+                        protocol_error("Claude provider thread has no app thread")
+                    })?;
+                let fresh = uuid::Uuid::new_v4().to_string();
+                let mut thread = make_thread(
+                    &self.instance_id,
+                    &self.session_id,
+                    app_thread_id,
+                    &fresh,
+                    input.provider_thread.owner_node_id.clone(),
+                    input.provider_thread.forked_from.clone(),
+                );
+                thread.handoff_ids = input.provider_thread.handoff_ids.clone();
+                Ok(thread_snapshot(thread))
+            }
+            ProviderAdapterV2RollbackTarget::ProviderTurn {
+                provider_turn,
+                app_run_ordinal,
+                ..
+            } => {
+                let resume = rollback_resume_cursor(&input, provider_turn)?;
+                let mut thread = input.provider_thread.clone();
+                thread.provider_session_id = Some(self.session_id.clone());
+                thread.native_conversation_head_ref = resume.as_deref().map(weak_native_ref);
+                thread.status = OrchestrationV2ProviderThreadStatus::Idle;
+                thread.last_run_ordinal = u64::try_from(*app_run_ordinal)
+                    .ok()
+                    .and_then(PositiveInt::new);
+                thread.updated_at = now;
+                Ok(thread_snapshot(thread))
+            }
+        }
+    }
+    async fn close_live(&mut self) -> Result<(), ProviderAdapterV2Error> {
+        self.host_requests = None;
+        if let Some(mut claude) = self.claude.take() {
+            claude
+                .close()
+                .await
+                .map_err(|e| protocol_error(e.to_string()))?;
+        }
+        Ok(())
+    }
     async fn fork(
         &mut self,
         input: ProviderAdapterV2ForkThreadInput,
@@ -811,13 +1015,14 @@ impl ClaudeActor {
             ));
         }
         let native = native_id(&input.source_provider_thread)?.to_owned();
+        let up_to = fork_up_to_message_id(&input)?;
         let forked = if let Some(claude) = self
             .claude
             .as_mut()
             .filter(|c| c.session_id() == Some(native.as_str()))
         {
             let id = claude
-                .fork(None, None)
+                .fork(up_to.as_deref(), None)
                 .await
                 .map_err(|e| protocol_error(e.to_string()))?;
             self.claude = None;
@@ -832,7 +1037,7 @@ impl ClaudeActor {
                     .map(PathBuf::from),
                 ..Default::default()
             };
-            turin_claude_protocol::fork_session(&native, &options, None, None)
+            turin_claude_protocol::fork_session(&native, &options, up_to.as_deref(), None)
                 .await
                 .map_err(|e| protocol_error(e.to_string()))?
         };
@@ -962,7 +1167,12 @@ impl ClaudeActor {
     }
     fn assistant(&mut self, frame: turin_claude_protocol::Frame) {
         let events = match self.active.as_mut() {
-            Some(active) => assistant_events(&mut self.plans, active, &frame),
+            Some(active) => {
+                if let Some(uuid) = frame.raw.get("uuid").and_then(Value::as_str) {
+                    active.native_message_cursor = Some(uuid.to_owned());
+                }
+                assistant_events(&mut self.plans, active, &frame)
+            }
             None => return,
         };
         for event in events {
@@ -1031,6 +1241,14 @@ impl ClaudeActor {
             }
         };
         active.turn.completed_at = Some(now);
+        if let Some(cursor) = active.native_message_cursor.as_deref() {
+            active.turn.native_turn_ref = Some(weak_native_ref(cursor));
+        }
+        // A completed turn has consumed the rollback head, so the next turn
+        // resumes the session normally.
+        if status == ProviderAdapterV2TurnTerminalStatus::Completed {
+            active.thread.native_conversation_head_ref = None;
+        }
         active.thread.status = OrchestrationV2ProviderThreadStatus::Idle;
         active.thread.updated_at = now;
         let closing = finish_running_tools(active, terminal_item_status(status));
@@ -1115,6 +1333,9 @@ impl ClaudeActor {
         let closing = finish_running_tools(&mut active, terminal_item_status(status));
         for event in closing {
             self.emit(event);
+        }
+        if let Some(cursor) = active.native_message_cursor.as_deref() {
+            active.turn.native_turn_ref = Some(weak_native_ref(cursor));
         }
         let mut turn = active.turn;
         turn.status = if status == ProviderAdapterV2TurnTerminalStatus::Interrupted {

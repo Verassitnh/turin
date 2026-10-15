@@ -24,6 +24,7 @@ use turin_provider_claude::{
 use turin_provider_core::provider_adapter::{
     ProviderAdapterV2, ProviderAdapterV2EnsureThreadInput, ProviderAdapterV2Event,
     ProviderAdapterV2InterruptInput, ProviderAdapterV2OpenSessionInput,
+    ProviderAdapterV2RollbackTarget, ProviderAdapterV2RollbackThreadInput,
     ProviderAdapterV2RuntimePolicy, ProviderAdapterV2SteerInput, ProviderAdapterV2TurnInput,
     ProviderAdapterV2TurnMessage, ProviderAdapterV2TurnTerminalStatus, ProviderEventStream,
     ProviderSessionRuntime,
@@ -35,6 +36,9 @@ use turin_provider_core::provider_adapter::{
 /// control requests get a success reply. `runtime_exit` ends the process.
 const FAKE_CLI: &str = r#"#!/usr/bin/env python3
 import json, os, sys
+# Each launch appends its argv, so tests can check flags such as resume-at.
+with open(os.environ["FAKE_ARGV"], "a") as log:
+    log.write(json.dumps(sys.argv) + "\n")
 pending = [json.loads(line) for line in open(os.environ["FAKE_FIXTURE"]) if line.strip()]
 
 def emit(value):
@@ -126,6 +130,10 @@ impl Harness {
 
         let mut env: BTreeMap<String, String> = std::env::vars().collect();
         env.insert("FAKE_FIXTURE".into(), transcript);
+        env.insert(
+            "FAKE_ARGV".into(),
+            dir.join("argv.log").display().to_string(),
+        );
         let settings: ClaudeSettings =
             serde_json::from_value(json!({ "binaryPath": script.display().to_string() })).unwrap();
         let adapter = ClaudeProviderAdapter::new(
@@ -759,5 +767,117 @@ async fn task_tools_keep_one_list_and_ignore_subagent_task_calls() {
     assert_eq!(
         last["steps"],
         json!([{"id": "task-1", "text": "Write tests", "status": "completed"}])
+    );
+}
+
+fn assistant_text(uuid: &str, text: &str) -> Value {
+    json!({
+        "type": "assistant",
+        "message": {"id": format!("msg_{uuid}"), "role": "assistant",
+            "content": [{"type": "text", "text": text}]},
+        "uuid": uuid, "session_id": "rollback-session",
+    })
+}
+
+fn result_ok(uuid: &str, text: &str) -> Value {
+    json!({
+        "type": "result", "subtype": "success", "is_error": false,
+        "result": text, "terminal_reason": "completed",
+        "session_id": "rollback-session", "usage": {}, "uuid": uuid,
+    })
+}
+
+#[tokio::test]
+async fn rollback_resumes_the_next_turn_at_the_recorded_cursor() {
+    const FIRST: &str = "00000000-0000-4000-8000-0000000000c1";
+    const SECOND: &str = "00000000-0000-4000-8000-0000000000c2";
+    let harness = Harness::lines(&[
+        json!({"type": "expect_outbound", "label": "query.open:1", "frame": {}}),
+        json!({"type": "expect_outbound", "label": "prompt.offer:1", "frame": {}}),
+        json!({"type": "emit_inbound", "label": "assistant", "frame": assistant_text(FIRST, "first answer")}),
+        json!({"type": "emit_inbound", "label": "result", "frame": result_ok("00000000-0000-4000-8000-0000000000d1", "first answer")}),
+        json!({"type": "runtime_exit", "status": "success"}),
+        json!({"type": "expect_outbound", "label": "query.open:2", "frame": {}}),
+        json!({"type": "expect_outbound", "label": "prompt.offer:2", "frame": {}}),
+        json!({"type": "emit_inbound", "label": "assistant", "frame": assistant_text(SECOND, "second answer")}),
+        json!({"type": "emit_inbound", "label": "result", "frame": result_ok("00000000-0000-4000-8000-0000000000d2", "second answer")}),
+        json!({"type": "runtime_exit", "status": "success"}),
+    ]);
+    let capabilities =
+        serde_json::to_value(harness.adapter.get_capabilities().await.unwrap()).unwrap();
+    assert_eq!(capabilities["threads"]["canRollbackThread"], true);
+
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread.clone(), "first"))
+        .await
+        .expect("start turn");
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    // The terminal turn records the assistant cursor as its native ref.
+    let turn = seen
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::ProviderTurnUpdated { provider_turn, .. } => {
+                Some(provider_turn.clone())
+            }
+            _ => None,
+        })
+        .expect("terminal turn");
+    let cursor = turn
+        .native_turn_ref
+        .as_ref()
+        .and_then(|r| r.native_id.as_ref());
+    assert_eq!(cursor.map(|id| id.as_str()), Some(FIRST));
+
+    let rolled = runtime
+        .rollback_thread(ProviderAdapterV2RollbackThreadInput {
+            provider_thread: thread,
+            target: ProviderAdapterV2RollbackTarget::ProviderTurn {
+                checkpoint_id: id("checkpoint-1"),
+                app_run_ordinal: 1,
+                provider_turn: turn.clone(),
+            },
+            provider_thread_turns: vec![turn],
+        })
+        .await
+        .expect("rollback");
+    let head = rolled.provider_thread.native_conversation_head_ref.as_ref();
+    assert_eq!(
+        head.and_then(|r| r.native_id.as_ref())
+            .map(|id| id.as_str()),
+        Some(FIRST)
+    );
+
+    runtime
+        .start_turn(harness.turn_input(rolled.provider_thread, "second"))
+        .await
+        .expect("start turn after rollback");
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    // The completed turn consumes the head, so later turns resume normally.
+    let cleared = seen.iter().any(|event| match event {
+        ProviderAdapterV2Event::ProviderThreadUpdated {
+            provider_thread, ..
+        } => provider_thread.native_conversation_head_ref.is_none(),
+        _ => false,
+    });
+    assert!(cleared);
+
+    let launches = std::fs::read_to_string(harness.dir.join("argv.log")).unwrap();
+    let launches: Vec<&str> = launches.lines().collect();
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    assert!(
+        !launches[0].contains("resume-session-at"),
+        "{}",
+        launches[0]
+    );
+    assert!(
+        launches[1].contains(&format!("--resume-session-at={FIRST}")),
+        "{}",
+        launches[1]
     );
 }

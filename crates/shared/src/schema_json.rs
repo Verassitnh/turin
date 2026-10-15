@@ -5,13 +5,13 @@
 //! object extraction, lenient JSONC parsing, and the diagnostic formatter.
 //! Callers pass an explicit issue tree; the formatter never prints values.
 
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 use regex::Regex;
 use serde_json::Value;
 use turin_contracts::base_schemas::js_trim;
 
-use crate::js_string::{slice_utf16, utf16_len};
+use crate::js_string::{JS_DOT, JS_WS, slice_utf16, utf16_len};
 
 const MAX_SCHEMA_DIAGNOSTIC_ISSUES: usize = 8;
 const MAX_SCHEMA_DIAGNOSTIC_PATH_SEGMENTS: usize = 16;
@@ -228,9 +228,23 @@ fn truncate_diagnostic(value: &str, max_length: usize) -> String {
     }
 }
 
+/// JSON string literals (group 1), which every pass keeps intact so comment markers inside a string
+/// survive. A backslash escape takes one character that is not a line terminator, as JS `.` does.
+static LINE_COMMENTS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r#"("(?:[^"\\]|\\{JS_DOT})*")|//[^\n]*"#)).expect("static regex")
+});
+static BLOCK_COMMENTS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r#"("(?:[^"\\]|\\{JS_DOT})*")|/\*(?s:.*?)\*/"#)).expect("static regex")
+});
+static TRAILING_COMMAS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r#"("(?:[^"\\]|\\{JS_DOT})*")|,([{JS_WS}]*[}}\]])"#
+    ))
+    .expect("static regex")
+});
+
 fn strip_lenient_json(input: &str) -> String {
-    let line_comments = regex(r#"("(?:[^"\\]|\\.)*")|//[^\n]*"#);
-    let stripped = line_comments
+    let stripped = LINE_COMMENTS
         .replace_all(input, |captures: &regex::Captures| {
             if captures.get(1).is_some() {
                 captures.get(0).unwrap().as_str().to_owned()
@@ -239,8 +253,7 @@ fn strip_lenient_json(input: &str) -> String {
             }
         })
         .into_owned();
-    let block_comments = regex(r#"("(?:[^"\\]|\\.)*")|/\*(?s:.*?)\*/"#);
-    let stripped = block_comments
+    let stripped = BLOCK_COMMENTS
         .replace_all(&stripped, |captures: &regex::Captures| {
             if captures.get(1).is_some() {
                 captures.get(0).unwrap().as_str().to_owned()
@@ -249,8 +262,7 @@ fn strip_lenient_json(input: &str) -> String {
             }
         })
         .into_owned();
-    let trailing = regex(r#"("(?:[^"\\]|\\.)*")|,(\s*[}\]])"#);
-    trailing
+    TRAILING_COMMAS
         .replace_all(&stripped, |captures: &regex::Captures| {
             if captures.get(1).is_some() {
                 captures.get(0).unwrap().as_str().to_owned()
@@ -262,19 +274,6 @@ fn strip_lenient_json(input: &str) -> String {
             }
         })
         .into_owned()
-}
-
-fn regex(pattern: &str) -> &'static Regex {
-    static LINE: OnceLock<Regex> = OnceLock::new();
-    static BLOCK: OnceLock<Regex> = OnceLock::new();
-    static TRAILING: OnceLock<Regex> = OnceLock::new();
-    match pattern {
-        r#"("(?:[^"\\]|\\.)*")|//[^\n]*"# => LINE.get_or_init(|| Regex::new(pattern).unwrap()),
-        r#"("(?:[^"\\]|\\.)*")|/\*(?s:.*?)\*/"# => {
-            BLOCK.get_or_init(|| Regex::new(pattern).unwrap())
-        }
-        _ => TRAILING.get_or_init(|| Regex::new(pattern).unwrap()),
-    }
 }
 
 #[cfg(test)]

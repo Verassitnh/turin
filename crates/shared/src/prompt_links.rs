@@ -3,7 +3,7 @@
 //! `DEFAULT_HOSTED_APP_URL` is inlined from `connectAuth.ts`, which is cut
 //! (T3 Connect). The constant is the only piece this module needs.
 
-use crate::js_string::utf16_len;
+use crate::js_string::{JS_DOT, JS_WS, utf16_len};
 use turin_contracts::base_schemas::js_trim;
 use url::Url;
 
@@ -136,7 +136,7 @@ pub fn parse_prompt_link_repository(value: &str) -> Option<PromptLinkRepository>
             .expect("repo url")
     });
     static SHORT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^([^/\s]+)/([^/\s]+)$").expect("repo short")
+        regex::Regex::new(&format!(r"^([^/{JS_WS}]+)/([^/{JS_WS}]+)$")).expect("repo short")
     });
     let captures = URL_RE
         .captures(trimmed)
@@ -147,13 +147,16 @@ pub fn parse_prompt_link_repository(value: &str) -> Option<PromptLinkRepository>
 fn parse_prompt_link_pull_request(value: &str) -> Option<PromptLinkPullRequest> {
     let trimmed = js_trim(value);
     static URL_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(
-            r"(?i)^https?://(?:www\.)?github\.com/([^/?#]+)/([^/?#]+)/pull/(\d+)(?:[/?#].*)?$",
-        )
+        regex::Regex::new(&format!(
+            r"(?i)^https?://(?:www\.)?github\.com/([^/?#]+)/([^/?#]+)/pull/([0-9]+)(?:[/?#]{JS_DOT}*)?$"
+        ))
         .expect("pr url")
     });
     static SHORT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^([^/\s#]+)/([^/\s#]+)(?:/|#)(\d+)$").expect("pr short")
+        regex::Regex::new(&format!(
+            r"^([^/{JS_WS}#]+)/([^/{JS_WS}#]+)(?:/|#)([0-9]+)$"
+        ))
+        .expect("pr short")
     });
     let captures = URL_RE
         .captures(trimmed)
@@ -634,5 +637,16 @@ mod tests {
             }
             other => panic!("expected a new-thread link, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod qc_regressions {
+    use super::*;
+
+    #[test]
+    fn repository_short_form_rejects_u_feff_like_js_whitespace() {
+        // Node 22: /^([^/\s]+)\/([^/\s]+)$/.test("a﻿/b") is false.
+        assert_eq!(parse_prompt_link_repository("a\u{FEFF}/b"), None);
     }
 }

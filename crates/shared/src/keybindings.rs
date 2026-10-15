@@ -4,20 +4,51 @@
 //! rules with the defaults. Upstream has no test file for this module; the tests here cover the
 //! behavior the rest of the app depends on.
 //!
-//! Deviation: `KeybindingValue` (contracts) trims and needs one or more characters, so a `space`
-//! shortcut (key `" "`) cannot be held and is dropped at parse time; so is a key over 64 chars.
+//! Parsed shortcuts hold their key as a [`ShortcutKey`], unvalidated as upstream's parsed object is.
+//! Contracts' `KeybindingValue` trims and needs 1..=64 chars, so it cannot hold the `space` key
+//! (`" "`). Resolved rules carry this module's [`ResolvedKeybindingRule`] for the same reason.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use turin_contracts::base_schemas::js_trim;
 use turin_contracts::keybindings::{
-    KeybindingCommand, KeybindingRule, KeybindingShortcut, KeybindingValue, KeybindingWhen,
-    KeybindingWhenNode, MAX_KEYBINDINGS_COUNT, MAX_WHEN_EXPRESSION_DEPTH,
-    MODEL_PICKER_JUMP_KEYBINDING_COMMANDS, ResolvedKeybindingRule, THREAD_JUMP_KEYBINDING_COMMANDS,
+    KeybindingCommand, KeybindingRule, KeybindingValue, KeybindingWhen, KeybindingWhenNode,
+    MAX_KEYBINDINGS_COUNT, MAX_WHEN_EXPRESSION_DEPTH, MODEL_PICKER_JUMP_KEYBINDING_COMMANDS,
+    THREAD_JUMP_KEYBINDING_COMMANDS,
 };
 
 use crate::js_string::is_js_whitespace_char;
+
+/// The key of a parsed shortcut. Holds any non-empty text, including `" "` for `space`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ShortcutKey(String);
+
+impl ShortcutKey {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// `ParsedShortcut` as parsed from a rule. Differs from the contracts type only in its key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedShortcut {
+    pub key: ShortcutKey,
+    pub meta_key: bool,
+    pub ctrl_key: bool,
+    pub shift_key: bool,
+    pub alt_key: bool,
+    pub mod_key: bool,
+}
+
+/// `ResolvedKeybindingRule` with a [`ParsedShortcut`]. Differs from the contracts type only in
+/// its shortcut key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedKeybindingRule {
+    pub command: KeybindingCommand,
+    pub shortcut: ParsedShortcut,
+    pub when_ast: Option<KeybindingWhenNode>,
+}
 
 /// The fields of a keyboard event that shortcut matching reads.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -143,7 +174,7 @@ pub fn resolve_event_keys(event: &ShortcutEvent) -> HashSet<String> {
 
 pub fn matches_keybinding_shortcut_modifiers(
     event: &ModifierState,
-    shortcut: &KeybindingShortcut,
+    shortcut: &ParsedShortcut,
     platform: &str,
 ) -> bool {
     let use_meta_for_mod = is_mac_platform(platform);
@@ -157,7 +188,7 @@ pub fn matches_keybinding_shortcut_modifiers(
 
 pub fn matches_keybinding_shortcut(
     event: &ShortcutEvent,
-    shortcut: &KeybindingShortcut,
+    shortcut: &ParsedShortcut,
     platform: &str,
 ) -> bool {
     // AltGraph layouts type characters through Alt+Ctrl; only plain alphanumerics keep matching.
@@ -190,7 +221,7 @@ pub fn normalize_key_token(token: &str) -> &str {
 
 /// `value` is one shortcut such as `mod+shift+b`. Returns `None` when a token is empty, a key
 /// appears twice, or no key is present.
-pub fn parse_keybinding_shortcut(value: &str) -> Option<KeybindingShortcut> {
+pub fn parse_keybinding_shortcut(value: &str) -> Option<ParsedShortcut> {
     let mut tokens: Vec<String> = value
         .to_lowercase()
         .split('+')
@@ -228,9 +259,8 @@ pub fn parse_keybinding_shortcut(value: &str) -> Option<KeybindingShortcut> {
         }
     }
 
-    let key = KeybindingValue::new(key?).ok()?;
-    Some(KeybindingShortcut {
-        key,
+    Some(ParsedShortcut {
+        key: ShortcutKey(key?),
         meta_key,
         ctrl_key,
         shift_key,
@@ -605,7 +635,7 @@ mod tests {
     use super::*;
     use turin_contracts::keybindings::KeybindingWhenNode as N;
 
-    fn shortcut(value: &str) -> KeybindingShortcut {
+    fn shortcut(value: &str) -> ParsedShortcut {
         parse_keybinding_shortcut(value).unwrap_or_else(|| panic!("{value} parses"))
     }
 
@@ -647,8 +677,25 @@ mod tests {
     }
 
     #[test]
-    fn space_cannot_be_held_as_a_key() {
-        assert_eq!(parse_keybinding_shortcut("mod+space"), None);
+    fn parses_the_space_key_and_matches_a_space_press() {
+        let spec = shortcut("mod+space");
+        assert_eq!(spec.key.as_str(), " ");
+        let press = ShortcutEvent {
+            meta_key: true,
+            ..event(" ", Some("Space"))
+        };
+        assert!(matches_keybinding_shortcut(&press, &spec, "MacIntel"));
+        assert!(!matches_keybinding_shortcut(
+            &event("x", None),
+            &spec,
+            "MacIntel"
+        ));
+    }
+
+    #[test]
+    fn keys_longer_than_contract_values_are_kept_as_upstream_keeps_them() {
+        let long = "x".repeat(70);
+        assert_eq!(shortcut(&format!("mod+{long}")).key.as_str(), long);
     }
 
     #[test]

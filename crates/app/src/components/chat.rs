@@ -21,5 +21,8 @@ pub mod pending_user_input;
 pub mod timeline;
 pub mod timeline_message_rows;
 pub mod timeline_work_rows;
+// Scroll anchoring state for the timeline view; the view does not read it yet.
+#[allow(dead_code)]
+pub mod timeline_scroll_anchoring;
 pub mod timestamp_format;
 pub mod work_log;

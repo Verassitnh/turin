@@ -479,6 +479,8 @@ struct FsDouble {
     read_requests: Arc<Mutex<Vec<usize>>>,
     /// Bytes returned by reads of a path's second and later opens.
     reopened_bytes: Arc<Mutex<usize>>,
+    /// Runs after each non-empty read of a path's second and later opens.
+    after_reopened_read: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Caps every `read_alloc` request, forcing short reads.
     max_read: Option<usize>,
     /// From the `after`-th call onward, `stat` or `open` of `path` uses `target`.
@@ -567,6 +569,9 @@ impl ScannerFileSystem for FsDouble {
             requests: Arc::clone(&self.read_requests),
             max_read: self.max_read,
             reopened_bytes: (open_index > 1).then(|| Arc::clone(&self.reopened_bytes)),
+            after_read: (open_index > 1)
+                .then(|| self.after_reopened_read.clone())
+                .flatten(),
         }))
     }
 }
@@ -576,6 +581,7 @@ struct CountingFile {
     requests: Arc<Mutex<Vec<usize>>>,
     max_read: Option<usize>,
     reopened_bytes: Option<Arc<Mutex<usize>>>,
+    after_read: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[async_trait]
@@ -589,6 +595,11 @@ impl ScannerFile for CountingFile {
         let chunk = self.inner.read_alloc(size).await?;
         if let (Some(total), Some(chunk)) = (&self.reopened_bytes, &chunk) {
             *total.lock() += chunk.len();
+        }
+        if let (Some(after_read), Some(chunk)) = (&self.after_read, &chunk)
+            && !chunk.is_empty()
+        {
+            after_read();
         }
         Ok(chunk)
     }
@@ -2237,5 +2248,122 @@ async fn imports_visible_history_from_a_transcript_with_an_oversized_tool_record
         thread_messages(&threads),
         vec![vec!["Import this large session".to_owned()]]
     );
+}
+
+#[tokio::test]
+async fn does_not_reopen_a_transcript_that_becomes_a_non_file_after_discovery() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture.workspace("t3code-workspace-");
+    let non_file = fixture.workspace("t3code-non-file-");
+    let transcript_path = fixture.codex_rollout("2026", "08", "24", "rollout-changed.jsonl");
+    write_transcript(
+        &transcript_path,
+        &[
+            json!({"type": "session_meta", "payload": {"id": "changed-session", "cwd": workspace.path()}}).to_string(),
+            json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Do not import this session"}}).to_string(),
+        ]
+        .join("\n"),
+        now,
+    );
+    let double = fs_double(|double| {
+        // Discovery stat is call 1. The import stat (call 2) sees a directory.
+        double.call_redirects.push(CallRedirect {
+            kind: CallKind::Stat,
+            path: transcript_path.to_string_lossy().into_owned(),
+            after: 2,
+            target: non_file.path().to_string_lossy().into_owned(),
+        });
+    });
+
+    let outcomes = collect_outcomes(&fixture.scanner_with(double.clone()), workspace.path(), &[]).await;
+
+    assert_eq!(double.opened(&transcript_path), 1);
+    assert_eq!(outcomes.iter().map(outcome_tag).collect::<Vec<_>>(), vec!["Skipped"]);
+}
+
+#[tokio::test]
+async fn does_not_import_a_transcript_dated_after_the_current_time() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture.workspace("t3code-workspace-");
+    // A full second ahead, so the clock's millisecond floor cannot round it back to `now`.
+    write_transcript(
+        &fixture.codex_rollout("2026", "08", "24", "rollout-future.jsonl"),
+        &[
+            json!({"type": "session_meta", "payload": {"id": "future-session", "cwd": workspace.path()}}).to_string(),
+            json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Future work"}}).to_string(),
+        ]
+        .join("\n"),
+        now + 1_000.0,
+    );
+
+    let outcomes = collect_outcomes(&fixture.scanner(), workspace.path(), &[]).await;
+
+    assert!(outcomes.is_empty());
+}
+
+#[tokio::test]
+async fn skips_growth_during_reading_without_exceeding_the_reserved_bytes() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture.workspace("t3code-workspace-");
+    let transcript_path = fixture.codex_rollout("2026", "08", "24", "rollout-growing.jsonl");
+    let contents = [
+        json!({"type": "session_meta", "payload": {"id": "growing-session", "cwd": workspace.path()}}).to_string(),
+        json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Do not import a changing file"}}).to_string(),
+    ]
+    .join("\n");
+    write_transcript(&transcript_path, &contents, now);
+    let grew = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let grow_path = transcript_path.clone();
+    let grow_contents = format!("{contents}\nchanged");
+    let double = fs_double(|double| {
+        double.after_reopened_read = Some(Arc::new(move || {
+            if !grew.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                fs::write(&grow_path, &grow_contents).expect("grow transcript");
+            }
+        }));
+    });
+
+    let outcomes = collect_outcomes(&fixture.scanner_with(double.clone()), workspace.path(), &[]).await;
+
+    assert_eq!(double.opened(&transcript_path), 2);
+    assert_eq!(*double.reopened_bytes.lock(), contents.len());
+    assert_eq!(outcomes.iter().map(outcome_tag).collect::<Vec<_>>(), vec!["Skipped"]);
+}
+
+#[tokio::test]
+async fn skips_a_transcript_that_shrinks_after_its_size_check() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture.workspace("t3code-workspace-");
+    let transcript_path = fixture.codex_rollout("2026", "08", "24", "rollout-shrinking.jsonl");
+    let contents = [
+        json!({"type": "session_meta", "payload": {"id": "shrinking-session", "cwd": workspace.path()}}).to_string(),
+        json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Do not import a changing file"}}).to_string(),
+    ]
+    .join("\n");
+    write_transcript(&transcript_path, &format!("{contents}\n{}", "padding".repeat(100)), now);
+    let shrunk_path = fixture.codex_home.join("shrunk.jsonl");
+    write_transcript(&shrunk_path, &contents, now);
+    let double = fs_double(|double| {
+        // The metadata open is call 1. The import open (call 2) gets the shorter file.
+        double.call_redirects.push(CallRedirect {
+            kind: CallKind::Open,
+            path: transcript_path.to_string_lossy().into_owned(),
+            after: 2,
+            target: shrunk_path.to_string_lossy().into_owned(),
+        });
+    });
+
+    let outcomes = collect_outcomes(&fixture.scanner_with(double.clone()), workspace.path(), &[]).await;
+
+    assert_eq!(double.opened(&transcript_path), 2);
+    assert_eq!(outcomes.iter().map(outcome_tag).collect::<Vec<_>>(), vec!["Skipped"]);
 }
 

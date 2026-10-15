@@ -14,12 +14,13 @@ use super::chat::chat_header::ChatHeader;
 use super::chat::composer_pending_panels::{
     ComposerPendingApprovalBanner, ComposerPendingUserInputBanner,
 };
-use super::chat::composer_surface::ComposerSurface;
 use super::chat::messages_timeline::MessagesTimeline;
 use super::chat::timeline::session_logic::{derive_pending_approvals, derive_pending_user_inputs};
 use super::chat::timeline::source::MockTimelineSource;
 use super::drag_region::DragRegion as _;
 use super::workspace_titlebar::workspace_titlebar_content_left;
+use crate::composer::mock_source::MockComposerSource;
+use crate::composer::views::chat_composer::ChatComposer;
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::{CHAT_CONTENT_MAX_WIDTH, WORKSPACE_TOPBAR_HEIGHT};
 
@@ -46,6 +47,10 @@ impl RenderOnce for ChatView {
         let timeline = window.use_keyed_state("messages-timeline", cx, |window, cx| {
             let store = MockTimelineSource::start(cx);
             MessagesTimeline::new(store, window, cx)
+        });
+        let composer = window.use_keyed_state("chat-composer", cx, |window, cx| {
+            let store = MockComposerSource::start(cx);
+            ChatComposer::new(store, window, cx)
         });
         // The composer's top drawer: the oldest pending approval, else the
         // oldest pending question (ChatComposer.tsx `showComposerTopDrawer`).
@@ -117,7 +122,7 @@ impl RenderOnce for ChatView {
                                     .w_full()
                                     .max_w(CHAT_CONTENT_MAX_WIDTH)
                                     .children(drawer)
-                                    .child(ComposerSurface),
+                                    .child(composer),
                             )
                             // Bottom spacer: `h-[calc(env(safe-area-inset-bottom)+1.25rem)]`.
                             .child(div().h(rems(1.25))),

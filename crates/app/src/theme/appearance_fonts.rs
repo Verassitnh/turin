@@ -98,7 +98,8 @@ impl Default for AppearanceFontPreferences {
             size_interface: DEFAULT_INTERFACE_FONT_SIZE,
             size_prompt: DEFAULT_PROMPT_FONT_SIZE,
             size_code: DEFAULT_CODE_FONT_SIZE,
-            smoothing: false,
+            // contracts settings.ts: `fontSmoothing` decodes to `true`.
+            smoothing: true,
         }
     }
 }

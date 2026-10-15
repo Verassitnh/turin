@@ -61,6 +61,12 @@ fn snapshot_copies_committed_rows_and_not_an_open_transaction() {
     let before = checksum(&src);
 
     let snapshot = T3Import::snapshot(&src).unwrap();
+    let snapshot_path = snapshot.path().canonicalize().unwrap();
+    assert!(
+        snapshot_path.starts_with("/tmp") || snapshot_path.starts_with("/private/tmp"),
+        "{}",
+        snapshot_path.display()
+    );
     assert_eq!(
         column(snapshot.path(), "SELECT v FROM notes ORDER BY v"),
         vec!["kept".to_owned()]
@@ -72,6 +78,30 @@ fn snapshot_copies_committed_rows_and_not_an_open_transaction() {
         column(&src, "SELECT v FROM notes ORDER BY v"),
         vec!["hidden".to_owned(), "kept".to_owned()]
     );
+}
+
+#[test]
+fn a_failed_open_does_not_delete_an_existing_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("statev2.sqlite");
+    std::fs::write(&dest, b"already here").unwrap();
+    let missing = dir.path().join("missing.sqlite");
+    let err = super::snapshot::backup_to(&missing, &dest).unwrap_err();
+    assert!(err.to_string().contains("t3Import.snapshot.open"), "{err}");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"already here");
+}
+
+#[test]
+fn an_unfinished_backup_deletes_the_partial_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("statev2.sqlite");
+    std::fs::write(&dest, b"partial").unwrap();
+    std::fs::write(dir.path().join("statev2.sqlite-journal"), b"journal").unwrap();
+    std::fs::write(dir.path().join("statev2.sqlite-wal"), b"wal").unwrap();
+    super::snapshot::discard_partial(&dest);
+    assert!(!dest.exists());
+    assert!(!dir.path().join("statev2.sqlite-journal").exists());
+    assert!(!dir.path().join("statev2.sqlite-wal").exists());
 }
 
 #[test]

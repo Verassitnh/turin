@@ -1,6 +1,6 @@
-//! Online backup. Same loop as `initializeV2Database`: only `Done` is a
-//! finished copy. `Busy` and `Locked` wait; anything else deletes the partial
-//! file by dropping the temp directory.
+//! Online backup. Same rule as `initializeV2Database`: only `Done` is a
+//! finished copy. `Busy` and `Locked` wait and retry the same step. Any error
+//! deletes the destination file, so a partial copy is never returned.
 
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -12,9 +12,14 @@ use rusqlite::{Connection, OpenFlags};
 use super::T3ImportError;
 
 const BUSY: Duration = Duration::from_secs(5);
-const STEP_PAGES: i32 = 64;
+/// Pages per `sqlite3_backup_step`. Large enough that a 1 GB file is not one
+/// syscall per 256 KB, small enough that a writer can commit between steps.
+const STEP_PAGES: i32 = 1024;
 const STEP_PAUSE: Duration = Duration::from_millis(25);
-const MAX_PAUSES: u32 = 100;
+/// Consecutive busy/locked results before giving up. 30s covers a checkpoint
+/// on a database T3 is still writing.
+const MAX_PAUSES: u32 = 1_200;
+const SNAPSHOT_DIR: &str = "/tmp";
 
 /// A snapshot file owned by a temporary directory.
 pub struct T3Snapshot {
@@ -29,7 +34,7 @@ impl T3Snapshot {
 }
 
 pub(crate) fn snapshot(src: &Path) -> Result<T3Snapshot, T3ImportError> {
-    let dir = tempfile::TempDir::with_prefix("turin-t3-import-")
+    let dir = tempfile::TempDir::with_prefix_in("turin-t3-import-", SNAPSHOT_DIR)
         .map_err(|err| T3ImportError::io("create t3 import snapshot directory", err))?;
     let path = dir.path().join("statev2.sqlite");
     backup_to(src, &path)?;
@@ -43,6 +48,9 @@ pub(crate) fn backup_to(src: &Path, dest: &Path) -> Result<(), T3ImportError> {
         std::fs::create_dir_all(parent)
             .map_err(|err| T3ImportError::io("create t3 import destination", err))?;
     }
+    // Armed only once the source is open, immediately before creating `dest`.
+    // A failure to open the source must not delete a file the caller already had.
+    let mut partial = PartialCopy::new(dest);
     let source = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|err| crate::errors::PersistenceError::sql("t3Import.snapshot.open", &err))?;
     source.busy_timeout(BUSY).map_err(|err| {
@@ -54,8 +62,12 @@ pub(crate) fn backup_to(src: &Path, dest: &Path) -> Result<(), T3ImportError> {
         .execute_batch("PRAGMA query_only = ON;")
         .map_err(|err| crate::errors::PersistenceError::sql("t3Import.snapshot.queryOnly", &err))?;
 
+    partial.arm();
     let mut copied = Connection::open(dest)
         .map_err(|err| crate::errors::PersistenceError::sql("t3Import.snapshot.create", &err))?;
+    copied.busy_timeout(BUSY).map_err(|err| {
+        crate::errors::PersistenceError::sql("t3Import.snapshot.busyTimeout", &err)
+    })?;
     let backup = Backup::new(&source, &mut copied)
         .map_err(|err| crate::errors::PersistenceError::sql("t3Import.snapshot.backup", &err))?;
     let mut pauses = 0u32;
@@ -88,7 +100,47 @@ pub(crate) fn backup_to(src: &Path, dest: &Path) -> Result<(), T3ImportError> {
     }
     drop(backup);
     drop(copied);
+    partial.disarm();
     Ok(())
+}
+
+/// Deletes `dest` and its SQLite sidecars unless [`Self::disarm`] ran.
+struct PartialCopy {
+    dest: PathBuf,
+    armed: bool,
+}
+
+impl PartialCopy {
+    fn new(dest: &Path) -> Self {
+        Self {
+            dest: dest.to_path_buf(),
+            armed: false,
+        }
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PartialCopy {
+    fn drop(&mut self) {
+        if self.armed {
+            discard_partial(&self.dest);
+        }
+    }
+}
+
+pub(crate) fn discard_partial(dest: &Path) {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut name = dest.file_name().unwrap_or_default().to_os_string();
+        name.push(suffix);
+        let _ = std::fs::remove_file(dest.with_file_name(name));
+    }
 }
 
 fn busy_err() -> rusqlite::Error {

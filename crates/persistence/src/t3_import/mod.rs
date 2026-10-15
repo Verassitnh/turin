@@ -49,7 +49,7 @@ use verify::migrate_and_verify;
 pub struct T3Import;
 
 impl T3Import {
-    /// Consistent online backup of `src` into a new temporary directory.
+    /// Consistent online backup of `src` into a new directory under `/tmp`.
     ///
     /// The source is opened with `SQLITE_OPEN_READ_ONLY` and a busy timeout.
     /// The returned path is the only file later steps migrate. Dropping the

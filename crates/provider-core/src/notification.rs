@@ -10,7 +10,10 @@ use turin_contracts::{
     },
 };
 
-use crate::turn_item::turn_item_common;
+use crate::{
+    js::{take_utf16, utf16_len},
+    turn_item::turn_item_common,
+};
 
 /// A piece of background work an adapter can name, by kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,23 +61,13 @@ pub struct BackgroundWorkReport {
 
 const LABEL_MAX_LENGTH: usize = 80;
 
-/// UTF-16 length, as JS `string.length`.
-fn js_len(value: &str) -> usize {
-    value.encode_utf16().count()
-}
-
-fn js_slice_units(value: &str, end: usize) -> String {
-    let units: Vec<u16> = value.encode_utf16().take(end).collect();
-    String::from_utf16_lossy(&units)
-}
-
 fn report_label(label: Option<&str>) -> Option<String> {
     let first_line = js_trim(js_trim(label?).split('\n').next().unwrap_or(""));
     if first_line.is_empty() {
         return None;
     }
-    Some(if js_len(first_line) > LABEL_MAX_LENGTH {
-        format!("{}…", js_slice_units(first_line, LABEL_MAX_LENGTH - 1))
+    Some(if utf16_len(first_line) > LABEL_MAX_LENGTH {
+        format!("{}…", take_utf16(first_line, LABEL_MAX_LENGTH - 1))
     } else {
         first_line.to_owned()
     })
@@ -520,7 +513,7 @@ mod tests {
     fn long_labels_are_cut_at_eighty_units() {
         let long = "x".repeat(120);
         let label = report_label(Some(&long)).unwrap();
-        assert_eq!(js_len(&label), 80);
+        assert_eq!(utf16_len(&label), 80);
         assert!(label.ends_with('…'));
     }
 

@@ -13,7 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Subscription, Window, div, px, rems,
+    Subscription, WeakEntity, Window, div, px, rems,
 };
 use serde_json::Value;
 
@@ -93,6 +93,20 @@ impl SettingsScope {
 
 type InputCommit = Rc<dyn Fn(&mut SettingsView, String, &mut Window, &mut Context<SettingsView>)>;
 
+/// Placeholder of a saved secret field (`SecretInput` with `configured`).
+pub(super) const STORED_SECRET_PLACEHOLDER: &str = "Stored secret, enter a new value to replace";
+
+/// How an input commits and renders.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputKind {
+    /// Commits on Enter and blur (`DraftInput`).
+    Draft,
+    /// Commits on every change as well (`DraftInput` with `live`).
+    Live,
+    /// A masked draft that commits like [`InputKind::Draft`] (`SecretInput`).
+    Secret,
+}
+
 pub struct SettingsView {
     pub(super) store: Entity<SettingsStore>,
     pub(super) route: SettingsRoute,
@@ -100,6 +114,8 @@ pub struct SettingsView {
     pub(super) menus: MenuState,
     pub(super) inputs: HashMap<SharedString, Entity<InputState>>,
     input_commits: HashMap<SharedString, InputCommit>,
+    /// The placeholder each input was last given, so it is only pushed on change.
+    input_placeholders: HashMap<SharedString, SharedString>,
     pub(super) textareas: HashMap<SharedString, Entity<TextareaState>>,
     pub(super) nav_search: Entity<InputState>,
     pub(super) nav_query: String,
@@ -137,6 +153,7 @@ impl SettingsView {
             menus: MenuState::default(),
             inputs: HashMap::new(),
             input_commits: HashMap::new(),
+            input_placeholders: HashMap::new(),
             textareas: HashMap::new(),
             nav_search,
             nav_query: String::new(),
@@ -259,7 +276,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
         commit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
     ) -> Entity<InputState> {
-        self.input_with(id, value, placeholder, false, window, cx, commit)
+        self.input_with(id, value, placeholder, InputKind::Draft, window, cx, commit)
     }
 
     /// Like [`Self::input`] but `commit` also runs on every change.
@@ -272,7 +289,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
         commit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
     ) -> Entity<InputState> {
-        self.input_with(id, value, placeholder, true, window, cx, commit)
+        self.input_with(id, value, placeholder, InputKind::Live, window, cx, commit)
     }
 
     /// A multi-line input (`Textarea`, `rows={rows}`); `commit` runs on blur.
@@ -349,7 +366,7 @@ impl SettingsView {
         id: &str,
         value: &str,
         placeholder: &str,
-        live: bool,
+        kind: InputKind,
         window: &mut Window,
         cx: &mut Context<Self>,
         commit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
@@ -358,6 +375,15 @@ impl SettingsView {
         self.input_commits.insert(key.clone(), Rc::new(commit));
         if let Some(state) = self.inputs.get(&key) {
             let state = state.clone();
+            // The placeholder follows the caller, as an upstream prop does (a saved
+            // secret swaps "Not set" for the stored-secret hint after save).
+            if self.input_placeholders.get(&key).map(SharedString::as_str) != Some(placeholder) {
+                state.update(cx, |state, cx| {
+                    state.set_placeholder(placeholder.to_owned(), window, cx)
+                });
+                self.input_placeholders
+                    .insert(key.clone(), SharedString::from(placeholder.to_owned()));
+            }
             let focused = state.read(cx).focus_handle(cx).is_focused(window);
             if !focused && state.read(cx).value() != value {
                 state.update(cx, |state, cx| {
@@ -366,9 +392,12 @@ impl SettingsView {
             }
             return state;
         }
+        self.input_placeholders
+            .insert(key.clone(), SharedString::from(placeholder.to_owned()));
         let state = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(placeholder.to_owned())
+                .masked(kind == InputKind::Secret)
                 .default_value(value.to_owned())
         });
         let subscription_key = key.clone();
@@ -377,7 +406,7 @@ impl SettingsView {
             window,
             move |this, state, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur)
-                    || (live && matches!(event, InputEvent::Change))
+                    || (kind == InputKind::Live && matches!(event, InputEvent::Change))
                 {
                     let text = state.read(cx).value().to_string();
                     if let Some(commit) = this.input_commits.get(&subscription_key).cloned() {
@@ -389,6 +418,41 @@ impl SettingsView {
         self._subscriptions.push(subscription);
         self.inputs.insert(key, state.clone());
         state
+    }
+
+    /// A masked input with a commit hook (`SecretInput` on `DraftInput`). While
+    /// `configured`, the field shows the stored-secret hint and a blank commit is
+    /// ignored, so blurring an untouched saved field never clears it. Callers pass
+    /// `value` as "" for a saved secret: the app never holds the plaintext back.
+    pub(super) fn secret_commit_input(
+        &mut self,
+        id: &str,
+        value: &str,
+        placeholder: &str,
+        configured: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        commit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Entity<InputState> {
+        let placeholder = if configured {
+            STORED_SECRET_PLACEHOLDER
+        } else {
+            placeholder
+        };
+        self.input_with(
+            id,
+            value,
+            placeholder,
+            InputKind::Secret,
+            window,
+            cx,
+            move |this, text, window, cx| {
+                if configured && text.is_empty() {
+                    return;
+                }
+                commit(this, text, window, cx);
+            },
+        )
     }
 }
 
@@ -492,7 +556,9 @@ impl Render for SettingsView {
                         .text_color(theme.sidebar_foreground)
                         .child(SidebarChromeHeader)
                         .child(self.render_nav(window, cx))
-                        .child(SidebarChromeFooter),
+                        // The settings window has no app sidebar to route the footer's
+                        // events to, so its buttons stay inert here.
+                        .child(SidebarChromeFooter::new(WeakEntity::new_invalid())),
                 )
             })
             .child(

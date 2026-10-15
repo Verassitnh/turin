@@ -3,10 +3,11 @@
 //! and can be screenshotted before the live services are wired (T22).
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui_kit::{App, AppContext as _, Entity};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use turin_contracts::keybindings::KeybindingRule;
 use turin_contracts::settings::{
     ClientSettings, ServerSettings, ServerSettingsPatch, default_client_settings,
@@ -198,11 +199,23 @@ fn mock_view_model() -> SettingsViewModel {
     }
 }
 
-/// The mutable state behind the mock: the settings plus the user's raw
-/// keybinding rules, which the resolved config is derived from.
+/// `SECRET_REDACTED` (settingsSecrets.ts): what a saved field secret reads back as.
+const SECRET_REDACTED: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
+
+/// The host's secret store, which settings never read back. Sensitive provider
+/// variables are keyed by instance and name, usage-source keys by source id.
+#[derive(Default)]
+struct SecretStore {
+    environment: BTreeMap<(String, String), String>,
+    usage_keys: BTreeMap<String, String>,
+}
+
+/// The mutable state behind the mock: the settings, the user's raw keybinding
+/// rules (which the resolved config is derived from) and the secret store.
 struct MockState {
     vm: SettingsViewModel,
     custom_keybindings: Vec<KeybindingRule>,
+    secrets: SecretStore,
 }
 
 pub struct MockSettingsSource {
@@ -217,6 +230,7 @@ impl MockSettingsSource {
             state: RefCell::new(MockState {
                 vm: mock_view_model(),
                 custom_keybindings: Vec::new(),
+                secrets: SecretStore::default(),
             }),
             store: RefCell::new(None),
         });
@@ -288,6 +302,110 @@ fn merge_client_patch(client: &ClientSettings, patch: &Value) -> ClientSettings 
     serde_json::from_value(value).unwrap_or_else(|_| client.clone())
 }
 
+/// `mapSettingsSecrets` as the host runs it: a saved patch's sensitive environment
+/// values and usage-source keys move into `store`, and the patch carries a
+/// redaction marker in their place. A blank value clears its secret, and an
+/// unchanged marker keeps the stored one. `providerInstances` is always the whole
+/// map (`write_provider_instance`), so secrets of instances it no longer lists go.
+fn split_settings_secrets(store: &mut SecretStore, patch: &mut Value) {
+    let Some(patch) = patch.as_object_mut() else {
+        return;
+    };
+    if let Some(instances) = patch
+        .get_mut("providerInstances")
+        .and_then(Value::as_object_mut)
+    {
+        store
+            .environment
+            .retain(|(instance_id, _), _| instances.contains_key(instance_id));
+        for (instance_id, instance) in instances.iter_mut() {
+            let Some(variables) = instance
+                .get_mut("environment")
+                .and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            for variable in variables.iter_mut() {
+                split_environment_variable(store, instance_id, variable);
+            }
+        }
+    }
+    if let Some(sources) = patch
+        .get_mut("usageLimitSources")
+        .and_then(Value::as_object_mut)
+    {
+        for (source_id, source) in sources.iter_mut() {
+            if source.is_null() {
+                // A removed hub takes its management key with it.
+                store.usage_keys.remove(source_id);
+            } else if let Some(source) = source.as_object_mut() {
+                split_management_key(store, source_id, source);
+            }
+        }
+    }
+}
+
+fn split_environment_variable(store: &mut SecretStore, instance_id: &str, variable: &mut Value) {
+    let Some(variable) = variable.as_object_mut() else {
+        return;
+    };
+    let name = variable
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let key = (instance_id.to_owned(), name);
+    let sensitive = variable
+        .get("sensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let redacted = variable.remove("valueRedacted").and_then(|v| v.as_bool()) == Some(true);
+    if !sensitive {
+        // A plain value stays in settings; it has no secret to keep.
+        store.environment.remove(&key);
+        return;
+    }
+    if !redacted {
+        let value = variable
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if value.is_empty() {
+            store.environment.remove(&key);
+            return;
+        }
+        store.environment.insert(key, value);
+    }
+    variable.insert("value".into(), Value::String(String::new()));
+    variable.insert("valueRedacted".into(), Value::Bool(true));
+}
+
+fn split_management_key(store: &mut SecretStore, source_id: &str, source: &mut Map<String, Value>) {
+    let Some(typed) = source
+        .get("managementKey")
+        .and_then(Value::as_str)
+        .map(|key| key.trim().to_owned())
+    else {
+        return;
+    };
+    match typed.as_str() {
+        SECRET_REDACTED => {}
+        "" => {
+            store.usage_keys.remove(source_id);
+        }
+        key => {
+            store
+                .usage_keys
+                .insert(source_id.to_owned(), key.to_owned());
+            source.insert(
+                "managementKey".into(),
+                Value::String(SECRET_REDACTED.into()),
+            );
+        }
+    }
+}
+
 fn apply_server_patch(server: &ServerSettings, patch: Value) -> ServerSettings {
     match serde_json::from_value::<ServerSettingsPatch>(patch) {
         Ok(patch) => apply_server_settings_patch(server, &patch).unwrap_or_else(|_| server.clone()),
@@ -307,9 +425,11 @@ impl SettingsSource for MockSettingsSource {
         self.publish(cx);
     }
 
-    fn update_server(&self, patch: Value, cx: &mut App) {
+    fn update_server(&self, mut patch: Value, cx: &mut App) {
         {
             let mut state = self.state.borrow_mut();
+            let state = &mut *state;
+            split_settings_secrets(&mut state.secrets, &mut patch);
             state.vm.server = apply_server_patch(&state.vm.server, patch);
         }
         self.publish(cx);
@@ -583,4 +703,113 @@ fn mock_licenses() -> Vec<LicenseEntry> {
             &format!("Copyright (c) Tokio Contributors\n\n{MIT}"),
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn split(patch: Value) -> (Value, SecretStore) {
+        let mut store = SecretStore::default();
+        let mut patch = patch;
+        split_settings_secrets(&mut store, &mut patch);
+        (patch, store)
+    }
+
+    fn instance(environment: Value) -> Value {
+        json!({ "providerInstances": { "cursor": { "environment": environment } } })
+    }
+
+    #[test]
+    fn sensitive_value_moves_aside_and_settings_keep_a_marker() {
+        let (patch, store) = split(instance(json!([
+            { "name": "CURSOR_API_KEY", "value": "sk-1", "sensitive": true },
+        ])));
+        assert_eq!(
+            patch["providerInstances"]["cursor"]["environment"],
+            json!([{ "name": "CURSOR_API_KEY", "value": "", "sensitive": true, "valueRedacted": true }])
+        );
+        assert_eq!(
+            store
+                .environment
+                .get(&("cursor".into(), "CURSOR_API_KEY".into())),
+            Some(&"sk-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn unchanged_marker_keeps_the_stored_secret() {
+        let mut store = SecretStore::default();
+        store
+            .environment
+            .insert(("cursor".into(), "CURSOR_API_KEY".into()), "sk-1".into());
+        let mut patch = instance(json!([
+            { "name": "CURSOR_API_KEY", "value": "", "sensitive": true, "valueRedacted": true },
+        ]));
+        split_settings_secrets(&mut store, &mut patch);
+        assert_eq!(
+            patch["providerInstances"]["cursor"]["environment"][0]["valueRedacted"],
+            json!(true)
+        );
+        assert_eq!(store.environment.len(), 1);
+    }
+
+    #[test]
+    fn blank_sensitive_value_clears_its_secret_without_a_marker() {
+        let mut store = SecretStore::default();
+        store
+            .environment
+            .insert(("cursor".into(), "CURSOR_API_KEY".into()), "sk-1".into());
+        let mut patch = instance(json!([
+            { "name": "CURSOR_API_KEY", "value": "", "sensitive": true, "valueRedacted": false },
+        ]));
+        split_settings_secrets(&mut store, &mut patch);
+        assert_eq!(
+            patch["providerInstances"]["cursor"]["environment"],
+            json!([{ "name": "CURSOR_API_KEY", "value": "", "sensitive": true }])
+        );
+        assert!(store.environment.is_empty());
+    }
+
+    #[test]
+    fn plain_value_stays_in_settings() {
+        let (patch, store) = split(instance(json!([
+            { "name": "EXTRA_FLAG", "value": "1", "sensitive": false },
+        ])));
+        assert_eq!(
+            patch["providerInstances"]["cursor"]["environment"],
+            json!([{ "name": "EXTRA_FLAG", "value": "1", "sensitive": false }])
+        );
+        assert!(store.environment.is_empty());
+    }
+
+    #[test]
+    fn dropped_instances_take_their_secrets_with_them() {
+        let mut store = SecretStore::default();
+        store
+            .environment
+            .insert(("gone".into(), "CURSOR_API_KEY".into()), "sk-1".into());
+        let mut patch = instance(json!([]));
+        split_settings_secrets(&mut store, &mut patch);
+        assert!(store.environment.is_empty());
+    }
+
+    #[test]
+    fn management_key_moves_aside_and_removing_a_hub_drops_it() {
+        let mut store = SecretStore::default();
+        let mut patch = json!({ "usageLimitSources": {
+            "cliproxy-hub": { "kind": "cliproxy", "url": "https://hub", "managementKey": " mk " },
+        } });
+        split_settings_secrets(&mut store, &mut patch);
+        assert_eq!(
+            patch["usageLimitSources"]["cliproxy-hub"]["managementKey"],
+            json!(SECRET_REDACTED)
+        );
+        assert_eq!(store.usage_keys.get("cliproxy-hub"), Some(&"mk".to_owned()));
+
+        let mut removed = json!({ "usageLimitSources": { "cliproxy-hub": null } });
+        split_settings_secrets(&mut store, &mut removed);
+        assert!(store.usage_keys.is_empty());
+    }
 }

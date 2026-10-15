@@ -322,6 +322,27 @@ pub fn provider_environment_without_names(
         .collect()
 }
 
+/// The draft a published environment leaves behind. The host writes each
+/// sensitive value aside and echoes back an empty value with `valueRedacted`
+/// (`settingsSecrets.ts`); the app keeps the same shape, so no plaintext secret
+/// stays in the view model once it is saved.
+pub fn redact_saved_environment(environment: &[EnvironmentVariable]) -> Vec<EnvironmentVariable> {
+    environment
+        .iter()
+        .map(|variable| {
+            if variable.sensitive && !variable.value.is_empty() {
+                EnvironmentVariable {
+                    value: String::new(),
+                    value_redacted: Some(true),
+                    ..variable.clone()
+                }
+            } else {
+                variable.clone()
+            }
+        })
+        .collect()
+}
+
 /// `nextProviderEnvironmentWithFieldValue`.
 pub fn next_provider_environment_with_field_value(
     environment: &[EnvironmentVariable],
@@ -758,6 +779,43 @@ mod tests {
         assert_eq!(cleared, env);
         assert!(is_valid_environment_variable_name("FOO_1"));
         assert!(!is_valid_environment_variable_name("1FOO"));
+    }
+
+    #[test]
+    fn saved_environment_keeps_no_sensitive_plaintext() {
+        let env = vec![
+            EnvironmentVariable {
+                name: "KEY".into(),
+                value: "secret".into(),
+                sensitive: true,
+                value_redacted: Some(false),
+            },
+            EnvironmentVariable {
+                name: "PLAIN".into(),
+                value: "1".into(),
+                sensitive: false,
+                value_redacted: None,
+            },
+            EnvironmentVariable {
+                name: "SAVED".into(),
+                value: String::new(),
+                sensitive: true,
+                value_redacted: Some(true),
+            },
+        ];
+        assert_eq!(
+            redact_saved_environment(&env),
+            vec![
+                EnvironmentVariable {
+                    name: "KEY".into(),
+                    value: String::new(),
+                    sensitive: true,
+                    value_redacted: Some(true),
+                },
+                env[1].clone(),
+                env[2].clone(),
+            ]
+        );
     }
 
     #[test]

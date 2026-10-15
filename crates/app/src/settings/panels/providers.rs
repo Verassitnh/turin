@@ -39,7 +39,7 @@ use super::super::provider_form::{
     model_list_changes, next_config_blob_with_value, next_hidden_models_for_bulk_toggle,
     next_provider_config_with_field_value, next_provider_environment_with_field_value,
     provider_environment_without_names, read_config_custom_models, read_provider_config_boolean,
-    read_provider_config_string, read_provider_environment_variable,
+    read_provider_config_string, read_provider_environment_variable, redact_saved_environment,
 };
 use super::super::provider_meta::driver_label;
 use super::super::provider_status::{
@@ -1260,28 +1260,31 @@ impl SettingsView {
         let configured = variable.is_some_and(|v| v.value_redacted == Some(true));
         let id = row.id.clone();
         let environment_snapshot = environment.to_vec();
-        let input = self.input(
-            &format!("provider-env-field-{id}-{}", field.name),
-            &value,
-            if configured {
-                "Configured"
-            } else {
-                field.placeholder
-            },
-            window,
-            cx,
-            move |this, text, _, cx| {
-                let rows = this.instance_rows(cx);
-                if let Some(row) = rows.iter().find(|row| row.id == id) {
-                    let next = next_provider_environment_with_field_value(
-                        &environment_snapshot,
-                        field,
-                        &text,
-                    );
-                    this.write_environment(row, &next, cx);
-                }
-            },
-        );
+        let input_id = format!("provider-env-field-{id}-{}", field.name);
+        let commit = move |this: &mut Self,
+                           text: String,
+                           _: &mut Window,
+                           cx: &mut Context<Self>| {
+            let rows = this.instance_rows(cx);
+            if let Some(row) = rows.iter().find(|row| row.id == id) {
+                let next =
+                    next_provider_environment_with_field_value(&environment_snapshot, field, &text);
+                this.write_environment(row, &next, cx);
+            }
+        };
+        let input = if field.sensitive {
+            self.secret_commit_input(
+                &input_id,
+                &value,
+                field.placeholder,
+                configured,
+                window,
+                cx,
+                commit,
+            )
+        } else {
+            self.input(&input_id, &value, field.placeholder, window, cx, commit)
+        };
         let clear_id = row.id.clone();
         let clear_env = environment.to_vec();
         let clear = variable.is_some().then(|| {
@@ -1522,29 +1525,42 @@ impl SettingsView {
             );
             let value_id = id.clone();
             let value_vars = all_vars.clone();
-            let value_input = self.input(
-                &format!("env-value-{id}-{index}"),
-                if variable.value_redacted == Some(true) {
-                    ""
-                } else {
-                    &variable.value
-                },
-                if variable.value_redacted == Some(true) {
-                    "Configured"
-                } else {
-                    "value"
-                },
-                window,
-                cx,
-                move |this, text, _, cx| {
+            let value_configured = variable.value_redacted == Some(true);
+            let value_text = if value_configured {
+                ""
+            } else {
+                &variable.value
+            };
+            let value_commit =
+                move |this: &mut Self, text: String, _: &mut Window, cx: &mut Context<Self>| {
                     let mut next = value_vars.clone();
                     if let Some(entry) = next.get_mut(offset + index) {
                         entry.value = text;
                         entry.value_redacted = Some(false);
                     }
                     this.publish_environment_rows(&value_id, next, cx);
-                },
-            );
+                };
+            let value_input_id = format!("env-value-{id}-{index}");
+            let value_input = if variable.sensitive {
+                self.secret_commit_input(
+                    &value_input_id,
+                    value_text,
+                    "value",
+                    value_configured,
+                    window,
+                    cx,
+                    value_commit,
+                )
+            } else {
+                self.input(
+                    &value_input_id,
+                    value_text,
+                    "value",
+                    window,
+                    cx,
+                    value_commit,
+                )
+            };
             let sensitive = variable.sensitive;
             let sens_id = id.clone();
             let sens_vars = all_vars.clone();
@@ -1567,6 +1583,10 @@ impl SettingsView {
                         let mut next = sens_vars.clone();
                         if let Some(entry) = next.get_mut(offset + index) {
                             entry.sensitive = !entry.sensitive;
+                            // A plain value is never saved as redacted (`ProviderInstanceCard`).
+                            if !entry.sensitive {
+                                entry.value_redacted = Some(false);
+                            }
                         }
                         this.publish_environment_rows(&sens_id, next, cx);
                     }));
@@ -1649,10 +1669,6 @@ impl SettingsView {
         rows: Vec<EnvironmentVariable>,
         cx: &mut Context<Self>,
     ) {
-        self.panels
-            .providers
-            .env_drafts
-            .insert(id.to_owned(), rows.clone());
         let mut published = Vec::new();
         for row in &rows {
             let name = row.name.trim();
@@ -1662,6 +1678,11 @@ impl SettingsView {
                     || !row.sensitive
                     || row.value_redacted.is_some()
                 {
+                    // Unfinished rows stay as typed until they can be published.
+                    self.panels
+                        .providers
+                        .env_drafts
+                        .insert(id.to_owned(), rows.clone());
                     cx.notify();
                     return;
                 }
@@ -1671,6 +1692,12 @@ impl SettingsView {
             row.name = name.to_owned();
             published.push(row);
         }
+        // The draft keeps no plaintext secret once it is published: the host holds
+        // it, and the echoed row shows the "Configured" state.
+        self.panels
+            .providers
+            .env_drafts
+            .insert(id.to_owned(), redact_saved_environment(&rows));
         let rows_now = self.instance_rows(cx);
         if let Some(row) = rows_now.iter().find(|row| row.id == id) {
             self.write_environment(row, &published, cx);

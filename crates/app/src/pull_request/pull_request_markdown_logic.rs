@@ -92,4 +92,21 @@ mod tests {
     fn zero_reference_is_not_candidate() {
         assert!(find_pull_request_autolinks("#0", "https://github.com/a/b").is_empty());
     }
+    #[test]
+    fn repository_url_loses_every_trailing_slash() {
+        let links = find_pull_request_autolinks("#7", "https://github.com/a/b///");
+        assert_eq!(links[0].url, "https://github.com/a/b/issues/7");
+    }
+    #[test]
+    fn offsets_are_utf16_code_units() {
+        // An astral character is two UTF-16 units, so `#7` starts at 2 and ends at 4.
+        let links = find_pull_request_autolinks("\u{1F600} #7", "https://github.com/a/b");
+        assert_eq!((links[0].start, links[0].end), (3, 5));
+    }
+    #[test]
+    fn commit_prefix_accepts_any_js_whitespace() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let links = find_pull_request_autolinks(&format!("\u{a0}{sha}"), "https://github.com/a/b");
+        assert_eq!(links.len(), 1);
+    }
 }

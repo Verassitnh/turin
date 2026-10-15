@@ -689,6 +689,22 @@ pub fn thread_links() -> Vec<ThreadPullRequestLink> {
     decode(links)
 }
 
+/// The link a thread gets when the reader links `entry` by hand.
+pub fn link_for_entry(entry: &PullRequestListEntry) -> ThreadPullRequestLink {
+    decode(json!({
+        "host": entry.host.as_str(), "repository": entry.repository.as_str(),
+        "number": entry.number.get(), "url": entry.url.as_str(),
+        "source": "manual", "linkedAt": ago(0),
+        "snapshot": {
+            "state": entry.state, "title": entry.title.as_str(),
+            "headBranch": entry.head_branch.as_str(), "baseBranch": entry.base_branch.as_str(),
+            "isDraft": entry.is_draft, "updatedAt": entry.updated_at, "syncedAt": ago(0),
+            "additions": entry.additions, "deletions": entry.deletions,
+        },
+        "stack": null,
+    }))
+}
+
 /// A finished guide written against the demo head.
 pub fn guide_result() -> PullRequestReviewGuideResult {
     decode(json!({

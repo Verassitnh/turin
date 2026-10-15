@@ -231,7 +231,9 @@ mod tests {
             Ok(self.held.borrow().get(key).cloned())
         }
         fn set_item(&self, key: &str, value: &str) -> io::Result<()> {
-            self.held.borrow_mut().insert(key.to_owned(), value.to_owned());
+            self.held
+                .borrow_mut()
+                .insert(key.to_owned(), value.to_owned());
             Ok(())
         }
     }
@@ -248,7 +250,10 @@ mod tests {
         }
     }
 
-    fn controls(involvement: PullRequestInvolvement, state: PullRequestListState) -> PullRequestListPreferences {
+    fn controls(
+        involvement: PullRequestInvolvement,
+        state: PullRequestListState,
+    ) -> PullRequestListPreferences {
         PullRequestListPreferences {
             involvement,
             state,
@@ -266,8 +271,8 @@ mod tests {
         let preferences = PullRequestListPreferences {
             involvement: PullRequestInvolvement::Reviewing,
             state: PullRequestListState::Merged,
-            environment_id: Some(EnvironmentId::new("env-1")),
-            project_id: Some(ProjectId::new("project-1")),
+            environment_id: Some(EnvironmentId::new("env-1").unwrap()),
+            project_id: Some(ProjectId::new("project-1").unwrap()),
             host: Some("github.com".into()),
             q: Some("workflow".into()),
             draft: Some(PullRequestDraftFilter::Hide),
@@ -312,8 +317,13 @@ mod tests {
     #[test]
     fn falls_back_to_the_default_controls_when_storage_is_corrupt() {
         let storage = MemoryStorage::default();
-        storage.set_item(PULL_REQUEST_LIST_PREFERENCES_STORAGE_KEY, "{not json").unwrap();
-        assert_eq!(read_pull_request_list_preferences(&storage), default_controls());
+        storage
+            .set_item(PULL_REQUEST_LIST_PREFERENCES_STORAGE_KEY, "{not json")
+            .unwrap();
+        assert_eq!(
+            read_pull_request_list_preferences(&storage),
+            default_controls()
+        );
     }
 
     #[test]
@@ -336,7 +346,10 @@ mod tests {
                 r#"{"involvement":"reviewing","state":"open","host":null}"#,
             )
             .unwrap();
-        assert_eq!(read_pull_request_list_preferences(&storage), default_controls());
+        assert_eq!(
+            read_pull_request_list_preferences(&storage),
+            default_controls()
+        );
     }
 
     #[test]
@@ -349,7 +362,10 @@ mod tests {
                 &format!(r#"{{"involvement":"all","state":"open","q":"{long}"}}"#),
             )
             .unwrap();
-        assert_eq!(read_pull_request_list_preferences(&storage), default_controls());
+        assert_eq!(
+            read_pull_request_list_preferences(&storage),
+            default_controls()
+        );
     }
 
     #[test]

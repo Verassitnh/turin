@@ -18,8 +18,8 @@ use crate::state::helpers::source_control_clients::{
     is_change_request_in_project_repository, is_change_request_on_project_host,
 };
 use crate::state::support::change_request_url::{ChangeRequestLink, parse_change_request_url};
+use crate::state::support::collate::locale_compare;
 use regex::Regex;
-use std::cmp::Ordering;
 use std::sync::LazyLock;
 use turin_contracts::environment::RepositoryIdentity;
 use turin_contracts::js_trim;
@@ -184,8 +184,7 @@ impl OwnLinkProject {
     }
 }
 
-pub const LINK_PULL_REQUEST_EMPTY_MESSAGE: &str =
-    "Paste a pull request URL or enter 123 / #123.";
+pub const LINK_PULL_REQUEST_EMPTY_MESSAGE: &str = "Paste a pull request URL or enter 123 / #123.";
 pub const LINK_PULL_REQUEST_INVALID_MESSAGE: &str = "Use a pull request URL, 123, or #123.";
 
 /// The line under the input: an empty or unreadable reference is only named once the user has
@@ -239,7 +238,9 @@ pub enum CandidatePickerBody {
     /// The label leads the host's own message in one sentence.
     Error(String),
     /// A search that found nothing says so; an empty list says it is empty.
-    Empty { no_match: bool },
+    Empty {
+        no_match: bool,
+    },
     Rows,
 }
 
@@ -399,9 +400,7 @@ pub fn thread_picker_candidates<'a, 'b>(
                 .contains(&search)
         })
         .collect();
-    candidates.sort_by(|left, right| {
-        super::super::state::support::collate::locale_compare(right.updated_at, left.updated_at)
-    });
+    candidates.sort_by(|left, right| locale_compare(right.updated_at, left.updated_at));
     candidates
 }
 
@@ -450,9 +449,7 @@ pub fn thread_link_unlink_label(source: ThreadPullRequestLinkSource) -> &'static
 /// base branch.
 pub fn thread_link_stack_tooltip(native: bool, host_label: &str, size: u64) -> String {
     if native {
-        format!(
-            "{host_label} stack of {size}: merging a layer lands the ones below it."
-        )
+        format!("{host_label} stack of {size}: merging a layer lands the ones below it.")
     } else {
         format!("{size} pull requests chained by base branch.")
     }
@@ -645,13 +642,9 @@ pub fn checkout_is_resolving(
     resolution_pending: bool,
     resolution_fetching: bool,
 ) -> bool {
-    open
-        && reference_parses
+    open && reference_parses
         && !has_resolved_pull_request
-        && (debouncer_pending
-            || !reference_settled
-            || resolution_pending
-            || resolution_fetching)
+        && (debouncer_pending || !reference_settled || resolution_pending || resolution_fetching)
 }
 
 /// Enter in the reference field. `None` leaves the key alone (IME composition, key code 229);
@@ -711,15 +704,12 @@ pub fn find_project_on_change_request_host<'a, T>(
     })
 }
 
-/// Stable comparison used where upstream calls `localeCompare` on ASCII identifiers.
-pub fn compare_locale(left: &str, right: &str) -> Ordering {
-    crate::state::support::collate::locale_compare(left, right)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::helpers::source_control_clients::UNKNOWN_SOURCE_CONTROL_CLIENT;
     use pretty_assertions::assert_eq;
+    use turin_contracts::TrimmedNonEmptyString;
 
     fn resolve(
         reference: &str,
@@ -756,7 +746,8 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                resolve(&format!(" {url} "), None, &|candidate| candidate.host == host),
+                resolve(&format!(" {url} "), None, &|candidate| candidate.host
+                    == host),
                 Some(LinkPullRequestResolution::Link(ResolvedLink {
                     host: host.to_owned(),
                     repository: "acme/web".to_owned(),
@@ -916,20 +907,7 @@ mod tests {
             ),
             Some("https://github.com/g/repo/pull/5".to_owned())
         );
-        assert_eq!(
-            build(&UNKNOWN_CLIENT_FOR_TESTS, "x", "a/b", 1),
-            None
-        );
-    }
-
-    /// The registry's fallback definition, which builds no change request URL.
-    static UNKNOWN_CLIENT_FOR_TESTS: LazyLockUnknown = LazyLockUnknown;
-    struct LazyLockUnknown;
-    impl std::ops::Deref for LazyLockUnknown {
-        type Target = SourceControlClientDefinition;
-        fn deref(&self) -> &SourceControlClientDefinition {
-            &crate::state::helpers::source_control_clients::UNKNOWN_SOURCE_CONTROL_CLIENT
-        }
+        assert_eq!(build(&UNKNOWN_SOURCE_CONTROL_CLIENT, "x", "a/b", 1), None);
     }
 
     #[test]
@@ -992,7 +970,10 @@ mod tests {
             candidate_picker_body(false, None, "", 0, ""),
             CandidatePickerBody::Empty { no_match: false }
         );
-        assert_eq!(candidate_picker_body(false, None, "", 1, ""), CandidatePickerBody::Rows);
+        assert_eq!(
+            candidate_picker_body(false, None, "", 1, ""),
+            CandidatePickerBody::Rows
+        );
     }
 
     #[test]
@@ -1006,7 +987,7 @@ mod tests {
     fn author_label_covers_ghost_name_and_login_only() {
         let actor = |name: Option<&str>| PullRequestActor {
             is_bot: None,
-            login: "octocat".into(),
+            login: TrimmedNonEmptyString::new("octocat").unwrap(),
             name: name.map(str::to_owned),
             avatar_url: None,
         };
@@ -1015,7 +996,10 @@ mod tests {
             link_preview_author_label(Some(&actor(Some("Mona")))),
             "Mona (@octocat)"
         );
-        assert_eq!(link_preview_author_label(Some(&actor(Some("octocat")))), "octocat");
+        assert_eq!(
+            link_preview_author_label(Some(&actor(Some("octocat")))),
+            "octocat"
+        );
         assert_eq!(link_preview_author_label(Some(&actor(Some("")))), "octocat");
         assert_eq!(link_preview_author_label(Some(&actor(None))), "octocat");
     }
@@ -1041,12 +1025,18 @@ mod tests {
         assert!(show_linked_threads_count(true, 0, true));
         assert!(!show_linked_threads_count(true, 0, false));
         assert!(!show_linked_threads_count(false, 3, false));
-        assert_eq!(thread_link_menu_label(true, false), "Unlink from this thread");
+        assert_eq!(
+            thread_link_menu_label(true, false),
+            "Unlink from this thread"
+        );
         assert_eq!(thread_link_menu_label(false, true), "Link to this thread");
         assert_eq!(thread_link_menu_label(false, false), "Link to thread");
         assert!(thread_links_render(true, true, false));
         assert!(!thread_links_render(false, true, true));
-        assert_eq!(change_link_failure_title(true), "Could not unlink the pull request");
+        assert_eq!(
+            change_link_failure_title(true),
+            "Could not unlink the pull request"
+        );
     }
 
     #[test]
@@ -1107,10 +1097,22 @@ mod tests {
 
     #[test]
     fn thread_panel_labels_indent_and_footer() {
-        assert_eq!(thread_link_source_label(ThreadPullRequestLinkSource::Agent), "Linked by the agent");
-        assert_eq!(thread_link_source_label(ThreadPullRequestLinkSource::StackDismissed), "Dismissed");
-        assert_eq!(thread_link_unlink_label(ThreadPullRequestLinkSource::Stack), "Dismiss from thread");
-        assert_eq!(thread_link_unlink_label(ThreadPullRequestLinkSource::Manual), "Unlink from thread");
+        assert_eq!(
+            thread_link_source_label(ThreadPullRequestLinkSource::Agent),
+            "Linked by the agent"
+        );
+        assert_eq!(
+            thread_link_source_label(ThreadPullRequestLinkSource::StackDismissed),
+            "Dismissed"
+        );
+        assert_eq!(
+            thread_link_unlink_label(ThreadPullRequestLinkSource::Stack),
+            "Dismiss from thread"
+        );
+        assert_eq!(
+            thread_link_unlink_label(ThreadPullRequestLinkSource::Manual),
+            "Unlink from thread"
+        );
         assert_eq!(thread_link_watch_label(true), "Stop watching");
         assert_eq!(thread_link_watch_label(false), "Watch for changes");
         assert_eq!(thread_link_row_indent_rem(0), 0.5);
@@ -1151,10 +1153,22 @@ mod tests {
         let mut projects = vec!["a", "thread", "b"];
         sort_projects_thread_first(&mut projects, |project| *project == "thread");
         assert_eq!(projects, vec!["thread", "a", "b"]);
-        assert_eq!(thread_link_row_project_id(true, Some("found"), Some("own")), Some("found"));
-        assert_eq!(thread_link_row_project_id(true, None, Some("own")), Some("own"));
-        assert_eq!(thread_link_row_project_id(false, Some("found"), Some("own")), None);
-        assert_eq!(thread_link_row_key("github.com", "acme/web", 7), "github.com/acme/web#7");
+        assert_eq!(
+            thread_link_row_project_id(true, Some("found"), Some("own")),
+            Some("found")
+        );
+        assert_eq!(
+            thread_link_row_project_id(true, None, Some("own")),
+            Some("own")
+        );
+        assert_eq!(
+            thread_link_row_project_id(false, Some("found"), Some("own")),
+            None
+        );
+        assert_eq!(
+            thread_link_row_key("github.com", "acme/web", 7),
+            "github.com/acme/web#7"
+        );
     }
 
     #[test]
@@ -1169,7 +1183,10 @@ mod tests {
         };
         assert_eq!(checkout_confirm_step(base), CheckoutConfirmStep::Prepare);
         assert_eq!(
-            checkout_confirm_step(CheckoutConfirmInput { operate_scope_granted: false, ..base }),
+            checkout_confirm_step(CheckoutConfirmInput {
+                operate_scope_granted: false,
+                ..base
+            }),
             CheckoutConfirmStep::Ignore
         );
         assert_eq!(
@@ -1181,28 +1198,51 @@ mod tests {
             CheckoutConfirmStep::Prepare
         );
         assert_eq!(
-            checkout_confirm_step(CheckoutConfirmInput { reference_parses: false, ..base }),
+            checkout_confirm_step(CheckoutConfirmInput {
+                reference_parses: false,
+                ..base
+            }),
             CheckoutConfirmStep::MarkReferenceDirty
         );
         assert_eq!(
-            checkout_confirm_step(CheckoutConfirmInput { has_resolved_pull_request: false, ..base }),
+            checkout_confirm_step(CheckoutConfirmInput {
+                has_resolved_pull_request: false,
+                ..base
+            }),
             CheckoutConfirmStep::Ignore
         );
         assert_eq!(
-            checkout_confirm_step(CheckoutConfirmInput { is_allowed: false, ..base }),
+            checkout_confirm_step(CheckoutConfirmInput {
+                is_allowed: false,
+                ..base
+            }),
             CheckoutConfirmStep::Ignore
         );
     }
 
     #[test]
     fn checkout_buttons_and_resolving_state() {
-        assert!(!checkout_button_disabled(false, true, false, true, true, false, false));
-        assert!(checkout_button_disabled(true, true, false, true, true, false, false));
-        assert!(checkout_button_disabled(false, true, true, true, true, true, false));
-        assert!(checkout_is_resolving(true, true, false, true, true, false, false));
-        assert!(checkout_is_resolving(true, true, false, false, false, false, false));
-        assert!(!checkout_is_resolving(true, true, true, true, true, true, true));
-        assert!(!checkout_is_resolving(false, true, false, true, true, true, true));
+        assert!(!checkout_button_disabled(
+            false, true, false, true, true, false, false
+        ));
+        assert!(checkout_button_disabled(
+            true, true, false, true, true, false, false
+        ));
+        assert!(checkout_button_disabled(
+            false, true, true, true, true, true, false
+        ));
+        assert!(checkout_is_resolving(
+            true, true, false, true, true, false, false
+        ));
+        assert!(checkout_is_resolving(
+            true, true, false, false, false, false, false
+        ));
+        assert!(!checkout_is_resolving(
+            true, true, true, true, true, true, true
+        ));
+        assert!(!checkout_is_resolving(
+            false, true, false, true, true, true, true
+        ));
     }
 
     #[test]
@@ -1256,7 +1296,10 @@ mod tests {
             checkout_validation_message(true, "x", false, "merge request").as_deref(),
             Some("Use a merge request URL, checkout command, 123, or #123.")
         );
-        assert_eq!(checkout_validation_message(false, "", false, "pull request"), None);
+        assert_eq!(
+            checkout_validation_message(false, "", false, "pull request"),
+            None
+        );
     }
 
     #[test]

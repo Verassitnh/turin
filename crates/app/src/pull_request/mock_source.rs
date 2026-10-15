@@ -41,6 +41,7 @@ impl MockPullRequestSource {
         store.update(cx, |store, cx| {
             store.set_source(source);
             let merged = merge_pull_request_lists(&[(demo_environment_id(), fixtures::list_result())]);
+            store.set_thread_links(&demo_thread_id(), fixtures::thread_links(), cx);
             store.update_list(cx, |list| {
                 list.merged = merged;
                 list.projects = vec![PullRequestProject {
@@ -373,14 +374,51 @@ impl PullRequestSource for MockPullRequestSource {
     }
 
     fn link_thread(&self, thread_id: &ThreadId, reference: &PullRequestRef, cx: &mut App) {
-        let _ = (thread_id, reference, cx);
+        let Some(entry) = self.list_entry(reference, cx) else {
+            return;
+        };
+        let link = fixtures::link_for_entry(&entry);
+        let thread_id = thread_id.clone();
+        self.with_store(cx, |store, cx| {
+            let mut links = store.thread_links(&thread_id).to_vec();
+            if links.iter().all(|existing| existing.number != link.number) {
+                links.push(link);
+            }
+            store.set_thread_links(&thread_id, links, cx);
+        });
     }
 
     fn unlink_thread(&self, thread_id: &ThreadId, reference: &PullRequestRef, cx: &mut App) {
-        let _ = (thread_id, reference, cx);
+        let thread_id = thread_id.clone();
+        let number = reference.number;
+        self.with_store(cx, |store, cx| {
+            let links: Vec<_> = store
+                .thread_links(&thread_id)
+                .iter()
+                .filter(|link| link.number != number)
+                .cloned()
+                .collect();
+            store.set_thread_links(&thread_id, links, cx);
+        });
     }
 
     fn open_thread(&self, _thread_id: &ThreadId, _cx: &mut App) {}
+}
+
+/// A reference to a pull request of the demo repository.
+pub fn reference_for(host: &str, repository: &str, number: turin_contracts::PositiveInt) -> Option<PullRequestRef> {
+    serde_json::from_value(serde_json::json!({
+        "projectId": fixtures::DEMO_PROJECT_ID,
+        "host": host,
+        "repository": repository,
+        "number": number.get(),
+    }))
+    .ok()
+}
+
+/// The thread whose links the demo thread panel shows.
+pub fn demo_thread_id() -> ThreadId {
+    ThreadId::new("thread-pr-views").expect("static id is non-blank")
 }
 
 /// Thread links of the demo thread, for the thread panel.

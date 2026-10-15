@@ -119,7 +119,7 @@ impl Render for TooltipView {
                     if glass {
                         this.bg(dropdown_glass_background(theme))
                             .border_color(dropdown_glass_border(theme))
-                            .shadow(tokens::shadow_lg(0.25))
+                            .shadow(tokens::shadow_xl(0.25))
                     } else {
                         this.bg(theme.popover)
                             .border_color(theme.border)

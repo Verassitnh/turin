@@ -195,6 +195,14 @@ pub fn shadow_lg(alpha: f32) -> Vec<BoxShadow> {
     ]
 }
 
+/// Tailwind `shadow-xl` (`0 20px 25px -5px`, `0 8px 10px -6px`).
+pub fn shadow_xl(alpha: f32) -> Vec<BoxShadow> {
+    vec![
+        shadow(20., 25., -5., black(alpha)),
+        shadow(8., 10., -6., black(alpha)),
+    ]
+}
+
 /// `--shadow-composer` / `--shadow-composer-dark`: the composer's elevation,
 /// a soft drop pulled in under the surface.
 pub fn shadow_composer(dark: bool) -> Vec<BoxShadow> {

@@ -7,10 +7,13 @@ license.workspace = true
 [dependencies]
 turin-contracts.workspace = true
 anyhow.workspace = true
+iana-time-zone.workspace = true
 futures.workspace = true
 indexmap.workspace = true
 libc.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
+fancy-regex.workspace = true
 markdown.workspace = true
 percent-encoding.workspace = true
 regex.workspace = true

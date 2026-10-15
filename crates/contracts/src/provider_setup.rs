@@ -2,7 +2,7 @@
 
 use crate::base_schemas::{
     ContractError, EnvironmentId, IsoDateTime, NonNegativeInt, TrimmedNonEmptyString,
-    double_option, forward_compatible_array,
+    double_option, forward_compatible_array, js_len,
 };
 use crate::provider_instance::{ProviderDriverKind, ProviderInstanceId, optional_unknown};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -14,14 +14,10 @@ mod checks {
     use super::*;
     use serde::de::Error;
 
-    fn utf16_len(value: &str) -> usize {
-        value.encode_utf16().count()
-    }
-
     /// `Schema.String.check(Schema.isMaxLength(N))`
     pub fn max_string<'de, D: Deserializer<'de>, const N: usize>(d: D) -> Result<String, D::Error> {
         let value = String::deserialize(d)?;
-        if utf16_len(&value) > N {
+        if js_len(&value) > N {
             return Err(D::Error::custom(format!(
                 "expected a string of at most {N} characters"
             )));
@@ -35,7 +31,7 @@ mod checks {
     ) -> Result<Option<String>, D::Error> {
         let value = Option::<String>::deserialize(d)?;
         if let Some(value) = &value
-            && utf16_len(value) > N
+            && js_len(value) > N
         {
             return Err(D::Error::custom(format!(
                 "expected a string of at most {N} characters"
@@ -67,7 +63,7 @@ mod checks {
         d: D,
     ) -> Result<TrimmedNonEmptyString, D::Error> {
         let value = TrimmedNonEmptyString::deserialize(d)?;
-        if utf16_len(value.as_str()) > N {
+        if js_len(value.as_str()) > N {
             return Err(D::Error::custom(format!(
                 "expected a string of at most {N} characters"
             )));
@@ -109,7 +105,7 @@ mod checks {
         if values.len() > 16 {
             return Err(D::Error::custom("expected at most 16 credential values"));
         }
-        if values.values().any(|value| utf16_len(value) > 16_384) {
+        if values.values().any(|value| js_len(value) > 16_384) {
             return Err(D::Error::custom(
                 "expected credential values of at most 16384 characters",
             ));
@@ -216,7 +212,7 @@ impl SetupOperationId {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
         let value = TrimmedNonEmptyString::new(value)?;
         // `Schema.isMaxLength` counts UTF-16 code units.
-        if value.as_str().encode_utf16().count() > 128 {
+        if js_len(value.as_str()) > 128 {
             return Err(ContractError {
                 expected: "a setup operation id of at most 128 chars",
                 got: value.as_str().to_owned(),

@@ -1152,3 +1152,149 @@ fn bulk_visibility_and_order_edits_keep_unrelated_models_and_providers() {
         json!({"hiddenModels": ["luna", "sol"], "modelOrder": []})
     );
 }
+
+// project actions (upstream serverSettings.test.ts 98, 142)
+
+fn project_script(command: &str) -> turin_contracts::project::ProjectScript {
+    serde_json::from_value(json!({
+        "id": "check",
+        "name": "Check",
+        "command": command,
+        "icon": "play",
+        "runOnWorktreeCreate": false,
+    }))
+    .unwrap()
+}
+
+/// Defaults after the one-time project fold (upstream `FOLDED_SERVER_SETTINGS`).
+fn folded_defaults() -> ServerSettings {
+    let mut settings = defaults();
+    settings.project_settings_folded = true;
+    settings
+}
+
+fn project<'a>(
+    id: &'a turin_contracts::base_schemas::ProjectId,
+    scripts: &'a [turin_contracts::project::ProjectScript],
+) -> crate::project_scripts::ProjectScriptsProject<'a> {
+    crate::project_scripts::ProjectScriptsProject { id, scripts }
+}
+
+#[test]
+fn project_actions_inherit_defaults_and_keep_existing_ones_until_folded() {
+    use crate::project_scripts::{
+        project_scripts_inherit_defaults as inherits, resolve_project_scripts as resolve,
+    };
+    let id = turin_contracts::base_schemas::ProjectId::new("project-actions").unwrap();
+    let action = project_script("npm test");
+    let existing = vec![project_script("npm run lint")];
+    let none: Vec<turin_contracts::project::ProjectScript> = Vec::new();
+
+    // Before the one-time fold, scripts stored on the project aggregate still apply.
+    let unfolded = apply(&defaults(), json!({"defaultProjectScripts": [action]}));
+    assert_eq!(
+        resolve(&unfolded, project(&id, &existing)).to_vec(),
+        existing
+    );
+    assert!(!inherits(&unfolded, project(&id, &existing)));
+
+    let inherited = apply(
+        &folded_defaults(),
+        json!({"defaultProjectScripts": [action]}),
+    );
+    assert_eq!(
+        resolve(&inherited, project(&id, &none)).to_vec(),
+        vec![action.clone()]
+    );
+    assert!(inherits(&inherited, project(&id, &none)));
+    assert_eq!(
+        resolve(&inherited, project(&id, &existing)).to_vec(),
+        vec![action.clone()]
+    );
+
+    let disabled = apply(
+        &inherited,
+        json!({"projectScriptOverrides": {"project-actions": []}}),
+    );
+    assert!(resolve(&disabled, project(&id, &none)).is_empty());
+    assert!(!inherits(&disabled, project(&id, &none)));
+
+    let changed_default = apply(
+        &disabled,
+        json!({"defaultProjectScripts": [{
+            "id": "check", "name": "Check", "command": "npm run build",
+            "icon": "play", "runOnWorktreeCreate": false,
+        }]}),
+    );
+    assert!(resolve(&changed_default, project(&id, &none)).is_empty());
+
+    let reset = apply(
+        &changed_default,
+        json!({"projectScriptOverrides": {"project-actions": null}}),
+    );
+    assert_eq!(
+        resolve(&reset, project(&id, &existing)).to_vec(),
+        changed_default.default_project_scripts
+    );
+    assert!(inherits(&reset, project(&id, &existing)));
+    let emptied = apply(&reset, json!({"defaultProjectScripts": []}));
+    assert!(resolve(&emptied, project(&id, &existing)).is_empty());
+}
+
+#[test]
+fn other_projects_actions_survive_overriding_clearing_or_resetting_one_project() {
+    use crate::project_scripts::resolve_project_scripts as resolve;
+    let first = turin_contracts::base_schemas::ProjectId::new("first-project").unwrap();
+    let second = turin_contracts::base_schemas::ProjectId::new("second-project").unwrap();
+    let none: Vec<turin_contracts::project::ProjectScript> = Vec::new();
+    let default_action = project_script("npm test");
+    let first_action = project_script("npm run lint");
+    let second_action = project_script("npm run build");
+
+    let first_update = apply(
+        &folded_defaults(),
+        json!({
+            "defaultProjectScripts": [default_action],
+            "projectScriptOverrides": {"first-project": [first_action]},
+        }),
+    );
+    let second_update = apply(
+        &first_update,
+        json!({"projectScriptOverrides": {"second-project": [second_action]}}),
+    );
+    assert_eq!(
+        resolve(&second_update, project(&first, &none)).to_vec(),
+        vec![first_action.clone()]
+    );
+    assert_eq!(
+        resolve(&second_update, project(&second, &none)).to_vec(),
+        vec![second_action.clone()]
+    );
+
+    let cleared = apply(
+        &second_update,
+        json!({"projectScriptOverrides": {"first-project": []}}),
+    );
+    assert!(resolve(&cleared, project(&first, &none)).is_empty());
+    assert_eq!(
+        resolve(&cleared, project(&second, &none)).to_vec(),
+        vec![second_action.clone()]
+    );
+
+    let reset = apply(
+        &cleared,
+        json!({"projectScriptOverrides": {"first-project": null}}),
+    );
+    assert_eq!(
+        resolve(&reset, project(&first, &[first_action.clone()])).to_vec(),
+        vec![default_action.clone()]
+    );
+    assert_eq!(
+        resolve(&reset, project(&second, &none)).to_vec(),
+        vec![second_action.clone()]
+    );
+    assert_eq!(
+        resolve(&second_update, project(&first, &none)).to_vec(),
+        vec![first_action]
+    );
+}

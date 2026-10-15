@@ -93,16 +93,20 @@ fn tested_base_name(path: &str) -> String {
 }
 /// Source dependencies first, then covering tests, then generated output.
 pub fn order_diff_files(files: &[OrderableDiffFile]) -> Vec<OrderableDiffFile> {
+    // Like upstream's `Map`: a repeated path keeps its first position and its last value.
+    let mut paths: Vec<String> = Vec::new();
     let mut by_path: HashMap<String, OrderableDiffFile> = HashMap::new();
     for file in files {
-        by_path.insert(file.path.clone(), file.clone());
+        if by_path.insert(file.path.clone(), file.clone()).is_none() {
+            paths.push(file.path.clone());
+        }
     }
-    let mut source_paths: Vec<String> = by_path
-        .keys()
+    // Collision maps are built in input order, so the last input file wins (as upstream).
+    let source_paths: Vec<String> = paths
+        .iter()
         .filter(|path| diff_file_tier(path) == DiffFileTier::Source)
         .cloned()
         .collect();
-    source_paths.sort_by(|left, right| locale_compare(left, right));
     let mut by_module_path: HashMap<String, String> = HashMap::new();
     let mut by_base_name: HashMap<String, String> = HashMap::new();
     let mut ambiguous: HashSet<String> = HashSet::new();
@@ -149,10 +153,12 @@ pub fn order_diff_files(files: &[OrderableDiffFile]) -> Vec<OrderableDiffFile> {
         imports.insert(path.clone(), imported);
     }
     // Kahn's algorithm takes the lowest ready path. A cycle takes the lowest path still standing.
-    let mut remaining: HashSet<String> = source_paths.iter().cloned().collect();
+    let mut sorted_source = source_paths.clone();
+    sorted_source.sort_by(|left, right| locale_compare(left, right));
+    let mut remaining: HashSet<String> = sorted_source.iter().cloned().collect();
     let mut ordered_source = Vec::new();
     while !remaining.is_empty() {
-        let next = source_paths
+        let next = sorted_source
             .iter()
             .find(|path| {
                 remaining.contains(*path)
@@ -162,7 +168,7 @@ pub fn order_diff_files(files: &[OrderableDiffFile]) -> Vec<OrderableDiffFile> {
                             .all(|dependency| !remaining.contains(dependency))
                     })
             })
-            .or_else(|| source_paths.iter().find(|path| remaining.contains(*path)))
+            .or_else(|| sorted_source.iter().find(|path| remaining.contains(*path)))
             .unwrap()
             .clone();
         remaining.remove(&next);
@@ -172,8 +178,8 @@ pub fn order_diff_files(files: &[OrderableDiffFile]) -> Vec<OrderableDiffFile> {
     for (index, path) in ordered_source.iter().enumerate() {
         positions.entry(base_name(path).to_owned()).or_insert(index);
     }
-    let mut tests: Vec<String> = by_path
-        .keys()
+    let mut tests: Vec<String> = paths
+        .iter()
         .filter(|path| diff_file_tier(path) == DiffFileTier::Test)
         .cloned()
         .collect();
@@ -188,8 +194,8 @@ pub fn order_diff_files(files: &[OrderableDiffFile]) -> Vec<OrderableDiffFile> {
             )
             .then_with(|| locale_compare(left, right))
     });
-    let mut generated: Vec<String> = by_path
-        .keys()
+    let mut generated: Vec<String> = paths
+        .iter()
         .filter(|path| diff_file_tier(path) == DiffFileTier::Generated)
         .cloned()
         .collect();
@@ -400,6 +406,18 @@ mod tests {
                 file("src/a.ts", &[])
             ]),
             names(&["src/a.ts", "src/a.test.ts", "src/orphan.spec.ts"])
+        );
+    }
+    #[test]
+    fn module_path_collision_last_input_wins() {
+        // Input order decides which of `z.ts` / `z.tsx` owns `./z`, not path order.
+        assert_eq!(
+            order(vec![
+                file("src/z.tsx", &[]),
+                file("src/z.ts", &[]),
+                file("src/b.ts", &["import { z } from \"./z\";"])
+            ]),
+            names(&["src/z.ts", "src/b.ts", "src/z.tsx"])
         );
     }
     #[test]

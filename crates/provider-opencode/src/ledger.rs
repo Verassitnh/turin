@@ -531,6 +531,15 @@ mod tests {
         assert_eq!(parsed.pgid, 5162);
         assert_eq!(parsed.start_time, "Thu Oct 15 13:03:10 2026");
         assert_eq!(parsed.command, "sh -c sleep 600");
+        // Real `ps` right-aligns pid and pgid to five columns, so one- and four-digit ids pad too.
+        let launchd =
+            parse_darwin_line("    1     1 Ss   Tue Oct 13 20:41:43 2026     /sbin/launchd")
+                .unwrap();
+        assert_eq!((launchd.pid, launchd.pgid), (1, 1));
+        assert_eq!(launchd.command, "/sbin/launchd");
+        let padded =
+            parse_darwin_line(" 648   648 Ss   Tue Oct  5 09:12:00 2026 node serve").unwrap();
+        assert_eq!((padded.pid, padded.pgid), (648, 648));
     }
 
     #[cfg(unix)]

@@ -266,6 +266,30 @@ fn a_rejected_file_link_candidate_consumes_its_span() {
 }
 
 #[test]
+fn sent_prompt_skills_accept_a_name_that_ends_the_text() {
+    assert_eq!(
+        collect_sent_prompt_skill_tokens("use $ui"),
+        vec![skill("ui", "$ui", 4, 7)]
+    );
+    // While typing, the same trailing name stays plain text.
+    assert_eq!(
+        collect_composer_inline_tokens("use $ui", Default::default()),
+        vec![]
+    );
+}
+
+#[test]
+fn sent_prompt_skills_follow_the_upstream_skill_mention_pattern() {
+    // `(?=\s|$)`: whitespace or end of text, never other punctuation.
+    assert_eq!(
+        collect_sent_prompt_skill_tokens("$ui and €review $20 end"),
+        vec![skill("ui", "$ui", 0, 3), skill("review", "€review", 8, 15)]
+    );
+    assert_eq!(collect_sent_prompt_skill_tokens("use $ui."), vec![]);
+    assert_eq!(collect_sent_prompt_skill_tokens("pay $20"), vec![]);
+}
+
+#[test]
 fn stays_fast_on_unterminated_bracket_runs() {
     // Unbounded, the label body rescanned the rest of the text from every
     // whitespace: this input took seconds.

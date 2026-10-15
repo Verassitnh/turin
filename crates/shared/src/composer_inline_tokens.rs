@@ -67,11 +67,15 @@ impl CharUnits {
         index == 0 || is_js_whitespace_char(self.chars[index - 1])
     }
 
-    /// `(?=\s)`: an actual JS whitespace char must follow (end of text does
-    /// not satisfy the lookahead — only the sent-prompt skill pattern allows
-    /// `$` there, and the composer uses the while-typing one).
+    /// `(?=\s)`: an actual JS whitespace char must follow. End of text does
+    /// not satisfy it, which is what keeps a half-typed token plain.
     fn followed_by_whitespace(&self, index: usize) -> bool {
         index < self.len() && is_js_whitespace_char(self.chars[index])
+    }
+
+    /// `(?=\s|$)`: whitespace or end of text, for sent prompts.
+    fn followed_by_whitespace_or_end(&self, index: usize) -> bool {
+        index == self.len() || self.followed_by_whitespace(index)
     }
 }
 
@@ -96,7 +100,15 @@ fn is_skill_name_char(ch: char) -> bool {
 /// `(^|\s)\p{Sc}(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:_-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:_-]*)`
 /// plus a `(?=\s)` lookahead while typing; the Rust `regex` crate has no
 /// lookarounds, so the same acceptance rules are hand-rolled here.
-fn scan_skill_tokens(text: &str, units: &CharUnits, tokens: &mut Vec<ComposerInlineToken>) {
+///
+/// `sent_prompt` swaps the lookahead for upstream's `SKILL_MENTION_PATTERN`
+/// `(?=\s|$)`, so a name that ends the text also counts.
+fn scan_skill_tokens(
+    text: &str,
+    units: &CharUnits,
+    sent_prompt: bool,
+    tokens: &mut Vec<ComposerInlineToken>,
+) {
     let mut index = 0usize;
     while index < units.len() {
         let ch = units.chars[index];
@@ -113,10 +125,15 @@ fn scan_skill_tokens(text: &str, units: &CharUnits, tokens: &mut Vec<ComposerInl
                 cursor += 1;
             }
             // (?=\s): while typing, a token only becomes a chip once a
-            // delimiter follows it.
+            // delimiter follows it. Sent prompts also accept end of text.
             // (?!...): reject `[0-9][0-9_]*(suffix)?(\s|$)` amounts.
+            let delimited = if sent_prompt {
+                units.followed_by_whitespace_or_end(cursor)
+            } else {
+                units.followed_by_whitespace(cursor)
+            };
             let looks_like_amount = looks_like_compact_amount(units, index + 1);
-            if has_letter && units.followed_by_whitespace(cursor) && !looks_like_amount {
+            if has_letter && delimited && !looks_like_amount {
                 let start = units.unit_at(index);
                 let end = units.unit_at(cursor);
                 tokens.push(ComposerInlineToken {
@@ -418,6 +435,17 @@ fn scan_file_link_at(text: &str, units: &CharUnits, index: usize) -> Option<File
     })
 }
 
+/// Upstream `SKILL_MENTION_PATTERN` over a sent prompt: `$name` skill mentions,
+/// where the name may end the text. Provider adapters use this in place of
+/// their own copies. `value` is the name without its sigil, as in upstream's
+/// group 2.
+pub fn collect_sent_prompt_skill_tokens(text: &str) -> Vec<ComposerInlineToken> {
+    let units = CharUnits::new(text);
+    let mut matches: Vec<ComposerInlineToken> = Vec::new();
+    scan_skill_tokens(text, &units, true, &mut matches);
+    matches
+}
+
 pub fn collect_composer_inline_tokens(
     text: &str,
     options: CollectComposerInlineTokensOptions,
@@ -427,7 +455,7 @@ pub fn collect_composer_inline_tokens(
 
     scan_file_link_tokens(text, &units, &mut matches);
     scan_mention_tokens(text, &units, &mut matches);
-    scan_skill_tokens(text, &units, &mut matches);
+    scan_skill_tokens(text, &units, false, &mut matches);
 
     for token in options.preserve_trailing_from {
         if token.end == utf16_len(text)

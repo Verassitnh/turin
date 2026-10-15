@@ -29,6 +29,7 @@ anyhow = "1"
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 futures = "0.3"
 parking_lot = "0.12"
 regex = "1"
@@ -48,11 +49,16 @@ url = "2"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 unicode-ccc = "0.4"
 indexmap = { version = "2", features = ["serde"] }
+iana-time-zone = "0.1"
 dirs = "6"
+fancy-regex = "0.14"
 libc = "0.2"
 notify = "8"
 tempfile = "3"
 pretty_assertions = "1"
+markdown = "1.0.0"
+percent-encoding = "2"
+unicode-normalization = "0.1"
 
 gpui-kit = "0.7.3"
 

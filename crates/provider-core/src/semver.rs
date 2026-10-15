@@ -142,13 +142,16 @@ pub fn satisfies_semver_range(raw_version: &str, range: &str) -> bool {
         return false;
     };
     range.split("||").any(|group| {
-        let comparators: Vec<&str> = group.split_whitespace().filter(|part| !part.is_empty()).collect();
+        let comparators: Vec<&str> = group
+            .split_whitespace()
+            .filter(|part| !part.is_empty())
+            .collect();
         if comparators.is_empty() {
             return false;
         }
         comparators.iter().all(|comparator| {
             let comparator = js_trim(comparator);
-            let (operator, target_raw) = split_comparator(&comparator);
+            let (operator, target_raw) = split_comparator(comparator);
             let Some(target_raw) = target_raw else {
                 return false;
             };
@@ -190,7 +193,11 @@ fn parse_range_version(value: &str) -> Option<(u64, u64, u64)> {
     if parts.next().is_some() {
         return None;
     }
-    if numeric.is_empty() || !numeric.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.') {
+    if numeric.is_empty()
+        || !numeric
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
         return None;
     }
     Some((major, minor, patch))
@@ -204,7 +211,14 @@ fn split_comparator(comparator: &str) -> (&str, Option<&str>) {
             return (operator, if rest.is_empty() { None } else { Some(rest) });
         }
     }
-    ( "=", if comparator.is_empty() { None } else { Some(comparator) } )
+    (
+        "=",
+        if comparator.is_empty() {
+            None
+        } else {
+            Some(comparator)
+        },
+    )
 }
 
 fn cmp_triple(version: (u64, u64, u64), target: (u64, u64, u64)) -> i32 {

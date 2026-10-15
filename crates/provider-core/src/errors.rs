@@ -7,9 +7,7 @@ use crate::failure::ProviderFailureCause;
 /// A driver `create` call failed before producing an instance. The registry
 /// marks the entry as an unavailable shadow snapshot rather than crashing.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
-#[error(
-    "Provider driver '{driver}' failed to create instance '{instance_id}': {detail}"
-)]
+#[error("Provider driver '{driver}' failed to create instance '{instance_id}': {detail}")]
 pub struct ProviderDriverError {
     pub driver: ProviderDriverKind,
     pub instance_id: ProviderInstanceId,

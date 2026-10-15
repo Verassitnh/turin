@@ -3,7 +3,10 @@
 //! A configured instance whose driver this build does not ship still has to
 //! round-trip on the wire. The snapshot says `unavailable` and refuses turns.
 
-use turin_contracts::{IsoDateTime, TrimmedNonEmptyString, UtcDateTime, provider_instance::{ProviderDriverKind, ProviderInstanceId}};
+use turin_contracts::{
+    IsoDateTime, TrimmedNonEmptyString, UtcDateTime,
+    provider_instance::{ProviderDriverKind, ProviderInstanceId},
+};
 
 use crate::{
     server_provider::{
@@ -26,7 +29,9 @@ pub struct UnavailableProviderSnapshotInput {
     pub checked_at: Option<IsoDateTime>,
 }
 
-pub fn build_unavailable_provider_snapshot(input: UnavailableProviderSnapshotInput) -> ServerProvider {
+pub fn build_unavailable_provider_snapshot(
+    input: UnavailableProviderSnapshotInput,
+) -> ServerProvider {
     let checked_at = input
         .checked_at
         .unwrap_or_else(|| UtcDateTime::now().to_string());
@@ -64,7 +69,10 @@ pub fn build_unavailable_provider_snapshot(input: UnavailableProviderSnapshotInp
         },
         maintenance: None,
     });
-    draft.accent_color = input.accent_color.as_deref().and_then(|color| TrimmedNonEmptyString::new(color).ok());
+    draft.accent_color = input
+        .accent_color
+        .as_deref()
+        .and_then(|color| TrimmedNonEmptyString::new(color).ok());
     draft.availability = Some(ServerProviderAvailability::Unavailable);
     draft.unavailable_reason = TrimmedNonEmptyString::new(&input.reason).ok();
     ServerProvider {

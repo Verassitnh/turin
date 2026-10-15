@@ -13,8 +13,6 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + 'a>>;
 
-pub fn boxed<'a, T: Send + 'a>(
-    future: impl Future<Output = T> + Send + 'a,
-) -> BoxFuture<'a, T> {
+pub fn boxed<'a, T: Send + 'a>(future: impl Future<Output = T> + Send + 'a) -> BoxFuture<'a, T> {
     Box::pin(future)
 }

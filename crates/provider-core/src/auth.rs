@@ -7,8 +7,8 @@ use std::{any::Any, sync::Arc};
 
 use futures::Stream;
 use turin_contracts::provider_setup::{
-    ChatGptReconnectProfile, ChatGptTransferredProfile, ProviderAuthRespondInput, ProviderAuthState,
-    ProviderCredentialOwner, ProviderSetupError,
+    ChatGptReconnectProfile, ChatGptTransferredProfile, ProviderAuthRespondInput,
+    ProviderAuthState, ProviderCredentialOwner, ProviderSetupError,
 };
 
 use crate::rt::BoxFuture;
@@ -57,19 +57,24 @@ impl AdmittedTask {
     /// Re-box a gate's own future without wrapping its error twice.
     pub fn from_output(
         fut: impl std::future::Future<Output = Result<Box<dyn Any + Send>, AdmittedFailure>>
-            + Send
-            + 'static,
+        + Send
+        + 'static,
     ) -> Self {
         Self { fut: Box::pin(fut) }
     }
 
+    #[allow(clippy::result_large_err)]
     pub async fn run(self) -> Result<Box<dyn Any + Send>, AdmittedFailure> {
         self.fut.await
     }
 
+    #[allow(clippy::result_large_err)]
     pub async fn wait<T: Send + 'static>(self) -> Result<T, AdmittedFailure> {
         match self.fut.await {
-            Ok(value) => value.downcast::<T>().map(|boxed| *boxed).map_err(AdmittedFailure::Other),
+            Ok(value) => value
+                .downcast::<T>()
+                .map(|boxed| *boxed)
+                .map_err(AdmittedFailure::Other),
             Err(error) => Err(error),
         }
     }
@@ -82,18 +87,28 @@ pub struct ProviderCredentialBinding {
 }
 
 /// Sign-in controller owned by one provider instance.
+#[allow(clippy::type_complexity)]
 pub struct ProviderAuthController {
     /// Equal keys mean these instances share credentials on this environment.
     pub credential_binding: Option<ProviderCredentialBinding>,
     pub reconnect_profile: Option<
-        Arc<dyn Fn(String) -> BoxFuture<'static, Result<Option<ChatGptReconnectProfile>, ProviderSetupError>> + Send + Sync>,
+        Arc<
+            dyn Fn(
+                    String,
+                ) -> BoxFuture<
+                    'static,
+                    Result<Option<ChatGptReconnectProfile>, ProviderSetupError>,
+                > + Send
+                + Sync,
+        >,
     >,
     pub import_profile: Option<
         Arc<
             dyn Fn(
                     ChatGptTransferredProfile,
                     BoxFuture<'static, Result<(), ProviderSetupError>>,
-                ) -> BoxFuture<'static, Result<ProviderAuthState, ProviderSetupError>>
+                )
+                    -> BoxFuture<'static, Result<ProviderAuthState, ProviderSetupError>>
                 + Send
                 + Sync,
         >,
@@ -103,7 +118,8 @@ pub struct ProviderAuthController {
             dyn Fn(
                     BoxFuture<'static, Result<(), ProviderSetupError>>,
                     BoxFuture<'static, Result<(), ProviderSetupError>>,
-                ) -> BoxFuture<'static, Result<ProviderAuthState, ProviderSetupError>>
+                )
+                    -> BoxFuture<'static, Result<ProviderAuthState, ProviderSetupError>>
                 + Send
                 + Sync,
         >,
@@ -159,9 +175,7 @@ pub type ProviderAuthLogout = dyn Fn(
 pub type ProviderAuthSubscribe =
     dyn Fn(String) -> Box<dyn Stream<Item = ProviderAuthState> + Send> + Send + Sync;
 
-pub type ProviderAuthWithAccess = dyn Fn(
-        AdmittedTask,
-    ) -> BoxFuture<'static, Result<Box<dyn Any + Send>, AdmittedFailure>>
+pub type ProviderAuthWithAccess = dyn Fn(AdmittedTask) -> BoxFuture<'static, Result<Box<dyn Any + Send>, AdmittedFailure>>
     + Send
     + Sync;
 

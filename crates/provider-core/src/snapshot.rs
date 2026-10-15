@@ -7,9 +7,7 @@ use async_trait::async_trait;
 use turin_contracts::provider_usage_limits::ProviderUsageLimitsUpdate;
 
 use crate::{
-    maintenance::ProviderMaintenanceCapabilities,
-    rt::BoxStream,
-    server_provider::ServerProvider,
+    maintenance::ProviderMaintenanceCapabilities, rt::BoxStream, server_provider::ServerProvider,
 };
 
 #[async_trait]

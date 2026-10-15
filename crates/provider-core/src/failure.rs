@@ -81,9 +81,17 @@ impl ProviderFailureCause {
             Some(Value::String(tag)) => tag.clone(),
             _ => return Self::Unreadable,
         };
-        let message = object.get("message").and_then(Value::as_str).map(str::to_owned);
-        let code = object.get("code").and_then(Value::as_str).map(str::to_owned);
-        let cause = object.get("cause").map(|cause| Box::new(Self::from_json(cause)));
+        let message = object
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let code = object
+            .get("code")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let cause = object
+            .get("cause")
+            .map(|cause| Box::new(Self::from_json(cause)));
         Self::Tagged {
             tag,
             message,
@@ -196,7 +204,10 @@ fn strip_url_secrets(candidate: &str) -> Option<String> {
     if authority.is_empty() {
         return None;
     }
-    let host = authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority);
+    let host = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
     if host.is_empty() {
         return None;
     }
@@ -436,6 +447,7 @@ pub fn make_provider_retry_turn_item(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn error_item(
     driver: &ProviderDriverKind,
     thread_id: ThreadId,
@@ -477,10 +489,7 @@ fn error_item(
 }
 
 fn turn_item_id(driver: &ProviderDriverKind, provider_turn_id: &ProviderTurnId) -> TurnItemId {
-    derive::turn_item_from_provider_item(
-        driver,
-        &format!("terminal-failure:{provider_turn_id}"),
-    )
+    derive::turn_item_from_provider_item(driver, &format!("terminal-failure:{provider_turn_id}"))
 }
 
 #[cfg(test)]
@@ -503,12 +512,25 @@ mod tests {
             retryable: None,
             reset_at: None,
         });
-        assert_eq!(failure.class, OrchestrationV2ProviderFailureClass::ProviderError);
-        assert_eq!(failure.code.as_ref().map(|code| code.as_str()), Some("provider_rejected"));
+        assert_eq!(
+            failure.class,
+            OrchestrationV2ProviderFailureClass::ProviderError
+        );
+        assert_eq!(
+            failure.code.as_ref().map(|code| code.as_str()),
+            Some("provider_rejected")
+        );
         let message = message_of(&failure);
         assert!(message.contains("[REDACTED]"));
         assert!(message.contains("https://example.test/path"));
-        for secret in ["bearer-secret", "user:pass", "url-secret", "json-secret", "key-secret", "sk-abcdefghijklmnop"] {
+        for secret in [
+            "bearer-secret",
+            "user:pass",
+            "url-secret",
+            "json-secret",
+            "key-secret",
+            "sk-abcdefghijklmnop",
+        ] {
             assert!(!message.contains(secret), "{message}");
         }
     }
@@ -536,7 +558,10 @@ mod tests {
             retryable: None,
             reset_at: None,
         });
-        assert_eq!(utf16_len(message_of(&failure)), MAX_PROVIDER_FAILURE_MESSAGE_LENGTH);
+        assert_eq!(
+            utf16_len(message_of(&failure)),
+            MAX_PROVIDER_FAILURE_MESSAGE_LENGTH
+        );
         assert_eq!(
             failure.code.as_ref().map(|code| utf16_len(code.as_str())),
             Some(MAX_PROVIDER_FAILURE_CODE_LENGTH)
@@ -646,13 +671,15 @@ mod tests {
 
     #[test]
     fn handles_cyclic_causes() {
-        let mut cyclic = ProviderFailureCause::tagged("Error").with_message("Provider disconnected. Retry the turn.");
+        let mut cyclic = ProviderFailureCause::tagged("Error")
+            .with_message("Provider disconnected. Retry the turn.");
         cyclic = cyclic.with_cause(ProviderFailureCause::tagged("placeholder"));
         // Close the cycle after the first node exists by rebuilding with a shared structure
         // the walker caps at 16 and detects via pointer identity on the chain we can form
         // with a leaked box. The public API does not hand out interior pointers, so the
         // depth cap is what stops a hostile chain; a 20-deep chain still returns the default.
-        let mut cause = ProviderFailureCause::tagged("Error").with_message("Provider disconnected. Retry the turn.");
+        let mut cause = ProviderFailureCause::tagged("Error")
+            .with_message("Provider disconnected. Retry the turn.");
         for _ in 0..20 {
             cause = ProviderFailureCause::tagged("Error")
                 .with_message("Provider disconnected. Retry the turn.")
@@ -697,7 +724,10 @@ mod tests {
             retryable: None,
             reset_at: None,
         });
-        assert_eq!(failure.class, OrchestrationV2ProviderFailureClass::TransportError);
+        assert_eq!(
+            failure.class,
+            OrchestrationV2ProviderFailureClass::TransportError
+        );
         assert_eq!(message_of(&failure), "Provider turn failed.");
         assert!(failure.code.is_none());
         assert!(failure.retryable.is_none());
@@ -713,7 +743,8 @@ mod tests {
         let thread_id = ThreadId::new("thread:provider-failure-id").unwrap();
         let run_id = RunId::new("run:provider-failure-id").unwrap();
         let node_id = NodeId::new("node:provider-failure-id").unwrap();
-        let provider_thread_id = ProviderThreadId::new("provider-thread:provider-failure-id").unwrap();
+        let provider_thread_id =
+            ProviderThreadId::new("provider-thread:provider-failure-id").unwrap();
         let failure = make_provider_failure(ProviderFailureInput {
             cause: None,
             message: Some("Provider failed"),

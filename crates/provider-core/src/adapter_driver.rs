@@ -17,8 +17,7 @@ use turin_contracts::{
 };
 
 use crate::{
-    driver::ProviderInstanceScope,
-    failure::ProviderFailureCause,
+    driver::ProviderInstanceScope, failure::ProviderFailureCause,
     provider_adapter::ProviderAdapterV2,
 };
 

@@ -11,7 +11,8 @@ use crate::rt::BoxFuture;
 
 pub struct EventNdjsonLogger {
     pub file_path: String,
-    pub write: Arc<dyn Fn(serde_json::Value, Option<ThreadId>) -> BoxFuture<'static, ()> + Send + Sync>,
+    pub write:
+        Arc<dyn Fn(serde_json::Value, Option<ThreadId>) -> BoxFuture<'static, ()> + Send + Sync>,
     pub close: Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>,
 }
 

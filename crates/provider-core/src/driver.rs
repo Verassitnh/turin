@@ -5,11 +5,9 @@
 //! applies the driver's defaults, and `create` reads that value back into
 //! its own struct. ACP session management on the instance is cut.
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use async_trait::async_trait;
@@ -17,21 +15,14 @@ use serde_json::Value;
 use tokio::sync::watch;
 use turin_contracts::{
     TrimmedNonEmptyString,
-    provider_instance::{
-        ProviderDriverKind, ProviderInstanceEnvironment, ProviderInstanceId,
-    },
+    provider_instance::{ProviderDriverKind, ProviderInstanceEnvironment, ProviderInstanceId},
     provider_usage_limits::ProviderConsumeResetCreditOutcome,
 };
 
 use crate::{
-    auth::ProviderAuthController,
-    errors::ProviderDriverError,
-    provider_adapter::ProviderAdapterV2,
-    rt::BoxFuture,
-    server_provider::ProviderWorkspaceSnapshot,
-    snapshot::ManagedServerProvider,
-    text_generation::ProviderTextGeneration,
-    usage::ProviderUsageReader,
+    auth::ProviderAuthController, errors::ProviderDriverError, provider_adapter::ProviderAdapterV2,
+    rt::BoxFuture, server_provider::ProviderWorkspaceSnapshot, snapshot::ManagedServerProvider,
+    text_generation::ProviderTextGeneration, usage::ProviderUsageReader,
 };
 
 #[derive(Debug, Clone)]
@@ -276,7 +267,10 @@ pub(crate) mod test_support {
 
     #[async_trait]
     impl ManagedServerProvider for StubSnapshot {
-        async fn resolve_maintenance(&self, _fresh: bool) -> crate::maintenance::ProviderMaintenanceCapabilities {
+        async fn resolve_maintenance(
+            &self,
+            _fresh: bool,
+        ) -> crate::maintenance::ProviderMaintenanceCapabilities {
             make_manual_only_provider_maintenance_capabilities(self.provider.driver.clone())
         }
 
@@ -310,29 +304,38 @@ pub(crate) mod test_support {
             &self.driver
         }
 
-        async fn get_capabilities(&self) -> Result<OrchestrationV2ProviderCapabilities, ProviderAdapterV2Error> {
-            Err(ProviderAdapterV2Error::new(ProviderAdapterErrorKind::Capabilities {
-                driver: self.driver.clone(),
-            }))
+        async fn get_capabilities(
+            &self,
+        ) -> Result<OrchestrationV2ProviderCapabilities, ProviderAdapterV2Error> {
+            Err(ProviderAdapterV2Error::new(
+                ProviderAdapterErrorKind::Capabilities {
+                    driver: self.driver.clone(),
+                },
+            ))
         }
 
         async fn plan_selection_transition(
             &self,
             _input: ProviderSelectionTransitionInput,
         ) -> Result<ProviderSelectionTransitionPlan, ProviderAdapterV2Error> {
-            Err(ProviderAdapterV2Error::new(ProviderAdapterErrorKind::Capabilities {
-                driver: self.driver.clone(),
-            }))
+            Err(ProviderAdapterV2Error::new(
+                ProviderAdapterErrorKind::Capabilities {
+                    driver: self.driver.clone(),
+                },
+            ))
         }
 
         async fn open_session(
             &self,
             input: ProviderAdapterV2OpenSessionInput,
-        ) -> Result<Arc<dyn crate::provider_adapter::ProviderSessionRuntime>, ProviderAdapterV2Error> {
-            Err(ProviderAdapterV2Error::new(ProviderAdapterErrorKind::OpenSession {
-                driver: self.driver.clone(),
-                provider_session_id: input.provider_session_id,
-            }))
+        ) -> Result<Arc<dyn crate::provider_adapter::ProviderSessionRuntime>, ProviderAdapterV2Error>
+        {
+            Err(ProviderAdapterV2Error::new(
+                ProviderAdapterErrorKind::OpenSession {
+                    driver: self.driver.clone(),
+                    provider_session_id: input.provider_session_id,
+                },
+            ))
         }
     }
 
@@ -380,7 +383,10 @@ pub(crate) mod test_support {
         }
     }
 
-    pub fn stub_provider(instance_id: &ProviderInstanceId, driver: &ProviderDriverKind) -> ServerProvider {
+    pub fn stub_provider(
+        instance_id: &ProviderInstanceId,
+        driver: &ProviderDriverKind,
+    ) -> ServerProvider {
         let mut value = serde_json::json!({
             "instanceId": instance_id.as_str(),
             "driver": driver.as_str(),

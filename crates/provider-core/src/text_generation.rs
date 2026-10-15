@@ -5,11 +5,8 @@
 
 use async_trait::async_trait;
 use turin_contracts::{
-    chat_attachment::ChatAttachment,
-    git::TextGenerationError,
-    model_selection::ModelSelection,
-    pull_request_review_guide::PullRequestReviewGuideStop,
-    settings::BranchNamingOptions,
+    chat_attachment::ChatAttachment, git::TextGenerationError, model_selection::ModelSelection,
+    pull_request_review_guide::PullRequestReviewGuideStop, settings::BranchNamingOptions,
 };
 
 #[derive(Debug, Clone)]

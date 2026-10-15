@@ -15,12 +15,13 @@ use turin_contracts::{
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2AppThread, OrchestrationV2ConversationMessage,
-        OrchestrationV2CreationSource, OrchestrationV2ExecutionNode, OrchestrationV2HistoricalMessage,
-        OrchestrationV2PlanArtifact, OrchestrationV2ProviderCapabilities,
-        OrchestrationV2ProviderFailure, OrchestrationV2ProviderRetry,
-        OrchestrationV2ProviderSession, OrchestrationV2ProviderThread,
-        OrchestrationV2ProviderThreadDisposition, OrchestrationV2ProviderTurn,
-        OrchestrationV2RuntimeRequest, OrchestrationV2Subagent, OrchestrationV2TurnItem,
+        OrchestrationV2CreationSource, OrchestrationV2ExecutionNode,
+        OrchestrationV2HistoricalMessage, OrchestrationV2PlanArtifact,
+        OrchestrationV2ProviderCapabilities, OrchestrationV2ProviderFailure,
+        OrchestrationV2ProviderRetry, OrchestrationV2ProviderSession,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadDisposition,
+        OrchestrationV2ProviderTurn, OrchestrationV2RuntimeRequest, OrchestrationV2Subagent,
+        OrchestrationV2TurnItem,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
     provider_policy::{
@@ -392,7 +393,10 @@ impl std::fmt::Display for ProviderAdapterV2Error {
                 driver,
                 provider_turn_id,
                 ..
-            } => write!(f, "Failed to interrupt {driver} provider turn {provider_turn_id}."),
+            } => write!(
+                f,
+                "Failed to interrupt {driver} provider turn {provider_turn_id}."
+            ),
             ProviderAdapterErrorKind::RuntimeRequestResponse { driver, request_id } => {
                 write!(
                     f,
@@ -506,6 +510,7 @@ pub struct ProviderAdapterV2ReadThreadSnapshotInput {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum ProviderAdapterV2RollbackTarget {
     ThreadStart {
         checkpoint_id: CheckpointId,
@@ -646,7 +651,10 @@ pub trait ProviderSessionRuntime: Send + Sync {
     /// [`Self::subscribe_events`] so concurrent threads each get a copy.
     fn events(&self) -> ProviderEventStream;
 
-    fn subscribe_events(&self) -> Option<BoxFuture<'_, Result<ProviderAdapterV2EventSubscription, ProviderAdapterV2Error>>> {
+    fn subscribe_events(
+        &self,
+    ) -> Option<BoxFuture<'_, Result<ProviderAdapterV2EventSubscription, ProviderAdapterV2Error>>>
+    {
         None
     }
 
@@ -739,8 +747,9 @@ pub trait ProviderSessionRuntime: Send + Sync {
     fn stop_subagent(
         &self,
         _input: ProviderAdapterV2StopSubagentInput,
-    ) -> Option<BoxFuture<'_, Result<Option<ProviderAdapterV2SubagentOutcome>, ProviderAdapterV2Error>>>
-    {
+    ) -> Option<
+        BoxFuture<'_, Result<Option<ProviderAdapterV2SubagentOutcome>, ProviderAdapterV2Error>>,
+    > {
         None
     }
 

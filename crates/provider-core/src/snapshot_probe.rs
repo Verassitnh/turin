@@ -7,10 +7,8 @@
 use regex::Regex;
 use std::sync::OnceLock;
 use turin_contracts::{
-    IsoDateTime, TrimmedNonEmptyString,
-    provider_instance::ProviderDriverKind,
-    provider_policy::RuntimeMode,
-    provider_usage_limits::ServerProviderUsageLimits,
+    IsoDateTime, TrimmedNonEmptyString, provider_instance::ProviderDriverKind,
+    provider_policy::RuntimeMode, provider_usage_limits::ServerProviderUsageLimits,
 };
 
 use crate::{
@@ -73,7 +71,9 @@ pub fn build_server_provider(input: BuildServerProviderInput<'_>) -> ServerProvi
         show_interaction_mode_toggle: input.presentation.show_interaction_mode_toggle,
         reports_context_window: input.presentation.reports_context_window,
         supported_runtime_modes: input.presentation.supported_runtime_modes,
-        requires_new_thread_for_model_change: input.presentation.requires_new_thread_for_model_change,
+        requires_new_thread_for_model_change: input
+            .presentation
+            .requires_new_thread_for_model_change,
         supports_conversation_rollback: input.presentation.supports_conversation_rollback,
         supports_text_generation: None,
         setup: None,
@@ -113,7 +113,8 @@ pub fn build_server_provider(input: BuildServerProviderInput<'_>) -> ServerProvi
 /// Accepts a leading "v" (for example `opencode v2.0.3`).
 pub fn parse_generic_cli_version(output: &str) -> Option<String> {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    let pattern = PATTERN.get_or_init(|| Regex::new(r"\bv?(\d+\.\d+\.\d+)\b").expect("version regex"));
+    let pattern =
+        PATTERN.get_or_init(|| Regex::new(r"\bv?(\d+\.\d+\.\d+)\b").expect("version regex"));
     pattern
         .captures(output)
         .and_then(|captures| captures.get(1))
@@ -130,7 +131,10 @@ mod tests {
 
     #[test]
     fn reads_a_leading_v_before_the_word_boundary() {
-        assert_eq!(parse_generic_cli_version("opencode v2.0.3\n").as_deref(), Some("2.0.3"));
+        assert_eq!(
+            parse_generic_cli_version("opencode v2.0.3\n").as_deref(),
+            Some("2.0.3")
+        );
         assert_eq!(parse_generic_cli_version("no version here"), None);
     }
 
@@ -157,7 +161,9 @@ mod tests {
                 installed: false,
                 version: None,
                 status: ServerProviderState::Error,
-                auth: ServerProviderAuth::with_status(crate::server_provider::ServerProviderAuthStatus::Unknown),
+                auth: ServerProviderAuth::with_status(
+                    crate::server_provider::ServerProviderAuthStatus::Unknown,
+                ),
                 message: Some("missing".to_owned()),
                 usage_limits: None,
             },

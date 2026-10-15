@@ -44,9 +44,10 @@ pub fn make_targeted_provider_update_action(
     if !is_pinnable_lock_key(&update.lock_key) {
         return None;
     }
-    let package_index = update.args.iter().position(|arg| {
-        arg == &format!("{package_name}@latest") || arg == package_name
-    })?;
+    let package_index = update
+        .args
+        .iter()
+        .position(|arg| arg == &format!("{package_name}@latest") || arg == package_name)?;
     let previous = update.args[package_index].clone();
     let pinned = format!("{package_name}@{version}");
     let mut args = update.args.clone();
@@ -81,10 +82,13 @@ pub struct ProviderVersionAdvisoryInput<'a> {
 pub fn create_provider_version_advisory(
     input: ProviderVersionAdvisoryInput<'_>,
 ) -> ServerProviderVersionAdvisory {
-    let owned = input.maintenance.is_none().then(|| {
-        make_manual_only_provider_maintenance_capabilities(input.driver.clone())
-    });
-    let capabilities = input.maintenance.unwrap_or_else(|| owned.as_ref().expect("manual"));
+    let owned = input
+        .maintenance
+        .is_none()
+        .then(|| make_manual_only_provider_maintenance_capabilities(input.driver.clone()));
+    let capabilities = input
+        .maintenance
+        .unwrap_or_else(|| owned.as_ref().expect("manual"));
     let current = non_empty(input.current_version);
     let latest = non_empty(input.latest_version);
     let (status, message) = derive_version_advisory(current, latest, capabilities);
@@ -97,7 +101,9 @@ pub fn create_provider_version_advisory(
             .as_ref()
             .and_then(|update| TrimmedNonEmptyString::new(&update.command).ok()),
         can_update: capabilities.update.is_some(),
-        can_install_version: Some(make_targeted_provider_update_action(capabilities, "0.0.0").is_some()),
+        can_install_version: Some(
+            make_targeted_provider_update_action(capabilities, "0.0.0").is_some(),
+        ),
         checked_at: input.checked_at.map(str::to_owned),
         message: message.and_then(|text| TrimmedNonEmptyString::new(text).ok()),
     }
@@ -169,7 +175,11 @@ mod tests {
             update: Some(ProviderMaintenanceCommandAction {
                 command: format!("npm install -g {package}@latest"),
                 executable: "npm".to_owned(),
-                args: vec!["install".to_owned(), "-g".to_owned(), format!("{package}@latest")],
+                args: vec![
+                    "install".to_owned(),
+                    "-g".to_owned(),
+                    format!("{package}@latest"),
+                ],
                 lock_key: lock_key.to_owned(),
                 env: None,
             }),
@@ -187,10 +197,21 @@ mod tests {
         assert!(make_targeted_provider_update_action(&npm, "1.2").is_none());
 
         for lock_key in ["homebrew", "native", "mise"] {
-            assert!(make_targeted_provider_update_action(&action(lock_key, "@openai/codex"), "1.2.3").is_none());
+            assert!(
+                make_targeted_provider_update_action(&action(lock_key, "@openai/codex"), "1.2.3")
+                    .is_none()
+            );
         }
-        for lock_key in ["bun-global", "pnpm-global", "vite-plus-global", "yarn-global", "volta"] {
-            assert!(make_targeted_provider_update_action(&action(lock_key, "pkg"), "9.0.0").is_some());
+        for lock_key in [
+            "bun-global",
+            "pnpm-global",
+            "vite-plus-global",
+            "yarn-global",
+            "volta",
+        ] {
+            assert!(
+                make_targeted_provider_update_action(&action(lock_key, "pkg"), "9.0.0").is_some()
+            );
         }
     }
 
@@ -204,7 +225,10 @@ mod tests {
             checked_at: Some("2026-01-01T00:00:00.000Z"),
             maintenance: None,
         });
-        assert_eq!(advisory.status, ServerProviderVersionAdvisoryStatus::Unknown);
+        assert_eq!(
+            advisory.status,
+            ServerProviderVersionAdvisoryStatus::Unknown
+        );
         assert!(!advisory.can_update);
         assert_eq!(advisory.can_install_version, Some(false));
         assert!(advisory.message.is_none());

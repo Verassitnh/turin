@@ -1,8 +1,7 @@
 //! Port of upstream/packages/provider-core/src/server/selectionTransition.ts.
 
 use turin_contracts::{
-    model_selection::ModelSelection,
-    orchestration_v2::OrchestrationV2ProviderCapabilities,
+    model_selection::ModelSelection, orchestration_v2::OrchestrationV2ProviderCapabilities,
 };
 
 pub struct ProviderSelectionTransitionInput {

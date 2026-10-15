@@ -68,10 +68,10 @@ pub fn derive_provider_instance_config_map(
             }
             let mut next = existing;
             next.enabled = Some(true);
-            if provider_instance_config_enabled_flag(next.config.as_ref()) == Some(false) {
-                if let Some(serde_json::Value::Object(config)) = next.config.as_mut() {
-                    config.insert("enabled".to_owned(), serde_json::Value::Bool(true));
-                }
+            if provider_instance_config_enabled_flag(next.config.as_ref()) == Some(false)
+                && let Some(serde_json::Value::Object(config)) = next.config.as_mut()
+            {
+                config.insert("enabled".to_owned(), serde_json::Value::Bool(true));
             }
             merged.insert(instance_id.clone(), next);
         }
@@ -82,6 +82,8 @@ pub fn derive_provider_instance_config_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type ProjectInstanceEnables = Vec<(ProviderInstanceId, Option<bool>)>;
     use turin_contracts::{
         ProjectId,
         provider_instance::ProviderInstanceId,
@@ -111,7 +113,7 @@ mod tests {
 
     fn settings_with(
         instances: ProviderInstanceConfigMap,
-        overrides: Vec<(ProjectId, Vec<(ProviderInstanceId, Option<bool>)>)>,
+        overrides: Vec<(ProjectId, ProjectInstanceEnables)>,
     ) -> ServerSettings {
         let mut settings = default_server_settings();
         settings.provider_instances = instances;
@@ -136,7 +138,10 @@ mod tests {
         let instance_id = id("codex_work");
         let settings = settings_with(
             indexmap::IndexMap::from([(instance_id.clone(), codex(Some(false), None))]),
-            vec![(project("project-a"), vec![(instance_id.clone(), Some(true))])],
+            vec![(
+                project("project-a"),
+                vec![(instance_id.clone(), Some(true))],
+            )],
         );
         let merged = derive_provider_instance_config_map(&settings, &[]);
         assert_eq!(merged[&instance_id].enabled, Some(true));
@@ -151,11 +156,17 @@ mod tests {
                 instance_id.clone(),
                 codex(None, Some(serde_json::json!({"enabled": false}))),
             )]),
-            vec![(project("project-a"), vec![(instance_id.clone(), Some(true))])],
+            vec![(
+                project("project-a"),
+                vec![(instance_id.clone(), Some(true))],
+            )],
         );
         let merged = derive_provider_instance_config_map(&settings, &[]);
         assert_eq!(merged[&instance_id].enabled, Some(true));
-        assert_eq!(merged[&instance_id].config, Some(serde_json::json!({"enabled": true})));
+        assert_eq!(
+            merged[&instance_id].config,
+            Some(serde_json::json!({"enabled": true}))
+        );
     }
 
     #[test]
@@ -164,7 +175,10 @@ mod tests {
         let original = codex(Some(true), Some(serde_json::json!({"binaryPath": "codex"})));
         let settings = settings_with(
             indexmap::IndexMap::from([(instance_id.clone(), original.clone())]),
-            vec![(project("project-a"), vec![(instance_id.clone(), Some(true))])],
+            vec![(
+                project("project-a"),
+                vec![(instance_id.clone(), Some(true))],
+            )],
         );
         let merged = derive_provider_instance_config_map(&settings, &[]);
         assert_eq!(merged[&instance_id], original);
@@ -175,7 +189,10 @@ mod tests {
         let instance_id = id("codex_work");
         let settings = settings_with(
             indexmap::IndexMap::new(),
-            vec![(project("project-a"), vec![(instance_id.clone(), Some(true))])],
+            vec![(
+                project("project-a"),
+                vec![(instance_id.clone(), Some(true))],
+            )],
         );
         let merged = derive_provider_instance_config_map(&settings, &[]);
         assert!(!merged.contains_key(&instance_id));
@@ -187,7 +204,10 @@ mod tests {
         let original = codex(Some(true), None);
         let settings = settings_with(
             indexmap::IndexMap::from([(instance_id.clone(), original.clone())]),
-            vec![(project("project-a"), vec![(instance_id.clone(), Some(false))])],
+            vec![(
+                project("project-a"),
+                vec![(instance_id.clone(), Some(false))],
+            )],
         );
         let merged = derive_provider_instance_config_map(&settings, &[]);
         assert_eq!(merged[&instance_id], original);

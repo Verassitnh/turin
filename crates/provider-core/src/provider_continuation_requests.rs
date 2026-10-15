@@ -6,8 +6,7 @@
 
 use tokio::sync::mpsc;
 use turin_contracts::{
-    MessageId, ProviderThreadId, RunId, ThreadId,
-    orchestration_v2::OrchestrationV2Notification,
+    MessageId, ProviderThreadId, RunId, ThreadId, orchestration_v2::OrchestrationV2Notification,
     provider_instance::ProviderDriverKind,
 };
 
@@ -29,6 +28,12 @@ pub struct ProviderContinuationDelegatedCompletion {
     pub message_id: MessageId,
 }
 
+pub type DispatchIfCurrent = Box<
+    dyn Fn(BoxFuture<'static, Result<(), String>>) -> BoxFuture<'static, Result<Option<()>, String>>
+        + Send
+        + Sync,
+>;
+
 pub struct ProviderContinuationRequest {
     pub thread_id: ThreadId,
     pub provider_thread_id: ProviderThreadId,
@@ -40,13 +45,7 @@ pub struct ProviderContinuationRequest {
     pub delivery: Option<ProviderContinuationDelivery>,
     /// The message the continuation run starts from, when the adapter picks it.
     pub message_id: Option<MessageId>,
-    pub dispatch_if_current: Option<
-        Box<
-            dyn Fn(BoxFuture<'static, Result<(), String>>) -> BoxFuture<'static, Result<Option<()>, String>>
-                + Send
-                + Sync,
-        >,
-    >,
+    pub dispatch_if_current: Option<DispatchIfCurrent>,
     /// Clears a pending offer that the continuation worker intentionally drops.
     pub clear_if_current: Option<Box<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
 }

@@ -128,37 +128,48 @@ pub enum SelectedField {
     Nested(SelectedFields),
 }
 
+type UsageStateInit = Arc<dyn Fn() -> Value + Send + Sync>;
+type UsageStateEncode = Arc<dyn Fn(&Value) -> Value + Send + Sync>;
+type UsageStateDecode = Arc<dyn Fn(&Value) -> Result<Value, String> + Send + Sync>;
+type ParseUsageLine = Arc<dyn Fn(&str, &mut Value) -> Vec<UsageRecord> + Send + Sync>;
+type ParseUsageProjected = Arc<dyn Fn(&Value, &mut Value) -> Vec<UsageRecord> + Send + Sync>;
+
 pub struct TranscriptUsageState {
-    pub initial: Arc<dyn Fn() -> Value + Send + Sync>,
-    pub encode: Arc<dyn Fn(&Value) -> Value + Send + Sync>,
-    pub decode: Arc<dyn Fn(&Value) -> Result<Value, String> + Send + Sync>,
+    pub initial: UsageStateInit,
+    pub encode: UsageStateEncode,
+    pub decode: UsageStateDecode,
 }
 
 pub struct TranscriptUsageFormat {
     pub select_fields: SelectedFields,
     /// ASCII substrings. At least one must appear on every line that matters.
     pub usage_markers: Vec<String>,
-    pub parse_line: Arc<dyn Fn(&str, &mut Value) -> Vec<UsageRecord> + Send + Sync>,
-    pub parse_projected: Arc<dyn Fn(&Value, &mut Value) -> Vec<UsageRecord> + Send + Sync>,
+    pub parse_line: ParseUsageLine,
+    pub parse_projected: ParseUsageProjected,
     pub state: Option<TranscriptUsageState>,
     pub shared_sessions_across_files: bool,
 }
+
+type UsageDirectories = Arc<
+    dyn Fn(ProviderUsageInstance) -> BoxFuture<'static, Vec<TranscriptDirectory>> + Send + Sync,
+>;
+type UsageScan = Arc<
+    dyn Fn(
+            ProviderUsageScanInput,
+        ) -> BoxFuture<'static, Result<Vec<ProviderUsageScan>, UsageReadError>>
+        + Send
+        + Sync,
+>;
 
 pub enum ProviderUsageReader {
     Transcripts {
         provider: UsageProviderKind,
         format: TranscriptUsageFormat,
-        directories: Arc<
-            dyn Fn(ProviderUsageInstance) -> BoxFuture<'static, Vec<TranscriptDirectory>> + Send + Sync,
-        >,
+        directories: UsageDirectories,
     },
     Scan {
         provider: UsageProviderKind,
-        scan: Arc<
-            dyn Fn(ProviderUsageScanInput) -> BoxFuture<'static, Result<Vec<ProviderUsageScan>, UsageReadError>>
-                + Send
-                + Sync,
-        >,
+        scan: UsageScan,
     },
 }
 
@@ -189,7 +200,10 @@ mod tests {
 
     #[test]
     fn parse_timestamp_ms_reads_iso_strings() {
-        assert_eq!(parse_timestamp_ms(&json!("1970-01-01T00:00:00.000Z")), Some(0.0));
+        assert_eq!(
+            parse_timestamp_ms(&json!("1970-01-01T00:00:00.000Z")),
+            Some(0.0)
+        );
         assert_eq!(parse_timestamp_ms(&json!(1)), None);
     }
 }

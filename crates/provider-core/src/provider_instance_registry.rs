@@ -54,7 +54,9 @@ impl ChangeBus {
     }
 
     fn publish(&self) {
-        self.subscribers.lock().retain(|sender| sender.send(()).is_ok());
+        self.subscribers
+            .lock()
+            .retain(|sender| sender.send(()).is_ok());
     }
 }
 
@@ -122,7 +124,14 @@ impl ProviderInstanceRegistry {
             let entries = self.entries.lock();
             entries
                 .iter()
-                .map(|(id, entry)| (id.clone(), entry.entry.clone(), Arc::clone(&entry.scope), Arc::clone(&entry.instance)))
+                .map(|(id, entry)| {
+                    (
+                        id.clone(),
+                        entry.entry.clone(),
+                        Arc::clone(&entry.scope),
+                        Arc::clone(&entry.instance),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
         let previous_unavailable = self.unavailable.lock().clone();
@@ -135,15 +144,18 @@ impl ProviderInstanceRegistry {
                 removed_ids.push(instance_id.clone());
                 continue;
             }
-            if let Some(next) = config_map.get(instance_id) {
-                if next != entry {
-                    replaced_ids.push(instance_id.clone());
-                }
+            if let Some(next) = config_map.get(instance_id)
+                && next != entry
+            {
+                replaced_ids.push(instance_id.clone());
             }
         }
 
         for instance_id in removed_ids.iter().chain(replaced_ids.iter()) {
-            if let Some((_, _, scope, _)) = previous_entries.iter().find(|(id, _, _, _)| id == instance_id) {
+            if let Some((_, _, scope, _)) = previous_entries
+                .iter()
+                .find(|(id, _, _, _)| id == instance_id)
+            {
                 scope.close().await;
             }
         }
@@ -164,20 +176,19 @@ impl ProviderInstanceRegistry {
         for (instance_id, entry) in &config_map {
             next_order.push(instance_id.clone());
             let replaced = replaced_ids.iter().any(|id| id == instance_id);
-            if let Some((scope, instance)) = previous_by_id.get(instance_id) {
-                if !replaced {
-                    if let Some(previous_entry) = previous_entry_by_id.get(instance_id) {
-                        built_entries.insert(
-                            instance_id.clone(),
-                            LiveEntry {
-                                instance: Arc::clone(instance),
-                                scope: Arc::clone(scope),
-                                entry: previous_entry.clone(),
-                            },
-                        );
-                        continue;
-                    }
-                }
+            if let Some((scope, instance)) = previous_by_id.get(instance_id)
+                && !replaced
+                && let Some(previous_entry) = previous_entry_by_id.get(instance_id)
+            {
+                built_entries.insert(
+                    instance_id.clone(),
+                    LiveEntry {
+                        instance: Arc::clone(instance),
+                        scope: Arc::clone(scope),
+                        entry: previous_entry.clone(),
+                    },
+                );
+                continue;
             }
             match self.build_entry(instance_id, entry).await {
                 BuiltEntry::Live(live) => {
@@ -189,7 +200,10 @@ impl ProviderInstanceRegistry {
             }
         }
 
-        let previous_order: Vec<_> = previous_entries.iter().map(|(id, _, _, _)| id.clone()).collect();
+        let previous_order: Vec<_> = previous_entries
+            .iter()
+            .map(|(id, _, _, _)| id.clone())
+            .collect();
         let order_changed = previous_order != next_order;
         let entries_changed = order_changed
             || !removed_ids.is_empty()
@@ -197,9 +211,13 @@ impl ProviderInstanceRegistry {
             || built_entries.len() != previous_entries.len();
         let unavailable_changed = built_unavailable.len() != previous_unavailable.len()
             || built_unavailable.iter().any(|(id, snapshot)| {
-                previous_unavailable.get(id).is_none_or(|previous| previous != snapshot)
+                previous_unavailable
+                    .get(id)
+                    .is_none_or(|previous| previous != snapshot)
             })
-            || previous_unavailable.keys().any(|id| !built_unavailable.contains_key(id));
+            || previous_unavailable
+                .keys()
+                .any(|id| !built_unavailable.contains_key(id));
 
         *self.entries.lock() = built_entries;
         *self.unavailable.lock() = built_unavailable;
@@ -290,14 +308,21 @@ impl ProviderInstanceRegistry {
         build_unavailable_provider_snapshot(UnavailableProviderSnapshotInput {
             driver_kind: entry.driver.clone(),
             instance_id: instance_id.clone(),
-            display_name: entry.display_name.as_ref().map(|name| name.as_str().to_owned()),
-            accent_color: entry.accent_color.as_ref().map(|color| color.as_str().to_owned()),
+            display_name: entry
+                .display_name
+                .as_ref()
+                .map(|name| name.as_str().to_owned()),
+            accent_color: entry
+                .accent_color
+                .as_ref()
+                .map(|color| color.as_str().to_owned()),
             reason,
             checked_at: None,
         })
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum BuiltEntry {
     Live(LiveEntry),
     Unavailable(ServerProvider),
@@ -356,7 +381,10 @@ mod tests {
             }
             Ok(raw.clone())
         }
-        async fn create(&self, input: ProviderDriverCreateInput) -> Result<ProviderInstance, crate::errors::ProviderDriverError> {
+        async fn create(
+            &self,
+            input: ProviderDriverCreateInput,
+        ) -> Result<ProviderInstance, crate::errors::ProviderDriverError> {
             self.created.fetch_add(1, Ordering::SeqCst);
             let closed = Arc::clone(&self.closed);
             input.scope.on_close(async move {
@@ -369,9 +397,18 @@ mod tests {
             Ok(ProviderInstance {
                 instance_id: input.instance_id.clone(),
                 driver_kind: self.kind.clone(),
-                continuation_identity: default_provider_continuation_identity(&self.kind, &input.instance_id),
-                display_name: input.display_name.as_ref().map(|name| name.as_str().to_owned()),
-                accent_color: input.accent_color.as_ref().map(|color| color.as_str().to_owned()),
+                continuation_identity: default_provider_continuation_identity(
+                    &self.kind,
+                    &input.instance_id,
+                ),
+                display_name: input
+                    .display_name
+                    .as_ref()
+                    .map(|name| name.as_str().to_owned()),
+                accent_color: input
+                    .accent_color
+                    .as_ref()
+                    .map(|color| color.as_str().to_owned()),
                 enabled: input.enabled,
                 snapshot: Arc::new(StubSnapshot { provider }) as Arc<dyn ManagedServerProvider>,
                 snapshot_for_cwd: None,
@@ -422,12 +459,23 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_driver_is_an_unavailable_shadow() {
-        let registry = ProviderInstanceRegistry::new(Vec::new(), IndexMap::from([(id("codex"), entry(None, None))])).await;
+        let registry = ProviderInstanceRegistry::new(
+            Vec::new(),
+            IndexMap::from([(id("codex"), entry(None, None))]),
+        )
+        .await;
         assert!(registry.list_instances().is_empty());
         let unavailable = registry.list_unavailable();
         assert_eq!(unavailable.len(), 1);
         assert_eq!(unavailable[0].instance_id.as_str(), "codex");
-        assert!(unavailable[0].unavailable_reason.as_ref().unwrap().as_str().contains("not registered"));
+        assert!(
+            unavailable[0]
+                .unavailable_reason
+                .as_ref()
+                .unwrap()
+                .as_str()
+                .contains("not registered")
+        );
     }
 
     #[tokio::test]
@@ -454,19 +502,41 @@ mod tests {
     async fn decode_and_create_failures_become_shadows_and_close_the_scope() {
         let (driver, created, closed) = driver(false);
         let mut map = IndexMap::new();
-        map.insert(id("codex"), entry(None, Some(serde_json::json!({"bad": true}))));
-        let registry = ProviderInstanceRegistry::new(vec![driver.clone() as Arc<dyn ProviderDriver>], map).await;
+        map.insert(
+            id("codex"),
+            entry(None, Some(serde_json::json!({"bad": true}))),
+        );
+        let registry =
+            ProviderInstanceRegistry::new(vec![driver.clone() as Arc<dyn ProviderDriver>], map)
+                .await;
         assert_eq!(created.load(Ordering::SeqCst), 0);
-        assert!(registry.list_unavailable()[0].unavailable_reason.as_ref().unwrap().as_str().contains("Invalid config"));
+        assert!(
+            registry.list_unavailable()[0]
+                .unavailable_reason
+                .as_ref()
+                .unwrap()
+                .as_str()
+                .contains("Invalid config")
+        );
 
         driver.fail.store(true, Ordering::SeqCst);
         let mut map = IndexMap::new();
-        map.insert(id("codex"), entry(None, Some(serde_json::json!({"ok": true}))));
+        map.insert(
+            id("codex"),
+            entry(None, Some(serde_json::json!({"ok": true}))),
+        );
         registry.reconcile(map).await;
         assert_eq!(created.load(Ordering::SeqCst), 1);
         assert_eq!(closed.load(Ordering::SeqCst), 1);
         assert!(registry.list_instances().is_empty());
-        assert!(registry.list_unavailable()[0].unavailable_reason.as_ref().unwrap().as_str().contains("boom"));
+        assert!(
+            registry.list_unavailable()[0]
+                .unavailable_reason
+                .as_ref()
+                .unwrap()
+                .as_str()
+                .contains("boom")
+        );
     }
 
     #[tokio::test]
@@ -484,11 +554,17 @@ mod tests {
     #[test]
     fn resolve_entry_enabled_is_most_restrictive() {
         let mut config = entry(None, Some(serde_json::json!({"enabled": false})));
-        assert!(!resolve_entry_enabled(&config, &serde_json::json!({"enabled": true})));
+        assert!(!resolve_entry_enabled(
+            &config,
+            &serde_json::json!({"enabled": true})
+        ));
         config.enabled = Some(true);
         config.config = None;
         assert!(resolve_entry_enabled(&config, &serde_json::json!({})));
         config.enabled = None;
-        assert!(resolve_entry_enabled(&config, &serde_json::json!({"enabled": true})));
+        assert!(resolve_entry_enabled(
+            &config,
+            &serde_json::json!({"enabled": true})
+        ));
     }
 }

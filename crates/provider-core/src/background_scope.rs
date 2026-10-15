@@ -9,9 +9,17 @@ use turin_contracts::{ThreadId, provider_instance::ProviderInstanceId};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackgroundScope {
     ServerConfig,
-    ProviderStatus { instance_id: Option<ProviderInstanceId> },
-    VcsStatus { cwd: String },
-    GitRefs { cwd: String },
+    ProviderStatus {
+        instance_id: Option<ProviderInstanceId>,
+    },
+    VcsStatus {
+        cwd: String,
+    },
+    GitRefs {
+        cwd: String,
+    },
     Diagnostics,
-    Thread { thread_id: ThreadId },
+    Thread {
+        thread_id: ThreadId,
+    },
 }

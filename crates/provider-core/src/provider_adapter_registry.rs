@@ -10,9 +10,9 @@ use serde_json::Value;
 use thiserror::Error;
 use tracing::warn;
 use turin_contracts::{
+    orchestration_v2::OrchestrationV2ProviderCapabilities,
     provider_instance::{ProviderDriverKind, ProviderInstanceConfigMap, ProviderInstanceId},
     provider_setup::ProviderSetupError,
-    orchestration_v2::OrchestrationV2ProviderCapabilities,
     settings::provider_instance_config_enabled_flag,
 };
 
@@ -95,6 +95,7 @@ impl ProviderAdapterRegistry {
     /// Build adapters from a config map. An unknown driver is skipped. A
     /// decode or create failure fails the whole build, unlike the instance
     /// registry, which records a shadow snapshot.
+    #[allow(clippy::result_large_err)]
     pub async fn from_drivers(
         drivers: Vec<Arc<dyn ProviderAdapterDriver>>,
         config_map: ProviderInstanceConfigMap,
@@ -102,7 +103,10 @@ impl ProviderAdapterRegistry {
         let mut adapters = Vec::new();
         let mut scopes = Vec::new();
         for (instance_id, entry) in config_map {
-            let Some(driver) = drivers.iter().find(|driver| driver.driver_kind() == &entry.driver) else {
+            let Some(driver) = drivers
+                .iter()
+                .find(|driver| driver.driver_kind() == &entry.driver)
+            else {
                 warn!(
                     instance_id = instance_id.as_str(),
                     driver = entry.driver.as_str(),
@@ -114,12 +118,15 @@ impl ProviderAdapterRegistry {
                 None | Some(Value::Null) => driver.default_config(),
                 Some(value) => value.clone(),
             };
-            let typed = driver.decode_config(&raw).map_err(|detail| ProviderAdapterDriverCreateError {
-                driver: entry.driver.clone(),
-                instance_id: instance_id.clone(),
-                detail: format!("Invalid provider instance config. {detail}"),
-                cause: None,
-            })?;
+            let typed =
+                driver
+                    .decode_config(&raw)
+                    .map_err(|detail| ProviderAdapterDriverCreateError {
+                        driver: entry.driver.clone(),
+                        instance_id: instance_id.clone(),
+                        detail: format!("Invalid provider instance config. {detail}"),
+                        cause: None,
+                    })?;
             let scope = ProviderInstanceScope::new();
             let enabled = entry
                 .enabled
@@ -189,12 +196,14 @@ impl ProviderAdapterRegistry {
                 .into_iter()
                 .map(|instance| instance.instance_id.clone())
                 .collect(),
-            RegistrySource::Adapters { adapters, .. } => {
-                adapters.iter().map(|adapter| adapter.instance_id().clone()).collect()
-            }
+            RegistrySource::Adapters { adapters, .. } => adapters
+                .iter()
+                .map(|adapter| adapter.instance_id().clone())
+                .collect(),
         }
     }
 
+    #[allow(clippy::result_large_err)]
     pub async fn get_metadata(
         &self,
         instance_id: &ProviderInstanceId,
@@ -244,7 +253,9 @@ impl ProviderAdapterV2 for CredentialGuardedAdapter {
         self.inner.driver()
     }
 
-    async fn get_capabilities(&self) -> Result<OrchestrationV2ProviderCapabilities, ProviderAdapterV2Error> {
+    async fn get_capabilities(
+        &self,
+    ) -> Result<OrchestrationV2ProviderCapabilities, ProviderAdapterV2Error> {
         self.inner.get_capabilities().await
     }
 
@@ -259,9 +270,16 @@ impl ProviderAdapterV2 for CredentialGuardedAdapter {
         &self,
         input: ProviderAdapterV2OpenSessionInput,
     ) -> Result<Arc<dyn ProviderSessionRuntime>, ProviderAdapterV2Error> {
-        let current = self.registry.get_instance(&self.instance_id).ok_or_else(|| {
-            open_session_error(self.inner.driver(), &input, "The provider instance is no longer registered.")
-        })?;
+        let current = self
+            .registry
+            .get_instance(&self.instance_id)
+            .ok_or_else(|| {
+                open_session_error(
+                    self.inner.driver(),
+                    &input,
+                    "The provider instance is no longer registered.",
+                )
+            })?;
         let binding = current
             .auth
             .as_ref()
@@ -287,46 +305,59 @@ impl ProviderAdapterV2 for CredentialGuardedAdapter {
                 .auth
                 .as_ref()
                 .and_then(|auth| auth.is_changing_credentials.as_ref());
-            if let Some(changing) = changing {
-                if changing().await {
-                    return Err(setup_open_error(
-                        self.inner.driver(),
-                        &input,
-                        ProviderSetupError::SetupError {
-                            instance_id: self.instance_id.clone(),
-                            operation: "session".to_owned(),
-                            detail: "This provider's sign-in is changing. Try again after it finishes."
-                                .to_owned(),
-                            cause: None,
-                        },
-                    ));
-                }
+            if let Some(changing) = changing
+                && changing().await
+            {
+                return Err(setup_open_error(
+                    self.inner.driver(),
+                    &input,
+                    ProviderSetupError::SetupError {
+                        instance_id: self.instance_id.clone(),
+                        operation: "session".to_owned(),
+                        detail: "This provider's sign-in is changing. Try again after it finishes."
+                            .to_owned(),
+                        cause: None,
+                    },
+                ));
             }
         }
 
         let session_id = input.provider_session_id.clone();
         let driver = self.inner.driver().clone();
         let inner = Arc::clone(&self.inner);
-        let mut task = crate::auth::AdmittedTask::new(async move { inner.open_session(input).await });
+        let mut task =
+            crate::auth::AdmittedTask::new(async move { inner.open_session(input).await });
         for instance in &related {
-            let Some(gate) = instance.auth.as_ref().and_then(|auth| auth.with_access.clone()) else {
+            let Some(gate) = instance
+                .auth
+                .as_ref()
+                .and_then(|auth| auth.with_access.clone())
+            else {
                 continue;
             };
             task = crate::auth::AdmittedTask::from_output(gate(task));
         }
         match task.wait::<Arc<dyn ProviderSessionRuntime>>().await {
             Ok(runtime) => Ok(runtime),
-            Err(AdmittedFailure::Setup(error)) => Err(setup_open_error(&driver, &OpenSessionIds {
-                provider_session_id: session_id,
-            }, error)),
-            Err(AdmittedFailure::Other(error)) => match error.downcast::<ProviderAdapterV2Error>() {
-                Ok(error) => Err(*error),
-                Err(error) => Err(ProviderAdapterV2Error::new(ProviderAdapterErrorKind::OpenSession {
-                    driver,
+            Err(AdmittedFailure::Setup(error)) => Err(setup_open_error(
+                &driver,
+                &OpenSessionIds {
                     provider_session_id: session_id,
-                })
-                .with_cause(unreadable_cause(error))),
-            },
+                },
+                error,
+            )),
+            Err(AdmittedFailure::Other(error)) => {
+                match error.downcast::<ProviderAdapterV2Error>() {
+                    Ok(error) => Err(*error),
+                    Err(error) => Err(ProviderAdapterV2Error::new(
+                        ProviderAdapterErrorKind::OpenSession {
+                            driver,
+                            provider_session_id: session_id,
+                        },
+                    )
+                    .with_cause(unreadable_cause(error))),
+                }
+            }
         }
     }
 }
@@ -344,7 +375,9 @@ fn open_session_error(
         driver: driver.clone(),
         provider_session_id: input.provider_session_id.clone(),
     })
-    .with_cause(ProviderFailureCause::tagged("ProviderAdapterOpenSessionError").with_message(detail))
+    .with_cause(
+        ProviderFailureCause::tagged("ProviderAdapterOpenSessionError").with_message(detail),
+    )
 }
 
 fn setup_open_error(
@@ -356,10 +389,7 @@ fn setup_open_error(
         driver: driver.clone(),
         provider_session_id: input.session_id(),
     })
-    .with_cause(
-        ProviderFailureCause::tagged("ProviderSetupError")
-            .with_message(error.to_string()),
-    )
+    .with_cause(ProviderFailureCause::tagged("ProviderSetupError").with_message(error.to_string()))
 }
 
 fn unreadable_cause(error: Box<dyn Any + Send>) -> ProviderFailureCause {

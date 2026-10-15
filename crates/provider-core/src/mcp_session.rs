@@ -72,7 +72,10 @@ mod tests {
 
     #[test]
     fn preserves_provider_credentials_while_routing_devices() {
-        let base = env(&[("PATH", "/provider/bin:/usr/bin"), ("PROVIDER_KEY", "fixture")]);
+        let base = env(&[
+            ("PATH", "/provider/bin:/usr/bin"),
+            ("PROVIDER_KEY", "fixture"),
+        ]);
         let mut extra = env(&[
             ("PATH", "/t3/device/bin"),
             ("PATH_SEPARATOR", ":"),

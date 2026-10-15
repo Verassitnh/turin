@@ -71,8 +71,13 @@ pub enum ClientStateEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientStateRequest {
     /// Start feeding `ClientStateEvent::Thread` for this thread: a snapshot,
-    /// then events after it.
-    OpenThread(ThreadId),
+    /// then events after it. `after_sequence` is the last sequence the store
+    /// already applied (a thread reopened within the idle TTL): the feed may
+    /// resume from there instead of sending a snapshot.
+    OpenThread {
+        thread_id: ThreadId,
+        after_sequence: Option<u64>,
+    },
     /// Nobody is looking at the thread; the feed may stop. Its state is kept
     /// for [`THREAD_SNAPSHOT_IDLE_TTL`] so back navigation is instant.
     CloseThread(ThreadId),

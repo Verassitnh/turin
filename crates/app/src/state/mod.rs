@@ -21,6 +21,7 @@ pub mod project_grouping;
 pub mod projects;
 pub mod shell_reducer;
 pub mod shell_state;
+pub mod store;
 pub mod subagent_display;
 pub mod subagent_runtime;
 pub mod support;

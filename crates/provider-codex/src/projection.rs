@@ -660,15 +660,14 @@ fn item_started(
     };
     let kind = str_of(item, "type").unwrap_or_default();
     let started_at = time_ms(params.get("startedAtMs").and_then(Value::as_i64));
+    let native_item = str_of(item, "id").unwrap_or_default();
     // Upstream handles these before it resolves an item position.
     match kind {
-        // Compaction is not ported yet.
-        "contextCompaction" => return vec![],
+        "contextCompaction" => return compaction(turn, native_item, started_at, false, now),
         "userMessage" => return subagent::child_user_message(state, turn, item, started_at),
         "subAgentActivity" => return sub_agent_activity(item, thread, turn, state),
         _ => {}
     }
-    let native_item = str_of(item, "id").unwrap_or_default();
     if kind != "reasoning" {
         items::resolve_position(turn, native_item, started_at, now);
     }
@@ -744,6 +743,57 @@ fn sub_agent_activity(
     }
 }
 
+/// Upstream `emitCompactionItem`: a context compaction is one turn item with no
+/// node. It is titled while it runs and again once it completes.
+fn compaction(
+    turn: &mut TurnState,
+    native_item: &str,
+    started_at: Option<UtcDateTime>,
+    completed: bool,
+    now: UtcDateTime,
+) -> Vec<ProviderAdapterV2Event> {
+    let (ordinal, started) = items::resolve_position(turn, native_item, started_at, now);
+    let turn_item = OrchestrationV2TurnItem::Compaction {
+        tool_non_execution_kind: None,
+        tool_surface: None,
+        tool_icon: None,
+        tool_source: None,
+        id: derive::turn_item_from_provider_item(&driver(), native_item),
+        thread_id: turn.input.thread_id.clone(),
+        run_id: turn.run_id(),
+        node_id: Some(turn.input.root_node_id.clone()),
+        provider_thread_id: Some(turn.input.provider_thread.id.clone()),
+        provider_turn_id: Some(derive::provider_turn(&driver(), &turn.native_turn)),
+        native_item_ref: Some(items::native_item_ref(native_item)),
+        parent_item_id: None,
+        ordinal,
+        status: if completed {
+            OrchestrationV2TurnItemStatus::Completed
+        } else {
+            OrchestrationV2TurnItemStatus::Running
+        },
+        title: Some(
+            if completed {
+                "Context compacted"
+            } else {
+                "Compacting context"
+            }
+            .to_owned(),
+        ),
+        started_at: Some(started),
+        completed_at: completed.then_some(now),
+        updated_at: now,
+        driver: Some(driver()),
+        summary: None,
+        before_token_count: None,
+        after_token_count: None,
+    };
+    vec![ProviderAdapterV2Event::TurnItemUpdated {
+        driver: driver(),
+        turn_item,
+    }]
+}
+
 fn track_tool(turn: &mut TurnState, item: &Value) {
     let id = str_of(item, "id");
     turn.running_tools.retain(|tool| str_of(tool, "id") != id);
@@ -817,6 +867,7 @@ fn item_completed(
             emit_item(items::dynamic_tool(turn, item, now))
         }
         "webSearch" => emit_item(items::web_search(turn, item, true, now)),
+        "contextCompaction" => compaction(turn, &native_item, None, true, now),
         "fileChange" => items::file_change(turn, item, now)
             .map(emit_item)
             .unwrap_or_default(),

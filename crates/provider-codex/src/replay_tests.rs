@@ -2019,3 +2019,40 @@ fn running_command_outlives_a_clean_turn_and_completes_later() {
     );
     assert!(!state.settled.contains_key("native-turn-1"));
 }
+
+#[test]
+fn context_compaction_is_one_turn_item_that_runs_then_completes() {
+    let mut state = RuntimeState::default();
+    state
+        .turns
+        .insert("native-turn-1".into(), detached_turn("native-turn-1"));
+    let item = json!({"type": "contextCompaction", "id": "compact-1"});
+    let started = notify(
+        &mut state,
+        "item/started",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "startedAtMs": 1, "item": item}),
+    );
+    assert!(
+        !started
+            .iter()
+            .any(|event| matches!(event, ProviderAdapterV2Event::NodeUpdated { .. })),
+        "a compaction has no execution node"
+    );
+    let running = latest_items(&started);
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0]["type"], "compaction");
+    assert_eq!(running[0]["status"], "running");
+    assert_eq!(running[0]["title"], "Compacting context");
+
+    let completed = notify(
+        &mut state,
+        "item/completed",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "item": item}),
+    );
+    let done = latest_items(&completed);
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0]["id"], running[0]["id"], "the same item completes");
+    assert_eq!(done[0]["status"], "completed");
+    assert_eq!(done[0]["title"], "Context compacted");
+    assert!(done[0]["completedAt"].is_string());
+}

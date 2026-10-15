@@ -255,6 +255,7 @@ pub enum AttemptStatus {
 
 /// The variant half of `TimelineEntry`. HTML render and MCP app entries are
 /// cut (PORTING cut list); the session logic drops those items.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum TimelineEntryKind {
     Message {

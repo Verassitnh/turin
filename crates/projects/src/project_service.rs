@@ -5,8 +5,10 @@
 
 use async_trait::async_trait;
 use turin_contracts::base_schemas::TrimmedNonEmptyString;
-use turin_contracts::project::{Project, ProjectCreatePayload, ProjectSnapshot, ProjectUpdatePayload};
 use turin_contracts::orchestration_project::OrchestrationProjectShell;
+use turin_contracts::project::{
+    Project, ProjectCreatePayload, ProjectSnapshot, ProjectUpdatePayload,
+};
 use turin_contracts::{CommandId, ProjectId};
 
 use crate::project_ports::PortError;
@@ -148,7 +150,10 @@ pub(crate) fn trimmed(value: impl AsRef<str>) -> TrimmedNonEmptyString {
 }
 
 /// A create payload with only the required fields set.
-pub(crate) fn create_payload(title: TrimmedNonEmptyString, workspace_root: String) -> ProjectCreatePayload {
+pub(crate) fn create_payload(
+    title: TrimmedNonEmptyString,
+    workspace_root: String,
+) -> ProjectCreatePayload {
     ProjectCreatePayload {
         title,
         workspace_root: trimmed(workspace_root),

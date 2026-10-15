@@ -9,4 +9,5 @@ pub mod project_folder_name;
 pub mod project_ports;
 pub mod project_service;
 pub mod repository_identity_resolver;
+pub mod testing;
 pub mod ttl_cache;

@@ -8,12 +8,12 @@
 //! [`ThreadDeletions`].
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use turin_contracts::base_schemas::{IsoDateTime, TrimmedNonEmptyString, UtcDateTime};
+use turin_contracts::environment::ThreadEnvMode;
 use turin_contracts::model_selection::ModelSelection;
 use turin_contracts::orchestration_project::OrchestrationProjectShell;
 use turin_contracts::project::{ProjectIconOverride, ProjectScript};
-use turin_contracts::environment::ThreadEnvMode;
 use turin_contracts::{CommandId, EventId, ProjectId, ThreadId};
 
 /// Failure from a seam. Upstream carries these as `Schema.Defect` causes.
@@ -286,7 +286,13 @@ mod tests {
         let missing = ProjectCommandRejection::MissingProject {
             project_id: ProjectId::new("p-gone").expect("id"),
         };
-        assert_eq!(ProjectCommandRejection::decode(&missing.encode()), Some(missing));
-        assert_eq!(ProjectCommandRejection::decode(&json!({"_tag": "Other"})), None);
+        assert_eq!(
+            ProjectCommandRejection::decode(&missing.encode()),
+            Some(missing)
+        );
+        assert_eq!(
+            ProjectCommandRejection::decode(&json!({"_tag": "Other"})),
+            None
+        );
     }
 }

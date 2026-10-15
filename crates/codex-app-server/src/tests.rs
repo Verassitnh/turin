@@ -227,3 +227,186 @@ async fn replay_matches_outbound_and_emits_response() {
     .unwrap();
     driver.verify_complete().unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn child_exit_fails_pending_with_exit_code() {
+    let client = crate::client::Client::spawn("/bin/sh", &["-c", "exit 7"], None).unwrap();
+    let error = timeout(Duration::from_secs(2), client.raw.request("x/test", None))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, AppServerError::ProcessExited(Some(7))));
+}
+
+#[tokio::test]
+async fn typed_client_handles_approval_and_notification_during_request() {
+    let (client_read, mut peer_writer) = tokio::io::duplex(1024 * 1024);
+    let (peer_reader, client_write) = tokio::io::duplex(1024 * 1024);
+    let client = Arc::new(crate::client::Client::from_io(client_read, client_write));
+    client.handle_server_request("item/tool/requestUserInput", |_params| async {
+        Ok(Some(json!({"answers":{"approved":{"answers":["yes"]}}})))
+    });
+    let (event_tx, event_rx) = oneshot::channel();
+    let event_tx = std::sync::Mutex::new(Some(event_tx));
+    client.handle_server_notification("item/agentMessage/delta", move |params| {
+        let tx = event_tx.lock().unwrap().take();
+        async move {
+            if let Some(tx) = tx {
+                let _ = tx.send(params);
+            }
+            Ok(())
+        }
+    });
+    let mut lines = BufReader::new(peer_reader).lines();
+    let initialize = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            client.request("initialize",Some(json!({"clientInfo":{"name":"test","title":"Test","version":"0.1"},"capabilities":{"experimentalApi":true,"optOutNotificationMethods":null}}))).await
+        })
+    };
+    let initial: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(initial["method"], "initialize");
+    write_frame(&mut peer_writer,json!({"id":1,"result":{"userAgent":"mock","codexHome":"/tmp","platformFamily":"unix","platformOs":"macos"}})).await;
+    assert_eq!(
+        initialize.await.unwrap().unwrap().unwrap()["userAgent"],
+        "mock"
+    );
+    client.notify("initialized", None).unwrap();
+    let initialized: Value =
+        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(initialized, json!({"method":"initialized"}));
+    let account = {
+        let client = client.clone();
+        tokio::spawn(async move { client.request("account/read", Some(json!({}))).await })
+    };
+    let account_request: Value =
+        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(account_request["method"], "account/read");
+    write_frame(&mut peer_writer,json!({"method":"item/agentMessage/delta","params":{"delta":"Ready","itemId":"item-1","threadId":"thread-1","turnId":"turn-1"}})).await;
+    write_frame(&mut peer_writer,json!({"id":77,"method":"item/tool/requestUserInput","params":{"isBlocking":true,"itemId":"approval-1","threadId":"thread-1","turnId":"turn-1","questions":[{"id":"approved","header":"Approve","question":"Continue?"}]}})).await;
+    assert_eq!(
+        timeout(Duration::from_secs(1), event_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()["delta"],
+        "Ready"
+    );
+    let approval: Value = serde_json::from_str(
+        &timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        approval,
+        json!({"id":77,"result":{"answers":{"approved":{"answers":["yes"]}}}})
+    );
+    write_frame(&mut peer_writer,json!({"id":2,"result":{"account":{"type":"chatgpt","email":"mock@example.com","planType":"plus"},"requiresOpenaiAuth":false}})).await;
+    assert_eq!(
+        account.await.unwrap().unwrap().unwrap()["requiresOpenaiAuth"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn decode_failure_logs_only_structural_diagnostics() {
+    use crate::protocol::{Direction, ProtocolOptions, Stage};
+    let (reader, mut peer_writer) = tokio::io::duplex(1024);
+    let (_peer_reader, writer) = tokio::io::duplex(1024);
+    let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let logged = events.clone();
+    let (failure_tx, failure_rx) = oneshot::channel();
+    let failure_tx = std::sync::Mutex::new(Some(failure_tx));
+    let protocol = Protocol::new_with_options(
+        reader,
+        writer,
+        ProtocolOptions {
+            log_incoming: true,
+            logger: Some(Arc::new(move |event| logged.lock().push(event))),
+            on_termination: Some(Arc::new(move |error| {
+                if let Some(tx) = failure_tx.lock().unwrap().take() {
+                    let _ = tx.send(error);
+                }
+            })),
+            ..ProtocolOptions::default()
+        },
+    );
+    peer_writer
+        .write_all(b"{\"secret\":\"do not copy\",")
+        .await
+        .unwrap();
+    drop(peer_writer);
+    let error = timeout(Duration::from_secs(1), failure_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        error,
+        AppServerError::ProtocolParse {
+            operation: "decode-wire-message",
+            ..
+        }
+    ));
+    let events = events.lock();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        (events[1].direction, events[1].stage),
+        (Direction::Incoming, Stage::DecodeFailed)
+    );
+    assert_eq!(
+        events[1].payload,
+        json!({"operation":"decode-wire-message"})
+    );
+    drop(protocol);
+}
+
+#[tokio::test]
+async fn replay_mismatch_fails_client_and_driver() {
+    let transcript = ReplayTranscript {
+        provider: "codex".into(),
+        protocol: "codex.app-server".into(),
+        version: "1".into(),
+        scenario: "mismatch".into(),
+        metadata: None,
+        entries: vec![ReplayEntry::ExpectOutbound {
+            label: None,
+            frame: json!({"id":1,"method":"expected"}),
+        }],
+    };
+    let (client, driver) = make_replay_client(transcript);
+    let error = timeout(Duration::from_secs(1), client.raw.request("actual", None))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        AppServerError::Transport {
+            operation: "read-input-stream",
+            ..
+        }
+    ));
+    assert!(matches!(
+        driver.verify_complete(),
+        Err(crate::replay::ReplayError::FrameMismatch { .. })
+    ));
+}
+
+#[test]
+fn schema_keeps_async_questions_and_new_agent_values() {
+    let item=json!({"type":"agentMessage","id":"question-1","text":"Which package?","phase":"final_answer","delivery":"async","questions":[{"title":"Which package manager?","options":["pnpm","npm"]},{"title":"What should it be named?"}]});
+    for name in ["ServerNotification__ThreadItem","V2ItemStartedNotification__ThreadItem","V2ItemCompletedNotification__ThreadItem","V2ThreadReadResponse__ThreadItem","V2ThreadResumeResponse__ThreadItem"] {
+        assert!(schema::validate_type(name,&item).is_ok(),"{name}");
+    }
+    for name in ["ServerNotification__SubAgentActivityKind","V2ItemStartedNotification__SubAgentActivityKind","V2ItemCompletedNotification__SubAgentActivityKind","V2ThreadReadResponse__SubAgentActivityKind","V2ThreadResumeResponse__SubAgentActivityKind"] {
+        assert!(schema::validate_type(name,&json!("completed")).is_ok(),"{name}");
+    }
+    for tool in ["sendMessage","followupTask","interruptAgent","listAgents"] {
+        for name in ["ServerNotification__CollabAgentTool","V2ThreadResumeResponse__CollabAgentTool"] {
+            assert!(schema::validate_type(name,&json!(tool)).is_ok(),"{name}: {tool}");
+        }
+    }
+}

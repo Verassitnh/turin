@@ -2,7 +2,7 @@
 use crate::{
     errors::{AppServerError, ProtocolError},
     generated::meta::{self, MethodMeta},
-    protocol::{NotificationHandler, Protocol, RequestHandler},
+    protocol::{NotificationHandler, Protocol, ProtocolOptions, RequestHandler},
     schema,
 };
 use futures::{FutureExt, future::BoxFuture};
@@ -10,10 +10,18 @@ use parking_lot::Mutex;
 use serde_json::Value;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    process::{Child, Command},
+    process::Command,
+    sync::watch,
     task::JoinHandle,
 };
 
@@ -36,7 +44,8 @@ struct Handlers {
 pub struct Client {
     pub raw: Protocol,
     handlers: Arc<Handlers>,
-    child: Option<Child>,
+    child_pid: Arc<AtomicU32>,
+    child_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
 }
 
@@ -46,7 +55,26 @@ impl Client {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let raw = Protocol::new(reader, writer);
+        Self::from_io_with_exit(reader, writer, None, ProtocolOptions::default())
+    }
+    pub fn from_io_with_options<R, W>(reader: R, writer: W, options: ProtocolOptions) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::from_io_with_exit(reader, writer, None, options)
+    }
+    pub(crate) fn from_io_with_exit<R, W>(
+        reader: R,
+        writer: W,
+        exit: Option<watch::Receiver<Option<AppServerError>>>,
+        options: ProtocolOptions,
+    ) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        let raw = Protocol::new_with_process_exit_and_options(reader, writer, exit, options);
         let handlers = Arc::new(Handlers::default());
         let requests = handlers.clone();
         raw.set_request_handler(Arc::new(move |method, params| {
@@ -116,11 +144,29 @@ impl Client {
         Self {
             raw,
             handlers,
-            child: None,
+            child_pid: Arc::new(AtomicU32::new(0)),
+            child_task: None,
             stderr_task: None,
         }
     }
     pub fn spawn(command: &str, args: &[&str], cwd: Option<&Path>) -> Result<Self, AppServerError> {
+        Self::spawn_with_options(command, args, cwd, ProtocolOptions::default())
+    }
+    pub fn spawn_with_options(
+        command: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+        options: ProtocolOptions,
+    ) -> Result<Self, AppServerError> {
+        Self::spawn_with_env(command, args, cwd, &[], options)
+    }
+    pub fn spawn_with_env(
+        command: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+        environment: &[(&str, &str)],
+        options: ProtocolOptions,
+    ) -> Result<Self, AppServerError> {
         let mut process = Command::new(command);
         process
             .args(args)
@@ -133,18 +179,37 @@ impl Client {
         if let Some(cwd) = cwd {
             process.current_dir(cwd);
         }
+        for (key, value) in environment {
+            process.env(key, value);
+        }
         let mut child = process
             .spawn()
             .map_err(|error| AppServerError::Spawn(error.to_string()))?;
+        let pid = child.id().unwrap_or(0);
         let stdout = child.stdout.take().expect("piped stdout");
         let stdin = child.stdin.take().expect("piped stdin");
-        let mut client = Self::from_io(stdout, stdin);
+        let (exit_tx, exit_rx) = watch::channel(None);
+        let mut client = Self::from_io_with_exit(stdout, stdin, Some(exit_rx), options);
         if let Some(mut stderr) = child.stderr.take() {
             client.stderr_task = Some(tokio::spawn(async move {
                 let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
             }));
         }
-        client.child = Some(child);
+        let terminator = client.raw.termination_handle();
+        client.child_pid.store(pid, Ordering::Release);
+        let child_pid = client.child_pid.clone();
+        client.child_task = Some(tokio::spawn(async move {
+            let error = match child.wait().await {
+                Ok(status) => AppServerError::ProcessExited(status.code()),
+                Err(error) => AppServerError::Transport {
+                    operation: "read-process-exit-status",
+                    detail: error.to_string(),
+                },
+            };
+            let _ = exit_tx.send(Some(error.clone()));
+            terminator.terminate(error);
+            child_pid.store(0, Ordering::Release);
+        }));
         Ok(client)
     }
     pub fn spawn_codex(cwd: Option<&Path>) -> Result<Self, AppServerError> {
@@ -211,43 +276,29 @@ impl Client {
     }
     pub async fn shutdown(mut self) -> Result<(), AppServerError> {
         self.raw.terminate(AppServerError::Cancelled);
-        if let Some(mut child) = self.child.take() {
+        if let Some(mut task) = self.child_task.take() {
             #[cfg(unix)]
-            if let Some(pid) = child.id() {
+            if let pid @ 1..=u32::MAX = self.child_pid.load(Ordering::Acquire) {
                 unsafe {
                     libc::kill(-(pid as i32), libc::SIGTERM);
                 }
             }
             #[cfg(not(unix))]
-            child
-                .start_kill()
-                .map_err(|error| AppServerError::Transport {
-                    operation: "read-process-exit-status",
-                    detail: error.to_string(),
-                })?;
-            if tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+            task.abort();
+            if tokio::time::timeout(std::time::Duration::from_secs(2), &mut task)
                 .await
                 .is_err()
             {
                 #[cfg(unix)]
-                if let Some(pid) = child.id() {
+                if let pid @ 1..=u32::MAX = self.child_pid.load(Ordering::Acquire) {
                     unsafe {
                         libc::kill(-(pid as i32), libc::SIGKILL);
                     }
                 }
-                child
-                    .start_kill()
-                    .map_err(|error| AppServerError::Transport {
-                        operation: "read-process-exit-status",
-                        detail: error.to_string(),
-                    })?;
-                child
-                    .wait()
-                    .await
-                    .map_err(|error| AppServerError::Transport {
-                        operation: "read-process-exit-status",
-                        detail: error.to_string(),
-                    })?;
+                task.await.map_err(|error| AppServerError::Transport {
+                    operation: "read-process-exit-status",
+                    detail: error.to_string(),
+                })?;
             }
         }
         Ok(())
@@ -279,10 +330,13 @@ fn invalid_params(detail: String) -> ProtocolError {
 impl Drop for Client {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if let Some(pid) = self.child.as_ref().and_then(Child::id) {
+        if let pid @ 1..=u32::MAX = self.child_pid.load(Ordering::Acquire) {
             unsafe {
                 libc::kill(-(pid as i32), libc::SIGKILL);
             }
+        }
+        if let Some(task) = self.child_task.take() {
+            task.abort();
         }
         if let Some(task) = self.stderr_task.take() {
             task.abort();

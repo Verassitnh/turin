@@ -1,12 +1,14 @@
 //! Port of upstream/packages/effect-codex-app-server/src/replay.ts
 #![allow(clippy::collapsible_if)] // Keep upstream normalization branches easy to compare.
-use crate::client::Client;
+use crate::{client::Client, errors::AppServerError};
+use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeSet, sync::Arc};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream},
+    sync::watch,
     task::JoinHandle,
     time::{Duration, sleep},
 };
@@ -80,6 +82,11 @@ pub struct ReplayDriver {
     pub state: Arc<Mutex<ReplayState>>,
     task: JoinHandle<()>,
 }
+pub type BeforeEmitInbound = Arc<dyn Fn(ReplayEntry) -> BoxFuture<'static, ()> + Send + Sync>;
+#[derive(Default)]
+pub struct ReplayOptions {
+    pub before_emit_inbound: Option<BeforeEmitInbound>,
+}
 impl Drop for ReplayDriver {
     fn drop(&mut self) {
         self.task.abort();
@@ -103,14 +110,43 @@ impl ReplayDriver {
     }
 }
 pub fn make_replay_client(transcript: ReplayTranscript) -> (Client, ReplayDriver) {
+    make_replay_client_with_options(transcript, ReplayOptions::default())
+}
+pub fn make_replay_client_with_options(
+    transcript: ReplayTranscript,
+    options: ReplayOptions,
+) -> (Client, ReplayDriver) {
     let (client_read, replay_write) = tokio::io::duplex(1024 * 1024);
     let (replay_read, client_write) = tokio::io::duplex(1024 * 1024);
-    let client = Client::from_io(client_read, client_write);
+    let (exit_tx, exit_rx) = watch::channel(None);
+    let client = Client::from_io_with_exit(
+        client_read,
+        client_write,
+        Some(exit_rx),
+        crate::protocol::ProtocolOptions::default(),
+    );
     let state = Arc::new(Mutex::new(ReplayState::default()));
     let task_state = state.clone();
     let task_transcript = transcript.clone();
     let task = tokio::spawn(async move {
-        run_replay(task_transcript, replay_read, replay_write, task_state).await;
+        run_replay(
+            task_transcript,
+            replay_read,
+            replay_write,
+            task_state.clone(),
+            options,
+        )
+        .await;
+        let error = task_state
+            .lock()
+            .failure
+            .as_ref()
+            .map(|error| AppServerError::Transport {
+                operation: "read-input-stream",
+                detail: error.to_string(),
+            })
+            .unwrap_or(AppServerError::ProcessExited(Some(0)));
+        let _ = exit_tx.send(Some(error));
     });
     (
         client,
@@ -126,6 +162,7 @@ async fn run_replay(
     read: DuplexStream,
     mut write: DuplexStream,
     state: Arc<Mutex<ReplayState>>,
+    options: ReplayOptions,
 ) {
     let ignored = transcript
         .metadata
@@ -149,6 +186,9 @@ async fn run_replay(
             ReplayEntry::EmitInbound {
                 frame, after_ms, ..
             } => {
+                if let Some(callback) = &options.before_emit_inbound {
+                    callback(entry.clone()).await;
+                }
                 if let Some(ms) = after_ms.filter(|ms| *ms > 0.0) {
                     sleep(Duration::from_secs_f64(ms / 1000.0)).await;
                 }
@@ -333,5 +373,34 @@ fn normalize_handoff(text: &str) -> String {
     format!("{}<dynamic-summary>{}", &text[..header + 2], &text[user..])
 }
 fn same_frame(expected: &Value, actual: &Value, ignored: &BTreeSet<String>) -> bool {
-    normalize(expected.clone(), ignored) == normalize(actual.clone(), ignored)
+    stable_stringify(&normalize(expected.clone(), ignored))
+        == stable_stringify(&normalize(actual.clone(), ignored))
+}
+fn stable_stringify(value: &Value) -> String {
+    match value {
+        Value::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(stable_stringify)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Value::Object(map) => {
+            let mut keys: Vec<_> = map.keys().collect();
+            keys.sort();
+            format!(
+                "{{{}}}",
+                keys.into_iter()
+                    .map(|key| format!(
+                        "{}:{}",
+                        serde_json::to_string(key).expect("key"),
+                        stable_stringify(&map[key])
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }
+        _ => serde_json::to_string(value).expect("JSON value"),
+    }
 }

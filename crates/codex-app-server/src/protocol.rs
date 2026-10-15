@@ -12,7 +12,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
-    sync::{Notify, mpsc, oneshot},
+    sync::{Notify, mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
 };
 
@@ -26,6 +26,32 @@ pub type NotificationHandler =
     Arc<dyn Fn(String, Option<Value>) -> BoxFuture<'static, ()> + Send + Sync>;
 const MAX_ACTIVE_REQUEST_HANDLERS: usize = 32;
 const MAX_BUFFERED_RAW_MESSAGES: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Incoming,
+    Outgoing,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Raw,
+    Decoded,
+    DecodeFailed,
+}
+#[derive(Debug, Clone)]
+pub struct ProtocolLogEvent {
+    pub direction: Direction,
+    pub stage: Stage,
+    pub payload: Value,
+}
+pub type ProtocolLogger = Arc<dyn Fn(ProtocolLogEvent) + Send + Sync>;
+#[derive(Clone, Default)]
+pub struct ProtocolOptions {
+    pub log_incoming: bool,
+    pub log_outgoing: bool,
+    pub logger: Option<ProtocolLogger>,
+    pub on_termination: Option<Arc<dyn Fn(AppServerError) + Send + Sync>>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncomingMessage {
@@ -76,6 +102,7 @@ struct State {
     outgoing: mpsc::UnboundedSender<Value>,
     notifications: Arc<SlidingQueue>,
     requests: Arc<SlidingQueue>,
+    options: ProtocolOptions,
 }
 
 impl State {
@@ -89,11 +116,32 @@ impl State {
             let _ = sender.send(Err(error.clone()));
         }
         self.handlers.lock().abort_all();
+        drop(failure);
+        if let Some(callback) = &self.options.on_termination {
+            callback(error);
+        }
+    }
+    fn log(&self, event: ProtocolLogEvent) {
+        if (event.direction == Direction::Incoming && !self.options.log_incoming)
+            || (event.direction == Direction::Outgoing && !self.options.log_outgoing)
+        {
+            return;
+        }
+        if let Some(logger) = &self.options.logger {
+            logger(event);
+        } else {
+            tracing::debug!(?event, "Codex App Server protocol event");
+        }
     }
     fn send(&self, value: Value) -> Result<(), AppServerError> {
         if let Some(error) = self.failure.lock().clone() {
             return Err(error);
         }
+        self.log(ProtocolLogEvent {
+            direction: Direction::Outgoing,
+            stage: Stage::Decoded,
+            payload: value.clone(),
+        });
         self.outgoing
             .send(value)
             .map_err(|_| AppServerError::InputStreamEnded)
@@ -107,8 +155,46 @@ pub struct Protocol {
     tasks: Vec<JoinHandle<()>>,
 }
 
+#[derive(Clone)]
+pub struct TerminationHandle(Arc<State>);
+impl TerminationHandle {
+    pub fn terminate(&self, error: AppServerError) {
+        self.0.fail(error);
+    }
+}
+
 impl Protocol {
     pub fn new<R, W>(reader: R, writer: W) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::new_with_process_exit_and_options(reader, writer, None, ProtocolOptions::default())
+    }
+    pub fn new_with_options<R, W>(reader: R, writer: W, options: ProtocolOptions) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::new_with_process_exit_and_options(reader, writer, None, options)
+    }
+    pub fn new_with_process_exit<R, W>(
+        reader: R,
+        writer: W,
+        exit: Option<watch::Receiver<Option<AppServerError>>>,
+    ) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::new_with_process_exit_and_options(reader, writer, exit, ProtocolOptions::default())
+    }
+    pub fn new_with_process_exit_and_options<R, W>(
+        reader: R,
+        writer: W,
+        exit: Option<watch::Receiver<Option<AppServerError>>>,
+        options: ProtocolOptions,
+    ) -> Self
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
@@ -127,9 +213,11 @@ impl Protocol {
             outgoing,
             notifications: notifications.clone(),
             requests: requests.clone(),
+            options,
         });
         let read_state = state.clone();
         let read_task = tokio::spawn(async move {
+            let mut exit = exit;
             let mut lines = BufReader::new(reader).lines();
             loop {
                 match lines.next_line().await {
@@ -137,14 +225,34 @@ impl Protocol {
                         if line.trim().is_empty() {
                             continue;
                         }
+                        read_state.log(ProtocolLogEvent {
+                            direction: Direction::Incoming,
+                            stage: Stage::Raw,
+                            payload: Value::String(line.clone()),
+                        });
                         match serde_json::from_str::<Value>(&line) {
                             Ok(value) => {
+                                read_state.log(ProtocolLogEvent {
+                                    direction: Direction::Incoming,
+                                    stage: Stage::Decoded,
+                                    payload: value.clone(),
+                                });
                                 if let Err(error) = route(&read_state, value) {
+                                    read_state.log(ProtocolLogEvent {
+                                        direction: Direction::Incoming,
+                                        stage: Stage::DecodeFailed,
+                                        payload: json!({"operation":"route-wire-message"}),
+                                    });
                                     read_state.fail(error);
                                     break;
                                 }
                             }
                             Err(error) => {
+                                read_state.log(ProtocolLogEvent {
+                                    direction: Direction::Incoming,
+                                    stage: Stage::DecodeFailed,
+                                    payload: json!({"operation":"decode-wire-message"}),
+                                });
                                 read_state.fail(AppServerError::ProtocolParse {
                                     operation: "decode-wire-message",
                                     detail: error.to_string(),
@@ -154,7 +262,19 @@ impl Protocol {
                         }
                     }
                     Ok(None) => {
-                        read_state.fail(AppServerError::InputStreamEnded);
+                        let error = if let Some(exit) = exit.as_mut() {
+                            loop {
+                                if let Some(error) = exit.borrow().clone() {
+                                    break error;
+                                }
+                                if exit.changed().await.is_err() {
+                                    break AppServerError::InputStreamEnded;
+                                }
+                            }
+                        } else {
+                            AppServerError::InputStreamEnded
+                        };
+                        read_state.fail(error);
                         break;
                     }
                     Err(error) => {
@@ -182,6 +302,11 @@ impl Protocol {
                     }
                 };
                 bytes.push(b'\n');
+                write_state.log(ProtocolLogEvent {
+                    direction: Direction::Outgoing,
+                    stage: Stage::Raw,
+                    payload: Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+                });
                 if let Err(error) = writer.write_all(&bytes).await {
                     write_state.fail(AppServerError::Transport {
                         operation: "write-output-stream",
@@ -252,6 +377,9 @@ impl Protocol {
     }
     pub fn terminate(&self, error: AppServerError) {
         self.state.fail(error);
+    }
+    pub fn termination_handle(&self) -> TerminationHandle {
+        TerminationHandle(self.state.clone())
     }
     #[cfg(test)]
     pub(crate) fn notifications_len_for_test(&self) -> usize {
@@ -337,7 +465,9 @@ fn route(state: &Arc<State>, value: Value) -> Result<(), AppServerError> {
                             Ok(None) => json!({"id": id}),
                             Err(error) => json!({"id": id, "error": error}),
                         };
-                        let _ = handler_state.send(frame);
+                        if let Err(error) = handler_state.send(frame) {
+                            handler_state.fail(error);
+                        }
                         handler_state.active_handlers.fetch_sub(1, Ordering::AcqRel);
                     });
                 }
@@ -355,19 +485,24 @@ fn route(state: &Arc<State>, value: Value) -> Result<(), AppServerError> {
         return Ok(());
     }
     if let Some(id) = id.and_then(id_key) {
-        if let Some((method, tx)) = state.pending.lock().remove(&id) {
-            let reply = match object.get("error") {
-                Some(value) => match serde_json::from_value::<ProtocolError>(value.clone()) {
-                    Ok(error) => Err(AppServerError::Request {
-                        method,
-                        request_id: id,
-                        error: Box::new(error),
-                    }),
-                    Err(error) => Err(AppServerError::ProtocolParse {
+        let parsed_error = object
+            .get("error")
+            .map(|value| {
+                serde_json::from_value::<ProtocolError>(value.clone()).map_err(|error| {
+                    AppServerError::ProtocolParse {
                         operation: "route-wire-message",
                         detail: error.to_string(),
-                    }),
-                },
+                    }
+                })
+            })
+            .transpose()?;
+        if let Some((method, tx)) = state.pending.lock().remove(&id) {
+            let reply = match parsed_error {
+                Some(error) => Err(AppServerError::Request {
+                    method,
+                    request_id: id,
+                    error: Box::new(error),
+                }),
                 None => Ok(object.get("result").cloned()),
             };
             let _ = tx.send(reply);

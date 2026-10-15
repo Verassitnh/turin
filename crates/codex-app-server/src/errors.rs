@@ -11,6 +11,34 @@ pub struct ProtocolError {
 }
 
 impl ProtocolError {
+    pub fn parse_error(message: impl Into<String>, data: Option<Value>) -> Self {
+        Self {
+            code: -32700,
+            message: message.into(),
+            data,
+        }
+    }
+    pub fn invalid_request(message: impl Into<String>, data: Option<Value>) -> Self {
+        Self {
+            code: -32600,
+            message: message.into(),
+            data,
+        }
+    }
+    pub fn invalid_params(message: impl Into<String>, data: Option<Value>) -> Self {
+        Self {
+            code: -32602,
+            message: message.into(),
+            data,
+        }
+    }
+    pub fn internal_error(message: impl Into<String>, data: Option<Value>) -> Self {
+        Self {
+            code: -32603,
+            message: message.into(),
+            data,
+        }
+    }
     pub fn method_not_found(method: &str) -> Self {
         Self {
             code: -32601,
@@ -51,6 +79,8 @@ pub enum AppServerError {
     },
     #[error("Codex App Server input stream ended")]
     InputStreamEnded,
+    #[error("failed to generate Codex App Server identifier for {purpose}: {detail}")]
+    IdentifierGeneration { purpose: String, detail: String },
     #[error("invalid Codex App Server payload for {method}: {detail}")]
     InvalidPayload { method: String, detail: String },
     #[error("Codex App Server request was cancelled")]

@@ -1118,7 +1118,7 @@ impl PromptEditor {
             (theme.secondary, with_alpha(theme.border, 0.7).into())
         };
         let header_color = with_alpha(theme.foreground, 0.72);
-        let code_size = px(theme.fonts.size_prompt) * 0.92;
+        let code_size = px(theme.fonts.size_code);
         let text = InlineFlow::new(
             ElementId::NamedInteger("composer-code".into(), index as u64),
             flow.flow.clone(),
@@ -1270,7 +1270,7 @@ fn code_flow(env: &FlowEnv<'_>, code: &CodeBlock) -> BlockFlow {
     let theme = env.theme;
     let language = language_of_info_string(&code.language);
     let highlighted = highlight_code(&code.text, language, theme.is_dark());
-    let code_size = px(theme.fonts.size_prompt) * 0.92;
+    let code_size = px(theme.fonts.size_code);
     let base = FlowSpanStyle {
         family: env.mono.clone(),
         weight: FontWeight::NORMAL,

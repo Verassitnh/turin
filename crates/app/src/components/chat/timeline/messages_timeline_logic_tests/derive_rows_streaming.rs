@@ -354,3 +354,133 @@ fn rebuilds_for_completion_late_failure_metadata_expansion_and_older_history() {
         }
     });
 }
+
+#[test]
+fn keeps_history_references_with_each_preview_through_the_v2_materializer() {
+    use crate::components::chat::timeline::types::ChatAttachment;
+
+    for kind in ["file", "image", "handoff", "streaming-image"] {
+        let initial = streaming_state("Partial");
+        let image = ChatAttachment {
+            id: "image".into(),
+            kind: "image".into(),
+            name: "image.png".into(),
+            mime_type: "image/png".into(),
+            size_bytes: 42,
+            preview_path: None,
+        };
+        let file = ChatAttachment {
+            id: "file".into(),
+            kind: "file".into(),
+            name: "file.txt".into(),
+            mime_type: "text/plain".into(),
+            size_bytes: 8,
+            preview_path: None,
+        };
+        let attachments = if kind == "file" {
+            vec![file.clone()]
+        } else {
+            vec![image.clone(), file.clone()]
+        };
+        let initial_url = if kind == "handoff" {
+            "blob:handoff"
+        } else {
+            "https://server.test/image"
+        };
+        let mut visible = initial.source.visible_turn_items.clone();
+        for (index, row) in visible.iter_mut().enumerate() {
+            match &mut row.item.payload {
+                TurnItemPayload::UserMessage {
+                    attachments: current,
+                    ..
+                } if index == 0 => *current = attachments.clone(),
+                TurnItemPayload::AssistantMessage {
+                    attachments: current,
+                    streaming: true,
+                    ..
+                } if kind == "streaming-image" => *current = attachments.clone(),
+                _ => {}
+            }
+        }
+        let urls =
+            |url: &str| std::collections::HashMap::from([(image.id.clone(), url.to_string())]);
+        let timeline_input = TimelineEntriesInput {
+            visible_turn_items: visible,
+            attachment_url_by_id: urls(initial_url),
+            ..initial.timeline_input.clone()
+        };
+        let timeline = derive_timeline_entries_from_visible_turn_items_with_state(
+            timeline_input.clone(),
+            None,
+        );
+        let input = MessagesTimelineRowsInput {
+            timeline_entries: Arc::new(timeline.entries.clone()),
+            ..initial.input.clone()
+        };
+        let previous = derive_messages_timeline_rows_with_state(input.clone(), None);
+
+        let next_timeline_input = TimelineEntriesInput {
+            visible_turn_items: update_text(&timeline_input.visible_turn_items, "Next token"),
+            ..timeline_input.clone()
+        };
+        let next_timeline = derive_timeline_entries_from_visible_turn_items_with_state(
+            next_timeline_input.clone(),
+            Some(&timeline),
+        );
+        let next_input = MessagesTimelineRowsInput {
+            timeline_entries: Arc::new(next_timeline.entries.clone()),
+            ..input.clone()
+        };
+        let next = derive_messages_timeline_rows_with_state(next_input.clone(), Some(&previous));
+        assert_eq!(next.rows, derive(&next_input), "{kind}");
+        for (index, row) in previous.rows.iter().enumerate() {
+            let is_live = matches!(
+                &row.content,
+                Row::Message { message, .. } | Row::AssistantMeta { message, .. }
+                    if message.id == "live-assistant"
+            );
+            if !is_live {
+                assert!(Arc::ptr_eq(&next.rows[index], row), "{kind}: row {index}");
+            }
+        }
+
+        // A renewed preview URL reaches the history message that holds it.
+        let renewed_timeline_input = TimelineEntriesInput {
+            attachment_url_by_id: urls("https://renewed.test/image"),
+            ..next_timeline_input
+        };
+        let renewed_timeline = derive_timeline_entries_from_visible_turn_items_with_state(
+            renewed_timeline_input,
+            Some(&next_timeline),
+        );
+        let renewed_input = MessagesTimelineRowsInput {
+            timeline_entries: Arc::new(renewed_timeline.entries.clone()),
+            ..input.clone()
+        };
+        let renewed = derive_messages_timeline_rows_with_state(renewed_input.clone(), Some(&next));
+        assert_eq!(renewed.rows, derive(&renewed_input), "{kind}");
+        if kind != "file" {
+            let history = renewed
+                .rows
+                .iter()
+                .find_map(|row| match &row.content {
+                    Row::Message { message, .. } if row.id() == "history-user" => {
+                        Some(message.attachments.clone())
+                    }
+                    _ => None,
+                })
+                .expect("history user row");
+            assert_eq!(
+                history,
+                vec![
+                    ChatAttachment {
+                        preview_path: Some("https://renewed.test/image".into()),
+                        ..image.clone()
+                    },
+                    file.clone(),
+                ],
+                "{kind}"
+            );
+        }
+    }
+}

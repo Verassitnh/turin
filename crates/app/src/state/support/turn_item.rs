@@ -5,8 +5,8 @@
 //! so the base fields are reached through this trait.
 
 use crate::state::contracts::{
-    NodeId, OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus, RunId, ThreadId, TurnItemId,
-    UtcDateTime,
+    NodeId, OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus, ProviderThreadId,
+    ProviderTurnId, RunId, ThreadId, TurnItemId, UtcDateTime,
 };
 
 /// `OrchestrationV2TurnItem["type"]`.
@@ -106,6 +106,8 @@ pub trait TurnItemExt {
     fn thread_id(&self) -> &ThreadId;
     fn run_id(&self) -> Option<&RunId>;
     fn node_id(&self) -> Option<&NodeId>;
+    fn provider_thread_id(&self) -> Option<&ProviderThreadId>;
+    fn provider_turn_id(&self) -> Option<&ProviderTurnId>;
     fn ordinal(&self) -> u64;
     fn status(&self) -> OrchestrationV2TurnItemStatus;
     fn updated_at(&self) -> &UtcDateTime;
@@ -127,6 +129,14 @@ impl TurnItemExt for OrchestrationV2TurnItem {
 
     fn node_id(&self) -> Option<&NodeId> {
         turn_item_dispatch!(self, node_id => node_id.as_ref())
+    }
+
+    fn provider_thread_id(&self) -> Option<&ProviderThreadId> {
+        turn_item_dispatch!(self, provider_thread_id => provider_thread_id.as_ref())
+    }
+
+    fn provider_turn_id(&self) -> Option<&ProviderTurnId> {
+        turn_item_dispatch!(self, provider_turn_id => provider_turn_id.as_ref())
     }
 
     fn ordinal(&self) -> u64 {

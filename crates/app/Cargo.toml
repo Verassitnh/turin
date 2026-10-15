@@ -12,6 +12,7 @@ path = "src/main.rs"
 turin-contracts.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
+futures.workspace = true
 indexmap.workspace = true
 parking_lot.workspace = true
 regex.workspace = true

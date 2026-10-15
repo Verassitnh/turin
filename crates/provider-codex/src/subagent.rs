@@ -628,21 +628,13 @@ pub fn start_child_turn(
     native_turn: &str,
     started_at: UtcDateTime,
 ) -> Vec<ProviderAdapterV2Event> {
-    let Some(parent_thread) = state
-        .subagents
-        .get(thread)
-        .map(|sub| sub.parent_native_thread.clone())
-    else {
+    let Some(known) = state.subagents.get(thread) else {
         return vec![];
     };
-    if state
-        .subagents
-        .get(thread)
-        .is_none_or(|sub| sub.native_turns.contains(native_turn))
-    {
+    if known.native_turns.contains(native_turn) {
         return vec![];
     }
-    let parent = active_parent(state, &parent_thread);
+    let parent = active_parent(state, &known.parent_native_thread);
     let Some(sub) = state.subagents.get_mut(thread) else {
         return vec![];
     };

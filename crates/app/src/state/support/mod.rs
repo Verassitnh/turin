@@ -5,6 +5,8 @@
 
 pub mod background_work;
 pub mod change_request_url;
+pub mod collate;
+pub mod domain_event;
 pub mod model;
 pub mod path;
 pub mod thread_pull_requests;

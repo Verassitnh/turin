@@ -6,6 +6,8 @@ pub mod codex_turn_token_usage;
 pub mod driver;
 pub mod orchestration_adapter;
 pub mod params;
+#[cfg(test)]
+mod replay_tests;
 pub mod runtime;
 
 pub use driver::CodexDriver;

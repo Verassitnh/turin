@@ -227,6 +227,8 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
 struct RuntimeState {
     turns: HashMap<String, ProviderAdapterV2TurnInput>,
     requests: HashMap<RuntimeRequestId, u64>,
+    /// Native item ids per native turn, in first-seen order.
+    item_positions: HashMap<String, Vec<String>>,
 }
 
 pub struct CodexProviderRuntime {
@@ -745,6 +747,11 @@ fn project_event(raw: CodexEvent, state: &Mutex<RuntimeState>) -> Vec<ProviderAd
     let Some(context) = state.lock().turns.get(native_turn).cloned() else {
         return vec![];
     };
+    if raw.method == "item/completed" {
+        return assistant_message_item(&raw, native_turn, &context, state)
+            .into_iter()
+            .collect();
+    }
     let ordinal =
         PositiveInt::new(context.provider_turn_ordinal.max(1) as u64).expect("positive ordinal");
     let provider_turn_id = derive::provider_turn(&driver(), native_turn);
@@ -809,6 +816,86 @@ fn project_event(raw: CodexEvent, state: &Mutex<RuntimeState>) -> Vec<ProviderAd
         state.lock().turns.remove(native_turn);
     }
     events
+}
+
+/// Turn-item position, as upstream's `resolveItemPosition`: the provider turn
+/// ordinal times 100, plus the item's first-seen position within the turn.
+fn item_ordinal(
+    state: &Mutex<RuntimeState>,
+    native_turn: &str,
+    native_item: &str,
+    provider_turn_ordinal: i64,
+) -> u64 {
+    let mut state = state.lock();
+    let items = state
+        .item_positions
+        .entry(native_turn.to_owned())
+        .or_default();
+    let index = match items.iter().position(|id| id == native_item) {
+        Some(index) => index,
+        None => {
+            items.push(native_item.to_owned());
+            items.len() - 1
+        }
+    };
+    provider_turn_ordinal.max(0) as u64 * 100 + index as u64 + 1
+}
+
+/// `item/completed` for an agent message becomes the assistant turn item.
+/// Streaming deltas are not mapped yet; the completed text is authoritative.
+fn assistant_message_item(
+    raw: &CodexEvent,
+    native_turn: &str,
+    context: &ProviderAdapterV2TurnInput,
+    state: &Mutex<RuntimeState>,
+) -> Option<ProviderAdapterV2Event> {
+    use turin_contracts::orchestration_v2::{
+        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
+    };
+    let item = raw.params.get("item")?;
+    if item.get("type").and_then(Value::as_str) != Some("agentMessage") {
+        return None;
+    }
+    let native_item = item.get("id").and_then(Value::as_str)?;
+    let text = item
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let now = UtcDateTime::now();
+    let turn_item = OrchestrationV2TurnItem::AssistantMessage {
+        tool_non_execution_kind: None,
+        tool_surface: None,
+        tool_icon: None,
+        tool_source: None,
+        id: derive::turn_item_from_provider_item(&driver(), native_item),
+        thread_id: context.thread_id.clone(),
+        run_id: Some(context.run_id.clone()),
+        node_id: Some(derive::node_from_provider_item(&driver(), native_item)),
+        provider_thread_id: Some(context.provider_thread.id.clone()),
+        provider_turn_id: Some(derive::provider_turn(&driver(), native_turn)),
+        native_item_ref: Some(native_ref(native_item)),
+        parent_item_id: None,
+        ordinal: item_ordinal(
+            state,
+            native_turn,
+            native_item,
+            context.provider_turn_ordinal,
+        ),
+        status: OrchestrationV2TurnItemStatus::Completed,
+        title: None,
+        started_at: None,
+        completed_at: Some(now),
+        updated_at: now,
+        message_id: derive::message_from_provider_item(&driver(), native_item),
+        text,
+        attachments: None,
+        streaming: false,
+    };
+    Some(ProviderAdapterV2Event::TurnItemUpdated {
+        driver: driver(),
+        turn_item,
+    })
 }
 
 fn project_request(

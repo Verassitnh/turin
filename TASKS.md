@@ -114,9 +114,9 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok | done → QC wf_54f7c42f-d77 |
 | T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex (high) | active (base: stage) |
 | T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | done (r2 routing/perms/ledger, live smoke ok) → QC pending |
-| T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok | todo |
+| T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok | active (base: stage) |
 | T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok | done (nested Cursor shapes) → QC pending |
-| T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok | todo |
+| T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok | active (base: stage) |
 | T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex (high) | active (base: stage) |
 | T13b | Orchestrator write side: EventSink/Store, outbox/worker, receipts, command policy, thread lifecycle services | `crates/orchestration/src/pipeline/**` | Codex (high) | active (base: stage) |
 | T13c | Orchestrator core + provider run services (Orchestrator.ts, ProviderSessionManager, RunExecution, ingest, recovery, checkpoints, PR reactors) | `crates/orchestration/src/core/**` | Codex (high) | todo (after T13a/b + T08) |

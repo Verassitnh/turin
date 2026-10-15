@@ -105,17 +105,25 @@ const fn square(size: f32, icon: f32) -> SizeSpec {
 
 impl ButtonSize {
     pub(crate) fn spec(self) -> SizeSpec {
+        // Desktop cascade: the base class's `sm:text-sm` and
+        // `sm:[&_svg]:size-4` come after a size's unprefixed `text-xs` /
+        // `[&_svg]:size-3.5` in the compiled CSS, so on desktop they win.
+        // Sizes that add their own `sm:` overrides (micro, xs, xl) keep them.
         match self {
-            // h-7 gap-1 rounded-md px-[calc(--spacing(2)-1px)] text-xs, svg size-3.5
+            // h-7 gap-1 rounded-md px-[calc(--spacing(2)-1px)]; text-xs and
+            // svg size-3.5 lose to the base sm: rules → 14px text, 16px icon.
             Self::Compact => SizeSpec {
                 radius: RADIUS_MD,
-                ..spec(1.75, 7., 0.25, TEXT_XS, 0.875)
+                ..spec(1.75, 7., 0.25, TEXT_SM, 1.)
             },
             // sm:h-8 px-[calc(--spacing(3)-1px)], sm:text-sm, svg sm:size-4
             Self::Default => spec(2., 11., 0.5, TEXT_SM, 1.),
             Self::Icon => square(2., 1.),
             Self::IconLg => square(2.25, 1.),
-            // size-5 rounded-sm p-0, svg size-3
+            // size-5 rounded-sm p-0, svg size-3. The cascade would make the
+            // default icon 16px, but nearly every upstream icon-micro /
+            // icon-tiny call site passes an explicit `size-3`, so 12px is the
+            // default here; use `Button::icon_size` for the rest.
             Self::IconMicro => SizeSpec {
                 radius: RADIUS_SM,
                 ..square(1.25, 0.75)
@@ -303,6 +311,7 @@ pub struct Button {
     variant: ButtonVariant,
     size: ButtonSize,
     icon: Option<IconName>,
+    icon_size: Option<Rems>,
     label: Option<SharedString>,
     children: Vec<AnyElement>,
     disabled: bool,
@@ -319,6 +328,7 @@ impl Button {
             variant: ButtonVariant::Default,
             size: ButtonSize::Default,
             icon: None,
+            icon_size: None,
             label: None,
             children: Vec::new(),
             disabled: false,
@@ -340,6 +350,12 @@ impl Button {
     }
 
     /// Leading icon, sized and tinted by the variant (`[&_svg]` rules).
+    /// An explicit `size-*` on the icon, overriding the size's default.
+    pub fn icon_size(mut self, size: Rems) -> Self {
+        self.icon_size = Some(size);
+        self
+    }
+
     pub fn icon(mut self, icon: IconName) -> Self {
         self.icon = Some(icon);
         self
@@ -474,7 +490,7 @@ impl RenderOnce for Button {
         if let Some(icon) = self.icon {
             root = root.child(
                 Icon::new(icon)
-                    .size(size.icon)
+                    .size(self.icon_size.unwrap_or(size.icon))
                     .color(theme_fg_for_icon)
                     .when_some(icon_hover.filter(|_| interactive), |this, hover| {
                         this.group_hover_color(group.clone(), hover)

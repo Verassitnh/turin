@@ -30,17 +30,20 @@ use turin_contracts::{
         OrchestrationV2ResponseCapability, OrchestrationV2RuntimeRequest,
         OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
         OrchestrationV2Subagent, OrchestrationV2SubagentOrigin, OrchestrationV2SubagentStatus,
-        OrchestrationV2TurnItemStatus,
+        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
-    provider_policy::{ProviderApprovalDecision, ProviderInteractionMode, RuntimeMode},
+    provider_policy::{
+        ProviderApprovalDecision, ProviderInteractionMode, ProviderRequestKind, RuntimeMode,
+    },
 };
 use turin_provider_core::id_allocator::{IdAllocator, derive};
 
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
 use crate::adapter::records::{
-    NodeOf, NodeTiming, TextBlock, assistant_message, execution_node, next_ordinal, node_status_of,
+    NodeOf, NodeTiming, RequestBody, TextBlock, assistant_message, execution_node, next_ordinal,
+    node_status_of, request_node, request_turn_item, settle_request_item, settle_request_node,
     text_turn_item,
 };
 use crate::events::V2StreamEvent;
@@ -102,6 +105,9 @@ struct Pending {
     native_id: String,
     session_id: String,
     ask: Ask,
+    /// The node and item shown while the request waits, settled when it ends.
+    node: OrchestrationV2ExecutionNode,
+    item: OrchestrationV2TurnItem,
 }
 
 struct V2Inner {
@@ -864,71 +870,77 @@ impl OpenCodeV2Session {
             .get(session_id)
             .cloned()
             .unwrap_or_else(|| session_id.to_owned());
-        let Some(turn) = guard
-            .threads
-            .get(&owner)
-            .and_then(|thread| thread.active.as_ref())
-        else {
-            return;
-        };
-        let provider_turn_id = turn.provider_turn.id.clone();
-        let thread_id = turn.thread_id.clone();
-        let root_node_id = turn.provider_turn.node_id.clone();
-        let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
-        let request_id =
-            IdAllocator.runtime_request(&self.driver, Some(&provider_turn_id), Some(native_id));
         let now = UtcDateTime::now();
-        // `approvalNode`: a request's node derives from the request id, not the native id.
-        let node_id = derive::approval_node(&request_id);
-        let node = execution_node(
-            &self.driver,
-            &NodeOf {
+        let (request, item, node, request_id, thread_id) = {
+            let Some(thread) = guard.threads.get_mut(&owner) else {
+                return;
+            };
+            let Some(turn) = thread.active.as_mut() else {
+                return;
+            };
+            let provider_turn_id = turn.provider_turn.id.clone();
+            let thread_id = turn.thread_id.clone();
+            let root_node_id = turn.provider_turn.node_id.clone();
+            let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
+            let request_id =
+                IdAllocator.runtime_request(&self.driver, Some(&provider_turn_id), Some(native_id));
+            let ordinal = next_ordinal(
+                &mut turn.item_ordinals,
+                &mut turn.next_item_ordinal,
+                native_id,
+            );
+            let of = NodeOf {
                 thread_id: &thread_id,
                 root_node_id: &root_node_id,
                 provider_thread_id: &provider_thread_id,
                 provider_turn_id: &provider_turn_id,
                 native_item_id: native_id,
                 weak_ref: false,
-            },
-            NodeTiming {
-                kind: if kind == "user_input" {
-                    OrchestrationV2ExecutionNodeKind::UserInputRequest
-                } else {
-                    OrchestrationV2ExecutionNodeKind::ApprovalRequest
+            };
+            let node = request_node(
+                &self.driver,
+                &of,
+                &request_id,
+                matches!(ask, Ask::Form(_)),
+                now,
+            );
+            let body = match &ask {
+                Ask::Permission { action, .. } => RequestBody::Approval {
+                    request_kind: match kind {
+                        "file-read" => ProviderRequestKind::FileRead,
+                        "file-change" => ProviderRequestKind::FileChange,
+                        _ => ProviderRequestKind::Command,
+                    },
+                    title: Some(action.clone()),
                 },
-                status: OrchestrationV2ExecutionNodeStatus::Waiting,
-                started_at: now,
-                completed_at: None,
-            },
-        );
-        // The request's node id is `approvalNode`, not the native item's.
-        let node = OrchestrationV2ExecutionNode {
-            id: node_id.clone(),
-            ..node
-        };
-        let request = OrchestrationV2RuntimeRequest {
-            id: request_id.clone(),
-            node_id: node_id.clone(),
-            provider_turn_id: Some(provider_turn_id),
-            native_request_ref: Some(native_ref(native_id, false)),
-            kind: match kind {
-                "file-read" => OrchestrationV2RuntimeRequestKind::FileRead,
-                "file-change" => OrchestrationV2RuntimeRequestKind::FileChange,
-                "user_input" => OrchestrationV2RuntimeRequestKind::UserInput,
-                _ => OrchestrationV2RuntimeRequestKind::Command,
-            },
-            status: OrchestrationV2RuntimeRequestStatus::Pending,
-            response_capability: OrchestrationV2ResponseCapability::Live {
-                provider_session_id: self.provider_session_id.clone(),
-            },
-            created_at: now,
-            resolved_at: None,
-            decision: None,
-            answers: None,
-        };
-        if let Some(thread) = guard.threads.get_mut(&owner) {
+                Ask::Form(form) => RequestBody::UserInput {
+                    questions: form_questions(form).unwrap_or_default(),
+                },
+            };
+            let item = request_turn_item(&of, &request_id, ordinal, now, body);
+            let request = OrchestrationV2RuntimeRequest {
+                id: request_id.clone(),
+                node_id: node.id.clone(),
+                provider_turn_id: Some(provider_turn_id),
+                native_request_ref: Some(native_ref(native_id, false)),
+                kind: match kind {
+                    "file-read" => OrchestrationV2RuntimeRequestKind::FileRead,
+                    "file-change" => OrchestrationV2RuntimeRequestKind::FileChange,
+                    "user_input" => OrchestrationV2RuntimeRequestKind::UserInput,
+                    _ => OrchestrationV2RuntimeRequestKind::Command,
+                },
+                status: OrchestrationV2RuntimeRequestStatus::Pending,
+                response_capability: OrchestrationV2ResponseCapability::Live {
+                    provider_session_id: self.provider_session_id.clone(),
+                },
+                created_at: now,
+                resolved_at: None,
+                decision: None,
+                answers: None,
+            };
             thread.requests.push(request.clone());
-        }
+            (request, item, node, request_id, thread_id)
+        };
         guard.pending.insert(
             native_id.to_owned(),
             Pending {
@@ -936,6 +948,8 @@ impl OpenCodeV2Session {
                 native_id: native_id.to_owned(),
                 session_id: session_id.to_owned(),
                 ask,
+                node: node.clone(),
+                item: item.clone(),
             },
         );
         drop(guard);
@@ -943,10 +957,56 @@ impl OpenCodeV2Session {
             driver: self.driver.clone(),
             node,
         });
+        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: self.driver.clone(),
+            turn_item: item,
+        });
         self.emit(ProviderAdapterV2Event::RuntimeRequestUpdated {
             driver: self.driver.clone(),
             thread_id: Some(thread_id),
             runtime_request: request,
+        });
+    }
+
+    /// `settleRequest`: the request ends, resolved or cancelled, with its node and item.
+    fn settle_request(
+        &self,
+        guard: &mut V2Inner,
+        request_id: &RuntimeRequestId,
+        session_id: &str,
+        node: &OrchestrationV2ExecutionNode,
+        item: &OrchestrationV2TurnItem,
+        cancelled: bool,
+    ) {
+        let now = UtcDateTime::now();
+        let owner = guard
+            .children
+            .get(session_id)
+            .cloned()
+            .unwrap_or_else(|| session_id.to_owned());
+        if let Some(thread) = guard.threads.get_mut(&owner)
+            && let Some(request) = thread.requests.iter_mut().find(|r| r.id == *request_id)
+        {
+            request.status = if cancelled {
+                OrchestrationV2RuntimeRequestStatus::Cancelled
+            } else {
+                OrchestrationV2RuntimeRequestStatus::Resolved
+            };
+            request.resolved_at = Some(now);
+            let thread_id = thread.active.as_ref().map(|turn| turn.thread_id.clone());
+            self.emit(ProviderAdapterV2Event::RuntimeRequestUpdated {
+                driver: self.driver.clone(),
+                thread_id,
+                runtime_request: request.clone(),
+            });
+        }
+        self.emit(ProviderAdapterV2Event::NodeUpdated {
+            driver: self.driver.clone(),
+            node: settle_request_node(node, cancelled, now),
+        });
+        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: self.driver.clone(),
+            turn_item: settle_request_item(item, cancelled, now),
         });
     }
 
@@ -957,6 +1017,38 @@ impl OpenCodeV2Session {
         status: ProviderAdapterV2TurnTerminalStatus,
         failure: Option<String>,
     ) {
+        // `finishTurn`: OpenCode drops a request its session asked when the execution
+        // ends, so the request cancels with the turn.
+        if guard
+            .threads
+            .get(session_id)
+            .is_some_and(|thread| thread.active.is_some())
+        {
+            let doomed: Vec<String> = guard
+                .pending
+                .iter()
+                .filter(|(_, pending)| {
+                    pending.session_id == session_id
+                        || guard
+                            .children
+                            .get(&pending.session_id)
+                            .is_some_and(|owner| owner == session_id)
+                })
+                .map(|(native, _)| native.clone())
+                .collect();
+            for native in doomed {
+                if let Some(pending) = guard.pending.remove(&native) {
+                    self.settle_request(
+                        guard,
+                        &pending.request_id,
+                        &pending.session_id,
+                        &pending.node,
+                        &pending.item,
+                        true,
+                    );
+                }
+            }
+        }
         let Some(thread) = guard.threads.get_mut(session_id) else {
             return;
         };
@@ -1714,13 +1806,27 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                     .reply_permission(&pending.session_id, &pending.native_id, &body)
                     .await
                     .map_err(http_err)?;
+                let cancelled = matches!(
+                    decision,
+                    ProviderApprovalDecision::Decline | ProviderApprovalDecision::Cancel
+                );
+                let mut guard = self.inner.lock();
+                self.settle_request(
+                    &mut guard,
+                    &pending.request_id,
+                    &pending.session_id,
+                    &pending.node,
+                    &pending.item,
+                    cancelled,
+                );
             }
             Ask::Form(form) => {
                 let decline = matches!(
                     input.decision,
                     Some(ProviderApprovalDecision::Decline | ProviderApprovalDecision::Cancel)
                 );
-                if input.answers.is_none() || decline {
+                let cancelled = input.answers.is_none() || decline;
+                if cancelled {
                     self.client
                         .cancel_form(&pending.session_id, &form.id, None)
                         .await
@@ -1737,6 +1843,15 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                         .await
                         .map_err(http_err)?;
                 }
+                let mut guard = self.inner.lock();
+                self.settle_request(
+                    &mut guard,
+                    &pending.request_id,
+                    &pending.session_id,
+                    &pending.node,
+                    &pending.item,
+                    cancelled,
+                );
             }
         }
         Ok(())

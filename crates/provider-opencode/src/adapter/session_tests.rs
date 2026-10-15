@@ -1375,3 +1375,91 @@ async fn v1_an_open_permission_cancels_with_its_turn() {
     assert_eq!(node["node"]["status"], "cancelled");
     session.close().await;
 }
+
+#[tokio::test]
+async fn v2_declined_permission_settles_cancelled_with_its_node_and_item() {
+    let script = script(|request| {
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e1","type":"permission.asked","data":{"sessionID":"ses_1","id":"perm_3","permission":"bash","patterns":["rm"]}}).to_string(),
+        )))
+        .unwrap();
+    let asked = events_until(&mut events, |value| {
+        value["type"] == "runtime_request.updated"
+    })
+    .await;
+    let waiting = of_type(&asked, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["kind"] == "approval_request")
+        .expect("waiting node")
+        .clone();
+    assert_eq!(waiting["node"]["status"], "waiting");
+    let request_id = of_type(&asked, "runtime_request.updated")
+        .into_iter()
+        .next()
+        .expect("request")["runtime_request"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    session
+        .respond_to_runtime_request(ProviderAdapterV2RuntimeRequestResponseInput {
+            request_id: turin_contracts::RuntimeRequestId::new(request_id).unwrap(),
+            decision: Some(ProviderApprovalDecision::Decline),
+            answers: None,
+            response: None,
+        })
+        .await
+        .unwrap();
+    let settled = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "approval_request"
+            && value["turn_item"]["status"] == "cancelled"
+    })
+    .await;
+    let node = of_type(&settled, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["id"] == waiting["node"]["id"])
+        .expect("settled node");
+    assert_eq!(node["node"]["status"], "cancelled");
+    assert!(
+        of_type(&settled, "runtime_request.updated")
+            .iter()
+            .any(|event| event["runtime_request"]["status"] == "cancelled")
+    );
+    session.close().await;
+}

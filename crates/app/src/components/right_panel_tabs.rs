@@ -20,6 +20,7 @@ use crate::theme::tokens::{RADIUS_MD, TEXT_SM, TEXT_XS, WORKSPACE_TOPBAR_HEIGHT}
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 
 /// A surface tab: `h-6 max-w-36 rounded-md pl-1.5 pr-2 text-xs gap-0.5`,
+/// icons per `SurfaceIcon` (diff → FileDiff, pull-requests → Link2),
 /// active `bg-accent text-foreground`.
 fn surface_tab(
     id: &'static str,
@@ -43,12 +44,21 @@ fn surface_tab(
         .rounded(RADIUS_MD)
         .text_size(TEXT_XS.size)
         .cursor(CursorStyle::PointingHand)
-        .child(Icon::new(icon).size(rems(0.875)).color(if active {
-            theme.foreground
-        } else {
-            theme.muted_foreground
-        }))
-        .child(div().pl_1().truncate().child(label));
+        // PanelTabCloseButton slot: a `size-4` box around the `size-3` surface icon.
+        .child(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .size(rems(1.))
+                .items_center()
+                .justify_center()
+                .child(Icon::new(icon).size(rems(0.75)).color(if active {
+                    theme.foreground
+                } else {
+                    theme.muted_foreground
+                })),
+        )
+        .child(div().min_w_0().truncate().child(label));
     if active {
         tab.bg(theme.accent).text_color(theme.foreground)
     } else {
@@ -92,7 +102,7 @@ impl RenderOnce for RightPanelTabs {
                     ))
                     .child(surface_tab(
                         "right-panel-tab-prs",
-                        IconName::GitPullRequest,
+                        IconName::Link2,
                         "Pull requests",
                         false,
                         cx,

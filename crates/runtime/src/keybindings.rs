@@ -847,6 +847,197 @@ mod tests {
         assert_eq!(encode_shortcut(&shortcut).unwrap(), "mod+shift+k");
     }
 
+    fn persisted_view(path: &Path) -> Vec<(String, String)> {
+        let rules: Vec<KeybindingRule> = serde_json::from_value(read_json(path)).unwrap();
+        rules
+            .into_iter()
+            .map(|rule| {
+                (
+                    rule.key.as_str().to_owned(),
+                    rule.command.as_str().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    fn pair(key: &str, command: &str) -> (String, String) {
+        (key.to_owned(), command.to_owned())
+    }
+
+    #[test]
+    fn appends_additional_rules_for_the_same_command() {
+        let (_dir, path) = fixture();
+        std::fs::write(
+            &path,
+            r#"[{"key":"mod+r","command":"script.run-tests.run"}]"#,
+        )
+        .unwrap();
+        let service = Keybindings::new(&path);
+        service
+            .upsert_keybinding_rule(UpsertKeybindingInput {
+                rule: rule("mod+shift+r", "script.run-tests.run", None),
+                replace: None,
+            })
+            .unwrap();
+        assert_eq!(
+            persisted_view(&path),
+            vec![
+                pair("mod+r", "script.run-tests.run"),
+                pair("mod+shift+r", "script.run-tests.run"),
+            ]
+        );
+    }
+
+    #[test]
+    fn replacing_a_rule_with_one_that_already_exists_does_not_duplicate_it() {
+        let (_dir, path) = fixture();
+        std::fs::write(
+            &path,
+            r#"[{"key":"mod+r","command":"script.run-tests.run"},{"key":"mod+alt+r","command":"script.run-tests.run"}]"#,
+        )
+        .unwrap();
+        let service = Keybindings::new(&path);
+        service
+            .upsert_keybinding_rule(UpsertKeybindingInput {
+                rule: rule("mod+alt+r", "script.run-tests.run", None),
+                replace: Some(rule("mod+r", "script.run-tests.run", None)),
+            })
+            .unwrap();
+        assert_eq!(
+            persisted_view(&path),
+            vec![pair("mod+alt+r", "script.run-tests.run")]
+        );
+    }
+
+    #[test]
+    fn refuses_to_overwrite_a_malformed_config() {
+        let (_dir, path) = fixture();
+        std::fs::write(&path, "{ not-json").unwrap();
+        let service = Keybindings::new(&path);
+        let error = service
+            .upsert_keybinding_rule(UpsertKeybindingInput {
+                rule: rule("mod+shift+r", "script.run-tests.run", None),
+                replace: None,
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("expected JSON array"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not-json");
+    }
+
+    #[test]
+    fn a_non_array_config_reports_once_without_a_duplicate_prefix() {
+        let (_dir, path) = fixture();
+        std::fs::write(&path, r#"{"key":"mod+j","command":"terminal.toggle"}"#).unwrap();
+        let service = Keybindings::new(&path);
+        let state = service.snapshot().unwrap();
+        let [ServerConfigIssue::MalformedConfig { message }] = state.issues.as_slice() else {
+            panic!(
+                "expected one malformed-config issue, got {:?}",
+                state.issues
+            );
+        };
+        assert_eq!(message.matches("expected a JSON array").count(), 1);
+    }
+
+    #[test]
+    fn caches_the_loaded_config_across_repeated_reads() {
+        let (_dir, path) = fixture();
+        std::fs::write(&path, r#"[{"key":"mod+x","command":"thread.pin"}]"#).unwrap();
+        let service = Keybindings::new(&path);
+        let first = service.snapshot().unwrap();
+        // Changing the file without a watcher must not show up in a cached read.
+        std::fs::write(&path, "[]").unwrap();
+        let second = service.snapshot().unwrap();
+        assert_eq!(first, second);
+        assert!(
+            second
+                .keybindings
+                .iter()
+                .any(|binding| binding.command.as_str() == "thread.pin")
+        );
+    }
+
+    #[test]
+    fn a_failed_read_is_retried_instead_of_cached() {
+        let (_dir, path) = fixture();
+        // A directory where the file should be makes the read itself fail.
+        std::fs::create_dir_all(&path).unwrap();
+        let service = Keybindings::new(&path);
+        let error = service.snapshot().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to read keybindings config")
+        );
+
+        std::fs::remove_dir_all(&path).unwrap();
+        std::fs::write(&path, r#"[{"key":"mod+j","command":"terminal.toggle"}]"#).unwrap();
+        let state = service.snapshot().unwrap();
+        assert!(state.issues.is_empty());
+        assert!(
+            state
+                .keybindings
+                .iter()
+                .any(|binding| binding.command.as_str() == "terminal.toggle")
+        );
+    }
+
+    #[test]
+    fn the_cache_is_updated_after_an_upsert() {
+        let (_dir, path) = fixture();
+        std::fs::write(&path, r#"[{"key":"mod+j","command":"terminal.toggle"}]"#).unwrap();
+        let service = Keybindings::new(&path);
+        service.snapshot().unwrap();
+        service
+            .upsert_keybinding_rule(UpsertKeybindingInput {
+                rule: rule("mod+shift+r", "script.run-tests.run", None),
+                replace: None,
+            })
+            .unwrap();
+        let loaded = service.snapshot().unwrap().keybindings;
+        assert!(
+            loaded
+                .iter()
+                .any(|binding| binding.command.as_str() == "script.run-tests.run")
+        );
+        assert!(
+            loaded
+                .iter()
+                .any(|binding| binding.command.as_str() == "terminal.toggle")
+        );
+    }
+
+    #[test]
+    fn concurrent_upserts_do_not_lose_updates() {
+        let (_dir, path) = fixture();
+        std::fs::write(&path, "[]").unwrap();
+        let service = Keybindings::new(&path);
+        let commands: Vec<String> = (0..20)
+            .map(|index| format!("script.concurrent-{index}.run"))
+            .collect();
+        std::thread::scope(|scope| {
+            for (index, command) in commands.iter().enumerate() {
+                let service = &service;
+                scope.spawn(move || {
+                    let key = format!("mod+{}", (b'a' + index as u8) as char);
+                    service
+                        .upsert_keybinding_rule(UpsertKeybindingInput {
+                            rule: rule(&key, command, None),
+                            replace: None,
+                        })
+                        .unwrap();
+                });
+            }
+        });
+        let persisted: Vec<String> = persisted_view(&path)
+            .into_iter()
+            .map(|(_, command)| command)
+            .collect();
+        for command in &commands {
+            assert!(persisted.contains(command), "missing {command}");
+        }
+    }
+
     #[tokio::test]
     async fn watcher_reloads_and_emits_after_an_external_edit() {
         let (_dir, path) = fixture();

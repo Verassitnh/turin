@@ -16,7 +16,7 @@ use turin_contracts::environment::{
     ORCHESTRATION_PROTOCOL_VERSION,
 };
 
-use super::server_environment_label::resolve_server_environment_label;
+use super::server_environment_label::{SystemHost, resolve_server_environment_label};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvironmentIdOperation {
@@ -196,7 +196,7 @@ impl ServerEnvironment {
             .file_name()
             .map(|name| name.to_string_lossy().trim().to_owned())
             .unwrap_or_default();
-        let label = resolve_server_environment_label(&cwd_base_name);
+        let label = resolve_server_environment_label(&SystemHost, &cwd_base_name);
         Ok(Self::from_parts(environment_id, &label))
     }
 
@@ -310,6 +310,28 @@ mod tests {
         std::fs::write(&path, "  env-123 \n").unwrap();
         let id = load_or_create_environment_id(dir.path(), &path).unwrap();
         assert_eq!(id.as_str(), "env-123");
+    }
+
+    #[test]
+    fn an_unwritable_state_dir_is_a_structured_write_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("missing");
+        let path = state_dir.join("environment-id");
+        let error = load_or_create_environment_id(&state_dir, &path).unwrap_err();
+        assert!(matches!(
+            error,
+            ServerEnvironmentIdPersistenceError::Io {
+                operation: EnvironmentIdOperation::Write,
+                ..
+            }
+        ));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Server environment ID write failed at '{}'.",
+                path.display()
+            )
+        );
     }
 
     #[test]

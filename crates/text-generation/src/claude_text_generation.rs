@@ -16,7 +16,7 @@ use turin_contracts::model_selection::ModelSelection;
 use turin_contracts::settings::ClaudeSettings;
 use turin_provider_core::path_expansion::expand_home_path;
 
-use crate::command::{CommandError, run_command};
+use crate::command::{CommandError, make_temp_dir_owned, run_command};
 use crate::text_generation_operations::{Operation, Request, Runner, RunnerTextGeneration};
 use crate::text_generation_utils::normalize_cli_error;
 
@@ -76,6 +76,31 @@ pub fn claude_text_generation(
     options: ClaudeTextGenerationOptions,
 ) -> RunnerTextGeneration<ClaudeRunner> {
     RunnerTextGeneration::new("Claude", ClaudeRunner { options })
+}
+
+/// Upstream `path.resolve`: an absolute path, normalized, relative to the server's cwd when it is
+/// not already absolute. The child runs in another directory, so a relative config dir would
+/// resolve differently there.
+pub fn resolve_path(path: &str) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let joined = if std::path::Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/"))
+            .join(path)
+    };
+    let mut resolved = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    resolved
 }
 
 /// Upstream `claudeErrorResult`: the last non-blank `result` of an `is_error` message on stdout.
@@ -148,9 +173,10 @@ impl ClaudeRunner {
             .unwrap_or_else(|| std::env::vars().collect());
         let home_path = self.options.settings.home_path.as_str();
         if !home_path.is_empty() {
+            let expanded = expand_home_path(home_path, &self.options.home_dir);
             environment.insert(
                 "CLAUDE_CONFIG_DIR".to_owned(),
-                expand_home_path(home_path, &self.options.home_dir),
+                resolve_path(&expanded).to_string_lossy().into_owned(),
             );
         }
         environment
@@ -243,9 +269,8 @@ impl ClaudeRunner {
         // Titles need only the supplied prompt, not configuration from the checkout.
         let title_directory = if operation == Operation::GenerateThreadTitle {
             Some(
-                tempfile::Builder::new()
-                    .prefix("t3code-claude-title-")
-                    .tempdir()
+                make_temp_dir_owned("t3code-claude-title-".to_owned())
+                    .await
                     .map_err(|error| {
                         normalize_cli_error(
                             "claude",

@@ -8,6 +8,7 @@
 //! [`SyntheticClaudeModels`] gives the same resolution for the four synthetic models those
 //! tests name, so the argv expectations hold without the real catalog port.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,7 +22,8 @@ use turin_provider_core::text_generation::{
 };
 
 use super::{
-    ClaudeModelResolver, ClaudeResolvedModel, ClaudeTextGenerationOptions, claude_text_generation,
+    ClaudeModelResolver, ClaudeResolvedModel, ClaudeRunner, ClaudeTextGenerationOptions,
+    claude_text_generation,
 };
 use crate::text_generation_utils::sanitize_thread_title;
 
@@ -562,4 +564,45 @@ async fn falls_back_when_claude_thread_title_normalization_becomes_whitespace_on
         assert_eq!(generated.title, "New thread");
     })
     .await;
+}
+
+#[test]
+fn claude_config_dir_resolves_a_relative_home_path_against_the_server_cwd() {
+    let runner = ClaudeRunner {
+        options: ClaudeTextGenerationOptions {
+            settings: serde_json::from_value(json!({ "homePath": "claude-work/../claude-home" }))
+                .expect("claude settings"),
+            environment: Some(BTreeMap::new()),
+            models: Arc::new(SyntheticClaudeModels),
+            has_managed_mcp_config: Arc::new(|| false),
+            home_dir: "/home/someone".to_owned(),
+        },
+    };
+    let expected = std::env::current_dir()
+        .expect("cwd")
+        .join("claude-home")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        runner.environment().get("CLAUDE_CONFIG_DIR"),
+        Some(&expected)
+    );
+}
+
+#[test]
+fn claude_config_dir_expands_home_then_keeps_an_absolute_path() {
+    let runner = ClaudeRunner {
+        options: ClaudeTextGenerationOptions {
+            settings: serde_json::from_value(json!({ "homePath": "~/.claude-work" }))
+                .expect("claude settings"),
+            environment: Some(BTreeMap::new()),
+            models: Arc::new(SyntheticClaudeModels),
+            has_managed_mcp_config: Arc::new(|| false),
+            home_dir: "/home/someone".to_owned(),
+        },
+    };
+    assert_eq!(
+        runner.environment().get("CLAUDE_CONFIG_DIR"),
+        Some(&"/home/someone/.claude-work".to_owned())
+    );
 }

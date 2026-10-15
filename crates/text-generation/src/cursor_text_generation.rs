@@ -25,6 +25,7 @@ use turin_contracts::model::ProviderOptionSelectionValue;
 use turin_contracts::model_selection::ModelSelection;
 use turin_provider_core::process_group::signal_process_group;
 
+use crate::command::make_temp_dir_owned;
 use crate::text_generation_operations::{
     Operation, Request, Runner, RunnerTextGeneration, investigation_unsupported,
 };
@@ -83,10 +84,14 @@ struct CursorAgentChild {
     pid: u32,
     // A std mutex keeps the handle `Sync` for the shutdown `Any`. It is never contended.
     _child: Mutex<Child>,
+    stderr_drain: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for CursorAgentChild {
     fn drop(&mut self) {
+        if let Some(drain) = self.stderr_drain.take() {
+            drain.abort();
+        }
         let _ = signal_process_group(i64::from(self.pid), libc::SIGKILL);
     }
 }
@@ -120,12 +125,13 @@ impl CursorAcpConnector for CursorAgentProcess {
             .stdout
             .take()
             .ok_or_else(|| "cursor-agent stdout was not piped".to_owned())?;
-        if let Some(mut stderr) = child.stderr.take() {
-            // The child must never block on a full stderr pipe. Its text is not copied into errors.
+        // The child must never block on a full stderr pipe. Its text is not copied into errors.
+        // The handle is kept so dropping the connection aborts the drain with the child.
+        let stderr_drain = child.stderr.take().map(|mut stderr| {
             tokio::spawn(async move {
                 let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
-            });
-        }
+            })
+        });
         let on_eof: Arc<dyn Fn() -> BoxFuture<'static, AcpError> + Send + Sync> =
             Arc::new(move || {
                 Box::pin(async move {
@@ -140,6 +146,7 @@ impl CursorAcpConnector for CursorAgentProcess {
         let shutdown = Arc::new(CursorAgentChild {
             pid,
             _child: Mutex::new(child),
+            stderr_drain,
         });
         Ok(AcpClient::connect_with(
             stdout,
@@ -231,9 +238,8 @@ impl CursorRunner {
             Err(error) => return Err(failed(operation, error)),
         }
         // Upstream `makeTempDirectoryScoped`: the workspace is empty and lives for this request.
-        let workspace = tempfile::Builder::new()
-            .prefix("t3-cursor-text-")
-            .tempdir()
+        let workspace = make_temp_dir_owned("t3-cursor-text-".to_owned())
+            .await
             .map_err(|error| failed(operation, error))?;
         if self.options.resolve_api_key.is_some() {
             environment.insert(CURSOR_API_KEY_ENV.to_owned(), api_key);

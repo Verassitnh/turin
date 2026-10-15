@@ -19,7 +19,7 @@ use turin_contracts::settings::CodexSettings;
 use turin_provider_core::path_expansion::expand_home_path;
 
 use crate::codex_launch_args::{codex_exec_launch_args, resolve_codex_launch_args};
-use crate::command::{CommandError, run_command};
+use crate::command::{CommandError, make_temp_dir_owned, run_command};
 use crate::text_generation_operations::{Operation, Request, Runner, RunnerTextGeneration};
 use crate::text_generation_utils::normalize_cli_error;
 
@@ -407,11 +407,11 @@ impl Runner for CodexRunner {
         })?;
 
         // Removed when `workspace` drops, on every path, so no cleanup is needed.
-        let workspace = temp_workspace(operation)?;
+        let workspace = temp_workspace(operation).await?;
         let schema_path = workspace.path().join("codex-schema.json");
         let output_path = workspace.path().join("codex-output.txt");
-        write_temp_file(operation, &schema_path, &schema_json)?;
-        write_temp_file(operation, &output_path, "")?;
+        write_temp_file(operation, &schema_path, &schema_json).await?;
+        write_temp_file(operation, &output_path, "").await?;
 
         self.run_codex(
             &request,
@@ -421,7 +421,7 @@ impl Runner for CodexRunner {
         )
         .await?;
 
-        std::fs::read_to_string(&output_path).map_err(|_| {
+        tokio::fs::read_to_string(&output_path).await.map_err(|_| {
             TextGenerationError::TextGenerationError {
                 operation: operation.as_str().to_owned(),
                 detail: "Failed to read Codex output file.".to_owned(),
@@ -431,19 +431,21 @@ impl Runner for CodexRunner {
     }
 }
 
-fn temp_workspace(operation: Operation) -> Result<tempfile::TempDir, TextGenerationError> {
-    tempfile::Builder::new()
-        .prefix(&format!("t3code-codex-{}-", std::process::id()))
-        .tempdir()
+async fn temp_workspace(operation: Operation) -> Result<tempfile::TempDir, TextGenerationError> {
+    let prefix = format!("t3code-codex-{}-", std::process::id());
+    make_temp_dir_owned(prefix)
+        .await
         .map_err(|_| write_failed(operation))
 }
 
-fn write_temp_file(
+async fn write_temp_file(
     operation: Operation,
     path: &std::path::Path,
     content: &str,
 ) -> Result<(), TextGenerationError> {
-    std::fs::write(path, content).map_err(|_| write_failed(operation))
+    tokio::fs::write(path, content)
+        .await
+        .map_err(|_| write_failed(operation))
 }
 
 fn write_failed(operation: Operation) -> TextGenerationError {

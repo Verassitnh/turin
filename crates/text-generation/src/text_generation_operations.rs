@@ -15,13 +15,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use turin_contracts::chat_attachment::ChatAttachment;
 use turin_contracts::git::TextGenerationError;
+use turin_contracts::js_trim;
 use turin_contracts::model_selection::ModelSelection;
 use turin_contracts::pull_request_review_guide::{
-    PullRequestReviewGuideAttention, PullRequestReviewGuideAttentionKind,
-    PullRequestReviewGuideExcerpt, PullRequestReviewGuideExcerptSide, PullRequestReviewGuideFile,
-    PullRequestReviewGuideNote, PullRequestReviewGuideStop,
+    PullRequestReviewGuideAttentionKind, PullRequestReviewGuideExcerptSide,
 };
-use turin_contracts::{PositiveInt, TrimmedNonEmptyString, js_trim};
 use turin_provider_core::text_generation::{
     BranchNameGenerationInput, BranchNameGenerationResult, CommitMessageGenerationInput,
     CommitMessageGenerationResult, PrContentGenerationInput, PrContentGenerationResult,
@@ -231,6 +229,34 @@ impl<R: Runner> RunnerTextGeneration<R> {
         })
     }
 
+    /// `generateReviewGuide` with the output kept as the model wrote it.
+    ///
+    /// The prompt schema is permissive upstream (`Schema.String`, `Schema.Int`), and the review
+    /// guide normalizer drops or clamps what does not fit the change. So empty strings and lines
+    /// <= 0 are returned as they are, and only a reply that does not match the schema shape or
+    /// the enum values fails.
+    pub async fn generate_review_guide_raw(
+        &self,
+        input: &ReviewGuideGenerationInput,
+    ) -> Result<Vec<ReviewGuideStopOutput>, TextGenerationError> {
+        let operation = Operation::GenerateReviewGuide;
+        let prompt = build_review_guide_prompt(input);
+        let reply = self
+            .send(
+                operation,
+                &input.cwd,
+                &input.model_selection,
+                prompt,
+                Vec::new(),
+                Some(Investigate {
+                    timeout: INVESTIGATION_TIMEOUT,
+                }),
+            )
+            .await?;
+        let generated: ReviewGuideReply = decode_json_reply(operation, &self.name, &reply)?;
+        Ok(generated.stops)
+    }
+
     async fn send(
         &self,
         operation: Operation,
@@ -330,27 +356,16 @@ impl<R: Runner> ProviderTextGeneration for RunnerTextGeneration<R> {
         &self,
         input: ReviewGuideGenerationInput,
     ) -> Result<ReviewGuideGenerationResult, TextGenerationError> {
-        let operation = Operation::GenerateReviewGuide;
-        let prompt = build_review_guide_prompt(&input);
-        let reply = self
-            .send(
-                operation,
-                &input.cwd,
-                &input.model_selection,
-                prompt,
-                Vec::new(),
-                Some(Investigate {
-                    timeout: INVESTIGATION_TIMEOUT,
-                }),
-            )
-            .await?;
-        let generated: ReviewGuideReply = decode_json_reply(operation, &self.name, &reply)?;
-        let stops = generated
-            .stops
-            .into_iter()
-            .map(|stop| review_guide_stop(operation, &self.name, stop))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(ReviewGuideGenerationResult { stops })
+        // `ReviewGuideGenerationResult` holds contract values (non-empty titles, positive lines).
+        // Model output is only permissive, so it cannot be stored in that type unchanged, and
+        // dropping items here would move the normalizer's rules into the generator. Refuse before
+        // the model runs; `generate_review_guide_raw` returns the output unchanged.
+        let _ = input;
+        Err(TextGenerationError::TextGenerationError {
+            operation: Operation::GenerateReviewGuide.as_str().to_owned(),
+            detail: "Review guide output cannot be stored in the provider result type unchanged. Use generate_review_guide_raw until the review guide normalizer takes it.".to_owned(),
+            cause: None,
+        })
     }
 }
 
@@ -384,152 +399,225 @@ struct ThreadTitleReply {
 
 #[derive(Deserialize)]
 struct ReviewGuideReply {
-    stops: Vec<ReviewGuideStopReply>,
+    stops: Vec<ReviewGuideStopOutput>,
 }
 
-#[derive(Deserialize)]
-struct ReviewGuideStopReply {
-    title: String,
-    summary: String,
-    attention: Option<ReviewGuideAttentionReply>,
-    excerpts: Vec<ReviewGuideExcerptReply>,
-    files: Vec<ReviewGuideFileReply>,
-    notes: Vec<ReviewGuideNoteReply>,
-    questions: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct ReviewGuideAttentionReply {
-    kind: ReviewGuideAttentionKindReply,
-    note: String,
-}
-
-#[derive(Deserialize, Clone, Copy)]
+/// One review guide stop as the model wrote it. Titles, notes, and questions may be empty and
+/// lines may be zero or negative: the review guide normalizer drops or clamps those.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
-enum ReviewGuideAttentionKindReply {
-    Tradeoff,
-    Contract,
-    Product,
-    Risk,
-    Accessibility,
+pub struct ReviewGuideStopOutput {
+    pub title: String,
+    pub summary: String,
+    pub attention: Option<ReviewGuideAttentionOutput>,
+    pub excerpts: Vec<ReviewGuideExcerptOutput>,
+    pub files: Vec<ReviewGuideFileOutput>,
+    pub notes: Vec<ReviewGuideNoteOutput>,
+    pub questions: Vec<String>,
 }
 
-#[derive(Deserialize)]
-struct ReviewGuideExcerptReply {
-    path: String,
-    side: ReviewGuideSideReply,
-    start: i64,
-    end: i64,
-    caption: String,
-}
-
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
-enum ReviewGuideSideReply {
-    New,
-    Old,
+pub struct ReviewGuideAttentionOutput {
+    pub kind: PullRequestReviewGuideAttentionKind,
+    pub note: String,
 }
 
-#[derive(Deserialize)]
-struct ReviewGuideFileReply {
-    path: String,
-    note: String,
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewGuideExcerptOutput {
+    pub path: String,
+    pub side: PullRequestReviewGuideExcerptSide,
+    pub start: i64,
+    pub end: i64,
+    pub caption: String,
 }
 
-#[derive(Deserialize)]
-struct ReviewGuideNoteReply {
-    path: String,
-    line: i64,
-    title: String,
-    body: String,
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ReviewGuideFileOutput {
+    pub path: String,
+    pub note: String,
 }
 
-/// Holds a model-written stop to the contract types. Upstream's loose prompt schema
-/// accepts any `Int` and empty strings; the contract requires positive lines and
-/// non-empty titles, so those cases fail as invalid output.
-fn review_guide_stop(
-    operation: Operation,
-    provider: &str,
-    stop: ReviewGuideStopReply,
-) -> Result<PullRequestReviewGuideStop, TextGenerationError> {
-    let invalid = || invalid_output(operation, provider);
-    let text = |value: &str| TrimmedNonEmptyString::new(value).map_err(|_| invalid());
-    let line = |value: i64| {
-        u64::try_from(value)
-            .ok()
-            .and_then(PositiveInt::new)
-            .ok_or_else(invalid)
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ReviewGuideNoteOutput {
+    pub path: String,
+    pub line: i64,
+    pub title: String,
+    pub body: String,
+}
+
+#[cfg(test)]
+mod review_guide_tests {
+    use std::sync::Mutex;
+
+    use serde_json::{Value, json};
+    use turin_contracts::model_selection::ModelSelection;
+    use turin_provider_core::text_generation::{
+        ProviderTextGeneration, ReviewGuideGenerationInput,
     };
-    Ok(PullRequestReviewGuideStop {
-        title: text(&stop.title)?,
-        summary: stop.summary,
-        attention: stop
-            .attention
-            .map(|attention| {
-                Ok::<_, TextGenerationError>(PullRequestReviewGuideAttention {
-                    kind: match attention.kind {
-                        ReviewGuideAttentionKindReply::Tradeoff => {
-                            PullRequestReviewGuideAttentionKind::Tradeoff
-                        }
-                        ReviewGuideAttentionKindReply::Contract => {
-                            PullRequestReviewGuideAttentionKind::Contract
-                        }
-                        ReviewGuideAttentionKindReply::Product => {
-                            PullRequestReviewGuideAttentionKind::Product
-                        }
-                        ReviewGuideAttentionKindReply::Risk => {
-                            PullRequestReviewGuideAttentionKind::Risk
-                        }
-                        ReviewGuideAttentionKindReply::Accessibility => {
-                            PullRequestReviewGuideAttentionKind::Accessibility
-                        }
-                    },
-                    note: text(&attention.note)?,
-                })
+
+    use super::*;
+
+    /// Replies with a fixed text and records each request.
+    struct FixedReply {
+        reply: String,
+        requests: Mutex<Vec<Request>>,
+    }
+
+    #[async_trait]
+    impl Runner for FixedReply {
+        async fn run(&self, request: Request) -> Result<String, TextGenerationError> {
+            self.requests.lock().unwrap().push(request);
+            Ok(self.reply.clone())
+        }
+    }
+
+    fn generation(reply: Value) -> RunnerTextGeneration<FixedReply> {
+        RunnerTextGeneration::new(
+            "Codex",
+            FixedReply {
+                reply: reply.to_string(),
+                requests: Mutex::new(Vec::new()),
+            },
+        )
+    }
+
+    fn input() -> ReviewGuideGenerationInput {
+        ReviewGuideGenerationInput {
+            cwd: "/tmp/checkout".to_owned(),
+            number: 42,
+            title: "Add search".to_owned(),
+            description: String::new(),
+            base_branch: "main".to_owned(),
+            base_commit: "abc123".to_owned(),
+            settled_review: String::new(),
+            instructions: None,
+            stack: None,
+            model_selection: serde_json::from_value::<ModelSelection>(json!({
+                "instanceId": "codex",
+                "model": "gpt-5",
+            }))
+            .expect("selection"),
+        }
+    }
+
+    fn stop(overrides: Value) -> Value {
+        let mut stop = json!({
+            "title": "The index moves",
+            "summary": "Before and after.",
+            "attention": null,
+            "excerpts": [],
+            "files": [],
+            "notes": [],
+            "questions": [],
+        });
+        for (key, value) in overrides.as_object().expect("object") {
+            stop[key] = value.clone();
+        }
+        stop
+    }
+
+    #[tokio::test]
+    async fn raw_review_guide_keeps_empty_strings_and_out_of_range_lines_for_the_normalizer() {
+        let generation = generation(json!({
+            "stops": [stop(json!({
+                "title": "",
+                "attention": { "kind": "risk", "note": "" },
+                "excerpts": [{ "path": "", "side": "new", "start": 0, "end": -3, "caption": "" }],
+                "files": [{ "path": "", "note": "" }],
+                "notes": [{ "path": "", "line": 0, "title": "", "body": "" }],
+                "questions": [""],
+            }))],
+        }));
+        let stops = generation
+            .generate_review_guide_raw(&input())
+            .await
+            .expect("permissive stops");
+        assert_eq!(stops.len(), 1);
+        let stop = &stops[0];
+        assert_eq!(stop.title, "");
+        assert_eq!(stop.attention.as_ref().expect("attention").note, "");
+        assert_eq!(stop.excerpts[0].path, "");
+        assert_eq!(stop.excerpts[0].start, 0);
+        assert_eq!(stop.excerpts[0].end, -3);
+        assert_eq!(stop.files[0].path, "");
+        assert_eq!(stop.notes[0].line, 0);
+        assert_eq!(stop.notes[0].title, "");
+        assert_eq!(stop.questions, vec![String::new()]);
+    }
+
+    #[tokio::test]
+    async fn raw_review_guide_keeps_negative_note_lines_and_excerpt_ranges() {
+        let generation = generation(json!({
+            "stops": [stop(json!({
+                "excerpts": [{ "path": "a.ts", "side": "old", "start": -1, "end": -1, "caption": "" }],
+                "notes": [{ "path": "a.ts", "line": -7, "title": "t", "body": "b" }],
+            }))],
+        }));
+        let stops = generation
+            .generate_review_guide_raw(&input())
+            .await
+            .expect("permissive stops");
+        assert_eq!(
+            stops[0].excerpts[0].side,
+            PullRequestReviewGuideExcerptSide::Old
+        );
+        assert_eq!(stops[0].excerpts[0].start, -1);
+        assert_eq!(stops[0].notes[0].line, -7);
+    }
+
+    #[tokio::test]
+    async fn raw_review_guide_rejects_an_unknown_attention_kind_and_excerpt_side() {
+        for (field, value) in [
+            ("attention", json!({ "kind": "urgent", "note": "x" })),
+            (
+                "excerpts",
+                json!([{ "path": "a", "side": "middle", "start": 1, "end": 1, "caption": "" }]),
+            ),
+        ] {
+            let generation = generation(json!({ "stops": [stop(json!({ field: value }))] }));
+            let error = generation
+                .generate_review_guide_raw(&input())
+                .await
+                .expect_err(field);
+            let TextGenerationError::TextGenerationError { detail, .. } = error;
+            assert_eq!(
+                detail, "Codex returned invalid structured output.",
+                "{field}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_review_guide_runs_with_the_fifteen_minute_investigation_budget() {
+        let generation = generation(json!({ "stops": [] }));
+        generation
+            .generate_review_guide_raw(&input())
+            .await
+            .expect("empty tour");
+        let requests = generation.runner.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].investigate,
+            Some(Investigate {
+                timeout: INVESTIGATION_TIMEOUT,
             })
-            .transpose()?,
-        excerpts: stop
-            .excerpts
-            .into_iter()
-            .map(|excerpt| {
-                Ok(PullRequestReviewGuideExcerpt {
-                    path: text(&excerpt.path)?,
-                    side: match excerpt.side {
-                        ReviewGuideSideReply::New => PullRequestReviewGuideExcerptSide::New,
-                        ReviewGuideSideReply::Old => PullRequestReviewGuideExcerptSide::Old,
-                    },
-                    start: line(excerpt.start)?,
-                    end: line(excerpt.end)?,
-                    caption: excerpt.caption,
-                })
-            })
-            .collect::<Result<_, TextGenerationError>>()?,
-        files: stop
-            .files
-            .into_iter()
-            .map(|file| {
-                Ok(PullRequestReviewGuideFile {
-                    path: text(&file.path)?,
-                    note: Some(file.note),
-                })
-            })
-            .collect::<Result<_, TextGenerationError>>()?,
-        notes: stop
-            .notes
-            .into_iter()
-            .map(|note| {
-                Ok(PullRequestReviewGuideNote {
-                    path: text(&note.path)?,
-                    line: line(note.line)?,
-                    title: text(&note.title)?,
-                    body: note.body,
-                })
-            })
-            .collect::<Result<_, TextGenerationError>>()?,
-        questions: stop
-            .questions
-            .iter()
-            .map(|question| text(question))
-            .collect::<Result<_, _>>()?,
-    })
+        );
+        assert_eq!(requests[0].cwd, "/tmp/checkout");
+    }
+
+    #[tokio::test]
+    async fn trait_review_guide_refuses_before_running_the_model() {
+        let generation = generation(json!({ "stops": [] }));
+        let error = ProviderTextGeneration::generate_review_guide(&generation, input())
+            .await
+            .expect_err("trait result cannot carry permissive output");
+        let TextGenerationError::TextGenerationError {
+            operation, detail, ..
+        } = error;
+        assert_eq!(operation, "generateReviewGuide");
+        assert!(detail.contains("generate_review_guide_raw"));
+        assert!(generation.runner.requests.lock().unwrap().is_empty());
+    }
 }

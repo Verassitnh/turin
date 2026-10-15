@@ -34,3 +34,50 @@ fn last_utf16(text: &str, units: usize) -> &str {
     }
     ""
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_zero_budget_gives_an_empty_message() {
+        assert_eq!(limit_title_message(&"x".repeat(100), 0), "");
+    }
+
+    #[test]
+    fn a_message_within_budget_is_returned_unchanged() {
+        assert_eq!(limit_title_message("short message", 13), "short message");
+        assert_eq!(limit_title_message("short message", 100), "short message");
+    }
+
+    #[test]
+    fn the_result_never_exceeds_a_small_budget() {
+        let text = "x".repeat(100);
+        for budget in 1..40 {
+            let limited = limit_title_message(&text, budget);
+            assert!(
+                utf16_len(&limited) <= budget,
+                "budget {budget} gave {} units",
+                utf16_len(&limited)
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_message_keeps_its_head_and_its_tail_around_the_marker() {
+        // Budget 29: 29 - 21 (marker) = 8 units, head 4 ("abcd"), tail 4 ("wxyz").
+        let text = format!("{}wxyz", "abcdefghijklmnopqrstuvwxyz");
+        let limited = limit_title_message(&text, 29);
+        assert_eq!(limited, format!("abcd{TRUNCATED}wxyz"));
+        assert_eq!(utf16_len(&limited), 29);
+    }
+
+    #[test]
+    fn an_odd_available_budget_gives_the_extra_unit_to_the_head() {
+        // Budget 26: available 5, head 3, tail 2.
+        let limited = limit_title_message("0123456789", 26);
+        assert_eq!(limited, "0123456789");
+        let limited = limit_title_message(&"0123456789".repeat(3), 26);
+        assert_eq!(limited, format!("012{TRUNCATED}89"));
+    }
+}

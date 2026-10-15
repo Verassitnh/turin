@@ -9,7 +9,7 @@ turin-contracts.workspace = true
 turin-git.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio.workspace = true

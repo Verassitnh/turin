@@ -201,16 +201,21 @@ impl ReviewService {
         cwd: &str,
     ) -> Result<PathBuf, VcsError> {
         let settings = self.settings.worktrees_settings().await.unwrap_or_default();
-        let candidate = canonicalize_path(Path::new(cwd))?;
-        let workspace_root = canonicalize_path(&self.config.workspace_root)?;
+        let candidate = canonicalize_path_off_runtime(PathBuf::from(cwd)).await?;
+        let workspace_root =
+            canonicalize_path_off_runtime(self.config.workspace_root.clone()).await?;
         // A managed root that cannot be resolved, or resolves to a filesystem root through a
         // symlink, is skipped rather than failing every review.
-        let worktrees_roots: Vec<PathBuf> =
+        let mut worktrees_roots = Vec::new();
+        for directory in
             managed_worktrees_directories(&settings, &self.config.worktrees_dir, &self.config.home)
-                .iter()
-                .filter_map(|directory| canonicalize_path(directory).ok())
-                .filter(|root| !is_filesystem_root(root))
-                .collect();
+        {
+            if let Ok(root) = canonicalize_path_off_runtime(directory).await
+                && !is_filesystem_root(&root)
+            {
+                worktrees_roots.push(root);
+            }
+        }
 
         if is_within_root(&candidate, &workspace_root)
             || worktrees_roots
@@ -229,7 +234,7 @@ impl ReviewService {
             .await
             .unwrap_or_default();
         for project in projects {
-            if let Ok(root) = canonicalize_path(Path::new(&project))
+            if let Ok(root) = canonicalize_path_off_runtime(PathBuf::from(project)).await
                 && is_within_root(&candidate, &root)
             {
                 return Ok(candidate);
@@ -314,6 +319,14 @@ fn canonicalize_path(value: &Path) -> Result<PathBuf, VcsError> {
         }
     }
     Ok(resolved)
+}
+
+/// [`canonicalize_path`] on tokio's blocking pool. `realpath` can stall on a hung network mount,
+/// and that must not hold one of the runtime's worker threads.
+async fn canonicalize_path_off_runtime(value: PathBuf) -> Result<PathBuf, VcsError> {
+    tokio::task::spawn_blocking(move || canonicalize_path(&value))
+        .await
+        .unwrap_or_else(|error| std::panic::resume_unwind(error.into_panic()))
 }
 
 /// The canonical cwd as the `TrimmedNonEmptyString` the VCS inputs carry. A path that is not
@@ -747,6 +760,18 @@ mod tests {
         assert!(detail.contains("Failed to resolve a path"));
         assert!(cause.is_some_and(|cause| cause.is_string()));
         assert!(vcs.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn blocking_canonicalization_matches_the_inline_result() {
+        let fixture = fixture();
+        let existing = fixture.workspace.path().to_path_buf();
+        let missing = existing.join("missing").join("..").join("child");
+        let invalid = PathBuf::from(format!("{}\0invalid", existing.display()));
+        for path in [existing, missing, invalid] {
+            let inline = canonicalize_path(&path);
+            assert_eq!(canonicalize_path_off_runtime(path).await, inline);
+        }
     }
 
     #[tokio::test]

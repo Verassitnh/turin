@@ -3,7 +3,6 @@
 pub mod ambient;
 pub mod clock;
 pub mod definition;
-pub mod diff_file_revisions;
 pub mod discovery;
 pub mod driver;
 pub mod host;

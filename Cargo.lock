@@ -6805,6 +6805,7 @@ name = "turin-persistence"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "parking_lot",
  "pretty_assertions",
  "regex",
  "rusqlite",
@@ -6814,6 +6815,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "turin-contracts",
 ]
 
 [[package]]

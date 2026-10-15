@@ -317,8 +317,8 @@ pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallAr
     let read_path = matches!(normalized.as_str(), "read" | "readfile")
         .then(|| first_trimmed_string(input, &["file_path", "path"]))
         .flatten();
-    let title = match read_path {
-        Some(path) => Some(read_label(&path)),
+    let title = match read_path.as_deref() {
+        Some(path) => Some(read_label(path)),
         None if matches!(normalized.as_str(), "grep" | "glob" | "ls") => search_label(input),
         None => None,
     }
@@ -338,6 +338,16 @@ pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallAr
             .find_map(|key| input.get(*key).and_then(Value::as_str))
             .map(str::to_owned)
     };
+    // Upstream `viewedImagePath`: a Read of a workspace image names the image,
+    // so the viewer can show it. Only a single-line path within the length bound.
+    let viewed_image_path = read_path
+        .as_deref()
+        .filter(|path| {
+            turin_provider_core::js::utf16_len(path) <= 4096
+                && !path.contains(['\r', '\n'])
+                && turin_shared::file_preview::is_workspace_image_preview_path(path)
+        })
+        .map(str::to_owned);
     let extra = match classify_tool(call.tool_name) {
         ToolItemType::CommandExecution => {
             json!({
@@ -355,13 +365,7 @@ pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallAr
                 "diffStr": output_text,
             })
         }
-        ToolItemType::WebSearch => {
-            let pattern = str_field(&["query", "url"]);
-            json!({
-                "type": "web_search",
-                "patterns": pattern.map(|p| vec![p]).unwrap_or_default(),
-            })
-        }
+        ToolItemType::WebSearch => web_search_fields(call, input, output_text.as_deref()),
         ToolItemType::DynamicTool => {
             json!({
                 "type": "dynamic_tool",
@@ -370,6 +374,7 @@ pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallAr
                 "output": output_value,
                 "toolIcon": call.presentation.tool_icon,
                 "toolSource": call.presentation.tool_source,
+                "viewedImagePath": viewed_image_path,
             })
         }
     };
@@ -380,6 +385,76 @@ pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallAr
     }
     let turn_item = decode(Value::Object(item));
     ToolCallArtifacts { node, turn_item }
+}
+
+/// Upstream `WEB_FETCH_SNIPPET_MAX_CHARS`: a WebFetch row keeps this much page text.
+const WEB_FETCH_SNIPPET_MAX_CHARS: usize = 8_000;
+
+/// Upstream `isClaudeWebSearchOutput`: the structured output of a web search.
+fn is_web_search_output(value: &Value) -> bool {
+    value.get("query").is_some_and(Value::is_string)
+        && value.get("results").is_some_and(Value::is_array)
+        && value.get("durationSeconds").is_some_and(Value::is_number)
+}
+
+/// The `web_search` item of a WebSearch or WebFetch call (upstream
+/// `webSearchPatternsFromClaudeTool`, `webSearchResultsFromClaudeOutput`, and
+/// the WebFetch snippet). A WebFetch returns page text, not hits, so its
+/// row carries a bounded preview of that text.
+fn web_search_fields(call: &ToolCall<'_>, input: &Value, output_text: Option<&str>) -> Value {
+    let output = call.output.filter(|value| is_web_search_output(value));
+    let pattern = first_trimmed_string(input, &["query", "url", "pattern"]).or_else(|| {
+        output
+            .and_then(|value| value.get("query"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .map(str::to_owned)
+    });
+    // Each hit is one result: a title and URL, from the search's result blocks.
+    let mut results: Vec<Value> = output
+        .and_then(|value| value.get("results"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|result| result.get("content").and_then(Value::as_array))
+        .flatten()
+        .map(|content| {
+            let mut hit = serde_json::Map::new();
+            if let Some(title) = content.get("title").and_then(Value::as_str) {
+                hit.insert("title".into(), json!(title));
+            }
+            if let Some(url) = content
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+            {
+                hit.insert("url".into(), json!(url));
+            }
+            Value::Object(hit)
+        })
+        .collect();
+    let fetched = normalized_tool_name(call.tool_name) == "webfetch";
+    let text = output_text.unwrap_or_default();
+    if results.is_empty() && fetched && !text.trim().is_empty() {
+        let mut page = serde_json::Map::new();
+        if let Some(url) = first_trimmed_string(input, &["url"]) {
+            page.insert("url".into(), json!(url));
+        }
+        let snippet = turin_provider_core::js::take_utf16(text, WEB_FETCH_SNIPPET_MAX_CHARS);
+        page.insert("snippet".into(), json!(snippet));
+        results.push(Value::Object(page));
+    }
+    let mut fields = serde_json::Map::new();
+    fields.insert("type".into(), json!("web_search"));
+    if let Some(pattern) = pattern {
+        fields.insert("patterns".into(), json!([pattern]));
+    }
+    if !results.is_empty() {
+        fields.insert("results".into(), json!(results));
+    }
+    Value::Object(fields)
 }
 
 #[cfg(test)]
@@ -471,5 +546,64 @@ mod tests {
             tool.turn_item,
             OrchestrationV2TurnItem::CommandExecution { .. }
         ));
+    }
+
+    fn artifact(tool_name: &str, input: &Value, output: Option<&Value>) -> Value {
+        let at = UtcDateTime::now();
+        let presentation = crate::claude_tool_titles::fallback_presentation(tool_name);
+        let call = ToolCall {
+            native_item_id: "toolu_1",
+            tool_name,
+            input,
+            presentation: &presentation,
+            output,
+            output_fallback: None,
+            status: "completed",
+            ordinal: 1,
+            started_at: at,
+            updated_at: at,
+        };
+        serde_json::to_value(tool_call_artifacts(&scope(), &call).turn_item).unwrap()
+    }
+
+    #[test]
+    fn a_read_of_a_workspace_image_names_the_viewed_path() {
+        let image = artifact("Read", &json!({"file_path": "/work/app/logo.png"}), None);
+        assert_eq!(image["type"], "dynamic_tool");
+        assert_eq!(image["viewedImagePath"], "/work/app/logo.png");
+
+        let text = artifact("Read", &json!({"file_path": "/work/app/notes.md"}), None);
+        assert!(text.get("viewedImagePath").is_none());
+    }
+
+    #[test]
+    fn web_search_carries_its_query_and_hits_and_web_fetch_a_snippet() {
+        let search_output = json!({
+            "query": "rust gpui",
+            "results": [
+                {"tool_use_id": "t1", "content": [{"title": "GPUI", "url": "https://gpui.rs"}]},
+                "text only",
+            ],
+            "durationSeconds": 1.5,
+        });
+        let search = artifact("WebSearch", &json!({}), Some(&search_output));
+        assert_eq!(search["type"], "web_search");
+        assert_eq!(search["patterns"], json!(["rust gpui"]));
+        assert_eq!(
+            search["results"],
+            json!([{"title": "GPUI", "url": "https://gpui.rs"}])
+        );
+
+        let page = json!("Page body");
+        let fetch = artifact(
+            "WebFetch",
+            &json!({"url": "https://example.com"}),
+            Some(&page),
+        );
+        assert_eq!(fetch["patterns"], json!(["https://example.com"]));
+        assert_eq!(
+            fetch["results"],
+            json!([{"url": "https://example.com", "snippet": "Page body"}])
+        );
     }
 }

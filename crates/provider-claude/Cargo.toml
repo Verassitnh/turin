@@ -8,6 +8,7 @@ license.workspace = true
 turin-contracts.workspace = true
 turin-claude-protocol.workspace = true
 turin-provider-core.workspace = true
+turin-shared.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

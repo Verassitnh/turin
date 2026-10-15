@@ -73,7 +73,8 @@ pub enum PromptBody {
 }
 
 /// `skills: "all"` appends `Skill` to `allowedTools`. A name list appends
-/// `Skill(<name>)` for names not already present.
+/// `Skill(<name>)` for names not already present and is also sent as
+/// `initialize.skills`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Skills {
     All,
@@ -97,7 +98,6 @@ pub struct InitializeOptions {
     pub json_schema: Option<Value>,
     pub tool_aliases: Option<Value>,
     pub title: Option<String>,
-    pub skills: Option<Vec<String>>,
     pub plan_mode_instructions: Option<String>,
     pub prompt_suggestions: Option<bool>,
     pub forward_subagent_text: Option<bool>,
@@ -494,7 +494,7 @@ impl LaunchOptions {
         if let Some(title) = &self.initialize.title {
             request.insert("title".into(), Value::String(title.clone()));
         }
-        if let Some(skills) = &self.initialize.skills {
+        if let Some(Skills::Names(skills)) = &self.skills {
             request.insert("skills".into(), serde_json::json!(skills));
         }
         if let Some(value) = self.initialize.prompt_suggestions {
@@ -785,6 +785,36 @@ mod tests {
             Value::String("t3".into())
         );
         assert!(options.initialize_request().get("systemPrompt").is_none());
+    }
+
+    #[test]
+    fn skill_names_feed_allowed_tools_and_initialize() {
+        let options = LaunchOptions {
+            skills: Some(Skills::Names(vec!["pdf".into(), "x:y".into()])),
+            ..Default::default()
+        };
+        assert_eq!(
+            options.initialize_request()["skills"],
+            serde_json::json!(["pdf", "x:y"])
+        );
+        assert!(
+            options
+                .spec()
+                .unwrap()
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--allowedTools", "Skill(pdf),Skill(x:y)"])
+        );
+        let empty = LaunchOptions {
+            skills: Some(Skills::Names(vec![])),
+            ..Default::default()
+        };
+        assert_eq!(empty.initialize_request()["skills"], serde_json::json!([]));
+        let all = LaunchOptions {
+            skills: Some(Skills::All),
+            ..Default::default()
+        };
+        assert!(all.initialize_request().get("skills").is_none());
     }
 
     #[test]

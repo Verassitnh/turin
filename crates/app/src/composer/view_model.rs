@@ -101,6 +101,14 @@ pub struct ContextWindowSnapshot {
     pub max_tokens: Option<f64>,
     pub total_processed_tokens: Option<f64>,
     pub compacts_automatically: bool,
+    pub auto_compact_threshold: Option<f64>,
+    pub cost: Option<ContextWindowCost>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextWindowCost {
+    pub amount: f64,
+    pub currency: String,
 }
 
 impl ContextWindowSnapshot {

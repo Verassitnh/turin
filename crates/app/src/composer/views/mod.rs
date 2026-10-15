@@ -1,4 +1,5 @@
 mod actions;
+mod banners;
 pub mod block_flow;
 pub mod chat_composer;
 pub mod chrome;

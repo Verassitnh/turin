@@ -337,3 +337,150 @@ fn read_picked_file(path: PathBuf) -> Option<(PickedFile, Vec<u8>)> {
     let picked = PickedFile::new(&name, &guess_mime(&name), data.len() as u64);
     Some((picked, data))
 }
+
+// ----- Stash and queued-message editing ---------------------------------------
+
+use crate::composer::draft_store::PromptStashEntry;
+
+impl ChatComposer {
+    fn next_stash_id(&mut self) -> String {
+        self.attachment_counter += 1;
+        format!("stash-{}", self.attachment_counter)
+    }
+
+    /// ⌘S: stash the draft; on an empty composer restore the lone entry or
+    /// open the menu when there are several.
+    pub(super) fn stash_or_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let images = self.draft_images();
+        let files = self.draft_files();
+        let prompt = self.prompt(cx);
+        if !prompt.trim().is_empty() || !images.is_empty() || !files.is_empty() {
+            let entry = PromptStashEntry {
+                id: self.next_stash_id(),
+                created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                prompt,
+                images,
+                files,
+                dropped_image_names: Vec::new(),
+                unreadable_image_names: Vec::new(),
+                pending_image_count: 0,
+            };
+            self.drafts.push_stash_entry(entry);
+            self.clear_draft(window, cx);
+            return;
+        }
+        let entries = self.drafts.stash_entries();
+        match entries.len() {
+            0 => {}
+            1 => {
+                let id = entries[0].id.clone();
+                self.restore_stash_entry(&id, window, cx);
+            }
+            _ => {
+                self.stash_highlight = None;
+                self.set_layer(Some(Layer::Stash), cx);
+            }
+        }
+    }
+
+    /// `restoreStashEntry`: append the prompt after what is already typed and
+    /// bring the attachments back.
+    pub(super) fn restore_stash_entry(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.drafts.remove_stash_entry(id) else {
+            return;
+        };
+        let current = self.prompt(cx);
+        let restored = entry.prompt.clone();
+        let next = if restored.is_empty() {
+            current
+        } else if current.trim().is_empty() {
+            restored
+        } else {
+            format!("{}\n\n{restored}", current.trim_end())
+        };
+        let key = self.thread_key.clone();
+        self.drafts.add_images(&key, entry.images, AddAttachmentsOptions::default());
+        self.drafts.add_files(&key, entry.files, AddAttachmentsOptions::default());
+        self.replace_prompt(&next, window, cx);
+        self.layer = None;
+        self.stash_highlight = None;
+        self.focus_editor(window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn delete_stash_entry(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.drafts.remove_stash_entry(id);
+        if self.drafts.stash_entries().is_empty() {
+            self.layer = None;
+        }
+        cx.notify();
+    }
+
+    /// Keys while the stash menu is open (a capture-phase window listener upstream).
+    pub(super) fn on_stash_key(&mut self, key: &CommandKey, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let entries: Vec<String> = self.drafts.stash_entries().iter().map(|entry| entry.id.clone()).collect();
+        let highlighted = self.stash_highlight.clone().or_else(|| entries.first().cloned());
+        match key.key.as_str() {
+            "Escape" => {
+                self.close_layer(window, cx);
+                true
+            }
+            "ArrowDown" | "ArrowUp" if !entries.is_empty() => {
+                let current = highlighted.as_ref().and_then(|id| entries.iter().position(|entry| entry == id));
+                let down = key.key == "ArrowDown";
+                let base = current.map_or(if down { -1 } else { 0 }, |index| index as i32);
+                let next = (base + if down { 1 } else { -1 }).rem_euclid(entries.len() as i32) as usize;
+                self.stash_highlight = Some(entries[next].clone());
+                cx.notify();
+                true
+            }
+            "Enter" => {
+                let Some(id) = highlighted else {
+                    return false;
+                };
+                let weak = cx.weak_entity();
+                window.defer(cx, move |window, cx| {
+                    weak.update(cx, |this, cx| this.restore_stash_entry(&id, window, cx)).ok();
+                });
+                true
+            }
+            "Backspace" if key.meta || key.ctrl => {
+                if let Some(id) = highlighted {
+                    self.delete_stash_entry(&id, cx);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Load a queued message into the composer while it is edited, and bring
+    /// the previous draft back afterwards (`onEditQueuedRun`).
+    pub(super) fn sync_queue_edit(&mut self, vm: &ComposerViewModel, window: &mut Window, cx: &mut Context<Self>) {
+        let editing = vm.queue.as_ref().and_then(|queue| queue.editing_run_id.clone());
+        if editing == self.editing_run_id {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.editing_run_id, editing.clone());
+        match editing {
+            Some(run_id) => {
+                if previous.is_none() {
+                    self.pre_edit_prompt = Some(self.prompt(cx));
+                }
+                let text = vm
+                    .queue
+                    .as_ref()
+                    .and_then(|queue| queue.queued.iter().find(|run| run.run_id == run_id))
+                    .map(|run| run.text.clone())
+                    .unwrap_or_default();
+                self.replace_prompt(&text, window, cx);
+                self.focus_editor(window, cx);
+            }
+            None => {
+                if let Some(prompt) = self.pre_edit_prompt.take() {
+                    self.replace_prompt(&prompt, window, cx);
+                }
+            }
+        }
+    }
+}

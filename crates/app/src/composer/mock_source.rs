@@ -181,6 +181,8 @@ pub fn fixture_view_model() -> ComposerViewModel {
             max_tokens: Some(272_000.),
             total_processed_tokens: Some(143_000.),
             compacts_automatically: true,
+            auto_compact_threshold: None,
+            cost: None,
         }),
         reserve_context_window_meter: true,
         active_thread_model_display_name: Some("GPT-5.4".into()),
@@ -373,3 +375,69 @@ impl ComposerSource for MockComposerSource {
 
 #[allow(dead_code)]
 fn _option_value(_: OptionValue) {}
+
+/// Debug scenarios (`TURIN_COMPOSER_DEMO`): extra state layered over the
+/// fixture so each drawer can be screenshotted.
+pub fn apply_demo_scenario(scenario: &str, vm: &mut ComposerViewModel) {
+    use crate::composer::view_model::{BannerItem, BannerPriority, BannerVariant, QueueState, QueuedRun};
+    use crate::ui::IconName;
+    match scenario {
+        "banners" => {
+            vm.banners = vec![
+                BannerItem {
+                    id: "usage".into(),
+                    variant: BannerVariant::Info,
+                    priority: Some(BannerPriority::Notice),
+                    icon: IconName::Gauge,
+                    title: "Usage limits".into(),
+                    description: Some("Codex · Pro".into()),
+                    dismissible: true,
+                    dismiss_label: Some("Dismiss usage limits".into()),
+                    actions: Vec::new(),
+                },
+                BannerItem {
+                    id: "update".into(),
+                    variant: BannerVariant::Warning,
+                    priority: Some(BannerPriority::Urgent),
+                    icon: IconName::TriangleAlert,
+                    title: "Claude needs an update".into(),
+                    description: Some("Update the CLI to keep using this provider.".into()),
+                    dismissible: true,
+                    dismiss_label: None,
+                    actions: vec![("Provider settings".into(), "open-settings".into())],
+                },
+            ];
+        }
+        "queue" => {
+            vm.phase = SessionPhase::Running;
+            vm.can_interrupt = true;
+            vm.queue = Some(QueueState {
+                queued: vec![
+                    QueuedRun {
+                        run_id: "run-1".into(),
+                        message_id: "m1".into(),
+                        text: "Also add a test for the empty-prompt case".into(),
+                        image_names: Vec::new(),
+                        file_names: Vec::new(),
+                        pending: false,
+                    },
+                    QueuedRun {
+                        run_id: "run-2".into(),
+                        message_id: "m2".into(),
+                        text: "Then update the changelog".into(),
+                        image_names: Vec::new(),
+                        file_names: Vec::new(),
+                        pending: true,
+                    },
+                ],
+                can_reorder: true,
+                editing_run_id: None,
+            });
+        }
+        "plan" => {
+            vm.show_plan_follow_up_prompt = true;
+            vm.plan_follow_up_title = Some("Port the composer to GPUI".into());
+        }
+        _ => {}
+    }
+}

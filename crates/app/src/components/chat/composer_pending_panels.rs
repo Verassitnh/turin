@@ -42,6 +42,9 @@ pub(crate) fn attachment_overlap(window: &Window) -> gpui_kit::Pixels {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BannerVariant {
     Default,
+    Error,
+    Info,
+    Success,
     Warning,
 }
 
@@ -65,7 +68,11 @@ pub(crate) fn banner_surface(
             with_alpha(theme.warning, 0.28).into(),
             Some(with_alpha(theme.warning, 0.08).into()),
         ),
-        BannerVariant::Default => (
+        BannerVariant::Error => (
+            with_alpha(theme.error, 0.32).into(),
+            Some(with_alpha(theme.error, 0.08).into()),
+        ),
+        BannerVariant::Default | BannerVariant::Info | BannerVariant::Success => (
             if dark {
                 with_alpha(crate::theme::tokens::tw::WHITE, 0.05).into()
             } else {

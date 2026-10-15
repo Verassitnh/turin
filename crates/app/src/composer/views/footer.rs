@@ -207,12 +207,14 @@ impl ChatComposer {
             .tooltip(Tooltip::new("Attach files"))
             .on_click(cx.listener(|this, _, window, cx| this.pick_attachments(window, cx)));
         let actions = self.render_primary_actions(vm, compact, cx);
+        let meter = self.render_context_meter(vm, cx);
         div()
             .flex()
             .flex_shrink_0()
             .items_center()
             .justify_end()
             .gap(if compact { rems(0.375) } else { rems(0.5) })
+            .children(meter)
             .child(attach)
             .child(actions)
             .into_any_element()
@@ -392,6 +394,7 @@ impl ChatComposer {
                 }
             }
             Some(Layer::RuntimeMode) => layers.push(self.runtime_mode_menu(vm, cx)),
+            Some(Layer::ContextMeter) => layers.extend(self.context_meter_popover(vm, cx)),
             Some(Layer::Traits) => layers.extend(self.traits_menu(vm, _window, cx)),
             _ => {}
         }

@@ -58,6 +58,11 @@ pub struct ChatComposer {
     pub(super) focus: FocusHandle,
     pub(super) attachment_counter: usize,
     pub(super) menu: super::menu::MenuState,
+    pub(super) banner_stack_expanded: bool,
+    pub(super) queue_expanded: bool,
+    pub(super) stash_highlight: Option<String>,
+    pub(super) editing_run_id: Option<String>,
+    pub(super) pre_edit_prompt: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -105,11 +110,21 @@ impl ChatComposer {
             focus: cx.focus_handle(),
             attachment_counter: 0,
             menu: Default::default(),
+            banner_stack_expanded: false,
+            queue_expanded: true,
+            stash_highlight: None,
+            editing_run_id: None,
+            pre_edit_prompt: None,
             _subscriptions: subscriptions,
         };
         this.install_key_handler(cx);
         this.apply_demo(window, cx);
         this
+    }
+
+    fn next_demo_stash_id(&mut self) -> String {
+        self.attachment_counter += 1;
+        format!("stash-{}", self.attachment_counter)
     }
 
     /// Debug aid for screenshots: `TURIN_COMPOSER_DEMO=<scenario>` preloads
@@ -131,6 +146,27 @@ impl ChatComposer {
         if let Some(prompt) = prompt {
             let key = "local:thread-1".to_owned();
             self.drafts.set_prompt(&key, prompt);
+        }
+        let overlay = scenario.clone();
+        self.store.update(cx, |store, cx| {
+            let mut vm = (**store.view_model()).clone();
+            crate::composer::mock_source::apply_demo_scenario(&overlay, &mut vm);
+            store.publish(vm, cx);
+        });
+        if scenario == "stash" {
+            for text in ["Investigate the flaky sidebar test", "Draft release notes for 0.9"] {
+                let id = self.next_demo_stash_id();
+                self.drafts.push_stash_entry(crate::composer::draft_store::PromptStashEntry {
+                    id,
+                    created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    prompt: text.into(),
+                    images: Vec::new(),
+                    files: Vec::new(),
+                    dropped_image_names: Vec::new(),
+                    unreadable_image_names: Vec::new(),
+                    pending_image_count: 0,
+                });
+            }
         }
         let layer = match scenario.as_str() {
             "traits" => Some(Layer::Traits),
@@ -273,6 +309,16 @@ impl ChatComposer {
 
     /// `onCommandKeyDown`: the keys the composer claims before the editor.
     fn on_command_key(&mut self, snapshot: &EditorSnapshot, key: &CommandKey, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.layer == Some(Layer::Stash) && self.on_stash_key(key, window, cx) {
+            return true;
+        }
+        if key.key == "s" && key.meta && !key.shift && !key.alt && !key.ctrl && !key.is_composing {
+            let weak = cx.weak_entity();
+            window.defer(cx, move |window, cx| {
+                weak.update(cx, |this, cx| this.stash_or_restore(window, cx)).ok();
+            });
+            return true;
+        }
         if self.on_menu_key(snapshot, key, window, cx) {
             return true;
         }
@@ -447,6 +493,7 @@ impl Render for ChatComposer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let vm = self.view_model(cx);
         self.sync_thread(&vm, window, cx);
+        self.sync_queue_edit(&vm, window, cx);
         self.sync_editor_config(&vm, cx);
         let theme = cx.app_theme().clone();
         let dark = theme.is_dark();
@@ -462,6 +509,7 @@ impl Render for ChatComposer {
             self.refresh_menu_items(cx);
         }
         let menu_drawer = self.render_menu_drawer(window, cx);
+        let drawers = self.render_drawers(&vm, window, cx);
         let attachments = self.render_attachments(&vm, cx);
         let footer = self.render_footer(&vm, window, cx);
         let layers = self.render_layers(&vm, window, cx);
@@ -498,7 +546,7 @@ impl Render for ChatComposer {
             )
             .child(footer)
             .children(layers);
-        div().w_full().flex().flex_col().children(menu_drawer).child(frame)
+        div().w_full().flex().flex_col().children(menu_drawer).children(drawers).child(frame)
     }
 }
 

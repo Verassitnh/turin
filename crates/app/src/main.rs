@@ -5,6 +5,7 @@ mod branding;
 mod components;
 mod diff;
 mod hooks;
+mod onboarding;
 mod project_icon_colors;
 mod project_identity;
 // The view-model layer is a library until the orchestrator and views are wired

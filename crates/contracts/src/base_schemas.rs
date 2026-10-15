@@ -37,6 +37,12 @@ pub fn js_trim(value: &str) -> &str {
     value.trim_matches(is_js_whitespace)
 }
 
+/// JS `string.length` (UTF-16 code units). `Schema.isMaxLength` and friends
+/// count this, not bytes or `char`s.
+pub fn js_len(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+
 #[doc(hidden)]
 pub mod __private {
     pub use serde;
@@ -64,6 +70,12 @@ impl TrimmedString {
     }
     pub fn into_inner(self) -> String {
         self.0
+    }
+}
+
+impl AsRef<str> for TrimmedString {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 
@@ -103,6 +115,12 @@ impl TrimmedNonEmptyString {
     }
     pub fn into_inner(self) -> String {
         self.0
+    }
+}
+
+impl AsRef<str> for TrimmedNonEmptyString {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 
@@ -634,6 +652,57 @@ pub mod omitted_when_null {
         d: D,
     ) -> Result<Option<T>, D::Error> {
         decode_lenient(d)
+    }
+}
+
+/// Wire form of upstream `Schema.Option(X)`: `Some` encodes as
+/// `{"_tag":"Some","value":…}`, `None` as `{"_tag":"None"}`.
+///
+/// T01-local: upstream `baseSchemas.ts` carries `Schema.Option` (a plain
+/// codec, unlike the forward-compat helpers above); it appears inside struct
+/// fields of `sourceControl.ts` and `vcs.ts` only. Distinct from
+/// `Option<T>` (which maps `Schema.optionalKey` / `Schema.NullOr`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "_tag")]
+pub enum EffectOption<T> {
+    #[serde(rename = "Some")]
+    Some { value: Box<T> },
+    #[serde(rename = "None")]
+    None,
+}
+
+impl<T> EffectOption<T> {
+    pub fn some(value: T) -> Self {
+        Self::Some {
+            value: Box::new(value),
+        }
+    }
+    pub fn as_ref_option(&self) -> Option<&T> {
+        match self {
+            Self::Some { value } => Some(value),
+            Self::None => None,
+        }
+    }
+    pub fn into_option(self) -> Option<T> {
+        match self {
+            Self::Some { value } => Some(*value),
+            Self::None => None,
+        }
+    }
+}
+
+impl<T> Default for EffectOption<T> {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl<T> From<Option<T>> for EffectOption<T> {
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(value) => Self::some(value),
+            None => Self::None,
+        }
     }
 }
 

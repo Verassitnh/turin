@@ -450,20 +450,23 @@ async fn does_not_open_a_non_file_transcript() {
 }
 
 /// Test double over the host filesystem. Each hook mirrors one upstream
-/// instrumented `FileSystem` override: scripted listings, stat aliasing,
-/// open counts, and short reads.
+/// instrumented `FileSystem` override: scripted listings, path aliasing, open
+/// counts, and capped reads.
 #[derive(Default)]
 struct FsDouble {
     inner: LocalScannerFileSystem,
     /// `stat(path)` answers for `path` as if it were this other path.
     stat_redirects: HashMap<String, String>,
+    /// Maps every stat and open path (virtual files onto a template).
+    path_redirect: Option<Box<dyn Fn(&str) -> Option<String> + Send + Sync>>,
     /// Scripted `readDirectory` answers, counted in `directory_reads`.
     listings: HashMap<String, Vec<String>>,
     /// Every directory whose parent is this path reads as empty and is counted.
     empty_children_of: Option<String>,
     directory_reads: Mutex<usize>,
     opens: Mutex<Vec<String>>,
-    read_calls: Arc<Mutex<usize>>,
+    /// Size requested by each `read_alloc`, in call order.
+    read_requests: Arc<Mutex<Vec<usize>>>,
     /// Caps every `read_alloc` request, forcing short reads.
     max_read: Option<usize>,
 }
@@ -473,12 +476,23 @@ impl FsDouble {
         let target = path.to_string_lossy();
         self.opens.lock().iter().filter(|open| **open == target).count()
     }
+
+    fn resolve(&self, path: &str) -> String {
+        self.path_redirect
+            .as_ref()
+            .and_then(|redirect| redirect(path))
+            .unwrap_or_else(|| path.to_owned())
+    }
 }
 
 #[async_trait]
 impl ScannerFileSystem for FsDouble {
     async fn stat(&self, path: &str) -> Option<FileStat> {
-        let target = self.stat_redirects.get(path).map_or(path, String::as_str);
+        let resolved = self.resolve(path);
+        let target = self
+            .stat_redirects
+            .get(&resolved)
+            .map_or(resolved.as_str(), String::as_str);
         self.inner.stat(target).await
     }
     async fn real_path(&self, path: &str) -> Option<String> {
@@ -500,10 +514,10 @@ impl ScannerFileSystem for FsDouble {
     }
     async fn open(&self, path: &str) -> Option<Box<dyn ScannerFile>> {
         self.opens.lock().push(path.to_owned());
-        let file = self.inner.open(path).await?;
+        let file = self.inner.open(&self.resolve(path)).await?;
         Some(Box::new(CountingFile {
             inner: file,
-            reads: Arc::clone(&self.read_calls),
+            requests: Arc::clone(&self.read_requests),
             max_read: self.max_read,
         }))
     }
@@ -511,7 +525,7 @@ impl ScannerFileSystem for FsDouble {
 
 struct CountingFile {
     inner: Box<dyn ScannerFile>,
-    reads: Arc<Mutex<usize>>,
+    requests: Arc<Mutex<Vec<usize>>>,
     max_read: Option<usize>,
 }
 
@@ -521,7 +535,7 @@ impl ScannerFile for CountingFile {
         self.inner.stat().await
     }
     async fn read_alloc(&mut self, size: usize) -> std::io::Result<Option<Vec<u8>>> {
-        *self.reads.lock() += 1;
+        self.requests.lock().push(size);
         let size = self.max_read.map_or(size, |cap| size.min(cap));
         self.inner.read_alloc(size).await
     }
@@ -1197,4 +1211,285 @@ async fn excludes_sandboxes_reached_through_a_symlink_into_the_worktrees_dir() {
     let result = fixture.scan().await;
 
     assert_eq!(summarize(&result), Vec::new());
+}
+
+/// A JSON record padded with leading spaces to exactly `total` bytes (no newline).
+fn padded_record(cwd: &Path, total: usize) -> String {
+    let record = json!({ "cwd": cwd }).to_string();
+    format!("{}{}", " ".repeat(total - record.len()), record)
+}
+
+fn opens_in(double: &FsDouble, dir: &Path) -> usize {
+    double
+        .opens
+        .lock()
+        .iter()
+        .filter(|open| Path::new(open.as_str()).parent() == Some(dir))
+        .count()
+}
+
+#[tokio::test]
+async fn finds_the_cwd_on_a_later_line_when_the_first_records_carry_none() {
+    let fixture = Fixture::new();
+    let workspace = fixture.workspace("t3code-workspace-");
+    // Claude transcripts often open with records that have no cwd.
+    let contents = format!(
+        "{}\n{}\n{}",
+        json!({"type": "file-history-snapshot", "messageId": "m1"}),
+        json!({"type": "queue-operation", "operation": "enqueue"}),
+        claude_session_line(workspace.path()),
+    );
+    write_transcript(
+        &fixture.claude_transcript("-slug", "a.jsonl"),
+        &contents,
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(paths(&result), vec![workspace.path().to_string_lossy().into_owned()]);
+}
+
+#[tokio::test]
+async fn reads_a_complete_transcript_record_at_the_exact_chunk_boundary() {
+    let fixture = Fixture::new();
+    let workspace = fixture.workspace("t3code-workspace-");
+    let record = claude_session_line(workspace.path())
+        .split('\n')
+        .next()
+        .expect("first record")
+        .to_owned();
+    let prefix = r#"{"padding":""#;
+    let suffix = format!(r#"",{}"#, &record[1..]);
+    let contents = format!(
+        "{prefix}{}{suffix}",
+        "x".repeat(32 * 1024 - prefix.len() - suffix.len())
+    );
+    assert_eq!(contents.len(), 32 * 1024);
+    write_transcript(
+        &fixture.claude_transcript("-exact", "session.jsonl"),
+        &contents,
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(paths(&result), vec![workspace.path().to_string_lossy().into_owned()]);
+}
+
+#[tokio::test]
+async fn finds_session_metadata_after_a_first_record_larger_than_one_chunk() {
+    let fixture = Fixture::new();
+    let workspace = fixture.workspace("t3code-workspace-");
+    let history = format!(
+        "{{\"type\":\"file-history-snapshot\",\"data\":\"{}\"}}\n",
+        "x".repeat(32 * 1024)
+    );
+    write_transcript(
+        &fixture.claude_transcript("-large", "session.jsonl"),
+        &format!("{history}{}", claude_session_line(workspace.path())),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(paths(&result), vec![workspace.path().to_string_lossy().into_owned()]);
+}
+
+#[tokio::test]
+async fn shares_metadata_bytes_across_homes_for_64_and_65_one_mib_files() {
+    for count in [64usize, 65] {
+        let mut fixture = Fixture::new();
+        let second_home = temp_dir("t3code-metadata-second-");
+        let first_workspace = fixture.workspace("t3code-metadata-first-project-");
+        let second_workspace = fixture.workspace("t3code-metadata-second-project-");
+        fixture.configure(
+            "claude-work",
+            instance("claudeAgent", json!({"homePath": second_home.path()})),
+        );
+        let directories = [
+            fixture.claude_home.join("projects").join("p"),
+            second_home.path().join("projects").join("p"),
+        ];
+        let templates = [
+            directories[0].join("template.jsonl"),
+            directories[1].join("template.jsonl"),
+        ];
+        let one_mib = 1024 * 1024;
+        for (index, (template, workspace)) in templates
+            .iter()
+            .zip([first_workspace.path(), second_workspace.path()])
+            .enumerate()
+        {
+            write_transcript(
+                template,
+                &padded_record(workspace, one_mib),
+                ms("2026-01-01T00:00:00.000Z") - (index as f64) * 1_000.0,
+            );
+        }
+        let names = |range: std::ops::Range<usize>| -> Vec<String> {
+            range.map(|item| format!("session-{item}.jsonl")).collect()
+        };
+        let mut listings = HashMap::new();
+        listings.insert(
+            directories[0].to_string_lossy().into_owned(),
+            names(0..32),
+        );
+        listings.insert(
+            directories[1].to_string_lossy().into_owned(),
+            names(0..count - 32),
+        );
+        let redirect_dirs: Vec<(String, String)> = directories
+            .iter()
+            .zip(templates.iter())
+            .map(|(dir, template)| {
+                (
+                    dir.to_string_lossy().into_owned(),
+                    template.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        let double = fs_double(|double| {
+            double.listings = listings;
+            double.path_redirect = Some(Box::new(move |path| {
+                let parent = Path::new(path).parent()?.to_str()?;
+                redirect_dirs
+                    .iter()
+                    .find(|(dir, _)| dir == parent)
+                    .map(|(_, template)| template.clone())
+            }));
+        });
+
+        let result = fixture
+            .scanner_with(double.clone())
+            .scan()
+            .await
+            .expect("scan");
+
+        assert_eq!(
+            paths(&result),
+            vec![
+                first_workspace.path().to_string_lossy().into_owned(),
+                second_workspace.path().to_string_lossy().into_owned(),
+            ],
+            "{count}"
+        );
+        assert_eq!(
+            result.candidates.iter().map(|c| c.thread_count).collect::<Vec<_>>(),
+            vec![32, 32],
+            "{count}"
+        );
+        assert_eq!(result.truncated, (count == 65).then_some(true), "{count}");
+        assert_eq!(double.opens.lock().len(), 64, "{count}");
+        let requests = double.read_requests.lock();
+        assert_eq!(requests.iter().sum::<usize>(), 64 * one_mib, "{count}");
+        assert_eq!(requests.first(), Some(&(8 * 1024)), "{count}");
+        assert_eq!(requests.iter().max(), Some(&(8 * 1024)), "{count}");
+    }
+}
+
+#[tokio::test]
+async fn bounds_metadata_open_and_read_calls_for_short_read_files() {
+    for count in [50usize, 51] {
+        let fixture = Fixture::new();
+        let workspace = fixture.workspace("t3code-short-metadata-project-");
+        let directory = fixture.claude_home.join("projects").join("p");
+        let template = directory.join("template.jsonl");
+        write_transcript(
+            &template,
+            &padded_record(workspace.path(), 399),
+            ms("2026-01-01T00:00:00.000Z"),
+        );
+        let names: Vec<String> = (0..count).map(|index| format!("session-{index}.jsonl")).collect();
+        let template_path = template.to_string_lossy().into_owned();
+        let directory_path = directory.clone();
+        let double = fs_double(|double| {
+            double
+                .listings
+                .insert(directory.to_string_lossy().into_owned(), names);
+            double.path_redirect = Some(Box::new(move |path| {
+                (Path::new(path).parent() == Some(directory_path.as_path()))
+                    .then(|| template_path.clone())
+            }));
+            // Every read returns one byte, so each record costs a read per byte.
+            double.max_read = Some(1);
+        });
+
+        let result = fixture
+            .scanner_with(double.clone())
+            .scan()
+            .await
+            .expect("scan");
+
+        let operations = double.opens.lock().len() + double.read_requests.lock().len();
+        assert_eq!(operations, 20_000, "{count}");
+        assert_eq!(result.candidates[0].thread_count, 50, "{count}");
+        assert_eq!(result.truncated, (count == 51).then_some(true), "{count}");
+    }
+}
+
+#[tokio::test]
+async fn bounds_malformed_metadata_records_without_excluding_another_account() {
+    let mut fixture = Fixture::new();
+    let second_home = temp_dir("t3code-record-metadata-second-");
+    let workspace = fixture.workspace("t3code-record-metadata-project-");
+    let directory = fixture.claude_home.join("projects").join("p");
+    let template = directory.join("template.jsonl");
+    write_transcript(&template, &"x\n".repeat(1_001), ms("2026-01-02T00:00:00.000Z"));
+    write_transcript(
+        &second_home.path().join("projects").join("p").join("session.jsonl"),
+        &json!({ "cwd": workspace.path() }).to_string(),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    fixture.configure(
+        "claude-work",
+        instance("claudeAgent", json!({"homePath": second_home.path()})),
+    );
+    let names: Vec<String> = (0..102).map(|index| format!("session-{index}.jsonl")).collect();
+    let template_path = template.to_string_lossy().into_owned();
+    let directory_path = directory.clone();
+    let double = fs_double(|double| {
+        double
+            .listings
+            .insert(directory.to_string_lossy().into_owned(), names);
+        double.path_redirect = Some(Box::new(move |path| {
+            (Path::new(path).parent() == Some(directory_path.as_path()))
+                .then(|| template_path.clone())
+        }));
+    });
+
+    let result = fixture
+        .scanner_with(double.clone())
+        .scan()
+        .await
+        .expect("scan");
+
+    assert_eq!(paths(&result), vec![workspace.path().to_string_lossy().into_owned()]);
+    assert_eq!(opens_in(&double, &directory), 100);
+    assert_eq!(result.truncated, Some(true));
+}
+
+#[tokio::test]
+async fn reports_unfinished_directory_work_for_19_999_and_20_000_project_directories() {
+    for count in [19_999usize, 20_000] {
+        let fixture = Fixture::new();
+        let projects_dir = fixture.claude_home.join("projects");
+        let names: Vec<String> = (0..count).map(|index| format!("project-{index}")).collect();
+        let double = fs_double(|double| {
+            double
+                .listings
+                .insert(projects_dir.to_string_lossy().into_owned(), names);
+            double.empty_children_of = Some(projects_dir.to_string_lossy().into_owned());
+        });
+
+        let result = fixture
+            .scanner_with(double.clone())
+            .scan()
+            .await
+            .expect("scan");
+
+        assert_eq!(*double.directory_reads.lock(), 20_000, "{count}");
+        assert_eq!(summarize(&result), Vec::new(), "{count}");
+        assert_eq!(result.truncated, (count == 20_000).then_some(true), "{count}");
+    }
 }

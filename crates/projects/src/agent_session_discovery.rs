@@ -567,6 +567,8 @@ impl AgentSessionDiscovery {
         let mut remaining: Vec<u8> = Vec::new();
         let mut bytes_read: u64 = 0;
         let mut records_read = 0usize;
+        // Bytes of `remaining` already known to hold no newline, so a long record is scanned once.
+        let mut scanned = 0usize;
         while bytes_read < max_bytes {
             if budget.bytes_remaining == 0 || budget.operations_remaining == 0 {
                 budget.truncated = true;
@@ -586,8 +588,13 @@ impl AgentSessionDiscovery {
             };
             bytes_read += next.len() as u64;
             remaining.extend_from_slice(&next);
-            while let Some(newline) = remaining.iter().position(|byte| *byte == b'\n') {
+            while let Some(newline) = remaining[scanned..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|offset| scanned + offset)
+            {
                 let line: Vec<u8> = remaining.drain(..=newline).collect();
+                scanned = 0;
                 let text = String::from_utf8_lossy(&line[..line.len() - 1]);
                 if !reserve_metadata_record(budget, &mut records_read) {
                     return None;
@@ -596,6 +603,7 @@ impl AgentSessionDiscovery {
                     return Some(cwd);
                 }
             }
+            scanned = remaining.len();
         }
         if bytes_read < transcript.size {
             budget.truncated = true;

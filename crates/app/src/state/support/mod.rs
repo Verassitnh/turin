@@ -9,6 +9,8 @@ pub mod collate;
 pub mod domain_event;
 pub mod model;
 pub mod path;
+pub mod thread_error;
 pub mod thread_pull_requests;
 pub mod timeline_visibility;
+pub mod timing;
 pub mod turn_item;

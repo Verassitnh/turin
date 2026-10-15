@@ -6,6 +6,8 @@
 #![allow(unused_imports)]
 
 pub use turin_contracts::base_schemas::*;
+pub use turin_contracts::chat_attachment::*;
+pub use turin_contracts::composer_context::OrchestrationMessageContext;
 pub use turin_contracts::environment::*;
 pub use turin_contracts::model_selection::ModelSelection;
 pub use turin_contracts::orchestration_project::OrchestrationProjectShell;

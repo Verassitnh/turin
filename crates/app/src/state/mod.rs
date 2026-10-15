@@ -17,5 +17,9 @@ pub mod subagent_runtime;
 pub mod support;
 #[cfg(test)]
 pub mod test_fixtures;
+pub mod thread_execution;
 pub mod thread_projection;
+pub mod thread_requests;
+pub mod thread_subagents;
+pub mod thread_workflows;
 pub mod time;

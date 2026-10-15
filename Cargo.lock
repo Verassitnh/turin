@@ -7047,6 +7047,7 @@ dependencies = [
  "chrono",
  "gpui-kit",
  "markdown",
+ "parking_lot",
  "pretty_assertions",
  "regex",
  "serde",

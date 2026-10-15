@@ -217,7 +217,7 @@ pub fn linked_pull_request_snapshot_status(
         .clone();
     Some(LinkedThreadPullRequestStatus {
         pr: VcsStatusChangeRequest {
-            number: link.number.clone(),
+            number: link.number,
             title: snapshot.title.clone(),
             url: link.url.as_str().to_owned(),
             base_ref: snapshot.base_branch.clone(),
@@ -452,7 +452,7 @@ impl ThreadPullRequestBadgePresentation {
     pub fn tone(&self, theme: &AppTheme) -> Hsla {
         match self.state {
             Some(state) => pull_request_state_tone(state, theme),
-            None => theme.sidebar_scope().muted_foreground.into(),
+            None => theme.sidebar_scope().muted_foreground,
         }
     }
 }

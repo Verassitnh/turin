@@ -1613,12 +1613,9 @@ pub fn sort_scoped_projects_for_sidebar(
         |left, right| {
             locale_compare(&left.title, &right.title)
                 .then_with(|| {
-                    locale_compare(
-                        &left.environment_id.to_string(),
-                        &right.environment_id.to_string(),
-                    )
+                    locale_compare(left.environment_id.as_ref(), right.environment_id.as_ref())
                 })
-                .then_with(|| locale_compare(&left.id.to_string(), &right.id.to_string()))
+                .then_with(|| locale_compare(left.id.as_ref(), right.id.as_ref()))
         },
     )
 }

@@ -1071,11 +1071,11 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(
-            earlier_local_instant(MappedLocalTime::Ambiguous(late.clone(), early.clone())),
-            Some(early.clone())
+            earlier_local_instant(MappedLocalTime::Ambiguous(late, early)),
+            Some(early)
         );
         assert_eq!(
-            earlier_local_instant(MappedLocalTime::Ambiguous(early.clone(), late)),
+            earlier_local_instant(MappedLocalTime::Ambiguous(early, late)),
             Some(early)
         );
         assert_eq!(

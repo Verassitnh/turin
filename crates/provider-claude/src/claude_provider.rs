@@ -35,8 +35,8 @@ use turin_provider_core::{
     rt::BoxFuture,
     server_provider::{
         ProviderWorkspaceSnapshot, ServerProvider, ServerProviderAuth, ServerProviderAuthStatus,
-        ServerProviderDraft, ServerProviderModel, ServerProviderSlashCommand, ServerProviderState,
-        ServerProviderUpdateRequiredModel,
+        ServerProviderDraft, ServerProviderModel, ServerProviderSkill, ServerProviderSlashCommand,
+        ServerProviderState, ServerProviderUpdateRequiredModel,
     },
     snapshot_probe::{
         BuildServerProviderInput, ProviderProbeResult, ServerProviderPresentation,
@@ -367,6 +367,25 @@ fn unknown_auth() -> ServerProviderAuth {
     ServerProviderAuth::with_status(ServerProviderAuthStatus::Unknown)
 }
 
+/// Skill discovery walks the config and workspace directories with blocking
+/// `std::fs`, so it runs on the blocking pool and not on an async worker.
+async fn discover_skills_off_async_workers(
+    settings: &ClaudeSettings,
+    cwd: Option<&Path>,
+    environment: &ProcessEnv,
+    home: &str,
+) -> Vec<ServerProviderSkill> {
+    let settings = settings.clone();
+    let cwd = cwd.map(Path::to_path_buf);
+    let environment = environment.clone();
+    let home = home.to_owned();
+    tokio::task::spawn_blocking(move || {
+        discover_claude_skills(&settings, cwd.as_deref(), &environment, &home)
+    })
+    .await
+    .expect("skill discovery does not panic")
+}
+
 /// `checkClaudeProviderStatus`: the full status draft for one instance.
 pub async fn check_claude_provider_status(input: ClaudeStatusInput<'_>) -> ServerProviderDraft {
     let settings = input.settings;
@@ -487,7 +506,8 @@ pub async fn check_claude_provider_status(input: ClaudeStatusInput<'_>) -> Serve
         None => None,
     };
     // Skills come from the machine's config dir, not a workspace (`cwd` is None here).
-    let skills = discover_claude_skills(settings, None, input.environment, input.home);
+    let skills =
+        discover_skills_off_async_workers(settings, None, input.environment, input.home).await;
     let slash_commands = dedupe_slash_commands(
         std::iter::once(compact_slash_command())
             .chain(
@@ -679,7 +699,8 @@ pub async fn probe_claude_workspace_snapshot(
             )
             .collect(),
     );
-    provider.draft.skills = discover_claude_skills(settings, Some(cwd), environment, home);
+    provider.draft.skills =
+        discover_skills_off_async_workers(settings, Some(cwd), environment, home).await;
     ProviderWorkspaceSnapshot {
         provider,
         slash_commands_pending: Some(capabilities.is_none()),

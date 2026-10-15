@@ -1004,26 +1004,25 @@ impl ClaudeActor {
                 compiled.prompt_effort.as_deref(),
             );
             // A `$skill` mention becomes the trailing `/skill` block Claude Code expands.
-            let skill_names = user_invocable_skill_names(
-                &self.settings,
-                input
-                    .runtime_policy
-                    .cwd
-                    .as_ref()
-                    .map(PathBuf::from)
-                    .as_deref(),
-                &self
-                    .environment
-                    .as_ref()
-                    .map(|environment| {
-                        environment
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                &self.home_directory,
-            );
+            // Skill discovery reads the filesystem, so it runs off the actor's task.
+            let skill_settings = self.settings.clone();
+            let skill_cwd = input.runtime_policy.cwd.as_ref().map(PathBuf::from);
+            let skill_environment: std::collections::HashMap<String, String> = self
+                .environment
+                .clone()
+                .map(|environment| environment.into_iter().collect())
+                .unwrap_or_default();
+            let skill_home = self.home_directory.clone();
+            let skill_names = tokio::task::spawn_blocking(move || {
+                user_invocable_skill_names(
+                    &skill_settings,
+                    skill_cwd.as_deref(),
+                    &skill_environment,
+                    &skill_home,
+                )
+            })
+            .await
+            .expect("skill discovery does not panic");
             let session = self
                 .claude
                 .as_mut()

@@ -47,9 +47,9 @@ PROD = ROOT / "assets" / "prod"
 UPSTREAM_PROD = ROOT / "upstream" / "assets" / "prod"
 
 DESIGN_GENERATION = "26"
-# Upstream's T path is scaled by this and re-centred (see place_t). Pending user sign-off
-# against 1.0 (upstream's size): compare with `--scale-options 1.0 1.25`.
-DEFAULT_T_SCALE = 1.25
+# Upstream's T path is scaled by this and re-centred (see place_t). The user chose 1.0,
+# upstream's exact T; prod/compare-scale-options.png records the 1.0 vs 1.25 comparison.
+DEFAULT_T_SCALE = 1.0
 WINDOWS_ICON_SIZES = [16, 24, 32, 48, 64, 128, 256]
 # Icon Composer draws the 128-unit SVG at the layer scale from icon.json, centred on
 # the 1024pt canvas; the pre-Tahoe macOS body is that canvas at 824px, inset 100px.

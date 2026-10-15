@@ -394,6 +394,12 @@ impl ChatComposer {
                 }
             }
             Some(Layer::RuntimeMode) => layers.push(self.runtime_mode_menu(vm, cx)),
+            Some(Layer::CodeLanguage) => {
+                if let Some((picker, anchor)) = self.language_picker.clone() {
+                    let bounds = gpui_kit::Bounds::new(anchor, gpui_kit::size(px(0.), px(0.)));
+                    layers.push(floating(bounds, false, false, glass_surface(cx).child(picker)));
+                }
+            }
             Some(Layer::ContextMeter) => layers.extend(self.context_meter_popover(vm, cx)),
             Some(Layer::Traits) => layers.extend(self.traits_menu(vm, _window, cx)),
             _ => {}

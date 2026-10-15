@@ -5,6 +5,7 @@ pub mod chat_composer;
 pub mod chrome;
 mod footer;
 pub mod menu;
+pub mod language_picker_view;
 pub mod model_picker_view;
 pub mod prompt_editor;
 mod traits;

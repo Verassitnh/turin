@@ -291,6 +291,14 @@ impl ChatComposer {
         let end = end.clamp(start, units.len());
         // A trailing space in the replacement swallows the one already there.
         let end = if replacement.ends_with(' ') && units.get(end) == Some(&(b' ' as u16)) { end + 1 } else { end };
+        self.apply_prompt_replacement(value, start, end, replacement, focus, window, cx);
+    }
+
+    /// `applyPromptReplacement`: swap a markdown range and put the caret after it.
+    pub(super) fn apply_prompt_replacement(&mut self, value: &str, start: usize, end: usize, replacement: &str, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let units: Vec<u16> = value.encode_utf16().collect();
+        let start = start.min(units.len());
+        let end = end.clamp(start, units.len());
         let mut next = String::from_utf16_lossy(&units[..start]);
         next.push_str(replacement);
         next.push_str(&String::from_utf16_lossy(&units[end..]));

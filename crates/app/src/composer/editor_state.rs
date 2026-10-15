@@ -1068,6 +1068,24 @@ impl EditorState {
         true
     }
 
+    /// The picker's choice for a fence's language (`updateAttributes` on the
+    /// code block node), keeping the rest of the info string.
+    pub fn set_code_block_language(&mut self, block: usize, language: &str) -> bool {
+        let Some(Block::Code(code)) = self.doc.blocks.get(block) else {
+            return false;
+        };
+        let next = crate::composer::code_languages::with_info_string_language(&code.language, language);
+        if next == code.language {
+            return false;
+        }
+        self.begin_change(ChangeKind::Other);
+        if let Block::Code(code) = &mut self.doc.blocks[block] {
+            code.language = next;
+        }
+        self.finish_change();
+        true
+    }
+
     /// `exitCodeBlockOnClosingFence`.
     pub fn exit_code_block_on_closing_fence(&mut self) -> bool {
         if !self.selection_in_one_code_block() || !self.selection.is_empty() {

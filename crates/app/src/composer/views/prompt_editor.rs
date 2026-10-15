@@ -47,7 +47,7 @@ pub enum PromptEditorEvent {
     /// A range selection appeared or moved (`onVisibleSelectionChange`).
     VisibleSelectionChanged,
     /// The language control of a code block was clicked.
-    OpenCodeLanguagePicker { block: usize },
+    OpenCodeLanguagePicker { block: usize, anchor: Point<Pixels> },
 }
 
 impl EventEmitter<PromptEditorEvent> for PromptEditor {}
@@ -276,6 +276,21 @@ impl PromptEditor {
     }
 
     /// Repaint and report after the host edited the state directly.
+    /// The language picker's choice for the fence at `block`.
+    pub fn set_code_block_language(&mut self, block: usize, language: &str, cx: &mut Context<Self>) {
+        if self.state.set_code_block_language(block, language) {
+            self.after_change(cx);
+        }
+    }
+
+    /// The info-string language of the fence at `block`.
+    pub fn code_block_language(&self, block: usize) -> Option<String> {
+        match self.state.doc().blocks.get(block) {
+            Some(Block::Code(code)) => Some(crate::composer::code_languages::language_of_info_string(&code.language).to_owned()),
+            _ => None,
+        }
+    }
+
     pub fn after_external_edit(&mut self, cx: &mut Context<Self>) {
         self.after_change(cx);
     }
@@ -977,9 +992,9 @@ impl PromptEditor {
                         .hover(|style| style.bg(theme.accent))
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |_, _, _, cx| {
+                            cx.listener(move |_, event: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
-                                cx.emit(PromptEditorEvent::OpenCodeLanguagePicker { block: index });
+                                cx.emit(PromptEditorEvent::OpenCodeLanguagePicker { block: index, anchor: event.position });
                             }),
                         )
                         .child(Icon::new(IconName::FileText).size(rems(0.875)).color(header_color.into()))

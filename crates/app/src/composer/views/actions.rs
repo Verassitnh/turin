@@ -19,6 +19,7 @@ use crate::composer::editor_state::EditorSnapshot;
 use crate::composer::prompt_history::{HistoryDirection, build_composer_prompt_history_entries, step_composer_prompt_history};
 use crate::composer::view_model::{ComposerViewModel, SessionPhase};
 use crate::composer::views::chat_composer::{ChatComposer, Layer};
+use crate::composer::views::language_picker_view::{LanguagePickerEvent, LanguagePickerView};
 use crate::composer::views::model_picker_view::{ModelPickerEvent, ModelPickerView};
 use crate::composer::views::prompt_editor::CommandKey;
 use crate::theme::ActiveAppTheme;
@@ -87,6 +88,26 @@ impl ChatComposer {
         picker.update(cx, |picker, cx| picker.focus_search(window, cx));
         self.model_picker = Some(picker);
         self.layer = Some(Layer::ModelPicker);
+        cx.notify();
+    }
+
+    // ----- Code block language ---------------------------------------------
+
+    pub(super) fn open_language_picker(&mut self, block: usize, anchor: gpui_kit::Point<gpui_kit::Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(language) = self.editor.read(cx).code_block_language(block) else {
+            return;
+        };
+        let picker = cx.new(|cx| LanguagePickerView::new(&language, window, cx));
+        cx.subscribe_in(&picker, window, move |this, _, event: &LanguagePickerEvent, window, cx| {
+            if let LanguagePickerEvent::Select(language) = event {
+                let language = language.clone();
+                this.editor.update(cx, |editor, cx| editor.set_code_block_language(block, &language, cx));
+            }
+            this.close_layer(window, cx);
+        })
+        .detach();
+        self.language_picker = Some((picker, anchor));
+        self.layer = Some(Layer::CodeLanguage);
         cx.notify();
     }
 
@@ -174,7 +195,7 @@ impl ChatComposer {
                 .border_color(with_alpha(theme.border, 0.8))
                 .bg(theme.background)
                 .child(match picture {
-                    Some(picture) => img(picture).size_full().object_fit(ObjectFit::Cover).into_any_element(),
+                    Some(picture) => img(picture).size_full().rounded(RADIUS_LG).object_fit(ObjectFit::Cover).into_any_element(),
                     None => div()
                         .size_full()
                         .flex()
@@ -331,7 +352,7 @@ impl ChatComposer {
     }
 }
 
-fn read_picked_file(path: PathBuf) -> Option<(PickedFile, Vec<u8>)> {
+pub(super) fn read_picked_file(path: PathBuf) -> Option<(PickedFile, Vec<u8>)> {
     let name = path.file_name()?.to_string_lossy().into_owned();
     let data = std::fs::read(&path).ok()?;
     let picked = PickedFile::new(&name, &guess_mime(&name), data.len() as u64);

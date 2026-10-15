@@ -319,7 +319,8 @@ impl ComposerDraftStore {
             .files
             .iter()
             .filter(|file| {
-                file.has_bytes()
+                // Bytes in hand, or an upload on the (single, local) environment.
+                (file.has_bytes() || file.uploaded_attachment_id.is_some())
                     && !destination_file_ids.contains(&file.id)
                     && !destination_file_keys.contains(&composer_file_dedup_key(file))
             })

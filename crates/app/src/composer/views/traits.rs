@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, CursorStyle, InteractiveElement as _, IntoElement, ParentElement as _,
+    AnyElement, Context, CursorStyle, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, Window, div, rems,
 };
 

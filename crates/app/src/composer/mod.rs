@@ -31,6 +31,7 @@ pub mod primary_actions;
 pub mod footer_layout;
 pub mod banner_stack;
 pub mod stash;
+pub mod queued_edit;
 pub mod context_meter;
 pub mod provider_options;
 pub mod provider_state;

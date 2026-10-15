@@ -8,7 +8,7 @@
 use markdown::mdast::Node;
 use markdown::{ParseOptions, to_mdast};
 
-use crate::js_string::is_js_whitespace_char;
+use turin_contracts::base_schemas::is_js_whitespace;
 
 /// Link GitHub references in prose without rewriting code, URLs, HTML, or existing links.
 pub fn github_markdown_links(markdown: &str, pull_request_url: Option<&str>) -> String {
@@ -446,7 +446,7 @@ fn tag_name_ends(source: &str, end: usize) -> bool {
     source[end..]
         .chars()
         .next()
-        .is_some_and(|ch| ch == '>' || is_js_whitespace_char(ch))
+        .is_some_and(|ch| ch == '>' || is_js_whitespace(ch))
 }
 
 #[cfg(test)]

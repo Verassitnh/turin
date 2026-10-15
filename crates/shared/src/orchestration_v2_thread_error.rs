@@ -44,7 +44,9 @@ impl RunOrder for OrchestrationV2Run {
     }
 
     fn completed_at_millis(&self) -> Option<i64> {
-        self.completed_at.as_ref().map(|at| at.0.timestamp_millis())
+        self.completed_at
+            .as_ref()
+            .map(|at| at.as_datetime().timestamp_millis())
     }
 
     fn queue_held(&self) -> bool {
@@ -135,7 +137,7 @@ pub fn latest_root_provider_failure<'a>(
             continue;
         }
         let candidate = (
-            updated_at.0.timestamp_millis(),
+            updated_at.as_datetime().timestamp_millis(),
             *ordinal,
             id.as_str(),
             failure,

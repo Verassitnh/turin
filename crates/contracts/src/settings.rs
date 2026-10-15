@@ -18,7 +18,7 @@
 //! like `JSON.stringify` does (`js_number`).
 
 use crate::base_schemas::{
-    ContractError, ProjectId, ThreadId, TrimmedNonEmptyString, TrimmedString, js_number,
+    ContractError, ProjectId, ThreadId, TrimmedNonEmptyString, TrimmedString, js_len, js_number,
     js_number_nullable, serialize_js_number,
 };
 use crate::environment::{EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules};
@@ -737,7 +737,7 @@ pub struct FontFamilyPreference(String);
 impl FontFamilyPreference {
     const MAX_LENGTH: usize = 200;
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
-        if value.as_ref().encode_utf16().count() > Self::MAX_LENGTH {
+        if js_len(value.as_ref()) > Self::MAX_LENGTH {
             return Err(ContractError {
                 expected: "a font family of at most 200 UTF-16 code units",
                 got: value.as_ref().to_owned(),
@@ -785,7 +785,7 @@ pub struct DefaultThemePreference(String);
 impl DefaultThemePreference {
     const MAX_LENGTH: usize = 64;
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
-        if value.as_ref().encode_utf16().count() > Self::MAX_LENGTH {
+        if js_len(value.as_ref()) > Self::MAX_LENGTH {
             return Err(ContractError {
                 expected: "a string of at most 64 UTF-16 code units",
                 got: value.as_ref().to_owned(),

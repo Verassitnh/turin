@@ -523,7 +523,7 @@ pub fn collect_limit_accounts<P: UsageProviderInfo>(
                 }
                 let key = format!(
                     "{}:{}{}",
-                    source.id.0,
+                    source.id,
                     account.id.as_str(),
                     account
                         .workspace_id
@@ -1298,7 +1298,7 @@ pub fn collect_provider_usage_limits<P: UsageProviderInfo>(
                 continue;
             }
             accounts.push(UsageLimitsReportAccount {
-                id: tne(format!("{}:{}", source.id.0, account.id.as_str())),
+                id: tne(format!("{}:{}", source.id, account.id.as_str())),
                 driver: account.driver.clone(),
                 label: tne(format!(
                     "{} · {}",
@@ -1362,7 +1362,6 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
-    use std::sync::Arc;
     use turin_contracts::usage_limit_source_id::UsageLimitSourceId;
 
     /// Test stand-in for `ServerProvider`: the same wire keys, so fixtures stay JSON.
@@ -1950,7 +1949,7 @@ mod tests {
                 environment_id: env("env-a"),
                 input: ProviderConsumeResetCreditInput::Source(
                     UsageLimitSourceConsumeResetCreditInput {
-                        source_id: UsageLimitSourceId(Arc::from("hub")),
+                        source_id: UsageLimitSourceId::new("hub"),
                         account_id: TrimmedNonEmptyString::new("claude-same@example.com.json")
                             .unwrap(),
                         credit_id: TrimmedNonEmptyString::new("hub-credit").unwrap(),
@@ -2049,7 +2048,7 @@ mod tests {
                 environment_id: env("env-b"),
                 input: ProviderConsumeResetCreditInput::Source(
                     UsageLimitSourceConsumeResetCreditInput {
-                        source_id: UsageLimitSourceId(Arc::from("hub")),
+                        source_id: UsageLimitSourceId::new("hub"),
                         account_id: TrimmedNonEmptyString::new("codex-same.json").unwrap(),
                         credit_id: TrimmedNonEmptyString::new("credit-2").unwrap(),
                     }
@@ -2106,7 +2105,7 @@ mod tests {
                     environment_id: env("env-a"),
                     input: ProviderConsumeResetCreditInput::Source(
                         UsageLimitSourceConsumeResetCreditInput {
-                            source_id: UsageLimitSourceId(Arc::from("hub")),
+                            source_id: UsageLimitSourceId::new("hub"),
                             account_id: TrimmedNonEmptyString::new(*id).unwrap(),
                             credit_id: TrimmedNonEmptyString::new(format!("{id}-credit")).unwrap(),
                         },
@@ -2841,7 +2840,7 @@ mod tests {
             report.accounts[0].reset_credit_input,
             Some(ProviderConsumeResetCreditInput::Source(
                 UsageLimitSourceConsumeResetCreditInput {
-                    source_id: UsageLimitSourceId(Arc::from("hub")),
+                    source_id: UsageLimitSourceId::new("hub"),
                     account_id: TrimmedNonEmptyString::new("duplicate").unwrap(),
                     credit_id: TrimmedNonEmptyString::new("duplicate-credit").unwrap(),
                 }
@@ -2856,7 +2855,7 @@ mod tests {
             oss.reset_credit_input,
             Some(ProviderConsumeResetCreditInput::Source(
                 UsageLimitSourceConsumeResetCreditInput {
-                    source_id: UsageLimitSourceId(Arc::from("hub")),
+                    source_id: UsageLimitSourceId::new("hub"),
                     account_id: TrimmedNonEmptyString::new("oss").unwrap(),
                     credit_id: TrimmedNonEmptyString::new("oss-credit").unwrap(),
                 }
@@ -3064,7 +3063,7 @@ mod tests {
                 }),
                 Some(ProviderConsumeResetCreditInput::Source(
                     UsageLimitSourceConsumeResetCreditInput {
-                        source_id: UsageLimitSourceId(Arc::from("hub")),
+                        source_id: UsageLimitSourceId::new("hub"),
                         account_id: TrimmedNonEmptyString::new("duplicate").unwrap(),
                         credit_id: TrimmedNonEmptyString::new("c").unwrap(),
                     }
@@ -3102,7 +3101,7 @@ mod tests {
             report.accounts[0].reset_credit_input,
             Some(ProviderConsumeResetCreditInput::Source(
                 UsageLimitSourceConsumeResetCreditInput {
-                    source_id: UsageLimitSourceId(Arc::from("hub")),
+                    source_id: UsageLimitSourceId::new("hub"),
                     account_id: TrimmedNonEmptyString::new("duplicate").unwrap(),
                     credit_id: TrimmedNonEmptyString::new("hub-credit").unwrap(),
                 }

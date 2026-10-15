@@ -18,12 +18,10 @@ use serde_json::json;
 use turin_contracts::assistant_citations::{
     ASSISTANT_CITATION_MAX_COMMENT_LENGTH, ASSISTANT_CITATION_MAX_TEXT_LENGTH, AssistantCitation,
 };
-use turin_contracts::base_schemas::js_trim;
+use turin_contracts::base_schemas::{is_js_whitespace, js_trim};
 use url::{Url, form_urlencoded};
 
-use crate::js_string::{
-    decode_uri_component, encode_uri_component, is_js_whitespace_char, utf16_len,
-};
+use crate::js_string::{decode_uri_component, encode_uri_component, utf16_len};
 
 const CITATION_SCHEME: &str = "t3-citation";
 const CITATION_HREF_PREFIX: &str = "t3-citation://v1/";
@@ -206,7 +204,7 @@ fn citation_links(text: &str) -> Vec<CitationLink<'_>> {
         let run_start = href_start + CITATION_HREF_PREFIX.len();
         let rest = &text[run_start..];
         let run_len = rest
-            .find(|character: char| is_js_whitespace_char(character) || character == ')')
+            .find(|character: char| is_js_whitespace(character) || character == ')')
             .unwrap_or(rest.len());
         let closes = rest[run_len..].starts_with(')');
         if run_len == 0 || !closes || utf16_len(&rest[..run_len]) > max_run {

@@ -5,10 +5,13 @@
 //! queued or running. Closing the worker drops queued items and interrupts
 //! the current item; an item that fails is logged and skipped.
 
+use std::any::Any;
 use std::collections::VecDeque;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -95,7 +98,17 @@ where
                         let guard = OutstandingGuard {
                             shared: Arc::clone(&worker),
                         };
-                        match process(item).await {
+                        // A panic is this item's defect: it is logged and the
+                        // loop keeps going, as upstream's `catchCause` does.
+                        // The async block also catches a panic while `process`
+                        // builds the item's future.
+                        let outcome = AssertUnwindSafe(async { process(item).await })
+                            .catch_unwind()
+                            .await
+                            .unwrap_or_else(|panic| {
+                                Err(WorkerItemError::Die(panic_message(panic.as_ref())))
+                            });
+                        match outcome {
                             Ok(()) | Err(WorkerItemError::Interrupt) => {}
                             Err(WorkerItemError::Fail(message) | WorkerItemError::Die(message)) => {
                                 tracing::error!("DrainableWorker item failed {message}");
@@ -172,6 +185,17 @@ impl<A> Drop for DrainableWorker<A> {
     }
 }
 
+/// The message of a caught panic payload, as `panic!` formats it.
+pub(crate) fn panic_message(panic: &(dyn Any + Send)) -> String {
+    if let Some(message) = panic.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = panic.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "panic with a non-string payload".to_owned()
+    }
+}
+
 struct OutstandingGuard<A> {
     shared: Arc<Shared<A>>,
 }
@@ -221,6 +245,38 @@ mod tests {
         assert_eq!(
             worker.logged_errors(),
             ["typed failure".to_string(), "defect".to_string()]
+        );
+        worker.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_panicking_item_is_logged_and_the_worker_keeps_draining() {
+        let processed = Arc::new(AsyncMutex::new(Vec::new()));
+        let seen = Arc::clone(&processed);
+        let worker = DrainableWorker::spawn(move |item: String| {
+            let seen = Arc::clone(&seen);
+            async move {
+                if item == "panic-in-body" {
+                    panic!("body boom");
+                }
+                if item == "panic-while-building" {
+                    panic!("build boom");
+                }
+                seen.lock().await.push(item);
+                Ok(())
+            }
+        });
+        worker.enqueue("panic-in-body".into());
+        worker.enqueue("panic-while-building".into());
+        worker.enqueue("ok".into());
+        // Backstop: before the fix, drain never resolved.
+        tokio::time::timeout(std::time::Duration::from_secs(5), worker.drain())
+            .await
+            .expect("drain resolves after an item panics");
+        assert_eq!(processed.lock().await.as_slice(), ["ok"]);
+        assert_eq!(
+            worker.logged_errors(),
+            ["body boom".to_string(), "build boom".to_string()]
         );
         worker.close().await;
     }

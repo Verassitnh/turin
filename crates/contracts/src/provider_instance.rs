@@ -6,7 +6,7 @@
 //! driver-specific config payload stays opaque here; each driver owns its own
 //! config schema.
 
-use crate::base_schemas::{ContractError, TrimmedNonEmptyString, js_trim};
+use crate::base_schemas::{ContractError, TrimmedNonEmptyString, js_len, js_trim};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
@@ -28,8 +28,7 @@ fn is_slug(value: &str) -> bool {
         _ => return false,
     }
     // `Schema.isMaxLength` counts UTF-16 code units.
-    value.encode_utf16().count() <= PROVIDER_SLUG_MAX_CHARS
-        && chars.all(|c| PROVIDER_SLUG_REST.contains(c))
+    js_len(value) <= PROVIDER_SLUG_MAX_CHARS && chars.all(|c| PROVIDER_SLUG_REST.contains(c))
 }
 
 macro_rules! provider_slug {
@@ -134,7 +133,7 @@ impl ProviderInstanceEnvironmentVariableName {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
         let trimmed = js_trim(value.as_ref());
         let valid = !trimmed.is_empty()
-            && trimmed.encode_utf16().count() <= ENVIRONMENT_VARIABLE_NAME_MAX_CHARS
+            && js_len(trimmed) <= ENVIRONMENT_VARIABLE_NAME_MAX_CHARS
             && trimmed
                 .bytes()
                 .next()

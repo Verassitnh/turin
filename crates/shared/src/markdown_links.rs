@@ -4,9 +4,9 @@ use crate::file_links::{
     FilePathPosition, format_file_path_position, parse_file_url_href, resolve_path_link_target,
     split_file_path_position,
 };
-use crate::js_string::{decode_uri_component, is_js_whitespace_char};
+use crate::js_string::decode_uri_component;
 use crate::path::{is_windows_absolute_path, strip_slash_prefixed_windows_drive};
-use turin_contracts::base_schemas::js_trim;
+use turin_contracts::base_schemas::{is_js_whitespace, js_trim};
 
 // /^(~\/|\.{1,2}\/)/
 fn is_relative_path_prefix(value: &str) -> bool {
@@ -242,11 +242,7 @@ fn strip_position_suffix(value: &str) -> &str {
 /// It does not resolve paths or turn plain prose and fenced code into links.
 pub fn inline_code_file_path_candidate(code_text: &str) -> Option<String> {
     let trimmed = js_trim(code_text);
-    if trimmed.is_empty()
-        || trimmed
-            .chars()
-            .any(|c| is_js_whitespace_char(c) || c == '`')
-    {
+    if trimmed.is_empty() || trimmed.chars().any(|c| is_js_whitespace(c) || c == '`') {
         return None;
     }
 
@@ -501,7 +497,7 @@ fn markdown_run_end_finder<'a>(
 }
 
 fn is_not_whitespace(ch: char) -> bool {
-    !is_js_whitespace_char(ch)
+    !is_js_whitespace(ch)
 }
 fn is_quote(ch: char) -> bool {
     ch == '"' || ch == '\''
@@ -510,7 +506,7 @@ fn is_angle_end(ch: char) -> bool {
     ch == '>' || ch == '\n'
 }
 fn is_bare_end(ch: char) -> bool {
-    is_js_whitespace_char(ch) || ch == ')'
+    is_js_whitespace(ch) || ch == ')'
 }
 
 fn markdown_link_tail_scanner(markdown: &str) -> impl FnMut(usize) -> Option<usize> + '_ {

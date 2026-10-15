@@ -1,6 +1,7 @@
 //! Port of upstream/packages/shared/src/threadLinks.ts
 
-use crate::js_string::{decode_uri_component, is_js_whitespace_char};
+use crate::js_string::decode_uri_component;
+use turin_contracts::base_schemas::is_js_whitespace;
 use turin_contracts::base_schemas::{ThreadId, js_trim};
 
 /// Agents mention another thread in Markdown as `[title](t3-thread://v1/<threadId>)`. The id is
@@ -38,7 +39,7 @@ pub fn format_thread_link(thread_id: &str, label: &str) -> String {
     let mut collapsed = String::with_capacity(spaced.len());
     let mut in_whitespace = false;
     for ch in spaced.chars() {
-        if is_js_whitespace_char(ch) {
+        if is_js_whitespace(ch) {
             if !in_whitespace {
                 collapsed.push(' ');
             }
@@ -194,7 +195,7 @@ fn href_link(chars: &[char], start: usize) -> Option<(usize, String)> {
     }
     let id_start = href_start + prefix.len();
     let id_end = (id_start..chars.len())
-        .find(|&at| is_js_whitespace_char(chars[at]) || chars[at] == ')')
+        .find(|&at| is_js_whitespace(chars[at]) || chars[at] == ')')
         .unwrap_or(chars.len());
     if id_end == id_start || chars.get(id_end) != Some(&')') {
         return None;

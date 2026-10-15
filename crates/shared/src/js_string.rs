@@ -7,9 +7,29 @@
 //! trimming; the helpers here cover UTF-16 indexing and searching so the ported
 //! logic keeps upstream's offsets and edge cases.
 
+use turin_contracts::base_schemas::{JS_WHITESPACE_CHARS, is_js_whitespace};
+
 /// Length of `value` in UTF-16 code units (`String.prototype.length`).
 pub fn utf16_len(value: &str) -> usize {
     value.chars().map(|c| c.len_utf16()).sum()
+}
+
+/// `.replace(/\s+/g, replacement)`: every run of JS whitespace becomes one `replacement`.
+pub fn replace_js_whitespace_runs(text: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_run = false;
+    for ch in text.chars() {
+        if is_js_whitespace(ch) {
+            if !in_run {
+                out.push_str(replacement);
+            }
+            in_run = true;
+        } else {
+            out.push(ch);
+            in_run = false;
+        }
+    }
+    out
 }
 
 /// `String.prototype.charCodeAt(index)`: the UTF-16 code unit at `index`, if any.
@@ -147,7 +167,10 @@ pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
                 continue;
             }
             let lowered = c.to_lowercase().next().unwrap_or(c);
-            let weight = if is_js_whitespace_char(c) || c.is_control() {
+            let weight = if let Some(rank) = JS_WHITESPACE_CHARS.iter().position(|ws| *ws == c) {
+                // Above raw control code points (all < 200), below punctuation.
+                200 + rank as u32
+            } else if c.is_control() {
                 c as u32
             } else if let Some(index) = COLLATION_PUNCTUATION.find(c) {
                 1_000 + index as u32
@@ -180,30 +203,6 @@ pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
 /// (it has U+0085 and lacks U+FEFF), so patterns ported from JS splice this in:
 /// `format!("[{JS_WS}]")` for `\s`, `format!("[^{JS_WS}]")` for `\S`.
 pub const JS_WS: &str = r"\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
-
-/// JS `\s` whitespace test on a `char`: WhiteSpace + LineTerminator, so U+FEFF
-/// is in and U+0085 is out (unlike Rust's `char::is_whitespace`).
-pub fn is_js_whitespace_char(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{0009}'
-            | '\u{000a}'
-            | '\u{000b}'
-            | '\u{000c}'
-            | '\u{000d}'
-            | '\u{0020}'
-            | '\u{00a0}'
-            | '\u{1680}'
-            | '\u{2000}'
-            ..='\u{200a}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202f}'
-                | '\u{205f}'
-                | '\u{3000}'
-                | '\u{feff}'
-    )
-}
 
 /// JS `URIError`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -348,6 +347,22 @@ mod tests {
         assert_eq!(locale_compare("b", "r\u{e9}sum\u{e9}"), Less);
         assert_eq!(locale_compare("same", "same"), std::cmp::Ordering::Equal);
         assert_eq!(locale_compare("ab", "a"), Greater);
+    }
+
+    #[test]
+    fn locale_compare_sorts_every_whitespace_before_letters() {
+        use std::cmp::Ordering::{Greater, Less};
+        // U+2003 and U+3000 used to take their code point as weight, which put
+        // them after ASCII letters.
+        assert_eq!(locale_compare("\u{2003}x", "ax"), Less);
+        assert_eq!(locale_compare("\u{3000}x", "ax"), Less);
+        assert_eq!(locale_compare("\u{2003}x", "-x"), Less);
+        assert_eq!(locale_compare("\u{2003}x", "9x"), Less);
+        assert_eq!(locale_compare("ax", "\u{2003}x"), Greater);
+        assert_eq!(
+            locale_compare("\u{2003}", "\u{2003}"),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]

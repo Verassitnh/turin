@@ -7160,6 +7160,7 @@ dependencies = [
  "parking_lot",
  "pretty_assertions",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7170,6 +7171,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "turin-contracts",
+ "url",
  "uuid",
 ]
 
@@ -7213,8 +7215,11 @@ dependencies = [
  "anyhow",
  "chrono",
  "chrono-tz",
+ "fancy-regex",
+ "futures",
  "iana-time-zone",
  "indexmap",
+ "libc",
  "markdown",
  "parking_lot",
  "percent-encoding",

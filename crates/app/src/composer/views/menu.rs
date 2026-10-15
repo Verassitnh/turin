@@ -516,7 +516,8 @@ impl ChatComposer {
                 .flex_col()
                 .max_h(rems(18.))
                 .overflow_y_scroll()
-                .p_1()
+                // CommandList: `not-empty:p-2`.
+                .p_2()
                 .children(rows)
                 .into_any_element()
         };
@@ -577,11 +578,13 @@ impl ChatComposer {
         div()
             .id(("composer-menu-item", index))
             .flex()
-            .min_h(rems(2.))
+            // Desktop rows: `sm:min-h-7`, `py-1.5`, text-xs (28px at 1rem line height).
+            .min_h(rems(1.75))
             .items_center()
             .gap_2()
             .px_2()
-            .py_1()
+            .py(rems(0.375))
+            .line_height(TEXT_XS.line_height)
             .rounded(RADIUS_LG)
             .cursor(CursorStyle::PointingHand)
             .when(active, |this| {

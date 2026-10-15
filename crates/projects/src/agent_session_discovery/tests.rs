@@ -481,6 +481,23 @@ struct FsDouble {
     reopened_bytes: Arc<Mutex<usize>>,
     /// Caps every `read_alloc` request, forcing short reads.
     max_read: Option<usize>,
+    /// From the `after`-th call onward, `stat` or `open` of `path` uses `target`.
+    call_redirects: Vec<CallRedirect>,
+    calls: Mutex<HashMap<(CallKind, String), usize>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum CallKind {
+    Stat,
+    Open,
+}
+
+struct CallRedirect {
+    kind: CallKind,
+    path: String,
+    /// Calls before this one are answered normally (1-based count).
+    after: usize,
+    target: String,
 }
 
 impl FsDouble {
@@ -495,12 +512,26 @@ impl FsDouble {
             .and_then(|redirect| redirect(path))
             .unwrap_or_else(|| path.to_owned())
     }
+
+    /// Counts this call and applies any redirect whose threshold it has reached.
+    fn resolve_call(&self, kind: CallKind, path: &str) -> String {
+        let count = {
+            let mut calls = self.calls.lock();
+            let count = calls.entry((kind, path.to_owned())).or_insert(0);
+            *count += 1;
+            *count
+        };
+        self.call_redirects
+            .iter()
+            .find(|redirect| redirect.kind == kind && redirect.path == path && count >= redirect.after)
+            .map_or_else(|| self.resolve(path), |redirect| redirect.target.clone())
+    }
 }
 
 #[async_trait]
 impl ScannerFileSystem for FsDouble {
     async fn stat(&self, path: &str) -> Option<FileStat> {
-        let resolved = self.resolve(path);
+        let resolved = self.resolve_call(CallKind::Stat, path);
         let target = self
             .stat_redirects
             .get(&resolved)
@@ -530,7 +561,7 @@ impl ScannerFileSystem for FsDouble {
             opens.push(path.to_owned());
             opens.iter().filter(|open| open.as_str() == path).count()
         };
-        let file = self.inner.open(&self.resolve(path)).await?;
+        let file = self.inner.open(&self.resolve_call(CallKind::Open, path)).await?;
         Some(Box::new(CountingFile {
             inner: file,
             requests: Arc::clone(&self.read_requests),
@@ -2084,3 +2115,127 @@ async fn rechecks_snapshot_cwd_after_replacement() {
         }
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn checks_file_identity_and_provider_before_skipping_completed_history() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture.workspace("t3code-completed-workspace-");
+    let file_path = fixture.codex_rollout("2026", "08", "24", "rollout-replaced.jsonl");
+    let contents = |session_id: &str| {
+        [
+            json!({"type": "session_meta", "payload": {"id": session_id, "cwd": workspace.path()}}).to_string(),
+            json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Imported prompt"}}).to_string(),
+        ]
+        .join("\n")
+    };
+    write_transcript(&file_path, &contents("original-session"), now);
+    let scanner = fixture.scanner();
+
+    let initial = collect_outcomes(&scanner, workspace.path(), &[]).await;
+    let imported = match &initial[0] {
+        AgentSessionRecentThread::Importable { source, .. } => source.clone(),
+        other => panic!("expected Importable, got {other:?}"),
+    };
+    let completed = collect_outcomes(&scanner, workspace.path(), std::slice::from_ref(&imported)).await;
+    assert_eq!(outcome_tag(&completed[0]), "AlreadyImported");
+    let mut wrong_provider = imported.clone();
+    wrong_provider.provider = AgentSessionSource::ClaudeAgent;
+    let wrong = collect_outcomes(&scanner, workspace.path(), &[wrong_provider]).await;
+    assert_eq!(outcome_tag(&wrong[0]), "Importable");
+
+    // Keep the old inode allocated while the path is replaced by an equal-size file.
+    let _held = fs::File::open(&file_path).expect("hold inode");
+    fs::remove_file(&file_path).expect("remove");
+    write_transcript(&file_path, &contents("replaced-session"), now);
+    let replaced = collect_outcomes(&scanner, workspace.path(), std::slice::from_ref(&imported)).await;
+    match &replaced[0] {
+        AgentSessionRecentThread::Importable { thread, source } => {
+            assert_eq!(thread.provider_session_id, "replaced-session");
+            assert_eq!(source.size, imported.size);
+            assert_eq!(source.mtime_ms, imported.mtime_ms);
+        }
+        other => panic!("expected Importable, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn reports_stat_read_and_parse_failures_as_skipped() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture.workspace("t3code-workspace-");
+    let missing = fixture.codex_home.join("missing.jsonl");
+    let session = |session_id: &str| {
+        [
+            json!({"type": "session_meta", "payload": {"id": session_id, "cwd": workspace.path()}}).to_string(),
+            json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Import this session"}}).to_string(),
+        ]
+        .join("\n")
+    };
+    let stat_path = fixture.codex_rollout("2026", "08", "24", "rollout-stat.jsonl");
+    let read_path = fixture.codex_rollout("2026", "08", "24", "rollout-read.jsonl");
+    let parse_path = fixture.codex_rollout("2026", "08", "24", "rollout-parse.jsonl");
+    write_transcript(&stat_path, &session("stat-session"), now);
+    write_transcript(&read_path, &session("read-session"), now);
+    // A session_meta with no user message: the parser rejects it.
+    write_transcript(
+        &parse_path,
+        &json!({"type": "session_meta", "payload": {"id": "parse-session", "cwd": workspace.path()}}).to_string(),
+        now,
+    );
+    let double = fs_double(|double| {
+        // The discovery stat is call 1. The import stat (call 2) finds nothing.
+        double.call_redirects.push(CallRedirect {
+            kind: CallKind::Stat,
+            path: stat_path.to_string_lossy().into_owned(),
+            after: 2,
+            target: missing.to_string_lossy().into_owned(),
+        });
+        // The metadata open is call 1. The import read (call 2) finds nothing.
+        double.call_redirects.push(CallRedirect {
+            kind: CallKind::Open,
+            path: read_path.to_string_lossy().into_owned(),
+            after: 2,
+            target: missing.to_string_lossy().into_owned(),
+        });
+    });
+
+    let outcomes = collect_outcomes(&fixture.scanner_with(double), workspace.path(), &[]).await;
+
+    let tags: Vec<&str> = outcomes.iter().map(outcome_tag).collect();
+    assert_eq!(tags, vec!["Skipped", "Skipped", "Skipped"]);
+}
+
+#[tokio::test]
+async fn imports_visible_history_from_a_transcript_with_an_oversized_tool_record() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture.workspace("t3code-workspace-");
+    let mut transcript = format!(
+        "{}\n{}\n",
+        json!({"type": "session_meta", "payload": {"id": "large-session", "cwd": workspace.path()}}),
+        json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Import this large session"}}),
+    );
+    // A last record of 16 MiB + 1 bytes, all spaces after the tool record.
+    let tool = json!({"type": "tool_result", "data": ""}).to_string();
+    transcript.push_str(&tool);
+    transcript.extend(std::iter::repeat_n(' ', 16 * 1024 * 1024 + 1 - tool.len()));
+    write_transcript(
+        &fixture.codex_rollout("2026", "08", "24", "rollout-large.jsonl"),
+        &transcript,
+        now,
+    );
+
+    let threads = fixture.threads(workspace.path()).await;
+
+    assert_eq!(thread_session_ids(&threads), vec!["large-session".to_owned()]);
+    assert_eq!(
+        thread_messages(&threads),
+        vec![vec!["Import this large session".to_owned()]]
+    );
+}
+

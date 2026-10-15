@@ -2,15 +2,13 @@
 //!
 //! Also home of the guide-generation seam types upstream imports from
 //! `@t3tools/provider-core/server/textGeneration` (`ReviewGuideGenerationInput`,
-//! `ReviewGuideStackLayer`, `ReviewGuideGenerationResult`); move them to `turin-provider-core`
-//! when that crate ports `textGeneration.ts`.
+//! `ReviewGuideStackLayer`); the result is provider-core's and is re-exported here.
 
 use std::sync::LazyLock;
 
 use regex::Regex;
 use turin_contracts::model_selection::ModelSelection;
 use turin_contracts::pull_request::{PullRequestActivity, PullRequestDetail};
-use turin_contracts::pull_request_review_guide::PullRequestReviewGuideStop;
 
 use crate::shared::js::js_trim;
 
@@ -95,12 +93,9 @@ impl ReviewGuideGenerationInput {
     }
 }
 
-/// `ReviewGuideGenerationResult`: a guide as the model wrote it, before the server holds it to
-/// the change (`PullRequestReviewGuide` without `headSha`, `generatedAt` and `modelSelection`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReviewGuideGenerationResult {
-    pub stops: Vec<PullRequestReviewGuideStop>,
-}
+/// `ReviewGuideGenerationResult` is provider-core's: the stops as the model wrote them, which
+/// [`super::review_guide_normalize::normalize_review_guide`] checks and clamps before anything is stored.
+pub use turin_provider_core::text_generation::ReviewGuideGenerationResult;
 
 /// Longest a settled remark is quoted. The guide needs what was raised, not the argument.
 const SETTLED_REMARK_CHARS: usize = 200;

@@ -7728,6 +7728,7 @@ dependencies = [
  "tracing",
  "turin-contracts",
  "turin-persistence",
+ "turin-provider-core",
  "uuid",
 ]
 

@@ -6,11 +6,12 @@ use std::sync::LazyLock;
 use regex::Regex;
 use turin_contracts::base_schemas::{PositiveInt, TrimmedNonEmptyString};
 use turin_contracts::pull_request_review_guide::{
-    PullRequestReviewGuideExcerpt, PullRequestReviewGuideExcerptSide, PullRequestReviewGuideFile,
+    PullRequestReviewGuideAttention, PullRequestReviewGuideExcerpt,
+    PullRequestReviewGuideExcerptSide, PullRequestReviewGuideFile, PullRequestReviewGuideNote,
     PullRequestReviewGuideStop,
 };
+use turin_provider_core::text_generation::{ReviewGuideExcerptOutput, ReviewGuideGenerationResult};
 
-use super::review_guide_input::ReviewGuideGenerationResult;
 use crate::shared::js::js_trim;
 
 /// Longest excerpt kept. The reader wants the lines that carry the idea, not the whole hunk.
@@ -104,18 +105,16 @@ pub fn parse_review_guide_change(name_only: &str, patch: &str) -> ReviewGuideCha
     }
 }
 
-fn positive(value: u64, fallback: PositiveInt) -> PositiveInt {
-    PositiveInt::new(value).unwrap_or(fallback)
-}
-
 /// Narrows an excerpt to the changed lines it covers: from the first changed line it overlaps to
 /// the last. `None` when it covers none, which means the model pointed somewhere the change is not.
+/// The model's lines are signed and may be zero; a clamped range is inside a changed hunk, so it is
+/// positive.
 fn clamp_excerpt(
-    excerpt: &PullRequestReviewGuideExcerpt,
+    excerpt: &ReviewGuideExcerptOutput,
     change: &ReviewGuideChange,
 ) -> Option<PullRequestReviewGuideExcerpt> {
-    let start = excerpt.start.get().min(excerpt.end.get());
-    let end = excerpt.start.get().max(excerpt.end.get());
+    let start = excerpt.start.min(excerpt.end);
+    let end = excerpt.start.max(excerpt.end);
     let ranges = change
         .hunks
         .get(excerpt.path.as_str())
@@ -126,14 +125,22 @@ fn clamp_excerpt(
     let overlapping: Vec<&LineRange> = ranges
         .into_iter()
         .flatten()
-        .filter(|hunk| hunk.start <= end && start <= hunk.end)
+        .filter(|hunk| (hunk.start as i64) <= end && start <= hunk.end as i64)
         .collect();
     let (first, last) = (overlapping.first()?, overlapping.last()?);
+    let start = start.max(first.start as i64);
+    let end = end.min(last.end as i64);
     Some(PullRequestReviewGuideExcerpt {
-        start: positive(start.max(first.start), excerpt.start),
-        end: positive(end.min(last.end), excerpt.end),
-        ..excerpt.clone()
+        path: TrimmedNonEmptyString::new(excerpt.path.as_str()).ok()?,
+        side: excerpt.side,
+        start: PositiveInt::new(start as u64)?,
+        end: PositiveInt::new(end as u64)?,
+        caption: excerpt.caption.clone(),
     })
+}
+
+fn positive(value: u64, fallback: PositiveInt) -> PositiveInt {
+    PositiveInt::new(value).unwrap_or(fallback)
 }
 
 /// Joins a stop's excerpts that overlap or touch in one file, then caps each one's length.
@@ -186,53 +193,73 @@ fn non_empty(value: &str) -> bool {
 
 /// Holds a generated guide to the change it describes. A model's line numbers and ids are
 /// suggestions: excerpts are clamped to changed lines, notes must sit inside what is left, and any
-/// changed file the tour skipped lands in a closing skim stop.
+/// changed file the tour skipped lands in a closing skim stop. Returns the stops the guide keeps.
 pub fn normalize_review_guide(
     guide: ReviewGuideGenerationResult,
     change: &ReviewGuideChange,
-) -> ReviewGuideGenerationResult {
+) -> Vec<PullRequestReviewGuideStop> {
     let changed: HashSet<&str> = change.files.iter().map(String::as_str).collect();
     let in_change = |path: &str| changed.contains(path);
 
     let shaped: Vec<PullRequestReviewGuideStop> = guide
         .stops
         .into_iter()
-        .filter(|stop| non_empty(stop.title.as_str()))
-        .map(|stop| {
+        .filter_map(|stop| {
+            if !non_empty(&stop.title) {
+                return None;
+            }
             let excerpts = merge_excerpts(
                 stop.excerpts
                     .iter()
-                    .filter(|excerpt| in_change(excerpt.path.as_str()))
+                    .filter(|excerpt| in_change(&excerpt.path))
                     .filter_map(|excerpt| clamp_excerpt(excerpt, change))
                     .collect(),
             );
-            let attention = stop
-                .attention
-                .filter(|attention| non_empty(attention.note.as_str()));
+            let attention = stop.attention.and_then(|attention| {
+                if !non_empty(&attention.note) {
+                    return None;
+                }
+                Some(PullRequestReviewGuideAttention {
+                    kind: attention.kind,
+                    note: TrimmedNonEmptyString::new(attention.note.as_str()).ok()?,
+                })
+            });
             let files = stop
                 .files
                 .into_iter()
-                .filter(|file| in_change(file.path.as_str()))
-                .map(
-                    |PullRequestReviewGuideFile { path, note }| PullRequestReviewGuideFile {
-                        path,
-                        note: note.filter(|note| !js_trim(note).is_empty()),
-                    },
-                )
+                .filter(|file| in_change(&file.path))
+                .filter_map(|file| {
+                    Some(PullRequestReviewGuideFile {
+                        path: TrimmedNonEmptyString::new(file.path.as_str()).ok()?,
+                        note: Some(file.note).filter(|note| !js_trim(note).is_empty()),
+                    })
+                })
                 .collect();
             let notes = stop
                 .notes
                 .into_iter()
-                .filter(|note| {
-                    non_empty(note.title.as_str())
+                .filter_map(|note| {
+                    let line = u64::try_from(note.line).ok().and_then(PositiveInt::new)?;
+                    let inside = non_empty(&note.title)
                         && excerpts.iter().any(|excerpt| {
-                            excerpt.path == note.path
-                                && excerpt.start <= note.line
-                                && note.line <= excerpt.end
-                        })
+                            excerpt.path.as_str() == note.path
+                                && excerpt.start.get() <= line.get()
+                                && line.get() <= excerpt.end.get()
+                        });
+                    if !inside {
+                        return None;
+                    }
+                    Some(PullRequestReviewGuideNote {
+                        path: TrimmedNonEmptyString::new(note.path.as_str()).ok()?,
+                        line,
+                        title: TrimmedNonEmptyString::new(note.title.as_str()).ok()?,
+                        body: note.body,
+                    })
                 })
                 .collect();
-            PullRequestReviewGuideStop {
+            Some(PullRequestReviewGuideStop {
+                title: TrimmedNonEmptyString::new(stop.title.as_str()).ok()?,
+                summary: stop.summary,
                 attention,
                 excerpts,
                 files,
@@ -240,10 +267,10 @@ pub fn normalize_review_guide(
                 questions: stop
                     .questions
                     .into_iter()
-                    .filter(|q| non_empty(q.as_str()))
+                    .filter(|question| non_empty(question))
+                    .filter_map(|question| TrimmedNonEmptyString::new(question.as_str()).ok())
                     .collect(),
-                ..stop
-            }
+            })
         })
         .collect();
 
@@ -289,14 +316,16 @@ pub fn normalize_review_guide(
         });
     }
 
-    ReviewGuideGenerationResult { stops }
+    stops
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
-    use turin_contracts::pull_request_review_guide::PullRequestReviewGuideNote;
+    use turin_provider_core::text_generation::{
+        ReviewGuideFileOutput, ReviewGuideNoteOutput, ReviewGuideStopOutput,
+    };
 
     // `git diff --unified=0` of: src/a.ts with lines 10-14 and 40-59 added and an old line 30
     // removed; src/gone.ts deleted (old lines 1-20); docs/readme.md with line 3 added.
@@ -336,9 +365,12 @@ mod tests {
         TrimmedNonEmptyString::new(value).unwrap()
     }
 
-    fn stop(edit: impl FnOnce(&mut PullRequestReviewGuideStop)) -> PullRequestReviewGuideStop {
-        let mut stop = PullRequestReviewGuideStop {
-            title: t("Stop"),
+    // The model's stops, as provider-core hands them over. Lines are signed and titles may be empty.
+
+    /// A raw stop titled `Stop`, shaped by `edit`.
+    fn stop(edit: impl FnOnce(&mut ReviewGuideStopOutput)) -> ReviewGuideStopOutput {
+        let mut stop = ReviewGuideStopOutput {
+            title: "Stop".to_owned(),
             summary: String::new(),
             attention: None,
             excerpts: vec![],
@@ -350,9 +382,46 @@ mod tests {
         stop
     }
 
-    fn guide(stops: Vec<PullRequestReviewGuideStop>) -> ReviewGuideGenerationResult {
+    fn guide(stops: Vec<ReviewGuideStopOutput>) -> ReviewGuideGenerationResult {
         ReviewGuideGenerationResult { stops }
     }
+
+    fn raw_excerpt(path: &str, start: i64, end: i64) -> ReviewGuideExcerptOutput {
+        raw_excerpt_on(path, start, end, PullRequestReviewGuideExcerptSide::New)
+    }
+
+    fn raw_excerpt_on(
+        path: &str,
+        start: i64,
+        end: i64,
+        side: PullRequestReviewGuideExcerptSide,
+    ) -> ReviewGuideExcerptOutput {
+        ReviewGuideExcerptOutput {
+            path: path.to_owned(),
+            side,
+            start,
+            end,
+            caption: String::new(),
+        }
+    }
+
+    fn raw_file(path: &str, note: Option<&str>) -> ReviewGuideFileOutput {
+        ReviewGuideFileOutput {
+            path: path.to_owned(),
+            note: note.unwrap_or_default().to_owned(),
+        }
+    }
+
+    fn raw_note(path: &str, line: i64, title: &str) -> ReviewGuideNoteOutput {
+        ReviewGuideNoteOutput {
+            path: path.to_owned(),
+            line,
+            title: title.to_owned(),
+            body: String::new(),
+        }
+    }
+
+    // The stops the normalizer keeps, as the contract stores them.
 
     fn excerpt(path: &str, start: u64, end: u64) -> PullRequestReviewGuideExcerpt {
         excerpt_on(path, start, end, PullRequestReviewGuideExcerptSide::New)
@@ -446,30 +515,30 @@ mod tests {
             guide(vec![stop(|s| {
                 s.excerpts = vec![
                     // Starts on context before the hunk: clamped to the hunk.
-                    excerpt("src/a.ts", 5, 12),
+                    raw_excerpt("src/a.ts", 5, 12),
                     // Touches the previous one once clamped: merged.
-                    excerpt("src/a.ts", 13, 14),
+                    raw_excerpt("src/a.ts", 13, 14),
                     // Spans the whole second hunk and beyond: clamped to it.
-                    excerpt("src/a.ts", 38, 80),
+                    raw_excerpt("src/a.ts", 38, 80),
                     // On no changed line: dropped.
-                    excerpt("src/a.ts", 20, 25),
+                    raw_excerpt("src/a.ts", 20, 25),
                     // Removed code shown from the old side.
-                    excerpt_on("src/gone.ts", 2, 8, PullRequestReviewGuideExcerptSide::Old),
+                    raw_excerpt_on("src/gone.ts", 2, 8, PullRequestReviewGuideExcerptSide::Old),
                 ];
-                s.files = vec![file("docs/readme.md", Some(""))];
+                s.files = vec![raw_file("docs/readme.md", Some(""))];
             })]),
             &change(),
         );
         assert_eq!(
-            result.stops[0].excerpts,
+            result[0].excerpts,
             vec![
                 excerpt("src/a.ts", 10, 14),
                 excerpt("src/a.ts", 40, 59),
                 excerpt_on("src/gone.ts", 2, 8, PullRequestReviewGuideExcerptSide::Old),
             ]
         );
-        assert_eq!(result.stops[0].files, vec![file("docs/readme.md", None)]);
-        assert_eq!(result.stops.len(), 1);
+        assert_eq!(result[0].files, vec![file("docs/readme.md", None)]);
+        assert_eq!(result.len(), 1);
     }
 
     #[test]
@@ -479,67 +548,92 @@ mod tests {
             "--- a/big.ts\n+++ b/big.ts\n@@ -0,0 +1,100 @@\n",
         );
         let result = normalize_review_guide(
-            guide(vec![stop(|s| s.excerpts = vec![excerpt("big.ts", 1, 100)])]),
+            guide(vec![stop(|s| {
+                s.excerpts = vec![raw_excerpt("big.ts", 1, 100)]
+            })]),
             &long,
         );
-        assert_eq!(result.stops[0].excerpts, vec![excerpt("big.ts", 1, 25)]);
+        assert_eq!(result[0].excerpts, vec![excerpt("big.ts", 1, 25)]);
     }
 
     #[test]
     fn drops_notes_outside_the_stops_remaining_excerpts() {
-        let note = |path: &str, line: u64, title: &str| PullRequestReviewGuideNote {
-            path: t(path),
-            line: PositiveInt::new(line).unwrap(),
-            title: t(title),
-            body: String::new(),
-        };
         let result = normalize_review_guide(
             guide(vec![stop(|s| {
-                s.excerpts = vec![excerpt("src/a.ts", 5, 12)];
+                s.excerpts = vec![raw_excerpt("src/a.ts", 5, 12)];
                 s.notes = vec![
-                    note("src/a.ts", 11, "Inside"),
-                    note("src/a.ts", 6, "Clamped away"),
-                    note("src/other.ts", 11, "Other file"),
+                    raw_note("src/a.ts", 11, "Inside"),
+                    raw_note("src/a.ts", 6, "Clamped away"),
+                    raw_note("src/other.ts", 11, "Other file"),
                 ];
             })]),
             &change(),
         );
-        let titles: Vec<&str> = result.stops[0]
-            .notes
-            .iter()
-            .map(|n| n.title.as_str())
-            .collect();
+        let titles: Vec<&str> = result[0].notes.iter().map(|n| n.title.as_str()).collect();
         assert_eq!(titles, vec!["Inside"]);
+    }
+
+    #[test]
+    fn drops_a_note_on_a_line_the_model_wrote_as_zero_or_negative() {
+        let result = normalize_review_guide(
+            guide(vec![stop(|s| {
+                s.excerpts = vec![raw_excerpt("src/a.ts", 10, 14)];
+                s.notes = vec![
+                    raw_note("src/a.ts", 0, "Zero"),
+                    raw_note("src/a.ts", -3, "Negative"),
+                    raw_note("src/a.ts", 12, "Kept"),
+                ];
+            })]),
+            &change(),
+        );
+        let titles: Vec<&str> = result[0].notes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles, vec!["Kept"]);
+    }
+
+    #[test]
+    fn drops_a_stop_whose_title_is_blank_and_keeps_the_rest_of_the_guide() {
+        let result = normalize_review_guide(
+            guide(vec![
+                stop(|s| {
+                    s.title = "   ".to_owned();
+                    s.excerpts = vec![raw_excerpt("src/a.ts", 10, 12)];
+                }),
+                stop(|s| {
+                    s.title = "Kept".to_owned();
+                    s.excerpts = vec![raw_excerpt("src/a.ts", 40, 41)];
+                }),
+            ]),
+            &change(),
+        );
+        let titles: Vec<&str> = result.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, vec!["Kept", "Other files"]);
     }
 
     #[test]
     fn drops_excerpts_and_files_outside_the_change() {
         let result = normalize_review_guide(
             guide(vec![stop(|s| {
-                s.excerpts = vec![excerpt("src/unchanged.ts", 1, 5)];
+                s.excerpts = vec![raw_excerpt("src/unchanged.ts", 1, 5)];
                 s.files = vec![
-                    file("src/a.ts", Some("edited")),
-                    file("src/unchanged.ts", None),
+                    raw_file("src/a.ts", Some("edited")),
+                    raw_file("src/unchanged.ts", None),
                 ];
             })]),
             &change(),
         );
-        assert_eq!(result.stops[0].excerpts, vec![]);
-        assert_eq!(
-            result.stops[0].files,
-            vec![file("src/a.ts", Some("edited"))]
-        );
+        assert_eq!(result[0].excerpts, vec![]);
+        assert_eq!(result[0].files, vec![file("src/a.ts", Some("edited"))]);
     }
 
     #[test]
     fn puts_changed_files_the_tour_left_out_into_a_closing_stop() {
         let result = normalize_review_guide(
             guide(vec![stop(|s| {
-                s.excerpts = vec![excerpt("src/a.ts", 10, 12)]
+                s.excerpts = vec![raw_excerpt("src/a.ts", 10, 12)];
             })]),
             &change(),
         );
-        let last = result.stops.last().unwrap();
+        let last = result.last().unwrap();
         assert_eq!(last.title.as_str(), "Other files");
         assert_eq!(
             last.files,
@@ -552,24 +646,23 @@ mod tests {
         let result = normalize_review_guide(
             guide(vec![
                 stop(|s| {
-                    s.title = t("Shape");
-                    s.excerpts = vec![excerpt("src/a.ts", 10, 14)];
-                    s.files = vec![file("docs/readme.md", None)];
+                    s.title = "Shape".to_owned();
+                    s.excerpts = vec![raw_excerpt("src/a.ts", 10, 14)];
+                    s.files = vec![raw_file("docs/readme.md", None)];
                 }),
                 stop(|s| {
-                    s.title = t("Implementation");
-                    s.excerpts = vec![excerpt("src/a.ts", 40, 50)];
+                    s.title = "Implementation".to_owned();
+                    s.excerpts = vec![raw_excerpt("src/a.ts", 40, 50)];
                     s.files = vec![
-                        file("src/a.ts", None),
-                        file("docs/readme.md", None),
-                        file("src/gone.ts", None),
+                        raw_file("src/a.ts", None),
+                        raw_file("docs/readme.md", None),
+                        raw_file("src/gone.ts", None),
                     ];
                 }),
             ]),
             &change(),
         );
         let shape: Vec<_> = result
-            .stops
             .iter()
             .map(|s| {
                 (

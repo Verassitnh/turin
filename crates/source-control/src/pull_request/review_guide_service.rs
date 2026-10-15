@@ -681,7 +681,7 @@ impl Inner {
                 .map_err(|error| GuideError::Other(error.to_string()))?,
             generated_at: now_iso(self.deps.clock.as_ref()),
             model_selection: settings.model_selection,
-            stops: normalized.stops,
+            stops: normalized,
         };
         // A newer run for this pull request, say after a push, owns its guide now; this one's
         // result is for an older head and is dropped rather than written over it.
@@ -1218,7 +1218,10 @@ mod tests {
     use turin_contracts::base_schemas::PositiveInt;
     use turin_contracts::pull_request_review_guide::{
         PullRequestReviewGuideExcerpt, PullRequestReviewGuideExcerptSide,
-        PullRequestReviewGuideFile, PullRequestReviewGuideNote, PullRequestReviewGuideStop,
+        PullRequestReviewGuideFile,
+    };
+    use turin_provider_core::text_generation::{
+        ReviewGuideExcerptOutput, ReviewGuideNoteOutput, ReviewGuideStopOutput,
     };
 
     const START: i64 = 1_790_812_800_000;
@@ -2166,8 +2169,8 @@ mod tests {
 
     fn answer(title: &str) -> ReviewGuideGenerationResult {
         ReviewGuideGenerationResult {
-            stops: vec![PullRequestReviewGuideStop {
-                title: TrimmedNonEmptyString::new(title).unwrap(),
+            stops: vec![ReviewGuideStopOutput {
+                title: title.to_owned(),
                 summary: String::new(),
                 attention: None,
                 excerpts: vec![],
@@ -2218,32 +2221,30 @@ mod tests {
                     finish.notified().await;
                     // Written the way a model gets it wrong: an excerpt past the end of the file, a
                     // note outside what is left of it, and a changed file left off the tour.
-                    let t = |value: &str| TrimmedNonEmptyString::new(value).unwrap();
-                    let p = |value: u64| PositiveInt::new(value).unwrap();
                     ReviewGuideGenerationResult {
-                        stops: vec![PullRequestReviewGuideStop {
-                            title: t("The feature"),
+                        stops: vec![ReviewGuideStopOutput {
+                            title: "The feature".to_owned(),
                             summary: "The change.".to_owned(),
                             attention: None,
-                            excerpts: vec![PullRequestReviewGuideExcerpt {
-                                path: t("feature.txt"),
+                            excerpts: vec![ReviewGuideExcerptOutput {
+                                path: "feature.txt".to_owned(),
                                 side: PullRequestReviewGuideExcerptSide::New,
-                                start: p(4),
-                                end: p(40),
+                                start: 4,
+                                end: 40,
                                 caption: String::new(),
                             }],
                             files: vec![],
                             notes: vec![
-                                PullRequestReviewGuideNote {
-                                    path: t("feature.txt"),
-                                    line: p(5),
-                                    title: t("Kept"),
+                                ReviewGuideNoteOutput {
+                                    path: "feature.txt".to_owned(),
+                                    line: 5,
+                                    title: "Kept".to_owned(),
                                     body: "Inside.".to_owned(),
                                 },
-                                PullRequestReviewGuideNote {
-                                    path: t("feature.txt"),
-                                    line: p(30),
-                                    title: t("Dropped"),
+                                ReviewGuideNoteOutput {
+                                    path: "feature.txt".to_owned(),
+                                    line: 30,
+                                    title: "Dropped".to_owned(),
                                     body: "Outside.".to_owned(),
                                 },
                             ],

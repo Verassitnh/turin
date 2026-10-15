@@ -14,6 +14,8 @@ pub mod provider_skills;
 pub mod provider_types;
 pub mod provider_update_required_models;
 pub mod pull_request_markdown;
+pub mod review_guide_tour;
 pub mod shared_support;
 pub mod text_paste;
+pub mod thread_pull_request_compatibility;
 pub mod user_message;

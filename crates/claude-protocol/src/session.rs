@@ -4,26 +4,29 @@ use crate::{
     launch::LaunchOptions,
 };
 use anyhow::{Context, Result};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
+    panic::AssertUnwindSafe,
     pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    process::{Child, Command},
-    sync::{mpsc, oneshot},
+    process::Command,
+    sync::{Notify, mpsc, oneshot},
     task::JoinSet,
 };
 use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::sync::CancellationToken;
 
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<Option<Value>>> + Send>>;
-/// Return None to deliberately leave a dialog unanswered, as the SDK does when no renderer is registered.
+/// `Ok(None)` means "no callback registered" and gets the SDK's default reply for the
+/// subtype. Only `request_user_dialog` stays unanswered; `elicitation` is declined and
+/// every other subtype gets an error response so the CLI never waits forever.
 pub trait ControlHandler: Send + Sync + 'static {
     fn handle(&self, request: ControlRequest, cancel: CancellationToken) -> HandlerFuture;
 }
@@ -116,13 +119,21 @@ impl InboundControl {
     }
 }
 
+/// Status collected after the CLI process is reaped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessExit {
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+}
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum SessionEvent {
     Frame(Frame),
     Stderr(String),
     Error(String),
+    /// Stdout closed. [`SessionEvent::Exit`] carries the reaped status and may arrive before or after this.
     Eof,
+    Exit(ProcessExit),
 }
 enum WriteCommand {
     Json(Value),
@@ -132,17 +143,37 @@ struct Pending {
     sender: oneshot::Sender<Value>,
     subtype: String,
 }
+struct PendingTable {
+    closed: bool,
+    requests: HashMap<String, Pending>,
+}
+impl PendingTable {
+    fn fail_all(&mut self) {
+        self.closed = true;
+        for (id, pending) in self.requests.drain() {
+            let _ = pending.sender.send(json!({
+                "subtype": "error",
+                "request_id": id,
+                "error": "claude process closed"
+            }));
+        }
+    }
+}
 struct Shared {
     writer: mpsc::UnboundedSender<WriteCommand>,
     events: mpsc::UnboundedSender<SessionEvent>,
-    pending: Mutex<HashMap<String, Pending>>,
+    pending: Mutex<PendingTable>,
     unmatched: Mutex<VecDeque<(String, Value)>>,
     inbound: Mutex<HashMap<String, CancellationToken>>,
     handler: Arc<dyn ControlHandler>,
+    exit_status: Mutex<Option<ProcessExit>>,
+    exited: Notify,
+    stderr_tail: Mutex<String>,
+    /// Process-group id. Taken after the leader is reaped so the group can still be signaled.
+    pgid: Mutex<Option<u32>>,
 }
 pub struct ClaudeSession {
     state: Arc<Shared>,
-    child: Child,
     pid: Option<u32>,
     events: mpsc::UnboundedReceiver<SessionEvent>,
     tasks: JoinSet<()>,
@@ -177,25 +208,46 @@ impl ClaudeSession {
         let state = Arc::new(Shared {
             writer,
             events: event_tx,
-            pending: Mutex::new(HashMap::new()),
+            pending: Mutex::new(PendingTable {
+                closed: false,
+                requests: HashMap::new(),
+            }),
             unmatched: Mutex::new(VecDeque::new()),
             inbound: Mutex::new(HashMap::new()),
             handler,
+            exit_status: Mutex::new(None),
+            exited: Notify::new(),
+            stderr_tail: Mutex::new(String::new()),
+            pgid: Mutex::new(pid),
         });
         let mut tasks = JoinSet::new();
-        tasks.spawn(write_loop(stdin, writes, state.events.clone()));
+        tasks.spawn(reaper(child, state.clone()));
+        tasks.spawn(write_loop(stdin, writes, state.clone()));
         tasks.spawn(read_loop(stdout, state.clone()));
-        tasks.spawn(stderr_loop(stderr, state.events.clone()));
+        tasks.spawn(stderr_loop(stderr, state.clone()));
         let mut session = Self {
             state,
-            child,
             pid,
             events,
             tasks,
             initialization: Value::Null,
         };
         // SDK initializes immediately, before any prompt. system/init is emitted only when a turn begins.
-        session.initialization = session.initialize(options.initialize_request()).await?;
+        session.initialization = match session.initialize(options.initialize_request()).await {
+            Ok(value) => value,
+            Err(error) => {
+                let text = error.to_string();
+                if text.contains("claude process closed")
+                    || text.contains("channel closed")
+                    || text.contains("stdin closed")
+                {
+                    let exit = session.wait_for_exit().await;
+                    let tail = session.state.stderr_tail.lock().unwrap().clone();
+                    anyhow::bail!("{}", exit_error(&exit, &tail));
+                }
+                return Err(error);
+            }
+        };
         Ok(session)
     }
     /// Inner `response` object from the initialize control response (commands, models, account, …).
@@ -209,6 +261,9 @@ impl ClaudeSession {
         self.send_raw(serde_json::to_value(message)?)
     }
     pub fn send_raw(&self, value: Value) -> Result<()> {
+        if self.state.pending.lock().unwrap().closed {
+            anyhow::bail!("claude process closed");
+        }
         self.state
             .writer
             .send(WriteCommand::Json(value))
@@ -230,7 +285,11 @@ impl ClaudeSession {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         {
-            self.state.pending.lock().unwrap().insert(
+            let mut pending = self.state.pending.lock().unwrap();
+            if pending.closed {
+                anyhow::bail!("claude process closed");
+            }
+            pending.requests.insert(
                 id.clone(),
                 Pending {
                     sender: tx,
@@ -242,7 +301,7 @@ impl ClaudeSession {
         let response = if let Some(token) = cancel {
             tokio::select! {
                 value = rx => value.context("claude control response channel closed")?,
-                _ = token.cancelled() => { self.state.pending.lock().unwrap().remove(&id); self.send_raw(json!({"type":"control_cancel_request", "request_id":id}))?; anyhow::bail!("control request cancelled"); }
+                _ = token.cancelled() => { self.state.pending.lock().unwrap().requests.remove(&id); self.send_raw(json!({"type":"control_cancel_request", "request_id":id}))?; anyhow::bail!("control request cancelled"); }
             }
         } else {
             rx.await.context("claude control response channel closed")?
@@ -261,13 +320,19 @@ impl ClaudeSession {
             return parse_control_response(response, "await_control_response");
         }
         let (sender, receiver) = oneshot::channel();
-        self.state.pending.lock().unwrap().insert(
-            request_id.into(),
-            Pending {
-                sender,
-                subtype: "await_control_response".into(),
-            },
-        );
+        {
+            let mut pending = self.state.pending.lock().unwrap();
+            if pending.closed {
+                anyhow::bail!("claude process closed");
+            }
+            pending.requests.insert(
+                request_id.into(),
+                Pending {
+                    sender,
+                    subtype: "await_control_response".into(),
+                },
+            );
+        }
         let response = receiver
             .await
             .context("claude control response channel closed")?;
@@ -323,26 +388,49 @@ impl ClaudeSession {
         self.request(json!({"subtype":"mcp_message","server_name":server_name,"message":message}))
             .await
     }
-    pub async fn shutdown(mut self) -> Result<()> {
+    pub async fn shutdown(mut self) -> Result<ProcessExit> {
         let _ = self.state.writer.send(WriteCommand::Close);
-        if tokio::time::timeout(Duration::from_secs(2), self.child.wait())
+        let exit = self.wait_for_exit_with_signals().await;
+        self.pid = None;
+        self.tasks.abort_all();
+        while self.tasks.join_next().await.is_some() {}
+        Ok(exit)
+    }
+    async fn wait_for_exit(&self) -> ProcessExit {
+        if self.state.exit_status.lock().unwrap().is_none() {
+            let _ =
+                tokio::time::timeout(Duration::from_secs(2), self.state.exited.notified()).await;
+        }
+        self.state
+            .exit_status
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(ProcessExit {
+                code: None,
+                signal: None,
+            })
+    }
+    async fn wait_for_exit_with_signals(&self) -> ProcessExit {
+        if self.state.exit_status.lock().unwrap().is_some() {
+            return self.wait_for_exit().await;
+        }
+        let wait = self.state.exited.notified();
+        tokio::pin!(wait);
+        if tokio::time::timeout(Duration::from_secs(2), &mut wait)
             .await
             .is_err()
         {
             signal_group(self.pid, term_signal());
-            if tokio::time::timeout(Duration::from_secs(5), self.child.wait())
+            if tokio::time::timeout(Duration::from_secs(5), &mut wait)
                 .await
                 .is_err()
             {
                 signal_group(self.pid, kill_signal());
-                let _ = self.child.kill().await;
-                let _ = self.child.wait().await;
+                let _ = tokio::time::timeout(Duration::from_secs(1), &mut wait).await;
             }
         }
-        self.pid = None;
-        self.tasks.abort_all();
-        while self.tasks.join_next().await.is_some() {}
-        Ok(())
+        self.wait_for_exit().await
     }
 }
 fn parse_control_response(response: Value, subtype: &str) -> Result<Value> {
@@ -393,10 +481,69 @@ fn signal_group(pid: Option<u32>, signal: i32) {
 }
 #[cfg(not(unix))]
 fn signal_group(_: Option<u32>, _: i32) {}
+fn process_exit(status: Option<std::process::ExitStatus>) -> ProcessExit {
+    let Some(status) = status else {
+        return ProcessExit {
+            code: None,
+            signal: None,
+        };
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return ProcessExit {
+                code: None,
+                signal: Some(signal),
+            };
+        }
+    }
+    ProcessExit {
+        code: status.code(),
+        signal: None,
+    }
+}
+fn exit_error(exit: &ProcessExit, tail: &str) -> String {
+    let mut message = if let Some(signal) = exit.signal {
+        format!("Claude Code process exited with signal {signal}")
+    } else {
+        format!(
+            "Claude Code process exited with code {}",
+            exit.code.unwrap_or(0)
+        )
+    };
+    let tail = tail.trim();
+    if !tail.is_empty() {
+        message.push_str(". stderr: ");
+        message.push_str(tail);
+    }
+    message
+}
+fn push_stderr_tail(tail: &mut String, chunk: &str) {
+    tail.push_str(chunk);
+    let extra = tail.chars().count().saturating_sub(2048);
+    if extra > 0 {
+        let start = tail
+            .char_indices()
+            .nth(extra)
+            .map(|(index, _)| index)
+            .unwrap_or(tail.len());
+        tail.replace_range(..start, "");
+    }
+}
+async fn reaper(mut child: tokio::process::Child, state: Arc<Shared>) {
+    let status = child.wait().await.ok();
+    let pgid = state.pgid.lock().unwrap().take();
+    signal_group(pgid, kill_signal());
+    let exit = process_exit(status);
+    *state.exit_status.lock().unwrap() = Some(exit.clone());
+    state.exited.notify_one();
+    let _ = state.events.send(SessionEvent::Exit(exit));
+}
 async fn write_loop(
     mut stdin: tokio::process::ChildStdin,
     mut writes: mpsc::UnboundedReceiver<WriteCommand>,
-    events: mpsc::UnboundedSender<SessionEvent>,
+    state: Arc<Shared>,
 ) {
     while let Some(command) = writes.recv().await {
         match command {
@@ -404,12 +551,17 @@ async fn write_loop(
                 Ok(mut bytes) => {
                     bytes.push(b'\n');
                     if let Err(e) = stdin.write_all(&bytes).await {
-                        let _ = events.send(SessionEvent::Error(format!("stdin: {e}")));
+                        let _ = state
+                            .events
+                            .send(SessionEvent::Error(format!("stdin: {e}")));
+                        state.pending.lock().unwrap().fail_all();
                         break;
                     }
                 }
                 Err(e) => {
-                    let _ = events.send(SessionEvent::Error(format!("serialize: {e}")));
+                    let _ = state
+                        .events
+                        .send(SessionEvent::Error(format!("serialize: {e}")));
                 }
             },
             WriteCommand::Close => break,
@@ -423,8 +575,12 @@ async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
     let mut lines = FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_STDOUT_LINE));
     let mut handlers = JoinSet::new();
     loop {
+        while handlers.try_join_next().is_some() {}
         match lines.next().await {
             Some(Ok(line)) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
                 let value: Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
                     Err(e) => {
@@ -438,7 +594,8 @@ async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
                     Some("control_response") => {
                         let response = value.get("response").cloned().unwrap_or(Value::Null);
                         if let Some(id) = response.get("request_id").and_then(Value::as_str) {
-                            if let Some(pending) = state.pending.lock().unwrap().remove(id) {
+                            if let Some(pending) = state.pending.lock().unwrap().requests.remove(id)
+                            {
                                 if pending.subtype == "initialize"
                                     && response.get("subtype").and_then(Value::as_str)
                                         == Some("success")
@@ -487,9 +644,7 @@ async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
         }
     }
     handlers.abort_all();
-    for (_, pending) in state.pending.lock().unwrap().drain() {
-        drop(pending.sender);
-    }
+    state.pending.lock().unwrap().fail_all();
     let _ = state.events.send(SessionEvent::Eof);
 }
 fn replay_pending(response: &Value, state: &Arc<Shared>, tasks: &mut JoinSet<()>) {
@@ -531,11 +686,14 @@ fn dispatch(value: Value, state: &Arc<Shared>, tasks: &mut JoinSet<()>) {
     let state = state.clone();
     tasks.spawn(async move {
         let request = ControlRequest { request_id: id.clone(), subtype: subtype.clone(), kind: InboundControl::from_body(&body), body: body.clone() };
-        let outcome = state.handler.handle(request, token).await;
+        let outcome = AssertUnwindSafe(async { state.handler.handle(request, token).await })
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|panic| Err(anyhow::anyhow!(panic_message(panic.as_ref()))));
         state.inbound.lock().unwrap().remove(&id);
         // A cancel aborts the handler's token. The SDK still writes whatever the
         // handler settled (including an error). Only an explicit None stays silent.
-        let response = match outcome {
+        let outcome = match outcome {
             Ok(Some(mut payload)) => {
                 if subtype == "can_use_tool"
                     && let Some(tool_id) = body.get("tool_use_id").and_then(Value::as_str)
@@ -543,25 +701,67 @@ fn dispatch(value: Value, state: &Arc<Shared>, tasks: &mut JoinSet<()>) {
                 {
                     object.insert("toolUseID".into(), tool_id.into());
                 }
-                json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":payload}}) },
-            Ok(None) => return,
-            Err(e) => json!({"type":"control_response","response":{"subtype":"error","request_id":id,"error":e.to_string()}}),
+                Ok(payload)
+            }
+            Ok(None) => match unhandled_reply(&body) {
+                Some(reply) => reply,
+                None => return,
+            },
+            Err(e) => Err(e.to_string()),
+        };
+        let response = match outcome {
+            Ok(payload) => json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":payload}}),
+            Err(error) => json!({"type":"control_response","response":{"subtype":"error","request_id":id,"error":error}}),
         };
         let _ = state.writer.send(WriteCommand::Json(response));
     });
 }
-async fn stderr_loop(
-    mut stderr: tokio::process::ChildStderr,
-    events: mpsc::UnboundedSender<SessionEvent>,
-) {
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    let detail = panic
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into());
+    format!("control handler panicked: {detail}")
+}
+/// The SDK's reply when no callback is registered for a subtype. `None` means stay silent.
+fn unhandled_reply(body: &Value) -> Option<Result<Value, String>> {
+    let field = |key: &str| body.get(key).and_then(Value::as_str).unwrap_or("undefined");
+    let error = |message: String| Some(Err(message));
+    match body.get("subtype").and_then(Value::as_str) {
+        Some("request_user_dialog") => None,
+        Some("elicitation") => Some(Ok(json!({"action": "decline"}))),
+        Some("can_use_tool") => error("canUseTool callback is not provided.".into()),
+        Some("hook_callback") => error(format!(
+            "No hook callback found for ID: {}",
+            field("callback_id")
+        )),
+        Some("mcp_message") => error(format!(
+            "SDK MCP server not found: {}",
+            field("server_name")
+        )),
+        Some("oauth_token_refresh") => error("getOAuthToken callback is not provided.".into()),
+        Some("host_auth_token_refresh") => {
+            error("getHostAuthToken callback is not provided.".into())
+        }
+        Some("remote_control_work_secret") => {
+            error("refreshWorkSecret callback is not provided.".into())
+        }
+        _ => error(format!(
+            "Unsupported control request subtype: {}",
+            field("subtype")
+        )),
+    }
+}
+async fn stderr_loop(mut stderr: tokio::process::ChildStderr, state: Arc<Shared>) {
     let mut chunk = [0_u8; 4096];
     loop {
         match stderr.read(&mut chunk).await {
             Ok(0) => break,
             Ok(n) => {
-                let _ = events.send(SessionEvent::Stderr(
-                    String::from_utf8_lossy(&chunk[..n]).into_owned(),
-                ));
+                let text = String::from_utf8_lossy(&chunk[..n]).into_owned();
+                push_stderr_tail(&mut state.stderr_tail.lock().unwrap(), &text);
+                let _ = state.events.send(SessionEvent::Stderr(text));
             }
             Err(_) => break,
         }
@@ -664,6 +864,429 @@ for line in sys.stdin:
             serde_json::from_str(recorded.lines().last().unwrap()).unwrap();
         assert_eq!(reply["response"]["request_id"], "approval-1");
         assert_eq!(reply["response"]["response"]["toolUseID"], "toolu_1");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    fn script(dir: &std::path::Path, body: &str) -> LaunchOptions {
+        let path = dir.join("fake-claude");
+        fs::write(&path, body).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&path, permissions).unwrap();
+        let mut env = BTreeMap::new();
+        if let Some(path_env) = std::env::var_os("PATH") {
+            env.insert("PATH".into(), path_env.to_string_lossy().into_owned());
+        }
+        LaunchOptions {
+            binary: path,
+            env: Some(env),
+            ..Default::default()
+        }
+    }
+    struct Accept;
+    impl ControlHandler for Accept {
+        fn handle(&self, _: ControlRequest, _: CancellationToken) -> HandlerFuture {
+            Box::pin(async { Ok(Some(json!({}))) })
+        }
+    }
+    #[tokio::test]
+    async fn control_request_after_stdout_eof_fails_instead_of_hanging() {
+        let dir =
+            std::env::temp_dir().join(format!("turin-claude-closed-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,os,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        os.close(1)
+        sys.stdin.read()
+"#,
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                SessionEvent::Eof => break,
+                SessionEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        let error = tokio::time::timeout(Duration::from_secs(2), session.interrupt(false))
+            .await
+            .expect("interrupt hung after stdout eof")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("claude process closed"),
+            "{error}"
+        );
+        let error = session.get_mcp_status().await.unwrap_err();
+        assert!(
+            error.to_string().contains("claude process closed"),
+            "{error}"
+        );
+        session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn stdin_write_failure_fails_pending_control_requests() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-stdin-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,os,sys,time
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        print(json.dumps({"type":"system","subtype":"status","status":"stdin-closed"}),flush=True)
+        os.close(0)
+        time.sleep(30)
+"#,
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                SessionEvent::Frame(frame) if frame.raw["status"] == "stdin-closed" => break,
+                SessionEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        let error = tokio::time::timeout(Duration::from_secs(2), session.get_mcp_status())
+            .await
+            .expect("request hung after stdin closed")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("claude process closed"),
+            "{error}"
+        );
+        session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    /// A fake CLI that sends `requests` after initialize and echoes each control_response
+    /// back as a `system` frame so the test can read the replies.
+    fn replier(dir: &std::path::Path, requests: Value) -> LaunchOptions {
+        script(
+            dir,
+            &format!(
+                r#"#!/usr/bin/env python3
+import json,sys
+requests=json.loads({:?})
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({{"type":"control_response","response":{{"subtype":"success","request_id":value["request_id"],"response":{{"models":[]}}}}}}),flush=True)
+        for request in requests:
+            print(json.dumps(request),flush=True)
+    elif value.get("type")=="control_response":
+        print(json.dumps({{"type":"system","subtype":"status","reply":value["response"]}}),flush=True)
+"#,
+                requests.to_string()
+            ),
+        )
+    }
+    async fn replies(session: &mut ClaudeSession, count: usize) -> HashMap<String, Value> {
+        let mut replies = HashMap::new();
+        while replies.len() < count {
+            match tokio::time::timeout(Duration::from_secs(3), session.next_event())
+                .await
+                .expect("control request left unanswered")
+                .unwrap()
+            {
+                SessionEvent::Frame(frame) => {
+                    let reply = frame.raw["reply"].clone();
+                    replies.insert(reply["request_id"].as_str().unwrap().to_owned(), reply);
+                }
+                SessionEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        replies
+    }
+    fn control(id: &str, request: Value) -> Value {
+        json!({"type":"control_request","request_id":id,"request":request})
+    }
+    struct Silent;
+    impl ControlHandler for Silent {
+        fn handle(&self, _: ControlRequest, _: CancellationToken) -> HandlerFuture {
+            Box::pin(async { Ok(None) })
+        }
+    }
+    #[tokio::test]
+    async fn unanswered_control_requests_get_sdk_default_replies() {
+        let dir =
+            std::env::temp_dir().join(format!("turin-claude-defaults-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = replier(
+            &dir,
+            json!([
+                control(
+                    "d1",
+                    json!({"subtype":"request_user_dialog","dialog_kind":"x","payload":{}})
+                ),
+                control(
+                    "e1",
+                    json!({"subtype":"elicitation","mcp_server_name":"s","message":"m"})
+                ),
+                control("f1", json!({"subtype":"future_thing"})),
+                control(
+                    "c1",
+                    json!({"subtype":"can_use_tool","tool_name":"Bash","input":{},"tool_use_id":"t"})
+                ),
+                control(
+                    "h1",
+                    json!({"subtype":"hook_callback","callback_id":"cb9","input":{}})
+                ),
+            ]),
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Silent))
+            .await
+            .unwrap();
+        let replies = replies(&mut session, 4).await;
+        assert_eq!(replies["e1"]["subtype"], "success");
+        assert_eq!(replies["e1"]["response"], json!({"action":"decline"}));
+        assert_eq!(replies["f1"]["subtype"], "error");
+        assert_eq!(
+            replies["f1"]["error"],
+            "Unsupported control request subtype: future_thing"
+        );
+        assert_eq!(
+            replies["c1"]["error"],
+            "canUseTool callback is not provided."
+        );
+        assert_eq!(replies["h1"]["error"], "No hook callback found for ID: cb9");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), session.next_event())
+                .await
+                .is_err(),
+            "request_user_dialog must stay unanswered"
+        );
+        session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    struct PanicOnce(std::sync::atomic::AtomicBool);
+    impl ControlHandler for PanicOnce {
+        fn handle(&self, _: ControlRequest, _: CancellationToken) -> HandlerFuture {
+            let first = !self.0.swap(true, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if first {
+                    panic!("boom");
+                }
+                Ok(Some(json!({"behavior":"allow","updatedInput":{}})))
+            })
+        }
+    }
+    #[tokio::test]
+    async fn panicking_handler_replies_with_an_error_and_frees_the_request_id() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-panic-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+request={"type":"control_request","request_id":"p1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{},"tool_use_id":"t1"}}
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        print(json.dumps(request),flush=True)
+    elif value.get("type")=="control_response":
+        print(json.dumps({"type":"system","subtype":"status","reply":value["response"]}),flush=True)
+        if value["response"]["subtype"]=="error":
+            print(json.dumps(request),flush=True)
+"#,
+        );
+        let handler = Arc::new(PanicOnce(std::sync::atomic::AtomicBool::new(false)));
+        let mut session = ClaudeSession::spawn(options, handler).await.unwrap();
+        let mut seen = vec![];
+        while seen.len() < 2 {
+            match tokio::time::timeout(Duration::from_secs(3), session.next_event())
+                .await
+                .expect("panicking handler left the request unanswered")
+                .unwrap()
+            {
+                SessionEvent::Frame(frame) => seen.push(frame.raw["reply"].clone()),
+                SessionEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(seen[0]["subtype"], "error");
+        assert_eq!(seen[0]["error"], "control handler panicked: boom");
+        assert_eq!(seen[1]["subtype"], "success");
+        assert_eq!(seen[1]["response"]["toolUseID"], "t1");
+        session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn blank_stdout_lines_are_skipped() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-blank-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        sys.stdout.write("\n   \n\t\n")
+        print(json.dumps({"type":"system","subtype":"status","status":"after-blank"}),flush=True)
+"#,
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                SessionEvent::Frame(frame) => {
+                    assert_eq!(frame.raw["status"], "after-blank");
+                    break;
+                }
+                SessionEvent::Error(error) => panic!("blank line surfaced as an error: {error}"),
+                _ => {}
+            }
+        }
+        session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn spawn_reports_exit_code_when_the_cli_dies_before_initialize() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-exit-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            "#!/usr/bin/env python3\nimport sys\nsys.stderr.write('Error: not logged in\\n')\nsys.stderr.flush()\nraise SystemExit(3)\n",
+        );
+        let error = match ClaudeSession::spawn(options, Arc::new(Accept)).await {
+            Err(error) => error,
+            Ok(_) => panic!("spawn succeeded"),
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("Claude Code process exited with code 3"),
+            "{text}"
+        );
+        assert!(text.contains("Error: not logged in"), "{text}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn exit_event_and_shutdown_surface_the_status_after_init() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-exit7-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        sys.stderr.write("boom\n")
+        sys.stderr.flush()
+        raise SystemExit(7)
+"#,
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        let mut saw_stderr = false;
+        let mut exit = None;
+        let mut saw_eof = false;
+        while !saw_stderr || exit.is_none() || !saw_eof {
+            match tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                SessionEvent::Stderr(text) => {
+                    if text.contains("boom") {
+                        saw_stderr = true;
+                    }
+                }
+                SessionEvent::Exit(status) => exit = Some(status),
+                SessionEvent::Eof => saw_eof = true,
+                SessionEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            exit.unwrap(),
+            ProcessExit {
+                code: Some(7),
+                signal: None
+            }
+        );
+        let status = session.shutdown().await.unwrap();
+        assert_eq!(status.code, Some(7));
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn shutdown_kills_grandchildren_after_the_leader_exits() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-group-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let grandchild = dir.join("grandchild");
+        let mut options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,os,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        pid=os.fork()
+        if pid==0:
+            os.execvp("sleep", ["sleep", "47"])
+        handle=open(os.environ["GRANDCHILD"], "w")
+        handle.write(str(pid))
+        handle.flush()
+        os._exit(0)
+"#,
+        );
+        options
+            .env
+            .as_mut()
+            .unwrap()
+            .insert("GRANDCHILD".into(), grandchild.display().to_string());
+        let session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        let pid = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&grandchild).await {
+                    if let Ok(pid) = text.trim().parse::<i32>() {
+                        return pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("grandchild pid was not written");
+        let status = session.shutdown().await.unwrap();
+        assert_eq!(status.code, Some(0));
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "grandchild {pid} still alive"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }

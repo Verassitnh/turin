@@ -1224,7 +1224,7 @@ mod tests {
         assert_eq!(parsed.branch_changes.unwrap().base_ref, None);
         // A required NullOr key always encodes `null`, never omits the key.
         assert_eq!(
-            serde_json::to_value(&round_trip::<VcsStatusLocalResult>(local_status())).unwrap()["refName"],
+            serde_json::to_value(round_trip::<VcsStatusLocalResult>(local_status())).unwrap()["refName"],
             Value::Null
         );
 

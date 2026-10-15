@@ -32,7 +32,7 @@ Haiku (skeptics, mechanical edits). Grok carries the bulk of backend ports
 while Codex/GLM are out. Keep concurrent Claude agents ≤ 8 and QC workflows ≤ 2
 to stay under the Claude session limit (hit once on 2026-10-14 ~20:45).
 
-**Codex 401s (2026-10-15):** T3's Codex app-server gets the access token once at launch; when the Codex daemon refreshes `~/.codex/auth.json` the old token dies → every Codex turn 401s. Fix: kill T3's `codex app-server -c model_provider=...` process; T3 respawns it with the fresh token. Resume the failed threads.
+**Codex 401s (2026-10-15):** T3's Codex app-server gets the access token once at launch; when the Codex daemon refreshes `~/.codex/auth.json` the old token dies → every Codex turn 401s. Fix: kill T3's `codex app-server -c model_provider=...` process; T3 respawns it with the fresh token. Old threads then can't resume ("Insufficient context allowance for the provider handoff": T3 replays the whole history into the new session) → relaunch as fresh delegate_task threads that rebuild state from git.
 
 **Outage (2026-10-15 12:18 UTC): Grok hit Cursor's plan usage limit ("You're out of usage. Switch to Auto"). T06, T10a, T11, T12, T23 moved to Cursor Auto (`cursor`/`default`) in their own threads; trailer `Model: cursor-auto (cursor)`. Back to grok-4.7 when usage resets.**
 

@@ -10,5 +10,6 @@ pub mod provider_event_ingestor;
 pub mod provider_session_manager;
 pub mod provider_session_transition_policy;
 pub mod restart_background_note;
+pub mod run_finalization_service;
 pub mod runtime_request_service;
 pub mod session_sink;

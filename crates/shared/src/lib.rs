@@ -4,6 +4,7 @@ pub mod agent_awareness;
 pub mod agent_scope;
 pub mod array;
 pub mod atomic_write;
+pub mod background_activity_settings;
 pub mod change_request_url;
 pub mod chat_list;
 pub mod claude_compaction;

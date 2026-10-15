@@ -9,7 +9,8 @@ use turin_contracts::orchestration_v2::{
     OrchestrationV2TurnItemStatus, OrchestrationV2UserMessageInputIntent,
 };
 use turin_contracts::{
-    MessageId, NodeId, ProviderThreadId, ProviderTurnId, RunId, ThreadId, TurnItemId, UtcDateTime,
+    CheckpointId, ContextHandoffId, MessageId, NodeId, PlanId, ProviderThreadId, ProviderTurnId,
+    RunId, ThreadId, TurnItemId, UtcDateTime,
 };
 
 /// The fields every turn item carries.
@@ -128,6 +129,33 @@ pub fn message_id(item: &OrchestrationV2TurnItem) -> Option<&MessageId> {
     match item {
         OrchestrationV2TurnItem::UserMessage { message_id, .. }
         | OrchestrationV2TurnItem::AssistantMessage { message_id, .. } => Some(message_id),
+        _ => None,
+    }
+}
+
+/// `planId` of a proposed-plan / todo-list item.
+pub fn plan_id(item: &OrchestrationV2TurnItem) -> Option<&PlanId> {
+    match item {
+        OrchestrationV2TurnItem::ProposedPlan { plan_id, .. }
+        | OrchestrationV2TurnItem::TodoList { plan_id, .. } => Some(plan_id),
+        _ => None,
+    }
+}
+
+/// `checkpointId` of a checkpoint item.
+pub fn checkpoint_id(item: &OrchestrationV2TurnItem) -> Option<&CheckpointId> {
+    match item {
+        OrchestrationV2TurnItem::Checkpoint { checkpoint_id, .. } => Some(checkpoint_id),
+        _ => None,
+    }
+}
+
+/// `contextHandoffId` of a handoff item.
+pub fn context_handoff_id(item: &OrchestrationV2TurnItem) -> Option<&ContextHandoffId> {
+    match item {
+        OrchestrationV2TurnItem::Handoff {
+            context_handoff_id, ..
+        } => Some(context_handoff_id),
         _ => None,
     }
 }

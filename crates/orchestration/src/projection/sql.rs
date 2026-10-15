@@ -86,3 +86,48 @@ pub(crate) fn query_map<T>(
 pub(crate) fn execute(conn: &Connection, sql: &str, params: impl Params) -> CauseResult<usize> {
     Ok(conn.prepare_cached(sql)?.execute(params)?)
 }
+
+/// Builds a statement whose shape depends on optional filters, binding every
+/// value (the `sql\`…${filter ? sql\`AND …\` : sql\`\`}\`` pattern upstream uses).
+#[derive(Default)]
+pub(crate) struct SqlBuilder {
+    pub sql: String,
+    pub params: Vec<rusqlite::types::Value>,
+}
+
+impl SqlBuilder {
+    pub fn new(sql: &str) -> Self {
+        Self {
+            sql: sql.to_owned(),
+            params: Vec::new(),
+        }
+    }
+
+    /// Append SQL text.
+    pub fn push(&mut self, sql: &str) -> &mut Self {
+        self.sql.push_str(sql);
+        self
+    }
+
+    /// Append a bound value, returning the builder for chaining text after it.
+    pub fn bind(&mut self, value: impl Into<rusqlite::types::Value>) -> &mut Self {
+        self.params.push(value.into());
+        self.sql.push_str(&format!("?{}", self.params.len()));
+        self
+    }
+
+    pub fn query_payloads<T: DeserializeOwned>(&self, conn: &Connection) -> CauseResult<Vec<T>> {
+        query_payloads(
+            conn,
+            &self.sql,
+            rusqlite::params_from_iter(self.params.iter()),
+        )
+    }
+}
+
+/// `Option<&str>` as a bindable value.
+pub(crate) fn opt_text(value: Option<&str>) -> rusqlite::types::Value {
+    value.map_or(rusqlite::types::Value::Null, |text| {
+        rusqlite::types::Value::Text(text.to_owned())
+    })
+}

@@ -5,6 +5,7 @@ pub mod event;
 pub mod shared;
 pub(crate) mod sql;
 pub mod store;
+pub mod thread_history_paging;
 pub mod turn_item;
 
 #[cfg(test)]

@@ -47,5 +47,7 @@ pub mod source_control;
 pub mod r#struct;
 pub mod symlink;
 pub mod thread_links;
+pub mod thread_pull_requests;
+pub mod thread_reference;
 pub mod thread_search;
 pub mod video;

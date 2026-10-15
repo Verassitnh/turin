@@ -36,3 +36,5 @@ pub mod model_picker_keys;
 pub mod model_picker_search;
 pub mod catalog;
 pub mod model_picker;
+pub mod attachment_files;
+pub mod draft_store;

@@ -7096,6 +7096,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "gpui-kit",
+ "indexmap",
  "markdown",
  "percent-encoding",
  "pretty_assertions",

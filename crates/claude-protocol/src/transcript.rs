@@ -1105,12 +1105,13 @@ pub async fn list_sessions(options: &TranscriptOptions) -> Result<Vec<SessionInf
                 None => sidecar_title(&path, id).await,
             };
             let named = window_title(&head, &tail, sidecar, false);
-            let first_prompt = first_prompt_text(&entries);
+            let first_prompt = first_prompt(&head);
             let summary = named
                 .clone()
                 .or_else(|| nonempty(last_string_field(&tail, "lastPrompt")))
                 .or_else(|| nonempty(last_string_field(&tail, "summary")))
-                .or(first_prompt.clone());
+                .or_else(|| first_prompt.clone())
+                .or_else(|| media_hint(&head));
             let Some(summary) = summary else { continue };
             let metadata = file.metadata().await?;
             let modified = metadata
@@ -1273,67 +1274,133 @@ fn remap_parent(
     }
     Value::Null
 }
-fn first_prompt_text(entries: &[Value]) -> Option<String> {
-    for entry in entries {
-        if entry.get("type").and_then(Value::as_str) != Some("user") {
-            continue;
-        }
-        if entry.get("isMeta").and_then(Value::as_bool) == Some(true)
-            || entry.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
-        {
-            continue;
-        }
-        let content = entry.pointer("/message/content")?;
-        let text = match content {
-            Value::String(text) => text.clone(),
-            Value::Array(blocks) => {
-                if blocks
-                    .iter()
-                    .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
-                {
-                    continue;
+/// SDK `Ca`: a user entry's first usable prompt line; `<command-name>` only feeds the fallback.
+fn entry_prompt(entry: &Value, command_fallback: &mut String) -> Option<String> {
+    if entry.get("type").and_then(Value::as_str) != Some("user")
+        || entry.get("isMeta").and_then(Value::as_bool) == Some(true)
+        || entry.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
+    {
+        return None;
+    }
+    let texts: Vec<&str> = match entry.pointer("/message/content")? {
+        Value::String(text) => vec![text],
+        Value::Array(blocks) => {
+            let mut texts = vec![];
+            for block in blocks.iter().filter(|block| block.is_object()) {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("tool_result") => return None,
+                    Some("text") => texts.extend(block.get("text").and_then(Value::as_str)),
+                    _ => {}
                 }
-                blocks
-                    .iter()
-                    .filter_map(|block| {
-                        (block.get("type").and_then(Value::as_str) == Some("text"))
-                            .then(|| block.get("text").and_then(Value::as_str))
-                            .flatten()
-                    })
-                    .collect::<Vec<_>>()
-                    .join("")
             }
-            _ => continue,
-        };
-        let text = text.replace('\n', " ").trim().to_owned();
+            texts
+        }
+        _ => vec![],
+    };
+    for text in texts {
+        let text = text.replace('\n', " ");
+        let text = text.trim();
         if text.is_empty() {
             continue;
         }
-        if text.chars().count() > 200 {
-            let cut: String = text.chars().take(200).collect();
-            return Some(format!("{cut}…"));
+        if let Some(name) = between(text, "<command-name>", "</command-name>") {
+            if command_fallback.is_empty() {
+                *command_fallback = name.to_owned();
+            }
+            continue;
         }
-        return Some(text);
+        if let Some(input) = between(text, "<bash-input>", "</bash-input>") {
+            return Some(format!("! {}", input.trim()));
+        }
+        if starts_with_tag_or_interrupt(text) {
+            continue;
+        }
+        if text.encode_utf16().count() > 200 {
+            let mut units = 0;
+            let cut: String = text
+                .chars()
+                .take_while(|c| {
+                    units += c.len_utf16();
+                    units <= 200
+                })
+                .collect();
+            return Some(format!("{}…", cut.trim()));
+        }
+        return Some(text.to_owned());
     }
     None
+}
+fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = text.find(open)? + open.len();
+    let end = text[start..].find(close)?;
+    Some(&text[start..start + end])
+}
+fn starts_with_tag_or_interrupt(text: &str) -> bool {
+    if let Some(rest) = text.trim_start().strip_prefix('<') {
+        let mut chars = rest.chars();
+        if !chars.next().is_some_and(|c| c.is_ascii_lowercase()) {
+            return false;
+        }
+        for c in chars {
+            if !(c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                return c.is_whitespace() || c == '>';
+            }
+        }
+        return false;
+    }
+    text.strip_prefix("[Request interrupted by user")
+        .is_some_and(|rest| rest.contains(']'))
+}
+fn is_candidate_user_line(line: &str) -> bool {
+    (line.contains("\"type\":\"user\"") || line.contains("\"type\": \"user\""))
+        && !line.contains("\"tool_result\"")
+        && !line.contains("\"isMeta\":true")
+        && !line.contains("\"isMeta\": true")
+}
+/// SDK `_S`: the first prompt in the head window, else the first slash-command name.
+fn first_prompt(head: &str) -> Option<String> {
+    let mut command_fallback = String::new();
+    for line in head.split('\n').filter(|line| is_candidate_user_line(line)) {
+        if line.contains("\"isCompactSummary\":true") || line.contains("\"isCompactSummary\": true")
+        {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(prompt) = entry_prompt(&entry, &mut command_fallback) {
+            return Some(prompt);
+        }
+    }
+    nonempty(Some(command_fallback))
+}
+/// SDK `d4`: a media label when no text prompt exists.
+fn media_hint(head: &str) -> Option<String> {
+    head.split('\n')
+        .filter(|line| is_candidate_user_line(line))
+        .find_map(|line| {
+            if line.contains("\"type\":\"image\"") || line.contains("\"type\": \"image\"") {
+                Some("Image".to_owned())
+            } else if line.contains("\"type\":\"document\"")
+                || line.contains("\"type\": \"document\"")
+            {
+                Some("Document".to_owned())
+            } else {
+                None
+            }
+        })
 }
 fn parse_millis(value: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|time| time.timestamp_millis() as u64)
 }
-fn fork_title(
-    explicit: Option<&str>,
-    raw: &[Value],
-    head: &str,
-    tail: &str,
-    sidecar: Option<String>,
-) -> String {
+fn fork_title(explicit: Option<&str>, head: &str, tail: &str, sidecar: Option<String>) -> String {
     if let Some(title) = explicit.map(str::trim).filter(|title| !title.is_empty()) {
         return title.to_owned();
     }
     let derived = window_title(head, tail, sidecar, true)
-        .or_else(|| first_prompt_text(raw))
+        .or_else(|| first_prompt(head))
         .unwrap_or_else(|| "Forked session".into());
     format!("{derived} (fork)")
 }
@@ -1351,7 +1418,7 @@ pub async fn fork_session(
     let raw = parse_entries(&String::from_utf8_lossy(&bytes));
     let (head, tail) = windows(&bytes);
     let sidecar = sidecar_title(&path, id).await;
-    let title = fork_title(title, &raw, &head, &tail, sidecar);
+    let title = fork_title(title, &head, &tail, sidecar);
     let side = fork_side(&raw, id);
     let mut entries: Vec<_> = raw
         .into_iter()
@@ -1716,6 +1783,55 @@ mod tests {
         let source = listed.iter().find(|info| info.session_id == id).unwrap();
         assert_eq!(source.custom_title.as_deref(), Some("Head AI"));
         fs::remove_dir_all(root).await.unwrap();
+    }
+    #[test]
+    fn first_prompt_follows_sdk_prompt_rules() {
+        let lines = |entries: &[Value]| {
+            entries
+                .iter()
+                .map(|entry| serde_json::to_string(entry).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let head = lines(&[
+            json!({"type":"user","uuid":"u0"}),
+            user(
+                "u1",
+                None,
+                "<ide_opened_file>The user opened a.rs</ide_opened_file>",
+            ),
+            user("u2", None, "[Request interrupted by user for tool use]"),
+            user(
+                "u3",
+                None,
+                "<command-name>/clear</command-name> <command-args></command-args>",
+            ),
+            json!({"type":"user","message":{"content":[{"type":"text","text":"<system-reminder>x</system-reminder>"},{"type":"text","text":"real\nprompt"}]}}),
+        ]);
+        assert_eq!(first_prompt(&head).as_deref(), Some("real prompt"));
+
+        let head = lines(&[
+            user(
+                "u1",
+                None,
+                "<local-command-stdout>ok</local-command-stdout>",
+            ),
+            user("u2", None, "<command-name>/model</command-name>"),
+            user("u3", None, "<command-name>/clear</command-name>"),
+        ]);
+        assert_eq!(first_prompt(&head).as_deref(), Some("/model"));
+
+        let head = lines(&[user("u1", None, "<bash-input> ls -la </bash-input>")]);
+        assert_eq!(first_prompt(&head).as_deref(), Some("! ls -la"));
+
+        let long = format!("{} tail", "a".repeat(199));
+        let head = lines(&[user("u1", None, &long)]);
+        assert_eq!(first_prompt(&head), Some(format!("{}…", "a".repeat(199))));
+
+        let head =
+            lines(&[json!({"type":"user","message":{"content":[{"type":"image","source":{}}]}})]);
+        assert_eq!(first_prompt(&head), None);
+        assert_eq!(media_hint(&head).as_deref(), Some("Image"));
     }
     #[test]
     fn last_string_field_takes_the_textually_last_match() {

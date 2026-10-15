@@ -94,7 +94,8 @@ impl LaunchHost for SystemHost {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             // Own process group, so a Ctrl-C aimed at the server does not reach
-            // the editor (upstream `detached: true`).
+            // the editor. Upstream `detached: true` also starts a new session;
+            // this does not (see PORTING.md Deviations).
             .process_group(0)
             .spawn()?;
         // Deliberately no `kill_on_drop`: upstream unrefs the child so it

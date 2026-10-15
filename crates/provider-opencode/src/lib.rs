@@ -9,6 +9,7 @@ mod auth;
 mod error;
 mod events;
 mod http_client;
+mod permission_rules;
 mod process_group;
 mod runtime;
 mod semver;
@@ -30,6 +31,9 @@ pub use error::{
     EventStreamError, OpenCodeRuntimeError, SilentStreamError, open_code_runtime_error_detail,
 };
 pub use events::{V1Event, V2Event, V2StreamEvent, decode_v1_event, decode_v2_event};
+pub use permission_rules::{
+    SessionPermissionRule, agent_path_allows, last_effect, rule, session_permission_rules,
+};
 pub use runtime::{
     ConnectOpenCodeServer, OpenCodeServerConnection, OpenCodeServerProcess, StartOpenCodeServer,
     VerifyFn, VerifyInput, connect_to_open_code_server, default_v1_verify,

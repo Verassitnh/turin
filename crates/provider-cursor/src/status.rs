@@ -68,7 +68,7 @@ pub fn initial_draft(
     };
     let mut draft = build_server_provider(BuildServerProviderInput {
         driver: Some(driver),
-        presentation: presentation(false),
+        presentation: presentation(true),
         enabled,
         checked_at,
         models,

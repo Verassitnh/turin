@@ -5,6 +5,7 @@
 use crate::claude_background_tasks::{
     Roster, is_opaque_task_type, parse_roster_entry, pending_task,
 };
+use crate::claude_goal::next_claude_goal;
 use crate::claude_tool_titles::{ToolPresentation, fallback_presentation, presentations_from_meta};
 use crate::{
     claude_adapter_v2::{ClaudeAdapterEvent, ClaudeAdapterV2, ClaudeHostRequest},
@@ -42,7 +43,8 @@ use turin_contracts::{
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2ConversationMessage, OrchestrationV2NativeRefStrength,
-        OrchestrationV2ProviderCapabilities, OrchestrationV2ProviderRef,
+        OrchestrationV2ProviderCapabilities, OrchestrationV2ProviderGoal,
+        OrchestrationV2ProviderGoalStatus, OrchestrationV2ProviderRef,
         OrchestrationV2ProviderSession, OrchestrationV2ProviderSessionStatus,
         OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadDisposition,
         OrchestrationV2ProviderThreadForkedFrom, OrchestrationV2ProviderThreadStatus,
@@ -378,6 +380,8 @@ impl ProviderAdapterV2 for ClaudeProviderAdapter {
             monitor_tool_uses: HashSet::new(),
             monitor_tasks: HashSet::new(),
             last_thread: None,
+            goal: None,
+            goal_seeded: false,
             pending_requests: HashMap::new(),
             commands: command_rx,
             events,
@@ -607,6 +611,8 @@ struct ActiveTurn {
     /// The thinking block the last content block left open.
     last_thinking: Option<LastThinking>,
     last_assistant: Option<OrchestrationV2ConversationMessage>,
+    /// A root assistant frame of this turn was checked against an active goal.
+    goal_checked: bool,
     scope: TurnScope,
     item_ordinals: ItemOrdinals,
     tool_calls: HashMap<String, TrackedTool>,
@@ -686,6 +692,9 @@ struct ClaudeActor {
     monitor_tasks: HashSet<String>,
     /// The thread as last emitted, for a roster change between turns.
     last_thread: Option<OrchestrationV2ProviderThread>,
+    /// The session's `/goal` (upstream `goalsByNativeThread`), seeded once from the thread.
+    goal: Option<OrchestrationV2ProviderGoal>,
+    goal_seeded: bool,
     pending_requests: HashMap<RuntimeRequestId, PendingRequest>,
     commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedSender<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>,
@@ -914,6 +923,10 @@ impl ClaudeActor {
             app_thread: input.app_thread.clone(),
             model_selection: input.model_selection.clone(),
         });
+        if !self.goal_seeded {
+            self.goal = input.provider_thread.goal.clone();
+            self.goal_seeded = true;
+        }
         self.last_thread = Some(thread.clone());
         self.active = Some(ActiveTurn {
             input,
@@ -927,6 +940,7 @@ impl ClaudeActor {
             stream: StreamState::default(),
             last_thinking: None,
             last_assistant: None,
+            goal_checked: false,
             scope,
             item_ordinals: ItemOrdinals::new(),
             tool_calls: HashMap::new(),
@@ -1355,6 +1369,9 @@ impl ClaudeActor {
                 _ => {}
             }
         }
+        if owner.is_none() {
+            self.track_goal(&frame.raw);
+        }
         // A subagent's frames belong to the subagent. Its text and tool calls go
         // to its child thread; its uuid must not reach the parent turn's rollback cursor.
         if let Some(owner) = owner.as_deref() {
@@ -1487,6 +1504,11 @@ impl ClaudeActor {
     /// Upstream `emitProviderThreadRoster`: the thread with its roster. Between
     /// turns it is idle; during a turn an idle thread is active.
     fn emit_roster(&mut self) {
+        self.emit_thread(true);
+    }
+    /// Emits the thread with the roster and goal as they now are. With
+    /// `update_status`, the status follows whether a turn is running.
+    fn emit_thread(&mut self, update_status: bool) {
         let base = match self.active.as_ref() {
             Some(active) => Some(active.thread.clone()),
             None => self.last_thread.clone(),
@@ -1494,14 +1516,17 @@ impl ClaudeActor {
         let Some(mut thread) = base else {
             return;
         };
-        thread.status = match (self.active.is_some(), thread.status) {
-            (false, _) => OrchestrationV2ProviderThreadStatus::Idle,
-            (true, OrchestrationV2ProviderThreadStatus::Idle) => {
-                OrchestrationV2ProviderThreadStatus::Active
-            }
-            (true, status) => status,
-        };
+        if update_status {
+            thread.status = match (self.active.is_some(), thread.status) {
+                (false, _) => OrchestrationV2ProviderThreadStatus::Idle,
+                (true, OrchestrationV2ProviderThreadStatus::Idle) => {
+                    OrchestrationV2ProviderThreadStatus::Active
+                }
+                (true, status) => status,
+            };
+        }
         thread.pending_background_tasks = self.roster.tasks().to_vec();
+        thread.goal = self.goal.clone();
         thread.updated_at = UtcDateTime::now();
         self.last_thread = Some(thread.clone());
         self.emit(ProviderAdapterV2Event::ProviderThreadUpdated {
@@ -1509,6 +1534,29 @@ impl ClaudeActor {
             provider_thread: thread,
             retained_native_turn_ids: None,
         });
+    }
+    /// Upstream `trackClaudeGoal`: a root frame may change the goal, and a
+    /// checked assistant frame marks the turn as checked against it.
+    fn track_goal(&mut self, raw: &Value) {
+        let checked_assistant = raw.get("type").and_then(Value::as_str) == Some("assistant")
+            && raw.pointer("/message/model").and_then(Value::as_str) != Some("<synthetic>");
+        if checked_assistant
+            && self
+                .goal
+                .as_ref()
+                .is_some_and(|goal| goal.status == OrchestrationV2ProviderGoalStatus::Active)
+            && let Some(active) = self.active.as_mut()
+        {
+            active.goal_checked = true;
+        }
+        let Some(next) = next_claude_goal(self.goal.as_ref(), raw) else {
+            return;
+        };
+        if next == self.goal {
+            return;
+        }
+        self.goal = next;
+        self.emit_thread(false);
     }
     /// Upstream `compact_boundary`: a completed "Context compacted" item. A
     /// positive post-compaction size also becomes the turn's used tokens.
@@ -1566,6 +1614,7 @@ impl ClaudeActor {
             }
             return;
         }
+        self.track_goal(&frame.raw);
         let mut events = self.workflow_handles(&frame);
         if let Some(active) = self.active.as_mut() {
             events.extend(tool_result_events(&mut self.plans, active, &frame));
@@ -1669,6 +1718,25 @@ impl ClaudeActor {
         }
         active.thread.status = OrchestrationV2ProviderThreadStatus::Idle;
         active.thread.updated_at = now;
+        // Claude ends a goal's turn on its own only after the goal's check
+        // passes; the check is deferred while background work runs. A turn that
+        // was checked and finished that way completes the goal.
+        let terminal_reason = result.get("terminal_reason").and_then(Value::as_str);
+        if let Some(goal) = self.goal.as_mut()
+            && goal.status == OrchestrationV2ProviderGoalStatus::Active
+            && active.goal_checked
+            && status == ProviderAdapterV2TurnTerminalStatus::Completed
+            && matches!(terminal_reason, None | Some("completed"))
+            && self.roster.tasks().is_empty()
+        {
+            *goal = serde_json::from_value(json!({
+                "objective": goal.objective.as_str(),
+                "status": "complete",
+                "checks": goal.checks,
+            }))
+            .expect("goal matches the contract shape");
+        }
+        active.thread.goal = self.goal.clone();
         let closing = finish_running_tools(active, terminal_item_status(status));
         let turn = active.turn.clone();
         let thread = active.thread.clone();

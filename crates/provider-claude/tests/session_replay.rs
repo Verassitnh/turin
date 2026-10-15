@@ -1197,6 +1197,49 @@ async fn subagent_frames_stay_out_of_the_parent_turn() {
     assert_eq!(subagents[1]["progress"], "running echo");
 }
 
+/// A `/goal` is read from the transcript: its synthetic output sets it, and a
+/// checked turn that completes with no background work completes it.
+#[tokio::test]
+async fn goal_set_by_command_output_completes_after_a_checked_turn() {
+    let harness = one_turn(vec![
+        json!({
+            "type": "assistant",
+            "message": {"id": "msg_goal_set", "model": "<synthetic>", "role": "assistant",
+                "content": [{"type": "text", "text": "Goal set: ship the parser"}]},
+            "uuid": "00000000-0000-4000-8000-000000000701", "session_id": "todo-session",
+        }),
+        assistant_text("00000000-0000-4000-8000-000000000702", "working on it"),
+    ]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Set a goal"))
+        .await
+        .expect("start turn");
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+
+    let goals: Vec<Value> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::ProviderThreadUpdated {
+                provider_thread, ..
+            } => serde_json::to_value(&provider_thread.goal).ok(),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        goals
+            .iter()
+            .any(|goal| goal["objective"] == "ship the parser" && goal["status"] == "active"),
+        "{goals:?}"
+    );
+    let last = goals.last().expect("the thread carries its goal");
+    assert_eq!(last["objective"], "ship the parser");
+    assert_eq!(last["status"], "complete", "{goals:?}");
+}
+
 /// A `local_bash` task is background work on the thread's roster until its
 /// notification. Each change re-emits the thread with the roster.
 #[tokio::test]

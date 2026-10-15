@@ -3,6 +3,7 @@ pub mod claude_adapter_v2;
 pub mod claude_background_tasks;
 pub mod claude_capabilities_probe;
 pub mod claude_driver;
+pub mod claude_goal;
 pub mod claude_model_catalog;
 pub mod claude_model_options;
 pub mod claude_permission;

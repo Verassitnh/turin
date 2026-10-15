@@ -1,6 +1,7 @@
 //! Port of upstream/apps/server/src/orchestration-v2/UserFacingErrors.ts
 
 use serde_json::Value;
+use std::collections::HashSet;
 
 const GENERIC: [&str; 3] = [
     "Failed to dispatch orchestration V2 command",
@@ -100,10 +101,12 @@ pub fn user_facing_dispatch_error_message(cause: &Value) -> Option<String> {
     }
     let mut messages = Vec::new();
     collect(cause, &mut messages, 0);
+    // Upstream keeps each message's first occurrence, then takes `.at(-1)`, so
+    // a repeat of an earlier message does not move it to the end.
+    let mut seen = HashSet::new();
     messages
-        .into_iter()
-        .rev()
-        .find(|m| !GENERIC.iter().any(|prefix| m.starts_with(prefix)))
+        .retain(|m| !GENERIC.iter().any(|prefix| m.starts_with(prefix)) && seen.insert(m.clone()));
+    messages.pop()
 }
 
 #[cfg(test)]
@@ -173,6 +176,24 @@ mod tests {
             Some(
                 "Grok cannot rewind its conversation, so this checkpoint cannot be restored on this thread."
             )
+        );
+    }
+
+    #[test]
+    fn repeated_message_keeps_its_first_position_before_taking_the_last() {
+        // Upstream probe: [X, Y, X] dedupes to [X, Y] and returns Y.
+        let value = serde_json::json!({
+            "message": "Claude provider thread provider-thread-1 has no live query.",
+            "cause": {
+                "message": "Codex cannot stop a run once it has started.",
+                "cause": {
+                    "message": "Claude provider thread provider-thread-1 has no live query."
+                }
+            }
+        });
+        assert_eq!(
+            user_facing_dispatch_error_message(&value).as_deref(),
+            Some("Codex cannot stop a run once it has started.")
         );
     }
 

@@ -683,7 +683,6 @@ impl DiffPanel {
             .top(rems(1.75))
             .left_0()
             .w(rems(18.))
-            .max_w_full()
             .p_0()
             .overflow_hidden()
             .child(
@@ -711,7 +710,8 @@ impl DiffPanel {
                             .font_weight(FontWeight::MEDIUM)
                             .text_size(TEXT_3XS.size)
                             .text_color(theme.muted_foreground)
-                            .child(div().flex_1().child("BRANCH"))
+                            .justify_between()
+                            .child("BRANCH")
                             .child("REMOTE"),
                     )
                     .child(div().p_1().child(list)),

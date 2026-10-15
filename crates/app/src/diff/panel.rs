@@ -118,6 +118,10 @@ pub struct FileEntry {
     pub truncated: bool,
 }
 
+/// What a file's rows depend on: split or unified, loader presence, content
+/// version and the expanded regions.
+type RowsKey = (bool, bool, u32, Vec<(usize, usize, usize)>);
+
 /// A row of the virtualized list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlatItem {
@@ -232,6 +236,8 @@ pub struct DiffPanel {
     pub(super) expanded: HashMap<String, ExpandedHunks>,
     pub(super) hydrated: HashMap<String, Arc<FileDiffMetadata>>,
     pub(super) file_rows: Vec<Arc<Vec<DiffRow>>>,
+    /// Rows per file, reused while its inputs are unchanged.
+    rows_cache: HashMap<String, (RowsKey, Arc<Vec<DiffRow>>)>,
     pub(super) items: Vec<FlatItem>,
     pub(super) list: ListState,
     pub(super) menu: Option<OpenMenu>,
@@ -291,6 +297,7 @@ impl DiffPanel {
             expanded: HashMap::new(),
             hydrated: HashMap::new(),
             file_rows: Vec::new(),
+            rows_cache: HashMap::new(),
             items: Vec::new(),
             list,
             menu: None,
@@ -343,6 +350,12 @@ impl DiffPanel {
             Some("baseref") => Some(OpenMenu::BaseRef),
             _ => None,
         };
+        if let Some(item) = env("TURIN_DIFF_SCROLL_ITEM").and_then(|v| v.parse::<usize>().ok()) {
+            panel.list.scroll_to(gpui_kit::ListOffset {
+                item_ix: item,
+                offset_in_item: px(12.),
+            });
+        }
         if let Some(spec) = env("TURIN_DIFF_EXPAND_CONTEXT") {
             // `<hunk>[:down|up]` on the first expanded file.
             let mut parts = spec.split(':');
@@ -941,7 +954,22 @@ impl DiffPanel {
                 continue;
             }
             let expanded = self.expanded.get(&entry.key).cloned().unwrap_or_default();
-            let rows = Arc::new(build_rows(&entry.file, style, &expanded, loader));
+            let mut regions: Vec<(usize, usize, usize)> = expanded
+                .regions
+                .iter()
+                .map(|(index, region)| (*index, region.from_start, region.from_end))
+                .collect();
+            regions.sort_unstable();
+            let rows_key = (style == DiffStyle::Split, loader, entry.version, regions);
+            let rows = match self.rows_cache.get(&entry.key) {
+                Some((key, rows)) if *key == rows_key => rows.clone(),
+                _ => {
+                    let rows = Arc::new(build_rows(&entry.file, style, &expanded, loader));
+                    self.rows_cache
+                        .insert(entry.key.clone(), (rows_key, rows.clone()));
+                    rows
+                }
+            };
             let annotations = self.annotation_rows(entry, &rows);
             for row_index in 0..rows.len() {
                 items.push(FlatItem::Row(file_index, row_index));

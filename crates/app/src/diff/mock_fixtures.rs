@@ -349,8 +349,34 @@ pub fn turn_sets() -> Vec<Vec<FixtureFile>> {
     ]
 }
 
+/// `TURIN_DIFF_STRESS=<files>`: that many generated 600-line new files, to
+/// exercise virtualization.
+fn stress_files(count: usize) -> Vec<FixtureFile> {
+    (0..count)
+        .map(|index| {
+            let body: String = (0..600)
+                .map(|line| {
+                    format!(
+                        "pub fn generated_{index}_{line}(value: usize) -> usize {{ value.wrapping_mul({}) + {line} }}\n",
+                        line + 3
+                    )
+                })
+                .collect();
+            let path: &'static str = Box::leak(format!("crates/stress/src/module_{index:03}.rs").into_boxed_str());
+            let body: &'static str = Box::leak(body.into_boxed_str());
+            added(path, body)
+        })
+        .collect()
+}
+
 /// "Changes": everything since the base branch.
 pub fn branch_changes() -> Vec<FixtureFile> {
+    if let Some(count) = std::env::var("TURIN_DIFF_STRESS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        return stress_files(count);
+    }
     let mut files = vec![
         added("crates/app/src/diff/rows.rs", ROWS_NEW),
         modified("crates/app/Cargo.toml", CARGO_OLD, CARGO_NEW),

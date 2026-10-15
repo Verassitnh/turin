@@ -1343,7 +1343,7 @@ mod tests {
                     label: "Pulling latest changes".into(),
                     action_id: None,
                 },
-                || std::future::pending::<Result<(), Failure>>(),
+                std::future::pending::<Result<(), Failure>>,
             ),
         )
         .await;

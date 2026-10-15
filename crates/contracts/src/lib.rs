@@ -2,6 +2,8 @@
 
 #[macro_use]
 pub mod base_schemas;
+#[macro_use]
+pub mod macros;
 pub mod agent_sessions;
 pub mod assistant_citations;
 pub mod chat_attachment;

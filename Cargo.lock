@@ -6746,11 +6746,13 @@ name = "turin-contracts"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "indexmap",
  "pretty_assertions",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "turin-contracts-id-consumer",
+ "unicode-ccc",
  "uuid",
 ]
 

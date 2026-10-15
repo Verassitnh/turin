@@ -28,6 +28,7 @@
 
 pub mod config;
 pub mod event;
+pub mod references;
 pub mod runner;
 pub mod trust;
 
@@ -36,9 +37,13 @@ pub use config::{
     HooksConfig, PendingProjectHooks, PendingReason, ProjectHooksStatus,
 };
 pub use event::{HookEvent, HookEventKind, UnknownHookEventError};
+pub use references::{UnhashedReference, unhashed_references};
 pub use runner::{
     DispatchSummary, HookDispatchContext, HookReturn, HookRunResult, HookRunner, HookUpdate,
     MAX_OUTPUT_BYTES, TRUNCATED_MARKER, dispatch, hook_env_vars, hook_stdin_json,
     parse_hook_return, resolve_blocking, resolve_hook_cwd,
 };
-pub use trust::{TrustError, TrustStore, default_trust_store_path, sha256_hex};
+pub use trust::{
+    TreeError, TreeSnapshot, TrustError, TrustStore, default_trust_store_path, hash_config_tree,
+    sha256_hex,
+};

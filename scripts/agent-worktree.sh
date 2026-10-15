@@ -9,5 +9,8 @@ wt="$(dirname "$root")/turin-wt/$task"
 if [ ! -d "$wt" ]; then
   git -C "$root" worktree add -q -b "task/$task" "$wt" "$base"
   ln -sfn "$(cd "$root/../upstream" && pwd)" "$wt/upstream"
+  # Build output lives under ../turin-targets.noindex (Spotlight skips it).
+  mkdir -p "$(dirname "$root")/turin-targets.noindex/$task"
+  ln -sfn "$(dirname "$root")/turin-targets.noindex/$task" "$wt/target"
 fi
 echo "$wt"

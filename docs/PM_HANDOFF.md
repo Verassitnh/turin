@@ -51,3 +51,13 @@ QC runs wf_8b97ef76-9c9 (T02) and wf_42618e43-71a (T04) were resumed after the r
 - T06 (Grok), T07 (Sonnet), T08 (Codex) are based on task/T01-contracts and are waiting for the PM to say "merge T01" once T01 compiles.
 - T24 icon: QC PASS; user asked to see 1.0x vs 1.25x T before deciding (agent producing assets/prod/compare-scale-options.png).
 - Live QC reports in docs/qc/. Board in TASKS.md is current.
+
+
+## Update 2026-10-15 ~04:30
+
+- Claude session limit hit ~20:45 on 10-14; all Claude tasks died, WIP saved per worktree (model-attributed). Codex usage reset; GLM still out (OpenRouter credits).
+- Model policy (user): Sonnet/Haiku wherever reasonable; Opus for UI rendering + look-and-feel QC only. QC workflow takes `models` arg (default review sonnet, verify haiku, lead sonnet).
+- Integration branch `stage` (worktree ../turin-wt/stage) = main + T01 + T02b + T08 + T09a + T10a + T11a + T12a. Re-merge when those move; dependents `git merge stage` on instruction.
+- New MCP session prefix for tasks: `node:delegated-task:command%3Amcp%3Aa4bbaa6c-c3a6-42ee-89f1-02d82165c892%3Adelegate-task%3Aturin-<id>` (resumes in old threads use `…%3Athread-send%3A…`).
+- Running: Codex T13a, T13b, T09, T10 · Grok T06, T08, T05a, T23, T11, T12 · Sonnet T01(r3), T07(r3), T14, T21c · Opus T15(r2), T16(r2) · QC T02b re-QC (wf_e19abae9-25e), T10a (wf_54f7c42f-d77).
+- Queued QC: T04c light verify, T09a, T11a, T12a, T03 re-QC rerun.

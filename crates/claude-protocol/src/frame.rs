@@ -71,8 +71,10 @@ pub struct AssistantFrame {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct UserFrame {
     pub message: Value,
-    pub uuid: String,
-    pub session_id: String,
+    #[serde(default)]
+    pub uuid: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
     #[serde(default)]
     pub parent_tool_use_id: Option<String>,
     #[serde(default)]
@@ -701,5 +703,19 @@ mod tests {
         let raw = serde_json::json!({"type":"future_frame","subtype":"x","a":1});
         assert_eq!(Frame::decode(raw.clone()).unwrap().raw, raw);
         assert!(Frame::decode(serde_json::json!({"type":"result","subtype":"success"})).is_err());
+    }
+    #[test]
+    fn user_frame_uuid_and_session_id_are_optional() {
+        let raw = serde_json::json!({"type":"user","message":{"role":"user","content":"hi"},"parent_tool_use_id":null,"isSynthetic":true});
+        let FrameKind::User(user) = Frame::decode(raw).unwrap().kind else {
+            panic!("expected a user frame");
+        };
+        assert_eq!((user.uuid, user.session_id), (None, None));
+        let raw = serde_json::json!({"type":"user","message":{},"uuid":"u1","session_id":"s1"});
+        let FrameKind::User(user) = Frame::decode(raw).unwrap().kind else {
+            panic!("expected a user frame");
+        };
+        assert_eq!(user.uuid.as_deref(), Some("u1"));
+        assert_eq!(user.session_id.as_deref(), Some("s1"));
     }
 }

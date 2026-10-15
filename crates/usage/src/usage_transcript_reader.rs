@@ -295,6 +295,8 @@ pub async fn read_transcript_records(
     };
     let mut resumed = false;
     let mut start = 0u64;
+    // The guard check moves the handle, so the parse seeks even when it starts at 0.
+    let mut positioned = false;
     let saved_state = match (resume_from, &format.state) {
         (Some(position), Some(codec)) if !position.state.is_null() => {
             (codec.decode)(&position.state).ok()
@@ -304,7 +306,10 @@ pub async fn read_transcript_records(
     if let Some(position) = resume_from
         && position.resume_offset > 0
         && (format.state.is_none() || saved_state.is_some())
-        && guard_matches(&mut file, position).await
+        && {
+            positioned = true;
+            guard_matches(&mut file, position).await
+        }
     {
         if let Some(saved) = saved_state {
             state = saved;
@@ -313,7 +318,10 @@ pub async fn read_transcript_records(
         resumed = true;
     }
 
-    file.seek(std::io::SeekFrom::Start(start)).await.ok()?;
+    // Seeking a FIFO (or any non-seekable file) fails even at offset 0, so only seek when moving.
+    if start > 0 || positioned {
+        file.seek(std::io::SeekFrom::Start(start)).await.ok()?;
+    }
     let mut reader = BufReader::new(file);
     let mut records = Vec::new();
     let mut resume_offset = start;

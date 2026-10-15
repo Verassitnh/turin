@@ -84,6 +84,14 @@ pub struct UsageReader {
     pub reader: ProviderUsageReader,
 }
 
+/// Epoch milliseconds, read at every point the service needs the time.
+pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
+
+/// The wall clock. Tests inject a clock they can move.
+pub fn system_clock() -> Clock {
+    Arc::new(now_ms)
+}
+
 pub struct UsageServiceConfig {
     pub state_dir: PathBuf,
     pub readers: Vec<UsageReader>,
@@ -92,6 +100,7 @@ pub struct UsageServiceConfig {
     pub home_dir: String,
     /// Where the LiteLLM rate table is fetched from. Tests point this at a dead port.
     pub rates_url: String,
+    pub clock: Clock,
 }
 
 /// A transcript directory a reader points at, with its resolved identity.
@@ -303,6 +312,10 @@ impl UsageService {
         }
     }
 
+    fn now(&self) -> f64 {
+        (self.inner.config.clock)()
+    }
+
     fn scan_cache_path(&self) -> PathBuf {
         self.inner.config.state_dir.join(SCAN_CACHE_FILE_NAME)
     }
@@ -372,7 +385,7 @@ impl UsageService {
     /// than the page failing. `force` refetches inside the TTL so a model that
     /// LiteLLM added since the last fetch gets priced now.
     async fn load_rates(&self, force: bool) {
-        let now = now_ms();
+        let now = self.now();
         let max_age = if force {
             RATES_REFRESH_FLOOR_MS
         } else {
@@ -982,7 +995,7 @@ impl UsageService {
             None
         };
 
-        let started_at_ms = now_ms();
+        let started_at_ms = self.now();
         self.ensure_scan_cache_loaded().await;
 
         let host_id = gethostname::gethostname().to_string_lossy().into_owned();
@@ -1149,7 +1162,7 @@ impl UsageService {
         }
 
         let aggregated = aggregator.finish();
-        let finished_at_ms = now_ms();
+        let finished_at_ms = self.now();
         Ok(UsageSummary {
             contract_version: USAGE_CONTRACT_VERSION,
             read_at: iso_millis(finished_at_ms),
@@ -1209,259 +1222,4 @@ impl UsageService {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_formats::claude_format;
-    use serde_json::json;
-    use turin_contracts::usage::{UsageCostSource, UsageResolution};
-    use turin_provider_core::rt::boxed;
-
-    fn claude_line(id: u32, output_tokens: u64) -> String {
-        format!(
-            "{}\n",
-            json!({
-                "type": "assistant",
-                "timestamp": "2026-08-01T10:00:00Z",
-                "requestId": format!("req_{id}"),
-                "sessionId": "session-1",
-                "message": {
-                    "id": format!("msg_{id}"),
-                    "model": "claude-fable-5",
-                    "usage": { "input_tokens": 10, "output_tokens": output_tokens },
-                },
-            })
-        )
-    }
-
-    fn settings() -> ServerSettings {
-        serde_json::from_value(json!({})).expect("empty settings decode to defaults")
-    }
-
-    fn input(since: &str, until: &str) -> UsageSummaryInput {
-        UsageSummaryInput {
-            since_day: UsageDay::new(since).unwrap(),
-            until_day: UsageDay::new(until).unwrap(),
-            time_zone: TrimmedNonEmptyString::new("UTC").unwrap(),
-            resolution: None,
-            since_time: None,
-            until_time: None,
-            await_refresh: None,
-        }
-    }
-
-    /// A rate table written to disk with a fresh timestamp, so no fetch happens.
-    fn seed_rates(state_dir: &Path) {
-        std::fs::create_dir_all(state_dir).unwrap();
-        let document = json!({
-            "fetchedAtMs": now_ms(),
-            "document": {
-                "claude-fable-5": { "input_cost_per_token": 1e-5, "output_cost_per_token": 5e-5 },
-            },
-        });
-        std::fs::write(state_dir.join(RATES_CACHE_FILE_NAME), document.to_string()).unwrap();
-    }
-
-    fn service(state_dir: &Path, transcripts: &Path) -> UsageService {
-        let dir = transcripts.to_path_buf();
-        let reader = UsageReader {
-            driver_kind: "claudeAgent".to_owned(),
-            reader: ProviderUsageReader::Transcripts {
-                provider: UsageProviderKind::Claude,
-                format: claude_format(),
-                directories: Arc::new(move |_instance| {
-                    let dir = dir.clone();
-                    boxed(async move {
-                        vec![TranscriptDirectory {
-                            dir: dir.to_string_lossy().into_owned(),
-                            file_name: None,
-                        }]
-                    })
-                }),
-            },
-        };
-        UsageService::new(UsageServiceConfig {
-            state_dir: state_dir.to_path_buf(),
-            readers: vec![reader],
-            host_env: ProcessEnv::new(),
-            home_dir: "/home/test".to_owned(),
-            // Never reached: the seeded rate table is fresh. A dead port keeps a stray fetch cheap.
-            rates_url: "http://127.0.0.1:9/rates.json".to_owned(),
-        })
-    }
-
-    fn reason(error: &UsageReadError) -> UsageReadErrorReason {
-        match error {
-            UsageReadError::ReadError { reason, .. } => *reason,
-        }
-    }
-
-    fn records(summary: &UsageSummary) -> u64 {
-        summary.buckets.iter().map(|bucket| bucket.records).sum()
-    }
-
-    #[tokio::test]
-    async fn reads_and_prices_a_transcript_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let state = root.path().join("state");
-        let transcripts = root.path().join("projects");
-        std::fs::create_dir_all(&transcripts).unwrap();
-        std::fs::write(
-            transcripts.join("s1.jsonl"),
-            claude_line(1, 5) + &claude_line(2, 7),
-        )
-        .unwrap();
-        seed_rates(&state);
-
-        let summary = service(&state, &transcripts)
-            .read_summary(&input("2026-08-01", "2026-08-31"), &settings())
-            .await
-            .unwrap();
-
-        assert_eq!(summary.buckets.len(), 1);
-        let bucket = &summary.buckets[0];
-        assert_eq!(bucket.records, 2);
-        assert_eq!(bucket.totals.output_tokens, 12);
-        // Two records of 10 input and 5 or 7 output tokens: 2 * 10 * 1e-5 + 12 * 5e-5.
-        assert_eq!(bucket.cost_source, UsageCostSource::ModelPriced);
-        assert!(
-            (bucket.cost_usd - 8e-4).abs() < 1e-12,
-            "{}",
-            bucket.cost_usd
-        );
-        assert_eq!(summary.sources.len(), 1);
-        assert_eq!(summary.sources[0].status, UsageSourceStatus::Ok);
-        assert_eq!(summary.sources[0].scanned_files, 1);
-        assert_eq!(summary.sources[0].distinct_sessions, 1);
-        assert_eq!(summary.pricing.status, UsagePricingStatus::Cached);
-        assert_eq!(summary.pricing.known_models, 1);
-    }
-
-    #[tokio::test]
-    async fn a_warm_scan_sees_only_appended_lines_of_a_grown_file() {
-        let root = tempfile::tempdir().unwrap();
-        let state = root.path().join("state");
-        let transcripts = root.path().join("projects");
-        std::fs::create_dir_all(&transcripts).unwrap();
-        let file = transcripts.join("s1.jsonl");
-        std::fs::write(&file, claude_line(1, 5)).unwrap();
-        seed_rates(&state);
-        let service = service(&state, &transcripts);
-        let cold = service
-            .read_summary(&input("2026-08-01", "2026-08-31"), &settings())
-            .await
-            .unwrap();
-        assert_eq!(records(&cold), 1);
-
-        let mut appended = std::fs::read_to_string(&file).unwrap();
-        appended += &claude_line(2, 9);
-        std::fs::write(&file, appended).unwrap();
-        let warm = service
-            .read_summary(&input("2026-08-01", "2026-08-31"), &settings())
-            .await
-            .unwrap();
-        assert_eq!(records(&warm), 2);
-        assert_eq!(warm.buckets[0].totals.output_tokens, 14);
-    }
-
-    #[tokio::test]
-    async fn drops_a_message_copied_into_another_transcript() {
-        // Resumed and forked sessions copy a message's records forward; the
-        // global dedupe pass keeps one.
-        let root = tempfile::tempdir().unwrap();
-        let state = root.path().join("state");
-        let transcripts = root.path().join("projects");
-        std::fs::create_dir_all(&transcripts).unwrap();
-        std::fs::write(transcripts.join("a.jsonl"), claude_line(1, 5)).unwrap();
-        std::fs::write(transcripts.join("b.jsonl"), claude_line(1, 5)).unwrap();
-        seed_rates(&state);
-
-        let summary = service(&state, &transcripts)
-            .read_summary(&input("2026-08-01", "2026-08-31"), &settings())
-            .await
-            .unwrap();
-        assert_eq!(records(&summary), 1);
-        assert_eq!(summary.buckets[0].totals.output_tokens, 5);
-    }
-
-    #[tokio::test]
-    async fn persists_the_scan_cache_for_the_next_start() {
-        let root = tempfile::tempdir().unwrap();
-        let state = root.path().join("state");
-        let transcripts = root.path().join("projects");
-        std::fs::create_dir_all(&transcripts).unwrap();
-        std::fs::write(transcripts.join("s1.jsonl"), claude_line(1, 5)).unwrap();
-        seed_rates(&state);
-
-        let first = service(&state, &transcripts);
-        let cold = first
-            .read_summary(&input("2026-08-01", "2026-08-31"), &settings())
-            .await
-            .unwrap();
-        first.await_persisted().await;
-        assert!(state.join(SCAN_CACHE_FILE_NAME).exists());
-
-        let restarted = service(&state, &transcripts)
-            .read_summary(&input("2026-08-01", "2026-08-31"), &settings())
-            .await
-            .unwrap();
-        assert_eq!(restarted.buckets, cold.buckets);
-        assert_eq!(restarted.sources[0].scanned_files, 1);
-    }
-
-    #[tokio::test]
-    async fn reports_a_missing_directory_as_a_missing_source() {
-        let root = tempfile::tempdir().unwrap();
-        let state = root.path().join("state");
-        seed_rates(&state);
-        let summary = service(&state, &root.path().join("absent"))
-            .read_summary(&input("2026-08-01", "2026-08-31"), &settings())
-            .await
-            .unwrap();
-
-        assert!(summary.buckets.is_empty());
-        assert_eq!(summary.sources[0].status, UsageSourceStatus::Missing);
-        assert_eq!(
-            summary.sources[0]
-                .message
-                .as_ref()
-                .map(|message| message.as_str()),
-            Some("No transcript directory on this environment.")
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_an_inverted_window() {
-        let root = tempfile::tempdir().unwrap();
-        let state = root.path().join("state");
-        seed_rates(&state);
-        let error = service(&state, root.path())
-            .read_summary(&input("2026-08-31", "2026-08-01"), &settings())
-            .await
-            .unwrap_err();
-        assert_eq!(reason(&error), UsageReadErrorReason::InvalidWindow);
-    }
-
-    #[tokio::test]
-    async fn rejects_an_hourly_window_without_instants_or_longer_than_a_day() {
-        let root = tempfile::tempdir().unwrap();
-        let state = root.path().join("state");
-        seed_rates(&state);
-        let service = service(&state, root.path());
-
-        let mut hourly = input("2026-08-01", "2026-08-01");
-        hourly.resolution = Some(UsageResolution::Hour);
-        let error = service
-            .read_summary(&hourly, &settings())
-            .await
-            .unwrap_err();
-        assert_eq!(reason(&error), UsageReadErrorReason::InvalidWindow);
-
-        hourly.since_time = Some(TrimmedNonEmptyString::new("2026-08-01T00:00:00Z").unwrap());
-        hourly.until_time = Some(TrimmedNonEmptyString::new("2026-08-03T00:00:00Z").unwrap());
-        let error = service
-            .read_summary(&hourly, &settings())
-            .await
-            .unwrap_err();
-        assert_eq!(reason(&error), UsageReadErrorReason::InvalidWindow);
-    }
-}
+mod tests;

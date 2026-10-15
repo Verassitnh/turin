@@ -137,7 +137,7 @@ pub fn codex_format() -> TranscriptUsageFormat {
                 }
             }),
         }),
-        shared_sessions_across_files: false,
+        shared_sessions_across_files: true,
     }
 }
 

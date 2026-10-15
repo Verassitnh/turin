@@ -166,6 +166,8 @@ struct Shared {
     exit_status: Mutex<Option<ProcessExit>>,
     exited: Notify,
     stderr_tail: Mutex<String>,
+    /// Process-group id. Taken after the leader is reaped so the group can still be signaled.
+    pgid: Mutex<Option<u32>>,
 }
 pub struct ClaudeSession {
     state: Arc<Shared>,
@@ -213,6 +215,7 @@ impl ClaudeSession {
             exit_status: Mutex::new(None),
             exited: Notify::new(),
             stderr_tail: Mutex::new(String::new()),
+            pgid: Mutex::new(pid),
         });
         let mut tasks = JoinSet::new();
         tasks.spawn(reaper(child, state.clone()));
@@ -527,6 +530,8 @@ fn push_stderr_tail(tail: &mut String, chunk: &str) {
 }
 async fn reaper(mut child: tokio::process::Child, state: Arc<Shared>) {
     let status = child.wait().await.ok();
+    let pgid = state.pgid.lock().unwrap().take();
+    signal_group(pgid, kill_signal());
     let exit = process_exit(status);
     *state.exit_status.lock().unwrap() = Some(exit.clone());
     state.exited.notify_one();
@@ -986,6 +991,57 @@ for line in sys.stdin:
         );
         let status = session.shutdown().await.unwrap();
         assert_eq!(status.code, Some(7));
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn shutdown_kills_grandchildren_after_the_leader_exits() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-group-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let grandchild = dir.join("grandchild");
+        let mut options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,os,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        pid=os.fork()
+        if pid==0:
+            os.execvp("sleep", ["sleep", "47"])
+        handle=open(os.environ["GRANDCHILD"], "w")
+        handle.write(str(pid))
+        handle.flush()
+        os._exit(0)
+"#,
+        );
+        options
+            .env
+            .as_mut()
+            .unwrap()
+            .insert("GRANDCHILD".into(), grandchild.display().to_string());
+        let session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        let pid = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&grandchild).await {
+                    if let Ok(pid) = text.trim().parse::<i32>() {
+                        return pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("grandchild pid was not written");
+        let status = session.shutdown().await.unwrap();
+        assert_eq!(status.code, Some(0));
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "grandchild {pid} still alive"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }

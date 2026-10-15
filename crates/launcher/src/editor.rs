@@ -58,8 +58,8 @@ fn is_versioned_bundle(entry: &str, name: &str) -> bool {
 }
 
 /// Upstream `resolveEditorCommand(editor, env)` on darwin: PATH first, then
-/// the app bundles in `~/Applications` and `/Applications`, then the
-/// JetBrains Toolbox script directory.
+/// the app bundles under `host.application_roots`, then the JetBrains
+/// Toolbox script directory.
 pub fn resolve_editor_command(
     editor: &EditorDefinition,
     host: &dyn LaunchHost,
@@ -95,14 +95,8 @@ pub fn resolve_editor_command(
     let jetbrains = editor.launch_style == EditorLaunchStyle::LineColumn;
     let mut candidates: Vec<String> = Vec::new();
 
-    let mut roots: Vec<String> = Vec::new();
-    if let Some(home) = home {
-        roots.push(Path::new(home).join("Applications").display().to_string());
-    }
-    roots.push("/Applications".to_owned());
-    for root in roots {
-        let root_path = Path::new(&root);
-        let entries = host.read_directory(root_path);
+    for root_path in host.application_roots(env) {
+        let entries = host.read_directory(&root_path);
         // JetBrains Toolbox installs bundles named after the app and its
         // version (`IntelliJ IDEA 2026.1.4.app`), so list the directory and
         // accept `<name> <version>.app` as well as the exact `<name>.app`.

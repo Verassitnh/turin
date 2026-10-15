@@ -35,6 +35,11 @@ pub trait LaunchHost: Send + Sync + 'static {
     /// upstream `readDirectory(...).pipe(Effect.orElseSucceed(() => []))`.
     fn read_directory(&self, path: &Path) -> Vec<String>;
 
+    /// Directories searched for app bundles, in priority order: the user's
+    /// `~/Applications` before `/Applications`. Injected so tests never see
+    /// apps the developer happens to have installed.
+    fn application_roots(&self, env: &Env) -> Vec<PathBuf>;
+
     /// Starts a child with stdio ignored and does not wait for it. Errors only
     /// when the spawn itself fails.
     async fn spawn_detached(&self, command: &str, args: &[String]) -> io::Result<()>;
@@ -71,6 +76,15 @@ impl LaunchHost for SystemHost {
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect()
+    }
+
+    fn application_roots(&self, env: &Env) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        if let Some(home) = env.get("HOME").filter(|home| !home.is_empty()) {
+            roots.push(Path::new(home).join("Applications"));
+        }
+        roots.push(PathBuf::from("/Applications"));
+        roots
     }
 
     async fn spawn_detached(&self, command: &str, args: &[String]) -> io::Result<()> {
@@ -281,6 +295,15 @@ pub(crate) mod test_support {
 
         fn read_directory(&self, path: &Path) -> Vec<String> {
             SystemHost.read_directory(path)
+        }
+
+        /// Only the fixture HOME: a developer's real `/Applications` must not
+        /// change what a test sees.
+        fn application_roots(&self, env: &Env) -> Vec<PathBuf> {
+            env.get("HOME")
+                .filter(|home| !home.is_empty())
+                .map(|home| vec![Path::new(home).join("Applications")])
+                .unwrap_or_default()
         }
 
         async fn spawn_detached(&self, command: &str, args: &[String]) -> io::Result<()> {

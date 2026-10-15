@@ -110,23 +110,24 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
 | T00 | Foundation fixes from QC wf_6ce02f2f-38c (docs part done by PM; helpers: Codex died on auth expiry → Sonnet r2) | `crates/contracts/src/base_schemas.rs` | Codex → Sonnet | done (merged) |
-| T00c | QC low items: UtcDateTime parse bounds/leap/zone-less, private field; `forward_compatible_*::optional` | `crates/contracts/src/base_schemas.rs` | Sonnet | todo (after T01 merges, to avoid conflicts) |
+| T00c | QC low items: UtcDateTime parse bounds/leap/zone-less, private field; `forward_compatible_*::optional` | `crates/contracts/src/base_schemas.rs` | Cursor Auto | active (base: T01) |
+| T00i | Upstream coverage inventory → docs/inventory/upstream-coverage.md (KEEP/CUT/UNASSIGNED per file, % ported) | docs | Cursor Auto | active |
 | T01 | Port all kept contracts modules | `crates/contracts` | GLM → Sonnet | done (9f37c0a, 545 tests) → QC queued |
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | done (merged; QC PASS) |
 | T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | done (merged with T02c) |
 | T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | done (merged; re-QC PASS) |
-| T03c | T03 re-QC lows: contrast deviation row, 2 themePalette tests, send tooltip label, etc. | `crates/app/src/theme`, composer_surface | Haiku | done (6 commits) → merge to main |
+| T03c | T03 re-QC lows: contrast deviation row, 2 themePalette tests, send tooltip label, etc. | `crates/app/src/theme`, composer_surface | Haiku | done (merged) |
 | T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex → Haiku | done (merged; T04c verify PASS) |
 
 ### Wave 2: backend leaves (after T01)
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T04c | Apply T04b re-QC corrections to protocol docs | `docs/protocols` | Haiku | done (merged). 3 low stale-note fixes → T04d (Haiku) |
+| T04c | Apply T04b re-QC corrections to protocol docs | `docs/protocols` | Haiku | done (merged, incl. T04d stale-note fixes) |
 | T02c | Persistence: Db drop deadlock + index DDL whitespace (from T02b re-QC) | `crates/persistence` | Haiku | done (merged; test catches bug, 6.5k cycles clean) |
 | T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet → Grok → Haiku | r4 active (Haiku) |
 | T05b | Shared utils, contract-dependent files | `crates/shared` (new modules only) | Codex | active (Codex re-auth) |
-| T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok | r2 active (core execute/parsers/checkpoints done) |
+| T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok → Cursor Auto | done (151 tests) → QC queued |
 | T07 | Source control: core + GitHub driver, PR service, review guides, viewed files | `crates/source-control` | GLM → Sonnet | r3 active (resume after Claude limit) |
 | T08 | Provider core: adapter trait, registry, catalog, model manifests, auth/credentials | `crates/provider-core` | Codex → Sonnet → Grok | done (stable trait + registries) → QC queued |
 | T08b | Provider core remainder: subagentProjection, mcpToolPresentation, settings watcher → reconcile, model manifest fetch, NDJSON event log, ProviderHost live wiring | `crates/provider-core` | Codex | active (Codex re-auth) |

@@ -80,11 +80,18 @@ pub fn user_facing_dispatch_error_message(cause: &Value) -> Option<String> {
             .as_str()
             .map(str::to_owned)
             .or_else(|| friendly(value))
+            // Upstream `textValue(detail) ?? textValue(message)`: a missing,
+            // non-string, or blank detail falls through to message.
             .or_else(|| {
-                value
-                    .get("detail")
-                    .or_else(|| value.get("message"))
-                    .and_then(|v| v.as_str())
+                ["detail", "message"]
+                    .iter()
+                    .find_map(|key| {
+                        value
+                            .get(*key)?
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                    })
                     .map(str::to_owned)
             });
         if let Some(message) = message
@@ -195,6 +202,21 @@ mod tests {
             user_facing_dispatch_error_message(&value).as_deref(),
             Some("Codex cannot stop a run once it has started.")
         );
+    }
+
+    #[test]
+    fn blank_or_non_string_detail_falls_back_to_message() {
+        // Upstream probes: {detail:"", message:"Real"} and {detail:5, message:"Real"}.
+        for detail in [serde_json::json!(""), serde_json::json!(5)] {
+            let value = serde_json::json!({
+                "message": "Failed to dispatch orchestration command message.dispatch (command-1).",
+                "cause": { "detail": detail, "message": "Real" }
+            });
+            assert_eq!(
+                user_facing_dispatch_error_message(&value).as_deref(),
+                Some("Real")
+            );
+        }
     }
 
     #[test]

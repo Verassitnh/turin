@@ -194,3 +194,4 @@ Hooks get event JSON on stdin and `TURIN_*` env vars (`TURIN_EVENT`,
 | `contracts/base_schemas.rs` | `isUnknownUnionMember(value)` | no function; match `ForwardCompatible::Unknown` | Rust enums make it a pattern |
 | `contracts/base_schemas.rs` | `PortSchema` | omitted | only used by cut features |
 | `contracts/base_schemas.rs` | cut-feature exports (AuthSessionId, RpcClientId, SecretRef, DpopFailureReason, Client* enums) | omitted | features cut (PORTING cut list) |
+| `contracts/*` (every `Schema.Number` → `f64`) | JS encodes whole-valued numbers without a fraction (`7`) | serde_json encodes the `f64` `7.0` as `7.0`; decode accepts both | Both are the same JSON number to every reader (upstream decodes `7.0` identically), so no on-disk or wire incompatibility; only byte-level diffs of re-encoded JSON, and `serde_json::Value` equality between `7` and `7.0`, differ |

@@ -22,15 +22,16 @@ use turin_contracts::{
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2ConversationMessage,
         OrchestrationV2ConversationMessageRole, OrchestrationV2CreationSource,
-        OrchestrationV2ExecutionNodeKind, OrchestrationV2ExecutionNodeStatus,
-        OrchestrationV2ProviderFailureClass, OrchestrationV2ProviderSession,
-        OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
-        OrchestrationV2ProviderThreadDisposition, OrchestrationV2ProviderThreadStatus,
-        OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus,
-        OrchestrationV2ResponseCapability, OrchestrationV2RuntimeRequest,
-        OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
-        OrchestrationV2Subagent, OrchestrationV2SubagentOrigin, OrchestrationV2SubagentStatus,
-        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
+        OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeKind,
+        OrchestrationV2ExecutionNodeStatus, OrchestrationV2ProviderFailureClass,
+        OrchestrationV2ProviderSession, OrchestrationV2ProviderSessionStatus,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadDisposition,
+        OrchestrationV2ProviderThreadStatus, OrchestrationV2ProviderTurn,
+        OrchestrationV2ProviderTurnStatus, OrchestrationV2ResponseCapability,
+        OrchestrationV2RuntimeRequest, OrchestrationV2RuntimeRequestKind,
+        OrchestrationV2RuntimeRequestStatus, OrchestrationV2Subagent,
+        OrchestrationV2SubagentOrigin, OrchestrationV2SubagentStatus, OrchestrationV2TurnItem,
+        OrchestrationV2TurnItemStatus,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
 };
@@ -39,8 +40,8 @@ use turin_provider_core::id_allocator::{IdAllocator, derive};
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
 use crate::adapter::records::{
-    NodeOf, NodeTiming, assistant_message, epoch_ms_or, execution_node, todo_native_id, todo_plan,
-    todo_steps, todos_complete,
+    NodeOf, NodeTiming, TextBlock, assistant_message, epoch_ms_or, execution_node, next_ordinal,
+    text_turn_item, todo_native_id, todo_plan, todo_steps, todos_complete,
 };
 use crate::events::V1Event;
 use crate::v1_client::{PermissionReply, QuestionReply, V1Client};
@@ -707,30 +708,7 @@ impl OpenCodeV1Session {
         } else {
             OrchestrationV2TurnItemStatus::Running
         };
-        let item = if record.reasoning {
-            OrchestrationV2TurnItem::Reasoning {
-                tool_non_execution_kind: None,
-                tool_surface: None,
-                tool_icon: None,
-                tool_source: None,
-                id: derive::turn_item_from_provider_item(&self.driver, part_id),
-                thread_id: thread_id.clone(),
-                run_id: None,
-                node_id: Some(node_id),
-                provider_thread_id: Some(provider_thread_id),
-                provider_turn_id: Some(provider_turn_id),
-                native_item_ref: Some(native_ref(part_id, false)),
-                parent_item_id: None,
-                ordinal,
-                status,
-                title: None,
-                started_at: Some(started_at),
-                completed_at,
-                updated_at: now,
-                text: record.text.clone(),
-                streaming: !completed,
-            }
-        } else {
+        if !record.reasoning {
             let message = assistant_message(
                 &self.driver,
                 &of,
@@ -740,36 +718,26 @@ impl OpenCodeV1Session {
                 started_at,
                 now,
             );
-            let message_id = message.id.clone();
             self.emit(ProviderAdapterV2Event::MessageUpdated {
                 driver: self.driver.clone(),
                 message,
             });
-            OrchestrationV2TurnItem::AssistantMessage {
-                tool_non_execution_kind: None,
-                tool_surface: None,
-                tool_icon: None,
-                tool_source: None,
-                id: derive::turn_item_from_provider_item(&self.driver, part_id),
-                thread_id: thread_id.clone(),
-                run_id: None,
-                node_id: Some(node_id),
-                provider_thread_id: Some(provider_thread_id),
-                provider_turn_id: Some(provider_turn_id),
-                native_item_ref: Some(native_ref(part_id, false)),
-                parent_item_id: None,
-                ordinal,
+        }
+        let item = text_turn_item(
+            &self.driver,
+            &of,
+            &node_id,
+            TextBlock {
+                reasoning: record.reasoning,
+                text: &record.text,
+                streaming: !completed,
                 status,
-                title: None,
-                started_at: Some(started_at),
+                ordinal,
+                started_at,
                 completed_at,
                 updated_at: now,
-                message_id,
-                text: record.text.clone(),
-                attachments: None,
-                streaming: !completed,
-            }
-        };
+            },
+        );
         self.emit(ProviderAdapterV2Event::TurnItemUpdated {
             driver: self.driver.clone(),
             turn_item: item,
@@ -995,14 +963,17 @@ impl OpenCodeV1Session {
         if guard.pending.contains_key(&native_id) {
             return;
         }
-        let Some((provider_turn_id, thread_id)) = guard.threads.get(&owner).and_then(|thread| {
-            thread
-                .active
-                .as_ref()
-                .map(|turn| (turn.provider_turn.id.clone(), turn.thread_id.clone()))
-        }) else {
+        let Some(turn) = guard
+            .threads
+            .get(&owner)
+            .and_then(|thread| thread.active.as_ref())
+        else {
             return;
         };
+        let provider_turn_id = turn.provider_turn.id.clone();
+        let thread_id = turn.thread_id.clone();
+        let root_node_id = turn.provider_turn.node_id.clone();
+        let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
         let request_id =
             IdAllocator.runtime_request(&self.driver, Some(&provider_turn_id), Some(&native_id));
         let kind = if event_type == "question.asked" {
@@ -1020,9 +991,41 @@ impl OpenCodeV1Session {
             )
         };
         let now = UtcDateTime::now();
+        // `approvalNode`: a request's node derives from the request id.
+        let node_id = derive::approval_node(&request_id);
+        let node = execution_node(
+            &self.driver,
+            &NodeOf {
+                thread_id: &thread_id,
+                root_node_id: &root_node_id,
+                provider_thread_id: &provider_thread_id,
+                provider_turn_id: &provider_turn_id,
+                native_item_id: &native_id,
+                weak_ref: false,
+            },
+            NodeTiming {
+                kind: if kind == "user_input" {
+                    OrchestrationV2ExecutionNodeKind::UserInputRequest
+                } else {
+                    OrchestrationV2ExecutionNodeKind::ApprovalRequest
+                },
+                status: OrchestrationV2ExecutionNodeStatus::Waiting,
+                started_at: now,
+                completed_at: None,
+            },
+        );
+        // The request's node id is `approvalNode`, not the native item's.
+        let node = OrchestrationV2ExecutionNode {
+            id: node_id.clone(),
+            ..node
+        };
+        self.emit(ProviderAdapterV2Event::NodeUpdated {
+            driver: self.driver.clone(),
+            node,
+        });
         let request = OrchestrationV2RuntimeRequest {
             id: request_id.clone(),
-            node_id: derive::node_from_provider_item(&self.driver, &native_id),
+            node_id,
             provider_turn_id: Some(provider_turn_id),
             native_request_ref: Some(native_ref(&native_id, false)),
             kind: match kind {
@@ -1816,13 +1819,11 @@ fn make_thread(
 
 /// `itemOrdinal`: an item keeps the ordinal of its first emission, so updates do not renumber it.
 fn item_ordinal(turn: &mut V1Turn, native_id: &str) -> u64 {
-    if let Some(ordinal) = turn.item_ordinals.get(native_id) {
-        return *ordinal;
-    }
-    let ordinal = turn.next_item_ordinal;
-    turn.next_item_ordinal += 1;
-    turn.item_ordinals.insert(native_id.to_owned(), ordinal);
-    ordinal
+    next_ordinal(
+        &mut turn.item_ordinals,
+        &mut turn.next_item_ordinal,
+        native_id,
+    )
 }
 
 fn tool_base(

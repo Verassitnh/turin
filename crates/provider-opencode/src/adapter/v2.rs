@@ -21,14 +21,15 @@ use turin_contracts::{
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2ConversationMessage,
         OrchestrationV2ConversationMessageRole, OrchestrationV2CreationSource,
-        OrchestrationV2ProviderFailureClass, OrchestrationV2ProviderSession,
-        OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
-        OrchestrationV2ProviderThreadDisposition, OrchestrationV2ProviderThreadForkedFrom,
-        OrchestrationV2ProviderThreadStatus, OrchestrationV2ProviderTurn,
-        OrchestrationV2ProviderTurnStatus, OrchestrationV2ResponseCapability,
-        OrchestrationV2RuntimeRequest, OrchestrationV2RuntimeRequestKind,
-        OrchestrationV2RuntimeRequestStatus, OrchestrationV2Subagent,
-        OrchestrationV2SubagentOrigin, OrchestrationV2SubagentStatus,
+        OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeKind,
+        OrchestrationV2ExecutionNodeStatus, OrchestrationV2ProviderFailureClass,
+        OrchestrationV2ProviderSession, OrchestrationV2ProviderSessionStatus,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadDisposition,
+        OrchestrationV2ProviderThreadForkedFrom, OrchestrationV2ProviderThreadStatus,
+        OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus,
+        OrchestrationV2ResponseCapability, OrchestrationV2RuntimeRequest,
+        OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
+        OrchestrationV2Subagent, OrchestrationV2SubagentOrigin, OrchestrationV2SubagentStatus,
         OrchestrationV2TurnItemStatus,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
@@ -38,6 +39,10 @@ use turin_provider_core::id_allocator::{IdAllocator, derive};
 
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
+use crate::adapter::records::{
+    NodeOf, NodeTiming, TextBlock, assistant_message, execution_node, next_ordinal, node_status_of,
+    text_turn_item,
+};
 use crate::events::V2StreamEvent;
 use crate::permission_rules::{SessionPermissionRule, session_permission_rules};
 use crate::v2_client::{MessageQuery, V2Client};
@@ -51,9 +56,20 @@ struct V2Turn {
     interrupted: bool,
     finalized: bool,
     usage: UsageAccum,
-    next_ordinal: u64,
-    texts: HashMap<String, String>,
+    /// Ordinals are per native item, assigned on first sight, as upstream's `ordinalOf`.
+    item_ordinals: HashMap<String, u64>,
+    next_item_ordinal: u64,
+    /// Text and reasoning blocks still streaming, keyed by their native id.
+    text_blocks: HashMap<String, TextBlockState>,
+    /// When each tool call was first seen, for its node and item start.
+    tool_started: HashMap<String, UtcDateTime>,
     before: Option<String>,
+}
+
+/// A text block being accumulated (upstream `emitText`'s `turn.texts` entry).
+struct TextBlockState {
+    started_at: UtcDateTime,
+    text: String,
 }
 
 struct V2Thread {
@@ -301,7 +317,7 @@ impl OpenCodeV2Session {
                 if part_type == "text" || part_type == "reasoning" {
                     let text = part.get("text").and_then(Value::as_str).unwrap_or("");
                     let id = part.get("id").and_then(Value::as_str).unwrap_or("part");
-                    self.emit_text(session_id, id, text, part_type == "reasoning", false);
+                    self.emit_settled_text(session_id, id, text, part_type == "reasoning");
                 } else if part_type == "tool" {
                     let id = part.get("id").and_then(Value::as_str).unwrap_or("tool");
                     let name = part.get("name").and_then(Value::as_str).unwrap_or("tool");
@@ -447,37 +463,14 @@ impl OpenCodeV2Session {
                     }
                 }
             }
-            "session.text.delta"
-            | "session.text.ended"
+            "session.text.started"
+            | "session.reasoning.started"
+            | "session.text.delta"
             | "session.reasoning.delta"
+            | "session.text.ended"
             | "session.reasoning.ended" => {
                 if let Some(session_id) = session_id {
-                    let reasoning = event_type.contains("reasoning");
-                    let id = str_field(data, "id")
-                        .or_else(|| str_field(data, "partID"))
-                        .unwrap_or_else(|| "text".to_owned());
-                    let streaming = event_type.ends_with("delta");
-                    let text = if streaming {
-                        data.get("delta").and_then(Value::as_str).unwrap_or("")
-                    } else {
-                        data.get("text").and_then(Value::as_str).unwrap_or("")
-                    };
-                    if streaming {
-                        let mut guard = self.inner.lock();
-                        if let Some(turn) = guard
-                            .threads
-                            .get_mut(&session_id)
-                            .and_then(|thread| thread.active.as_mut())
-                        {
-                            let slot = turn.texts.entry(id.clone()).or_default();
-                            slot.push_str(text);
-                            let owned = slot.clone();
-                            drop(guard);
-                            self.emit_text(&session_id, &id, &owned, reasoning, true);
-                            return;
-                        }
-                    }
-                    self.emit_text(&session_id, &id, text, reasoning, streaming);
+                    self.on_text(&session_id, event_type, data);
                 }
             }
             "session.tool.input.started"
@@ -543,76 +536,263 @@ impl OpenCodeV2Session {
         }
     }
 
-    fn emit_text(
-        &self,
-        session_id: &str,
-        part_id: &str,
-        text: &str,
-        reasoning: bool,
-        streaming: bool,
-    ) {
-        let mut guard = self.inner.lock();
-        let Some(turn) = guard
-            .threads
-            .get_mut(session_id)
-            .and_then(|thread| thread.active.as_mut())
-        else {
+    /// `emitText` for a v2 stream event. The block's native id is
+    /// `${assistantMessageID}:${kind}:${ordinal}`. Deltas accumulate; the `text` field
+    /// of an ended event is the final text, so `completed` is "text" in data.
+    fn on_text(&self, session_id: &str, event_type: &str, data: &Value) {
+        let reasoning = event_type.contains("reasoning");
+        let kind = if reasoning { "reasoning" } else { "text" };
+        let Some(message_id) = str_field(data, "assistantMessageID") else {
             return;
         };
-        if !streaming {
-            turn.texts.insert(part_id.to_owned(), text.to_owned());
+        let ordinal = data.get("ordinal").and_then(Value::as_u64).unwrap_or(0);
+        let native = format!("{message_id}:{kind}:{ordinal}");
+        let now = UtcDateTime::now();
+        let completed = data.get("text").is_some();
+        let mut events = Vec::new();
+        {
+            let mut guard = self.inner.lock();
+            let Some(turn) = guard
+                .threads
+                .get_mut(session_id)
+                .and_then(|thread| thread.active.as_mut())
+            else {
+                return;
+            };
+            let block = turn
+                .text_blocks
+                .entry(native.clone())
+                .or_insert_with(|| TextBlockState {
+                    started_at: now,
+                    text: String::new(),
+                });
+            if let Some(delta) = data.get("delta").and_then(Value::as_str) {
+                block.text.push_str(delta);
+            } else if let Some(text) = data.get("text").and_then(Value::as_str) {
+                block.text = text.to_owned();
+            }
+            let text = block.text.clone();
+            let started_at = block.started_at;
+            if completed {
+                turn.text_blocks.remove(&native);
+            }
+            if !text.is_empty() {
+                self.block_events(
+                    turn,
+                    &native,
+                    reasoning,
+                    &text,
+                    completed,
+                    started_at,
+                    now,
+                    &mut events,
+                );
+            }
         }
-        let item = text_item(turn, &self.driver, part_id, text, reasoning, streaming);
-        drop(guard);
-        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+        for event in events {
+            self.emit(event);
+        }
+    }
+
+    /// A text block already settled in OpenCode's history: it is emitted once, completed.
+    fn emit_settled_text(&self, session_id: &str, part_id: &str, text: &str, reasoning: bool) {
+        let now = UtcDateTime::now();
+        let mut events = Vec::new();
+        {
+            let mut guard = self.inner.lock();
+            let Some(turn) = guard
+                .threads
+                .get_mut(session_id)
+                .and_then(|thread| thread.active.as_mut())
+            else {
+                return;
+            };
+            self.block_events(turn, part_id, reasoning, text, true, now, now, &mut events);
+        }
+        for event in events {
+            self.emit(event);
+        }
+    }
+
+    /// The node, the assistant message (text only), and the item for one block.
+    #[allow(clippy::too_many_arguments)]
+    fn block_events(
+        &self,
+        turn: &mut V2Turn,
+        native: &str,
+        reasoning: bool,
+        text: &str,
+        completed: bool,
+        started_at: UtcDateTime,
+        now: UtcDateTime,
+        events: &mut Vec<ProviderAdapterV2Event>,
+    ) {
+        let thread_id = turn.thread_id.clone();
+        let root_node_id = turn.provider_turn.node_id.clone();
+        let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
+        let provider_turn_id = turn.provider_turn.id.clone();
+        let of = NodeOf {
+            thread_id: &thread_id,
+            root_node_id: &root_node_id,
+            provider_thread_id: &provider_thread_id,
+            provider_turn_id: &provider_turn_id,
+            native_item_id: native,
+            weak_ref: false,
+        };
+        let completed_at = completed.then_some(now);
+        let node = execution_node(
+            &self.driver,
+            &of,
+            NodeTiming {
+                kind: if reasoning {
+                    OrchestrationV2ExecutionNodeKind::Reasoning
+                } else {
+                    OrchestrationV2ExecutionNodeKind::AssistantMessage
+                },
+                status: if completed {
+                    OrchestrationV2ExecutionNodeStatus::Completed
+                } else {
+                    OrchestrationV2ExecutionNodeStatus::Running
+                },
+                started_at,
+                completed_at,
+            },
+        );
+        let node_id = node.id.clone();
+        events.push(ProviderAdapterV2Event::NodeUpdated {
             driver: self.driver.clone(),
-            turn_item: item,
+            node,
+        });
+        if !reasoning {
+            events.push(ProviderAdapterV2Event::MessageUpdated {
+                driver: self.driver.clone(),
+                message: assistant_message(
+                    &self.driver,
+                    &of,
+                    &node_id,
+                    text,
+                    !completed,
+                    started_at,
+                    now,
+                ),
+            });
+        }
+        let ordinal = item_ordinal(turn, native);
+        events.push(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: self.driver.clone(),
+            turn_item: text_turn_item(
+                &self.driver,
+                &of,
+                &node_id,
+                TextBlock {
+                    reasoning,
+                    text,
+                    streaming: !completed,
+                    status: if completed {
+                        OrchestrationV2TurnItemStatus::Completed
+                    } else {
+                        OrchestrationV2TurnItemStatus::Running
+                    },
+                    ordinal,
+                    started_at,
+                    completed_at,
+                    updated_at: now,
+                },
+            ),
         });
     }
 
     fn emit_tool(&self, session_id: &str, call_id: &str, name: &str, state: &Value) {
-        let mut guard = self.inner.lock();
-        let Some(turn) = guard
-            .threads
-            .get_mut(session_id)
-            .and_then(|thread| thread.active.as_mut())
-        else {
-            return;
-        };
-        let status_name = state
-            .get("status")
-            .or_else(|| state.pointer("/state/status"))
-            .and_then(Value::as_str)
-            .unwrap_or("running");
-        let status = match status_name {
-            "completed" | "success" => OrchestrationV2TurnItemStatus::Completed,
-            "error" | "failed" => OrchestrationV2TurnItemStatus::Failed,
-            _ => OrchestrationV2TurnItemStatus::Running,
-        };
-        if name == "task" || name == "subagent" {
-            turn.usage.has_subagents = true;
-        }
-        let input = state.get("input").cloned().unwrap_or_else(|| json!({}));
-        let output = state
-            .get("output")
-            .or_else(|| state.pointer("/state/output"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let shown = output.as_deref().map(|text| {
+        let mut events = Vec::new();
+        {
+            let mut guard = self.inner.lock();
+            let Some(turn) = guard
+                .threads
+                .get_mut(session_id)
+                .and_then(|thread| thread.active.as_mut())
+            else {
+                return;
+            };
+            let status_name = state
+                .get("status")
+                .or_else(|| state.pointer("/state/status"))
+                .and_then(Value::as_str)
+                .unwrap_or("running");
+            let status = match status_name {
+                "completed" | "success" => OrchestrationV2TurnItemStatus::Completed,
+                "error" | "failed" => OrchestrationV2TurnItemStatus::Failed,
+                _ => OrchestrationV2TurnItemStatus::Running,
+            };
             if name == "task" || name == "subagent" {
-                subagent_output(text)
-            } else {
-                text.to_owned()
+                turn.usage.has_subagents = true;
             }
-        });
-        let base = tool_base(turn, &self.driver, call_id, status);
-        let item =
-            open_code_tool_turn_item(base, name, &input, shown.as_deref(), state.get("metadata"));
-        drop(guard);
-        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
-            driver: self.driver.clone(),
-            turn_item: item,
-        });
+            let now = UtcDateTime::now();
+            let started_at = *turn.tool_started.entry(call_id.to_owned()).or_insert(now);
+            let completed_at = matches!(
+                status,
+                OrchestrationV2TurnItemStatus::Completed | OrchestrationV2TurnItemStatus::Failed
+            )
+            .then_some(now);
+            let thread_id = turn.thread_id.clone();
+            let root_node_id = turn.provider_turn.node_id.clone();
+            let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
+            let provider_turn_id = turn.provider_turn.id.clone();
+            let of = NodeOf {
+                thread_id: &thread_id,
+                root_node_id: &root_node_id,
+                provider_thread_id: &provider_thread_id,
+                provider_turn_id: &provider_turn_id,
+                native_item_id: call_id,
+                weak_ref: false,
+            };
+            events.push(ProviderAdapterV2Event::NodeUpdated {
+                driver: self.driver.clone(),
+                node: execution_node(
+                    &self.driver,
+                    &of,
+                    NodeTiming {
+                        kind: OrchestrationV2ExecutionNodeKind::ToolCall,
+                        status: node_status_of(status),
+                        started_at,
+                        completed_at,
+                    },
+                ),
+            });
+            let input = state.get("input").cloned().unwrap_or_else(|| json!({}));
+            let output = state
+                .get("output")
+                .or_else(|| state.pointer("/state/output"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let shown = output.as_deref().map(|text| {
+                if name == "task" || name == "subagent" {
+                    subagent_output(text)
+                } else {
+                    text.to_owned()
+                }
+            });
+            let base = tool_base(
+                turn,
+                &self.driver,
+                call_id,
+                status,
+                started_at,
+                completed_at,
+            );
+            events.push(ProviderAdapterV2Event::TurnItemUpdated {
+                driver: self.driver.clone(),
+                turn_item: open_code_tool_turn_item(
+                    base,
+                    name,
+                    &input,
+                    shown.as_deref(),
+                    state.get("metadata"),
+                ),
+            });
+        }
+        for event in events {
+            self.emit(event);
+        }
     }
 
     fn show_permission(&self, data: &Value) {
@@ -684,20 +864,51 @@ impl OpenCodeV2Session {
             .get(session_id)
             .cloned()
             .unwrap_or_else(|| session_id.to_owned());
-        let Some((provider_turn_id, thread_id)) = guard.threads.get(&owner).and_then(|thread| {
-            thread
-                .active
-                .as_ref()
-                .map(|turn| (turn.provider_turn.id.clone(), turn.thread_id.clone()))
-        }) else {
+        let Some(turn) = guard
+            .threads
+            .get(&owner)
+            .and_then(|thread| thread.active.as_ref())
+        else {
             return;
         };
+        let provider_turn_id = turn.provider_turn.id.clone();
+        let thread_id = turn.thread_id.clone();
+        let root_node_id = turn.provider_turn.node_id.clone();
+        let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
         let request_id =
             IdAllocator.runtime_request(&self.driver, Some(&provider_turn_id), Some(native_id));
         let now = UtcDateTime::now();
+        // `approvalNode`: a request's node derives from the request id, not the native id.
+        let node_id = derive::approval_node(&request_id);
+        let node = execution_node(
+            &self.driver,
+            &NodeOf {
+                thread_id: &thread_id,
+                root_node_id: &root_node_id,
+                provider_thread_id: &provider_thread_id,
+                provider_turn_id: &provider_turn_id,
+                native_item_id: native_id,
+                weak_ref: false,
+            },
+            NodeTiming {
+                kind: if kind == "user_input" {
+                    OrchestrationV2ExecutionNodeKind::UserInputRequest
+                } else {
+                    OrchestrationV2ExecutionNodeKind::ApprovalRequest
+                },
+                status: OrchestrationV2ExecutionNodeStatus::Waiting,
+                started_at: now,
+                completed_at: None,
+            },
+        );
+        // The request's node id is `approvalNode`, not the native item's.
+        let node = OrchestrationV2ExecutionNode {
+            id: node_id.clone(),
+            ..node
+        };
         let request = OrchestrationV2RuntimeRequest {
             id: request_id.clone(),
-            node_id: derive::node_from_provider_item(&self.driver, native_id),
+            node_id: node_id.clone(),
             provider_turn_id: Some(provider_turn_id),
             native_request_ref: Some(native_ref(native_id, false)),
             kind: match kind {
@@ -728,6 +939,10 @@ impl OpenCodeV2Session {
             },
         );
         drop(guard);
+        self.emit(ProviderAdapterV2Event::NodeUpdated {
+            driver: self.driver.clone(),
+            node,
+        });
         self.emit(ProviderAdapterV2Event::RuntimeRequestUpdated {
             driver: self.driver.clone(),
             thread_id: Some(thread_id),
@@ -1240,8 +1455,10 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                 interrupted: false,
                 finalized: false,
                 usage: UsageAccum::new(),
-                next_ordinal: input.provider_turn_ordinal.max(0) as u64 * 100 + 1,
-                texts: HashMap::new(),
+                next_item_ordinal: input.provider_turn_ordinal.max(0) as u64 * 100 + 1,
+                item_ordinals: HashMap::new(),
+                text_blocks: HashMap::new(),
+                tool_started: HashMap::new(),
                 before: None,
             });
         }
@@ -1916,14 +2133,23 @@ fn make_thread(
     thread
 }
 
+fn item_ordinal(turn: &mut V2Turn, native_id: &str) -> u64 {
+    next_ordinal(
+        &mut turn.item_ordinals,
+        &mut turn.next_item_ordinal,
+        native_id,
+    )
+}
+
 fn tool_base(
     turn: &mut V2Turn,
     driver: &ProviderDriverKind,
     native_id: &str,
     status: OrchestrationV2TurnItemStatus,
+    started_at: UtcDateTime,
+    completed_at: Option<UtcDateTime>,
 ) -> ToolItemBase {
-    let ordinal = turn.next_ordinal;
-    turn.next_ordinal += 1;
+    let ordinal = item_ordinal(turn, native_id);
     ToolItemBase {
         id: derive::turn_item_from_provider_item(driver, native_id),
         thread_id: turn.thread_id.clone(),
@@ -1935,76 +2161,9 @@ fn tool_base(
         ordinal,
         status,
         title: None,
-        started_at: Some(UtcDateTime::now()),
-        completed_at: matches!(
-            status,
-            OrchestrationV2TurnItemStatus::Completed | OrchestrationV2TurnItemStatus::Failed
-        )
-        .then(UtcDateTime::now),
+        started_at: Some(started_at),
+        completed_at,
         updated_at: UtcDateTime::now(),
-    }
-}
-
-fn text_item(
-    turn: &mut V2Turn,
-    driver: &ProviderDriverKind,
-    part_id: &str,
-    text: &str,
-    reasoning: bool,
-    streaming: bool,
-) -> turin_contracts::orchestration_v2::OrchestrationV2TurnItem {
-    let ordinal = turn.next_ordinal;
-    turn.next_ordinal += 1;
-    let now = UtcDateTime::now();
-    let id = derive::turn_item_from_provider_item(driver, part_id);
-    if reasoning {
-        turin_contracts::orchestration_v2::OrchestrationV2TurnItem::Reasoning {
-            tool_non_execution_kind: None,
-            tool_surface: None,
-            tool_icon: None,
-            tool_source: None,
-            id,
-            thread_id: turn.thread_id.clone(),
-            run_id: None,
-            node_id: None,
-            provider_thread_id: Some(turn.provider_turn.provider_thread_id.clone()),
-            provider_turn_id: Some(turn.provider_turn.id.clone()),
-            native_item_ref: Some(native_ref(part_id, false)),
-            parent_item_id: None,
-            ordinal,
-            status: OrchestrationV2TurnItemStatus::Running,
-            title: None,
-            started_at: Some(now),
-            completed_at: None,
-            updated_at: now,
-            text: text.to_owned(),
-            streaming,
-        }
-    } else {
-        turin_contracts::orchestration_v2::OrchestrationV2TurnItem::AssistantMessage {
-            tool_non_execution_kind: None,
-            tool_surface: None,
-            tool_icon: None,
-            tool_source: None,
-            id,
-            thread_id: turn.thread_id.clone(),
-            run_id: None,
-            node_id: None,
-            provider_thread_id: Some(turn.provider_turn.provider_thread_id.clone()),
-            provider_turn_id: Some(turn.provider_turn.id.clone()),
-            native_item_ref: Some(native_ref(part_id, false)),
-            parent_item_id: None,
-            ordinal,
-            status: OrchestrationV2TurnItemStatus::Running,
-            title: None,
-            started_at: Some(now),
-            completed_at: None,
-            updated_at: now,
-            message_id: derive::message_from_provider_item(driver, part_id),
-            text: text.to_owned(),
-            attachments: None,
-            streaming,
-        }
     }
 }
 

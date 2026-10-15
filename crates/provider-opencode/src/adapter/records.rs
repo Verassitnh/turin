@@ -11,6 +11,7 @@ use turin_contracts::{
         OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeKind,
         OrchestrationV2ExecutionNodeStatus, OrchestrationV2PlanArtifact,
         OrchestrationV2PlanArtifactStatus, OrchestrationV2PlanStep, OrchestrationV2PlanStepStatus,
+        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
     },
     provider_instance::ProviderDriverKind,
 };
@@ -168,4 +169,101 @@ pub fn todos_complete(steps: &[OrchestrationV2PlanStep]) -> bool {
         && steps
             .iter()
             .all(|step| step.status == OrchestrationV2PlanStepStatus::Completed)
+}
+
+/// One text or reasoning block's turn item, as `emitText` and `emitTextPart` build it.
+pub struct TextBlock<'a> {
+    pub reasoning: bool,
+    pub text: &'a str,
+    pub streaming: bool,
+    pub status: OrchestrationV2TurnItemStatus,
+    pub ordinal: u64,
+    pub started_at: UtcDateTime,
+    pub completed_at: Option<UtcDateTime>,
+    pub updated_at: UtcDateTime,
+}
+
+pub fn text_turn_item(
+    driver: &ProviderDriverKind,
+    of: &NodeOf<'_>,
+    node_id: &NodeId,
+    block: TextBlock<'_>,
+) -> OrchestrationV2TurnItem {
+    let id = derive::turn_item_from_provider_item(driver, of.native_item_id);
+    let native_item_ref = Some(native_ref(of.native_item_id, of.weak_ref));
+    let provider_thread_id = Some(of.provider_thread_id.clone());
+    let provider_turn_id = Some(of.provider_turn_id.clone());
+    if block.reasoning {
+        return OrchestrationV2TurnItem::Reasoning {
+            tool_non_execution_kind: None,
+            tool_surface: None,
+            tool_icon: None,
+            tool_source: None,
+            id,
+            thread_id: of.thread_id.clone(),
+            run_id: None,
+            node_id: Some(node_id.clone()),
+            provider_thread_id,
+            provider_turn_id,
+            native_item_ref,
+            parent_item_id: None,
+            ordinal: block.ordinal,
+            status: block.status,
+            title: None,
+            started_at: Some(block.started_at),
+            completed_at: block.completed_at,
+            updated_at: block.updated_at,
+            text: block.text.to_owned(),
+            streaming: block.streaming,
+        };
+    }
+    OrchestrationV2TurnItem::AssistantMessage {
+        tool_non_execution_kind: None,
+        tool_surface: None,
+        tool_icon: None,
+        tool_source: None,
+        id,
+        thread_id: of.thread_id.clone(),
+        run_id: None,
+        node_id: Some(node_id.clone()),
+        provider_thread_id,
+        provider_turn_id,
+        native_item_ref,
+        parent_item_id: None,
+        ordinal: block.ordinal,
+        status: block.status,
+        title: None,
+        started_at: Some(block.started_at),
+        completed_at: block.completed_at,
+        updated_at: block.updated_at,
+        message_id: derive::message_from_provider_item(driver, of.native_item_id),
+        text: block.text.to_owned(),
+        attachments: None,
+        streaming: block.streaming,
+    }
+}
+
+/// `ordinalOf` / `itemOrdinal`: a native item keeps the ordinal it got on first sight.
+pub fn next_ordinal(
+    ordinals: &mut std::collections::HashMap<String, u64>,
+    next: &mut u64,
+    native_item_id: &str,
+) -> u64 {
+    if let Some(ordinal) = ordinals.get(native_item_id) {
+        return *ordinal;
+    }
+    let ordinal = *next;
+    *next += 1;
+    ordinals.insert(native_item_id.to_owned(), ordinal);
+    ordinal
+}
+
+/// The node status an item status settles into (`toolStatus`, `emitTool`).
+pub fn node_status_of(status: OrchestrationV2TurnItemStatus) -> OrchestrationV2ExecutionNodeStatus {
+    match status {
+        OrchestrationV2TurnItemStatus::Pending => OrchestrationV2ExecutionNodeStatus::Pending,
+        OrchestrationV2TurnItemStatus::Completed => OrchestrationV2ExecutionNodeStatus::Completed,
+        OrchestrationV2TurnItemStatus::Failed => OrchestrationV2ExecutionNodeStatus::Failed,
+        _ => OrchestrationV2ExecutionNodeStatus::Running,
+    }
 }

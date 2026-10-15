@@ -1071,3 +1071,162 @@ fn derive_message(native: &str) -> String {
 fn derive_root() -> String {
     "node_1".to_owned()
 }
+
+#[tokio::test]
+async fn v2_text_blocks_and_tools_emit_node_and_message_records() {
+    let script = script(|request| {
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let client = V2Client::connect(&script.server.url, "pw").unwrap();
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        client,
+        None,
+    )
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+
+    let frames = [
+        json!({"id":"e1","type":"session.text.started","data":{"sessionID":"ses_1","assistantMessageID":"msg_a","ordinal":0}}),
+        json!({"id":"e2","type":"session.text.delta","data":{"sessionID":"ses_1","assistantMessageID":"msg_a","ordinal":0,"delta":"hel"}}),
+        json!({"id":"e3","type":"session.text.delta","data":{"sessionID":"ses_1","assistantMessageID":"msg_a","ordinal":0,"delta":"lo"}}),
+        json!({"id":"e4","type":"session.reasoning.delta","data":{"sessionID":"ses_1","assistantMessageID":"msg_a","ordinal":1,"delta":"hm"}}),
+        json!({"id":"e5","type":"session.tool.success","data":{"sessionID":"ses_1","id":"call_1","name":"bash","status":"completed","input":{"command":"ls"},"output":"x"}}),
+        json!({"id":"e6","type":"session.text.ended","data":{"sessionID":"ses_1","assistantMessageID":"msg_a","ordinal":0,"text":"hello"}}),
+    ];
+    for frame in frames {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let text_node = derive_node("msg_a:text:0");
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["nodeId"] == json!(text_node)
+            && value["turn_item"]["status"] == "completed"
+    })
+    .await;
+
+    let text_nodes: Vec<&Value> = of_type(&seen, "node.updated")
+        .into_iter()
+        .filter(|event| event["node"]["id"] == json!(text_node))
+        .collect();
+    let statuses: Vec<&str> = text_nodes
+        .iter()
+        .map(|event| event["node"]["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(statuses, ["running", "running", "completed"], "{seen:#?}");
+    let messages: Vec<&str> = of_type(&seen, "message.updated")
+        .into_iter()
+        .filter(|event| event["message"]["id"] == json!(derive_message("msg_a:text:0")))
+        .map(|event| event["message"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(messages, ["hel", "hello", "hello"], "{seen:#?}");
+    let ended_message = of_type(&seen, "message.updated")
+        .into_iter()
+        .rev()
+        .find(|event| event["message"]["id"] == json!(derive_message("msg_a:text:0")))
+        .unwrap();
+    assert_eq!(ended_message["message"]["streaming"], false);
+
+    let reasoning = of_type(&seen, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["id"] == json!(derive_node("msg_a:reasoning:1")))
+        .expect("reasoning node");
+    assert_eq!(reasoning["node"]["kind"], "reasoning");
+    assert!(
+        of_type(&seen, "message.updated")
+            .iter()
+            .all(|event| event["message"]["id"] != json!(derive_message("msg_a:reasoning:1"))),
+        "reasoning is not a message"
+    );
+
+    let tool = of_type(&seen, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["id"] == json!(derive_node("call_1")))
+        .expect("tool node");
+    assert_eq!(tool["node"]["kind"], "tool_call");
+    assert_eq!(tool["node"]["status"], "completed");
+    session.close().await;
+}
+
+#[tokio::test]
+async fn v2_approval_request_emits_a_waiting_node_at_the_approval_id() {
+    let script = script(|request| {
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e1","type":"permission.asked","data":{"sessionID":"ses_1","id":"perm_1","permission":"bash","patterns":["ls"]}}).to_string(),
+        )))
+        .unwrap();
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "runtime_request.updated"
+    })
+    .await;
+    let node = of_type(&seen, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["kind"] == "approval_request")
+        .expect("approval node");
+    assert_eq!(node["node"]["status"], "waiting");
+    let request = of_type(&seen, "runtime_request.updated")
+        .into_iter()
+        .next()
+        .expect("request");
+    assert_eq!(request["runtime_request"]["nodeId"], node["node"]["id"]);
+    session.close().await;
+}

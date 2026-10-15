@@ -223,7 +223,7 @@ impl VcsProcessExitError {
                 None
             },
             // JS `string.length`: UTF-16 code units, not bytes.
-            stderr_length: Some(error.stderr.encode_utf16().count() as u64),
+            stderr_length: Some(crate::base_schemas::js_len(&error.stderr) as u64),
             stderr_truncated: Some(error.stderr_truncated),
         }
     }
@@ -799,5 +799,43 @@ mod tests {
         let mut bad = capabilities;
         bad["ignoreClassifier"] = json!("fallback");
         assert!(serde_json::from_value::<VcsDriverCapabilities>(bad).is_err());
+    }
+
+    #[test]
+    fn schema_number_and_non_negative_int_fields_decode_strictly() {
+        // `Schema.Number` fields (exitCode, timeoutMs) accept fractions and
+        // negatives and encode whole numbers without a fraction.
+        let exit: VcsError = serde_json::from_value(json!({
+            "_tag": "VcsProcessExitError", "operation": "o", "command": "c", "cwd": "/",
+            "exitCode": -1, "detail": "d",
+        }))
+        .unwrap();
+        let encoded = serde_json::to_string(&exit).unwrap();
+        assert!(encoded.contains("\"exitCode\":-1,"), "{encoded}");
+        let timeout = serde_json::to_string(&VcsProcessTimeoutError::VcsProcessTimeoutError {
+            operation: "o".into(),
+            command: "c".into(),
+            cwd: "/".into(),
+            argument_count: None,
+            timeout_ms: 30_000.0,
+        })
+        .unwrap();
+        assert!(timeout.contains("\"timeoutMs\":30000}"), "{timeout}");
+        // NonNegativeInt fields reject negatives.
+        assert!(
+            serde_json::from_value::<VcsError>(json!({
+                "_tag": "VcsProcessMissingExitCodeError", "operation": "o", "command": "c",
+                "cwd": "/", "argumentCount": -1,
+            }))
+            .is_err()
+        );
+        // `failureKind` is optional on decode but a closed literal set.
+        assert!(
+            serde_json::from_value::<VcsError>(json!({
+                "_tag": "VcsProcessExitError", "operation": "o", "command": "c", "cwd": "/",
+                "exitCode": 1, "detail": "d", "failureKind": "timeout",
+            }))
+            .is_err()
+        );
     }
 }

@@ -7098,12 +7098,16 @@ name = "turin-provider-claude"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "indexmap",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
+ "turin-claude-protocol",
  "turin-contracts",
+ "uuid",
 ]
 
 [[package]]

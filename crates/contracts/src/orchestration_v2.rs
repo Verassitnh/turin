@@ -16,7 +16,7 @@ use crate::base_schemas::{
     EventId, IsoDateTime, MessageId, NodeId, NonNegativeInt, PlanId, PositiveInt, ProjectId,
     ProviderSessionId, ProviderThreadId, ProviderTurnId, RawEventId, RunAttemptId, RunId,
     RuntimeRequestId, ScheduledTaskId, TaggedUnion, ThreadId, TrimmedNonEmptyString, TurnItemId,
-    UtcDateTime,
+    UtcDateTime, js_len,
 };
 use crate::chat_attachment::ChatAttachment;
 use crate::composer_context::OrchestrationMessageContext;
@@ -2298,7 +2298,7 @@ impl OrchestrationV2ProviderFailureMessage {
     pub fn new(value: impl AsRef<str>) -> Result<Self, crate::base_schemas::ContractError> {
         let value = TrimmedNonEmptyString::new(value)?;
         // `Schema.isMaxLength` counts UTF-16 code units, like JS `length`.
-        if value.as_str().encode_utf16().count() > 4_096 {
+        if js_len(value.as_str()) > 4_096 {
             return Err(crate::base_schemas::ContractError {
                 expected: "a failure message of at most 4,096 chars",
                 got: value.as_str().to_owned(),
@@ -2338,7 +2338,7 @@ impl OrchestrationV2ProviderFailureCode {
     pub fn new(value: impl AsRef<str>) -> Result<Self, crate::base_schemas::ContractError> {
         let value = TrimmedNonEmptyString::new(value)?;
         // `Schema.isMaxLength` counts UTF-16 code units, like JS `length`.
-        if value.as_str().encode_utf16().count() > 128 {
+        if js_len(value.as_str()) > 128 {
             return Err(crate::base_schemas::ContractError {
                 expected: "a failure code of at most 128 chars",
                 got: value.as_str().to_owned(),
@@ -3306,7 +3306,10 @@ pub struct OrchestrationV2RawProviderEvent {
     pub message_kind: OrchestrationV2RawProviderEventMessageKind,
     pub method: Option<TrimmedNonEmptyString>,
     pub json_rpc_id: Option<OrchestrationV2JsonRpcId>,
-    /// `Schema.Unknown`: an absent key decodes (to null).
+    /// `Schema.Unknown`. Upstream requires the key (an absent key fails with
+    /// "Missing key"); Turin defaults an absent key to `null` so rows persisted
+    /// without `payload` still load (DB safety, see PORTING.md Deviations).
+    /// Re-encode writes `"payload": null` in that case.
     #[serde(default)]
     pub payload: serde_json::Value,
     pub observed_at: UtcDateTime,
@@ -5985,7 +5988,7 @@ impl OrchestrationV2SearchQuery {
     pub fn new(value: impl AsRef<str>) -> Result<Self, crate::base_schemas::ContractError> {
         let value = TrimmedNonEmptyString::new(value)?;
         // `Schema.isMaxLength` counts UTF-16 code units (JS string length).
-        if value.as_str().encode_utf16().count() > 200 {
+        if js_len(value.as_str()) > 200 {
             return Err(crate::base_schemas::ContractError {
                 expected: "a search query of at most 200 chars",
                 got: value.as_str().to_owned(),
@@ -6029,7 +6032,7 @@ fn check_max_length<E: serde::de::Error>(what: &str, count: usize, max: usize) -
 /// `Schema.String.check(Schema.isMaxLength(200))`.
 fn deserialize_string_max_200<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     let value = String::deserialize(d)?;
-    check_max_length("a string", value.encode_utf16().count(), 200)?;
+    check_max_length("a string", js_len(&value), 200)?;
     Ok(value)
 }
 

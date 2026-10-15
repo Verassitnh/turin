@@ -11,7 +11,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct UsageLimitSourceId(pub Arc<str>);
+pub struct UsageLimitSourceId(Arc<str>);
 
 impl UsageLimitSourceId {
     pub fn new(value: impl AsRef<str>) -> Self {

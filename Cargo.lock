@@ -7132,6 +7132,7 @@ dependencies = [
  "parking_lot",
  "pretty_assertions",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7142,6 +7143,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "turin-contracts",
+ "url",
  "uuid",
 ]
 
@@ -7193,12 +7195,23 @@ name = "turin-shared"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "futures",
+ "indexmap",
+ "libc",
+ "markdown",
+ "parking_lot",
+ "percent-encoding",
+ "regex",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "turin-contracts",
+ "unicode-normalization",
+ "url",
 ]
 
 [[package]]

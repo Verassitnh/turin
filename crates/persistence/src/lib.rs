@@ -15,6 +15,7 @@ mod provider_session_runtime;
 mod pull_request_files_viewed;
 mod pull_request_review_guides;
 mod sql_value;
+mod t3_import;
 mod time;
 
 pub use db::{Db, WAL_SIZE_LIMIT_BYTES};
@@ -50,6 +51,10 @@ pub use pull_request_review_guides::{
     put as put_pull_request_review_guide,
 };
 pub use sql_value::SqlValue;
+pub use t3_import::{
+    EventReadReport, ImportPlan, ImportReport, T3Import, T3ImportError, T3Snapshot,
+    TURIN_DATABASE_FILE,
+};
 pub use time::{format_utc_millis, utc_millis_now};
 
 #[cfg(test)]

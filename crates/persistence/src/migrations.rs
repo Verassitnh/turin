@@ -14,12 +14,12 @@ use crate::migration_manifest::{APPLICATION_EVENT_SOURCE_MARKER, MIGRATIONS, Mig
 const MIGRATIONS_TABLE: &str = "effect_sql_migrations";
 const FIRST_V2_MIGRATION_ID: i64 = 55;
 
-const ENSURE_TABLE: &str = "
-CREATE TABLE IF NOT EXISTS effect_sql_migrations (
+const ENSURE_TABLE: &str = r#"
+CREATE TABLE IF NOT EXISTS "effect_sql_migrations" (
   migration_id integer PRIMARY KEY NOT NULL,
   created_at datetime NOT NULL DEFAULT current_timestamp,
   name VARCHAR(255) NOT NULL
-)";
+)"#;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunMigrationsOptions {
@@ -112,7 +112,10 @@ fn migrate(
         ));
     }
 
-    conn.execute_batch("BEGIN")
+    // A deferred BEGIN only takes the write lock at the first write. If another
+    // process commits after this transaction's first read, that write fails at
+    // once with SQLITE_BUSY_SNAPSHOT, which busy_timeout cannot wait out.
+    conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|err| PersistenceError::sql("runMigrations.begin", &err))?;
     let result = migrate_in_transaction(conn, through_id);
     match &result {
@@ -191,9 +194,27 @@ fn migrate_in_transaction(
     Ok(executed)
 }
 
+/// Re-executes one migration's body without touching the ledger.
+/// Upstream tests call the migration effect again after the id is already recorded.
+#[cfg(test)]
+pub(crate) fn rerun_migration_body(conn: &Connection, id: i64) -> Result<(), PersistenceError> {
+    let migration = MIGRATIONS
+        .iter()
+        .find(|migration| migration.id == id)
+        .ok_or_else(|| {
+            PersistenceError::migration(
+                MigrationErrorKind::Failed,
+                format!("unknown migration {id}"),
+            )
+        })?;
+    run_one(conn, migration.kind, migration.sql)
+}
+
 fn run_one(conn: &Connection, kind: MigrationKind, sql: &str) -> Result<(), PersistenceError> {
     match kind {
         MigrationKind::Sql => execute_script(conn, sql),
+        MigrationKind::AddColumnIfMissing => execute_add_column_if_missing(conn, sql),
+        MigrationKind::CatchStatementErrors => execute_catching_statements(conn, sql),
         MigrationKind::PullRequests => {
             execute_script(conn, sql)?;
             backfill_projection_thread_pull_requests(conn)
@@ -221,6 +242,128 @@ fn execute_script(conn: &Connection, sql: &str) -> Result<(), PersistenceError> 
     }
     conn.execute_batch(sql)
         .map_err(|err| PersistenceError::sql("runMigrations.script", &err))
+}
+
+/// Upstream checks `PRAGMA table_info` before each `ADD COLUMN` so a partially
+/// migrated database (the column exists, the ledger row does not) still opens.
+fn execute_add_column_if_missing(conn: &Connection, sql: &str) -> Result<(), PersistenceError> {
+    for statement in sql_statements(sql) {
+        if let Some((table, column)) = add_column_target(statement)
+            && column_exists(conn, table, column)?
+        {
+            continue;
+        }
+        execute_script(conn, statement)?;
+    }
+    Ok(())
+}
+
+/// Migration 023 wraps each `ALTER` in `Effect.catch(() => Effect.void)`.
+fn execute_catching_statements(conn: &Connection, sql: &str) -> Result<(), PersistenceError> {
+    for statement in sql_statements(sql) {
+        let _ = execute_script(conn, statement);
+    }
+    Ok(())
+}
+
+fn sql_statements(sql: &str) -> Vec<&str> {
+    let bytes = sql.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    let mut quote: Option<u8> = None;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if let Some(q) = quote {
+            if byte == q {
+                if i + 1 < bytes.len() && bytes[i + 1] == q {
+                    i += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+            i += 1;
+            continue;
+        }
+        if byte == b';' {
+            let statement = sql[start..i].trim();
+            if !statement.is_empty() {
+                out.push(statement);
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    let tail = sql[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail);
+    }
+    out
+}
+
+fn add_column_target(statement: &str) -> Option<(&str, &str)> {
+    let statement = strip_leading_sql_comments(statement);
+    let parts: Vec<&str> = statement.split_whitespace().collect();
+    if parts.len() >= 6
+        && parts[0].eq_ignore_ascii_case("alter")
+        && parts[1].eq_ignore_ascii_case("table")
+        && parts[3].eq_ignore_ascii_case("add")
+        && parts[4].eq_ignore_ascii_case("column")
+        && is_ident(parts[2])
+        && is_ident(parts[5])
+    {
+        return Some((parts[2], parts[5]));
+    }
+    None
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, PersistenceError> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|err| PersistenceError::sql("runMigrations.tableInfo", &err))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|err| PersistenceError::sql("runMigrations.tableInfo", &err))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|err| PersistenceError::sql("runMigrations.tableInfo", &err))?
+    {
+        let name: String = row
+            .get(1)
+            .map_err(|err| PersistenceError::sql("runMigrations.tableInfo", &err))?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn strip_leading_sql_comments(sql: &str) -> &str {
+    let mut rest = sql;
+    loop {
+        let trimmed = rest.trim_start();
+        let Some(after) = trimmed.strip_prefix("--") else {
+            return trimmed;
+        };
+        let Some(newline) = after.find('\n') else {
+            return "";
+        };
+        rest = &after[newline + 1..];
+    }
+}
+
+fn is_ident(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn warn_divergent(conn: &Connection) -> Result<(), PersistenceError> {

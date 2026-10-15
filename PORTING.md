@@ -327,14 +327,14 @@ at app startup (T05b/T22), not per hook.
 
 ## DEDUP
 
-Each helper has one copy in `crates/app/src/state`. The `turin-shared` counterpart (T05b, not merged to `main`) is the copy to keep. When the app depends on `turin-shared`, point the callers at it with `use`, then delete the state file.
+Each helper has one copy in `crates/app/src/state`. Its `turin-shared` counterpart is on `main` now (merged with T05b). The app does not depend on `turin-shared` yet, so the state copy stays until that dependency is added. Then point the callers at the counterpart with `use` and delete the state file. Some signatures differ, for example `turin-shared`'s `file_basename` returns `String`.
 
 | State file | `turin-shared` counterpart | Holds |
 |---|---|---|
 | `state/support/path.rs` | `crates/shared/src/path.rs` | Windows and UNC path predicates, `file_basename`, `strip_slash_prefixed_windows_drive` |
 | `state/support/change_request_url.rs` | `crates/shared/src/change_request_url.rs` | `parse_change_request_url` with every upstream host shape, `url_host_with_port` |
 | `state/support/thread_pull_requests.rs` | `crates/shared/src/thread_pull_requests.rs`, `crates/shared/src/source_control.rs` (`canonical_repository_key`) | Thread pull-request keys, legacy keys, `thread_pull_requests_of`, current-link and chain resolution |
-| `state/support/model.rs` | none on T05b; `packages/shared/src/model.ts` | `SelectableModelOption`, `resolve_selectable_model`, `normalize_model_slug` |
+| `state/support/model.rs` | `crates/shared/src/model.rs` | `SelectableModelOption`, `resolve_selectable_model`, `normalize_model_slug` |
 | `state/helpers/shared_support.rs` | `crates/shared/src/{markdown_links,file_links,file_preview,image,semver,inline_skills}.rs` | Markdown and file link parsing, mime types, semver, inline skill names, prompt-link types, JS whitespace classes |
 | `crates/claude-protocol` launch env | Sets `process.env.CLAUDE_AGENT_SDK_VERSION` and injects an OTEL `traceparent` into the child env. | Child env only. `CLAUDE_CODE_ENTRYPOINT` and `CLAUDE_AGENT_SDK_VERSION` are set when absent or empty. `NODE_OPTIONS` is always removed. `DEBUG` follows `Pe()` on `DEBUG_CLAUDE_AGENT_SDK`. The parent process env is not mutated and no trace context is injected. | Rust must not leak SDK bookkeeping into the host process. There is no OTEL context to forward. |
 | `crates/claude-protocol` MCP | In-process `type: "sdk"` MCP servers are hosted inside the Node SDK. | Names and JSON configs are copied onto the initialize control request. No in-process server is started. | The crate speaks the CLI protocol. Hosting a JS MCP server is not possible here. Stdio, SSE, and HTTP configs still go over stdin via `set_mcp_servers`, which is how upstream keeps `Authorization` out of argv. |

@@ -8,6 +8,9 @@ pub mod markdown;
 pub mod message_copy_button;
 pub mod messages_timeline;
 pub mod panel_layout_controls;
+// Pure scroll state machine; the timeline view does not drive page keys yet.
+#[allow(dead_code)]
+pub mod page_scroll_controller;
 // Pure answer-draft logic; the pending-user-input card still keeps its drafts
 // in element state, so nothing calls these yet.
 #[allow(dead_code)]

@@ -5,6 +5,7 @@
 //! `apps/server/src/textGeneration/*`, and the text generation files of the Codex,
 //! Claude, OpenCode, and Cursor providers.
 
+pub mod claude_text_generation;
 pub mod cli_args;
 pub mod codex_launch_args;
 pub mod codex_text_generation;

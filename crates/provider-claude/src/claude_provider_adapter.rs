@@ -7,6 +7,7 @@ use crate::claude_background_tasks::{
     Roster, is_opaque_task_type, parse_roster_entry, pending_task, task_id as roster_task_id,
 };
 use crate::claude_goal::next_claude_goal;
+use crate::claude_model_catalog::resolve_claude_catalog_context_window_tokens;
 use crate::claude_tool_titles::{ToolPresentation, fallback_presentation, presentations_from_meta};
 use crate::claude_wake::{
     PromptEchoMode, WakeEvidence, WakeState, echoed_prompt_uuids, frame_tool_use_ids,
@@ -436,6 +437,7 @@ impl ProviderAdapterV2 for ClaudeProviderAdapter {
         Ok(Arc::new(ClaudeSessionRuntime {
             instance_id: self.instance_id.clone(),
             driver: self.driver.clone(),
+            catalog: self.catalog.clone(),
             session_id: input.provider_session_id,
             session,
             commands,
@@ -448,6 +450,8 @@ impl ProviderAdapterV2 for ClaudeProviderAdapter {
 struct ClaudeSessionRuntime {
     instance_id: ProviderInstanceId,
     driver: ProviderDriverKind,
+    /// Resolves a selection's context window (upstream `getModelContextWindow`).
+    catalog: ClaudeModelCatalog,
     session_id: ProviderSessionId,
     session: OrchestrationV2ProviderSession,
     commands: mpsc::UnboundedSender<Command>,
@@ -613,6 +617,13 @@ impl ProviderSessionRuntime for ClaudeSessionRuntime {
         input: ProviderAdapterV2ForkThreadInput,
     ) -> Result<OrchestrationV2ProviderThread, ProviderAdapterV2Error> {
         ask(&self.commands, |tx| Command::Fork(input, tx)).await
+    }
+    fn get_model_context_window(
+        &self,
+        model_selection: &ModelSelection,
+        _cwd: Option<&str>,
+    ) -> Option<Option<u64>> {
+        Some(context_window(&self.catalog, model_selection))
     }
     fn stop_task(
         &self,
@@ -1041,6 +1052,9 @@ impl ClaudeActor {
             provider_turn_id: turn.id.clone(),
             app_thread: input.app_thread.clone(),
             model_selection: input.model_selection.clone(),
+            catalog: self.catalog.clone(),
+            default_effort: compile_claude_model_selection(&input.model_selection, &self.catalog)
+                .effort,
         });
         if !self.goal_seeded {
             self.goal = input.provider_thread.goal.clone();
@@ -2155,10 +2169,10 @@ impl ClaudeActor {
             .map(|n| n as u64);
         let mut events = vec![];
         if let Some(used) = after {
-            // The context window is not resolved here yet, so `maxTokens` is null.
             let mut turn = active.turn.clone();
+            let max_tokens = context_window(&self.catalog, &active.input.model_selection);
             turn.token_usage = serde_json::from_value(json!({
-                "usedTokens": used, "maxTokens": null, "updatedAt": now,
+                "usedTokens": used, "maxTokens": max_tokens, "updatedAt": now,
             }))
             .ok();
             events.push(ProviderAdapterV2Event::ProviderTurnUpdated {
@@ -2773,6 +2787,12 @@ fn assistant_text_events(
 
 fn parent_tool_use_id(frame: &turin_claude_protocol::Frame) -> Option<&str> {
     frame.raw.get("parent_tool_use_id").and_then(Value::as_str)
+}
+
+/// Upstream `claudeContextWindow`: the window a selection resolves to, when the catalog knows it.
+fn context_window(catalog: &ClaudeModelCatalog, selection: &ModelSelection) -> Option<u64> {
+    resolve_claude_catalog_context_window_tokens(catalog, Some(selection))
+        .map(|tokens| tokens as u64)
 }
 
 /// The frame an event carries, for the events that carry one.

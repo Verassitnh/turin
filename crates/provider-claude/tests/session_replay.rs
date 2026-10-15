@@ -21,7 +21,11 @@ use turin_contracts::{
     settings::ClaudeSettings,
 };
 use turin_provider_claude::{
-    claude_model_catalog::ClaudeModelCatalog, claude_provider_adapter::ClaudeProviderAdapter,
+    claude_model_catalog::{
+        bundled_claude_model_catalog, resolve_claude_catalog_context_window_tokens,
+        resolve_claude_model_slug,
+    },
+    claude_provider_adapter::ClaudeProviderAdapter,
 };
 use turin_provider_core::provider_adapter::{
     ProviderAdapterV2, ProviderAdapterV2EnsureThreadInput, ProviderAdapterV2Event,
@@ -199,7 +203,8 @@ impl Harness {
         let adapter = ClaudeProviderAdapter::new(
             id::<ProviderInstanceId>("claudeAgent"),
             settings,
-            ClaudeModelCatalog::default(),
+            // The catalog the app ships, so aliases and context windows resolve as they do there.
+            bundled_claude_model_catalog().clone(),
             Some(env),
             None,
             String::new(),
@@ -1273,7 +1278,11 @@ async fn subagent_frames_stay_out_of_the_parent_turn() {
     let last = subagents.last().unwrap();
     assert_eq!(last["result"], "A_FIRST");
     assert_eq!(last["title"], "Agent A");
-    assert_eq!(last["model"], "haiku");
+    // The alias names the catalog's current Haiku.
+    assert_eq!(
+        last["model"],
+        resolve_claude_model_slug(bundled_claude_model_catalog(), "haiku")
+    );
     assert_eq!(subagents[1]["progress"], "running echo");
 }
 
@@ -2081,7 +2090,14 @@ async fn fixture_compact_boundary_frame_projects_its_sizes() {
     });
     let usage = usage.expect("turn usage after compaction");
     assert_eq!(usage["usedTokens"], 1192);
-    assert!(usage["maxTokens"].is_null());
+    // The window the selection resolves to in the catalog, not null.
+    let window = resolve_claude_catalog_context_window_tokens(
+        bundled_claude_model_catalog(),
+        Some(&harness.model()),
+    )
+    .map(|tokens| tokens as u64)
+    .expect("the catalog knows the window of the test model");
+    assert_eq!(usage["maxTokens"], window);
 }
 
 /// The upstream nested-subagent fixture. The outer subagent hangs off the
@@ -2129,6 +2145,36 @@ async fn fixture_nested_subagent_is_parented_to_its_owner() {
     assert_eq!(nested["status"], "completed");
     assert_eq!(outer["parentNodeId"], root);
     assert_eq!(nested["parentNodeId"], outer["id"]);
+    // The outer launch names an alias, which resolves to its catalog slug. A nested
+    // subagent names no model, so it runs on its owner's.
+    assert_eq!(outer["model"], "claude-haiku-4-5");
+    assert_eq!(
+        nested["model"], "claude-haiku-4-5",
+        "a nested subagent runs on its owner's model"
+    );
+    // Haiku offers no effort, so the selection is the model alone.
+    let selection = json!({"instanceId": "claudeAgent", "model": "claude-haiku-4-5"});
+    assert_eq!(outer["modelSelection"], selection);
+    assert_eq!(nested["modelSelection"], selection);
+    let child_models: Vec<(String, String)> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::AppThreadCreated { app_thread, .. } => Some((
+                app_thread.id.as_str().to_owned(),
+                app_thread.model_selection.model.as_str().to_owned(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let nested_child = nested["childThreadId"]
+        .as_str()
+        .expect("nested child thread");
+    assert!(
+        child_models
+            .iter()
+            .any(|(id, model)| id == nested_child && model == "claude-haiku-4-5"),
+        "{child_models:?}"
+    );
     assert!(
         nested["result"]
             .as_str()

@@ -11,6 +11,9 @@
 //! Not ported here: the model canonicalisation through the catalog (a subagent
 //! takes its parent's model selection); a resumed subagent's re-open
 //! (SendMessage, `reopen`); the workflow coordinator's members.
+use crate::claude_model_catalog::{
+    ClaudeModelCatalog, get_claude_catalog_model_capabilities, resolve_claude_model_slug,
+};
 use crate::{
     claude_subagent_threads::{
         ChildMessage, ChildThread, SubagentIds, SubagentNodeInput, child_tool_call,
@@ -24,6 +27,9 @@ use crate::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use turin_contracts::model::{
+    ProviderOptionDescriptor, ProviderOptionSelection, ProviderOptionSelectionValue,
+};
 use turin_contracts::{
     NodeId, ProviderThreadId, ProviderTurnId, RunId, ThreadId, TrimmedNonEmptyString, UtcDateTime,
     js_trim,
@@ -63,9 +69,12 @@ pub struct SubagentScope {
     pub provider_turn_id: ProviderTurnId,
     /// The parent thread, which a child thread copies its shape from.
     pub app_thread: OrchestrationV2AppThread,
-    /// The parent's selection. A child thread runs with it until model
-    /// canonicalisation lands (T10d).
+    /// The parent's selection. A subagent without a model of its own runs on it.
     pub model_selection: ModelSelection,
+    /// The catalog that resolves a model alias to its slug (upstream `subagentModelCatalog`).
+    pub catalog: ClaudeModelCatalog,
+    /// The parent's effort, which a subagent takes when neither it nor its owner names one.
+    pub default_effort: Option<String>,
 }
 
 /// What the launching Agent call said. It waits here until task_started names
@@ -74,6 +83,7 @@ pub struct SubagentScope {
 struct Launch {
     description: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
     prompt: Option<String>,
     /// The Agent call that owns this one, for a subagent that starts another.
     owner_tool_use_id: Option<String>,
@@ -96,6 +106,8 @@ struct Task {
     confirmed: Option<ProviderAdapterV2SubagentOutcome>,
     /// Launched by another subagent (upstream `nestedSubagentTaskIds`).
     nested: bool,
+    /// The effort the subagent runs with (upstream `effort`).
+    effort: Option<String>,
 }
 
 /// What the wake path needs to know about a task (upstream reads the session registry).
@@ -202,18 +214,98 @@ impl SubagentRegistry {
         if self.task_by_run_tool_use.contains_key(tool_use_id) {
             return;
         }
-        // `inherit` is the caller's model. Turin does not resolve it yet, so it
-        // is left unset, as an absent model would be.
-        let model = text(input, "model").filter(|model| model != "inherit");
+        // A model a snapshot already reported for this call wins over the requested one.
+        let known = self
+            .launches
+            .get(tool_use_id)
+            .and_then(|launch| launch.model.clone());
+        let model =
+            self.requested_model(text(input, "model").as_deref(), owner_tool_use_id.is_some());
         self.launches.insert(
             tool_use_id.to_owned(),
             Launch {
                 description: text(input, "description"),
-                model,
+                model: known.or(model),
+                effort: text(input, "effort"),
                 prompt: text(input, "prompt"),
                 owner_tool_use_id: owner_tool_use_id.map(str::to_owned),
             },
         );
+    }
+
+    /// The model an Agent call names, canonicalised. `inherit` is the caller's
+    /// model when the caller is the root; a nested subagent's is its owner's,
+    /// which task_started resolves (upstream `rememberClaudeSubagentLaunch`).
+    fn requested_model(&self, requested: Option<&str>, nested: bool) -> Option<String> {
+        match requested {
+            Some("inherit") => (!nested)
+                .then(|| {
+                    self.scope
+                        .as_ref()
+                        .map(|scope| scope.model_selection.model.as_str().to_owned())
+                        .unwrap_or_default()
+                })
+                .filter(|model| !model.is_empty()),
+            Some(model) => Some(self.canonical_model(model)),
+            None => None,
+        }
+    }
+
+    /// Upstream `canonicalClaudeSubagentModel`: an alias becomes its catalog slug.
+    fn canonical_model(&self, model: &str) -> String {
+        match &self.scope {
+            Some(scope) => resolve_claude_model_slug(&scope.catalog, model),
+            None => model.to_owned(),
+        }
+    }
+
+    /// Upstream `rememberPendingClaudeSubagentLaunch` for a snapshot: the model a
+    /// subagent's own frames name. A running subagent that changes model is
+    /// updated; one not started yet keeps it with its launch.
+    fn observe_snapshot_model(
+        &mut self,
+        owner_tool_use_id: &str,
+        raw: &Value,
+        now: UtcDateTime,
+    ) -> Vec<ProviderAdapterV2Event> {
+        let Some(model) = raw
+            .pointer("/message/model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        else {
+            return Vec::new();
+        };
+        let model = self.canonical_model(model);
+        let catalog = self
+            .scope
+            .as_ref()
+            .map(|scope| scope.catalog.clone())
+            .unwrap_or_default();
+        let Some(task_id) = self.task_by_run_tool_use.get(owner_tool_use_id).cloned() else {
+            self.launches
+                .entry(owner_tool_use_id.to_owned())
+                .or_default()
+                .model = Some(model);
+            return Vec::new();
+        };
+        let Some(task) = self.tasks.get_mut(&task_id) else {
+            return Vec::new();
+        };
+        if task.subagent.status != OrchestrationV2SubagentStatus::Running
+            || task.subagent.model.as_deref() == Some(model.as_str())
+        {
+            return Vec::new();
+        }
+        task.subagent.model_selection = Some(subagent_model_selection(
+            &catalog,
+            &task.subagent.provider_instance_id,
+            &model,
+            task.effort.as_deref(),
+        ));
+        task.subagent.model = Some(model);
+        task.subagent.updated_at = now;
+        task_events(task, false)
     }
 
     /// task_started registers the subagent, creates its child thread, and opens
@@ -272,6 +364,26 @@ impl SubagentRegistry {
             })
             .flatten();
         let nested = launch.owner_tool_use_id.is_some();
+        // With no model of its own, a nested subagent runs on its owner's (the
+        // SDK's default for a subagent's Agent call). Its effort is the owner's.
+        let owner_task = launch
+            .owner_tool_use_id
+            .as_deref()
+            .and_then(|owner| self.task_by_run_tool_use.get(owner))
+            .and_then(|task| self.tasks.get(task));
+        let model = launch
+            .model
+            .clone()
+            .or_else(|| owner_task.and_then(|owner| owner.subagent.model.clone()));
+        let effort = launch
+            .effort
+            .clone()
+            .or_else(|| owner_task.and_then(|owner| owner.effort.clone()))
+            .or_else(|| {
+                self.scope
+                    .as_ref()
+                    .and_then(|scope| scope.default_effort.clone())
+            });
         let prompt = launch.prompt.clone().or_else(|| text(raw, "prompt"));
         let title = launch
             .description
@@ -280,7 +392,7 @@ impl SubagentRegistry {
         let previous = self.tasks.remove(&task_id);
         let is_new = previous.is_none();
         let previous_nested = previous.as_ref().map_or(nested, |task| task.nested);
-        let (subagent, ids, turn_item_ordinal, child) = match previous {
+        let (subagent, ids, turn_item_ordinal, child, task_effort) = match previous {
             Some(previous) => {
                 // A resume: the record reopens. Its previous answer and progress no
                 // longer describe the run, and its run is the resuming one.
@@ -300,7 +412,13 @@ impl SubagentRegistry {
                 }
                 let mut child = previous.child;
                 child.last_assistant_text = None;
-                (subagent, previous.ids, previous.turn_item_ordinal, child)
+                (
+                    subagent,
+                    previous.ids,
+                    previous.turn_item_ordinal,
+                    child,
+                    previous.effort,
+                )
             }
             None => {
                 let ids = subagent_ids(&scope.driver, &scope.provider_thread_id, &task_id);
@@ -321,8 +439,15 @@ impl SubagentRegistry {
                     native_task_ref: Some(native_ref(&task_id)),
                     prompt: prompt.unwrap_or_default(),
                     title,
-                    model: launch.model,
-                    model_selection: None,
+                    model: model.clone(),
+                    model_selection: Some(subagent_model_selection(
+                        &scope.catalog,
+                        &scope.provider_instance_id,
+                        model
+                            .as_deref()
+                            .unwrap_or(scope.model_selection.model.as_str()),
+                        effort.as_deref(),
+                    )),
                     completion_wake: None,
                     completion_delivery: None,
                     status: OrchestrationV2SubagentStatus::Running,
@@ -333,7 +458,7 @@ impl SubagentRegistry {
                     completed_at: None,
                     updated_at: now,
                 };
-                (subagent, ids, ordinal, child)
+                (subagent, ids, ordinal, child, effort)
             }
         };
         if let Some(run_tool_use_id) = run_tool_use_id.clone() {
@@ -350,6 +475,7 @@ impl SubagentRegistry {
             root_node_id: scope.root_node_id.clone(),
             confirmed: None,
             nested: previous_nested,
+            effort: task_effort,
         };
         let mut events = Vec::new();
         if is_new {
@@ -379,7 +505,11 @@ impl SubagentRegistry {
                 parent_node_id: task.ids.node_id.clone(),
                 active_provider_thread_id: None,
                 provider_instance_id: scope.provider_instance_id.clone(),
-                model_selection: scope.model_selection.clone(),
+                model_selection: task
+                    .subagent
+                    .model_selection
+                    .clone()
+                    .unwrap_or_else(|| scope.model_selection.clone()),
                 title: TrimmedNonEmptyString::new(child_title).unwrap_or_else(|_| {
                     TrimmedNonEmptyString::new("Subagent").expect("non-empty title")
                 }),
@@ -485,6 +615,7 @@ impl SubagentRegistry {
                 root_node_id: scope.root_node_id,
                 confirmed: None,
                 nested: false,
+                effort: None,
             },
         );
     }
@@ -605,11 +736,12 @@ impl SubagentRegistry {
         raw: &Value,
         now: UtcDateTime,
     ) -> Vec<ProviderAdapterV2Event> {
+        let mut events = self.observe_snapshot_model(owner_tool_use_id, raw, now);
         let Some(task_id) = self.task_by_run_tool_use.get(owner_tool_use_id).cloned() else {
-            return Vec::new();
+            return events;
         };
         let Some(task) = self.tasks.get_mut(&task_id) else {
-            return Vec::new();
+            return events;
         };
         let driver = task.subagent.driver.clone();
         let message_id = raw
@@ -639,7 +771,6 @@ impl SubagentRegistry {
             &task.provider_thread_id,
             &task.provider_turn_id,
         );
-        let mut events = Vec::new();
         for (index, block) in blocks.iter().enumerate() {
             match block.get("type").and_then(Value::as_str) {
                 Some("text") => {
@@ -892,6 +1023,39 @@ fn finish_open_tools(task: &mut Task, now: UtcDateTime) -> Vec<ProviderAdapterV2
     events
 }
 
+/// Upstream `claudeSubagentModelSelection`: the selection a subagent's thread
+/// shows. An effort its model does not offer is left out.
+fn subagent_model_selection(
+    catalog: &ClaudeModelCatalog,
+    instance_id: &ProviderInstanceId,
+    model: &str,
+    effort: Option<&str>,
+) -> ModelSelection {
+    let caps = get_claude_catalog_model_capabilities(catalog, Some(model));
+    let offered = effort.is_some_and(|effort| {
+        caps.option_descriptors.iter().flatten().any(|descriptor| {
+            matches!(
+                descriptor,
+                ProviderOptionDescriptor::Select(select)
+                    if select.id.as_str() == "effort"
+                        && select.options.iter().any(|option| option.id.as_str() == effort)
+            )
+        })
+    });
+    ModelSelection {
+        instance_id: instance_id.clone(),
+        model: TrimmedNonEmptyString::new(model).expect("a subagent names a model"),
+        options: offered.then(|| {
+            vec![ProviderOptionSelection {
+                id: TrimmedNonEmptyString::new("effort").expect("option id"),
+                value: ProviderOptionSelectionValue::Str(
+                    TrimmedNonEmptyString::new(effort.unwrap_or_default()).expect("effort"),
+                ),
+            }]
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -923,6 +1087,8 @@ mod tests {
                 "instanceId": "claudeAgent", "model": "claude-haiku-4-5",
             }))
             .unwrap(),
+            catalog: ClaudeModelCatalog::default(),
+            default_effort: None,
         }
     }
 
@@ -1268,5 +1434,60 @@ mod tests {
                 .and_then(|outcome| outcome.result),
             Some("SECOND_DONE".to_owned())
         );
+    }
+
+    #[test]
+    fn a_model_alias_is_its_catalog_slug_and_a_nested_subagent_runs_on_its_owners() {
+        let mut registry = SubagentRegistry::default();
+        let mut bundled = scope();
+        bundled.catalog = crate::claude_model_catalog::bundled_claude_model_catalog().clone();
+        registry.set_scope(bundled);
+        let now = UtcDateTime::now();
+        let slug = crate::claude_model_catalog::resolve_claude_model_slug(
+            crate::claude_model_catalog::bundled_claude_model_catalog(),
+            "haiku",
+        );
+        assert_ne!(slug, "haiku", "the catalog resolves the alias");
+
+        registry.remember_launch(
+            "toolu_outer",
+            &json!({"description": "outer", "model": "haiku"}),
+            None,
+        );
+        let outer = subagent_of(&started_task(
+            &mut registry,
+            json!({"task_id": "task_outer", "tool_use_id": "toolu_outer", "task_type": "local_agent"}),
+        ))
+        .expect("the outer subagent starts");
+        assert_eq!(outer.model.as_deref(), Some(slug.as_str()));
+        assert_eq!(
+            outer
+                .model_selection
+                .as_ref()
+                .map(|selection| selection.model.as_str()),
+            Some(slug.as_str())
+        );
+
+        // No model of its own: the nested subagent takes its owner's.
+        registry.remember_launch(
+            "toolu_inner",
+            &json!({"description": "inner"}),
+            Some("toolu_outer"),
+        );
+        let inner = subagent_of(&started_task(
+            &mut registry,
+            json!({"task_id": "task_inner", "tool_use_id": "toolu_inner", "task_type": "local_agent"}),
+        ))
+        .expect("the nested subagent starts");
+        assert_eq!(inner.model.as_deref(), Some(slug.as_str()));
+
+        // A snapshot that names a different model updates a running subagent.
+        let changed = registry.child_assistant(
+            "toolu_outer",
+            &json!({"message": {"id": "m", "model": "claude-sonnet-4-6", "content": []}}),
+            now,
+        );
+        let updated = subagent_of(&changed).expect("the model change lands");
+        assert_eq!(updated.model.as_deref(), Some("claude-sonnet-4-6"));
     }
 }

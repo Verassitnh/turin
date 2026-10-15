@@ -9,9 +9,11 @@
 use std::fs;
 use std::io::{self, Read};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
@@ -59,21 +61,30 @@ const POSIX_PATH_DELIMITER: char = ':';
 pub type ExecFileSync<'a> = &'a dyn Fn(&str, &[&str], Duration) -> io::Result<String>;
 
 /// `execFileSync(file, args, { encoding: "utf8", timeout })`. A child that
-/// outlives `timeout` is killed rather than left running.
+/// outlives `timeout` is killed rather than left running. The child leads its
+/// own process group, and on timeout the whole group is killed, so a background
+/// process that still holds stdout cannot keep the call alive past the deadline.
 pub fn exec_file_sync(file: &str, args: &[&str], timeout: Duration) -> io::Result<String> {
     let mut child = Command::new(file)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()?;
+    // `process_group(0)` makes the child's pid its group id.
+    let group = child.id() as libc::pid_t;
     let stdout = child.stdout.take();
-    let reader = std::thread::spawn(move || {
+    // Detached on purpose: after a timeout it may stay blocked on a pipe that a
+    // surviving process holds, so the caller never joins it.
+    let (output_tx, output_rx) = mpsc::channel();
+    std::thread::spawn(move || {
         let mut output = Vec::new();
-        if let Some(mut stdout) = stdout {
-            stdout.read_to_end(&mut output)?;
-        }
-        Ok::<_, io::Error>(output)
+        let result = match stdout {
+            Some(mut stdout) => stdout.read_to_end(&mut output).map(|_| output),
+            None => Ok(output),
+        };
+        let _ = output_tx.send(result);
     });
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -81,19 +92,42 @@ pub fn exec_file_sync(file: &str, args: &[&str], timeout: Duration) -> io::Resul
             break status;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            kill_process_group(group);
             let _ = child.wait();
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "command timed out"));
+            return Err(timed_out());
         }
         std::thread::sleep(Duration::from_millis(5));
     };
-    let output = reader
-        .join()
-        .map_err(|_| io::Error::other("stdout reader panicked"))??;
+    // The child exited, but a process it left behind may still hold stdout.
+    // EOF is only waited for until the same deadline.
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let output = match output_rx.recv_timeout(remaining) {
+        Ok(output) => output?,
+        Err(RecvTimeoutError::Timeout) => {
+            kill_process_group(group);
+            return Err(timed_out());
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            return Err(io::Error::other("stdout reader panicked"));
+        }
+    };
     if !status.success() {
         return Err(io::Error::other(format!("{file} exited with {status}")));
     }
     String::from_utf8(output).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn timed_out() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "command timed out")
+}
+
+/// SIGKILL to every process in `group`. A group id stays in use while any
+/// member lives, so a group still holding our stdout cannot have been reused.
+fn kill_process_group(group: libc::pid_t) {
+    // SAFETY: `killpg` only sends a signal. ESRCH (group already gone) is harmless.
+    unsafe {
+        libc::killpg(group, libc::SIGKILL);
+    }
 }
 
 /// `Escapes a single argument for cmd.exe shell mode`. Mirrors cross-spawn.
@@ -1126,6 +1160,36 @@ mod tests {
 
     fn fail_exec(_: &str, _: &[&str], _: Duration) -> io::Result<String> {
         Err(io::Error::other("unexpected exec"))
+    }
+
+    #[test]
+    fn exec_file_sync_returns_the_stdout_of_a_finished_command() {
+        assert_eq!(
+            exec_file_sync("/bin/echo", &["hi"], Duration::from_secs(5)).unwrap(),
+            "hi\n"
+        );
+    }
+
+    #[test]
+    fn exec_file_sync_kills_a_child_that_outlives_its_timeout() {
+        let error = exec_file_sync("/bin/sleep", &["30"], Duration::from_millis(200)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn exec_file_sync_times_out_when_a_background_process_holds_stdout() {
+        // The shell exits at once, but its background `sleep` keeps the pipe
+        // open. Upstream's execFileSync returns ETIMEDOUT at the deadline, and
+        // so must this. Before the fix it waited for the sleep to finish.
+        let started = Instant::now();
+        let error = exec_file_sync(
+            "/bin/sh",
+            &["-c", "(sleep 30 &); echo hi"],
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

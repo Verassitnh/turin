@@ -52,6 +52,7 @@ url = "2"
 percent-encoding = "2"
 unicode-normalization = "0.1"
 indexmap = { version = "2", features = ["serde"] }
+libc = "0.2"
 
 gpui-kit = "0.7.3"
 

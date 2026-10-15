@@ -9,6 +9,7 @@ turin-contracts.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 indexmap.workspace = true
+libc.workspace = true
 chrono.workspace = true
 markdown.workspace = true
 percent-encoding.workspace = true

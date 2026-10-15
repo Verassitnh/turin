@@ -210,6 +210,7 @@ impl GitVcsDriverCore {
         let Some(base_ref) = base_ref else {
             return Ok((None, "HEAD".to_owned()));
         };
+        reject_option_like_ref("GitVcsDriver.resolveReviewMergeBase", cwd, &base_ref)?;
         let args = argv(&["merge-base", &base_ref, "HEAD"]);
         let mut call = GitCall::new("GitVcsDriver.resolveReviewMergeBase", args.clone());
         call.allow_non_zero = true;
@@ -527,6 +528,11 @@ impl GitVcsDriverCore {
         let old_contents = if input.change_type == ReviewDiffFileChangeType::New {
             String::new()
         } else {
+            reject_option_like_ref(
+                "GitVcsDriver.getReviewDiffFileContents.revision",
+                input.cwd.as_str(),
+                &old_revision,
+            )?;
             let mut call = GitCall::new(
                 "GitVcsDriver.getReviewDiffFileContents.revision",
                 argv(&["show", &format!("{old_revision}:{}", input.old_path.as_str())]),
@@ -572,7 +578,7 @@ impl GitVcsDriverCore {
                 ),
             ));
         }
-        let real_root = std::fs::canonicalize(root).map_err(|error| {
+        let real_root = tokio::fs::canonicalize(root).await.map_err(|error| {
             plain_error(
                 "GitVcsDriver.getReviewDiffFileContents.workingTree.fs.realPath",
                 input.cwd.as_str(),
@@ -581,7 +587,7 @@ impl GitVcsDriverCore {
             )
             .with_cause(error.to_string())
         })?;
-        let real_target = std::fs::canonicalize(&requested).map_err(|error| {
+        let real_target = tokio::fs::canonicalize(&requested).await.map_err(|error| {
             plain_error(
                 "GitVcsDriver.getReviewDiffFileContents.workingTree.fs.realPath",
                 input.cwd.as_str(),
@@ -601,7 +607,7 @@ impl GitVcsDriverCore {
                 ),
             ));
         }
-        let info = std::fs::metadata(&real_target).map_err(|error| {
+        let info = tokio::fs::metadata(&real_target).await.map_err(|error| {
             plain_error(
                 "GitVcsDriver.getReviewDiffFileContents.workingTree.fs.stat",
                 input.cwd.as_str(),
@@ -629,7 +635,7 @@ impl GitVcsDriverCore {
                 ),
             ));
         }
-        let bytes = std::fs::read(&real_target).map_err(|error| {
+        let bytes = tokio::fs::read(&real_target).await.map_err(|error| {
             plain_error(
                 "GitVcsDriver.getReviewDiffFileContents.workingTree.fs.readFile",
                 input.cwd.as_str(),
@@ -785,7 +791,7 @@ impl GitVcsDriverCore {
                 right
                     .1
                     .cmp(&left.1)
-                    .then_with(|| left.0.name.as_str().cmp(right.0.name.as_str()))
+                    .then_with(|| locale_compare(left.0.name.as_str(), right.0.name.as_str()))
             });
             refs.into_iter().map(|(reference, _)| reference).collect()
         };

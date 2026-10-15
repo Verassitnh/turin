@@ -744,7 +744,7 @@ impl GitVcsDriverCore {
                 });
             }
         }
-        files.sort_by(|left, right| left.path.as_str().cmp(right.path.as_str()));
+        files.sort_by(|left, right| locale_compare(left.path.as_str(), right.path.as_str()));
         let insertions = files.iter().map(|file| file.insertions).sum();
         let deletions = files.iter().map(|file| file.deletions).sum();
         let branch_changes = if options.include_branch_changes == Some(true) {

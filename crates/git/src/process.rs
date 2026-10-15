@@ -17,6 +17,12 @@ use tokio_util::task::AbortOnDropHandle;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+/// Upstream `processGroupGraceMillis`. Time a signalled group gets to exit
+/// after SIGTERM before it is SIGKILLed. SIGTERM lets git remove its own
+/// `index.lock` and ref locks; SIGKILL leaves them behind.
+const KILL_GRACE: Duration = Duration::from_secs(1);
+/// Upstream `processGroupPollIntervalMillis`.
+const KILL_POLL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
@@ -194,9 +200,10 @@ impl ProcessRunner {
         let stderr_marker = truncated_marker;
 
         let mut command = Command::new(&input.command);
+        // No `kill_on_drop`: tokio would SIGKILL the leader before `KillGroupGuard`
+        // can send SIGTERM. The guard signals the whole group on every early exit.
         command
             .args(&input.args)
-            .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(if input.stdin.is_some() {
@@ -221,9 +228,6 @@ impl ProcessRunner {
             cause: error.to_string(),
         })?;
         let pid = child.id();
-        // Declared after `child` so a cancelled run kills the group before
-        // `kill_on_drop` signals only the leader.
-        let _group = KillGroupGuard(pid);
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let stdin = child.stdin.take();
@@ -233,7 +237,10 @@ impl ProcessRunner {
 
         let work_invocation = invocation.clone();
         let stdin_bytes = stdin_text.as_ref().map(String::len).unwrap_or(0);
-        let work = async move {
+        // Pinned so a timeout can signal the group while the readers still run.
+        // Dropping the readers first closes the pipes, and a shell writing to
+        // them dies of SIGPIPE before its SIGTERM trap can clean up.
+        let mut work = std::pin::pin!(async move {
             let stdout_handle = AbortOnDropHandle::new(tokio::spawn(collect_stream(
                 stdout,
                 ProcessStream::Stdout,
@@ -270,13 +277,17 @@ impl ProcessRunner {
                 flatten_collect(&work_invocation, stdout)?,
                 flatten_collect(&work_invocation, stderr)?,
             ))
-        };
+        });
+        // Declared after `work`: on cancellation the guard drops first and
+        // signals the group before the readers are aborted.
+        let mut group = KillGroupGuard(pid);
 
         let joined = if let Some(duration) = timeout {
-            match tokio::time::timeout(duration, work).await {
+            match tokio::time::timeout(duration, work.as_mut()).await {
                 Ok(result) => result,
                 Err(_elapsed) => {
                     kill_tree(pid, &mut child).await;
+                    group.disarm();
                     return match timeout_behavior {
                         TimeoutBehavior::TimedOutResult => Ok(ProcessRunOutput {
                             stdout: String::new(),
@@ -306,6 +317,7 @@ impl ProcessRunner {
             Ok(streams) => streams,
             Err(error) => {
                 kill_tree(pid, &mut child).await;
+                group.disarm();
                 return Err(error);
             }
         };
@@ -319,7 +331,8 @@ impl ProcessRunner {
             cause: error.to_string(),
         })?;
         // The leader has exited. Anything it backgrounded is still in the group.
-        kill_group(pid);
+        terminate_group(pid).await;
+        group.disarm();
 
         Ok(ProcessRunOutput {
             stdout: stdout.text,
@@ -478,36 +491,114 @@ async fn write_stdin(stdin: Option<ChildStdin>, text: Option<String>) -> Result<
     stdin.shutdown().await.map_err(|error| error.to_string())
 }
 
-async fn kill_tree(pid: Option<u32>, child: &mut Child) {
-    kill_group(pid);
-    let _ = child.start_kill();
-    let _ = child.wait().await;
+#[derive(Clone, Copy)]
+enum GroupSignal {
+    Term,
+    Kill,
 }
 
+/// Stops a timed-out or failed child. The leader gets the grace window to
+/// clean up, then whatever is still in the group is SIGKILLed.
+async fn kill_tree(pid: Option<u32>, child: &mut Child) {
+    let deadline = tokio::time::Instant::now() + KILL_GRACE;
+    signal_group(pid, GroupSignal::Term);
+    let leader_exited = tokio::time::timeout_at(deadline, child.wait())
+        .await
+        .is_ok();
+    wait_for_group_exit(pid, deadline).await;
+    kill_group_if_alive(pid);
+    if !leader_exited {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+}
+
+/// Clean exit: the leader is already reaped, so only backgrounded work can
+/// remain. Give it the same SIGTERM, grace, SIGKILL sequence.
+async fn terminate_group(pid: Option<u32>) {
+    signal_group(pid, GroupSignal::Term);
+    wait_for_group_exit(pid, tokio::time::Instant::now() + KILL_GRACE).await;
+    kill_group_if_alive(pid);
+}
+
+async fn wait_for_group_exit(pid: Option<u32>, deadline: tokio::time::Instant) {
+    while group_alive(pid) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(KILL_POLL).await;
+    }
+}
+
+/// Dropping the guard means the caller cancelled or unwound mid-run. `Drop`
+/// cannot await, so SIGTERM goes out now and the SIGKILL fallback runs on a
+/// detached thread. Early exits that already killed the group call `disarm`.
 struct KillGroupGuard(Option<u32>);
+
+impl KillGroupGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
 
 impl Drop for KillGroupGuard {
     fn drop(&mut self) {
-        kill_group(self.0.take());
+        let Some(pid) = self.0.take() else {
+            return;
+        };
+        signal_group(Some(pid), GroupSignal::Term);
+        std::thread::spawn(move || {
+            std::thread::sleep(KILL_GRACE);
+            kill_group_if_alive(Some(pid));
+        });
     }
 }
 
-fn kill_group(pid: Option<u32>) {
+fn kill_group_if_alive(pid: Option<u32>) {
+    if group_alive(pid) {
+        signal_group(pid, GroupSignal::Kill);
+    }
+}
+
+#[cfg(unix)]
+fn signal_group(pid: Option<u32>, signal: GroupSignal) {
     let Some(pid) = pid else {
         return;
     };
-    #[cfg(unix)]
+    let signal = match signal {
+        GroupSignal::Term => libc::SIGTERM,
+        GroupSignal::Kill => libc::SIGKILL,
+    };
     // SAFETY: `pid` is the child's id and `process_group(0)` made it the leader.
     // A negative pid asks the kernel to signal that group, including hooks it spawned.
     unsafe {
-        libc::kill(-(pid as i32), libc::SIGKILL);
+        libc::kill(-(pid as i32), signal);
     }
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
-            .status();
-    }
+}
+
+/// Whether any process still has the group id. A zombie leader counts until it
+/// is reaped, so callers reap the leader before asking.
+#[cfg(unix)]
+fn group_alive(pid: Option<u32>) -> bool {
+    let Some(pid) = pid else {
+        return false;
+    };
+    // SAFETY: signal 0 only checks for existence and sends nothing.
+    unsafe { libc::kill(-(pid as i32), 0) == 0 }
+}
+
+#[cfg(windows)]
+fn signal_group(pid: Option<u32>, _signal: GroupSignal) {
+    let Some(pid) = pid else {
+        return;
+    };
+    // `taskkill` has no graceful step here, so Windows children are stopped at
+    // the TERM stage and `group_alive` reports false afterwards.
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .status();
+}
+
+#[cfg(windows)]
+fn group_alive(_pid: Option<u32>) -> bool {
+    false
 }
 
 pub fn cause_json(message: impl AsRef<str>) -> Value {
@@ -637,6 +728,77 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let alive = unsafe { libc::kill(pid, 0) == 0 };
         assert!(!alive, "grandchild {pid} survived the timeout");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_sends_sigterm_so_the_leader_can_clean_up() {
+        // git removes `.git/index.lock` from its SIGTERM handler. SIGKILL skips it.
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("cleaned");
+        let script = format!(
+            "trap 'echo cleaned > {}; exit 0' TERM\nwhile :; do sleep 0.05; done\n",
+            marker.display()
+        );
+        let error = runner()
+            .run(ProcessRunInput {
+                timeout: Some(Some(Duration::from_millis(300))),
+                ..ProcessRunInput::new("sh", vec!["-c".into(), script])
+            })
+            .await
+            .expect_err("timeout");
+        assert!(matches!(error, ProcessRunError::Timeout { .. }));
+        assert!(marker.exists(), "leader did not run its SIGTERM cleanup");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_escalates_to_sigkill_when_sigterm_is_ignored() {
+        let script = "trap '' TERM\nsleep 30\n".to_owned();
+        let started = std::time::Instant::now();
+        let error = runner()
+            .run(ProcessRunInput {
+                timeout: Some(Some(Duration::from_millis(200))),
+                ..ProcessRunInput::new("sh", vec!["-c".into(), script])
+            })
+            .await
+            .expect_err("timeout");
+        assert!(matches!(error, ProcessRunError::Timeout { .. }));
+        // The grace window ran first, then SIGKILL ended `sleep 30` well before it would exit.
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= KILL_GRACE,
+            "SIGKILL came before the grace window"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "SIGKILL never came: {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_the_run_sends_sigterm_to_the_group() {
+        // Caller abort drops the future. The guard must SIGTERM the leader; it must not
+        // SIGKILL it outright, or the cleanup trap never runs. The script detaches its
+        // stdio: dropping the readers closes the pipes at the same moment, and a shell
+        // that still writes to them dies of SIGPIPE before its trap runs.
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("cleaned");
+        let script = format!(
+            "exec >/dev/null 2>&1\ntrap 'echo cleaned > {}; exit 0' TERM\nwhile :; do sleep 0.05; done\n",
+            marker.display()
+        );
+        let run = ProcessRunner.run(ProcessRunInput {
+            timeout: Some(None),
+            ..ProcessRunInput::new("sh", vec!["-c".into(), script])
+        });
+        let _ = tokio::time::timeout(Duration::from_millis(300), run).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(marker.exists(), "dropped run did not SIGTERM its leader");
     }
 
     #[tokio::test]

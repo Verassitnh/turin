@@ -29,15 +29,15 @@ pub(super) const OUTPUT_TRUNCATED_MARKER: &str = "\n\n[truncated]";
 mod driver;
 pub use driver::{
     CreateWorktreeOptions, GitCommitOptions, GitCommitResult, GitDeleteLocalBranchInput,
-    SubmodulesDisabledCallback, SubmodulesFinishedCallback, WorktreeClaimedCallback,
     GitEnsureRemoteInput, GitFetchPullRequestBranchInput, GitFetchPullRequestHeadCommitInput,
     GitFetchRemoteBranchInput, GitFetchRemoteInput, GitFetchRemoteTrackingBranchInput,
     GitLocalStatusOptions, GitPreparedCommitContext, GitPushOptions, GitPushResult, GitPushStatus,
     GitRangeContext, GitRefreshCheckedOutBranchInput, GitRefreshCheckedOutBranchResult,
-    GitRemoteBranchExistsInput, GitRemoteExistsInput, GitRemoteStatusDetails, GitRemoteStatusOptions,
-    GitRenameBranchInput, GitRenameBranchResult, GitResolveCommitInput, GitResolveCommitResult,
-    GitResolveRemoteTrackingCommitInput, GitResolveRemoteTrackingCommitResult,
-    GitSetBranchUpstreamInput, GitStatusDetails,
+    GitRemoteBranchExistsInput, GitRemoteExistsInput, GitRemoteStatusDetails,
+    GitRemoteStatusOptions, GitRenameBranchInput, GitRenameBranchResult, GitResolveCommitInput,
+    GitResolveCommitResult, GitResolveRemoteTrackingCommitInput,
+    GitResolveRemoteTrackingCommitResult, GitSetBranchUpstreamInput, GitStatusDetails,
+    SubmodulesDisabledCallback, SubmodulesFinishedCallback, WorktreeClaimedCallback,
 };
 
 static BRANCH_AB: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\+(\d+)\s+-(\d+)$").unwrap());
@@ -837,14 +837,16 @@ impl Default for GitVcsDriverCore {
 }
 
 struct LineTail {
-    buffer: Arc<parking_lot::Mutex<String>>,
+    /// Raw bytes, not text. A read can end inside a multi-byte character, so
+    /// decoding each chunk would turn the split character into U+FFFD.
+    buffer: Arc<parking_lot::Mutex<Vec<u8>>>,
     callback: GitLineCallback,
 }
 
 impl LineTail {
     fn new(callback: GitLineCallback) -> Self {
         Self {
-            buffer: Arc::new(parking_lot::Mutex::new(String::new())),
+            buffer: Arc::new(parking_lot::Mutex::new(Vec::new())),
             callback,
         }
     }
@@ -854,7 +856,7 @@ impl LineTail {
         let callback = self.callback.clone();
         Arc::new(move |chunk: &[u8]| {
             let mut pending = buffer.lock();
-            pending.push_str(&String::from_utf8_lossy(chunk));
+            pending.extend_from_slice(chunk);
             drain_output_lines(&mut pending, &callback, false);
         })
     }
@@ -866,10 +868,12 @@ impl LineTail {
 }
 
 /// Git redraws progress with a bare `\r`. Treat `\r\n`, `\r`, and `\n` as breaks.
-fn drain_output_lines(buffer: &mut String, callback: &GitLineCallback, flush: bool) {
+/// `\r` and `\n` never occur inside a multi-byte UTF-8 sequence, so a line is
+/// complete once a break byte follows it and can be decoded on its own.
+fn drain_output_lines(buffer: &mut Vec<u8>, callback: &GitLineCallback, flush: bool) {
     while let Some((at, len)) = next_line_break(buffer) {
-        let line = buffer[..at].to_owned();
-        buffer.replace_range(..at + len, "");
+        let line = String::from_utf8_lossy(&buffer[..at]).into_owned();
+        buffer.drain(..at + len);
         if !line.is_empty() {
             callback(&line);
         }
@@ -877,17 +881,20 @@ fn drain_output_lines(buffer: &mut String, callback: &GitLineCallback, flush: bo
     if flush {
         let trailing = std::mem::take(buffer);
         if !trailing.is_empty() {
-            callback(&trailing);
+            callback(&String::from_utf8_lossy(&trailing));
         }
     }
 }
 
-fn next_line_break(buffer: &str) -> Option<(usize, usize)> {
-    let bytes = buffer.as_bytes();
+fn next_line_break(bytes: &[u8]) -> Option<(usize, usize)> {
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'\r' {
-            let len = if bytes.get(index + 1) == Some(&b'\n') { 2 } else { 1 };
+            let len = if bytes.get(index + 1) == Some(&b'\n') {
+                2
+            } else {
+                1
+            };
             return Some((index, len));
         }
         if bytes[index] == b'\n' {
@@ -966,6 +973,47 @@ impl WithReason for GitCommandError {
 mod tests {
     use super::*;
     use turin_contracts::base_schemas::TrimmedNonEmptyString;
+
+    #[test]
+    fn drops_an_unterminated_path_from_truncated_null_separated_output() {
+        assert_eq!(
+            split_null_separated_paths("complete.txt\0partial", true),
+            ["complete.txt"]
+        );
+        // A trailing NUL means the last path was complete, so truncation drops nothing.
+        assert_eq!(
+            split_null_separated_paths("complete.txt\0final.txt\0", true),
+            ["complete.txt", "final.txt"]
+        );
+    }
+
+    #[test]
+    fn keeps_the_final_path_when_null_separated_output_is_complete() {
+        assert_eq!(
+            split_null_separated_paths("complete.txt\0final.txt", false),
+            ["complete.txt", "final.txt"]
+        );
+        assert!(split_null_separated_paths("", false).is_empty());
+        assert!(split_null_separated_paths("", true).is_empty());
+    }
+
+    #[test]
+    fn streamed_lines_keep_a_character_split_across_reads() {
+        let lines = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let sink = lines.clone();
+        let callback: GitLineCallback =
+            Arc::new(move |line: &str| sink.lock().push(line.to_owned()));
+        let feed = LineTail::new(callback).chunk_callback();
+        // "é" is two bytes and the emoji four; split reads inside both.
+        let bytes = "héllo 🙂\nnext\n".as_bytes();
+        feed(&bytes[..2]);
+        feed(&bytes[2..9]);
+        feed(&bytes[9..]);
+        assert_eq!(
+            *lines.lock(),
+            vec!["héllo 🙂".to_owned(), "next".to_owned()]
+        );
+    }
 
     fn reason(stderr: &str) -> Option<&'static str> {
         classify_git_failure(stderr).map(|reason| match reason {

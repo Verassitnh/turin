@@ -94,7 +94,10 @@ struct ThreadSpec {
 struct FakeHost {
     summaries: Mutex<HashMap<u64, PullRequestSummary>>,
     failures: Mutex<HashMap<u64, SyncHostError>>,
+    /// Stack reads that fail once, then succeed on the next attempt.
+    stack_failures: Mutex<HashMap<u64, SyncHostError>>,
     stacks: Mutex<HashMap<u64, ThreadPullRequestStack>>,
+    stack_reads: Mutex<Vec<u64>>,
     summary_reads: Mutex<Vec<u64>>,
     invalidated: Mutex<Vec<u64>>,
 }
@@ -126,7 +129,12 @@ impl SyncHost for FakeHost {
         &self,
         reference: &PullRequestRef,
     ) -> Result<Option<ThreadPullRequestStack>, SyncHostError> {
-        Ok(self.stacks.lock().get(&reference.number.get()).cloned())
+        let number = reference.number.get();
+        self.stack_reads.lock().push(number);
+        if let Some(error) = self.stack_failures.lock().remove(&number) {
+            return Err(error);
+        }
+        Ok(self.stacks.lock().get(&number).cloned())
     }
 }
 
@@ -426,6 +434,47 @@ async fn one_failed_group_does_not_stop_the_others() {
         panic!("expected a link sync");
     };
     assert_eq!(number.get(), 43);
+}
+
+#[tokio::test]
+async fn a_failed_stack_read_is_retried_after_the_summary_becomes_terminal() {
+    // Upstream PullRequestSyncReactor.test.ts: 'retries a failed stack read after the summary
+    // becomes terminal'. A failed read must not record "no stack" over the stored state.
+    let h = harness(vec![thread("thread:one", true, vec![link(42, None)])]);
+    h.host
+        .summaries
+        .lock()
+        .insert(42, summary(42, "merged", "Merged"));
+    h.host.stacks.lock().insert(42, stack(&[42]));
+    h.host.stack_failures.lock().insert(
+        42,
+        SyncHostError {
+            message: "temporary failure".to_owned(),
+            retry_at: None,
+        },
+    );
+
+    h.reactor.sweep(SweepScope::All).await.expect("first sweep");
+
+    assert_eq!(h.host.stack_reads.lock().as_slice(), &[42]);
+    assert!(
+        sync_commands(&h.dispatch).is_empty(),
+        "a failed stack read writes nothing for the key"
+    );
+
+    // The summary is terminal, so only the retry flag makes the key due again.
+    h.reactor
+        .sweep(SweepScope::All)
+        .await
+        .expect("second sweep");
+
+    assert_eq!(h.host.stack_reads.lock().as_slice(), &[42, 42]);
+    let syncs = sync_commands(&h.dispatch);
+    assert_eq!(syncs.len(), 1);
+    let OrchestrationV2Command::ThreadPullRequestLinkSync { stack: synced, .. } = &syncs[0] else {
+        panic!("expected a link sync");
+    };
+    assert_eq!(synced.as_ref(), Some(&stack(&[42])));
 }
 
 impl Harness {

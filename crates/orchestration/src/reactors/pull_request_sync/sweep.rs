@@ -359,9 +359,11 @@ impl PullRequestSyncReactor {
                     self.cadence.lock().set_retry(key, true);
                     return Err(error);
                 }
+                // A failed read is not "no stack": keep the key due and write nothing for it.
                 Err(error) => {
                     tracing::warn!(key, error = %error, "pull request stack lookup failed");
-                    Some(None)
+                    self.cadence.lock().set_retry(key, true);
+                    return Ok(());
                 }
             }
         };

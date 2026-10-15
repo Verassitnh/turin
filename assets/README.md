@@ -6,24 +6,38 @@ mirrored.
 
 ## Sources
 
-- `prod/app-icon.icon` is the Icon Composer project and the source of truth. `icon.json` is
-  byte-identical to upstream prod: solid black fill, one `Text` layer at scale 8.5, neutral
-  shadow at 0.5, translucency 0.5.
-- `prod/app-icon.icon/Assets/text.svg` is the mark: upstream's T subpath with the "3" removed,
-  scaled by 1.25 and re-centred. The transform `matrix(1.25 0 0 1.25 14.086375 -16.25)` is baked
-  into the path (`M55.9 100V43.2H33.5V30H94.5V43.2H72.1V100H55.9Z`). The T's box is
-  x 33.5–94.5, y 30–100 on the 128 grid. That centres it horizontally and keeps upstream's
-  cap-height centre (y = 65, one unit below the canvas centre). The top-heavy T needs that slight
-  drop to sit optically centred.
-- `prod/logo.svg` is the flat 128px mark with the same structure as upstream's `logo.svg`
-  (10-radius black tile plus the white glyph).
-- `prod/wordmark.svg` is the bare T in upstream's original size, with a tight viewBox and
-  `currentColor`. It plays the same role as upstream's `T3Wordmark` component, for in-app brand
-  slots.
+`export-icons.py` writes the first two sources below from upstream's files and one number, the T
+scale (`DEFAULT_T_SCALE`, or `--t-scale`). Don't edit them by hand.
 
-Why scale 1.25: at 1.0 the lone T looks lost in the tile. At 1.4 its stroke gets visibly heavier
-than T3's. At 1.25 the T fills the tile about as fully as the T3 pair does at 1024, 180, 32 and
-16px.
+- `prod/app-icon.icon` is the Icon Composer project. `icon.json` is copied byte-for-byte from
+  upstream prod: solid black fill, one `Text` layer at scale 8.5, neutral shadow at 0.5,
+  translucency 0.5. `Assets/text.svg` is upstream's file with the T3 path swapped for Turin's T.
+- `prod/logo.svg` is upstream's flat 128px `logo.svg` (10-radius black tile plus white glyph)
+  with the same swap.
+- `prod/wordmark.svg` is hand-written. It is the bare T at upstream's original size, with a tight
+  viewBox and `currentColor`. It plays the same role as upstream's `T3Wordmark` component, for
+  in-app brand slots.
+
+The T is upstream's T subpath with the "3" dropped. It is scaled by *s*, then translated so it is
+centred on x = 64 and keeps the T3 pair's cap-height centre at y = 65 (one unit below the canvas
+centre, which also suits the top-heavy T optically). On the 128 grid:
+
+| *s* | Transform | Path | Box |
+| --- | --- | --- | --- |
+| 1.25 (committed) | `matrix(1.25 0 0 1.25 14.086375 -16.25)` | `M55.9 100V43.2H33.5V30H94.5V43.2H72.1V100H55.9Z` | x 33.5–94.5, y 30–100 |
+| 1.0 (upstream size) | `matrix(1 0 0 1 24.0691 0)` | `M57.52 93V47.56H39.6V37H88.4V47.56H70.48V93H57.52Z` | x 39.6–88.4, y 37–93 |
+
+**Pending user decision.** The user's requirement was "exactly like the t3 code icon except with
+a T instead of a T3". Read literally, that points to 1.0: upstream's T at its exact size and
+weight, only moved. The committed 1.25 is a design call, because at 1.0 the lone T leaves the
+tile emptier than the T3 pair does. At 1.25 its cap height goes from 56 to 70 and its stem from
+12.96 to 16.2.
+
+`prod/compare-scale-options.png` shows both against upstream at macOS 1024, 180, 32 and 16. It is
+built with `uv run assets/export-icons.py --scale-options 1.0 1.25`, which renders in a temp dir
+and leaves the committed exports alone. To switch to 1.0, set `DEFAULT_T_SCALE = 1.0` and re-run
+the script. That rewrites the sources and every export. To preview without touching `prod/`, run
+`uv run assets/export-icons.py --t-scale 1.0 --out-dir /tmp/turin-1.0`.
 
 ## Exports
 

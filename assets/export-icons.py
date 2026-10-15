@@ -42,10 +42,12 @@ from scipy import ndimage
 
 ROOT = Path(__file__).resolve().parent.parent
 PROD = ROOT / "assets" / "prod"
-SOURCE = PROD / "app-icon.icon"
 UPSTREAM_PROD = ROOT / "upstream" / "assets" / "prod"
 
 DESIGN_GENERATION = "26"
+# Upstream's T path is scaled by this and re-centred (see place_t). Pending user sign-off
+# against 1.0 (upstream's size): compare with `--scale-options 1.0 1.25`.
+DEFAULT_T_SCALE = 1.25
 WINDOWS_ICON_SIZES = [16, 24, 32, 48, 64, 128, 256]
 # Icon Composer draws the 128-unit SVG at the layer scale from icon.json, centred on
 # the 1024pt canvas; the pre-Tahoe macOS body is that canvas at 824px, inset 100px.
@@ -248,6 +250,40 @@ def bbox(d: str) -> tuple[float, float, float, float]:
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def fmt(v: float) -> str:
+    return f"{v:.4f}".rstrip("0").rstrip(".")
+
+
+def place_t(upstream_t: str, scale: float) -> str:
+    """Upstream's T scaled about nothing but itself: scale, then translate so it is centred on
+    x = 64 and keeps its cap-height centre (y = 65, the T3 pair's) on the 128 grid."""
+    x0, y0, x1, y1 = bbox(upstream_t)
+    tx, ty = 64 - scale * (x0 + x1) / 2, (y0 + y1) / 2 * (1 - scale)
+    d, cmd, n = "", None, 0
+    for tok in re.findall(r"[MLHVCZ]|-?\d*\.?\d+", upstream_t):
+        if tok in "MLHVCZ":
+            d, cmd, n = d + tok, tok, 0
+            continue
+        on_x = cmd == "H" or (cmd != "V" and n % 2 == 0)
+        d += (" " if n else "") + fmt(scale * float(tok) + (tx if on_x else ty))
+        n += 1
+    return d
+
+
+def write_sources(out_dir: Path, turin_t: str) -> None:
+    """The Icon Composer project and logo.svg: upstream prod's files with the T3 path swapped
+    for Turin's T. icon.json is copied unchanged."""
+    upstream_svg = (UPSTREAM_PROD / "app-icon.icon" / "Assets" / "text.svg").read_text()
+    upstream_logo = (UPSTREAM_PROD / "logo.svg").read_text()
+    mark = svg_paths(UPSTREAM_PROD / "app-icon.icon" / "Assets" / "text.svg")[0]
+    assert upstream_svg.count(mark) == 1 and upstream_logo.count(mark) == 1
+    project = out_dir / "app-icon.icon"
+    (project / "Assets").mkdir(parents=True, exist_ok=True)
+    shutil.copy(UPSTREAM_PROD / "app-icon.icon" / "icon.json", project / "icon.json")
+    (project / "Assets" / "text.svg").write_text(upstream_svg.replace(mark, turin_t))
+    (out_dir / "logo.svg").write_text(upstream_logo.replace(mark, turin_t))
+
+
 def coverage(d: str, size: int, k: float, b: float, ss: int = 8) -> np.ndarray:
     """Anti-aliased coverage of path d (128-unit space) drawn at px = k*u + b."""
     im = Image.new("L", (size * ss, size * ss), 0)
@@ -342,9 +378,16 @@ def compile_bundle_icon(icon: Path, resources: Path) -> None:
           f"CFBundleIconName = {name} and CFBundleIconFile = {name}")
 
 
-# --- comparison sheet ---
+# --- comparison sheets ---
 
-def compare_sheet(out: Path) -> None:
+def sheet_font() -> ImageFont.ImageFont:
+    try:
+        return ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 18)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def compare_sheet(out_dir: Path) -> None:
     cols = [  # (label, upstream file, turin file, display size, zoom)
         ("macOS 1024 (50%)", "black-macos-1024.png", OUTPUTS["macos"], 512, 1),
         ("iOS / universal 1024 (50%)", "black-ios-1024.png", OUTPUTS["ios"], 512, 1),
@@ -353,78 +396,134 @@ def compare_sheet(out: Path) -> None:
         ("favicon 16 (1x, 8x)", "t3-black-web-favicon-16x16.png", OUTPUTS["favicon16"], 16, 8),
     ]
     pad, label_h, row_label_w = 24, 34, 110
-    try:
-        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 18)
-    except OSError:
-        font = ImageFont.load_default()
+    font = sheet_font()
     widths = [(d + (d * z + pad if z > 1 else 0)) for _, _, _, d, z in cols]
     W = row_label_w + sum(widths) + pad * (len(cols) + 1)
     H = label_h + 2 * (512 + pad) + pad
     sheet = Image.new("RGBA", (W, H), (236, 236, 236, 255))
     draw = ImageDraw.Draw(sheet)
-    for r, (row, base) in enumerate((("T3 Code", UPSTREAM_PROD), ("Turin", PROD))):
+    for r, (row, base) in enumerate((("T3 Code", UPSTREAM_PROD), ("Turin", out_dir))):
         y = label_h + pad + r * (512 + pad)
         draw.text((pad, y + 246), row, fill=(40, 40, 40), font=font)
         x = row_label_w + pad
         for (label, up_name, turin_name, d, z), w in zip(cols, widths):
             if r == 0:
                 draw.text((x, 8), label, fill=(40, 40, 40), font=font)
-            im = Image.open(base / (up_name if r == 0 else turin_name)).convert("RGBA")
+            im = to_srgb8((base / (up_name if r == 0 else turin_name)).read_bytes())
             shown = im.resize((d, d), Image.LANCZOS) if im.width != d else im
             sheet.alpha_composite(shown, (x, y + (512 - d) // 2))
             if z > 1:
                 big = shown.resize((d * z, d * z), Image.NEAREST)
                 sheet.alpha_composite(big, (x + d + pad, y + (512 - d * z) // 2))
             x += w + pad
+    (out_dir / OUTPUTS["compare"]).write_bytes(srgb_png(sheet))
+
+
+def scale_options_sheet(tool: str, scales: list[float], out: Path) -> None:
+    """Upstream next to Turin at each T scale, every column through the same pipeline: macOS is
+    upstream's native pre-Tahoe export vs the derived PNG; 180/32/16 are ictool renders (upstream's
+    .icon re-rendered with the same ictool, so tool drift doesn't show up as a difference)."""
+    with tempfile.TemporaryDirectory(prefix="turin-scales-") as tmp_name:
+        tmp = Path(tmp_name)
+        columns = [("T3 Code (upstream)", {
+            "macos": to_srgb8((UPSTREAM_PROD / "black-macos-1024.png").read_bytes()),
+            **{size: to_srgb8(ictool_png(tool, UPSTREAM_PROD / "app-icon.icon", size, tmp / f"up-{size}.png"))
+               for size in (180, 32, 16)},
+        })]
+        for scale in scales:
+            out_dir = tmp / f"scale-{scale}"
+            export(tool, out_dir, scale, keep_macos_png=False, quiet=True)
+            columns.append((f"Turin, T at {scale:g}x" + (" (committed)" if scale == DEFAULT_T_SCALE else ""), {
+                "macos": to_srgb8((out_dir / OUTPUTS["macos"]).read_bytes()),
+                180: to_srgb8((out_dir / OUTPUTS["apple_touch"]).read_bytes()),
+                32: to_srgb8((out_dir / OUTPUTS["favicon32"]).read_bytes()),
+                16: to_srgb8((out_dir / OUTPUTS["favicon16"]).read_bytes()),
+            }))
+
+    rows = [("macOS 1024\n(50%)", "macos", 512, 1), ("apple-touch\n180", 180, 180, 1),
+            ("favicon 32\n(1x, 4x)", 32, 32, 4), ("favicon 16\n(1x, 8x)", 16, 16, 8)]
+    pad, label_h, row_label_w, col_w = 24, 40, 130, 560
+    heights = [max(d, d * z) for _, _, d, z in rows]
+    sheet = Image.new("RGBA", (row_label_w + len(columns) * (col_w + pad) + pad,
+                               label_h + sum(heights) + pad * (len(rows) + 1)), (236, 236, 236, 255))
+    draw = ImageDraw.Draw(sheet)
+    font = sheet_font()
+    for c, (title, images) in enumerate(columns):
+        x0 = row_label_w + pad + c * (col_w + pad)
+        draw.text((x0, 10), title, fill=(40, 40, 40), font=font)
+        y = label_h + pad
+        for (label, key, d, z), h in zip(rows, heights):
+            if c == 0:
+                draw.multiline_text((pad, y + h // 2 - 20), label, fill=(40, 40, 40), font=font)
+            im = images[key]
+            shown = im.resize((d, d), Image.LANCZOS) if im.width != d else im
+            sheet.alpha_composite(shown, (x0, y + (h - d) // 2))
+            if z > 1:
+                sheet.alpha_composite(shown.resize((d * z, d * z), Image.NEAREST), (x0 + d + pad, y + (h - d * z) // 2))
+            y += h + pad
     out.write_bytes(srgb_png(sheet))
+
+
+def export(tool: str, out_dir: Path, scale: float, keep_macos_png: bool, quiet: bool = False) -> None:
+    upstream_mark = svg_paths(UPSTREAM_PROD / "app-icon.icon" / "Assets" / "text.svg")[0]
+    upstream_t = subpaths(upstream_mark)[0]
+    turin_t = place_t(upstream_t, scale)
+    write_sources(out_dir, turin_t)
+
+    with tempfile.TemporaryDirectory(prefix="turin-icons-") as tmp_name:
+        tmp = Path(tmp_name)
+        render = {size: ictool_png(tool, out_dir / "app-icon.icon", size, tmp / f"ios-{size}.png")
+                  for size in sorted({1024, 180, *WINDOWS_ICON_SIZES})}
+
+        (out_dir / OUTPUTS["ios"]).write_bytes(render[1024])
+        (out_dir / OUTPUTS["universal"]).write_bytes(render[1024])
+        (out_dir / OUTPUTS["apple_touch"]).write_bytes(render[180])
+        (out_dir / OUTPUTS["favicon16"]).write_bytes(render[16])
+        (out_dir / OUTPUTS["favicon32"]).write_bytes(render[32])
+        ico = encode_png_ico([(size, render[size]) for size in WINDOWS_ICON_SIZES])
+        (out_dir / OUTPUTS["favicon_ico"]).write_bytes(ico)
+        (out_dir / OUTPUTS["windows_ico"]).write_bytes(ico)
+
+        if not keep_macos_png:
+            mac = macos_pre_tahoe(UPSTREAM_PROD / "black-macos-1024.png", upstream_mark, upstream_t, turin_t)
+            (out_dir / OUTPUTS["macos"]).write_bytes(srgb_png(mac))
+        build_icns(out_dir / OUTPUTS["macos"], out_dir / OUTPUTS["icns"], tmp)
+
+    compare_sheet(out_dir)
+    if not quiet:
+        for name in ["app-icon.icon", "logo.svg", *OUTPUTS.values()]:
+            kept = name == OUTPUTS["macos"] and keep_macos_png
+            print("kept" if kept else "wrote", out_dir / name)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--t-scale", type=float, default=DEFAULT_T_SCALE,
+                        help=f"scale of upstream's T path, re-centred in the tile (default {DEFAULT_T_SCALE:g}; "
+                             "1.0 keeps upstream's T size)")
+    parser.add_argument("--out-dir", type=Path, default=PROD,
+                        help="where sources and exports are written (default assets/prod)")
     parser.add_argument("--keep-macos-png", action="store_true",
-                        help="leave prod/black-macos-1024.png untouched (e.g. a native Icon Composer "
+                        help="leave black-macos-1024.png untouched (e.g. a native Icon Composer "
                              "pre-Tahoe export) and build the icns and compare sheet from it")
+    parser.add_argument("--scale-options", type=float, nargs="+", metavar="SCALE",
+                        help="only write prod/compare-scale-options.png comparing upstream with these "
+                             "T scales (rendered in a temp dir; committed exports are untouched)")
     parser.add_argument("--bundle-resources", type=Path, metavar="DIR",
                         help="only compile prod/app-icon.icon with actool into DIR (an app bundle's "
                              "Contents/Resources) and verify Assets.car + app-icon.icns were written")
     args = parser.parse_args()
     if args.bundle_resources:
-        compile_bundle_icon(SOURCE, args.bundle_resources)
+        compile_bundle_icon(args.out_dir / "app-icon.icon", args.bundle_resources)
         return
 
     tool, version = find_ictool()
     print(f"ictool {version}: {tool}")
-
-    turin_t = svg_paths(SOURCE / "Assets" / "text.svg")[0]
-    upstream_mark = svg_paths(UPSTREAM_PROD / "app-icon.icon" / "Assets" / "text.svg")[0]
-    upstream_t = subpaths(upstream_mark)[0]
-
-    with tempfile.TemporaryDirectory(prefix="turin-icons-") as tmp_name:
-        tmp = Path(tmp_name)
-        render = {size: ictool_png(tool, SOURCE, size, tmp / f"ios-{size}.png")
-                  for size in sorted({1024, 180, *WINDOWS_ICON_SIZES})}
-
-        (PROD / OUTPUTS["ios"]).write_bytes(render[1024])
-        (PROD / OUTPUTS["universal"]).write_bytes(render[1024])
-        (PROD / OUTPUTS["apple_touch"]).write_bytes(render[180])
-        (PROD / OUTPUTS["favicon16"]).write_bytes(render[16])
-        (PROD / OUTPUTS["favicon32"]).write_bytes(render[32])
-        ico = encode_png_ico([(size, render[size]) for size in WINDOWS_ICON_SIZES])
-        (PROD / OUTPUTS["favicon_ico"]).write_bytes(ico)
-        (PROD / OUTPUTS["windows_ico"]).write_bytes(ico)
-
-        if args.keep_macos_png:
-            print("kept", (PROD / OUTPUTS["macos"]).relative_to(ROOT))
-        else:
-            mac = macos_pre_tahoe(UPSTREAM_PROD / "black-macos-1024.png", upstream_mark, upstream_t, turin_t)
-            (PROD / OUTPUTS["macos"]).write_bytes(srgb_png(mac))
-
-        build_icns(PROD / OUTPUTS["macos"], PROD / OUTPUTS["icns"], tmp)
-
-    compare_sheet(PROD / OUTPUTS["compare"])
-    for key, name in OUTPUTS.items():
-        if not (key == "macos" and args.keep_macos_png):
-            print("wrote", (PROD / name).relative_to(ROOT))
+    if args.scale_options:
+        scale_options_sheet(tool, args.scale_options, PROD / "compare-scale-options.png")
+        print("wrote", PROD / "compare-scale-options.png")
+        return
+    export(tool, args.out_dir.resolve(), args.t_scale, args.keep_macos_png)
 
 
 if __name__ == "__main__":

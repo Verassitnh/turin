@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -102,7 +102,9 @@ fn isolate_hook(name: &'static str, hook: impl FnOnce()) {
 
 struct ConnectionInner {
     state: Mutex<State>,
-    write_tx: mpsc::UnboundedSender<WriteJob>,
+    // Taken on termination so the writer drains and exits, closing the child's
+    // stdin even while the caller still holds the connection.
+    write_tx: Mutex<Option<mpsc::UnboundedSender<WriteJob>>>,
     notifications: Mutex<VecDeque<IncomingNotification>>,
     notify_waiters: Notify,
     on_request: RequestCallback,
@@ -165,14 +167,17 @@ impl Connection {
                 ext_next: 1,
                 rpc_next: RPC_ID_START,
             }),
-            write_tx,
+            write_tx: Mutex::new(Some(write_tx)),
             notifications: Mutex::new(VecDeque::new()),
             notify_waiters: Notify::new(),
             on_request: config.on_request,
             on_notification: config.on_notification,
             hooks: config.hooks,
         });
-        let writer = tokio::spawn(writer_loop(write, write_rx, Arc::clone(&inner)));
+        // The writer holds only a weak handle. A strong one would keep the
+        // sender alive through `inner`, so the writer could never see its
+        // queue close.
+        let writer = tokio::spawn(writer_loop(write, write_rx, Arc::downgrade(&inner)));
         let reader = tokio::spawn(reader_loop(
             read,
             Arc::clone(&inner),
@@ -340,7 +345,7 @@ impl ConnectionInner {
 
     fn enqueue(&self, job: WriteJob) -> Result<(), AcpError> {
         self.ensure_active()?;
-        self.write_tx.send(job).map_err(|_| {
+        let queue_closed = || {
             AcpError::from(AcpTransportError {
                 operation: None,
                 method: None,
@@ -350,7 +355,12 @@ impl ConnectionInner {
                 pid: None,
                 cause: Some("Output queue closed".to_owned()),
             })
-        })
+        };
+        let write_tx = self.write_tx.lock();
+        match write_tx.as_ref() {
+            Some(tx) => tx.send(job).map_err(|_| queue_closed()),
+            None => Err(queue_closed()),
+        }
     }
 
     fn terminate(&self, error: AcpError) {
@@ -362,6 +372,9 @@ impl ConnectionInner {
             state.terminated = Some(error.clone());
             std::mem::take(&mut state.pending)
         };
+        // Dropping the sender lets the writer finish queued jobs and exit,
+        // which drops the child's stdin.
+        self.write_tx.lock().take();
         for (_, pending) in pending {
             let _ = pending.tx.send(Err(error.clone()));
         }
@@ -389,7 +402,7 @@ impl ConnectionInner {
 async fn writer_loop<W>(
     mut write: W,
     mut rx: mpsc::UnboundedReceiver<WriteJob>,
-    inner: Arc<ConnectionInner>,
+    inner: Weak<ConnectionInner>,
 ) where
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -420,7 +433,9 @@ async fn writer_loop<W>(
                         let _ = ack.send(Err(transport.clone()));
                     }
                 }
-                inner.terminate(transport);
+                if let Some(inner) = inner.upgrade() {
+                    inner.terminate(transport);
+                }
                 break;
             }
         }
@@ -1121,6 +1136,47 @@ mod tests {
             .expect("writer task still holds the outbound stream after drop")
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_connection_frees_the_connection_state() {
+        use tokio::io::AsyncReadExt;
+        let (connection, mut read, _write) = start_pair(noop_request(), noop_notification());
+        let state = Arc::downgrade(&connection.inner);
+        drop(connection);
+        let mut buf = [0_u8; 16];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), read.read(&mut buf))
+            .await
+            .expect("write half still open after the connection was dropped")
+            .unwrap();
+        assert_eq!(n, 0);
+        // The writer used to own `ConnectionInner`, which owns the sender that
+        // keeps the writer alive. The state must drop with the last handle.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.strong_count() > 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connection state leaked after the connection was dropped");
+    }
+
+    #[tokio::test]
+    async fn terminated_connection_releases_the_write_half_before_drop() {
+        use tokio::io::AsyncReadExt;
+        let (connection, mut read, _write) = start_pair(noop_request(), noop_notification());
+        // Termination is the child-exit / EOF path. The caller still holds the
+        // connection, so the write half must close without waiting for drop.
+        connection
+            .inner
+            .terminate(AcpError::transport("child exited for test"));
+        let mut buf = [0_u8; 16];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), read.read(&mut buf))
+            .await
+            .expect("terminated connection kept the child's stdin open")
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(connection.termination_error().is_some());
     }
 
     fn session_update_frame() -> Value {

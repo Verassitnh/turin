@@ -73,6 +73,12 @@ impl TrimmedString {
     }
 }
 
+impl AsRef<str> for TrimmedString {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
 impl Serialize for TrimmedString {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(js_trim(&self.0))
@@ -109,6 +115,12 @@ impl TrimmedNonEmptyString {
     }
     pub fn into_inner(self) -> String {
         self.0
+    }
+}
+
+impl AsRef<str> for TrimmedNonEmptyString {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 

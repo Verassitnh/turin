@@ -11,6 +11,9 @@ thiserror.workspace = true
 uuid.workspace = true
 unicode-ccc.workspace = true
 indexmap.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+# Downstream-crate fixture for the `id!` macro (dev-dependency cycles are allowed).
+turin-contracts-id-consumer = { path = "tests/id_consumer" }

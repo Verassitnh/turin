@@ -1045,6 +1045,20 @@ mod tagged_union_tests {
 
     #[test]
     fn received_project_icon_known_tags() {
-        crate::base_schemas::assert_known_tags::<ReceivedProjectIcon>();
+        use crate::base_schemas::assert_known_tags;
+        // One sample per known variant (lucide, emoji, monogram).
+        assert_known_tags(&[
+            ReceivedProjectIcon(Some(ProjectIconOverride::Lucide {
+                name: ProjectLucideIconName::new("folder").unwrap(),
+                color: ProjectIconColor::Blue,
+            })),
+            ReceivedProjectIcon(Some(ProjectIconOverride::Emoji {
+                emoji: ProjectEmoji::new("x").unwrap(),
+            })),
+            ReceivedProjectIcon(Some(ProjectIconOverride::Monogram {
+                text: ProjectMonogramText::new("A1").unwrap(),
+                color: ProjectIconColor::Rose,
+            })),
+        ]);
     }
 }

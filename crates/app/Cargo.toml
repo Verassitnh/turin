@@ -62,5 +62,11 @@ gpui-kit = { workspace = true, features = [
 markdown.workspace = true
 similar = "2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The versions gpui's macOS platform already locks; Dock icon only.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3", features = ["NSBundle", "NSData"] }
+
 [dev-dependencies]
 pretty_assertions.workspace = true

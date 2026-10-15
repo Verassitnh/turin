@@ -7,10 +7,11 @@
 
 use gpui_kit::{
     App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    Styled as _, WeakEntity, Window, div,
+    Styled as _, WeakEntity, Window, div, px, svg,
 };
 
 use super::SidebarEvent;
+use crate::assets::WORDMARK;
 use crate::branding::APP_BASE_NAME;
 use crate::components::drag_region::DragRegion as _;
 use crate::components::workspace_titlebar::workspace_titlebar_content_left;
@@ -54,8 +55,18 @@ impl RenderOnce for SidebarChromeHeader {
                             .rounded(CONTROL_RADIUS)
                             .text_color(theme.foreground)
                             // SidebarBrandMark slot styling (`text-sm font-medium
-                            // tracking-tight`) with Turin's name instead of
-                            // the T3 wordmark + "Code".
+                            // tracking-tight`): the T mark (`h-[1cap]`, 14px
+                            // text, cap height ~10px, width from the 48.8:56
+                            // viewBox) then Turin's name in place of "Code".
+                            .gap_1()
+                            .child(
+                                svg()
+                                    .path(WORDMARK)
+                                    .flex_shrink_0()
+                                    .w(px(8.71))
+                                    .h(px(10.))
+                                    .text_color(theme.foreground),
+                            )
                             .child(
                                 div()
                                     .text_size(TEXT_SM.size)

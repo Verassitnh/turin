@@ -1,9 +1,9 @@
 //! Port of the pure helpers in
 //! upstream/packages/provider-core/src/server/maintenanceResolver.ts.
 //!
-//! The async installer probe (npm, Homebrew, mise, volta) is not in this
-//! module yet. `build_server_provider` only needs the manual advisory, which
-//! is what upstream emits when it has not resolved a latest version.
+//! The async installer probe (npm, Homebrew, mise, volta) lives in
+//! `package_managed_maintenance`. The advisory here is what upstream emits when
+//! no latest version is resolved.
 
 use std::cmp::Ordering;
 

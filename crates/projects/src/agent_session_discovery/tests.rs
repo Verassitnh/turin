@@ -432,7 +432,7 @@ async fn does_not_open_a_non_file_transcript() {
         };
         // A directory named like a transcript must be skipped before any open.
         fs::create_dir_all(&transcript_path).expect("directory transcript");
-        let recording = Arc::new(RecordingFs::default());
+        let recording = Arc::new(FsDouble::default());
 
         let result = fixture
             .scanner_with(recording.clone())
@@ -445,35 +445,50 @@ async fn does_not_open_a_non_file_transcript() {
     }
 }
 
-/// Test double over the host filesystem that records what discovery opens and
-/// reads. Upstream's instrumented `FileSystem` cases use the same idea.
+/// Test double over the host filesystem. Each hook mirrors one upstream
+/// instrumented `FileSystem` override: scripted listings, stat aliasing,
+/// open counts, and short reads.
 #[derive(Default)]
-struct RecordingFs {
+struct FsDouble {
     inner: LocalScannerFileSystem,
+    /// `stat(path)` answers for `path` as if it were this other path.
+    stat_redirects: HashMap<String, String>,
+    /// Scripted `readDirectory` answers, counted in `directory_reads`.
+    listings: HashMap<String, Vec<String>>,
+    /// Every directory whose parent is this path reads as empty and is counted.
+    empty_children_of: Option<String>,
+    directory_reads: Mutex<usize>,
     opens: Mutex<Vec<String>>,
-    reads: Arc<Mutex<usize>>,
+    read_calls: Arc<Mutex<usize>>,
+    /// Caps every `read_alloc` request, forcing short reads.
+    max_read: Option<usize>,
 }
 
-impl RecordingFs {
+impl FsDouble {
     fn opened(&self, path: &Path) -> usize {
         let target = path.to_string_lossy();
         self.opens.lock().iter().filter(|open| **open == target).count()
     }
-
-    fn read_calls(&self) -> usize {
-        *self.reads.lock()
-    }
 }
 
 #[async_trait]
-impl ScannerFileSystem for RecordingFs {
+impl ScannerFileSystem for FsDouble {
     async fn stat(&self, path: &str) -> Option<FileStat> {
-        self.inner.stat(path).await
+        let target = self.stat_redirects.get(path).map_or(path, String::as_str);
+        self.inner.stat(target).await
     }
     async fn real_path(&self, path: &str) -> Option<String> {
         self.inner.real_path(path).await
     }
     async fn read_directory(&self, path: &str) -> Vec<String> {
+        if let Some(names) = self.listings.get(path) {
+            *self.directory_reads.lock() += 1;
+            return names.clone();
+        }
+        if self.empty_children_of.as_deref() == Path::new(path).parent().and_then(Path::to_str) {
+            *self.directory_reads.lock() += 1;
+            return Vec::new();
+        }
         self.inner.read_directory(path).await
     }
     async fn read_file_string(&self, path: &str) -> Option<String> {
@@ -484,7 +499,8 @@ impl ScannerFileSystem for RecordingFs {
         let file = self.inner.open(path).await?;
         Some(Box::new(CountingFile {
             inner: file,
-            reads: Arc::clone(&self.reads),
+            reads: Arc::clone(&self.read_calls),
+            max_read: self.max_read,
         }))
     }
 }
@@ -492,6 +508,7 @@ impl ScannerFileSystem for RecordingFs {
 struct CountingFile {
     inner: Box<dyn ScannerFile>,
     reads: Arc<Mutex<usize>>,
+    max_read: Option<usize>,
 }
 
 #[async_trait]
@@ -501,6 +518,220 @@ impl ScannerFile for CountingFile {
     }
     async fn read_alloc(&mut self, size: usize) -> std::io::Result<Option<Vec<u8>>> {
         *self.reads.lock() += 1;
+        let size = self.max_read.map_or(size, |cap| size.min(cap));
         self.inner.read_alloc(size).await
     }
+}
+
+fn fs_double(configure: impl FnOnce(&mut FsDouble)) -> Arc<FsDouble> {
+    let mut double = FsDouble::default();
+    configure(&mut double);
+    Arc::new(double)
+}
+
+#[tokio::test]
+async fn stops_directory_reads_at_the_discovery_operation_budget() {
+    for source in [AgentSessionSource::ClaudeAgent, AgentSessionSource::Codex] {
+        let fixture = Fixture::new();
+        let discovery_root = match source {
+            AgentSessionSource::ClaudeAgent => fixture.claude_home.join("projects"),
+            AgentSessionSource::Codex => fixture.codex_home.join("sessions"),
+        };
+        let names: Vec<String> = (0..20_001).map(|index| format!("empty-{index:05}")).collect();
+        let double = fs_double(|double| {
+            double
+                .listings
+                .insert(discovery_root.to_string_lossy().into_owned(), names);
+            double.empty_children_of = Some(discovery_root.to_string_lossy().into_owned());
+        });
+
+        let result = fixture
+            .scanner_with(double.clone())
+            .scan()
+            .await
+            .expect("scan");
+
+        assert_eq!(summarize(&result), Vec::new(), "{source:?}");
+        assert_eq!(*double.directory_reads.lock(), 20_000, "{source:?}");
+    }
+}
+
+#[tokio::test]
+async fn merges_the_same_cwd_seen_by_both_agents_and_flags_imported_projects() {
+    let mut fixture = Fixture::new();
+    let workspace = fixture.workspace("t3code-workspace-");
+    write_transcript(
+        &fixture.claude_transcript("-slug", "a.jsonl"),
+        &claude_session_line(workspace.path()),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    write_transcript(
+        &fixture.codex_rollout("2026", "04", "01", "rollout-2026-04-01T09-00-00-aaa.jsonl"),
+        &codex_rollout_line(workspace.path()),
+        ms("2026-04-01T09:00:00.000Z"),
+    );
+    fixture.imported_roots.push(workspace.path().to_path_buf());
+
+    let result = fixture.scan().await;
+
+    assert_eq!(
+        summarize(&result),
+        vec![Summary {
+            already_imported: true,
+            ..summary(
+                &workspace.path().to_string_lossy(),
+                &base_name(workspace.path()),
+                &["claudeAgent", "codex"],
+                2,
+                Some("2026-04-01T09:00:00.000Z"),
+            )
+        }]
+    );
+    assert_eq!(
+        result.candidates[0].project_id,
+        Some(ProjectId::new("project-1").expect("id"))
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn returns_the_imported_project_id_through_a_realpath_alias() {
+    let mut fixture = Fixture::new();
+    let workspace = fixture.workspace("t3code-workspace-");
+    let links = fixture.workspace("t3code-scanner-links-");
+    let alias = links.path().join("workspace-alias");
+    std::os::unix::fs::symlink(workspace.path(), &alias).expect("symlink");
+    write_transcript(
+        &fixture.claude_transcript("-slug", "a.jsonl"),
+        &claude_session_line(&alias),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    fixture.imported_roots.push(workspace.path().to_path_buf());
+
+    let result = fixture.scan().await;
+
+    let candidate = &result.candidates[0];
+    assert_eq!(candidate.path.as_str(), workspace.path().to_string_lossy());
+    assert_eq!(candidate.project_id, Some(ProjectId::new("project-1").expect("id")));
+    assert!(candidate.already_imported);
+    assert_eq!(candidate.git, Some(None));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn matches_a_persisted_project_alias_to_a_transcript_realpath() {
+    let mut fixture = Fixture::new();
+    let workspace = fixture.workspace("t3code-workspace-");
+    let links = fixture.workspace("t3code-scanner-links-");
+    let alias = links.path().join("workspace-alias");
+    std::os::unix::fs::symlink(workspace.path(), &alias).expect("symlink");
+    write_transcript(
+        &fixture.claude_transcript("-slug", "a.jsonl"),
+        &claude_session_line(workspace.path()),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    fixture.imported_roots.push(alias.clone());
+
+    let result = fixture.scan().await;
+
+    let candidate = &result.candidates[0];
+    assert_eq!(candidate.path.as_str(), alias.to_string_lossy());
+    assert_eq!(candidate.project_id, Some(ProjectId::new("project-1").expect("id")));
+    assert!(candidate.already_imported);
+    assert_eq!(candidate.git, Some(None));
+}
+
+#[tokio::test]
+async fn merges_case_aliases_and_preserves_the_persisted_project_path() {
+    let mut fixture = Fixture::new();
+    let workspace = fixture.workspace("t3code-workspace-");
+    let alias_name = base_name(workspace.path()).to_uppercase();
+    let alias = workspace.path().parent().expect("parent").join(alias_name);
+    write_transcript(
+        &fixture.claude_transcript("-slug", "a.jsonl"),
+        &claude_session_line(&alias),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    write_transcript(
+        &fixture.codex_rollout("2026", "01", "02", "rollout-b.jsonl"),
+        &codex_rollout_line(workspace.path()),
+        ms("2026-01-02T00:00:00.000Z"),
+    );
+    fixture.imported_roots.push(workspace.path().to_path_buf());
+    // The alias spelling stats as the real workspace, as on a case-insensitive volume.
+    let double = fs_double(|double| {
+        double.stat_redirects.insert(
+            alias.to_string_lossy().into_owned(),
+            workspace.path().to_string_lossy().into_owned(),
+        );
+    });
+
+    let result = fixture
+        .scanner_with(double)
+        .scan()
+        .await
+        .expect("scan");
+
+    assert_eq!(
+        summarize(&result),
+        vec![Summary {
+            already_imported: true,
+            ..summary(
+                &workspace.path().to_string_lossy(),
+                &base_name(workspace.path()),
+                &["claudeAgent", "codex"],
+                2,
+                Some("2026-01-02T00:00:00.000Z"),
+            )
+        }]
+    );
+}
+
+#[tokio::test]
+async fn keeps_case_variants_distinct_when_the_filesystem_identities_differ() {
+    let fixture = Fixture::new();
+    let backing_upper = fixture.workspace("t3code-backing-upper-");
+    let backing_lower = fixture.workspace("t3code-backing-lower-");
+    let alias_parent = fixture.workspace("t3code-case-aliases-");
+    let upper = alias_parent.path().join("Repo");
+    let lower = alias_parent.path().join("repo");
+    write_transcript(
+        &fixture.claude_transcript("-upper", "a.jsonl"),
+        &claude_session_line(&upper),
+        ms("2026-01-02T00:00:00.000Z"),
+    );
+    write_transcript(
+        &fixture.claude_transcript("-lower", "b.jsonl"),
+        &claude_session_line(&lower),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    let double = fs_double(|double| {
+        double.stat_redirects.insert(
+            upper.to_string_lossy().into_owned(),
+            backing_upper.path().to_string_lossy().into_owned(),
+        );
+        double.stat_redirects.insert(
+            lower.to_string_lossy().into_owned(),
+            backing_lower.path().to_string_lossy().into_owned(),
+        );
+    });
+
+    let result = fixture
+        .scanner_with(double)
+        .scan()
+        .await
+        .expect("scan");
+
+    let paths: Vec<String> = result
+        .candidates
+        .iter()
+        .map(|candidate| candidate.path.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            upper.to_string_lossy().into_owned(),
+            lower.to_string_lossy().into_owned(),
+        ]
+    );
 }

@@ -9,6 +9,7 @@ use crate::projection::shared::pending_background_work::background_work_holds_co
 use crate::projection::store::shell::ProjectionSettlementCandidate;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, StreamExt};
 use indexmap::IndexMap;
@@ -16,6 +17,7 @@ use parking_lot::Mutex;
 use regex::Regex;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -963,8 +965,26 @@ async fn run_sweep(
     merged: Option<&PullRequestMergeEvent>,
     thread_id: Option<&ThreadId>,
 ) {
-    if let Err(error) = sweep(deps, merged, thread_id).await {
-        tracing::warn!(error = %error, "automatic thread settlement sweep failed");
+    // A panic here must not unwind into the DrainableWorker task: that task
+    // would die, and the next `drain()` would hang, silently stopping the
+    // periodic sweep. Upstream `runSweep` uses `Effect.catchCause`, which
+    // contains defects too, so a panicking sweep is logged as a failed item.
+    match AssertUnwindSafe(sweep(deps, merged, thread_id))
+        .catch_unwind()
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "automatic thread settlement sweep failed");
+        }
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_owned())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "non-string panic payload".to_owned());
+            tracing::error!(panic = %message, "automatic thread settlement sweep panicked");
+        }
     }
 }
 

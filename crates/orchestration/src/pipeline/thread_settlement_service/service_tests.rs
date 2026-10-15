@@ -500,10 +500,17 @@ struct Harness {
 
 impl Harness {
     fn new(options: Options) -> Self {
+        Self::with_store(options, |fake| Arc::new(FakeStore(fake)))
+    }
+
+    fn with_store(
+        options: Options,
+        store: impl FnOnce(Arc<Fake>) -> Arc<dyn SettlementStore>,
+    ) -> Self {
         let fake = fake(options);
         let deps = SettlementDeps {
             orchestrator: Arc::new(FakeOrchestrator(fake.clone())),
-            store: Arc::new(FakeStore(fake.clone())),
+            store: store(fake.clone()),
             settings: Arc::new(FakeSettings(fake.clone())),
             git: Arc::new(FakeGit(fake.clone())),
             pull_requests: Arc::new(FakePullRequests(fake.clone())),
@@ -1122,4 +1129,69 @@ async fn a_finished_run_reads_only_its_own_threads_settlement_candidate() {
         *harness.fake.candidate_reads.lock(),
         vec![Some(finished.id.as_str().to_owned())]
     );
+}
+
+/// A store whose first candidate read panics, then behaves like the fake.
+struct PanicOnceStore {
+    inner: FakeStore,
+    panicked: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl SettlementStore for PanicOnceStore {
+    async fn settlement_candidates(
+        &self,
+        thread_id: Option<&ThreadId>,
+    ) -> Result<Vec<ProjectionSettlementCandidate>, BoxError> {
+        if !self.panicked.swap(true, Ordering::SeqCst) {
+            panic!("candidate read blew up");
+        }
+        self.inner.settlement_candidates(thread_id).await
+    }
+
+    async fn app_thread(&self, thread_id: &ThreadId) -> Result<OrchestrationV2AppThread, BoxError> {
+        self.inner.app_thread(thread_id).await
+    }
+
+    async fn project_shells(&self) -> Result<Vec<OrchestrationProjectShell>, BoxError> {
+        self.inner.project_shells().await
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_sweep_does_not_wedge_the_worker_for_later_sweeps() {
+    let thread = candidate("inactive-open-pr", |t| {
+        t.branch = TrimmedNonEmptyString::new("feature").ok();
+        t.latest_run_completed_at = Some(utc("2026-08-25T00:00:00.000Z"));
+    });
+    let harness = Harness::with_store(
+        Options {
+            snapshot_threads: vec![thread.clone()],
+            settings: Some(after_days(Some(2.0))),
+            branch: Some(Arc::new(|_| {
+                Box::pin(async { Some(branch_pr(PullRequestState::Open)) })
+            })),
+            ..Default::default()
+        },
+        |fake| {
+            Arc::new(PanicOnceStore {
+                inner: FakeStore(fake),
+                panicked: AtomicBool::new(false),
+            })
+        },
+    );
+    // The first sweep panics inside its candidate read. Drain must return.
+    harness.service.inner.worker.enqueue(None);
+    tokio::time::timeout(Duration::from_secs(10), harness.service.drain())
+        .await
+        .expect("drain hung after a panicking sweep");
+    assert!(harness.commands().is_empty());
+    // The worker survived, so the next sweep reads the candidate and settles it.
+    harness.service.inner.worker.enqueue(None);
+    tokio::time::timeout(Duration::from_secs(10), harness.service.drain())
+        .await
+        .expect("drain hung after a panicking sweep");
+    let commands = harness.commands();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].1, thread.latest_run_completed_at);
 }

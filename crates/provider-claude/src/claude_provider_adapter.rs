@@ -58,7 +58,8 @@ use turin_provider_core::{
         ProviderAdapterV2ReadThreadSnapshotInput, ProviderAdapterV2ResumeThreadInput,
         ProviderAdapterV2RollbackTarget, ProviderAdapterV2RollbackThreadInput,
         ProviderAdapterV2RuntimeRequestResponseInput, ProviderAdapterV2SteerInput,
-        ProviderAdapterV2StopTaskInput, ProviderAdapterV2ThreadSnapshot,
+        ProviderAdapterV2StopSubagentInput, ProviderAdapterV2StopTaskInput,
+        ProviderAdapterV2SubagentOutcome, ProviderAdapterV2ThreadSnapshot,
         ProviderAdapterV2TurnInput, ProviderAdapterV2TurnTerminalStatus, ProviderEventStream,
         ProviderSessionRuntime,
     },
@@ -365,6 +366,7 @@ impl ProviderAdapterV2 for ClaudeProviderAdapter {
             active: None,
             plans: PlanState::default(),
             subagents: SubagentRegistry::default(),
+            stop_waiters: HashMap::new(),
             pending_requests: HashMap::new(),
             commands: command_rx,
             events,
@@ -402,6 +404,13 @@ impl Drop for ClaudeSessionRuntime {
 }
 
 /// Short-lived request messages; boxing the large variants would add an
+/// The reply to a `stopSubagent`, held until the task's native outcome arrives.
+type StopReply =
+    oneshot::Sender<Result<Option<ProviderAdapterV2SubagentOutcome>, ProviderAdapterV2Error>>;
+
+/// Upstream `subagentStopOutcomes`: how long a Stop waits for the CLI's outcome.
+const SUBAGENT_STOP_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// allocation per call for no lasting size win.
 #[allow(clippy::large_enum_variant)]
 enum Command {
@@ -432,6 +441,10 @@ enum Command {
     StopTask(
         ProviderAdapterV2StopTaskInput,
         oneshot::Sender<Result<(), ProviderAdapterV2Error>>,
+    ),
+    StopSubagent(
+        ProviderAdapterV2StopSubagentInput,
+        oneshot::Sender<Result<Option<ProviderAdapterV2SubagentOutcome>, ProviderAdapterV2Error>>,
     ),
     Fork(
         ProviderAdapterV2ForkThreadInput,
@@ -544,6 +557,26 @@ impl ProviderSessionRuntime for ClaudeSessionRuntime {
             Command::StopTask(input, tx)
         })))
     }
+    fn stop_subagent(
+        &self,
+        input: ProviderAdapterV2StopSubagentInput,
+    ) -> Option<
+        BoxFuture<'_, Result<Option<ProviderAdapterV2SubagentOutcome>, ProviderAdapterV2Error>>,
+    > {
+        Some(Box::pin(async move {
+            match tokio::time::timeout(
+                SUBAGENT_STOP_CONFIRM_TIMEOUT,
+                ask(&self.commands, |tx| Command::StopSubagent(input, tx)),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(_) => Err(protocol_error(
+                    "Claude subagent Stop was not confirmed by a native outcome.",
+                )),
+            }
+        }))
+    }
 }
 
 struct ActiveTurn {
@@ -633,6 +666,8 @@ struct ClaudeActor {
     plans: PlanState,
     /// Session-scoped: a background subagent reports after its turn has settled.
     subagents: SubagentRegistry,
+    /// Stops waiting for the native outcome of a task, by CLI task id.
+    stop_waiters: HashMap<String, Vec<StopReply>>,
     pending_requests: HashMap<RuntimeRequestId, PendingRequest>,
     commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedSender<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>,
@@ -718,6 +753,7 @@ impl ClaudeActor {
                 };
                 let _ = reply.send(result);
             }
+            Command::StopSubagent(input, reply) => self.stop_subagent(input, reply).await,
             Command::Fork(input, reply) => {
                 let result = self.fork(input).await;
                 let _ = reply.send(result);
@@ -877,6 +913,56 @@ impl ClaudeActor {
             tool_calls: HashMap::new(),
         });
         Ok(())
+    }
+    /// Upstream `stopSubagent`. A confirmed task answers at once. Otherwise the
+    /// CLI is asked to stop it, and the reply waits for the task's native
+    /// terminal frame (`resolve_stop_waiters`). The caller bounds the wait.
+    async fn stop_subagent(&mut self, input: ProviderAdapterV2StopSubagentInput, reply: StopReply) {
+        let task_id = input.native_task_id.clone();
+        let Some(state) = self.subagents.stop_state(&task_id) else {
+            let _ = reply.send(Err(protocol_error(
+                "Claude subagent has no known owning task to confirm its outcome.",
+            )));
+            return;
+        };
+        if input.provider_thread.app_thread_id.as_ref() != Some(&state.thread_id) {
+            let _ = reply.send(Err(protocol_error(
+                "Claude subagent has no known owning task to confirm its outcome.",
+            )));
+            return;
+        }
+        // A Stop requested before this run of the task started is stale.
+        if let (Some(requested), Some(started)) = (input.requested_at, state.started_at)
+            && started > requested
+        {
+            let _ = reply.send(Ok(None));
+            return;
+        }
+        if let Some(confirmed) = state.confirmed {
+            let _ = reply.send(Ok(Some(confirmed)));
+            return;
+        }
+        let Some(claude) = self.claude.as_ref() else {
+            let _ = reply.send(Err(protocol_error(
+                "Claude subagent has no live owning query with task stopping support.",
+            )));
+            return;
+        };
+        match claude.stop_task(&task_id).await {
+            Ok(()) => self.stop_waiters.entry(task_id).or_default().push(reply),
+            Err(error) => {
+                let _ = reply.send(Err(protocol_error(error.to_string())));
+            }
+        }
+    }
+    /// Answers the Stop waiters of a task once it has a native outcome.
+    fn resolve_stop_waiters(&mut self, task_id: &str) {
+        let Some(outcome) = self.subagents.confirmed_outcome(task_id) else {
+            return;
+        };
+        for waiter in self.stop_waiters.remove(task_id).unwrap_or_default() {
+            let _ = waiter.send(Ok(Some(outcome.clone())));
+        }
     }
     fn steer(&mut self, input: ProviderAdapterV2SteerInput) -> Result<(), ProviderAdapterV2Error> {
         let active = self
@@ -1303,6 +1389,10 @@ impl ClaudeActor {
         };
         for event in events {
             self.emit(event);
+        }
+        if let Some(task_id) = frame.raw.get("task_id").and_then(Value::as_str) {
+            let task_id = task_id.to_owned();
+            self.resolve_stop_waiters(&task_id);
         }
     }
     /// Upstream `compact_boundary`: a completed "Context compacted" item. A

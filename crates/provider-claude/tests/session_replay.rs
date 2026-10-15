@@ -25,7 +25,9 @@ use turin_provider_core::provider_adapter::{
     ProviderAdapterV2, ProviderAdapterV2EnsureThreadInput, ProviderAdapterV2Event,
     ProviderAdapterV2InterruptInput, ProviderAdapterV2OpenSessionInput,
     ProviderAdapterV2RollbackTarget, ProviderAdapterV2RollbackThreadInput,
-    ProviderAdapterV2RuntimePolicy, ProviderAdapterV2SteerInput, ProviderAdapterV2TurnInput,
+    ProviderAdapterV2RuntimePolicy, ProviderAdapterV2SteerInput,
+    ProviderAdapterV2StopSubagentInput, ProviderAdapterV2SubagentOutcome,
+    ProviderAdapterV2SubagentOutcomeStatus, ProviderAdapterV2TurnInput,
     ProviderAdapterV2TurnMessage, ProviderAdapterV2TurnTerminalStatus, ProviderEventStream,
     ProviderSessionRuntime,
 };
@@ -81,8 +83,9 @@ for line in sys.stdin:
         request = message.get("request") or {}
         body = {"models": [], "commands": [], "account": {}} if request.get("subtype") == "initialize" else {}
         emit({"type": "control_response", "response": {"subtype": "success", "request_id": message["request_id"], "response": body}})
-        if request.get("subtype") == "interrupt":
-            consume("query.interrupt")
+        # An interrupt or a task stop is followed by the frames the CLI sends for it.
+        if request.get("subtype") in ("interrupt", "stop_task"):
+            consume("query." + request["subtype"])
 "#;
 
 fn fixture(name: &str) -> PathBuf {
@@ -1192,6 +1195,73 @@ async fn subagent_frames_stay_out_of_the_parent_turn() {
     assert_eq!(last["title"], "Agent A");
     assert_eq!(last["model"], "haiku");
     assert_eq!(subagents[1]["progress"], "running echo");
+}
+
+/// A Stop is confirmed by the task's native `stopped` frame, which the CLI
+/// sends after `stop_task`. A repeat Stop answers from that confirmed outcome.
+#[tokio::test]
+async fn stop_subagent_is_confirmed_by_the_native_stopped_frame() {
+    let entries = vec![
+        json!({"type": "expect_outbound", "label": "query.open", "frame": {}}),
+        json!({"type": "expect_outbound", "label": "prompt.offer:1", "frame": {}}),
+        json!({"type": "emit_inbound", "label": "frame", "frame": assistant_tool_use(
+            "00000000-0000-4000-8000-000000000501", None, "toolu_agent", "Agent",
+            json!({"description": "Agent S", "prompt": "Count", "model": "haiku"}),
+        )}),
+        json!({"type": "emit_inbound", "label": "frame", "frame": {
+            "type": "system", "subtype": "task_started", "task_id": "task_s",
+            "tool_use_id": "toolu_agent", "description": "Agent S",
+            "task_type": "local_agent", "session_id": "todo-session",
+            "uuid": "00000000-0000-4000-8000-000000000502",
+        }}),
+        json!({"type": "emit_inbound", "label": "result", "frame": {
+            "type": "result", "subtype": "success", "is_error": false,
+            "result": "parent done", "terminal_reason": "completed",
+            "session_id": "todo-session", "usage": {},
+            "uuid": "00000000-0000-4000-8000-000000000503"
+        }}),
+        // The CLI answers stop_task with this frame.
+        json!({"type": "expect_outbound", "label": "query.stop_task", "frame": {}}),
+        json!({"type": "emit_inbound", "label": "frame", "frame": {
+            "type": "system", "subtype": "task_notification", "task_id": "task_s",
+            "tool_use_id": "toolu_agent", "status": "stopped", "summary": "stopped early",
+            "session_id": "todo-session", "uuid": "00000000-0000-4000-8000-000000000504",
+        }}),
+    ];
+    let harness = Harness::lines(&entries);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread.clone(), "Count in the background"))
+        .await
+        .expect("start turn");
+    let (_seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+
+    let stop = |thread: OrchestrationV2ProviderThread| ProviderAdapterV2StopSubagentInput {
+        provider_thread: thread,
+        native_task_id: "task_s".into(),
+        requested_at: None,
+    };
+    let outcome: Option<ProviderAdapterV2SubagentOutcome> = runtime
+        .stop_subagent(stop(thread.clone()))
+        .expect("stopping a subagent is supported")
+        .await
+        .expect("the stop is confirmed");
+    let outcome = outcome.expect("the native frame confirms the stop");
+    assert_eq!(
+        outcome.status,
+        ProviderAdapterV2SubagentOutcomeStatus::Cancelled
+    );
+    assert_eq!(outcome.result.as_deref(), Some("stopped early"));
+
+    let again = runtime
+        .stop_subagent(stop(thread))
+        .expect("stopping a subagent is supported")
+        .await
+        .expect("a repeat stop answers");
+    assert_eq!(again, Some(outcome));
 }
 
 /// Bash output is the structured `stdout` and `stderr`, as upstream reads it.

@@ -37,7 +37,10 @@ use turin_contracts::{
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
 };
 use turin_provider_core::{
-    provider_adapter::ProviderAdapterV2Event,
+    provider_adapter::{
+        ProviderAdapterV2Event, ProviderAdapterV2SubagentOutcome,
+        ProviderAdapterV2SubagentOutcomeStatus,
+    },
     subagent_projection::{
         SubagentChildThreadInput, make_subagent_child_thread, subagent_thread_title,
     },
@@ -88,6 +91,16 @@ struct Task {
     provider_thread_id: ProviderThreadId,
     provider_turn_id: ProviderTurnId,
     root_node_id: NodeId,
+    /// Set by a native terminal frame (upstream `confirmedOutcome`). A Stop
+    /// is answered from it, and a resume clears it.
+    confirmed: Option<ProviderAdapterV2SubagentOutcome>,
+}
+
+/// What `stopSubagent` checks before it asks the CLI to stop a task.
+pub struct StopState {
+    pub thread_id: ThreadId,
+    pub started_at: Option<UtcDateTime>,
+    pub confirmed: Option<ProviderAdapterV2SubagentOutcome>,
 }
 
 #[derive(Default)]
@@ -194,9 +207,11 @@ impl SubagentRegistry {
     }
 
     /// task_started registers the subagent, creates its child thread, and opens
-    /// its run. `turn_item_ordinal` numbers its turn item in the parent turn
-    /// (upstream `resolveItemOrdinal`). Empty for shell tasks and when no scope
-    /// is set yet.
+    /// its run. A task_started for a finished task is a resume (SendMessage):
+    /// it reopens the task under the resuming tool call, and the message is the
+    /// child's next prompt. `turn_item_ordinal` numbers the turn item in the
+    /// parent turn (upstream `resolveItemOrdinal`). Empty for shell tasks, a
+    /// duplicate start of a running task, and when no scope is set yet.
     pub fn started(
         &mut self,
         raw: &Value,
@@ -215,6 +230,13 @@ impl SubagentRegistry {
         let Some(task_id) = text(raw, "task_id") else {
             return Vec::new();
         };
+        if self
+            .tasks
+            .get(&task_id)
+            .is_some_and(|task| task.subagent.status == OrchestrationV2SubagentStatus::Running)
+        {
+            return Vec::new();
+        }
         let run_tool_use_id = text(raw, "tool_use_id");
         let launch = run_tool_use_id
             .as_deref()
@@ -239,48 +261,70 @@ impl SubagentRegistry {
                 )
             })
             .flatten();
+        let prompt = launch.prompt.clone().or_else(|| text(raw, "prompt"));
+        let title = launch
+            .description
+            .clone()
+            .or_else(|| text(raw, "description"));
         let previous = self.tasks.remove(&task_id);
         let is_new = previous.is_none();
-        let (ids, turn_item_ordinal, child) = match previous {
-            Some(previous) => (previous.ids, previous.turn_item_ordinal, previous.child),
+        let (subagent, ids, turn_item_ordinal, child) = match previous {
+            Some(previous) => {
+                // A resume: the record reopens. Its previous answer and progress no
+                // longer describe the run, and its run is the resuming one.
+                let mut subagent = previous.subagent;
+                subagent.run_id = Some(scope.run_id.clone());
+                subagent.status = OrchestrationV2SubagentStatus::Running;
+                subagent.progress = None;
+                subagent.result = None;
+                subagent.started_at = Some(now);
+                subagent.completed_at = None;
+                subagent.updated_at = now;
+                if let Some(prompt) = prompt {
+                    subagent.prompt = prompt;
+                }
+                if let Some(title) = title {
+                    subagent.title = Some(title);
+                }
+                let mut child = previous.child;
+                child.last_assistant_text = None;
+                (subagent, previous.ids, previous.turn_item_ordinal, child)
+            }
             None => {
                 let ids = subagent_ids(&scope.driver, &scope.provider_thread_id, &task_id);
                 let child =
                     ChildThread::new(ids.child_thread_id.clone(), ids.child_root_node_id.clone());
                 let ordinal = turn_item_ordinal(&format!("task:{task_id}:subagent"));
-                (ids, ordinal, child)
+                let subagent = OrchestrationV2Subagent {
+                    id: ids.node_id.clone(),
+                    thread_id: scope.thread_id.clone(),
+                    run_id: Some(scope.run_id.clone()),
+                    parent_node_id,
+                    origin: OrchestrationV2SubagentOrigin::ProviderNative,
+                    created_by: OrchestrationV2Actor::Agent,
+                    driver: scope.driver.clone(),
+                    provider_instance_id: scope.provider_instance_id.clone(),
+                    provider_thread_id: None,
+                    child_thread_id: Some(ids.child_thread_id.clone()),
+                    native_task_ref: Some(native_ref(&task_id)),
+                    prompt: prompt.unwrap_or_default(),
+                    title,
+                    model: launch.model,
+                    model_selection: None,
+                    completion_wake: None,
+                    completion_delivery: None,
+                    status: OrchestrationV2SubagentStatus::Running,
+                    progress: None,
+                    workflow,
+                    result: None,
+                    started_at: Some(now),
+                    completed_at: None,
+                    updated_at: now,
+                };
+                (subagent, ids, ordinal, child)
             }
         };
-        let subagent = OrchestrationV2Subagent {
-            id: ids.node_id.clone(),
-            thread_id: scope.thread_id.clone(),
-            run_id: Some(scope.run_id.clone()),
-            parent_node_id,
-            origin: OrchestrationV2SubagentOrigin::ProviderNative,
-            created_by: OrchestrationV2Actor::Agent,
-            driver: scope.driver.clone(),
-            provider_instance_id: scope.provider_instance_id.clone(),
-            provider_thread_id: None,
-            child_thread_id: Some(ids.child_thread_id.clone()),
-            native_task_ref: Some(native_ref(&task_id)),
-            prompt: launch
-                .prompt
-                .or_else(|| text(raw, "prompt"))
-                .unwrap_or_default(),
-            title: launch.description.or_else(|| text(raw, "description")),
-            model: launch.model,
-            model_selection: None,
-            completion_wake: None,
-            completion_delivery: None,
-            status: OrchestrationV2SubagentStatus::Running,
-            progress: None,
-            workflow,
-            result: None,
-            started_at: Some(now),
-            completed_at: None,
-            updated_at: now,
-        };
-        if let Some(run_tool_use_id) = run_tool_use_id {
+        if let Some(run_tool_use_id) = run_tool_use_id.clone() {
             self.task_by_run_tool_use
                 .insert(run_tool_use_id, task_id.clone());
         }
@@ -292,6 +336,7 @@ impl SubagentRegistry {
             provider_thread_id: scope.provider_thread_id.clone(),
             provider_turn_id: scope.provider_turn_id.clone(),
             root_node_id: scope.root_node_id.clone(),
+            confirmed: None,
         };
         let mut events = Vec::new();
         if is_new {
@@ -335,16 +380,24 @@ impl SubagentRegistry {
             });
         }
         events.extend(task_events(&task, true));
-        if is_new {
-            // The launch prompt opens the child thread.
+        // The launch prompt opens the child thread. A resume's message opens the
+        // next run, under the resuming tool call.
+        let prompt_native = match (is_new, run_tool_use_id) {
+            (true, _) => Some(format!("task:{task_id}:prompt")),
+            (false, Some(tool_use_id)) if text(raw, "prompt").is_some() => {
+                Some(format!("task:{task_id}:prompt:{tool_use_id}"))
+            }
+            (false, _) => None,
+        };
+        if let Some(native) = prompt_native {
             let prompt = task.subagent.prompt.clone();
-            let ordinal = task.child.ordinal(&format!("task:{task_id}:prompt"));
+            let ordinal = task.child.ordinal(&native);
             events.extend(conversation_events(
                 &scope.driver,
                 &task.child.thread_id,
                 &task.child.root_node_id,
                 Some(&scope.thread_id),
-                &format!("task:{task_id}:prompt"),
+                &native,
                 OrchestrationV2ConversationMessageRole::User,
                 &prompt,
                 ordinal,
@@ -353,6 +406,21 @@ impl SubagentRegistry {
         }
         self.tasks.insert(task_id, task);
         events
+    }
+
+    /// What `stopSubagent` needs to know about a task. `None` for an unknown task.
+    pub fn stop_state(&self, task_id: &str) -> Option<StopState> {
+        let task = self.tasks.get(task_id)?;
+        Some(StopState {
+            thread_id: task.subagent.thread_id.clone(),
+            started_at: task.subagent.started_at,
+            confirmed: task.confirmed.clone(),
+        })
+    }
+
+    /// The outcome a native terminal frame confirmed for the task, if any.
+    pub fn confirmed_outcome(&self, task_id: &str) -> Option<ProviderAdapterV2SubagentOutcome> {
+        self.tasks.get(task_id)?.confirmed.clone()
     }
 
     /// task_progress updates a running subagent's progress line, and a
@@ -641,6 +709,9 @@ impl SubagentRegistry {
             return Vec::new();
         }
         task.subagent.updated_at = now;
+        if let Some(outcome) = confirmed_outcome(&task.subagent) {
+            task.confirmed = Some(outcome);
+        }
         let mut events = Vec::new();
         if lifecycle {
             // A call the subagent left open never returns once it ends.
@@ -677,6 +748,27 @@ impl SubagentRegistry {
         }
         events
     }
+}
+
+/// Upstream `confirmedSubagentOutcome`: a finished subagent with its end time.
+fn confirmed_outcome(
+    subagent: &OrchestrationV2Subagent,
+) -> Option<ProviderAdapterV2SubagentOutcome> {
+    let status = match subagent.status {
+        OrchestrationV2SubagentStatus::Completed => {
+            ProviderAdapterV2SubagentOutcomeStatus::Completed
+        }
+        OrchestrationV2SubagentStatus::Failed => ProviderAdapterV2SubagentOutcomeStatus::Failed,
+        OrchestrationV2SubagentStatus::Cancelled => {
+            ProviderAdapterV2SubagentOutcomeStatus::Cancelled
+        }
+        _ => return None,
+    };
+    Some(ProviderAdapterV2SubagentOutcome {
+        status,
+        completed_at: subagent.completed_at?,
+        result: subagent.result.clone(),
+    })
 }
 
 /// Ends the child tool calls still open when their subagent ends.
@@ -1017,6 +1109,72 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, ProviderAdapterV2Event::MessageUpdated { message, .. } if message.text == "A done")),
             "a result equal to the last text is already shown"
+        );
+    }
+
+    #[test]
+    fn send_message_resumes_a_finished_subagent_under_its_own_call() {
+        let mut registry = SubagentRegistry::default();
+        registry.set_scope(scope());
+        let now = UtcDateTime::now();
+        registry.remember_launch("toolu_a", &json!({"prompt": "First"}), None);
+        let started = started_task(
+            &mut registry,
+            json!({"task_id": "task_a", "tool_use_id": "toolu_a", "task_type": "local_agent"}),
+        );
+        let child_id = subagent_of(&started).unwrap().child_thread_id.unwrap();
+        registry.notified(
+            &json!({"task_id": "task_a", "status": "completed", "summary": "FIRST_DONE"}),
+            now,
+        );
+
+        // SendMessage re-emits task_started for the same task under its own call.
+        let resumed = started_task(
+            &mut registry,
+            json!({"task_id": "task_a", "tool_use_id": "toolu_send", "task_type": "local_agent", "prompt": "Second"}),
+        );
+        let reopened = subagent_of(&resumed).expect("the resume reopens the task");
+        assert_eq!(reopened.status, OrchestrationV2SubagentStatus::Running);
+        assert_eq!(reopened.prompt, "Second");
+        assert!(reopened.result.is_none());
+        assert_eq!(reopened.child_thread_id.as_ref(), Some(&child_id));
+        assert!(
+            !resumed
+                .iter()
+                .any(|event| matches!(event, ProviderAdapterV2Event::AppThreadCreated { .. })),
+            "a resume reuses the child thread"
+        );
+        assert!(resumed.iter().any(|event| matches!(
+            event,
+            ProviderAdapterV2Event::MessageUpdated { message, .. }
+                if message.text == "Second" && message.thread_id == child_id
+        )));
+
+        // The resumed run's text goes to the same child thread.
+        let text = registry.child_assistant(
+            "toolu_send",
+            &json!({"message": {"id": "m2", "content": [{"type": "text", "text": "SECOND_TEXT"}]}}),
+            now,
+        );
+        assert!(text.iter().any(|event| matches!(
+            event,
+            ProviderAdapterV2Event::MessageUpdated { message, .. }
+                if message.text == "SECOND_TEXT" && message.thread_id == child_id
+        )));
+
+        let done = registry.notified(
+            &json!({"task_id": "task_a", "status": "completed", "summary": "SECOND_DONE"}),
+            now,
+        );
+        assert_eq!(
+            subagent_of(&done).unwrap().result.as_deref(),
+            Some("SECOND_DONE")
+        );
+        assert_eq!(
+            registry
+                .confirmed_outcome("task_a")
+                .and_then(|outcome| outcome.result),
+            Some("SECOND_DONE".to_owned())
         );
     }
 }

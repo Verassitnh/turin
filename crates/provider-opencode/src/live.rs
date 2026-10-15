@@ -29,17 +29,14 @@ async fn installed_opencode_serves_health_and_events() {
             port: None,
             timeout: Some(Duration::from_secs(30)),
             shutdown_grace: None,
+            ledger: None,
         },
         default_v1_verify(),
     )
     .await
     .expect("opencode serve");
-    let client = V1Client::new(
-        &process.url,
-        &directory,
-        process.server_password.as_deref(),
-    )
-    .unwrap();
+    let client =
+        V1Client::new(&process.url, &directory, process.server_password.as_deref()).unwrap();
     let health = client.health().await.expect("health");
     assert!(health.healthy);
     assert_eq!(health.version, process.version);

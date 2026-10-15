@@ -8,6 +8,15 @@ use std::io;
 pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
 
+/// `kill(-pid, 0)`. ESRCH means the group is gone. Any other error means it
+/// still exists and this process may not be allowed to signal it.
+pub fn process_group_exists(pid: u32) -> bool {
+    match signal_process_group(pid, 0) {
+        Ok(()) => true,
+        Err(err) => err.raw_os_error() != Some(esrch()),
+    }
+}
+
 pub fn signal_process_group(pid: u32, signal: i32) -> io::Result<()> {
     if pid <= 1 {
         return Err(io::Error::from_raw_os_error(esrch()));

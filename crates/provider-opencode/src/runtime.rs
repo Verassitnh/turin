@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::error::OpenCodeRuntimeError;
+use crate::ledger::{OpenCodeServerLedger, ServerLease};
 use crate::process_group::{SIGKILL, SIGTERM, signal_process_group};
 use crate::semver::{compare_semver_versions, parse_semver};
 use crate::v1_client::V1Client;
@@ -39,6 +40,8 @@ pub struct StartOpenCodeServer {
     pub timeout: Option<Duration>,
     /// Defaults to 1 second, the upstream finalizer's SIGKILL delay.
     pub shutdown_grace: Option<Duration>,
+    /// When set, the spawned group is recorded so a later start can reap it.
+    pub ledger: Option<OpenCodeServerLedger>,
 }
 
 pub struct VerifyInput {
@@ -118,6 +121,7 @@ pub struct OpenCodeServerProcess {
     tasks: std::sync::Mutex<Vec<JoinHandle<()>>>,
     stopped: AtomicBool,
     shutdown_grace: Duration,
+    lease: std::sync::Mutex<Option<ServerLease>>,
 }
 
 pub struct ConnectOpenCodeServer {
@@ -130,6 +134,7 @@ pub struct ConnectOpenCodeServer {
     pub port: Option<u16>,
     pub timeout: Option<Duration>,
     pub shutdown_grace: Option<Duration>,
+    pub ledger: Option<OpenCodeServerLedger>,
 }
 
 pub struct OpenCodeServerConnection {
@@ -190,7 +195,19 @@ impl OpenCodeServerProcess {
         let _ = signal_process_group(self.pid, SIGTERM);
         tokio::time::sleep(self.shutdown_grace).await;
         let _ = signal_process_group(self.pid, SIGKILL);
+        self.forget_lease();
         self.finish_tasks();
+    }
+
+    fn forget_lease(&self) {
+        let lease = self
+            .lease
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(lease) = lease {
+            lease.forget();
+        }
     }
 
     fn finish_tasks(&self) {
@@ -213,6 +230,7 @@ impl Drop for OpenCodeServerProcess {
             return;
         }
         let _ = signal_process_group(self.pid, SIGKILL);
+        self.forget_lease();
         self.finish_tasks();
     }
 }
@@ -299,6 +317,16 @@ pub async fn start_open_code_server_process(
         )
     })?;
     let pid = child.id().unwrap_or(0);
+    let serve_args = vec![
+        "serve".to_string(),
+        format!("--hostname={hostname}"),
+        format!("--port={port}"),
+    ];
+    let recorded = match &input.ledger {
+        Some(ledger) => ledger.track(pid, port, &serve_args).await,
+        None => None,
+    };
+    let mut recorded = Some(std::sync::Mutex::new(recorded));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (exit_tx, exit_rx) = watch::channel(None);
@@ -357,6 +385,7 @@ pub async fn start_open_code_server_process(
                 tasks: std::sync::Mutex::new(tasks),
                 stopped: AtomicBool::new(false),
                 shutdown_grace,
+                lease: recorded.take().expect("lease"),
             };
             failed.shutdown().await;
             return Err(OpenCodeRuntimeError::new(
@@ -375,6 +404,7 @@ pub async fn start_open_code_server_process(
                 tasks: std::sync::Mutex::new(tasks),
                 stopped: AtomicBool::new(false),
                 shutdown_grace,
+                lease: recorded.take().expect("lease"),
             };
             failed.shutdown().await;
             return Err(OpenCodeRuntimeError::new(
@@ -398,6 +428,7 @@ pub async fn start_open_code_server_process(
         tasks: std::sync::Mutex::new(tasks),
         stopped: AtomicBool::new(false),
         shutdown_grace,
+        lease: recorded.take().expect("lease"),
     };
     match verify(VerifyInput {
         url,
@@ -447,6 +478,7 @@ pub async fn connect_to_open_code_server(
             port: input.port,
             timeout: input.timeout,
             shutdown_grace: input.shutdown_grace,
+            ledger: input.ledger,
         },
         verify,
     )
@@ -722,6 +754,7 @@ done
                 port: Some(9),
                 timeout: Some(Duration::from_secs(2)),
                 shutdown_grace: Some(grace()),
+                ledger: None,
             },
             ok_verify(),
         )
@@ -755,6 +788,7 @@ done
                 port: Some(9),
                 timeout: Some(Duration::from_secs(2)),
                 shutdown_grace: Some(grace()),
+                ledger: None,
             },
             ok_verify(),
         )
@@ -786,6 +820,7 @@ done
                 port: Some(9),
                 timeout: Some(Duration::from_secs(2)),
                 shutdown_grace: Some(grace()),
+                ledger: None,
             },
             ok_verify(),
         )
@@ -812,6 +847,7 @@ done
                 port: Some(9),
                 timeout: Some(Duration::from_millis(200)),
                 shutdown_grace: Some(grace()),
+                ledger: None,
             },
             ok_verify(),
         )

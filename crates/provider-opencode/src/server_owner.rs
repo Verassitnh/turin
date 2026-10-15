@@ -163,6 +163,7 @@ impl Inner {
             port: None,
             timeout: None,
             shutdown_grace: self.shutdown_grace,
+            ledger: None,
         }
     }
 }

@@ -9,6 +9,7 @@ mod auth;
 mod error;
 mod events;
 mod http_client;
+mod ledger;
 mod permission_rules;
 mod process_group;
 mod runtime;
@@ -31,6 +32,7 @@ pub use error::{
     EventStreamError, OpenCodeRuntimeError, SilentStreamError, open_code_runtime_error_detail,
 };
 pub use events::{V1Event, V2Event, V2StreamEvent, decode_v1_event, decode_v2_event};
+pub use ledger::{OpenCodeServerLedger, ServerLease};
 pub use permission_rules::{
     SessionPermissionRule, agent_path_allows, last_effect, rule, session_permission_rules,
 };

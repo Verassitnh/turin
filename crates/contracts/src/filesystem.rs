@@ -1,6 +1,6 @@
 //! Port of upstream/packages/contracts/src/filesystem.ts
 
-use crate::base_schemas::{NonNegativeInt, TrimmedNonEmptyString};
+use crate::base_schemas::{NonNegativeInt, TrimmedNonEmptyString, js_len};
 use serde::{Deserialize, Serialize};
 
 const FILESYSTEM_PATH_MAX_LENGTH: usize = 512;
@@ -15,7 +15,7 @@ mod path_field {
         d: D,
     ) -> Result<TrimmedNonEmptyString, D::Error> {
         let value = TrimmedNonEmptyString::deserialize(d)?;
-        if value.as_str().len() > FILESYSTEM_PATH_MAX_LENGTH {
+        if js_len(value.as_str()) > FILESYSTEM_PATH_MAX_LENGTH {
             Err(serde::de::Error::custom(
                 "filesystem paths can be at most 512 chars",
             ))
@@ -27,20 +27,23 @@ mod path_field {
     pub fn deserialize_vec<'de, D: serde::Deserializer<'de>>(
         d: D,
     ) -> Result<Vec<TrimmedNonEmptyString>, D::Error> {
-        let values = Vec::<serde_json::Value>::deserialize(d)?;
-        values
-            .into_iter()
-            .map(|value| deserialize(value).map_err(serde::de::Error::custom))
-            .collect()
+        #[derive(Deserialize)]
+        struct Path(#[serde(deserialize_with = "deserialize")] TrimmedNonEmptyString);
+        let values = Vec::<Path>::deserialize(d)?;
+        if values.is_empty() || values.len() > FILESYSTEM_METADATA_BATCH_LIMIT {
+            return Err(serde::de::Error::custom(format!(
+                "expected between 1 and {FILESYSTEM_METADATA_BATCH_LIMIT} paths"
+            )));
+        }
+        Ok(values.into_iter().map(|path| path.0).collect())
     }
 
     pub fn deserialize_option<'de, D: serde::Deserializer<'de>>(
         d: D,
     ) -> Result<Option<TrimmedNonEmptyString>, D::Error> {
-        let value = Option::<serde_json::Value>::deserialize(d)?;
-        value
-            .map(|value| deserialize(value).map_err(serde::de::Error::custom))
-            .transpose()
+        #[derive(Deserialize)]
+        struct Path(#[serde(deserialize_with = "deserialize")] TrimmedNonEmptyString);
+        Ok(Option::<Path>::deserialize(d)?.map(|path| path.0))
     }
 }
 
@@ -161,5 +164,73 @@ impl FilesystemBrowseError {
             .expect("message is non-empty"),
             cause: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn metadata_input_bounds() {
+        let decode = |value| serde_json::from_value::<FilesystemGetMetadataInput>(value);
+        assert!(decode(json!({ "paths": [] })).is_err());
+        assert!(decode(json!({ "paths": ["  ~/a  "] })).is_ok());
+        assert!(decode(json!({ "paths": vec!["/a"; 64] })).is_ok());
+        assert!(decode(json!({ "paths": vec!["/a"; 65] })).is_err());
+        assert!(decode(json!({ "paths": ["   "] })).is_err());
+        // 512 UTF-16 units pass; 513 fail (astral chars count as two).
+        assert!(decode(json!({ "paths": ["a".repeat(512)] })).is_ok());
+        assert!(decode(json!({ "paths": ["a".repeat(513)] })).is_err());
+        assert!(decode(json!({ "paths": ["😀".repeat(256)] })).is_ok());
+        assert!(decode(json!({ "paths": ["😀".repeat(257)] })).is_err());
+    }
+
+    #[test]
+    fn browse_input_cwd_is_optional_and_bounded() {
+        let decoded: FilesystemBrowseInput =
+            serde_json::from_value(json!({ "partialPath": "~/" })).unwrap();
+        assert_eq!(decoded.cwd, None);
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            json!({ "partialPath": "~/" })
+        );
+        assert!(
+            serde_json::from_value::<FilesystemBrowseInput>(
+                json!({ "partialPath": "~/", "cwd": "c".repeat(513) })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn metadata_result_keeps_null_entries() {
+        let result: FilesystemGetMetadataResult = serde_json::from_value(
+            json!({ "entries": [null, { "kind": "file", "byteLength": 3 }] }),
+        )
+        .unwrap();
+        assert_eq!(result.entries[0], None);
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            json!({ "entries": [null, { "kind": "file", "byteLength": 3 }] })
+        );
+    }
+
+    #[test]
+    fn browse_failure_literals() {
+        assert_eq!(
+            serde_json::to_value(FilesystemBrowseFailure::WindowsPathUnsupported).unwrap(),
+            json!("windows_path_unsupported")
+        );
+        let error = FilesystemBrowseError::new(
+            "~/x",
+            Some("/p"),
+            FilesystemBrowseFailure::ReadDirectoryFailed,
+        );
+        assert_eq!(
+            error.to_string(),
+            "Failed to browse filesystem path '~/x' from '/p'."
+        );
     }
 }

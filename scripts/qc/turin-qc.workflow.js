@@ -24,7 +24,8 @@ Upstream reference (read-only): ${WT}/upstream  (pingdotgg/t3code@ec1313c8).
 Scope under review: ${SCOPE}
 Upstream counterpart: ${UPSTREAM}
 ${CONTEXT}
-You may run read-only commands (cargo build/test/clippy with PATH=$HOME/.cargo/bin:$PATH DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer, small throwaway test programs in /tmp, node one-liners to check upstream behaviour). Never modify files in the checkout.
+You may run read-only commands (cargo build/test/clippy with PATH=$HOME/.cargo/bin:$PATH DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer, small throwaway test programs, node one-liners to check upstream behaviour). Never modify files in the checkout.
+STORAGE (disk is nearly full): put throwaway crates under /tmp/turin-scratch-qc-<your-label>/, build them with CARGO_TARGET_DIR=/tmp/turin-scratch-target (shared, do not create other target dirs), and `rm -rf` your scratch dir before you finish. Never copy user databases (~/.t3/userdata/*.sqlite) anywhere.
 Report only concrete, evidenced problems with file:line. No style nits unless they violate PORTING.md. If nothing is wrong in your dimension, return an empty list.`
 
 const DIMENSIONS = A.dimensions || [

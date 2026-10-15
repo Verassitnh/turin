@@ -618,7 +618,7 @@ mod tests {
             .expect("identity");
 
         assert_eq!(
-            std::fs::canonicalize(&identity.root_path.as_ref().expect("root").as_str()).ok(),
+            std::fs::canonicalize(identity.root_path.as_ref().expect("root").as_str()).ok(),
             std::fs::canonicalize(cwd).ok()
         );
         assert_eq!(identity.canonical_key.as_str(), "github.com/t3tools/t3code");

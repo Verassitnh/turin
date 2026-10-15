@@ -460,10 +460,8 @@ mod tests {
         }
     }
 
-    fn ok_favicon(
-        root: String,
-    ) -> impl Future<Output = Result<Option<String>, ProjectFaviconResolutionError>> + Send {
-        async move { Ok(Some(format!("{root}/favicon.svg"))) }
+    async fn ok_favicon(root: String) -> Result<Option<String>, ProjectFaviconResolutionError> {
+        Ok(Some(format!("{root}/favicon.svg")))
     }
 
     fn service(
@@ -500,9 +498,9 @@ mod tests {
                         workspace_root: root,
                         relative_path: None,
                         absolute_path: None,
-                        cause: ProjectFaviconCause::Io(std::io::Error::other(
+                        cause: Box::new(ProjectFaviconCause::Io(std::io::Error::other(
                             "favicon resolver failed",
-                        )),
+                        ))),
                     });
                 }
                 ok_favicon(root).await

@@ -32,7 +32,7 @@ fn favicon_cache_key(cwd: &str, favicon_path: Option<&str>) -> String {
 fn parse_favicon_cache_key(key: &str) -> (String, Option<String>) {
     match key.split_once('\0') {
         None => (key.to_owned(), None),
-        Some((favicon_path, cwd)) if favicon_path.is_empty() => (cwd.to_owned(), None),
+        Some(("", cwd)) => (cwd.to_owned(), None),
         Some((favicon_path, cwd)) => (cwd.to_owned(), Some(favicon_path.to_owned())),
     }
 }
@@ -137,8 +137,9 @@ pub struct ProjectFaviconResolutionError {
     pub workspace_root: String,
     pub relative_path: Option<String>,
     pub absolute_path: Option<String>,
+    // Boxed: keeps `Result<_, ProjectFaviconResolutionError>` under clippy's result_large_err limit.
     #[source]
-    pub cause: ProjectFaviconCause,
+    pub cause: Box<ProjectFaviconCause>,
 }
 
 impl ProjectFaviconResolutionError {
@@ -146,7 +147,7 @@ impl ProjectFaviconResolutionError {
     pub fn is_missing_workspace_root(&self) -> bool {
         self.operation == ProjectFaviconOperation::NormalizeWorkspace
             && matches!(
-                self.cause,
+                *self.cause,
                 ProjectFaviconCause::Workspace(NormalizeWorkspaceRootError::NotExists(_))
             )
     }
@@ -163,7 +164,7 @@ impl ProjectFaviconResolutionError {
             workspace_root: workspace_root.to_owned(),
             relative_path: relative_path.map(str::to_owned),
             absolute_path: absolute_path.map(str::to_owned),
-            cause,
+            cause: Box::new(cause),
         }
     }
 }
@@ -297,14 +298,14 @@ impl ProjectFaviconResolver {
         }
 
         // A t3.json iconPath takes precedence over the well-known locations.
-        if let Some(source) = &self.icon_source {
-            if let Some(icon_path) = source.icon_path(&project_cwd).await {
-                let existing = self
-                    .find_existing_file(&project_cwd, &[icon_path], CandidateScope::Workspace)
-                    .await?;
-                if existing.is_some() {
-                    return Ok(existing);
-                }
+        if let Some(source) = &self.icon_source
+            && let Some(icon_path) = source.icon_path(&project_cwd).await
+        {
+            let existing = self
+                .find_existing_file(&project_cwd, &[icon_path], CandidateScope::Workspace)
+                .await?;
+            if existing.is_some() {
+                return Ok(existing);
             }
         }
 
@@ -854,7 +855,7 @@ mod tests {
             error.absolute_path,
             Some(path_string(&temp.path().join("favicon.svg")))
         );
-        assert!(matches!(error.cause, ProjectFaviconCause::Io(_)));
+        assert!(matches!(*error.cause, ProjectFaviconCause::Io(_)));
     }
 
     #[tokio::test]

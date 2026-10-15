@@ -7089,6 +7089,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "turin-contracts",
+ "turin-source-control",
  "uuid",
 ]
 

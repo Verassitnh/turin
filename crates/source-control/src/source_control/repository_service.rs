@@ -225,8 +225,9 @@ fn redact_remote_url(remote_url: &str) -> String {
 static URL_WITH_USERINFO: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/]+@").unwrap());
 
-/// Drops `user:token@` from any URL embedded in free text.
-fn redact_url_credentials(text: &str) -> String {
+/// Drops `user:token@` from any URL embedded in free text. The git crate uses it for the
+/// messages of git failures it reports through [`RepositoryGit`].
+pub fn redact_url_credentials(text: &str) -> String {
     URL_WITH_USERINFO.replace_all(text, "$1").into_owned()
 }
 

@@ -19,7 +19,7 @@ use turin_shared::keybindings::{
 use turin_shared::server_settings::apply_server_settings_patch;
 
 use super::view_model::{
-    ArchivedThread, EnvironmentInfo, KeybindingsViewModel, RemoveKeybinding, SettingsProject,
+    ArchivedThread, LicenseEntry, CleanupEntry, CleanupReport, EnvironmentInfo, KeybindingsViewModel, RemoveKeybinding, SettingsProject,
     SettingsSource, SettingsStore, SettingsViewModel, UpsertKeybinding,
 };
 
@@ -162,6 +162,8 @@ fn mock_view_model() -> SettingsViewModel {
         source_control: mock_source_control(),
         projects: mock_projects(),
         archived_threads: mock_archived_threads(),
+        storage_cleanup: None,
+        licenses: mock_licenses(),
     }
 }
 
@@ -392,6 +394,38 @@ impl SettingsSource for MockSettingsSource {
         self.publish(cx);
     }
 
+    fn run_storage_cleanup(&self, cx: &mut App) {
+        self.state.borrow_mut().vm.storage_cleanup = Some(CleanupReport {
+            finished_at: "2026-10-15T10:00:00.000Z".into(),
+            bytes_freed: 482_344_960,
+            removed: 2,
+            kept: 1,
+            failed: 0,
+            entries: vec![
+                CleanupEntry {
+                    name: "turin-fix-composer".into(),
+                    thread_title: Some("Fix composer paste handling".into()),
+                    reason: "Thread inactive for 12 days.".into(),
+                    failed: false,
+                    removed: true,
+                    files: None,
+                    bytes: Some(401_604_608),
+                },
+                CleanupEntry {
+                    name: "Rotated logs".into(),
+                    thread_title: None,
+                    reason: "Rotated log files older than 14 days.".into(),
+                    failed: false,
+                    removed: true,
+                    files: Some(18),
+                    bytes: Some(80_740_352),
+                },
+            ],
+            omitted: 0,
+        });
+        self.publish(cx);
+    }
+
     fn delete_thread(&self, thread_id: &str, cx: &mut App) {
         self.unarchive_thread(thread_id, cx);
     }
@@ -449,4 +483,23 @@ fn mock_source_control() -> turin_contracts::source_control::SourceControlDiscov
         ],
     }))
     .expect("mock source control discovery")
+}
+
+fn mock_licenses() -> Vec<LicenseEntry> {
+    const MIT: &str = "Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.";
+    let entry = |name: &str, version: &str, license: &str, url: &str, notice: &str| LicenseEntry {
+        kind: "cargo".into(),
+        name: name.into(),
+        version: Some(version.into()),
+        license: license.into(),
+        bundles: vec!["desktop".into()],
+        source_url: Some(url.into()),
+        notice_text: notice.into(),
+    };
+    vec![
+        entry("gpui", "0.3.9", "Apache-2.0", "https://github.com/zed-industries/zed", "Licensed under the Apache License, Version 2.0 (the \"License\"); you may not use this file except in compliance with the License."),
+        entry("serde", "1.0.228", "MIT OR Apache-2.0", "https://github.com/serde-rs/serde", &format!("Copyright (c) David Tolnay\n\n{MIT}")),
+        entry("serde_json", "1.0.145", "MIT OR Apache-2.0", "https://github.com/serde-rs/json", &format!("Copyright (c) David Tolnay\n\n{MIT}")),
+        entry("tokio", "1.48.0", "MIT", "https://github.com/tokio-rs/tokio", &format!("Copyright (c) Tokio Contributors\n\n{MIT}")),
+    ]
 }

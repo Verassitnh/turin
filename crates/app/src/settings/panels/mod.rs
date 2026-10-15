@@ -3,10 +3,13 @@
 //! (`SettingsPageContainer`).
 
 mod appearance;
+mod archived;
 mod general;
 mod keybindings;
+mod licenses;
 mod providers;
 mod source_control;
+mod storage;
 
 use gpui_kit::{
     AnyElement, Context, IntoElement, ParentElement as _, SharedString,
@@ -16,7 +19,6 @@ use gpui_kit::{
 use super::search::SettingsPath;
 use super::view::{SettingsRoute, SettingsView, Which};
 use crate::theme::ActiveAppTheme;
-use crate::ui::scroll_area;
 
 /// Per-page UI state that is not part of the settings.
 #[derive(Default)]
@@ -26,6 +28,8 @@ pub struct PanelState {
     pub keybindings: keybindings::KeybindingsState,
     pub providers: providers::ProvidersState,
     pub source_control: source_control::SourceControlState,
+    pub storage: storage::StorageState,
+    pub licenses: licenses::LicensesState,
     /// Dev hook (`TURIN_SETTINGS_SCROLL`): page scroll offset in px and the
     /// renders left to apply it (the first layouts clamp it to zero).
     pub demo_scroll: Option<(f32, u8)>,
@@ -47,6 +51,9 @@ impl SettingsView {
             SettingsRoute::Section(SettingsPath::Appearance) => self.render_appearance(window, cx),
             SettingsRoute::Section(SettingsPath::Keybindings) => self.render_keybindings(window, cx),
             SettingsRoute::Section(SettingsPath::Providers) => self.render_providers(window, cx),
+            SettingsRoute::Section(SettingsPath::Archived) => self.render_archived(window, cx),
+            SettingsRoute::Section(SettingsPath::Storage) => self.render_storage(window, cx),
+            SettingsRoute::OpenSourceLicenses => self.render_licenses(window, cx),
             SettingsRoute::Section(SettingsPath::SourceControl) => self.render_source_control(window, cx),
             _ => vec![div()
                 .text_color(cx.app_theme().muted_foreground)

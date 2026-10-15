@@ -31,6 +31,42 @@ pub struct SettingsProject {
     pub checkout_count: usize,
 }
 
+/// One row of `StorageCleanupReport.entries`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CleanupEntry {
+    pub name: String,
+    pub thread_title: Option<String>,
+    pub reason: String,
+    pub failed: bool,
+    pub removed: bool,
+    pub files: Option<u64>,
+    pub bytes: Option<u64>,
+}
+
+/// The last storage cleanup run (`StorageCleanupReport`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CleanupReport {
+    pub finished_at: String,
+    pub bytes_freed: u64,
+    pub removed: usize,
+    pub kept: usize,
+    pub failed: usize,
+    pub entries: Vec<CleanupEntry>,
+    pub omitted: usize,
+}
+
+/// One entry of the third-party license manifest (`ThirdPartyLicenseEntry`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LicenseEntry {
+    pub kind: String,
+    pub name: String,
+    pub version: Option<String>,
+    pub license: String,
+    pub bundles: Vec<String>,
+    pub source_url: Option<String>,
+    pub notice_text: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArchivedThread {
     pub id: String,
@@ -99,6 +135,8 @@ pub struct SettingsViewModel {
     pub source_control: turin_contracts::source_control::SourceControlDiscoveryResult,
     pub projects: Vec<SettingsProject>,
     pub archived_threads: Vec<ArchivedThread>,
+    pub storage_cleanup: Option<CleanupReport>,
+    pub licenses: Vec<LicenseEntry>,
 }
 
 impl SettingsViewModel {
@@ -153,6 +191,8 @@ pub trait SettingsSource {
     /// Opens `keybindings.json` in the preferred editor.
     fn open_keybindings_file(&self, cx: &mut App);
     fn unarchive_thread(&self, thread_id: &str, cx: &mut App);
+    /// `runStorageCleanup`.
+    fn run_storage_cleanup(&self, cx: &mut App);
     fn delete_thread(&self, thread_id: &str, cx: &mut App);
 }
 

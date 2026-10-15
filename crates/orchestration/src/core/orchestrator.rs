@@ -12,6 +12,7 @@
 //! `dispatch::decide`, which reports `OrchestratorError::CommandRejected`.
 
 pub mod dispatch;
+mod message_dispatch;
 mod provider_detach;
 pub mod services;
 #[cfg(test)]
@@ -47,7 +48,7 @@ use crate::projection::store::{
     canonical::{ProjectionRecordField, ProjectionRecordFilter},
     shell::{ShellSnapshotLocation, ShellSnapshotOptions as ProjectionShellSnapshotOptions},
 };
-use services::RestartRecovery;
+use services::{DispatchSeams, RestartRecovery};
 use turin_provider_core::id_allocator::IdAllocator;
 
 /// Thread id upstream attaches to shell-snapshot errors (`shellProjectionError`).
@@ -63,6 +64,7 @@ pub struct Orchestrator {
     locks: ThreadCommandExecutor,
     ids: IdAllocator,
     recovery: Arc<dyn RestartRecovery>,
+    seams: DispatchSeams,
 }
 
 impl Orchestrator {
@@ -79,7 +81,16 @@ impl Orchestrator {
             locks: ThreadCommandExecutor::new(),
             ids: IdAllocator,
             recovery,
+            seams: DispatchSeams::default(),
         }
+    }
+
+    /// Hands in the checkpoint, adapter and project-root seams that message
+    /// dispatch needs. Without them a run that needs a scope or a provider
+    /// refuses.
+    pub fn with_dispatch_seams(mut self, seams: DispatchSeams) -> Self {
+        self.seams = seams;
+        self
     }
 
     fn projection_error(thread_id: &ThreadId, cause: impl Into<BoxError>) -> OrchestratorError {

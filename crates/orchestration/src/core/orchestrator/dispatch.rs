@@ -15,7 +15,10 @@ use turin_contracts::{
 use turin_persistence::ReceiptStatus;
 use turin_provider_core::id_allocator::IdAllocator;
 
-use super::{Orchestrator, thread_archive, thread_lifecycle, thread_metadata, thread_mutation};
+use super::{
+    Orchestrator, message_dispatch, thread_archive, thread_lifecycle, thread_metadata,
+    thread_mutation,
+};
 use crate::pipeline::command_receipt_store::CommandReceipt;
 use crate::pipeline::effect_outbox::PendingEffect;
 use crate::pipeline::event_sink::{CancelUnsettled, CommandCommit};
@@ -624,6 +627,9 @@ async fn decide(
         return Ok(true);
     }
     if thread_metadata::decide(orchestrator, command, decision).await? {
+        return Ok(true);
+    }
+    if message_dispatch::decide(orchestrator, command, decision).await? {
         return Ok(true);
     }
     Ok(false)

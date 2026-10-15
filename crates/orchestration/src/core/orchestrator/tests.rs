@@ -896,3 +896,102 @@ async fn archive_sets_the_flag_then_refuses_a_second_archive_and_unarchive_resto
             .is_none()
     );
 }
+
+/// The refusal's cause. The top-level message names only the command, so the
+/// cause is read from the error's `Debug` form.
+fn refusal_text(error: &OrchestratorError) -> String {
+    format!("{error:?}")
+}
+
+fn message_command(command: &str, thread_id: &str, extra: Value) -> OrchestrationV2ServerCommand {
+    let mut value = json!({
+        "type": "message.dispatch",
+        "commandId": command,
+        "threadId": thread_id,
+        "messageId": format!("message:{command}"),
+        "text": "hello",
+        "attachments": [],
+        "createdBy": "user",
+        "creationSource": "web",
+        "dispatchMode": { "type": "start_immediately" },
+    });
+    value
+        .as_object_mut()
+        .expect("object")
+        .extend(extra.as_object().expect("object").clone());
+    serde_json::from_value(value).expect("message.dispatch decodes")
+}
+
+#[tokio::test]
+async fn a_manual_continuation_of_an_unknown_run_is_refused_and_replays() {
+    let (orchestrator, _) = harness().await;
+    orchestrator
+        .dispatch(create_command("command:create", "thread:msg", "Thread"))
+        .await
+        .expect("create commits");
+    let command = message_command(
+        "command:resume",
+        "thread:msg",
+        json!({ "manualContinuationOfRunId": "run:missing" }),
+    );
+
+    let error = orchestrator
+        .dispatch(command.clone())
+        .await
+        .expect_err("a run that does not exist cannot be resumed");
+    assert!(
+        refusal_text(&error).contains("This thread can no longer be resumed from that run."),
+        "{error:?}"
+    );
+
+    let replay = orchestrator
+        .dispatch(command)
+        .await
+        .expect_err("the refusal replays");
+    assert!(
+        matches!(replay, OrchestratorError::CommandPreviouslyRejected { .. }),
+        "{replay:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_restart_continuation_is_refused_until_the_restart_port_lands() {
+    let (orchestrator, _) = harness().await;
+    orchestrator
+        .dispatch(create_command("command:create", "thread:restart", "Thread"))
+        .await
+        .expect("create commits");
+
+    let error = orchestrator
+        .dispatch(message_command(
+            "command:restart",
+            "thread:restart",
+            json!({ "restartContinuationOfRunId": "run:interrupted" }),
+        ))
+        .await
+        .expect_err("restart continuation is not ported");
+    assert!(
+        refusal_text(&error).contains("Restart continuation is not ported yet (T13e)."),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_new_turn_on_an_idle_thread_stops_before_the_provider_start_port() {
+    let (orchestrator, _) = harness().await;
+    orchestrator
+        .dispatch(create_command("command:create", "thread:idle", "Thread"))
+        .await
+        .expect("create commits");
+
+    // Without a checkpoint scope and provider adapter, a start is refused
+    // rather than run without them.
+    let error = orchestrator
+        .dispatch(message_command("command:start", "thread:idle", json!({})))
+        .await
+        .expect_err("the start path is not ported");
+    assert!(
+        refusal_text(&error).contains("Starting a provider turn is not ported yet (T13c S3)."),
+        "{error:?}"
+    );
+}

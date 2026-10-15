@@ -17,17 +17,22 @@
 //! `OrchestratorError::Dispatch` or `Projection`, so each service keeps its own
 //! error type.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use turin_contracts::{
-    NodeId, ProviderSessionId, ProviderThreadId, ProviderTurnId, RunId, RuntimeRequestId, ThreadId,
-    UtcDateTime,
+    NodeId, ProjectId, ProviderSessionId, ProviderThreadId, ProviderTurnId, RunId,
+    RuntimeRequestId, ThreadId, UtcDateTime,
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2CheckpointScope, OrchestrationV2Run, OrchestrationV2ThreadProjection,
     },
+    provider_instance::ProviderInstanceId,
     provider_policy::ProviderApprovalDecision,
 };
-use turin_provider_core::provider_adapter::ProviderAdapterV2SubagentOutcome;
+use turin_provider_core::provider_adapter::{ProviderAdapterV2, ProviderAdapterV2SubagentOutcome};
+
+use crate::core::provider_session_manager::ProviderAdapterLookup;
 
 use crate::pipeline::orchestrator_port::BoxError;
 
@@ -278,5 +283,54 @@ impl ProviderSwitchPlanner for UnwiredProviderSwitchPlanner {
         _target: &ModelSelection,
     ) -> Result<ProviderSwitchPlan, BoxError> {
         Err("provider switching is not wired".into())
+    }
+}
+
+/// The workspace root of a project, for the cwd a run starts in
+/// (`RuntimePolicyV2.resolve` reads it from the project store). `None` when
+/// the project is gone.
+#[async_trait]
+pub trait ProjectRoots: Send + Sync {
+    async fn workspace_root(&self, project_id: &ProjectId) -> Result<Option<String>, BoxError>;
+}
+
+/// [`ProjectRoots`] before the project store is handed to the orchestrator.
+/// Every read fails, so a run never starts in an unknown directory.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UnwiredProjectRoots;
+
+#[async_trait]
+impl ProjectRoots for UnwiredProjectRoots {
+    async fn workspace_root(&self, _project_id: &ProjectId) -> Result<Option<String>, BoxError> {
+        Err("project roots are not wired (T13c composition root)".into())
+    }
+}
+
+/// The provider-side seams message dispatch reads and writes. Upstream takes
+/// them from the Effect context; here the composition root passes them in.
+#[derive(Clone)]
+pub struct DispatchSeams {
+    pub checkpoints: Arc<dyn CheckpointScopes>,
+    pub adapters: Arc<dyn ProviderAdapterLookup>,
+    pub project_roots: Arc<dyn ProjectRoots>,
+}
+
+impl Default for DispatchSeams {
+    fn default() -> Self {
+        Self {
+            checkpoints: Arc::new(UnwiredCheckpointScopes),
+            adapters: Arc::new(NoProviderAdapters),
+            project_roots: Arc::new(UnwiredProjectRoots),
+        }
+    }
+}
+
+/// [`ProviderAdapterLookup`] with no providers. Every instance is unknown.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoProviderAdapters;
+
+impl ProviderAdapterLookup for NoProviderAdapters {
+    fn adapter(&self, _instance_id: &ProviderInstanceId) -> Option<Arc<dyn ProviderAdapterV2>> {
+        None
     }
 }

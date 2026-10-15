@@ -2005,4 +2005,75 @@ mod tests {
             .collect();
         assert_eq!(types, vec!["project.created", "project.deleted"]);
     }
+
+    #[tokio::test]
+    async fn fails_the_delete_when_a_child_command_id_collides_with_an_unrelated_receipt() {
+        let h = Harness::new();
+        let root = h.root("collision");
+        h.service
+            .create(h.create(
+                "command:collision-project-delete",
+                "project:collision",
+                "Collision",
+                &root,
+            ))
+            .await
+            .expect("create");
+        h.threads
+            .threads
+            .lock()
+            .push((tid("thread:collision"), pid("project:collision")));
+        // The child command id `{command}:delete-thread:{thread}` is already taken, so the child step fails.
+        h.threads.fail_once.lock().push(tid("thread:collision"));
+
+        let failure = h
+            .service
+            .delete(ProjectDeleteInput {
+                force: Some(true),
+                ..h.delete("command:collision-project-delete", "project:collision")
+            })
+            .await
+            .expect_err("child step fails");
+
+        match failure {
+            ProjectServiceError::Operation(error) => {
+                assert_eq!(error.operation, ProjectOperation::DeleteThread);
+            }
+            other => panic!("expected a delete-thread operation error, got {other:?}"),
+        }
+        assert!(
+            h.service
+                .get_by_id(&pid("project:collision"), false)
+                .await
+                .expect("read")
+                .is_some(),
+            "the project stays active"
+        );
+        assert_eq!(h.threads.threads.lock().len(), 1, "the thread stays");
+        assert!(h.settings.cleared.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deletes_a_project_without_force_once_its_threads_were_deleted() {
+        let h = Harness::new();
+        let root = h.root("imported");
+        h.service
+            .create(h.create("command:imported", "project:imported", "Imported", &root))
+            .await
+            .expect("create");
+        h.threads
+            .threads
+            .lock()
+            .push((tid("thread:imported"), pid("project:imported")));
+        // The thread was deleted, so the project no longer lists it as live.
+        h.threads.threads.lock().clear();
+
+        h.service
+            .delete(h.delete("command:imported-delete", "project:imported"))
+            .await
+            .expect("delete without force");
+
+        assert!(h.threads.deleted.lock().is_empty());
+        assert_eq!(*h.settings.cleared.lock(), vec![pid("project:imported")]);
+    }
 }

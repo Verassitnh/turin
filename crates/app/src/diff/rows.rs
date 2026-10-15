@@ -10,7 +10,9 @@ use super::pierre::iterate_over_diff::{
     DEFAULT_COLLAPSED_CONTEXT_THRESHOLD, DEFAULT_EXPANSION_LINE_COUNT, DiffStyle, ExpandedHunks,
     LineEvent, LineEventKind, get_trailing_context_range_size, iterate_over_diff,
 };
-use super::pierre::types::{ChangeType, FileDiffMetadata, SelectionSide};
+use super::pierre::types::{
+    ChangeType, FileDiffMetadata, SelectionSide, get_hunk_side_end_boundary,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineKind {
@@ -309,10 +311,14 @@ fn push_event(
     }
 }
 
-/// `totalLines` of `createPreElement`: sizes the number column.
+/// `totalLines` of `createPreElement`: sizes the number column. Upstream
+/// `getTotalLineCountFromHunks`: the last hunk's end boundaries, so a hunk
+/// ending at line 99 gives 99, not 100.
 pub fn total_lines(file: &FileDiffMetadata) -> usize {
     let from_hunks = file.hunks.last().map_or(0, |hunk| {
-        (hunk.addition_start + hunk.addition_count).max(hunk.deletion_start + hunk.deletion_count)
+        get_hunk_side_end_boundary(hunk.addition_start, hunk.addition_count).max(
+            get_hunk_side_end_boundary(hunk.deletion_start, hunk.deletion_count),
+        )
     });
     from_hunks
         .max(file.addition_lines.len())
@@ -455,7 +461,13 @@ mod tests {
 
     #[test]
     fn total_lines_sizes_the_number_column() {
-        assert_eq!(total_lines(&parse(PATCH)), 42);
+        assert_eq!(total_lines(&parse(PATCH)), 41);
+    }
+
+    #[test]
+    fn total_lines_does_not_count_past_a_last_line_of_99() {
+        let patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -98 +99 @@\n-p\n+q\n";
+        assert_eq!(total_lines(&parse(patch)), 99);
     }
 
     #[test]

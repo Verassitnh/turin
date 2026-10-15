@@ -6,6 +6,8 @@ PM (Claude Opus 5.5) owns this file. Agents don't edit it; they report back.
 
 ## Roster and budget
 
+**Haiku everywhere (user, 2026-10-15 ~13:30 UTC): "just go crazy with haiku, its not worth it with the others."** All backend/logic work and QC run on Claude Haiku 5.5 (effort high). Cursor/Codex/OpenRouter are not worth pursuing now. UI stays on Sonnet (max 2). Opus = PM only, minimal.
+
 **Claude budget (user, 2026-10-15 ~12:55 UTC): Claude usage nearly out.** Use
 Cursor Auto, Codex and Haiku as much as possible; be very sparing with Opus
 and Sonnet. UI may now be written by **Sonnet** (replaces the Opus-only UI
@@ -126,14 +128,14 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T00 | Foundation fixes from QC wf_6ce02f2f-38c (docs part done by PM; helpers: Codex died on auth expiry → Sonnet r2) | `crates/contracts/src/base_schemas.rs` | Codex → Sonnet | done (merged) |
 | T00c | QC low items: UtcDateTime parse bounds/leap/zone-less, private field; `forward_compatible_*::optional` | `crates/contracts/src/base_schemas.rs` | Cursor Auto | done (merged into T01; UtcDateTime field now private) |
 | T00i | Upstream coverage inventory → docs/inventory/upstream-coverage.md | docs | Cursor Auto | done (merged): 40.4% of kept lines ported (54.9% incl. partial); 36.1% of all needed; 135 unassigned files → N1–N11 |
-| N1 | App runtime: settings + secrets, keybindings file, data dir, environment descriptor, storage cleanup | `crates/runtime` | Cursor Auto | active |
-| N2s | Project services (server): identity, favicons, scratch projects, agent-session scan/import | `crates/projects` | Cursor Auto | active |
+| N1 | App runtime: settings + secrets, keybindings file, data dir, environment descriptor, storage cleanup | `crates/runtime` | Haiku | active |
+| N2s | Project services (server): identity, favicons, scratch projects, agent-session scan/import | `crates/projects` | Haiku | active |
 | N2u | Onboarding / welcome UI | `crates/app` | Sonnet | todo |
 | N3 | Text generation (titles, commit messages, PR bodies, branch names) per provider | provider crates | Cursor Auto | todo (after adapters) |
-| N4 | Usage page: service (scan, aggregate, pricing) + UI | backend + `crates/app` | Cursor Auto + Sonnet | todo |
-| N5 | Editor / Open-in: launcher, app icons, prefs, picker, file context menu | backend + `crates/app` | Cursor Auto + Sonnet | todo |
-| N6 | Git UI (branch toolbar/picker, git actions) + ReviewService | `crates/app` + backend | Sonnet + Cursor Auto | todo |
-| N7 | GitHubMediaFetch (fold into T07) | `crates/source-control` | Cursor Auto | todo |
+| N4 | Usage page: service (scan, aggregate, pricing) + UI | `crates/usage` + `crates/app` | Haiku (N4s backend active) + Sonnet (UI todo) | N4s active |
+| N5 | Editor / Open-in: launcher, app icons, prefs, picker, file context menu | `crates/launcher` + `crates/app` | Haiku (N5s backend active) + Sonnet (UI todo) | N5s active |
+| N6 | Git UI (branch toolbar/picker, git actions) + ReviewService | `crates/review` + `crates/app` | Haiku (N6s backend active) + Sonnet (UI todo) | N6s active |
+| N7 | GitHubMediaFetch (folded into T07) | `crates/source-control` | Haiku | in T07 |
 | N7b | App shell, routing, command palette, UI-state stores (fold into T22?) | `crates/app` | Sonnet | todo |
 | N8 | Provider update UI | `crates/app` | Sonnet | todo |
 | N9 | Native macOS shell: menu, window lifecycle, quit hold, dock badge | `crates/app` | Sonnet | todo |

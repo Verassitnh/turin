@@ -146,6 +146,14 @@ pub struct RuntimeState {
     /// Turns that completed with background work still running, keyed by native turn
     /// id. Their late item frames project until that work is done.
     pub settled: HashMap<String, TurnState>,
+    /// Native turns that ended without completing. A child turn under one is interrupted.
+    pub terminalized: HashSet<String>,
+    /// Late child turns to interrupt, as (native thread, native turn). The pump sends them.
+    pub interrupts: Vec<(String, String)>,
+    /// Threads whose `turn/start` is in flight. Its turn registers when the call answers.
+    pub starting: HashSet<String>,
+    /// The model each thread reported, by native thread id.
+    pub subagent_selections: HashMap<String, subagent::ReportedSelection>,
 }
 
 fn group_of(kind: TextKind) -> usize {
@@ -507,6 +515,13 @@ fn plan_step_status(status: &str) -> OrchestrationV2PlanStepStatus {
 
 /// Projects one Codex notification into orchestration events.
 pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderAdapterV2Event> {
+    // Thread settings are not turn-scoped, so they update the reported selection directly.
+    if matches!(
+        raw.method.as_str(),
+        "thread/settings/updated" | "model/rerouted"
+    ) {
+        return subagent::settings_updated(state, &raw.method, &raw.params);
+    }
     let Some(native_turn) = native_turn_of(&raw.params).map(str::to_owned) else {
         return vec![];
     };
@@ -634,8 +649,9 @@ pub fn has_retained_work(turn: &TurnState) -> bool {
 }
 
 /// A frame for a turn that completed with background work still running. Upstream
-/// keeps such a turn's context, so its late item frames still project. Only item
-/// frames project here. The turn is released once it has no work left.
+/// resolves such a turn only for `item/completed`. A settled turn's text emits
+/// await an active turn, so text completed on it is dropped. Work it still runs
+/// (commands, persistent tools) completes. The turn is released once no work is left.
 fn project_settled(
     raw: &CodexEvent,
     thread: &str,
@@ -643,15 +659,20 @@ fn project_settled(
     state: &mut RuntimeState,
     now: UtcDateTime,
 ) -> Vec<ProviderAdapterV2Event> {
-    if !matches!(raw.method.as_str(), "item/started" | "item/completed") {
+    if raw.method != "item/completed" {
         return vec![];
     }
     let Some(mut turn) = state.settled.remove(native_turn) else {
         return vec![];
     };
-    let events = match raw.method.as_str() {
-        "item/started" => item_started(&raw.params, thread, &mut turn, state, now),
-        _ => item_completed(&raw.params, thread, &mut turn, state, now),
+    let text_item = matches!(
+        raw.params.pointer("/item/type").and_then(Value::as_str),
+        Some("agentMessage" | "reasoning" | "plan")
+    );
+    let events = if text_item {
+        vec![]
+    } else {
+        item_completed(&raw.params, thread, &mut turn, state, now)
     };
     if has_retained_work(&turn) {
         state.settled.insert(native_turn.to_owned(), turn);
@@ -742,6 +763,7 @@ fn sub_agent_activity(
                 prompt: "",
                 title: str_of(item, "agentPath"),
                 model: None,
+                effort: None,
                 ordinal,
                 emit_initial_prompt: false,
             };
@@ -1047,6 +1069,7 @@ fn spawn_agents(
                 prompt,
                 title: None,
                 model,
+                effort: Some(str_of(item, "reasoningEffort")),
                 ordinal: index + 1,
                 emit_initial_prompt: true,
             },
@@ -1186,6 +1209,9 @@ fn turn_completed(
         status,
         OrchestrationV2ProviderTurnStatus::Interrupted | OrchestrationV2ProviderTurnStatus::Failed
     );
+    if status != OrchestrationV2ProviderTurnStatus::Completed {
+        state.terminalized.insert(turn.native_turn.clone());
+    }
     let retry = turn.provider_retry.take();
     let mut events = retry::finish(turn, retry.clone(), status, now);
     events.extend(flush_turn(state, turn, stopped_early));

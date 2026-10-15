@@ -2283,3 +2283,192 @@ fn final_provider_error_becomes_the_failed_terminal_failure() {
         Some("usageLimitExceeded")
     );
 }
+
+#[test]
+fn settled_turn_drops_late_text_and_new_starts_but_completes_its_command() {
+    let mut state = RuntimeState::default();
+    state
+        .turns
+        .insert("native-turn-1".into(), detached_turn("native-turn-1"));
+    let command = json!({"type": "commandExecution", "id": "cmd-1", "command": "sleep 5", "status": "inProgress", "aggregatedOutput": null});
+    notify(
+        &mut state,
+        "item/started",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "startedAtMs": 1, "item": command}),
+    );
+    notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-1", "status": "completed", "completedAt": 2}}),
+    );
+
+    let late_text = notify(
+        &mut state,
+        "item/agentMessage/delta",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "itemId": "msg-late", "delta": "late words"}),
+    );
+    assert!(late_text.is_empty());
+    let late_message = notify(
+        &mut state,
+        "item/completed",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "item": {"type": "agentMessage", "id": "msg-late", "text": "late words", "phase": "final_answer"}}),
+    );
+    assert!(late_message.is_empty(), "text on a settled turn is dropped");
+    let late_start = notify(
+        &mut state,
+        "item/started",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "startedAtMs": 3, "item": {"type": "commandExecution", "id": "cmd-2", "command": "ls", "status": "inProgress"}}),
+    );
+    assert!(late_start.is_empty(), "a settled turn starts nothing new");
+
+    let mut done = command.clone();
+    done["status"] = json!("completed");
+    let completed = notify(
+        &mut state,
+        "item/completed",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "item": done}),
+    );
+    assert_eq!(
+        node_status_of(&completed, &item_node("cmd-1")),
+        vec![OrchestrationV2ExecutionNodeStatus::Completed]
+    );
+}
+
+#[test]
+fn late_child_turn_under_a_terminalized_ancestor_is_interrupted_not_registered() {
+    let mut state = RuntimeState::default();
+    state
+        .turns
+        .insert("native-turn-1".into(), detached_turn("native-turn-1"));
+    notify(
+        &mut state,
+        "item/started",
+        json!({
+            "threadId": "thread-1",
+            "turnId": "native-turn-1",
+            "startedAtMs": 1,
+            "item": {"type": "subAgentActivity", "id": "call-1", "kind": "started", "agentThreadId": "child-thread", "agentPath": "/root/late"},
+        }),
+    );
+    // The spawning turn ends interrupted before the child starts its turn.
+    notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-1", "status": "interrupted", "completedAt": 2}}),
+    );
+    let started = notify(
+        &mut state,
+        "turn/started",
+        json!({"threadId": "child-thread", "turn": {"id": "child-turn-1", "startedAt": 3}}),
+    );
+    assert!(
+        started.is_empty(),
+        "the late child projects nothing, as upstream registers no context for it"
+    );
+    assert!(!state.turns.contains_key("child-turn-1"));
+    assert_eq!(
+        state.interrupts,
+        vec![("child-thread".to_owned(), "child-turn-1".to_owned())],
+        "the child turn is interrupted"
+    );
+}
+
+#[test]
+fn child_settings_update_the_subagent_selection_and_reroutes_keep_options() {
+    let mut state = RuntimeState::default();
+    state
+        .turns
+        .insert("native-turn-1".into(), detached_turn("native-turn-1"));
+    notify(
+        &mut state,
+        "item/started",
+        json!({
+            "threadId": "thread-1",
+            "turnId": "native-turn-1",
+            "startedAtMs": 1,
+            "item": {"type": "subAgentActivity", "id": "call-1", "kind": "started", "agentThreadId": "child-settings", "agentPath": "/root/settings"},
+        }),
+    );
+    let set = notify(
+        &mut state,
+        "thread/settings/updated",
+        json!({
+            "threadId": "child-settings",
+            "threadSettings": {"model": "gpt-6-sol", "effort": "high", "serviceTier": null},
+        }),
+    );
+    let updated = set
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::SubagentUpdated { subagent, .. } => Some(subagent.clone()),
+            _ => None,
+        })
+        .expect("subagent updated");
+    let selection = serde_json::to_value(updated.model_selection.expect("selection")).unwrap();
+    assert_eq!(selection["model"], "gpt-6-sol");
+    assert_eq!(
+        selection["options"],
+        json!([{"id": "reasoningEffort", "value": "high"}])
+    );
+
+    let rerouted = notify(
+        &mut state,
+        "model/rerouted",
+        json!({"threadId": "child-settings", "toModel": "gpt-6-luna"}),
+    );
+    let rerouted = rerouted
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::SubagentUpdated { subagent, .. } => Some(subagent.clone()),
+            _ => None,
+        })
+        .expect("subagent updated on reroute");
+    let selection = serde_json::to_value(rerouted.model_selection.expect("selection")).unwrap();
+    assert_eq!(selection["model"], "gpt-6-luna");
+    assert_eq!(
+        selection["options"],
+        json!([{"id": "reasoningEffort", "value": "high"}]),
+        "a reroute carries no effort, so the reported effort stays"
+    );
+}
+
+#[test]
+fn late_child_turn_after_a_clean_parent_end_runs_under_the_parent_context() {
+    let mut state = RuntimeState::default();
+    state
+        .turns
+        .insert("native-turn-1".into(), detached_turn("native-turn-1"));
+    notify(
+        &mut state,
+        "item/started",
+        json!({
+            "threadId": "thread-1",
+            "turnId": "native-turn-1",
+            "startedAtMs": 1,
+            "item": {"type": "subAgentActivity", "id": "call-1", "kind": "started", "agentThreadId": "child-late", "agentPath": "/root/late"},
+        }),
+    );
+    notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-1", "status": "completed", "completedAt": 2}}),
+    );
+    let started = notify(
+        &mut state,
+        "turn/started",
+        json!({"threadId": "child-late", "turn": {"id": "child-turn-late", "startedAt": 3}}),
+    );
+    assert!(
+        started.iter().any(|event| matches!(
+            event,
+            ProviderAdapterV2Event::ProviderTurnUpdated { thread_id: Some(thread), provider_turn, .. }
+                if thread.as_str().contains("child") && provider_turn.status == turin_contracts::orchestration_v2::OrchestrationV2ProviderTurnStatus::Running
+        )),
+        "the child turn is registered and runs"
+    );
+    assert!(state.turns.contains_key("child-turn-late"));
+    assert!(
+        state.interrupts.is_empty(),
+        "a clean parent end interrupts nothing"
+    );
+}

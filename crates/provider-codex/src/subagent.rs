@@ -13,7 +13,7 @@ use crate::{
     orchestration_adapter::{driver, native_ref},
     projection::{self, RuntimeState, TurnState},
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use turin_contracts::{
     NodeId, ProviderThreadId, ProviderTurnId, RunId, ThreadId, TrimmedNonEmptyString, TurnItemId,
@@ -31,6 +31,7 @@ use turin_contracts::{
         OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
         OrchestrationV2UserMessageInputIntent,
     },
+    provider_instance::ProviderInstanceId,
 };
 use turin_provider_core::{
     id_allocator::derive,
@@ -51,6 +52,8 @@ pub struct ParentLink {
     owner_native_turn: String,
     /// The native subagent thread the parent turn runs in, when the parent is a child turn.
     subagent: Option<String>,
+    /// The parent turn, then the turns above it, through each subagent's parent.
+    ancestors: Vec<String>,
 }
 
 /// One native subagent thread: upstream's `CodexSubagentThreadContext`.
@@ -83,6 +86,8 @@ pub struct Spawn<'a> {
     /// `agentPath` for a `subAgentActivity`; a spawn has no title.
     pub title: Option<&'a str>,
     pub model: Option<&'a str>,
+    /// `Some(effort)` when the spawn reported one, null included. `None` when it did not.
+    pub effort: Option<Option<&'a str>>,
     pub ordinal: usize,
     /// Whether the spawn's prompt becomes a user message in the child thread.
     pub emit_initial_prompt: bool,
@@ -124,6 +129,19 @@ pub fn subagent_node(state: &RuntimeState, turn: &TurnState) -> Option<NodeId> {
     node
 }
 
+/// The turn and every turn above it, through the subagents it runs under.
+fn ancestors_of(state: &RuntimeState, turn: &TurnState) -> Vec<String> {
+    let mut ancestors = vec![turn.native_turn.clone()];
+    if let Some(sub) = turn
+        .subagent
+        .as_ref()
+        .and_then(|thread| state.subagents.get(thread))
+    {
+        ancestors.extend(sub.parent.ancestors.iter().cloned());
+    }
+    ancestors
+}
+
 fn link_of(state: &RuntimeState, turn: &TurnState) -> ParentLink {
     ParentLink {
         thread_id: turn.input.thread_id.clone(),
@@ -133,6 +151,7 @@ fn link_of(state: &RuntimeState, turn: &TurnState) -> ParentLink {
         input: turn.input.clone(),
         owner_native_turn: owner_native_turn(state, turn),
         subagent: turn.subagent.clone(),
+        ancestors: ancestors_of(state, turn),
     }
 }
 
@@ -144,6 +163,123 @@ fn native_thread_of(thread: &OrchestrationV2ProviderThread) -> Option<String> {
         .native_id
         .as_ref()
         .map(|id| id.as_str().to_owned())
+}
+
+/// The model a child thread reported, as upstream's `subagentSelections` entry: the
+/// model and its options, without the instance.
+#[derive(Clone)]
+pub struct ReportedSelection {
+    model: String,
+    options: Option<Vec<Value>>,
+}
+
+/// The reported selection as a model selection of the subagent's instance.
+fn model_selection_of(
+    instance: &ProviderInstanceId,
+    selection: &ReportedSelection,
+) -> ModelSelection {
+    let mut value = json!({"instanceId": instance, "model": selection.model});
+    if let Some(options) = &selection.options {
+        value["options"] = Value::Array(options.clone());
+    }
+    serde_json::from_value(value).expect("model selection")
+}
+
+/// Upstream `updateSubagentSelection`. It records the model a child thread reported,
+/// and updates its subagent's task when the selection changes. `effort` and `tier`
+/// are `None` when the event did not carry them, and `Some(None)` when it carried null.
+pub fn update_selection(
+    state: &mut RuntimeState,
+    thread: &str,
+    model: Option<&str>,
+    effort: Option<Option<&str>>,
+    tier: Option<Option<&str>>,
+) -> Vec<ProviderAdapterV2Event> {
+    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+        return vec![];
+    };
+    let previous_options = state
+        .subagent_selections
+        .get(thread)
+        .and_then(|selection| selection.options.clone());
+    let options = if effort.is_none() && tier.is_none() {
+        previous_options
+    } else {
+        let mut kept: Vec<Value> = previous_options
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|option| match option["id"].as_str() {
+                Some("reasoningEffort") => effort.is_none(),
+                Some("serviceTier") => tier.is_none(),
+                _ => false,
+            })
+            .collect();
+        for (id, value) in [
+            ("reasoningEffort", effort.flatten()),
+            ("serviceTier", tier.flatten()),
+        ] {
+            if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+                kept.push(json!({"id": id, "value": value}));
+            }
+        }
+        Some(kept)
+    };
+    let selection = ReportedSelection {
+        model: model.to_owned(),
+        options,
+    };
+    state
+        .subagent_selections
+        .insert(thread.to_owned(), selection.clone());
+    let Some(sub) = state.subagents.get_mut(thread) else {
+        return vec![];
+    };
+    let model_selection = model_selection_of(&sub.task.provider_instance_id, &selection);
+    if sub.task.model_selection.as_ref().is_some_and(|known| {
+        serde_json::to_value(known).ok() == serde_json::to_value(&model_selection).ok()
+    }) {
+        return vec![];
+    }
+    sub.task.model = Some(selection.model);
+    sub.task.model_selection = Some(model_selection);
+    sub.task.updated_at = UtcDateTime::now();
+    vec![ProviderAdapterV2Event::SubagentUpdated {
+        driver: driver(),
+        subagent: sub.task.clone(),
+    }]
+}
+
+/// Upstream's `thread/settings/updated` and `model/rerouted`: a thread's reported
+/// model, and its effort and service tier when the event carries them.
+pub fn settings_updated(
+    state: &mut RuntimeState,
+    method: &str,
+    params: &Value,
+) -> Vec<ProviderAdapterV2Event> {
+    let thread = params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if method == "model/rerouted" {
+        return update_selection(
+            state,
+            thread,
+            params.get("toModel").and_then(Value::as_str),
+            None,
+            None,
+        );
+    }
+    let Some(settings) = params.get("threadSettings") else {
+        return vec![];
+    };
+    let carried = |key: &str| settings.get(key).map(Value::as_str);
+    update_selection(
+        state,
+        thread,
+        settings.get("model").and_then(Value::as_str),
+        carried("effort"),
+        carried("serviceTier"),
+    )
 }
 
 /// Upstream `subagentThreadTitle`.
@@ -414,7 +550,22 @@ pub fn register(
     let provider_thread_id =
         derive::provider_thread(&driver(), Some(&instance), spawn.native_thread);
     let turn_item_id = derive::turn_item_from_provider_item(&driver(), &spawn.native_item);
-    let model = spawn.model.map(str::to_owned);
+    // Upstream `registerSubagentThread`: a spawn's model and effort are the child's
+    // selection, unless the child has already reported one. The subagent is not
+    // registered yet, so the update only records the selection.
+    if let Some(model) = spawn.model
+        && !state.subagent_selections.contains_key(spawn.native_thread)
+    {
+        update_selection(state, spawn.native_thread, Some(model), spawn.effort, None);
+    }
+    let reported = state.subagent_selections.get(spawn.native_thread).cloned();
+    let model = reported
+        .as_ref()
+        .map(|selection| selection.model.clone())
+        .or_else(|| spawn.model.map(str::to_owned));
+    let task_selection = reported
+        .as_ref()
+        .map(|selection| model_selection_of(&instance, selection));
 
     let mut child_selection: ModelSelection = parent.input.model_selection.clone();
     if let Some(model) = &model {
@@ -489,7 +640,7 @@ pub fn register(
         prompt: spawn.prompt.to_owned(),
         title: spawn.title.map(str::to_owned),
         model,
-        model_selection: None,
+        model_selection: task_selection,
         completion_wake: None,
         completion_delivery: None,
         status: OrchestrationV2SubagentStatus::Running,
@@ -610,13 +761,20 @@ fn active_parent(state: &RuntimeState, parent_native_thread: &str) -> Option<Par
 }
 
 /// Whether a `turn/started` opens a child turn of a registered subagent. It does
-/// once the parent thread has an active turn to run under. Until then the frame
-/// waits, as upstream's `pendingSubagentTurns` does, because `turn/start` can
-/// answer after the child's first frames.
+/// unless its parent thread is starting a turn, which the child's frame waits for,
+/// as upstream's `pendingSubagentTurns` does. A parent that has finished is not
+/// waited for: upstream runs the late child under the parent's last context, and
+/// interrupts it if an ancestor ended without completing.
 pub fn opens_child_turn(state: &RuntimeState, thread: &str, native_turn: &str) -> bool {
     state.subagents.get(thread).is_some_and(|sub| {
         !sub.native_turns.contains(native_turn)
-            && active_parent(state, &sub.parent_native_thread).is_some()
+            && (active_parent(state, &sub.parent_native_thread).is_some()
+                || !state.starting.contains(&sub.parent_native_thread)
+                || sub
+                    .parent
+                    .ancestors
+                    .iter()
+                    .any(|turn| state.terminalized.contains(turn)))
     })
 }
 
@@ -641,6 +799,18 @@ pub fn start_child_turn(
     sub.native_turns.insert(native_turn.to_owned());
     if let Some(parent) = parent {
         sub.parent = parent;
+    }
+    // Upstream: a child turn under a terminalized ancestor is interrupted, not registered.
+    if sub
+        .parent
+        .ancestors
+        .iter()
+        .any(|turn| state.terminalized.contains(turn))
+    {
+        state
+            .interrupts
+            .push((thread.to_owned(), native_turn.to_owned()));
+        return vec![];
     }
     sub.turn_count += 1;
     let ordinal = sub.turn_count;

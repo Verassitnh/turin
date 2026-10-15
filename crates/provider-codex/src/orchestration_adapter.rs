@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use futures::stream;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-use std::{collections::VecDeque, path::Path, sync::Arc};
+use std::{collections::VecDeque, path::Path, sync::Arc, time::Duration};
 use turin_codex_app_server::{client::Client, errors::AppServerError};
 use turin_contracts::{
     ProviderSessionId, ThreadId, TrimmedNonEmptyString, UtcDateTime,
@@ -193,12 +193,14 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
                 )
             })?;
         let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let session = Arc::new(session);
         let state = Arc::new(Mutex::new(RuntimeState::default()));
         let turn_registered = Arc::new(tokio::sync::Notify::new());
         let pump = tokio::spawn(project_pump(
             session.take_events(),
             session.take_requests(),
             state.clone(),
+            session.clone(),
             turn_registered.clone(),
             input.provider_session_id.clone(),
             out_tx,
@@ -226,7 +228,7 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
             driver: self.driver.clone(),
             provider_session_id: input.provider_session_id,
             provider_session,
-            session: Arc::new(session),
+            session,
             events: Mutex::new(Some(out_rx)),
             pump,
             turn_registered,
@@ -388,6 +390,7 @@ async fn project_pump(
     mut events: Option<tokio::sync::mpsc::UnboundedReceiver<CodexEvent>>,
     mut requests: Option<tokio::sync::mpsc::UnboundedReceiver<PendingRequest>>,
     state: Arc<Mutex<RuntimeState>>,
+    session: Arc<CodexSession>,
     registered: Arc<tokio::sync::Notify>,
     session_id: ProviderSessionId,
     out: tokio::sync::mpsc::UnboundedSender<ProviderAdapterV2Event>,
@@ -412,6 +415,26 @@ async fn project_pump(
             } => projection::flush_due(&mut state.lock(), tokio::time::Instant::now()),
         };
         batch.extend(drain_parked(&mut parked, &mut state.lock(), &session_id));
+        let interrupts = std::mem::take(&mut state.lock().interrupts);
+        for (thread, turn) in interrupts {
+            // Upstream interrupts a late child turn and does not wait on it: the
+            // interrupt is bounded by a timeout, and its failure is only logged.
+            let session = session.clone();
+            tokio::spawn(async move {
+                match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    session.interrupt_turn(&thread, &turn),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(cause)) => {
+                        tracing::warn!(thread, turn, %cause, "late subagent interrupt failed")
+                    }
+                    Err(_) => tracing::warn!(thread, turn, "late subagent interrupt timed out"),
+                }
+            });
+        }
         for event in batch {
             if out.send(event).is_err() {
                 return;
@@ -708,7 +731,10 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
         let thread = native_id(&input.provider_thread)?.to_owned();
         let policy = runtime_policy(&input.runtime_policy, &self.config.cwd);
         let model = input.model_selection.model.as_str();
-        let native_turn = self
+        // The thread is starting a turn until the turn is registered, so a child turn
+        // that starts first waits for its parent rather than running under a stale one.
+        self.state.lock().starting.insert(thread.clone());
+        let started = self
             .session
             .start_turn(
                 &thread,
@@ -718,9 +744,12 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
                 option(&input.model_selection, "serviceTier"),
                 &policy,
             )
-            .await
-            .map_err(|e| {
-                error(
+            .await;
+        let native_turn = match started {
+            Ok(native_turn) => native_turn,
+            Err(e) => {
+                self.state.lock().starting.remove(&thread);
+                return Err(error(
                     ProviderAdapterErrorKind::TurnStart {
                         driver: self.driver.clone(),
                         thread_id: input.thread_id.clone(),
@@ -728,12 +757,16 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
                         run_id: input.run_id.clone(),
                     },
                     e,
-                )
-            })?;
-        self.state
-            .lock()
-            .turns
-            .insert(native_turn.clone(), TurnState::new(native_turn, input));
+                ));
+            }
+        };
+        {
+            let mut state = self.state.lock();
+            state.starting.remove(&thread);
+            state
+                .turns
+                .insert(native_turn.clone(), TurnState::new(native_turn, input));
+        }
         self.turn_registered.notify_one();
         Ok(())
     }

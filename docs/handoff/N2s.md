@@ -21,10 +21,12 @@ Deviations are logged in `PORTING.md` (rows for each file below).
 | `AgentSessionImporter.ts` | `agent_session_importer.rs` | 1 | all 1 upstream case; seams in `project_ports.rs` |
 | `AgentSessionScanner.ts`: model types, `recentThreads` trait | `agent_session_scanner.rs` | 0 | `AgentSessionScanner` trait, `AgentSessionRecentThread` outcomes |
 | `AgentSessionScanner.ts`: transcript parser | `agent_session_scanner.rs` | 16 | `parse_agent_session_transcript`; all pure upstream cases |
+| `AgentSessionScanner.ts`: discovery (`scan`, `recentThreads`) | `agent_session_discovery.rs` (+ `agent_session_discovery/tests.rs`) | 51 | filesystem seam `ScannerFileSystem`; git identity from `.git`; T3 worktree and Downloads/Codex exclusion; budgets; 54 upstream FS cases (each-variants inside one test) |
+| `CodexHomeLayout.ts` (shared-home path) | `codex_home_layout.rs` | 0 | direct and auth-overlay modes; shadow-home files are the Codex provider's |
 
 Support: `ttl_cache.rs`, `testing.rs` (fakes and real-git adapters, `#[cfg(test)]` only), `project_ports.rs` (seams), `project_service.rs`.
 
-Current state: `cargo test -p turin-projects` = 101 passing. `cargo clippy -p turin-projects --all-targets -- -D warnings` (with deps) is clean. `rustfmt --check` is clean on all files in `crates/projects/src`.
+Current state: `cargo test -p turin-projects` = 152 passing. `cargo clippy -p turin-projects --all-targets --no-deps -- -D warnings` is clean. `rustfmt --edition 2024 --check` is clean on the crate's files.
 
 **Gate `scripts/check.sh -p turin-projects` does NOT exit 0 yet.** It stops at the first step, `cargo fmt --all --check`, which reports diffs only in `crates/git/` (`git_manager.rs`, `shared_git.rs`, `vcs_driver_registry.rs`). That code is on `main` (T06) and is not ours, so the PM must fix it or merge the fix. The build, test, and clippy steps run after fmt and were run separately: all pass.
 
@@ -54,8 +56,8 @@ All in `project_ports.rs`, `project_service.rs`, and `agent_session_scanner.rs`:
 
 ## Remaining (in order)
 
-1. **`AgentSessionScanner.ts`, discovery half** (upstream lines 620 to 1494 plus the 54 FS cases in the
-   3202-line test file). Still to port:
+1. **DONE (step 1).** `AgentSessionScanner.ts` discovery half and its FS cases. Commits `832428e`..`98550b8`.
+   Its deviations are in PORTING.md. The seams it needs, for the T22 wiring:
    - config-path seam: Claude and Codex home dirs, `ServerConfig` base and worktrees dirs, the
      `expandHomePath` rules, and `HostProcess`;
    - `CodexHomeLayout` seam (`provider/Drivers/CodexHomeLayout.ts`) and provider settings seams
@@ -69,8 +71,8 @@ All in `project_ports.rs`, `project_service.rs`, and `agent_session_scanner.rs`:
    - T3 worktree exclusion (`isT3ManagedWorktree`) with realpath checks;
    - `read_transcript_json` via `agent_session_json.rs` (`TranscriptJsonReader` and the
      record selector) for the bounded, streamed reads.
-   Tests use temp-dir fixtures only. Do not read `~/.claude` or `~/.codex`.
-   Log each slice in `PORTING.md`. The Deviations rows already cover the pure parser.
+   - `AgentSessionDiscoveryHost` must carry canonical `base_dir` and `worktrees_dir` (see the PORTING
+     realpath row).
 2. **`ProjectService.test.ts`, 4 cases not ported**: enrichment failure, invalidation on move,
    slow metadata, update-after-delete lock wait. See the Known gaps.
 3. **`ProjectService.deletion.test.ts`, 4 cases** (thread-deletion cascade). Depends on the
@@ -85,7 +87,7 @@ All in `project_ports.rs`, `project_service.rs`, and `agent_session_scanner.rs`:
 - `ProjectEnrichmentService.test.ts`: logger-capture case not ported.
 - `ProjectFaviconResolver.test.ts`: FileSystem-instrumented cases and the `t3.json` cases not ported.
 - `ProjectService` rejection receipt encoding is unverified against upstream (see seams).
-- `AgentSessionScanner`: only the parser and model are ported. The 54 filesystem cases are open.
+- `AgentSessionScanner`: parser, model, and discovery are ported. The FS cases are in `agent_session_discovery/tests.rs`.
 
 ## Working rules that bit this session
 

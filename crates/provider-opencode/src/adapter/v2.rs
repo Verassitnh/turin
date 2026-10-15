@@ -42,9 +42,9 @@ use turin_provider_core::id_allocator::{IdAllocator, derive};
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
 use crate::adapter::records::{
-    Compaction, NodeOf, NodeTiming, RequestBody, TextBlock, assistant_message,
+    Compaction, NodeOf, NodeTiming, RequestBody, SubagentCall, TextBlock, assistant_message,
     compaction_turn_item, execution_node, next_ordinal, node_status_of, request_node,
-    request_turn_item, settle_request_item, settle_request_node, text_turn_item,
+    request_turn_item, settle_request_item, settle_request_node, subagent_records, text_turn_item,
 };
 use crate::events::V2StreamEvent;
 use crate::permission_rules::{SessionPermissionRule, session_permission_rules};
@@ -761,50 +761,98 @@ impl OpenCodeV2Session {
                 native_item_id: call_id,
                 weak_ref: false,
             };
-            events.push(ProviderAdapterV2Event::NodeUpdated {
-                driver: self.driver.clone(),
-                node: execution_node(
+            if name == "task" || name == "subagent" {
+                // `emitSubagent`: a task call is a subagent, not a tool call.
+                let input = state.get("input").cloned().unwrap_or_else(|| json!({}));
+                let prompt = input
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                let title = state
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .or_else(|| input.get("description").and_then(Value::as_str));
+                let result = state
+                    .get("output")
+                    .or_else(|| state.pointer("/state/output"))
+                    .and_then(Value::as_str)
+                    .map(subagent_output);
+                let ordinal = item_ordinal(turn, call_id);
+                let records = subagent_records(
                     &self.driver,
-                    &of,
-                    NodeTiming {
-                        kind: OrchestrationV2ExecutionNodeKind::ToolCall,
-                        status: node_status_of(status),
+                    SubagentCall {
+                        instance_id: &self.instance_id,
+                        of,
+                        ordinal,
+                        prompt: &prompt,
+                        title,
+                        status,
                         started_at,
                         completed_at,
+                        result,
+                        child_session: None,
+                        now,
                     },
-                ),
-            });
-            let input = state.get("input").cloned().unwrap_or_else(|| json!({}));
-            let output = state
-                .get("output")
-                .or_else(|| state.pointer("/state/output"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let shown = output.as_deref().map(|text| {
-                if name == "task" || name == "subagent" {
-                    subagent_output(text)
-                } else {
-                    text.to_owned()
-                }
-            });
-            let base = tool_base(
-                turn,
-                &self.driver,
-                call_id,
-                status,
-                started_at,
-                completed_at,
-            );
-            events.push(ProviderAdapterV2Event::TurnItemUpdated {
-                driver: self.driver.clone(),
-                turn_item: open_code_tool_turn_item(
-                    base,
-                    name,
-                    &input,
-                    shown.as_deref(),
-                    state.get("metadata"),
-                ),
-            });
+                );
+                events.push(ProviderAdapterV2Event::NodeUpdated {
+                    driver: self.driver.clone(),
+                    node: records.node,
+                });
+                events.push(ProviderAdapterV2Event::SubagentUpdated {
+                    driver: self.driver.clone(),
+                    subagent: records.subagent,
+                });
+                events.push(ProviderAdapterV2Event::TurnItemUpdated {
+                    driver: self.driver.clone(),
+                    turn_item: records.item,
+                });
+            } else {
+                events.push(ProviderAdapterV2Event::NodeUpdated {
+                    driver: self.driver.clone(),
+                    node: execution_node(
+                        &self.driver,
+                        &of,
+                        NodeTiming {
+                            kind: OrchestrationV2ExecutionNodeKind::ToolCall,
+                            status: node_status_of(status),
+                            started_at,
+                            completed_at,
+                        },
+                    ),
+                });
+                let input = state.get("input").cloned().unwrap_or_else(|| json!({}));
+                let output = state
+                    .get("output")
+                    .or_else(|| state.pointer("/state/output"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let shown = output.as_deref().map(|text| {
+                    if name == "task" || name == "subagent" {
+                        subagent_output(text)
+                    } else {
+                        text.to_owned()
+                    }
+                });
+                let base = tool_base(
+                    turn,
+                    &self.driver,
+                    call_id,
+                    status,
+                    started_at,
+                    completed_at,
+                );
+                events.push(ProviderAdapterV2Event::TurnItemUpdated {
+                    driver: self.driver.clone(),
+                    turn_item: open_code_tool_turn_item(
+                        base,
+                        name,
+                        &input,
+                        shown.as_deref(),
+                        state.get("metadata"),
+                    ),
+                });
+            }
         }
         for event in events {
             self.emit(event);

@@ -3,6 +3,9 @@
 //! `server/adapter.ts`), `message.updated` for assistant text, and `plan.updated` for a
 //! todo list. Both generations build them here, so the field mapping lives in one place.
 
+use turin_contracts::orchestration_v2::{
+    OrchestrationV2Subagent, OrchestrationV2SubagentOrigin, OrchestrationV2SubagentStatus,
+};
 use turin_contracts::{
     NodeId, PlanId, ProviderThreadId, ProviderTurnId, RuntimeRequestId, ThreadId,
     TrimmedNonEmptyString, UtcDateTime,
@@ -15,7 +18,7 @@ use turin_contracts::{
         OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus, OrchestrationV2UserInputQuestion,
         OrchestrationV2UserInputQuestionOption,
     },
-    provider_instance::ProviderDriverKind,
+    provider_instance::{ProviderDriverKind, ProviderInstanceId},
     provider_policy::ProviderRequestKind,
 };
 use turin_provider_core::id_allocator::derive;
@@ -557,5 +560,108 @@ pub fn compaction_turn_item(
         summary: of.summary,
         before_token_count: None,
         after_token_count: None,
+    }
+}
+
+/// A `task` tool call, which upstream projects as a subagent rather than a tool call
+/// (`emitSubagent`). The node, the subagent record and the subagent item share one id:
+/// the node derived from the tool part.
+pub struct SubagentCall<'a> {
+    pub instance_id: &'a ProviderInstanceId,
+    pub of: NodeOf<'a>,
+    pub ordinal: u64,
+    pub prompt: &'a str,
+    pub title: Option<&'a str>,
+    pub status: OrchestrationV2TurnItemStatus,
+    pub started_at: UtcDateTime,
+    pub completed_at: Option<UtcDateTime>,
+    pub result: Option<String>,
+    /// The child session the call started, when OpenCode has named it.
+    pub child_session: Option<&'a str>,
+    pub now: UtcDateTime,
+}
+
+pub struct SubagentRecords {
+    pub node: OrchestrationV2ExecutionNode,
+    pub subagent: OrchestrationV2Subagent,
+    pub item: OrchestrationV2TurnItem,
+}
+
+pub fn subagent_records(driver: &ProviderDriverKind, call: SubagentCall<'_>) -> SubagentRecords {
+    let subagent_id = derive::node_from_provider_item(driver, call.of.native_item_id);
+    let node = execution_node(
+        driver,
+        &call.of,
+        NodeTiming {
+            kind: OrchestrationV2ExecutionNodeKind::Subagent,
+            status: node_status_of(call.status),
+            started_at: call.started_at,
+            completed_at: call.completed_at,
+        },
+    );
+    let subagent_status = match call.status {
+        OrchestrationV2TurnItemStatus::Pending => OrchestrationV2SubagentStatus::Pending,
+        OrchestrationV2TurnItemStatus::Completed => OrchestrationV2SubagentStatus::Completed,
+        OrchestrationV2TurnItemStatus::Failed => OrchestrationV2SubagentStatus::Failed,
+        _ => OrchestrationV2SubagentStatus::Running,
+    };
+    let subagent = OrchestrationV2Subagent {
+        id: subagent_id.clone(),
+        thread_id: call.of.thread_id.clone(),
+        run_id: None,
+        parent_node_id: call.of.root_node_id.clone(),
+        origin: OrchestrationV2SubagentOrigin::ProviderNative,
+        created_by: OrchestrationV2Actor::Agent,
+        driver: driver.clone(),
+        provider_instance_id: call.instance_id.clone(),
+        provider_thread_id: Some(call.of.provider_thread_id.clone()),
+        child_thread_id: None,
+        native_task_ref: call.child_session.map(|child| native_ref(child, false)),
+        prompt: call.prompt.to_owned(),
+        title: call.title.map(str::to_owned),
+        model: None,
+        model_selection: None,
+        completion_wake: None,
+        completion_delivery: None,
+        status: subagent_status,
+        progress: None,
+        workflow: None,
+        result: call.result.clone(),
+        started_at: Some(call.started_at),
+        completed_at: call.completed_at,
+        updated_at: call.now,
+    };
+    let item = OrchestrationV2TurnItem::Subagent {
+        tool_non_execution_kind: None,
+        tool_surface: None,
+        tool_icon: None,
+        tool_source: None,
+        id: derive::turn_item_from_provider_item(driver, call.of.native_item_id),
+        thread_id: call.of.thread_id.clone(),
+        run_id: None,
+        node_id: Some(subagent_id.clone()),
+        provider_thread_id: Some(call.of.provider_thread_id.clone()),
+        provider_turn_id: Some(call.of.provider_turn_id.clone()),
+        native_item_ref: Some(native_ref(call.of.native_item_id, false)),
+        parent_item_id: None,
+        ordinal: call.ordinal,
+        status: call.status,
+        title: call.title.map(str::to_owned),
+        started_at: Some(call.started_at),
+        completed_at: call.completed_at,
+        updated_at: call.now,
+        subagent_id,
+        origin: OrchestrationV2SubagentOrigin::ProviderNative,
+        driver: driver.clone(),
+        provider_instance_id: call.instance_id.clone(),
+        child_thread_id: None,
+        prompt: call.prompt.to_owned(),
+        progress: None,
+        result: call.result,
+    };
+    SubagentRecords {
+        node,
+        subagent,
+        item,
     }
 }

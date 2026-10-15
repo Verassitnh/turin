@@ -1580,3 +1580,120 @@ async fn v2_compaction_runs_then_completes_with_its_summary() {
     assert_eq!(done["turn_item"]["nodeId"], "node_1");
     session.close().await;
 }
+
+#[tokio::test]
+async fn v1_task_tool_is_a_subagent_node_record_and_item_not_a_tool_call() {
+    let (script, session, mut events) = v1_session_with_turn().await;
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"message.part.updated","properties":{"part":{"id":"t_task","sessionID":"ses_1","messageID":"msg_a","type":"tool","callID":"c_task","tool":"task","state":{"status":"running","input":{"prompt":"explore the repo"},"title":"explore","time":{"start":1760500000000i64}}}}}).to_string(),
+        )))
+        .unwrap();
+    let running = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated" && value["turn_item"]["type"] == "subagent"
+    })
+    .await;
+    let node = of_type(&running, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["id"] == json!(derive_node("t_task")))
+        .expect("subagent node");
+    assert_eq!(node["node"]["kind"], "subagent");
+    assert_eq!(node["node"]["status"], "running");
+    assert!(
+        of_type(&running, "node.updated")
+            .iter()
+            .all(|event| event["node"]["kind"] != "tool_call"),
+        "a task call is not a tool call: {running:#?}"
+    );
+    let subagent = of_type(&running, "subagent.updated")
+        .into_iter()
+        .find(|event| event["subagent"]["prompt"] == "explore the repo")
+        .expect("subagent record");
+    assert_eq!(subagent["subagent"]["id"], json!(derive_node("t_task")));
+    assert_eq!(subagent["subagent"]["status"], "running");
+
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"message.part.updated","properties":{"part":{"id":"t_task","sessionID":"ses_1","messageID":"msg_a","type":"tool","callID":"c_task","tool":"task","state":{"status":"completed","input":{"prompt":"explore the repo"},"output":"found it","title":"explore","time":{"start":1760500000000i64,"end":1760500001000i64}}}}}).to_string(),
+        )))
+        .unwrap();
+    let done = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "completed"
+    })
+    .await;
+    let item = of_type(&done, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["type"] == "subagent")
+        .expect("completed subagent item");
+    assert_eq!(item["turn_item"]["nodeId"], json!(derive_node("t_task")));
+    assert_eq!(
+        item["turn_item"]["subagentId"],
+        json!(derive_node("t_task"))
+    );
+    assert_eq!(item["turn_item"]["result"], "found it");
+    session.close().await;
+}
+
+#[tokio::test]
+async fn v2_subagent_tool_is_a_subagent_node_record_and_item() {
+    let script = script(|request| {
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e1","type":"session.tool.success","data":{"sessionID":"ses_1","id":"call_s","name":"subagent","status":"completed","input":{"prompt":"look"},"output":"seen"}}).to_string(),
+        )))
+        .unwrap();
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated" && value["turn_item"]["type"] == "subagent"
+    })
+    .await;
+    let node = of_type(&seen, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["id"] == json!(derive_node("call_s")))
+        .expect("subagent node");
+    assert_eq!(node["node"]["kind"], "subagent");
+    assert_eq!(node["node"]["status"], "completed");
+    let record = of_type(&seen, "subagent.updated")
+        .into_iter()
+        .find(|event| event["subagent"]["id"] == json!(derive_node("call_s")))
+        .expect("subagent record");
+    assert_eq!(record["subagent"]["prompt"], "look");
+    session.close().await;
+}

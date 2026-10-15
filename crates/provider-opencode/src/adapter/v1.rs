@@ -41,10 +41,10 @@ use turin_provider_core::id_allocator::{IdAllocator, derive};
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
 use crate::adapter::records::{
-    Compaction, NodeOf, NodeTiming, RequestBody, TextBlock, assistant_message,
+    Compaction, NodeOf, NodeTiming, RequestBody, SubagentCall, TextBlock, assistant_message,
     compaction_turn_item, epoch_ms_or, execution_node, next_ordinal, open_code_question_id,
-    request_node, request_turn_item, settle_request_item, settle_request_node, text_turn_item,
-    todo_native_id, todo_plan, todo_steps, todos_complete, user_input_questions,
+    request_node, request_turn_item, settle_request_item, settle_request_node, subagent_records,
+    text_turn_item, todo_native_id, todo_plan, todo_steps, todos_complete, user_input_questions,
 };
 use crate::events::V1Event;
 use crate::v1_client::{PermissionReply, QuestionReply, V1Client};
@@ -854,6 +854,59 @@ impl OpenCodeV1Session {
             native_item_id: part_id,
             weak_ref: false,
         };
+        if name == "task" {
+            // `emitSubagent`: a task call is a subagent, not a tool call.
+            let prompt = input
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let title = state
+                .get("title")
+                .and_then(Value::as_str)
+                .or_else(|| input.get("description").and_then(Value::as_str));
+            let child_session = state
+                .pointer("/metadata/sessionId")
+                .or_else(|| state.pointer("/metadata/sessionID"))
+                .and_then(Value::as_str);
+            let ordinal = item_ordinal(turn, part_id);
+            let records = subagent_records(
+                &self.driver,
+                SubagentCall {
+                    instance_id: &self.instance_id,
+                    of: NodeOf {
+                        thread_id: &thread_id,
+                        root_node_id: &root_node_id,
+                        provider_thread_id: &provider_thread_id,
+                        provider_turn_id: &provider_turn_id,
+                        native_item_id: part_id,
+                        weak_ref: false,
+                    },
+                    ordinal,
+                    prompt: &prompt,
+                    title,
+                    status,
+                    started_at,
+                    completed_at,
+                    result: output.map(str::to_owned),
+                    child_session,
+                    now,
+                },
+            );
+            self.emit(ProviderAdapterV2Event::NodeUpdated {
+                driver: self.driver.clone(),
+                node: records.node,
+            });
+            self.emit(ProviderAdapterV2Event::SubagentUpdated {
+                driver: self.driver.clone(),
+                subagent: records.subagent,
+            });
+            self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+                driver: self.driver.clone(),
+                turn_item: records.item,
+            });
+            return;
+        }
         let node = execution_node(
             &self.driver,
             &of,

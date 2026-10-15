@@ -264,7 +264,10 @@ mod tests {
     #[test]
     fn keeps_an_explicit_accent_on_a_single_acp_agent() {
         let only = entry("acpRegistry", Some("#ff8800"), Some("mistral-vibe"));
-        assert!(should_show_instance_badge(&only, &[only.clone()]));
+        assert!(should_show_instance_badge(
+            &only,
+            std::slice::from_ref(&only)
+        ));
     }
 
     #[test]
@@ -279,7 +282,10 @@ mod tests {
     #[test]
     fn shows_the_badge_for_an_accent_or_a_shared_driver() {
         let accented = entry("codex", Some("#ff8800"), None);
-        assert!(should_show_instance_badge(&accented, &[accented.clone()]));
+        assert!(should_show_instance_badge(
+            &accented,
+            std::slice::from_ref(&accented)
+        ));
         let first = entry("codex", None, None);
         assert!(should_show_instance_badge(
             &first,

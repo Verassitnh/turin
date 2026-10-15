@@ -96,9 +96,9 @@ impl OptimisticThreadUpdate {
                 next.settled_override = Some(OrchestrationV2SettleOverride::Settled);
                 next.settled_at = Some(
                     if thread.settled_override == Some(OrchestrationV2SettleOverride::Settled) {
-                        thread.settled_at.clone().unwrap_or_else(|| now.clone())
+                        thread.settled_at.unwrap_or(*now)
                     } else {
-                        now.clone()
+                        *now
                     },
                 );
                 next.unsettled_at = Some(None);
@@ -113,9 +113,9 @@ impl OptimisticThreadUpdate {
                 next.settled_at = None;
                 next.unsettled_at = Some(
                     if thread.settled_override == Some(OrchestrationV2SettleOverride::Active) {
-                        thread.unsettled_at.clone().flatten()
+                        thread.unsettled_at.flatten()
                     } else {
-                        Some(now.clone())
+                        Some(*now)
                     },
                 );
             }
@@ -132,17 +132,13 @@ impl OptimisticThreadUpdate {
                     return None;
                 }
                 let until: UtcDateTime = snoozed_until.parse().ok()?;
-                let current_until = thread.snoozed_until.clone().flatten();
+                let current_until = thread.snoozed_until.flatten();
                 next.pending_runtime_request = None;
                 next.snoozed_at = Some(Some(
                     if current_until.is_some_and(|current| iso(&current) == *snoozed_until) {
-                        thread
-                            .snoozed_at
-                            .clone()
-                            .flatten()
-                            .unwrap_or_else(|| now.clone())
+                        thread.snoozed_at.flatten().unwrap_or(*now)
                     } else {
-                        now.clone()
+                        *now
                     },
                 ));
                 next.snoozed_until = Some(Some(until));
@@ -155,27 +151,21 @@ impl OptimisticThreadUpdate {
                 next.auto_settle_disabled_at = Some(if *enabled {
                     None
                 } else {
-                    Some(
-                        thread
-                            .auto_settle_disabled_at
-                            .clone()
-                            .flatten()
-                            .unwrap_or_else(|| now.clone()),
-                    )
+                    Some(thread.auto_settle_disabled_at.flatten().unwrap_or(*now))
                 });
             }
             Self::Pin { order_key } => {
-                let pinned_at = thread.pinned_at.clone().flatten();
+                let pinned_at = thread.pinned_at.flatten();
                 next.pin_order_key = if pinned_at.is_none() {
                     Some(order_key.clone())
                 } else {
                     thread.pin_order_key.clone()
                 };
-                next.pinned_at = Some(Some(pinned_at.unwrap_or_else(|| now.clone())));
+                next.pinned_at = Some(Some(pinned_at.unwrap_or(*now)));
                 if thread.settled_override == Some(OrchestrationV2SettleOverride::Settled) {
                     next.settled_override = Some(OrchestrationV2SettleOverride::Active);
                     next.settled_at = None;
-                    next.unsettled_at = Some(Some(now.clone()));
+                    next.unsettled_at = Some(Some(*now));
                 }
                 next.snoozed_until = Some(None);
                 next.snoozed_at = Some(None);
@@ -701,10 +691,7 @@ mod tests {
                 OptimisticThreadUpdate::Pin {
                     order_key: Some(key("a")),
                 },
-                |t| {
-                    t.pinned_at.clone().flatten().is_some()
-                        && t.pin_order_key == Some(Some(key("a")))
-                },
+                |t| t.pinned_at.flatten().is_some() && t.pin_order_key == Some(Some(key("a"))),
             ),
             ("unpin", OptimisticThreadUpdate::Unpin, |t| {
                 t.pinned_at == Some(None) && t.pin_order_key == Some(None)
@@ -712,7 +699,7 @@ mod tests {
             (
                 "setAutoSettle",
                 OptimisticThreadUpdate::SetAutoSettle { enabled: false },
-                |t| t.auto_settle_disabled_at.clone().flatten().is_some(),
+                |t| t.auto_settle_disabled_at.flatten().is_some(),
             ),
             (
                 "reorderPin",

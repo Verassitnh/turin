@@ -31,9 +31,9 @@ pub fn format_attachment_size(size_bytes: u64) -> String {
 
 /// User-facing rejection for a file over the effective upload limit.
 pub fn file_attachment_too_large_message(name: &str, max_upload_bytes: u64) -> String {
-    let max_upload_size = if max_upload_bytes >= MIB && max_upload_bytes % MIB == 0 {
+    let max_upload_size = if max_upload_bytes >= MIB && max_upload_bytes.is_multiple_of(MIB) {
         format!("{} MB", max_upload_bytes / MIB)
-    } else if max_upload_bytes >= KIB && max_upload_bytes % KIB == 0 {
+    } else if max_upload_bytes >= KIB && max_upload_bytes.is_multiple_of(KIB) {
         format!("{} KB", max_upload_bytes / KIB)
     } else {
         format!(

@@ -14,12 +14,12 @@ use crate::migration_manifest::{APPLICATION_EVENT_SOURCE_MARKER, MIGRATIONS, Mig
 const MIGRATIONS_TABLE: &str = "effect_sql_migrations";
 const FIRST_V2_MIGRATION_ID: i64 = 55;
 
-const ENSURE_TABLE: &str = "
-CREATE TABLE IF NOT EXISTS effect_sql_migrations (
+const ENSURE_TABLE: &str = r#"
+CREATE TABLE IF NOT EXISTS "effect_sql_migrations" (
   migration_id integer PRIMARY KEY NOT NULL,
   created_at datetime NOT NULL DEFAULT current_timestamp,
   name VARCHAR(255) NOT NULL
-)";
+)"#;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunMigrationsOptions {

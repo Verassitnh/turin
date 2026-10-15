@@ -1,6 +1,7 @@
 //! Shared provider services and adapter interfaces. See `PORTING.md`.
 
 pub mod adapter_driver;
+pub mod attachment_paths;
 pub mod attachment_prompt;
 pub mod auth;
 pub mod background_scope;
@@ -21,6 +22,7 @@ pub mod maintenance_resolver;
 pub mod mcp_provider_sessions;
 pub mod mcp_session;
 pub mod mcp_tool_presentation;
+pub mod model_manifest;
 pub mod native_protocol_logging;
 pub mod notification;
 pub mod orchestration_instructions;
@@ -32,6 +34,7 @@ pub mod provider_continuation_requests;
 pub mod provider_errors;
 pub mod provider_event_loggers;
 pub mod provider_host;
+pub mod provider_host_live;
 pub mod provider_instance_registry;
 pub mod provider_instance_registry_hydration;
 pub mod provider_latest_versions;

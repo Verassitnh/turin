@@ -188,7 +188,106 @@ id!(
     ContextTransferId,
     RawEventId,
     PlanId,
+    /// Referenced by orchestration events even though the scheduled-task module itself is cut.
+    ScheduledTaskId,
 );
+
+/// Wire form of upstream `Schema.Option(X)`: `Some` encodes as
+/// `{"_tag":"Some","value":…}`, `None` as `{"_tag":"None"}`.
+///
+/// Distinct from `Option<T>` (which maps `Schema.optionalKey` /
+/// `Schema.NullOr`): this shape appears inside struct fields in
+/// `sourceControl.ts` / `vcs.ts`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum EffectOption<T> {
+    #[serde(rename = "Some")]
+    Some { value: Box<T> },
+    #[serde(rename = "None")]
+    None,
+}
+
+impl<T> EffectOption<T> {
+    pub fn some(value: T) -> Self {
+        Self::Some { value: Box::new(value) }
+    }
+    pub fn as_ref_option(&self) -> Option<&T> {
+        match self {
+            Self::Some { value } => Some(value),
+            Self::None => None,
+        }
+    }
+}
+
+impl<T> Default for EffectOption<T> {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl<T> From<Option<T>> for EffectOption<T> {
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(value) => Self::some(value),
+            None => Self::None,
+        }
+    }
+}
+
+/// Defines a unit struct used for a constant-valued struct field, mirroring
+/// upstream `Schema.Literal("value")` fields (e.g. `kind: "snap-shot"`,
+/// `version: 1`): decodes only from exactly that string, encodes to it.
+#[macro_export]
+macro_rules! string_literal {
+    ($(#[$meta:meta])* $name:ident, $value:literal) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct $name;
+
+        impl ::serde::Serialize for $name {
+            fn serialize<S: ::serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_str($value)
+            }
+        }
+
+        impl<'de> ::serde::Deserialize<'de> for $name {
+            fn deserialize<D: ::serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let raw = <::std::borrow::Cow<'de, str>>::deserialize(d)?;
+                if raw == $value {
+                    Ok($name)
+                } else {
+                    Err(::serde::de::Error::custom(concat!("expected ", $value)))
+                }
+            }
+        }
+    };
+}
+
+/// Integer-valued counterpart of [`string_literal`], for `Schema.Literal(n)`.
+#[macro_export]
+macro_rules! int_literal {
+    ($(#[$meta:meta])* $name:ident, $value:literal) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct $name;
+
+        impl ::serde::Serialize for $name {
+            fn serialize<S: ::serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_u64($value)
+            }
+        }
+
+        impl<'de> ::serde::Deserialize<'de> for $name {
+            fn deserialize<D: ::serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let raw = <u64 as ::serde::Deserialize>::deserialize(d)?;
+                if raw == $value {
+                    Ok($name)
+                } else {
+                    Err(::serde::de::Error::custom(concat!("expected ", $value)))
+                }
+            }
+        }
+    };
+}
 
 /// Which client surface a command comes from. Turin only ever sends
 /// `Desktop`, but persisted upstream rows may carry the others.

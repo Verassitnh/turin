@@ -20,15 +20,18 @@ pub enum FavoriteEditorShortcut {
 /// Decides the favorite-editor shortcut for one keydown.
 ///
 /// `enabled` is whether the listener is installed. `matches_shortcut` is the
-/// caller's keybinding check. An empty `open_in_cwd` counts as none, as in
-/// upstream's truthiness test.
+/// caller's keybinding check. `is_repeat` is the keydown's `repeat` flag: a
+/// held key auto-repeats, and upstream's `event.repeat !== true` guard ignores
+/// those so the editor opens once per press. An empty `open_in_cwd` counts as
+/// none, as in upstream's truthiness test.
 pub fn favorite_editor_shortcut(
     enabled: bool,
     matches_shortcut: bool,
+    is_repeat: bool,
     open_in_cwd: Option<&str>,
     preferred_editor: Option<EditorId>,
 ) -> FavoriteEditorShortcut {
-    if !enabled || !matches_shortcut {
+    if !enabled || is_repeat || !matches_shortcut {
         return FavoriteEditorShortcut::Ignore;
     }
     match (open_in_cwd.filter(|cwd| !cwd.is_empty()), preferred_editor) {
@@ -47,7 +50,7 @@ mod tests {
     #[test]
     fn opens_the_preferred_editor_for_a_matching_shortcut() {
         assert_eq!(
-            favorite_editor_shortcut(true, true, Some("/work"), Some(EditorId::Cursor)),
+            favorite_editor_shortcut(true, true, false, Some("/work"), Some(EditorId::Cursor)),
             FavoriteEditorShortcut::Open {
                 cwd: "/work".to_owned(),
                 editor: EditorId::Cursor,
@@ -58,11 +61,21 @@ mod tests {
     #[test]
     fn ignores_keys_that_are_not_the_shortcut_or_when_disabled() {
         assert_eq!(
-            favorite_editor_shortcut(true, false, Some("/work"), Some(EditorId::Cursor)),
+            favorite_editor_shortcut(true, false, false, Some("/work"), Some(EditorId::Cursor)),
             FavoriteEditorShortcut::Ignore
         );
         assert_eq!(
-            favorite_editor_shortcut(false, true, Some("/work"), Some(EditorId::Cursor)),
+            favorite_editor_shortcut(false, true, false, Some("/work"), Some(EditorId::Cursor)),
+            FavoriteEditorShortcut::Ignore
+        );
+    }
+
+    #[test]
+    fn ignores_auto_repeated_keydowns_of_the_shortcut() {
+        // Holding the shortcut sends repeated keydowns with `repeat` set. Only
+        // the first press opens the editor, as upstream's `event.repeat` guard.
+        assert_eq!(
+            favorite_editor_shortcut(true, true, true, Some("/work"), Some(EditorId::Cursor)),
             FavoriteEditorShortcut::Ignore
         );
     }
@@ -70,15 +83,15 @@ mod tests {
     #[test]
     fn ignores_the_shortcut_without_a_cwd_or_an_editor() {
         assert_eq!(
-            favorite_editor_shortcut(true, true, None, Some(EditorId::Cursor)),
+            favorite_editor_shortcut(true, true, false, None, Some(EditorId::Cursor)),
             FavoriteEditorShortcut::Ignore
         );
         assert_eq!(
-            favorite_editor_shortcut(true, true, Some(""), Some(EditorId::Cursor)),
+            favorite_editor_shortcut(true, true, false, Some(""), Some(EditorId::Cursor)),
             FavoriteEditorShortcut::Ignore
         );
         assert_eq!(
-            favorite_editor_shortcut(true, true, Some("/work"), None),
+            favorite_editor_shortcut(true, true, false, Some("/work"), None),
             FavoriteEditorShortcut::Ignore
         );
     }

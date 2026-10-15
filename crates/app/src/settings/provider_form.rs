@@ -41,7 +41,14 @@ pub struct ProviderEnvironmentField {
     pub label: &'static str,
     pub description: &'static str,
     pub placeholder: &'static str,
-    pub sensitive: bool,
+    /// `undefined` means secure: `sensitive ?? true`.
+    pub sensitive: Option<bool>,
+}
+
+impl ProviderEnvironmentField {
+    pub fn is_sensitive(&self) -> bool {
+        self.sensitive.unwrap_or(true)
+    }
 }
 
 /// `cursorClient.environmentFields`.
@@ -50,7 +57,7 @@ pub const CURSOR_ENVIRONMENT_FIELDS: &[ProviderEnvironmentField] = &[ProviderEnv
     label: "Cursor API key",
     description: "Optional. Overrides browser sign-in for this provider.",
     placeholder: "Paste API key",
-    sensitive: true,
+    sensitive: Some(true),
 }];
 
 pub fn environment_fields_for_driver(driver: &str) -> &'static [ProviderEnvironmentField] {
@@ -362,7 +369,7 @@ pub fn next_provider_environment_with_field_value(
             next.push(EnvironmentVariable {
                 name: variable.name.clone(),
                 value: trimmed.to_owned(),
-                sensitive: field.sensitive,
+                sensitive: field.is_sensitive(),
                 value_redacted: None,
             });
         }
@@ -371,7 +378,7 @@ pub fn next_provider_environment_with_field_value(
         next.push(EnvironmentVariable {
             name: field.name.to_owned(),
             value: trimmed.to_owned(),
-            sensitive: field.sensitive,
+            sensitive: field.is_sensitive(),
             value_redacted: None,
         });
     }
@@ -623,7 +630,7 @@ mod tests {
                 label: "Cursor API key",
                 description: "Optional. Overrides browser sign-in for this provider.",
                 placeholder: "Paste API key",
-                sensitive: true,
+                sensitive: Some(true),
             }]
         );
     }
@@ -815,6 +822,112 @@ mod tests {
                 env[1].clone(),
                 env[2].clone(),
             ]
+        );
+    }
+
+    #[test]
+    fn dedicated_secret_is_written_as_a_sensitive_env_var() {
+        // `writes dedicated provider secrets as sensitive environment variables`
+        let env = vec![EnvironmentVariable {
+            name: "EXTRA_FLAG".into(),
+            value: "1".into(),
+            sensitive: false,
+            value_redacted: None,
+        }];
+        assert_eq!(
+            next_provider_environment_with_field_value(
+                &env,
+                &CURSOR_ENVIRONMENT_FIELDS[0],
+                "  cursor-key  "
+            ),
+            vec![
+                env[0].clone(),
+                EnvironmentVariable {
+                    name: "CURSOR_API_KEY".into(),
+                    value: "cursor-key".into(),
+                    sensitive: true,
+                    value_redacted: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn replacing_a_redacted_secret_drops_the_marker() {
+        // `replaces redacted provider secrets without preserving redaction markers`
+        let env = vec![EnvironmentVariable {
+            name: "CURSOR_API_KEY".into(),
+            value: String::new(),
+            sensitive: true,
+            value_redacted: Some(true),
+        }];
+        assert_eq!(
+            next_provider_environment_with_field_value(
+                &env,
+                &CURSOR_ENVIRONMENT_FIELDS[0],
+                "new-key"
+            ),
+            vec![EnvironmentVariable {
+                name: "CURSOR_API_KEY".into(),
+                value: "new-key".into(),
+                sensitive: true,
+                value_redacted: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn unset_sensitive_defaults_to_secure() {
+        // `applies the secure field default when replacing an existing non-sensitive value`
+        let field = ProviderEnvironmentField {
+            name: "OPENAI_API_KEY",
+            label: "OpenAI API key",
+            description: "",
+            placeholder: "",
+            sensitive: None,
+        };
+        let env = vec![EnvironmentVariable {
+            name: "OPENAI_API_KEY".into(),
+            value: "old-key".into(),
+            sensitive: false,
+            value_redacted: None,
+        }];
+        assert_eq!(
+            next_provider_environment_with_field_value(&env, &field, "new-key"),
+            vec![EnvironmentVariable {
+                name: "OPENAI_API_KEY".into(),
+                value: "new-key".into(),
+                sensitive: true,
+                value_redacted: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn dedicated_secrets_are_separated_from_the_generic_table() {
+        // `separates dedicated provider secrets from the generic environment table`
+        let env = vec![
+            EnvironmentVariable {
+                name: "CURSOR_API_KEY".into(),
+                value: "cursor-key".into(),
+                sensitive: true,
+                value_redacted: None,
+            },
+            EnvironmentVariable {
+                name: "EXTRA_FLAG".into(),
+                value: "1".into(),
+                sensitive: false,
+                value_redacted: None,
+            },
+        ];
+        assert_eq!(
+            read_provider_environment_variable(&env, "CURSOR_API_KEY")
+                .map(|variable| variable.value.as_str()),
+            Some("cursor-key")
+        );
+        assert_eq!(
+            provider_environment_without_names(&env, &HashSet::from(["CURSOR_API_KEY"])),
+            vec![env[1].clone()]
         );
     }
 

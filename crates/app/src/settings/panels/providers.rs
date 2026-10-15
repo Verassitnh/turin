@@ -1292,7 +1292,7 @@ impl SettingsView {
                 this.write_environment(row, &next, cx);
             }
         };
-        let input = if field.sensitive {
+        let input = if field.is_sensitive() {
             self.secret_commit_input(
                 &input_id,
                 &value,

@@ -4,6 +4,10 @@
 #![allow(clippy::result_large_err)]
 use crate::{
     claude_adapter_v2::{ClaudeAdapterEvent, ClaudeAdapterV2, ClaudeHostRequest},
+    claude_turn_items::{
+        ItemOrdinals, ToolCall, TurnScope, assistant_artifacts, item_ordinal, new_plan_id,
+        proposed_plan_artifact, tool_call_artifacts,
+    },
     claude_model_catalog::ClaudeModelCatalog,
     claude_model_options::{apply_claude_prompt_effort_prefix, compile_claude_model_selection},
     claude_permission::ApprovalDecision,
@@ -24,7 +28,7 @@ use turin_contracts::{
     PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId, TrimmedNonEmptyString, UtcDateTime,
     model_selection::ModelSelection,
     orchestration_v2::{
-        OrchestrationV2ConversationMessage, OrchestrationV2ConversationMessageRole,
+        OrchestrationV2ConversationMessage,
         OrchestrationV2NativeRefStrength, OrchestrationV2ProviderCapabilities,
         OrchestrationV2ProviderRef, OrchestrationV2ProviderSession,
         OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
@@ -417,6 +421,18 @@ struct ActiveTurn {
     steer_pending: bool,
     interrupted: bool,
     last_assistant: Option<OrchestrationV2ConversationMessage>,
+    scope: TurnScope,
+    item_ordinals: ItemOrdinals,
+    tool_calls: HashMap<String, TrackedTool>,
+}
+
+/// A tool call from its `tool_use` block until its `tool_result`.
+struct TrackedTool {
+    name: String,
+    input: Value,
+    ordinal: u64,
+    started_at: UtcDateTime,
+    finished: bool,
 }
 enum PendingRequest {
     Approval(
@@ -642,6 +658,14 @@ impl ClaudeActor {
             .ok_or_else(|| protocol_error("Claude session is not running"))?
             .send_prompt(text, Some(prompt_uuid), None)
             .map_err(|e| protocol_error(e.to_string()))?;
+        let scope = TurnScope {
+            driver: driver(),
+            thread_id: input.thread_id.clone(),
+            run_id: input.run_id.clone(),
+            root_node_id: input.root_node_id.clone(),
+            provider_thread_id: input.provider_thread.id.clone(),
+            provider_turn_id: turn.id.clone(),
+        };
         self.active = Some(ActiveTurn {
             input,
             turn,
@@ -650,6 +674,9 @@ impl ClaudeActor {
             steer_pending: false,
             interrupted: false,
             last_assistant: None,
+            scope,
+            item_ordinals: ItemOrdinals::new(),
+            tool_calls: HashMap::new(),
         });
         Ok(())
     }
@@ -851,7 +878,15 @@ impl ClaudeActor {
             ClaudeHostRequest::Hook { reply, .. } => {
                 let _ = reply.send(Some(json!({})));
             }
-            ClaudeHostRequest::ProposedPlan { .. } => {}
+            ClaudeHostRequest::ProposedPlan { markdown, .. } => {
+                let plan_id = new_plan_id(&active.scope);
+                let plan = proposed_plan_artifact(&active.scope, plan_id, &markdown);
+                let event = ProviderAdapterV2Event::PlanUpdated {
+                    driver: driver(),
+                    plan,
+                };
+                self.emit(event);
+            }
         }
     }
     fn placeholder_request(&self, active: &ActiveTurn) -> OrchestrationV2RuntimeRequest {
@@ -901,6 +936,7 @@ impl ClaudeActor {
     async fn event(&mut self, event: ClaudeAdapterEvent) {
         match event {
             ClaudeAdapterEvent::Assistant(frame) => self.assistant(frame),
+            ClaudeAdapterEvent::User(frame) => self.user(frame),
             ClaudeAdapterEvent::Result(frame) => self.result(frame),
             ClaudeAdapterEvent::Error(error) => self.fail_active(&error),
             ClaudeAdapterEvent::Eof => {
@@ -910,55 +946,22 @@ impl ClaudeActor {
         }
     }
     fn assistant(&mut self, frame: turin_claude_protocol::Frame) {
-        let Some(active) = self.active.as_mut() else {
-            return;
+        let events = match self.active.as_mut() {
+            Some(active) => assistant_events(active, &frame),
+            None => return,
         };
-        let text = frame
-            .raw
-            .pointer("/message/content")
-            .and_then(Value::as_array)
-            .map(|parts| {
-                parts
-                    .iter()
-                    .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
-                    .filter_map(|p| p.get("text").and_then(Value::as_str))
-                    .collect::<String>()
-            })
-            .unwrap_or_default();
-        if text.is_empty() {
-            return;
+        for event in events {
+            self.emit(event);
         }
-        let native = frame
-            .raw
-            .get("uuid")
-            .and_then(Value::as_str)
-            .unwrap_or("assistant");
-        let now = UtcDateTime::now();
-        let message = OrchestrationV2ConversationMessage {
-            notification: None,
-            created_by: turin_contracts::orchestration_v2::OrchestrationV2Actor::Agent,
-            creation_source:
-                turin_contracts::orchestration_v2::OrchestrationV2CreationSource::Provider,
-            scheduled_task_id: None,
-            sender_thread_id: None,
-            id: derive::message_from_provider_item(&driver(), native),
-            thread_id: active.input.thread_id.clone(),
-            run_id: Some(active.input.run_id.clone()),
-            node_id: Some(active.input.root_node_id.clone()),
-            role: OrchestrationV2ConversationMessageRole::Assistant,
-            text,
-            context: None,
-            attachments: vec![],
-            streaming: false,
-            created_at: now,
-            updated_at: now,
-            delegated_completion: None,
+    }
+    fn user(&mut self, frame: turin_claude_protocol::Frame) {
+        let events = match self.active.as_mut() {
+            Some(active) => tool_result_events(active, &frame),
+            None => return,
         };
-        active.last_assistant = Some(message.clone());
-        self.emit(ProviderAdapterV2Event::MessageUpdated {
-            driver: driver(),
-            message,
-        });
+        for event in events {
+            self.emit(event);
+        }
     }
     fn result(&mut self, frame: turin_claude_protocol::Frame) {
         let Some(active) = self.active.as_mut() else {
@@ -1015,10 +1018,14 @@ impl ClaudeActor {
         active.turn.completed_at = Some(now);
         active.thread.status = OrchestrationV2ProviderThreadStatus::Idle;
         active.thread.updated_at = now;
+        let closing = finish_running_tools(active, terminal_item_status(status));
         let turn = active.turn.clone();
         let thread = active.thread.clone();
         let thread_id = active.input.thread_id.clone();
         let run_ordinal = PositiveInt::new(active.input.run_ordinal.max(1) as u64).unwrap();
+        for event in closing {
+            self.emit(event);
+        }
         self.emit(ProviderAdapterV2Event::ProviderTurnUpdated {
             driver: driver(),
             thread_id: Some(thread_id),
@@ -1066,7 +1073,7 @@ impl ClaudeActor {
     /// The CLI went away before a result. An interrupt that was asked for
     /// ends the turn as interrupted, and the process is reusable only then.
     fn fail_active(&mut self, error: &str) {
-        let Some(active) = self.active.take() else {
+        let Some(mut active) = self.active.take() else {
             return;
         };
         let run_ordinal = PositiveInt::new(active.input.run_ordinal.max(1) as u64).unwrap();
@@ -1090,6 +1097,10 @@ impl ClaudeActor {
                 OrchestrationV2ProviderThreadDisposition::Broken,
             )
         };
+        let closing = finish_running_tools(&mut active, terminal_item_status(status));
+        for event in closing {
+            self.emit(event);
+        }
         let mut turn = active.turn;
         turn.status = if status == ProviderAdapterV2TurnTerminalStatus::Interrupted {
             OrchestrationV2ProviderTurnStatus::Interrupted
@@ -1114,5 +1125,151 @@ impl ClaudeActor {
             retry_started_at: None,
             thread_disposition: disposition,
         });
+    }
+}
+
+/// Assistant text blocks become a node, message, and turn item. `tool_use`
+/// blocks start a tool call. Thinking blocks are not ported yet.
+fn assistant_events(active: &mut ActiveTurn, frame: &turin_claude_protocol::Frame) -> Vec<ProviderAdapterV2Event> {
+    let message_id = frame
+        .raw
+        .pointer("/message/id")
+        .and_then(Value::as_str)
+        .or_else(|| frame.raw.get("uuid").and_then(Value::as_str))
+        .unwrap_or("assistant")
+        .to_owned();
+    let blocks = frame
+        .raw
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let now = UtcDateTime::now();
+    let mut events = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                let text = block.get("text").and_then(Value::as_str).unwrap_or_default();
+                if text.is_empty() {
+                    continue;
+                }
+                let native = format!("{message_id}:text:{index}");
+                let ordinal = item_ordinal(&mut active.item_ordinals, active.input.provider_turn_ordinal, &native);
+                let artifacts = assistant_artifacts(&active.scope, &native, ordinal, text, now);
+                active.last_assistant = Some(artifacts.message.clone());
+                events.push(ProviderAdapterV2Event::NodeUpdated { driver: driver(), node: artifacts.node });
+                events.push(ProviderAdapterV2Event::MessageUpdated { driver: driver(), message: artifacts.message });
+                events.push(ProviderAdapterV2Event::TurnItemUpdated { driver: driver(), turn_item: artifacts.turn_item });
+            }
+            Some("tool_use") => {
+                let Some(native) = block.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("tool").to_owned();
+                let input = block.get("input").cloned().unwrap_or(Value::Null);
+                let ordinal = item_ordinal(&mut active.item_ordinals, active.input.provider_turn_ordinal, native);
+                let call = ToolCall {
+                    native_item_id: native,
+                    tool_name: &name,
+                    input: &input,
+                    output: None,
+                    status: "running",
+                    ordinal,
+                    started_at: now,
+                    updated_at: now,
+                };
+                let artifacts = tool_call_artifacts(&active.scope, &call);
+                events.push(ProviderAdapterV2Event::NodeUpdated { driver: driver(), node: artifacts.node });
+                events.push(ProviderAdapterV2Event::TurnItemUpdated { driver: driver(), turn_item: artifacts.turn_item });
+                active.tool_calls.insert(
+                    native.to_owned(),
+                    TrackedTool { name, input, ordinal, started_at: now, finished: false },
+                );
+            }
+            _ => {}
+        }
+    }
+    events
+}
+
+/// `tool_result` blocks finish the tracked tool call they answer.
+fn tool_result_events(active: &mut ActiveTurn, frame: &turin_claude_protocol::Frame) -> Vec<ProviderAdapterV2Event> {
+    let blocks = frame
+        .raw
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let now = UtcDateTime::now();
+    let mut events = Vec::new();
+    for block in blocks.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")) {
+        let Some(native) = block.get("tool_use_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(tracked) = active.tool_calls.get_mut(native) else {
+            continue;
+        };
+        if tracked.finished {
+            continue;
+        }
+        tracked.finished = true;
+        let failed = block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+        let output = block.get("content").cloned().unwrap_or(Value::Null);
+        let call = ToolCall {
+            native_item_id: native,
+            tool_name: &tracked.name,
+            input: &tracked.input,
+            output: Some(&output),
+            status: if failed { "failed" } else { "completed" },
+            ordinal: tracked.ordinal,
+            started_at: tracked.started_at,
+            updated_at: now,
+        };
+        let artifacts = tool_call_artifacts(&active.scope, &call);
+        events.push(ProviderAdapterV2Event::NodeUpdated { driver: driver(), node: artifacts.node });
+        events.push(ProviderAdapterV2Event::TurnItemUpdated { driver: driver(), turn_item: artifacts.turn_item });
+    }
+    events
+}
+
+/// A turn that ends with tool calls still open closes them with the turn's
+/// outcome, so no item is left running.
+fn finish_running_tools(active: &mut ActiveTurn, status: &'static str) -> Vec<ProviderAdapterV2Event> {
+    let now = UtcDateTime::now();
+    let mut events = Vec::new();
+    let open: Vec<String> = active
+        .tool_calls
+        .iter()
+        .filter(|(_, tool)| !tool.finished)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for native in open {
+        let Some(tracked) = active.tool_calls.get_mut(&native) else {
+            continue;
+        };
+        tracked.finished = true;
+        let call = ToolCall {
+            native_item_id: &native,
+            tool_name: &tracked.name,
+            input: &tracked.input,
+            output: None,
+            status,
+            ordinal: tracked.ordinal,
+            started_at: tracked.started_at,
+            updated_at: now,
+        };
+        let artifacts = tool_call_artifacts(&active.scope, &call);
+        events.push(ProviderAdapterV2Event::NodeUpdated { driver: driver(), node: artifacts.node });
+        events.push(ProviderAdapterV2Event::TurnItemUpdated { driver: driver(), turn_item: artifacts.turn_item });
+    }
+    events
+}
+
+fn terminal_item_status(status: ProviderAdapterV2TurnTerminalStatus) -> &'static str {
+    match status {
+        ProviderAdapterV2TurnTerminalStatus::Completed => "completed",
+        ProviderAdapterV2TurnTerminalStatus::Interrupted => "interrupted",
+        ProviderAdapterV2TurnTerminalStatus::Cancelled => "cancelled",
+        ProviderAdapterV2TurnTerminalStatus::Failed => "failed",
     }
 }

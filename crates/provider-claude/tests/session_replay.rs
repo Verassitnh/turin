@@ -10,8 +10,9 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use turin_contracts::{
     model_selection::ModelSelection,
     orchestration_v2::{
-        OrchestrationV2AppThread, OrchestrationV2ProviderThread, OrchestrationV2ProviderTurn,
-        OrchestrationV2ProviderTurnStatus,
+        OrchestrationV2AppThread, OrchestrationV2ExecutionNodeKind, OrchestrationV2ProviderThread,
+        OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus, OrchestrationV2TurnItem,
+        OrchestrationV2TurnItemStatus,
     },
     provider_instance::ProviderInstanceId,
     provider_policy::{ProviderInteractionMode, RuntimeMode},
@@ -414,4 +415,58 @@ async fn interrupt_reaches_the_cli_and_marks_the_turn_interrupted() {
         _ => None,
     });
     assert_eq!(turn, Some(OrchestrationV2ProviderTurnStatus::Interrupted));
+}
+
+fn turn_items(events: &[ProviderAdapterV2Event]) -> Vec<OrchestrationV2TurnItem> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::TurnItemUpdated { turn_item, .. } => Some(turn_item.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn read_only_tool_fixture_emits_tool_items_and_completes() {
+    let harness = Harness::fixture("tool_call_read_only");
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Read two files"))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    assert!(assistant_texts(&seen).iter().any(|t| t == "read only tool fixture complete"));
+
+    // Each Read starts running, then completes with its file content.
+    let reads: Vec<_> = turn_items(&seen)
+        .into_iter()
+        .filter_map(|item| match item {
+            OrchestrationV2TurnItem::DynamicTool {
+                tool_name,
+                status,
+                output,
+                ..
+            } if tool_name.as_ref().map(|name| name.as_str()) == Some("Read") => Some((status, output)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads.len(), 4, "two running and two completed updates");
+    let completed: Vec<_> = reads
+        .iter()
+        .filter(|(status, _)| *status == OrchestrationV2TurnItemStatus::Completed)
+        .collect();
+    assert_eq!(completed.len(), 2);
+    assert!(completed.iter().all(|(_, output)| output.is_some()));
+
+    let tool_nodes = seen
+        .iter()
+        .filter(|event| matches!(event, ProviderAdapterV2Event::NodeUpdated { node, .. }
+            if node.kind == OrchestrationV2ExecutionNodeKind::ToolCall))
+        .count();
+    assert_eq!(tool_nodes, 4);
 }

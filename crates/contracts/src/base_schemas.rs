@@ -198,7 +198,8 @@ id!(
 /// Distinct from `Option<T>` (which maps `Schema.optionalKey` /
 /// `Schema.NullOr`): this shape appears inside struct fields in
 /// `sourceControl.ts` / `vcs.ts`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "_tag")]
 pub enum EffectOption<T> {
     #[serde(rename = "Some")]
     Some { value: Box<T> },

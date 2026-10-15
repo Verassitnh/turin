@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 turin-contracts.workspace = true
 turin-git.workspace = true
 async-trait.workspace = true

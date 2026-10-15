@@ -20,6 +20,7 @@ use crate::adapter::logic::{opencode_driver, select_generation, v1_capabilities,
 use crate::adapter::v1::OpenCodeV1Session;
 use crate::adapter::v2::OpenCodeV2Session;
 use crate::error::OpenCodeRuntimeError;
+use crate::ledger::OpenCodeServerLedger;
 use crate::runtime::{
     ConnectOpenCodeServer, OpenCodeServerProcess, connect_to_open_code_server, default_v1_verify,
 };
@@ -93,6 +94,7 @@ pub struct OpenCodeAdapter {
     probed: Mutex<Option<OpenCodeGeneration>>,
     endpoint: Option<Endpoint>,
     v2_server: Mutex<Option<Arc<OpenCode2Server>>>,
+    ledger: Option<OpenCodeServerLedger>,
 }
 
 impl OpenCodeAdapter {
@@ -104,7 +106,15 @@ impl OpenCodeAdapter {
             probed: Mutex::new(None),
             endpoint: None,
             v2_server: Mutex::new(None),
+            ledger: None,
         }
+    }
+
+    /// Records every server this adapter spawns in `ledger`, so a T3 server
+    /// killed with SIGKILL leaves nothing running for the next start to find.
+    pub fn with_server_ledger(mut self, ledger: OpenCodeServerLedger) -> Self {
+        self.ledger = Some(ledger);
+        self
     }
 
     /// Tests and the gated smoke talk to a server that is already listening.
@@ -128,6 +138,7 @@ impl OpenCodeAdapter {
                 password: password.into(),
             }),
             v2_server: Mutex::new(None),
+            ledger: None,
         }
     }
 
@@ -154,6 +165,7 @@ impl OpenCodeAdapter {
             environment: std::env::vars().collect(),
             idle: None,
             shutdown_grace: None,
+            ledger: self.ledger.clone(),
         })?);
         *slot = Some(Arc::clone(&server));
         Ok(server)
@@ -280,7 +292,7 @@ impl ProviderAdapterV2 for OpenCodeAdapter {
                         port: None,
                         timeout: None,
                         shutdown_grace: None,
-                        ledger: None,
+                        ledger: self.ledger.clone(),
                     },
                     default_v1_verify(),
                 )

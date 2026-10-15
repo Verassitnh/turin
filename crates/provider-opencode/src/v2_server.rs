@@ -13,6 +13,7 @@ use base64::Engine;
 use tokio::sync::{Mutex, oneshot};
 
 use crate::error::OpenCodeRuntimeError;
+use crate::ledger::OpenCodeServerLedger;
 use crate::runtime::VerifyFn;
 use crate::server_owner::{OpenCodeServerOwner, OwnerConfig};
 use crate::v2_client::V2Client;
@@ -41,6 +42,7 @@ pub struct OpenCode2Config {
     pub environment: BTreeMap<String, String>,
     pub idle: Option<Duration>,
     pub shutdown_grace: Option<Duration>,
+    pub ledger: Option<OpenCodeServerLedger>,
 }
 
 #[derive(Clone)]
@@ -90,6 +92,7 @@ impl OpenCode2Server {
             idle: config.idle,
             shutdown_grace: config.shutdown_grace,
             verify: Some(verify),
+            ledger: config.ledger,
         });
         Ok(Self {
             mode: Mode::Spawned { owner, cached },
@@ -328,6 +331,7 @@ mod tests {
             environment: BTreeMap::new(),
             idle: None,
             shutdown_grace: None,
+            ledger: None,
         })
         .unwrap();
         let version = opencode
@@ -359,6 +363,7 @@ mod tests {
             environment: BTreeMap::new(),
             idle: None,
             shutdown_grace: None,
+            ledger: None,
         })
         .unwrap();
         let err = opencode
@@ -407,6 +412,7 @@ mod tests {
             idle: Some(idle),
             shutdown_grace: Some(Duration::from_millis(40)),
             verify: Some(verify),
+            ledger: None,
         });
         Spawned {
             server: OpenCode2Server {

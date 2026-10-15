@@ -429,9 +429,10 @@ mod tests {
         let zed = build_remote_open_url(EditorId::Zed, "host", "C:\\Users\\x").unwrap();
         assert_eq!(zed, "zed://ssh/host/Users/x");
 
-        // Other Windows drives keep their rooted shape.
+        // Other Windows drives keep their rooted shape; `encodeURIComponent`
+        // also encodes the `:` of a non-system drive.
         let zed_d = build_remote_open_url(EditorId::Zed, "host", "D:\\work").unwrap();
-        assert_eq!(zed_d, "zed://ssh/host/D:/work");
+        assert_eq!(zed_d, "zed://ssh/host/D%3A/work");
 
         // JetBrains goes through the Toolbox App link.
         let jb = build_remote_open_url(EditorId::Idea, "box", "/srv/app").unwrap();

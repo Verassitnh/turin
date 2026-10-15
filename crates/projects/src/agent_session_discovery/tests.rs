@@ -2,7 +2,7 @@
 //! `recentThreads`). Every fixture lives in a temp dir; the real `~/.claude`
 //! and `~/.codex` are never read.
 
-use std::collections::BTreeMap;
+use indexmap::IndexMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,17 +14,20 @@ use parking_lot::Mutex;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use turin_contracts::agent_sessions::{AgentSessionProjectGit, AgentSessionScanResult, AgentSessionSource};
+use turin_contracts::agent_sessions::{
+    AgentSessionProjectGit, AgentSessionScanResult, AgentSessionSource,
+};
 use turin_contracts::base_schemas::{ProjectId, TrimmedNonEmptyString};
 use turin_contracts::orchestration_project::OrchestrationProjectShell;
 use turin_contracts::provider_instance::{
-    ProviderDriverKind, ProviderInstanceConfig, ProviderInstanceConfigMap, ProviderInstanceEnvironmentVariable,
-    ProviderInstanceEnvironmentVariableName, ProviderInstanceId,
+    ProviderDriverKind, ProviderInstanceConfig, ProviderInstanceConfigMap,
+    ProviderInstanceEnvironmentVariable, ProviderInstanceEnvironmentVariableName,
+    ProviderInstanceId,
 };
 
 use super::*;
 use crate::agent_session_scanner::{AgentSessionRecentThread, AgentSessionScanner};
-use crate::project_ports::{PortError, ProjectStoreReads, ProjectRow};
+use crate::project_ports::{PortError, ProjectRow, ProjectStoreReads};
 
 /// `Date.parse` for the ISO strings the cases use.
 fn ms(iso: &str) -> f64 {
@@ -151,7 +154,10 @@ impl ProjectStoreReads for Shells {
     async fn get(&self, _: &ProjectId, _: bool) -> Result<Option<ProjectRow>, PortError> {
         Ok(None)
     }
-    async fn find_active_by_workspace_root(&self, _: &str) -> Result<Option<ProjectRow>, PortError> {
+    async fn find_active_by_workspace_root(
+        &self,
+        _: &str,
+    ) -> Result<Option<ProjectRow>, PortError> {
         Ok(None)
     }
     async fn list(&self, _: bool) -> Result<Vec<ProjectRow>, PortError> {
@@ -175,8 +181,7 @@ fn project_shell(workspace_root: &Path) -> OrchestrationProjectShell {
     OrchestrationProjectShell {
         id: ProjectId::new("project-1").expect("id"),
         title: TrimmedNonEmptyString::new("Imported").expect("title"),
-        workspace_root: TrimmedNonEmptyString::new(workspace_root.to_string_lossy())
-            .expect("root"),
+        workspace_root: TrimmedNonEmptyString::new(workspace_root.to_string_lossy()).expect("root"),
         repository_identity: None,
         default_model_selection: None,
         default_thread_env_mode: None,
@@ -207,7 +212,8 @@ struct Fixture {
     codex_home: PathBuf,
     base_dir: PathBuf,
     home_dir: PathBuf,
-    instances: BTreeMap<String, ProviderInstanceConfig>,
+    /// Insertion order is the configured order, as `Object.entries` gives upstream.
+    instances: IndexMap<String, ProviderInstanceConfig>,
     imported_roots: Vec<PathBuf>,
     host_environment: HashMap<String, String>,
     /// Pins `now` (epoch ms) for the window and `scannedAt`. `None` is the wall clock.
@@ -233,7 +239,7 @@ impl Fixture {
             codex_home,
             base_dir,
             home_dir,
-            instances: BTreeMap::new(),
+            instances: IndexMap::new(),
             imported_roots: Vec::new(),
             host_environment: HashMap::new(),
             now_ms: None,
@@ -459,6 +465,9 @@ async fn does_not_open_a_non_file_transcript() {
     }
 }
 
+/// Maps a stat or open path to the path that answers for it.
+type PathRedirect = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// Test double over the host filesystem. Each hook mirrors one upstream
 /// instrumented `FileSystem` override: scripted listings, path aliasing, open
 /// counts, and capped reads.
@@ -468,7 +477,7 @@ struct FsDouble {
     /// `stat(path)` answers for `path` as if it were this other path.
     stat_redirects: HashMap<String, String>,
     /// Maps every stat and open path (virtual files onto a template).
-    path_redirect: Option<Box<dyn Fn(&str) -> Option<String> + Send + Sync>>,
+    path_redirect: Option<PathRedirect>,
     /// Scripted `readDirectory` answers, counted in `directory_reads`.
     listings: HashMap<String, Vec<String>>,
     /// Every directory whose parent is this path reads as empty and is counted.
@@ -505,7 +514,11 @@ struct CallRedirect {
 impl FsDouble {
     fn opened(&self, path: &Path) -> usize {
         let target = path.to_string_lossy();
-        self.opens.lock().iter().filter(|open| **open == target).count()
+        self.opens
+            .lock()
+            .iter()
+            .filter(|open| **open == target)
+            .count()
     }
 
     fn resolve(&self, path: &str) -> String {
@@ -525,7 +538,9 @@ impl FsDouble {
         };
         self.call_redirects
             .iter()
-            .find(|redirect| redirect.kind == kind && redirect.path == path && count >= redirect.after)
+            .find(|redirect| {
+                redirect.kind == kind && redirect.path == path && count >= redirect.after
+            })
             .map_or_else(|| self.resolve(path), |redirect| redirect.target.clone())
     }
 }
@@ -563,7 +578,10 @@ impl ScannerFileSystem for FsDouble {
             opens.push(path.to_owned());
             opens.iter().filter(|open| open.as_str() == path).count()
         };
-        let file = self.inner.open(&self.resolve_call(CallKind::Open, path)).await?;
+        let file = self
+            .inner
+            .open(&self.resolve_call(CallKind::Open, path))
+            .await?;
         Some(Box::new(CountingFile {
             inner: file,
             requests: Arc::clone(&self.read_requests),
@@ -619,7 +637,9 @@ async fn stops_directory_reads_at_the_discovery_operation_budget() {
             AgentSessionSource::ClaudeAgent => fixture.claude_home.join("projects"),
             AgentSessionSource::Codex => fixture.codex_home.join("sessions"),
         };
-        let names: Vec<String> = (0..20_001).map(|index| format!("empty-{index:05}")).collect();
+        let names: Vec<String> = (0..20_001)
+            .map(|index| format!("empty-{index:05}"))
+            .collect();
         let double = fs_double(|double| {
             double
                 .listings
@@ -694,7 +714,10 @@ async fn returns_the_imported_project_id_through_a_realpath_alias() {
 
     let candidate = &result.candidates[0];
     assert_eq!(candidate.path.as_str(), workspace.path().to_string_lossy());
-    assert_eq!(candidate.project_id, Some(ProjectId::new("project-1").expect("id")));
+    assert_eq!(
+        candidate.project_id,
+        Some(ProjectId::new("project-1").expect("id"))
+    );
     assert!(candidate.already_imported);
     assert_eq!(candidate.git, Some(None));
 }
@@ -718,7 +741,10 @@ async fn matches_a_persisted_project_alias_to_a_transcript_realpath() {
 
     let candidate = &result.candidates[0];
     assert_eq!(candidate.path.as_str(), alias.to_string_lossy());
-    assert_eq!(candidate.project_id, Some(ProjectId::new("project-1").expect("id")));
+    assert_eq!(
+        candidate.project_id,
+        Some(ProjectId::new("project-1").expect("id"))
+    );
     assert!(candidate.already_imported);
     assert_eq!(candidate.git, Some(None));
 }
@@ -748,11 +774,7 @@ async fn merges_case_aliases_and_preserves_the_persisted_project_path() {
         );
     });
 
-    let result = fixture
-        .scanner_with(double)
-        .scan()
-        .await
-        .expect("scan");
+    let result = fixture.scanner_with(double).scan().await.expect("scan");
 
     assert_eq!(
         summarize(&result),
@@ -798,11 +820,7 @@ async fn keeps_case_variants_distinct_when_the_filesystem_identities_differ() {
         );
     });
 
-    let result = fixture
-        .scanner_with(double)
-        .scan()
-        .await
-        .expect("scan");
+    let result = fixture.scanner_with(double).scan().await.expect("scan");
 
     let paths: Vec<String> = result
         .candidates
@@ -850,7 +868,11 @@ async fn uses_explicit_default_slot_homes_instead_of_the_fixture_homes() {
         ms("2026-01-01T00:00:00.000Z"),
     );
     write_transcript(
-        &claude_instance_home.path().join("projects").join("-actual").join("session.jsonl"),
+        &claude_instance_home
+            .path()
+            .join("projects")
+            .join("-actual")
+            .join("session.jsonl"),
         &claude_session_line(claude_workspace.path()),
         ms("2026-02-01T00:00:00.000Z"),
     );
@@ -867,7 +889,10 @@ async fn uses_explicit_default_slot_homes_instead_of_the_fixture_homes() {
     );
     fixture.configure(
         "claudeAgent",
-        instance("claudeAgent", json!({"homePath": claude_instance_home.path()})),
+        instance(
+            "claudeAgent",
+            json!({"homePath": claude_instance_home.path()}),
+        ),
     );
     fixture.configure(
         "codex",
@@ -893,10 +918,18 @@ async fn scans_each_distinct_home_across_multiple_instances_once() {
     let other_workspace = fixture.workspace("t3code-workspace-other-");
     for (home, cwd) in [
         (fixture.codex_home.clone(), workspace.path().to_path_buf()),
-        (other_codex_home.path().to_path_buf(), other_workspace.path().to_path_buf()),
+        (
+            other_codex_home.path().to_path_buf(),
+            other_workspace.path().to_path_buf(),
+        ),
     ] {
         write_transcript(
-            &home.join("sessions").join("2026").join("01").join("01").join("rollout-session.jsonl"),
+            &home
+                .join("sessions")
+                .join("2026")
+                .join("01")
+                .join("01")
+                .join("rollout-session.jsonl"),
             &codex_rollout_line(&cwd),
             ms("2026-01-01T00:00:00.000Z"),
         );
@@ -961,7 +994,10 @@ async fn honors_provider_instance_home_directory_environment_variables() {
     fixture.configure(
         "claudeAgent",
         ProviderInstanceConfig {
-            environment: Some(vec![env_var("CLAUDE_CONFIG_DIR", claude_environment_home.path())]),
+            environment: Some(vec![env_var(
+                "CLAUDE_CONFIG_DIR",
+                claude_environment_home.path(),
+            )]),
             ..instance("claudeAgent", json!({}))
         },
     );
@@ -997,7 +1033,10 @@ async fn ignores_invalid_provider_instances_while_scanning_the_remaining_provide
 
     let result = fixture.scan().await;
 
-    assert_eq!(paths(&result), vec![workspace.path().to_string_lossy().into_owned()]);
+    assert_eq!(
+        paths(&result),
+        vec![workspace.path().to_string_lossy().into_owned()]
+    );
 }
 
 #[tokio::test]
@@ -1008,8 +1047,16 @@ async fn does_not_scan_provider_instances_disabled_by_the_envelope_or_config() {
     let envelope_workspace = fixture.workspace("t3code-workspace-disabled-envelope-");
     let config_workspace = fixture.workspace("t3code-workspace-disabled-config-");
     for (home, workspace, session) in [
-        (envelope_home.path(), envelope_workspace.path(), "envelope-disabled"),
-        (config_home.path(), config_workspace.path(), "config-disabled"),
+        (
+            envelope_home.path(),
+            envelope_workspace.path(),
+            "envelope-disabled",
+        ),
+        (
+            config_home.path(),
+            config_workspace.path(),
+            "config-disabled",
+        ),
     ] {
         write_transcript(
             &home
@@ -1031,7 +1078,10 @@ async fn does_not_scan_provider_instances_disabled_by_the_envelope_or_config() {
     );
     fixture.configure(
         "codex-config-disabled",
-        instance("codex", json!({"enabled": false, "homePath": config_home.path()})),
+        instance(
+            "codex",
+            json!({"enabled": false, "homePath": config_home.path()}),
+        ),
     );
 
     let result = fixture.scan().await;
@@ -1062,7 +1112,9 @@ fn pathdiff_relative(target: &Path) -> String {
     let mut common = 0;
     let target_parts: Vec<_> = target.components().collect();
     let cwd_parts: Vec<_> = cwd.components().collect();
-    while common < target_parts.len().min(cwd_parts.len()) && target_parts[common] == cwd_parts[common] {
+    while common < target_parts.len().min(cwd_parts.len())
+        && target_parts[common] == cwd_parts[common]
+    {
         common += 1;
     }
     for _ in common..cwd_parts.len() {
@@ -1108,7 +1160,10 @@ async fn excludes_the_home_directory_temporary_root_and_t3_data_directory() {
 
     let result = fixture.scan().await;
 
-    assert_eq!(paths(&result), vec![workspace.path().to_string_lossy().into_owned()]);
+    assert_eq!(
+        paths(&result),
+        vec![workspace.path().to_string_lossy().into_owned()]
+    );
 }
 
 #[tokio::test]
@@ -1156,7 +1211,10 @@ async fn excludes_codex_scratch_directories_and_downloads() {
 
     let result = fixture.scan().await;
 
-    assert_eq!(paths(&result), vec![keep.path().to_string_lossy().into_owned()]);
+    assert_eq!(
+        paths(&result),
+        vec![keep.path().to_string_lossy().into_owned()]
+    );
 }
 
 #[tokio::test]
@@ -1176,7 +1234,10 @@ async fn skips_linked_git_worktrees_and_reports_the_origin_of_real_checkouts() {
     .expect("repo config");
     fs::write(
         worktree.path().join(".git"),
-        format!("gitdir: {}\n", repo_git.join("worktrees").join("wt").display()),
+        format!(
+            "gitdir: {}\n",
+            repo_git.join("worktrees").join("wt").display()
+        ),
     )
     .expect("worktree pointer");
     fs::create_dir_all(no_remote.path().join(".git")).expect("no-remote git");
@@ -1227,13 +1288,22 @@ async fn skips_linked_git_worktrees_and_reports_the_origin_of_real_checkouts() {
         vec![
             (
                 submodule.path().to_string_lossy().into_owned(),
-                git(Some("github.com/pingdotgg/vendor"), Some("pingdotgg/vendor")),
+                git(
+                    Some("github.com/pingdotgg/vendor"),
+                    Some("pingdotgg/vendor")
+                ),
             ),
-            (no_remote.path().to_string_lossy().into_owned(), git(None, None)),
+            (
+                no_remote.path().to_string_lossy().into_owned(),
+                git(None, None)
+            ),
             (plain.path().to_string_lossy().into_owned(), Some(None)),
             (
                 repo.path().to_string_lossy().into_owned(),
-                git(Some("github.com/pingdotgg/t3code"), Some("pingdotgg/t3code")),
+                git(
+                    Some("github.com/pingdotgg/t3code"),
+                    Some("pingdotgg/t3code")
+                ),
             ),
         ]
     );
@@ -1243,7 +1313,11 @@ async fn skips_linked_git_worktrees_and_reports_the_origin_of_real_checkouts() {
 async fn excludes_sandboxes_under_the_configured_worktrees_dir_without_t3_in_the_path() {
     let fixture = Fixture::new();
     // Only the configured prefix can match here: the base dir has no `.t3` segment.
-    let worktree_cwd = fixture.base_dir.join("worktrees").join("t3code").join("wt-2");
+    let worktree_cwd = fixture
+        .base_dir
+        .join("worktrees")
+        .join("t3code")
+        .join("wt-2");
     fs::create_dir_all(&worktree_cwd).expect("worktree");
     write_transcript(
         &fixture.claude_transcript("-slug", "a.jsonl"),
@@ -1260,7 +1334,11 @@ async fn excludes_sandboxes_under_the_configured_worktrees_dir_without_t3_in_the
 #[tokio::test]
 async fn excludes_sandboxes_reached_through_a_symlink_into_the_worktrees_dir() {
     let fixture = Fixture::new();
-    let worktree_cwd = fixture.base_dir.join("worktrees").join("t3code").join("wt-3");
+    let worktree_cwd = fixture
+        .base_dir
+        .join("worktrees")
+        .join("t3code")
+        .join("wt-3");
     fs::create_dir_all(&worktree_cwd).expect("worktree");
     // The recorded cwd's own spelling looks harmless; only its realpath is managed.
     let links = fixture.workspace("t3code-scanner-links-");
@@ -1311,7 +1389,10 @@ async fn finds_the_cwd_on_a_later_line_when_the_first_records_carry_none() {
 
     let result = fixture.scan().await;
 
-    assert_eq!(paths(&result), vec![workspace.path().to_string_lossy().into_owned()]);
+    assert_eq!(
+        paths(&result),
+        vec![workspace.path().to_string_lossy().into_owned()]
+    );
 }
 
 #[tokio::test]
@@ -1338,7 +1419,10 @@ async fn reads_a_complete_transcript_record_at_the_exact_chunk_boundary() {
 
     let result = fixture.scan().await;
 
-    assert_eq!(paths(&result), vec![workspace.path().to_string_lossy().into_owned()]);
+    assert_eq!(
+        paths(&result),
+        vec![workspace.path().to_string_lossy().into_owned()]
+    );
 }
 
 #[tokio::test]
@@ -1357,7 +1441,10 @@ async fn finds_session_metadata_after_a_first_record_larger_than_one_chunk() {
 
     let result = fixture.scan().await;
 
-    assert_eq!(paths(&result), vec![workspace.path().to_string_lossy().into_owned()]);
+    assert_eq!(
+        paths(&result),
+        vec![workspace.path().to_string_lossy().into_owned()]
+    );
 }
 
 #[tokio::test]
@@ -1395,10 +1482,7 @@ async fn shares_metadata_bytes_across_homes_for_64_and_65_one_mib_files() {
             range.map(|item| format!("session-{item}.jsonl")).collect()
         };
         let mut listings = HashMap::new();
-        listings.insert(
-            directories[0].to_string_lossy().into_owned(),
-            names(0..32),
-        );
+        listings.insert(directories[0].to_string_lossy().into_owned(), names(0..32));
         listings.insert(
             directories[1].to_string_lossy().into_owned(),
             names(0..count - 32),
@@ -1439,7 +1523,11 @@ async fn shares_metadata_bytes_across_homes_for_64_and_65_one_mib_files() {
             "{count}"
         );
         assert_eq!(
-            result.candidates.iter().map(|c| c.thread_count).collect::<Vec<_>>(),
+            result
+                .candidates
+                .iter()
+                .map(|c| c.thread_count)
+                .collect::<Vec<_>>(),
             vec![32, 32],
             "{count}"
         );
@@ -1464,7 +1552,9 @@ async fn bounds_metadata_open_and_read_calls_for_short_read_files() {
             &padded_record(workspace.path(), 399),
             ms("2026-01-01T00:00:00.000Z"),
         );
-        let names: Vec<String> = (0..count).map(|index| format!("session-{index}.jsonl")).collect();
+        let names: Vec<String> = (0..count)
+            .map(|index| format!("session-{index}.jsonl"))
+            .collect();
         let template_path = template.to_string_lossy().into_owned();
         let directory_path = directory.clone();
         let double = fs_double(|double| {
@@ -1499,9 +1589,17 @@ async fn bounds_malformed_metadata_records_without_excluding_another_account() {
     let workspace = fixture.workspace("t3code-record-metadata-project-");
     let directory = fixture.claude_home.join("projects").join("p");
     let template = directory.join("template.jsonl");
-    write_transcript(&template, &"x\n".repeat(1_001), ms("2026-01-02T00:00:00.000Z"));
     write_transcript(
-        &second_home.path().join("projects").join("p").join("session.jsonl"),
+        &template,
+        &"x\n".repeat(1_001),
+        ms("2026-01-02T00:00:00.000Z"),
+    );
+    write_transcript(
+        &second_home
+            .path()
+            .join("projects")
+            .join("p")
+            .join("session.jsonl"),
         &json!({ "cwd": workspace.path() }).to_string(),
         ms("2026-01-01T00:00:00.000Z"),
     );
@@ -1509,7 +1607,9 @@ async fn bounds_malformed_metadata_records_without_excluding_another_account() {
         "claude-work",
         instance("claudeAgent", json!({"homePath": second_home.path()})),
     );
-    let names: Vec<String> = (0..102).map(|index| format!("session-{index}.jsonl")).collect();
+    let names: Vec<String> = (0..102)
+        .map(|index| format!("session-{index}.jsonl"))
+        .collect();
     let template_path = template.to_string_lossy().into_owned();
     let directory_path = directory.clone();
     let double = fs_double(|double| {
@@ -1528,7 +1628,10 @@ async fn bounds_malformed_metadata_records_without_excluding_another_account() {
         .await
         .expect("scan");
 
-    assert_eq!(paths(&result), vec![workspace.path().to_string_lossy().into_owned()]);
+    assert_eq!(
+        paths(&result),
+        vec![workspace.path().to_string_lossy().into_owned()]
+    );
     assert_eq!(opens_in(&double, &directory), 100);
     assert_eq!(result.truncated, Some(true));
 }
@@ -1554,7 +1657,11 @@ async fn reports_unfinished_directory_work_for_19_999_and_20_000_project_directo
 
         assert_eq!(*double.directory_reads.lock(), 20_000, "{count}");
         assert_eq!(summarize(&result), Vec::new(), "{count}");
-        assert_eq!(result.truncated, (count == 20_000).then_some(true), "{count}");
+        assert_eq!(
+            result.truncated,
+            (count == 20_000).then_some(true),
+            "{count}"
+        );
     }
 }
 
@@ -1624,7 +1731,12 @@ async fn counts_terminal_newlines_correctly_with_record_overflow() {
         let now = ms("2026-08-24T12:00:00.000Z");
         fixture.now_ms = Some(now);
         let workspace = fixture.workspace("t3code-record-limit-project-");
-        let directory = fixture.codex_home.join("sessions").join("2026").join("08").join("24");
+        let directory = fixture
+            .codex_home
+            .join("sessions")
+            .join("2026")
+            .join("08")
+            .join("24");
         write_transcript(
             &directory.join("rollout-records.jsonl"),
             &make_record_limit_transcript(workspace.path(), overflow),
@@ -1648,9 +1760,7 @@ async fn counts_terminal_newlines_correctly_with_record_overflow() {
             now - 1_000.0,
         );
 
-        let outcomes = fixture
-            .outcomes(workspace.path())
-            .await;
+        let outcomes = fixture.outcomes(workspace.path()).await;
 
         let tags: Vec<&str> = outcomes.iter().map(outcome_tag).collect();
         assert_eq!(
@@ -1675,7 +1785,14 @@ async fn counts_terminal_newlines_correctly_with_record_overflow() {
             .collect();
         assert_eq!(
             messages,
-            vec![if overflow { "Older prompt" } else { "First prompt" }.to_owned()],
+            vec![
+                if overflow {
+                    "Older prompt"
+                } else {
+                    "First prompt"
+                }
+                .to_owned()
+            ],
             "overflow={overflow}"
         );
     }
@@ -1877,7 +1994,10 @@ async fn imports_history_recorded_with_a_case_alias() {
 
     let outcomes = collect_outcomes(&fixture.scanner_with(double), workspace.path(), &[]).await;
 
-    assert_eq!(importable_session_ids(&outcomes), vec!["case-session".to_owned()]);
+    assert_eq!(
+        importable_session_ids(&outcomes),
+        vec!["case-session".to_owned()]
+    );
 }
 
 #[tokio::test]
@@ -2066,7 +2186,12 @@ fn replacement_contents(
 #[tokio::test]
 async fn rechecks_snapshot_cwd_after_replacement() {
     for source in [AgentSessionSource::ClaudeAgent, AgentSessionSource::Codex] {
-        for replacement in ["same root", "other root", "symlink alias", "other then same"] {
+        for replacement in [
+            "same root",
+            "other root",
+            "symlink alias",
+            "other then same",
+        ] {
             let mut fixture = Fixture::new();
             let now = ms("2026-08-24T12:00:00.000Z");
             fixture.now_ms = Some(now);
@@ -2092,7 +2217,11 @@ async fn rechecks_snapshot_cwd_after_replacement() {
             );
             let scanner = fixture.scanner();
             let scan = scanner.scan().await.expect("scan");
-            assert_eq!(paths(&scan), vec![workspace.to_string_lossy().into_owned()], "{replacement}");
+            assert_eq!(
+                paths(&scan),
+                vec![workspace.to_string_lossy().into_owned()],
+                "{replacement}"
+            );
 
             let replacement_cwd = match replacement {
                 "symlink alias" => alias.as_path(),
@@ -2150,7 +2279,8 @@ async fn checks_file_identity_and_provider_before_skipping_completed_history() {
         AgentSessionRecentThread::Importable { source, .. } => source.clone(),
         other => panic!("expected Importable, got {other:?}"),
     };
-    let completed = collect_outcomes(&scanner, workspace.path(), std::slice::from_ref(&imported)).await;
+    let completed =
+        collect_outcomes(&scanner, workspace.path(), std::slice::from_ref(&imported)).await;
     assert_eq!(outcome_tag(&completed[0]), "AlreadyImported");
     let mut wrong_provider = imported.clone();
     wrong_provider.provider = AgentSessionSource::ClaudeAgent;
@@ -2161,7 +2291,8 @@ async fn checks_file_identity_and_provider_before_skipping_completed_history() {
     let _held = fs::File::open(&file_path).expect("hold inode");
     fs::remove_file(&file_path).expect("remove");
     write_transcript(&file_path, &contents("replaced-session"), now);
-    let replaced = collect_outcomes(&scanner, workspace.path(), std::slice::from_ref(&imported)).await;
+    let replaced =
+        collect_outcomes(&scanner, workspace.path(), std::slice::from_ref(&imported)).await;
     match &replaced[0] {
         AgentSessionRecentThread::Importable { thread, source } => {
             assert_eq!(thread.provider_session_id, "replaced-session");
@@ -2243,7 +2374,10 @@ async fn imports_visible_history_from_a_transcript_with_an_oversized_tool_record
 
     let threads = fixture.threads(workspace.path()).await;
 
-    assert_eq!(thread_session_ids(&threads), vec!["large-session".to_owned()]);
+    assert_eq!(
+        thread_session_ids(&threads),
+        vec!["large-session".to_owned()]
+    );
     assert_eq!(
         thread_messages(&threads),
         vec![vec!["Import this large session".to_owned()]]
@@ -2277,10 +2411,14 @@ async fn does_not_reopen_a_transcript_that_becomes_a_non_file_after_discovery() 
         });
     });
 
-    let outcomes = collect_outcomes(&fixture.scanner_with(double.clone()), workspace.path(), &[]).await;
+    let outcomes =
+        collect_outcomes(&fixture.scanner_with(double.clone()), workspace.path(), &[]).await;
 
     assert_eq!(double.opened(&transcript_path), 1);
-    assert_eq!(outcomes.iter().map(outcome_tag).collect::<Vec<_>>(), vec!["Skipped"]);
+    assert_eq!(
+        outcomes.iter().map(outcome_tag).collect::<Vec<_>>(),
+        vec!["Skipped"]
+    );
 }
 
 #[tokio::test]
@@ -2329,11 +2467,15 @@ async fn skips_growth_during_reading_without_exceeding_the_reserved_bytes() {
         }));
     });
 
-    let outcomes = collect_outcomes(&fixture.scanner_with(double.clone()), workspace.path(), &[]).await;
+    let outcomes =
+        collect_outcomes(&fixture.scanner_with(double.clone()), workspace.path(), &[]).await;
 
     assert_eq!(double.opened(&transcript_path), 2);
     assert_eq!(*double.reopened_bytes.lock(), contents.len());
-    assert_eq!(outcomes.iter().map(outcome_tag).collect::<Vec<_>>(), vec!["Skipped"]);
+    assert_eq!(
+        outcomes.iter().map(outcome_tag).collect::<Vec<_>>(),
+        vec!["Skipped"]
+    );
 }
 
 #[tokio::test]
@@ -2348,7 +2490,11 @@ async fn skips_a_transcript_that_shrinks_after_its_size_check() {
         json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Do not import a changing file"}}).to_string(),
     ]
     .join("\n");
-    write_transcript(&transcript_path, &format!("{contents}\n{}", "padding".repeat(100)), now);
+    write_transcript(
+        &transcript_path,
+        &format!("{contents}\n{}", "padding".repeat(100)),
+        now,
+    );
     let shrunk_path = fixture.codex_home.join("shrunk.jsonl");
     write_transcript(&shrunk_path, &contents, now);
     let double = fs_double(|double| {
@@ -2361,9 +2507,236 @@ async fn skips_a_transcript_that_shrinks_after_its_size_check() {
         });
     });
 
-    let outcomes = collect_outcomes(&fixture.scanner_with(double.clone()), workspace.path(), &[]).await;
+    let outcomes =
+        collect_outcomes(&fixture.scanner_with(double.clone()), workspace.path(), &[]).await;
 
     assert_eq!(double.opened(&transcript_path), 2);
-    assert_eq!(outcomes.iter().map(outcome_tag).collect::<Vec<_>>(), vec!["Skipped"]);
+    assert_eq!(
+        outcomes.iter().map(outcome_tag).collect::<Vec<_>>(),
+        vec!["Skipped"]
+    );
 }
 
+#[tokio::test]
+async fn does_not_read_the_second_transcript_when_the_consumer_takes_one_thread() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture.workspace("t3code-workspace-");
+    let codex_transcript = |session_id: &str, text: &str| {
+        [
+            json!({"type": "session_meta", "payload": {"id": session_id, "cwd": workspace.path()}})
+                .to_string(),
+            json!({"type": "event_msg", "payload": {"type": "user_message", "message": text}})
+                .to_string(),
+        ]
+        .join("\n")
+    };
+    let older_path = fixture.codex_rollout("2026", "08", "23", "rollout-older.jsonl");
+    let newer_path = fixture.codex_rollout("2026", "08", "24", "rollout-newer.jsonl");
+    write_transcript(
+        &older_path,
+        &codex_transcript("older-session", "Older prompt"),
+        now - 1_000.0,
+    );
+    write_transcript(
+        &newer_path,
+        &codex_transcript("newer-session", "Newer prompt"),
+        now,
+    );
+    let double = fs_double(|_| {});
+
+    let scanner = fixture.scanner_with(double.clone());
+    let root = workspace.path().to_string_lossy().into_owned();
+    let taken: Vec<AgentSessionRecentThread> = scanner
+        .recent_threads(&root, &[])
+        .take(1)
+        .map(|outcome| outcome.expect("recent thread"))
+        .collect()
+        .await;
+
+    assert_eq!(
+        importable_session_ids(&taken),
+        vec!["newer-session".to_owned()]
+    );
+    // Metadata reads open each file once. Only the consumed transcript is read in full.
+    assert_eq!(double.opened(&older_path), 1);
+    assert_eq!(double.opened(&newer_path), 2);
+}
+
+#[tokio::test]
+async fn does_not_import_sessions_from_a_t3_managed_worktree() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture
+        .base_dir
+        .join("worktrees")
+        .join("t3code")
+        .join("managed-worktree");
+    fs::create_dir_all(&workspace).expect("worktree");
+    write_transcript(
+        &fixture.codex_rollout("2026", "08", "24", "rollout-managed.jsonl"),
+        &[
+            json!({"type": "session_meta", "payload": {"id": "managed-session", "cwd": workspace}}).to_string(),
+            json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Do not import this session"}}).to_string(),
+        ]
+        .join("\n"),
+        now,
+    );
+
+    let threads = fixture.threads(&workspace).await;
+
+    assert_eq!(threads, Vec::new());
+}
+
+#[tokio::test]
+async fn uses_one_deterministic_provider_instance_for_a_shared_session_home() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let shared_home = temp_dir("t3code-codex-shared-");
+    let workspace = fixture.workspace("t3code-workspace-");
+    write_transcript(
+        &shared_home
+            .path()
+            .join("sessions")
+            .join("2026")
+            .join("08")
+            .join("24")
+            .join("rollout-shared.jsonl"),
+        &[
+            json!({"type": "session_meta", "payload": {"id": "shared-session", "cwd": workspace.path()}}).to_string(),
+            json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Use the shared session"}}).to_string(),
+        ]
+        .join("\n"),
+        now,
+    );
+    for id in ["codex", "codex-personal", "codex-work"] {
+        fixture.configure(
+            id,
+            instance("codex", json!({"homePath": shared_home.path()})),
+        );
+    }
+
+    let threads = fixture.threads(workspace.path()).await;
+
+    assert_eq!(
+        threads
+            .iter()
+            .map(|thread| thread.provider_instance_id.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["codex".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn uses_configured_order_when_custom_instances_share_a_session_home() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let shared_home = temp_dir("t3code-codex-shared-");
+    let workspace = fixture.workspace("t3code-workspace-");
+    write_transcript(
+        &shared_home
+            .path()
+            .join("sessions")
+            .join("2026")
+            .join("08")
+            .join("24")
+            .join("rollout-shared.jsonl"),
+        &[
+            json!({"type": "session_meta", "payload": {"id": "shared-session", "cwd": workspace.path()}}).to_string(),
+            json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Use the first account"}}).to_string(),
+        ]
+        .join("\n"),
+        now,
+    );
+    fixture.configure(
+        "codex-work",
+        instance("codex", json!({"homePath": shared_home.path()})),
+    );
+    fixture.configure(
+        "codex-personal",
+        instance("codex", json!({"homePath": shared_home.path()})),
+    );
+
+    let threads = fixture.threads(workspace.path()).await;
+
+    assert_eq!(
+        threads
+            .iter()
+            .map(|thread| thread.provider_instance_id.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["codex-work".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn keeps_a_second_account_when_the_first_has_5000_newer_files() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let old_workspace = fixture.workspace("t3code-workspace-old-");
+    let recent_workspace = fixture.workspace("t3code-workspace-recent-");
+    let recent_home = temp_dir("t3code-claude-recent-home-");
+    let old_directory = fixture.claude_home.join("projects").join("-aaa-old");
+    let old_transcript = old_directory.join("old.jsonl");
+    write_transcript(
+        &old_transcript,
+        &json!({
+            "type": "user",
+            "cwd": old_workspace.path(),
+            "sessionId": "old-session",
+            "message": {"role": "user", "content": "Old work"},
+        })
+        .to_string(),
+        now,
+    );
+    write_transcript(
+        &recent_home
+            .path()
+            .join("projects")
+            .join("-zzz-recent")
+            .join("recent.jsonl"),
+        &json!({
+            "type": "user",
+            "cwd": recent_workspace.path(),
+            "sessionId": "recent-session",
+            "message": {"role": "user", "content": "Recent work"},
+        })
+        .to_string(),
+        now - 1_000.0,
+    );
+    fixture.configure(
+        "claude-work",
+        instance("claudeAgent", json!({"homePath": recent_home.path()})),
+    );
+    let names: Vec<String> = (0..5_000)
+        .map(|index| format!("old-{index}.jsonl"))
+        .collect();
+    let old_transcript_path = old_transcript.to_string_lossy().into_owned();
+    let old_directory_path = old_directory.clone();
+    let double = fs_double(|double| {
+        double
+            .listings
+            .insert(old_directory.to_string_lossy().into_owned(), names);
+        double.path_redirect = Some(Box::new(move |path| {
+            (Path::new(path).parent() == Some(old_directory_path.as_path())
+                && Path::new(path)
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("old-")))
+            .then(|| old_transcript_path.clone())
+        }));
+    });
+    let scanner = fixture.scanner_with(double);
+
+    let scan = scanner.scan().await.expect("scan");
+    assert_eq!(scan.truncated, Some(true));
+    let outcomes = collect_outcomes(&scanner, recent_workspace.path(), &[]).await;
+
+    assert_eq!(
+        importable_session_ids(&outcomes),
+        vec!["recent-session".to_owned()]
+    );
+}

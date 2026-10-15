@@ -252,6 +252,37 @@ pub fn encode_uri(value: &str) -> String {
     percent_encoding::utf8_percent_encode(value, ESCAPE).to_string()
 }
 
+/// JS `encodeURIComponent`: escapes everything except unreserved characters
+/// (`A-Za-z0-9 - _ . ! ~ * ' ( )`).
+pub fn encode_uri_component(value: &str) -> String {
+    const ESCAPE: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+        .add(b' ')
+        .add(b'"')
+        .add(b'#')
+        .add(b'$')
+        .add(b'%')
+        .add(b'&')
+        .add(b'+')
+        .add(b',')
+        .add(b'/')
+        .add(b':')
+        .add(b';')
+        .add(b'<')
+        .add(b'=')
+        .add(b'>')
+        .add(b'?')
+        .add(b'@')
+        .add(b'[')
+        .add(b'\\')
+        .add(b']')
+        .add(b'^')
+        .add(b'`')
+        .add(b'{')
+        .add(b'|')
+        .add(b'}');
+    percent_encoding::utf8_percent_encode(value, ESCAPE).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

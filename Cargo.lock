@@ -6889,6 +6889,7 @@ dependencies = [
  "chrono",
  "indexmap",
  "markdown",
+ "parking_lot",
  "percent-encoding",
  "regex",
  "serde",

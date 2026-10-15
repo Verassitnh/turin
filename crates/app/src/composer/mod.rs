@@ -40,3 +40,6 @@ pub mod attachment_files;
 pub mod draft_store;
 pub mod skills;
 pub mod command_items;
+pub mod views;
+pub mod view_model;
+pub mod mock_source;

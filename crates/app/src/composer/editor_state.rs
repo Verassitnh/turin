@@ -182,6 +182,17 @@ struct HistoryEntry {
     selection: Selection,
 }
 
+/// Where the caret sits at an edge between differently styled text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeStop {
+    /// Typing continues the styled text before the edge.
+    Before,
+    /// Typing continues the text after the edge.
+    After,
+    /// The user toggled marks by hand: neither.
+    Neither,
+}
+
 /// What the owner of the draft reads after a change (`readSnapshot`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditorSnapshot {
@@ -571,6 +582,18 @@ impl EditorState {
             return None;
         }
         Some((before, after, self.current_marks()))
+    }
+
+    /// Which stop of a styled edge the caret is on, or `None` away from edges.
+    pub fn caret_edge_stop(&self) -> Option<EdgeStop> {
+        let (before, after, current) = self.styled_edge()?;
+        Some(if current == before {
+            EdgeStop::Before
+        } else if current == after {
+            EdgeStop::After
+        } else {
+            EdgeStop::Neither
+        })
     }
 
     /// `caretTakesMarksBefore`: true when the caret sits on a styled edge and

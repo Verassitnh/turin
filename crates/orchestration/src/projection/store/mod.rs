@@ -11,6 +11,9 @@
 
 pub mod apply;
 pub mod canonical;
+#[cfg(test)]
+mod read_tests;
+pub mod recovery;
 pub mod shell;
 #[cfg(test)]
 mod shell_tests;
@@ -23,16 +26,18 @@ use std::sync::Arc;
 use rusqlite::Connection;
 use turin_contracts::orchestration_v2::{
     OrchestrationV2AppThread, OrchestrationV2DomainEvent, OrchestrationV2ThreadProjection,
+    OrchestrationV2TurnItem,
 };
 use turin_contracts::{RunId, ThreadId, TurnItemId};
 use turin_persistence::Db;
 
 use crate::projection::error::{ProjectionStoreError, ReadFailure, keep_or_read};
-use crate::projection::sql::query_payload;
+use crate::projection::sql::{query_payload, query_payloads};
 use canonical::{
     HistoryAnchor, ProjectionRecordField, ProjectionRecordFilter, ReadWindow,
     read_canonical_projection, read_projection,
 };
+use recovery::{ProjectionRecoveryKind, read_recovery_thread_ids};
 use shell::{
     ProjectionLimitRecoveryCandidate, ProjectionSettlementCandidate, ProjectionThreadPullRequests,
     ShellSnapshotOptions, ShellSnapshotRows, ThreadWorktreePath,
@@ -317,6 +322,69 @@ impl ProjectionStore {
             Ok(shell::read_thread_worktree_paths(conn)?)
         })
         .await
+    }
+
+    /// `getTurnItem`: one item of a thread, `None` when it is not there.
+    pub async fn get_turn_item(
+        &self,
+        thread_id: &ThreadId,
+        item_id: &TurnItemId,
+    ) -> Result<Option<OrchestrationV2TurnItem>, ProjectionStoreError> {
+        let item_id = item_id.clone();
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, false, move |conn| {
+            Ok(query_payload::<OrchestrationV2TurnItem>(
+                conn,
+                "SELECT payload_json FROM orchestration_v2_projection_turn_items
+                 WHERE turn_item_id = ?1 AND thread_id = ?2",
+                rusqlite::params![item_id.as_str(), thread.as_str()],
+            )?)
+        })
+        .await
+    }
+
+    /// `getTurnStartHistory`: the items that make up the visible turn history,
+    /// optionally limited to `run_ids`. An empty `run_ids` matches nothing.
+    pub async fn get_turn_start_history(
+        &self,
+        thread_id: &ThreadId,
+        run_ids: Option<&[RunId]>,
+    ) -> Result<Vec<OrchestrationV2TurnItem>, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let run_ids = run_ids.map(<[RunId]>::to_vec);
+        self.read_for_thread(thread_id, false, move |conn| {
+            let mut params = vec![thread.as_str().to_owned()];
+            let run_filter = match &run_ids {
+                None => "1".to_owned(),
+                Some(ids) => {
+                    params.extend(ids.iter().map(|id| id.as_str().to_owned()));
+                    format!("run_id IN ({})", vec!["?"; ids.len()].join(", "))
+                }
+            };
+            let sql = format!(
+                "SELECT payload_json FROM orchestration_v2_projection_turn_items
+                 WHERE thread_id = ?
+                   AND type IN ('user_message', 'assistant_message', 'command_execution', 'error',
+                     'run_interrupt_result', 'file_change', 'proposed_plan')
+                   AND {run_filter}
+                 ORDER BY ordinal ASC, turn_item_id ASC"
+            );
+            Ok(query_payloads::<OrchestrationV2TurnItem>(
+                conn,
+                &sql,
+                rusqlite::params_from_iter(params.iter()),
+            )?)
+        })
+        .await
+    }
+
+    /// `getRecoveryThreadIds`: threads a boot-time recovery pass of `kind` must visit.
+    pub async fn get_recovery_thread_ids(
+        &self,
+        kind: ProjectionRecoveryKind,
+    ) -> Result<Vec<ThreadId>, ProjectionStoreError> {
+        self.read(move |conn| read_recovery_thread_ids(conn, kind))
+            .await
     }
 
     /// `getUnreadableThreadIds`: threads whose projection rows fail to decode.

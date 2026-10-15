@@ -540,32 +540,18 @@ impl ChatComposer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        use crate::composer::list_continuation::{
-            list_continuation_for_enter, list_indent_for_tab,
-        };
+        use crate::composer::list_continuation::list_edit_for_key;
         let vm = self.view_model(cx);
-        if vm.settings.composer_rich_text_enabled
-            || key.is_composing
-            || key.shift
-            || key.alt
-            || key.meta
-            || key.ctrl
-        {
+        if vm.settings.composer_rich_text_enabled || key.is_composing {
             return false;
         }
-        if snapshot.selection_start != snapshot.selection_end {
-            return false;
-        }
-        let edit = match key.key.as_str() {
-            "Enter" => list_continuation_for_enter(&snapshot.value, snapshot.selection_start),
-            "Tab" => list_indent_for_tab(
-                &snapshot.value,
-                snapshot.selection_start,
-                snapshot.selection_end,
-            ),
-            _ => None,
-        };
-        let Some(edit) = edit else {
+        let Some(edit) = list_edit_for_key(
+            &key.key,
+            key.shift,
+            &snapshot.value,
+            snapshot.selection_start,
+            snapshot.selection_end,
+        ) else {
             return false;
         };
         let value = snapshot.value.clone();

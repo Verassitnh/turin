@@ -194,6 +194,27 @@ pub fn list_indent_for_tab(value: &str, start: usize, end: usize) -> Option<Comp
     })
 }
 
+/// The plain-text edit for an Enter or Tab keystroke (`ChatComposer.tsx`).
+/// Enter continues a list item whatever its modifiers, Shift and Alt
+/// included (the submit intent already claimed the other chords). Tab indents
+/// unless Shift is held. Ranged selections fall through to the editor.
+pub fn list_edit_for_key(
+    key: &str,
+    shift: bool,
+    value: &str,
+    start: usize,
+    end: usize,
+) -> Option<ComposerListEdit> {
+    if start != end {
+        return None;
+    }
+    match key {
+        "Enter" => list_continuation_for_enter(value, start),
+        "Tab" if !shift => list_indent_for_tab(value, start, end),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +305,28 @@ mod tests {
         );
         assert_eq!(list_indent_for_tab("plain", 2, 2), None);
         assert_eq!(list_indent_for_tab("- foo", 1, 3), None);
+    }
+
+    #[test]
+    fn shift_enter_continues_a_list_item() {
+        // Shift+Enter is a newline that keeps the list, not a plain break.
+        let edit = list_edit_for_key("Enter", true, "- foo", 5, 5).expect("edit");
+        assert_eq!(apply("- foo", &edit), "- foo\n- ");
+        let edit = list_edit_for_key("Enter", true, "1. foo\n2. ", 10, 10).expect("edit");
+        assert_eq!(apply("1. foo\n2. ", &edit), "1. foo\n");
+    }
+
+    #[test]
+    fn tab_with_shift_does_not_indent() {
+        assert_eq!(list_edit_for_key("Tab", true, "- foo", 2, 2), None);
+        let edit = list_edit_for_key("Tab", false, "- foo", 2, 2).expect("edit");
+        assert_eq!(apply("- foo", &edit), "  - foo");
+    }
+
+    #[test]
+    fn ranged_selections_fall_through_to_the_editor() {
+        assert_eq!(list_edit_for_key("Enter", false, "- foo", 1, 5), None);
+        assert_eq!(list_edit_for_key("Tab", false, "- foo", 1, 3), None);
     }
 
     #[test]

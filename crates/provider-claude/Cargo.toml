@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 turin-contracts.workspace = true
 turin-claude-protocol.workspace = true
+turin-provider-core.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -16,3 +17,7 @@ tracing.workspace = true
 uuid.workspace = true
 tokio-util.workspace = true
 indexmap.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true

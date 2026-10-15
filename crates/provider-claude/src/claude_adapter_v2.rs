@@ -12,8 +12,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use turin_claude_protocol::{
     ClaudeSession, ControlHandler, ControlRequest, Frame, FrameKind, InboundControl, LaunchOptions,
-    SessionEvent, SessionInfo, SessionMessage, TranscriptOptions, UserMessage, UserPriority,
-    fork_session, get_session_messages, get_subagent_messages, list_sessions,
+    ProcessExit, SessionEvent, SessionInfo, SessionMessage, TranscriptOptions, UserMessage,
+    UserPriority, fork_session, get_session_messages, get_subagent_messages, list_sessions,
 };
 
 pub const PROVIDER: &str = "claudeAgent";
@@ -134,11 +134,12 @@ impl ControlHandler for HostHandler {
                         })
                         .is_err()
                     {
-                        return Ok(None);
+                        return Ok(Some(json!({"behavior":"cancelled"})));
                     }
-                    Ok(
-                        tokio::select! { value = rx => value.ok().flatten(), _ = cancel.cancelled() => Some(json!({"behavior":"cancelled"})) },
-                    )
+                    Ok(Some(
+                        tokio::select! { value = rx => value.ok().flatten(), _ = cancel.cancelled() => None }
+                            .unwrap_or_else(|| json!({"behavior":"cancelled"})),
+                    ))
                 }
                 InboundControl::HookCallback { .. } => {
                     let (tx, rx) = oneshot::channel();
@@ -158,6 +159,16 @@ impl ControlHandler for HostHandler {
                 _ => Ok(None),
             }
         })
+    }
+}
+
+pub fn process_exit_message(exit: &ProcessExit) -> String {
+    match exit.signal {
+        Some(signal) => format!("Claude Code process exited with signal {signal}"),
+        None => format!(
+            "Claude Code process exited with code {}",
+            exit.code.unwrap_or(0)
+        ),
     }
 }
 
@@ -363,7 +374,24 @@ impl ClaudeAdapterV2 {
             }
             SessionEvent::Stderr(value) => ClaudeAdapterEvent::Stderr(value),
             SessionEvent::Error(value) => ClaudeAdapterEvent::Error(value),
-            SessionEvent::Eof => ClaudeAdapterEvent::Eof,
+            SessionEvent::Eof => {
+                if self.pending_prompts > 0 {
+                    self.pending_prompts = 0;
+                    ClaudeAdapterEvent::Error(
+                        "Claude Code process exited before turn result".into(),
+                    )
+                } else {
+                    ClaudeAdapterEvent::Eof
+                }
+            }
+            SessionEvent::Exit(exit) => {
+                if self.pending_prompts > 0 || exit.code.is_some_and(|code| code != 0) {
+                    self.pending_prompts = 0;
+                    ClaudeAdapterEvent::Error(process_exit_message(&exit))
+                } else {
+                    ClaudeAdapterEvent::Eof
+                }
+            }
         })
     }
     pub async fn interrupt(&self) -> Result<Value> {

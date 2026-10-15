@@ -1,9 +1,7 @@
 //! Port of upstream/apps/server/src/provider/ClaudeModelCatalog.ts and ClaudeModelManifest.ts.
 use serde_json::{Value, json};
 use std::cmp::Ordering;
-#[path = "../../provider-core/src/semver.rs"]
-mod provider_core_semver;
-use provider_core_semver::compare_semver_versions;
+use turin_provider_core::semver::compare_semver_versions;
 
 #[derive(Debug, Clone)]
 pub struct ClaudeCatalogModel {

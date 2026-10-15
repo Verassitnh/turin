@@ -7098,15 +7098,20 @@ name = "turin-provider-claude"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "futures",
  "indexmap",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tracing",
  "turin-claude-protocol",
  "turin-contracts",
+ "turin-provider-core",
  "uuid",
 ]
 

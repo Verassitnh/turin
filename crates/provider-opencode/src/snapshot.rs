@@ -7,7 +7,10 @@
 //! results, so the mapping can be tested without a server.
 
 use serde_json::Value;
-use turin_contracts::{IsoDateTime, TrimmedNonEmptyString, provider_instance::ProviderDriverKind};
+use turin_contracts::{
+    IsoDateTime, TrimmedNonEmptyString, provider_instance::ProviderDriverKind,
+    provider_usage_limits::ServerProviderUsageLimits,
+};
 use turin_provider_core::{
     server_provider::{
         ServerProviderAuth, ServerProviderAuthStatus, ServerProviderDraft, ServerProviderModel,
@@ -45,6 +48,8 @@ pub struct OpenCodeSnapshotInput<'a> {
     pub server_url: &'a str,
     pub checked_at: IsoDateTime,
     pub outcome: ProbeOutcome<'a>,
+    /// Go usage windows from `read_open_code_go_usage_limits`, if read.
+    pub usage_limits: Option<ServerProviderUsageLimits>,
 }
 
 pub enum ProbeOutcome<'a> {
@@ -67,6 +72,13 @@ pub struct V1Inventory<'a> {
 
 /// Builds the snapshot draft for one OpenCode instance.
 pub fn build_open_code_snapshot(input: OpenCodeSnapshotInput<'_>) -> ServerProviderDraft {
+    let usage_limits = input.usage_limits.clone();
+    let mut draft = build_draft(input);
+    draft.usage_limits = usage_limits;
+    draft
+}
+
+fn build_draft(input: OpenCodeSnapshotInput<'_>) -> ServerProviderDraft {
     let external = !input.server_url.trim().is_empty();
     if !input.enabled {
         let (_, _, message) = pending_status(false, input.server_url);
@@ -250,6 +262,7 @@ mod tests {
             server_url: "",
             checked_at: checked_at(),
             outcome,
+            usage_limits: None,
         }
     }
 

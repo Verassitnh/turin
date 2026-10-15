@@ -22,6 +22,7 @@ mod server_owner;
 mod snapshot;
 mod sse;
 mod urlutil;
+mod usage_limits;
 mod v1_client;
 mod v2_client;
 mod v2_server;
@@ -64,6 +65,7 @@ pub use semver::{compare_semver_versions, parse_semver};
 pub use server_owner::{OpenCodeServerOwner, OwnerConfig};
 pub use snapshot::{OpenCodeSnapshotInput, ProbeOutcome, V1Inventory, build_open_code_snapshot};
 pub use sse::{EventStream, SILENT_STREAM_TIMEOUT, SseFrame, decode_sse};
+pub use usage_limits::{GoUsageInput, OPENCODE_GO_USAGE_URL, read_open_code_go_usage_limits};
 pub use v1_client::{Health, OPENCODE_HEALTH_TIMEOUT, PermissionReply, QuestionReply, V1Client};
 pub use v2_client::{
     Cursor, DataEnvelope, Interrupt, Located, MessageQuery, Page, ServerInfo, ServerPaths,

@@ -744,39 +744,54 @@ impl PullRequestWatchReactor {
         );
 
         let watch_detail = watch_detail_of(&detail);
+        // Each target runs on its own, as upstream's `eachTarget` does: one refusal must not skip
+        // the rest of the group.
         for target in &group.targets {
-            let report =
-                evaluate_pull_request_watch(&target.watch, &watch_detail, remarks.as_deref());
-            if !report.changes.is_empty() {
-                let (text, notification) =
-                    pull_request_watch_message(PullRequestWatchMessageInput {
-                        number: target.link.number.get(),
-                        url: target.link.url.as_str(),
-                        base_branch: detail.base_branch.as_str(),
-                        head_sha: report.next.head_sha.as_ref().map(|sha| sha.as_str()),
-                        report: &report,
-                    });
-                let uuid_message =
-                    MessageId::new(format!("message:pr-watch:{}", uuid::Uuid::new_v4()))
-                        .expect("message id is non-empty");
-                let wake = OrchestrationV2WakeMessage {
-                    message_id: uuid_message,
-                    text,
-                    notification,
-                };
-                let next = if report.exhausted {
-                    None
-                } else {
-                    Some(report.next.clone())
-                };
-                self.record(target, next, Some(wake)).await?;
-                self.woke(target);
-                if report.exhausted {
-                    let life = self.life_of(target);
-                    self.report_end(&target.life_key(), &life, WatchEndReason::CommentLimit);
+            let step = async {
+                let report =
+                    evaluate_pull_request_watch(&target.watch, &watch_detail, remarks.as_deref());
+                if !report.changes.is_empty() {
+                    let (text, notification) =
+                        pull_request_watch_message(PullRequestWatchMessageInput {
+                            number: target.link.number.get(),
+                            url: target.link.url.as_str(),
+                            base_branch: detail.base_branch.as_str(),
+                            head_sha: report.next.head_sha.as_ref().map(|sha| sha.as_str()),
+                            report: &report,
+                        });
+                    let uuid_message =
+                        MessageId::new(format!("message:pr-watch:{}", uuid::Uuid::new_v4()))
+                            .expect("message id is non-empty");
+                    let wake = OrchestrationV2WakeMessage {
+                        message_id: uuid_message,
+                        text,
+                        notification,
+                    };
+                    let next = if report.exhausted {
+                        None
+                    } else {
+                        Some(report.next.clone())
+                    };
+                    self.record(target, next, Some(wake)).await?;
+                    self.woke(target);
+                    if report.exhausted {
+                        let life = self.life_of(target);
+                        self.report_end(&target.life_key(), &life, WatchEndReason::CommentLimit);
+                    }
+                } else if !watches_equal(&report.next, &target.watch) {
+                    self.record(target, Some(report.next.clone()), None).await?;
                 }
-            } else if !watches_equal(&report.next, &target.watch) {
-                self.record(target, Some(report.next.clone()), None).await?;
+                Ok::<(), BoxError>(())
+            };
+            if let Err(error) = step.await {
+                // A thread that did not get its update must not wait for the quiet reread.
+                self.last_reads.lock().remove(&group.key);
+                tracing::warn!(
+                    thread_id = %target.thread_id,
+                    pull_request = %group.key,
+                    error = %error,
+                    "pull request watch update failed"
+                );
             }
         }
         Ok(())

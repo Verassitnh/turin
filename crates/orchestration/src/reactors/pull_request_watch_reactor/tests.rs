@@ -367,3 +367,180 @@ fn end_reasons_use_the_wire_names_upstream_logs() {
     assert_eq!(WatchEndReason::Unreadable.as_str(), "unreadable");
     assert_eq!(WatchEndReason::Stopped.as_str(), "stopped");
 }
+
+// ---- The host-backed pass ----
+
+/// An open pull request at `bbbbbbbbbb`, with no checks, comments or threads. The watches in these
+/// tests were last seen at `aaaaaaaaaa`, so the head moved.
+fn open_detail() -> PullRequestDetail {
+    serde_json::from_value(json!({
+        "provider": "github",
+        "capabilities": {
+            "diff": true,
+            "comment": true,
+            "actions": ["merge"],
+            "mergeMethods": ["merge"],
+            "search": true,
+            "review": {
+                "inlineComment": true,
+                "reply": true,
+                "resolve": true,
+                "verdicts": ["comment", "approve", "request-changes"],
+            },
+            "reviewers": { "request": true, "listCandidates": true },
+        },
+        "viewerPermissions": {
+            "actions": ["merge"],
+            "comment": true,
+            "resolve": true,
+            "verdicts": ["comment", "approve", "request-changes"],
+            "requestReviewers": true,
+        },
+        "projectId": "project:test",
+        "projectTitle": "Test",
+        "workspaceRoot": "/repo",
+        "repository": "pingdotgg/t3code",
+        "number": 42,
+        "title": "Cache the title",
+        "body": "",
+        "url": "https://github.com/pingdotgg/t3code/pull/42",
+        "author": null,
+        "state": "open",
+        "isDraft": false,
+        "mergeability": "mergeable",
+        "additions": 1,
+        "deletions": 0,
+        "changedFiles": 1,
+        "headBranch": "feature",
+        "headSha": "bbbbbbbbbb",
+        "baseBranch": "main",
+        "createdAt": "2026-10-02T12:00:00.000Z",
+        "updatedAt": "2026-10-02T12:00:00.000Z",
+        "mergedAt": null,
+        "closedAt": null,
+        "reviewers": [],
+        "labels": [],
+        "checks": [],
+        "mergeCapabilities": { "merge": true, "squash": true, "rebase": true },
+    }))
+    .expect("detail fixture decodes")
+}
+
+fn quiet_activity() -> PullRequestActivity {
+    serde_json::from_value(json!({
+        "comments": [],
+        "commentCount": 0,
+        "commentsTruncated": false,
+        "reviewThreads": [],
+        "commits": [],
+    }))
+    .expect("activity fixture decodes")
+}
+
+/// Serves the same open pull request to every read.
+struct OpenHost;
+
+#[async_trait]
+impl WatchHost for OpenHost {
+    async fn invalidate(&self, _: &PullRequestRef) {}
+
+    async fn detail(&self, _: &PullRequestRef) -> Result<PullRequestDetail, WatchHostError> {
+        Ok(open_detail())
+    }
+
+    async fn activity(&self, _: &PullRequestRef) -> Result<PullRequestActivity, WatchHostError> {
+        Ok(quiet_activity())
+    }
+
+    async fn thread_comments(
+        &self,
+        _: &PullRequestRef,
+        _: &TrimmedNonEmptyString,
+        _: &TrimmedNonEmptyString,
+    ) -> Result<PullRequestThreadCommentsResult, WatchHostError> {
+        panic!("no review thread has comments in these tests")
+    }
+
+    async fn watch_fingerprint(
+        &self,
+        _: &PullRequestRef,
+    ) -> Result<Option<Fingerprint>, WatchHostError> {
+        Ok(None)
+    }
+}
+
+struct NoWatchThreads;
+
+#[async_trait]
+impl WatchProjections for NoWatchThreads {
+    async fn threads(&self) -> Result<Vec<WatchThread>, BoxError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Records the thread of each watch sync, and refuses the one for `refused`.
+struct RefusingDispatch {
+    refused: &'static str,
+    recorded: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl ServerCommandDispatch for RefusingDispatch {
+    async fn dispatch(&self, command: OrchestrationV2ServerCommand) -> Result<(), BoxError> {
+        let OrchestrationV2ServerCommand::Internal(
+            OrchestrationV2InternalCommand::ThreadPullRequestWatchSync { thread_id, .. },
+        ) = command
+        else {
+            panic!("expected a watch sync");
+        };
+        if thread_id.as_str() == self.refused {
+            return Err("dispatch refused".into());
+        }
+        self.recorded.lock().push(thread_id.as_str().to_owned());
+        Ok(())
+    }
+}
+
+fn watched(thread_id: &str) -> WatchTarget {
+    WatchTarget {
+        thread_id: ThreadId::new(thread_id).expect("thread id"),
+        project_id: ProjectId::new("project:test").expect("project id"),
+        link: link_with_snapshot("open", "2026-10-02T12:00:00.000Z"),
+        watch: watch_json(0, &[]),
+    }
+}
+
+#[tokio::test]
+async fn a_refused_update_does_not_skip_the_rest_of_the_group_or_wait_for_the_quiet_reread() {
+    // Upstream PullRequestWatchReactor.ts `eachTarget`: one target's failure is logged, the other
+    // targets still get their update, and the group forgets its quiet read.
+    let dispatch = Arc::new(RefusingDispatch {
+        refused: "thread:one",
+        recorded: Mutex::new(Vec::new()),
+    });
+    let reactor = PullRequestWatchReactor::new(
+        Arc::new(OpenHost),
+        Arc::new(NoWatchThreads),
+        dispatch.clone(),
+        UtcDateTime::now(),
+    );
+    let group = WatchGroup {
+        key: "project:test pingdotgg/t3code#42".to_owned(),
+        targets: vec![watched("thread:one"), watched("thread:two")],
+        fingerprint: String::new(),
+    };
+
+    reactor
+        .read_group(&group, None)
+        .await
+        .expect("a refused target does not fail the group read");
+
+    assert_eq!(
+        dispatch.recorded.lock().as_slice(),
+        &["thread:two".to_owned()]
+    );
+    assert!(
+        !reactor.last_reads.lock().contains_key(&group.key),
+        "the failed group is read again on the next pass, not after the quiet interval"
+    );
+}

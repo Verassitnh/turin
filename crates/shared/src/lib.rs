@@ -52,6 +52,7 @@ pub mod path;
 pub mod project_favicon;
 pub mod project_scripts;
 pub mod prompt_links;
+pub mod project_settings;
 pub mod proposed_plan_text;
 pub mod provider_auth_return_url;
 pub mod schema_json;

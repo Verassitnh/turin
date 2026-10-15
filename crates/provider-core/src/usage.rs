@@ -5,7 +5,6 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use chrono::{DateTime, Utc};
 use serde_json::Value;
 use turin_contracts::{
     NonNegativeInt,
@@ -70,8 +69,7 @@ pub fn token_count(value: &Value) -> NonNegativeInt {
 /// Epoch milliseconds of an ISO timestamp string, or `None`.
 pub fn parse_timestamp_ms(value: &Value) -> Option<f64> {
     let text = value.as_str()?;
-    let parsed = DateTime::parse_from_rfc3339(text).ok()?;
-    Some(parsed.with_timezone(&Utc).timestamp_millis() as f64)
+    crate::js::date_parse_ms(text).map(|millis| millis as f64)
 }
 
 /// A configured instance of the driver, its config already decoded.
@@ -205,5 +203,13 @@ mod tests {
             Some(0.0)
         );
         assert_eq!(parse_timestamp_ms(&json!(1)), None);
+    }
+
+    #[test]
+    fn parse_timestamp_ms_accepts_date_only_stamps_like_date_parse() {
+        assert_eq!(
+            parse_timestamp_ms(&json!("2026-10-10")),
+            Some(1_791_590_400_000.0)
+        );
     }
 }

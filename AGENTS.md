@@ -42,6 +42,8 @@ TASKS.md is the PM's board; don't edit it.
   don't kill or retry it. `target/` is a symlink into `../turin-targets.noindex/`:
   never `rm -rf target` (use `cargo clean -p <crate>`).
 
+- **Escape literals:** the Edit/Write tool can decode `\uXXXX` escapes inside its parameters, which silently changes string literals in tests. After writing escape-heavy literals, check the file bytes (`od -c`, or `grep -n` for the backslash).
+- **Disk fills fast:** about 25 worktrees build at once. Build only your own package (`-p <crate>`). If you hit `No space left on device`, stop and report. Never wipe another worktree's target.
 - **Never search the whole disk.** No `find /`, `find ~`, or recursive grep
   over `/`, `$HOME`, `~/.bun`, `~/Library` (a watchdog kills them after 20s;
   they pinned the CPU). Upstream's npm dependencies are installed read-only

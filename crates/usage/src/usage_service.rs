@@ -141,7 +141,7 @@ struct ScannedDir {
     message: Option<String>,
     action: Option<UsageSourceAction>,
     /// Parsed records per file, or `None` when the directory does not exist.
-    files: Option<Vec<(String, Vec<UsageRecord>)>>,
+    files: Option<Vec<(String, FileRecords)>>,
     /// Answered from a cache while a refresh runs.
     refreshing: bool,
 }
@@ -149,7 +149,7 @@ struct ScannedDir {
 /// What a read of one transcript yields, and the cache entry it would store.
 struct FileRead {
     path: String,
-    records: Vec<UsageRecord>,
+    records: FileRecords,
     failed: bool,
     update: Option<CacheUpdate>,
 }
@@ -229,19 +229,31 @@ fn is_within_directory(file_path: &str, dir: &str) -> bool {
     Path::new(file_path).starts_with(dir)
 }
 
+/// A file's records as shared slices. A warm hit hands out the cache's own
+/// slices, so no record is copied on that path.
+type FileRecords = Vec<Arc<[UsageRecord]>>;
+
+fn file_records(chunks: &FileRecords) -> impl Iterator<Item = &UsageRecord> {
+    chunks.iter().flat_map(|chunk| chunk.iter())
+}
+
+fn file_is_empty(chunks: &FileRecords) -> bool {
+    chunks.iter().all(|chunk| chunk.is_empty())
+}
+
 /// Sessions of shared-session providers with records in more than one file,
 /// such as a rollout that moved after it was read. Only these need cross-file
 /// dedupe keys: within one file the occurrence count already keeps every key
 /// unique.
 fn shared_sessions(
-    files: &[&[UsageRecord]],
+    files: &[&FileRecords],
     shared_providers: &HashSet<UsageProviderKind>,
 ) -> HashSet<String> {
     let mut first_file: HashMap<&str, usize> = HashMap::new();
     let mut shared = HashSet::new();
     for (index, records) in files.iter().enumerate() {
         let mut previous = "";
-        for record in *records {
+        for record in file_records(records) {
             let session = record.session_id.as_str();
             if !shared_providers.contains(&record.provider)
                 || session == previous
@@ -280,11 +292,25 @@ fn scan_key(input: &UsageSummaryInput, settings: &ServerSettings) -> String {
 }
 
 /// Upstream `writeFileStringAtomically`, run off the async workers: it does
-/// blocking file I/O and is a temp-file-plus-rename write.
+/// blocking file I/O.
 async fn write_atomically(path: PathBuf, contents: String) -> std::io::Result<()> {
-    tokio::task::spawn_blocking(move || write_file_string_atomically(&path, &contents))
-        .await
-        .map_err(std::io::Error::other)?
+    match tokio::task::spawn_blocking(move || write_file_string_atomically(&path, &contents)).await
+    {
+        Ok(result) => result,
+        Err(error) => Err(std::io::Error::other(error)),
+    }
+}
+
+/// Removes a request's in-flight entry when dropped.
+struct InflightEntry {
+    service: UsageService,
+    key: String,
+}
+
+impl Drop for InflightEntry {
+    fn drop(&mut self) {
+        self.service.inner.inflight.lock().remove(&self.key);
+    }
 }
 
 impl UsageService {
@@ -657,23 +683,30 @@ impl UsageService {
     /// restores it, so the next persist retries.
     async fn persist_caches(&self) {
         let _guard = self.inner.persist_lock.lock().await;
-        let contents = {
+        // Snapshot under the lock. Entries are shared, so this copies handles and
+        // not records; the encode and the write run off the async workers.
+        let (snapshot, sources) = {
             let mut state = self.inner.state.lock();
             if !state.cache_dirty {
                 return;
             }
             state.cache_dirty = false;
-            let mut extra = Map::new();
-            extra.insert("sources".to_owned(), json!(state.source_cache));
-            self.inner
-                .cache_writer
-                .lock()
-                .write(&state.file_cache, &extra)
+            (state.file_cache.clone(), state.source_cache.clone())
         };
-        if write_atomically(self.scan_cache_path(), contents)
-            .await
-            .is_err()
+        let service = self.clone();
+        let path = self.scan_cache_path();
+        let written = match tokio::task::spawn_blocking(move || {
+            let mut extra = Map::new();
+            extra.insert("sources".to_owned(), json!(sources));
+            let contents = service.inner.cache_writer.lock().write(&snapshot, &extra);
+            write_file_string_atomically(&path, &contents)
+        })
+        .await
         {
+            Ok(result) => result,
+            Err(error) => Err(std::io::Error::other(error)),
+        };
+        if written.is_err() {
             self.inner.state.lock().cache_dirty = true;
         }
     }
@@ -720,12 +753,7 @@ impl UsageService {
                 {
                     return FileRead {
                         path,
-                        records: cached
-                            .records
-                            .iter()
-                            .chain(&cached.tail_records)
-                            .cloned()
-                            .collect(),
+                        records: vec![cached.records.clone(), cached.tail_records.clone()],
                         failed: false,
                         update: None,
                     };
@@ -751,12 +779,9 @@ impl UsageService {
             // A read failure is not an empty transcript: caching it under this
             // (size, mtime) would silently drop the file's usage until it changes.
             let records = match &cached {
-                Some(cached) if cached.provider == provider => cached
-                    .records
-                    .iter()
-                    .chain(&cached.tail_records)
-                    .cloned()
-                    .collect(),
+                Some(cached) if cached.provider == provider => {
+                    vec![cached.records.clone(), cached.tail_records.clone()]
+                }
                 _ => Vec::new(),
             };
             return FileRead {
@@ -769,22 +794,19 @@ impl UsageService {
 
         // One seen set spans the cached base, the new lines, and the tail, so a
         // resumed parse dedupes exactly like a full one.
-        let base = match &cached {
-            Some(cached) if parsed.resumed => cached.records.clone(),
+        let base: Vec<UsageRecord> = match &cached {
+            Some(cached) if parsed.resumed => cached.records.to_vec(),
             _ => Vec::new(),
         };
         let mut seen = HashSet::new();
-        let records = dedupe_within_file(&[base, parsed.records].concat(), &mut seen);
-        let tail_records = dedupe_within_file(&parsed.tail_records, &mut seen);
+        let records: Arc<[UsageRecord]> =
+            dedupe_within_file(&[base, parsed.records].concat(), &mut seen).into();
+        let tail_records: Arc<[UsageRecord]> =
+            dedupe_within_file(&parsed.tail_records, &mut seen).into();
         let replaces = cached.as_ref().map(|cached| (cached.size, cached.mtime_ms));
-        let out = if tail_records.is_empty() {
-            records.clone()
-        } else {
-            [records.clone(), tail_records.clone()].concat()
-        };
         FileRead {
             path: path.clone(),
-            records: out,
+            records: vec![records.clone(), tail_records.clone()],
             failed: false,
             update: Some(CacheUpdate {
                 entry: CachedFile::new(
@@ -939,7 +961,7 @@ impl UsageService {
                             files: source.files.map(|files| {
                                 files
                                     .into_iter()
-                                    .map(|file| (file.path, file.records))
+                                    .map(|file| (file.path, vec![Arc::from(file.records)]))
                                     .collect()
                             }),
                             refreshing: source.refreshing,
@@ -1046,7 +1068,7 @@ impl UsageService {
         // contributes to its source through the normal aggregation and dedupe
         // path. Like the walk, skip files last written before the window.
         let retained_since_ms = window_start_ms.max(retention_cutoff_ms);
-        let files_by_dir: Vec<Vec<(String, Vec<UsageRecord>)>> = {
+        let files_by_dir: Vec<Vec<(String, FileRecords)>> = {
             let state = self.inner.state.lock();
             scanned_dirs
                 .iter()
@@ -1064,12 +1086,7 @@ impl UsageService {
                         }
                         retained.push((
                             path.clone(),
-                            entry
-                                .records
-                                .iter()
-                                .chain(&entry.tail_records)
-                                .cloned()
-                                .collect(),
+                            vec![entry.records.clone(), entry.tail_records.clone()],
                         ));
                     }
                     retained
@@ -1077,10 +1094,10 @@ impl UsageService {
                 .collect()
         };
         let shared_providers = self.shared_session_providers();
-        let all_files: Vec<&[UsageRecord]> = files_by_dir
+        let all_files: Vec<&FileRecords> = files_by_dir
             .iter()
             .flatten()
-            .map(|(_, records)| records.as_slice())
+            .map(|(_, records)| records)
             .collect();
         let cross_file_sessions = shared_sessions(&all_files, &shared_providers);
 
@@ -1093,13 +1110,13 @@ impl UsageService {
             let mut session_ids: HashSet<String> = HashSet::new();
 
             for (_, records) in &files_by_dir[index] {
-                if records.is_empty() {
+                if file_is_empty(records) {
                     skipped_files += 1;
                     continue;
                 }
                 scanned_files += 1;
                 let mut event_occurrences: HashMap<String, u64> = HashMap::new();
-                for record in records {
+                for record in file_records(records) {
                     let mut usage_record = record.clone();
                     if shared_providers.contains(&record.provider)
                         && cross_file_sessions.contains(&record.session_id)
@@ -1203,8 +1220,14 @@ impl UsageService {
                 // Detached on purpose, matching `Effect.forkDetach`: the handle is
                 // not kept because the scan outlives any one caller.
                 drop(tokio::spawn(async move {
+                    // Clears the entry on every exit, a panicking scan included, so
+                    // the next identical read starts a fresh scan.
+                    let entry = InflightEntry {
+                        service: service.clone(),
+                        key,
+                    };
                     let result = service.scan_summary(&input, &settings).await;
-                    service.inner.inflight.lock().remove(&key);
+                    drop(entry);
                     if result.is_ok() {
                         service.schedule_persist();
                     }

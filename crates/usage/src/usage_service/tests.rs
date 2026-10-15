@@ -10,7 +10,7 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::FutureExt;
@@ -1527,4 +1527,44 @@ async fn a_grown_codex_rollout_keeps_its_reducer_state_across_a_restart() {
     assert_eq!(grown.buckets[0].model.as_str(), "gpt-5.6-sol");
     assert_eq!(grown.buckets[0].sessions, 1);
     assert_eq!(grown.buckets[0].totals.output_tokens, 13);
+}
+
+#[tokio::test]
+async fn a_panicking_scan_does_not_leave_its_request_in_flight() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let home = root.path().join("home");
+    let dir = home.join("claude/projects");
+    write_file(&dir.join("proj/session.jsonl"), claude_line(1, 5));
+    seed_rates(&state, fable_rates());
+
+    // The first scan panics while resolving its directories; later scans read normally.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let reader = UsageReader {
+        driver_kind: "claudeAgent".to_owned(),
+        reader: ProviderUsageReader::Transcripts {
+            provider: UsageProviderKind::Claude,
+            format: claude_format(),
+            directories: Arc::new(move |_instance| {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("the first scan panics");
+                }
+                let dir = dir.clone();
+                boxed(async move {
+                    vec![TranscriptDirectory {
+                        dir: dir.to_string_lossy().into_owned(),
+                        file_name: None,
+                    }]
+                })
+            }),
+        },
+    };
+    let service = service_with(&state, vec![reader], &[], dead_rates_url(), system_clock());
+    let settings = default_settings(&home);
+
+    assert!(service.read_summary(&window(), &settings).await.is_err());
+    // The panic must not leave the request in flight: the identical read starts again.
+    let retry = service.read_summary(&window(), &settings).await.unwrap();
+    assert_eq!(total_output(&retry), 5);
 }

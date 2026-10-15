@@ -498,8 +498,7 @@ mod tests {
             )
             .await
             .expect("refresh");
-        let refreshed = refresher.pull_request_refreshes.lock().clone();
-        refreshed
+        refresher.pull_request_refreshes.lock().clone()
     }
 
     #[tokio::test]

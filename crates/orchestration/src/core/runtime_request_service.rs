@@ -226,7 +226,7 @@ impl RuntimeRequestService {
         session
             .respond_to_runtime_request(ProviderAdapterV2RuntimeRequestResponseInput {
                 request_id: input.request_id.clone(),
-                decision: input.decision.clone(),
+                decision: input.decision,
                 answers: input.answers.clone(),
                 response: None,
             })

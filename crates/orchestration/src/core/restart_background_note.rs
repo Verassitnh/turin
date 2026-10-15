@@ -292,10 +292,7 @@ pub fn restart_continuation_note(
     let mut current = source;
     let mut work = restart_work(current).to_vec();
     let mut visited: HashSet<RunId> = HashSet::from([source.id.clone()]);
-    loop {
-        let Some(continuation_of) = current.restart_continuation_of_run_id.as_ref() else {
-            break;
-        };
+    while let Some(continuation_of) = current.restart_continuation_of_run_id.as_ref() {
         let attempt_completed = current
             .active_attempt_id
             .as_ref()

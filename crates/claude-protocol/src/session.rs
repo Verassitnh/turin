@@ -1270,10 +1270,10 @@ for line in sys.stdin:
             .unwrap();
         let pid = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if let Ok(text) = tokio::fs::read_to_string(&grandchild).await {
-                    if let Ok(pid) = text.trim().parse::<i32>() {
-                        return pid;
-                    }
+                if let Ok(text) = tokio::fs::read_to_string(&grandchild).await
+                    && let Ok(pid) = text.trim().parse::<i32>()
+                {
+                    return pid;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -1282,11 +1282,14 @@ for line in sys.stdin:
         .expect("grandchild pid was not written");
         let status = session.shutdown().await.unwrap();
         assert_eq!(status.code, Some(0));
-        assert_ne!(
-            unsafe { libc::kill(pid, 0) },
-            0,
-            "grandchild {pid} still alive"
-        );
+        // The killed orphan stays a zombie until init reaps it, and kill(pid, 0) succeeds on zombies.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("grandchild {pid} still alive"));
         fs::remove_dir_all(dir).unwrap();
     }
 }

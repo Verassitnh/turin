@@ -78,14 +78,8 @@ fn absolute_source(dir: &Path) -> String {
             std::env::current_dir().unwrap_or_default().join(dir)
         }
     });
-    let source = absolute.to_string_lossy().into_owned();
     // SDK `it`: darwin paths are NFC-normalized before encoding.
-    #[cfg(target_os = "macos")]
-    {
-        return source.nfc().collect();
-    }
-    #[cfg(not(target_os = "macos"))]
-    source
+    normalize_text(&absolute.to_string_lossy())
 }
 
 /// `fm`: non-ASCII-alphanumerics become `-` per UTF-16 code unit. Paths longer
@@ -141,9 +135,7 @@ fn projects_dir(options: &TranscriptOptions) -> PathBuf {
 }
 const CHUNK_BYTES: usize = 65536;
 fn project_dir_override() -> Option<String> {
-    if std::env::var_os("CLAUDE_CONFIG_DIR").is_none() {
-        return None;
-    }
+    std::env::var_os("CLAUDE_CONFIG_DIR")?;
     valid_project_dir_name(std::env::var("CLAUDE_CODE_PROJECT_DIR_NAME").ok()?)
 }
 fn valid_project_dir_name(name: String) -> Option<String> {
@@ -230,12 +222,11 @@ async fn cwd_matches(project_dir: &Path, source: &str) -> bool {
     false
 }
 fn normalize_text(value: &str) -> String {
-    #[cfg(target_os = "macos")]
-    {
-        return value.nfc().collect();
+    if cfg!(target_os = "macos") {
+        value.nfc().collect()
+    } else {
+        value.to_owned()
     }
-    #[cfg(not(target_os = "macos"))]
-    value.to_owned()
 }
 async fn head_tail(path: &Path) -> Option<(String, String)> {
     let bytes = fs::read(path).await.ok()?;

@@ -295,3 +295,42 @@ fn truncate(text: &str, max: usize) -> String {
     }
     text[..end].to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use reqwest::Method;
+
+    use super::*;
+    use crate::test_support::{FakeResponse, FakeServer};
+
+    #[tokio::test]
+    async fn head_sends_the_directory_query_and_not_the_header() {
+        let server = FakeServer::spawn(|request| {
+            assert_eq!(request.method, "HEAD");
+            assert!(
+                request.target.contains("directory=%2Fwork+dir"),
+                "{}",
+                request.target
+            );
+            assert!(request.directory_header.is_none());
+            FakeResponse::empty(200)
+        })
+        .await;
+        let client = HttpClient::new(&server.url, "", false)
+            .unwrap()
+            .with_directory("/work dir");
+        client
+            .send_empty(
+                "head",
+                Method::HEAD,
+                "/global/health",
+                &[],
+                &[],
+                None,
+                &[200],
+                None,
+            )
+            .await
+            .unwrap();
+    }
+}

@@ -411,8 +411,10 @@ mod tests {
 
     #[test]
     fn an_empty_directory_is_rejected() {
-        let err = V1Client::new("http://127.0.0.1:1", "", None).unwrap_err();
-        assert!(err.detail.contains("directory"), "{}", err.detail);
+        match V1Client::new("http://127.0.0.1:1", "", None) {
+            Err(err) => assert!(err.detail.contains("directory"), "{}", err.detail),
+            Ok(_) => panic!("empty directory was accepted"),
+        }
     }
 
     #[test]
@@ -501,7 +503,17 @@ mod tests {
             .with_silent_timeout(Duration::from_millis(200));
         let mut events = client.events().await.unwrap();
         let opened = server.requests.recv().await.unwrap();
-        assert!(opened.target.starts_with("/event"), "{}", opened.target);
+        assert!(
+            opened.target.starts_with("/event?"),
+            "{}",
+            opened.target
+        );
+        assert!(
+            opened.target.contains("directory=%2Fwork"),
+            "{}",
+            opened.target
+        );
+        assert!(opened.directory_header.is_none());
         let event = events.next().await.unwrap().unwrap();
         assert_eq!(event.event_type, "server.connected");
         assert!(events.next().await.is_none());

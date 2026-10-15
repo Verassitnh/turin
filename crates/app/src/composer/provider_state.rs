@@ -26,6 +26,8 @@ pub struct ProviderModel {
     pub is_custom: bool,
     pub is_default: bool,
     pub is_legacy: bool,
+    /// A saved selection the provider no longer lists (shown, not selectable).
+    pub is_unavailable: bool,
     pub capabilities: Option<ModelCapabilities>,
 }
 

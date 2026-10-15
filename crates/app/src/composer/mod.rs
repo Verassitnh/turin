@@ -31,3 +31,6 @@ pub mod primary_actions;
 pub mod footer_layout;
 pub mod provider_options;
 pub mod provider_state;
+pub mod model_display;
+pub mod model_picker_keys;
+pub mod model_picker_search;

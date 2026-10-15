@@ -6,6 +6,9 @@
 //! interface font size exactly like the web app's root `font-size` does
 //! (GPUI's rem size is the theme font size). Pixel values stay pixels.
 
+// Ported in full: the full index.css token table, ahead of its callers.
+#![allow(dead_code)]
+
 use gpui_kit::{BoxShadow, Hsla, Pixels, Rems, point, px};
 
 use super::color::hex;
@@ -129,7 +132,6 @@ pub mod tw {
     pub const EMERALD_400: Rgba = hex(0x00d492);
     pub const EMERALD_500: Rgba = hex(0x00bc7d);
     pub const EMERALD_700: Rgba = hex(0x007a55);
-    pub const RED_300: Rgba = hex(0xffa2a2);
     pub const RED_400: Rgba = hex(0xff6467);
     pub const RED_600: Rgba = hex(0xe7000b);
     pub const EMERALD_600: Rgba = hex(0x009966);
@@ -195,6 +197,14 @@ pub fn shadow_lg(alpha: f32) -> Vec<BoxShadow> {
     ]
 }
 
+/// Tailwind `shadow-xl` (`0 20px 25px -5px`, `0 8px 10px -6px`).
+pub fn shadow_xl(alpha: f32) -> Vec<BoxShadow> {
+    vec![
+        shadow(20., 25., -5., black(alpha)),
+        shadow(8., 10., -6., black(alpha)),
+    ]
+}
+
 /// `--shadow-composer` / `--shadow-composer-dark`: the composer's elevation,
 /// a soft drop pulled in under the surface.
 pub fn shadow_composer(dark: bool) -> Vec<BoxShadow> {
@@ -235,16 +245,49 @@ pub fn inset_control_highlight() -> BoxShadow {
     highlight
 }
 
-/// `before:shadow-[0_1px_--theme(--color-black/4%)]` on outline controls in
-/// light mode, `0_-1px_white/6%` in dark: the 1px lip under raised surfaces.
-pub fn control_lip(dark: bool) -> BoxShadow {
-    let mut lip = if dark {
-        shadow(-1., 0., 0., white(0.06))
+/// The 1px lip on outline controls and popups: upstream's
+/// `before:shadow-[0_1px_--theme(--color-black/4%)]` (light) and
+/// `dark:before:shadow-[0_-1px_--theme(--color-white/6%)]` are *outer*
+/// shadows of an `inset-0` `::before`, so they paint over the bottom border
+/// in light mode and the top border in dark mode. GPUI paints shadows under
+/// borders, so the lip is drawn as a 1px overlay line ([`control_lip_overlay`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ControlLip {
+    pub color: Hsla,
+    /// `true`: over the top border (dark); `false`: over the bottom border.
+    pub top: bool,
+}
+
+pub fn control_lip(dark: bool) -> ControlLip {
+    if dark {
+        ControlLip {
+            color: white(0.06),
+            top: true,
+        }
     } else {
-        shadow(1., 0., 0., black(0.04))
-    };
-    lip.inset = true;
-    lip
+        ControlLip {
+            color: black(0.04),
+            top: false,
+        }
+    }
+}
+
+/// An absolutely positioned 1px line over the given border edge. Children
+/// paint after their parent's border, so it lands above it. Inset by the
+/// corner radius so it stays on the straight part of the edge.
+pub fn control_lip_overlay(lip: ControlLip, radius: Pixels) -> gpui_kit::Div {
+    use gpui_kit::Styled as _;
+    let line = gpui_kit::div()
+        .absolute()
+        .left(radius)
+        .right(radius)
+        .h(px(1.))
+        .bg(lip.color);
+    if lip.top {
+        line.top(px(-1.))
+    } else {
+        line.bottom(px(-1.))
+    }
 }
 
 /// Rems at the default interface size, for code that needs a pixel figure

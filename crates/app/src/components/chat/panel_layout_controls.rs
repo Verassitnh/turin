@@ -10,8 +10,7 @@ use gpui_kit::{
     App, ClickEvent, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div,
 };
 
-use crate::theme::tokens::RADIUS_LG;
-use crate::ui::{Button, ButtonSize, ButtonVariant, IconName, Tooltip};
+use crate::ui::{IconName, Toggle, ToggleSize, ToggleVariant, Tooltip};
 
 type Handler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -23,14 +22,13 @@ pub struct PanelLayoutControls {
     pub on_toggle_maximize: Handler,
 }
 
-fn toggle(id: &'static str, icon: IconName, pressed: bool, tooltip: Tooltip) -> Button {
-    Button::new(id)
-        .variant(ButtonVariant::Ghost)
-        .size(ButtonSize::IconSm)
+fn toggle(id: &'static str, icon: IconName, pressed: bool, tooltip: Tooltip) -> Toggle {
+    Toggle::new(id)
+        .variant(ToggleVariant::Ghost)
+        .size(ToggleSize::Sm)
         .icon(icon)
         .pressed(pressed)
         .tooltip(tooltip)
-        .rounded(RADIUS_LG)
 }
 
 impl RenderOnce for PanelLayoutControls {
@@ -45,14 +43,14 @@ impl RenderOnce for PanelLayoutControls {
                 "toggle-thread-details",
                 IconName::SquareMenu,
                 false,
-                Tooltip::new("Thread details").shortcut("⇧⌘B"),
+                Tooltip::new("Toggle thread details").shortcut("⇧⌘B"),
             ))
             .child(
                 toggle(
                     "toggle-right-panel",
                     IconName::PanelRight,
                     self.right_panel_open,
-                    Tooltip::new("Toggle panel").shortcut("⌥⌘B"),
+                    Tooltip::new("Toggle right panel").shortcut("⌥⌘B"),
                 )
                 .on_click(move |event, window, cx| on_toggle_right_panel(event, window, cx)),
             )
@@ -67,7 +65,7 @@ impl RenderOnce for PanelLayoutControls {
                         },
                         self.right_panel_maximized,
                         Tooltip::new(if self.right_panel_maximized {
-                            "Restore panel"
+                            "Restore panel size"
                         } else {
                             "Maximize panel"
                         }),

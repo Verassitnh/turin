@@ -6,22 +6,19 @@
 //! ported yet.
 
 use gpui_kit::{
-    App, CursorStyle, ElementId, FontWeight, InteractiveElement as _, IntoElement,
+    App, CursorStyle, ElementId, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, px, rems, svg,
+    Window, div, rems,
 };
 
-use crate::assets::T3_WORDMARK;
-use crate::components::drag_region::DragRegion as _;
+use crate::branding::APP_BASE_NAME;
+use crate::components::drag_region::{DragRegion as _, no_drag};
+use crate::components::workspace_titlebar::workspace_titlebar_content_left;
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::{
     CONTROL_RADIUS, SIDEBAR_CONTENT_INSET, TEXT_SM, WORKSPACE_TOPBAR_HEIGHT,
 };
 use crate::ui::{Icon, IconName, Tooltip};
-
-/// `--workspace-titlebar-content-left` on macOS desktop: the 90px window
-/// controls inset + the 28px sidebar toggle + its 12px gap.
-pub const WORKSPACE_TITLEBAR_CONTENT_LEFT: f32 = 90. + 28. + 12.;
 
 #[derive(IntoElement)]
 pub struct SidebarChromeHeader;
@@ -29,9 +26,6 @@ pub struct SidebarChromeHeader;
 impl RenderOnce for SidebarChromeHeader {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme();
-        // `h-[1cap]` of the 14px brand text.
-        let cap = 10.;
-        let wordmark_width = cap * 94.3941 / 56.96;
         div()
             .id("sidebar-chrome-header")
             .relative()
@@ -54,27 +48,20 @@ impl RenderOnce for SidebarChromeHeader {
                     .overflow_hidden()
                     .child(
                         div()
-                            .ml(px(WORKSPACE_TITLEBAR_CONTENT_LEFT))
+                            .ml(workspace_titlebar_content_left(window))
                             .flex()
                             .h_7()
                             .items_center()
                             .rounded(CONTROL_RADIUS)
                             .text_color(theme.foreground)
+                            // SidebarBrandMark slot styling (`text-sm font-medium
+                            // tracking-tight`) with Turin's name instead of
+                            // the T3 wordmark + "Code".
                             .child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
                                     .text_size(TEXT_SM.size)
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child(
-                                        svg()
-                                            .path(T3_WORDMARK)
-                                            .w(px(wordmark_width))
-                                            .h(px(cap))
-                                            .text_color(theme.foreground),
-                                    )
-                                    .child(div().text_color(theme.muted_foreground).child("Code")),
+                                    .child(APP_BASE_NAME),
                             ),
                     ),
             )
@@ -120,6 +107,7 @@ pub fn sidebar_icon_button(
     let tooltip = Tooltip::new(label);
     div()
         .id(id)
+        .on_mouse_down(MouseButton::Left, no_drag)
         .group(group.clone())
         .flex()
         .flex_shrink_0()
@@ -162,8 +150,8 @@ impl RenderOnce for SidebarChromeFooter {
                     ))
                     .child(SidebarUtilityButton::new(
                         "sidebar-pull-requests",
-                        IconName::GitPullRequest,
-                        "Pull requests",
+                        IconName::GitPullRequestArrow,
+                        "Pull Requests",
                     ))
                     .child(SidebarUtilityButton::new(
                         "sidebar-usage",

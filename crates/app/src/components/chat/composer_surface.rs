@@ -39,17 +39,24 @@ fn composer_control(
         .gap(rems(0.375))
         .px(rems(0.625))
         .rounded(RADIUS_MD)
+        .border_1()
+        .border_color(with_alpha(tw::BLACK, 0.))
         .text_size(TEXT_SM.size)
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.secondary_label)
         .cursor(CursorStyle::PointingHand)
-        .hover(|style| style.bg(theme.accent))
+        .hover(|style| style.bg(theme.accent).text_color(theme.foreground))
         .child(Icon::new(icon).color(theme.muted_foreground))
         .child(label)
         .child(
-            Icon::new(IconName::ChevronDown)
-                .size(rems(0.75))
-                .color(theme.muted_foreground),
+            // ComposerControlChevron size=sm: `size-3.5 text-icon-muted`,
+            // pulled in by the control's `[&_svg]:-mx-0.5`. Upstream strokes
+            // it at 2.25; the lucide asset is the stock 2.
+            div().mx(px(-2.)).child(
+                Icon::new(IconName::ChevronDown)
+                    .size(rems(0.875))
+                    .color(theme.icon_muted),
+            ),
         )
 }
 
@@ -138,7 +145,7 @@ impl RenderOnce for ComposerSurface {
                                     .variant(ButtonVariant::Ghost)
                                     .size(ButtonSize::IconSm)
                                     .icon(IconName::Paperclip)
-                                    .tooltip(Tooltip::new("Attach images")),
+                                    .tooltip(Tooltip::new("Attach files")),
                             )
                             .child(
                                 // Send: 32px round `bg-message-action`, disabled while empty.
@@ -150,7 +157,9 @@ impl RenderOnce for ComposerSurface {
                                     .justify_center()
                                     .rounded_full()
                                     .bg(theme.message_action)
-                                    .shadow(tokens::shadow_xs(0.05))
+                                    // Empty draft → disabled: `disabled:opacity-64
+                                    // disabled:shadow-none`. The enabled
+                                    // message-action/24 shadow lands with the composer.
                                     .opacity(0.64)
                                     .child(
                                         svg()

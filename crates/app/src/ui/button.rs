@@ -16,12 +16,13 @@ use gpui_kit::Refineable as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, BoxShadow, ClickEvent, CursorStyle, ElementId, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Rems, RenderOnce, SharedString,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, px,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Rems, RenderOnce,
+    SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, div, px,
 };
 
 use super::icon::{Icon, IconName};
 use super::tooltip::Tooltip;
+use crate::components::drag_region::no_drag;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{self, RADIUS_MD, RADIUS_SM, TEXT_BASE, TEXT_SM, TEXT_XS, TextSize, tw};
 use crate::theme::{ActiveAppTheme, AppTheme};
@@ -104,17 +105,25 @@ const fn square(size: f32, icon: f32) -> SizeSpec {
 
 impl ButtonSize {
     pub(crate) fn spec(self) -> SizeSpec {
+        // Desktop cascade: the base class's `sm:text-sm` and
+        // `sm:[&_svg]:size-4` come after a size's unprefixed `text-xs` /
+        // `[&_svg]:size-3.5` in the compiled CSS, so on desktop they win.
+        // Sizes that add their own `sm:` overrides (micro, xs, xl) keep them.
         match self {
-            // h-7 gap-1 rounded-md px-[calc(--spacing(2)-1px)] text-xs, svg size-3.5
+            // h-7 gap-1 rounded-md px-[calc(--spacing(2)-1px)]; text-xs and
+            // svg size-3.5 lose to the base sm: rules → 14px text, 16px icon.
             Self::Compact => SizeSpec {
                 radius: RADIUS_MD,
-                ..spec(1.75, 7., 0.25, TEXT_XS, 0.875)
+                ..spec(1.75, 7., 0.25, TEXT_SM, 1.)
             },
             // sm:h-8 px-[calc(--spacing(3)-1px)], sm:text-sm, svg sm:size-4
             Self::Default => spec(2., 11., 0.5, TEXT_SM, 1.),
             Self::Icon => square(2., 1.),
             Self::IconLg => square(2.25, 1.),
-            // size-5 rounded-sm p-0, svg size-3
+            // size-5 rounded-sm p-0, svg size-3. The cascade would make the
+            // default icon 16px, but nearly every upstream icon-micro /
+            // icon-tiny call site passes an explicit `size-3`, so 12px is the
+            // default here; use `Button::icon_size` for the rest.
             Self::IconMicro => SizeSpec {
                 radius: RADIUS_SM,
                 ..square(1.25, 0.75)
@@ -157,6 +166,8 @@ pub(crate) struct VariantColors {
     pub shadow: Vec<BoxShadow>,
     pub underline_on_hover: bool,
     pub pill: bool,
+    /// Outline controls: the 1px lip over the bottom (light) / top (dark) border.
+    pub lip: bool,
 }
 
 fn a(color: impl Into<gpui_kit::Rgba>, alpha: f32) -> Hsla {
@@ -179,6 +190,7 @@ impl ButtonVariant {
             shadow: Vec::new(),
             underline_on_hover: false,
             pill: false,
+            lip: false,
         };
         // Solid fills: inset top highlight plus a tinted shadow-xs.
         let solid_shadow = |tint: Hsla| {
@@ -193,11 +205,7 @@ impl ButtonVariant {
         } else {
             theme.popover
         };
-        let outline_shadow = || {
-            let mut shadow = tokens::shadow_xs(0.05);
-            shadow.push(tokens::control_lip(dark));
-            shadow
-        };
+        let outline_shadow = || tokens::shadow_xs(0.05);
         match self {
             Self::Default => VariantColors {
                 bg: Some(theme.primary),
@@ -222,6 +230,7 @@ impl ButtonVariant {
                 bg_hover: Some(a(theme.destructive, 0.04)),
                 border_hover: Some(a(theme.destructive, 0.32)),
                 shadow: outline_shadow(),
+                lip: true,
                 ..base
             },
             Self::Ghost => VariantColors {
@@ -264,6 +273,7 @@ impl ButtonVariant {
                     a(theme.accent, 0.5)
                 }),
                 shadow: outline_shadow(),
+                lip: true,
                 ..base
             },
             Self::Overlay => VariantColors {
@@ -301,6 +311,7 @@ pub struct Button {
     variant: ButtonVariant,
     size: ButtonSize,
     icon: Option<IconName>,
+    icon_size: Option<Rems>,
     label: Option<SharedString>,
     children: Vec<AnyElement>,
     disabled: bool,
@@ -317,6 +328,7 @@ impl Button {
             variant: ButtonVariant::Default,
             size: ButtonSize::Default,
             icon: None,
+            icon_size: None,
             label: None,
             children: Vec::new(),
             disabled: false,
@@ -338,6 +350,12 @@ impl Button {
     }
 
     /// Leading icon, sized and tinted by the variant (`[&_svg]` rules).
+    /// An explicit `size-*` on the icon, overriding the size's default.
+    pub fn icon_size(mut self, size: Rems) -> Self {
+        self.icon_size = Some(size);
+        self
+    }
+
     pub fn icon(mut self, icon: IconName) -> Self {
         self.icon = Some(icon);
         self
@@ -413,6 +431,8 @@ impl RenderOnce for Button {
 
         let mut root = div()
             .id(self.id.clone())
+            // `no-drag`: buttons inside titlebar drag regions keep their clicks.
+            .on_mouse_down(MouseButton::Left, no_drag)
             .group(group.clone())
             .relative()
             .flex()
@@ -470,7 +490,7 @@ impl RenderOnce for Button {
         if let Some(icon) = self.icon {
             root = root.child(
                 Icon::new(icon)
-                    .size(size.icon)
+                    .size(self.icon_size.unwrap_or(size.icon))
                     .color(theme_fg_for_icon)
                     .when_some(icon_hover.filter(|_| interactive), |this, hover| {
                         this.group_hover_color(group.clone(), hover)
@@ -481,6 +501,13 @@ impl RenderOnce for Button {
             root = root.child(label);
         }
         root = root.children(self.children);
+        // `not-disabled:not-active:not-data-pressed:before:shadow-[…]`.
+        if colors.lip && interactive && !pressed {
+            root = root.child(tokens::control_lip_overlay(
+                tokens::control_lip(theme.is_dark()),
+                radius,
+            ));
+        }
 
         if let Some(on_click) = self.on_click.filter(|_| interactive) {
             root = root.on_click(move |event, window, cx| on_click(event, window, cx));

@@ -36,7 +36,7 @@ impl Icon {
         }
     }
 
-    /// A monochrome SVG from [`crate::assets`] (e.g. the T3 wordmark).
+    /// A monochrome SVG from [`crate::assets`] (e.g. a brand glyph).
     pub fn path(path: impl Into<SharedString>) -> Self {
         Self {
             source: Source::Path(path.into()),

@@ -8,11 +8,10 @@
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyView, App, AppContext as _, Context, FontWeight, IntoElement, ParentElement, Render,
-    SharedString, Styled, Window, div, px, rems,
+    AnyView, App, AppContext as _, Context, IntoElement, ParentElement, Render, SharedString,
+    Styled, Window, div, px, rems,
 };
 
-use super::kbd::Kbd;
 use crate::theme::color::{MixSpace, color_mix, with_alpha};
 use crate::theme::tokens::{self, LEADING_RELAXED, LEADING_SNUG, RADIUS_MD, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
@@ -43,7 +42,8 @@ impl Tooltip {
         }
     }
 
-    /// A keyboard shortcut label shown after the text, e.g. `"⌘B"`.
+    /// A keyboard shortcut label, appended as plain text the way upstream
+    /// builds its labels: `Toggle main sidebar (⌘B)`.
     pub fn shortcut(mut self, shortcut: impl Into<SharedString>) -> Self {
         self.shortcut = Some(shortcut.into());
         self
@@ -97,9 +97,14 @@ impl Render for TooltipView {
         let tooltip = &self.0;
         let code = tooltip.variant == TooltipVariant::Code;
         let glass = tooltip.variant == TooltipVariant::Glass;
+        let label: SharedString = match &tooltip.shortcut {
+            Some(shortcut) => format!("{} ({shortcut})", tooltip.text).into(),
+            None => tooltip.text.clone(),
+        };
         // Offset from the pointer, as Base UI's `sideOffset` does from the trigger.
         div().pl(px(4.)).pt(px(4.)).child(
             div()
+                .relative()
                 .flex()
                 .items_center()
                 .gap_2()
@@ -114,7 +119,7 @@ impl Render for TooltipView {
                     if glass {
                         this.bg(dropdown_glass_background(theme))
                             .border_color(dropdown_glass_border(theme))
-                            .shadow(tokens::shadow_lg(0.25))
+                            .shadow(tokens::shadow_xl(0.25))
                     } else {
                         this.bg(theme.popover)
                             .border_color(theme.border)
@@ -132,14 +137,14 @@ impl Render for TooltipView {
                             .line_height(rems(TEXT_XS.size.0 * LEADING_SNUG))
                     }
                 })
-                .child(tooltip.text.clone())
-                .when_some(tooltip.shortcut.clone(), |this, shortcut| {
-                    this.child(
-                        div()
-                            .flex_shrink_0()
-                            .font_weight(FontWeight::NORMAL)
-                            .child(Kbd::new(shortcut)),
-                    )
+                .child(label)
+                // `before:shadow-[0_1px_black/4%]` / dark `0_-1px_white/6%`;
+                // the glass variant hides it (`before:hidden`).
+                .when(!glass, |this| {
+                    this.child(tokens::control_lip_overlay(
+                        tokens::control_lip(theme.is_dark()),
+                        RADIUS_MD,
+                    ))
                 }),
         )
     }

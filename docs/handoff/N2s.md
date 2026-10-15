@@ -26,7 +26,7 @@ Deviations are logged in `PORTING.md` (rows for each file below).
 
 Support: `ttl_cache.rs`, `testing.rs` (fakes and real-git adapters, `#[cfg(test)]` only), `project_ports.rs` (seams), `project_service.rs`.
 
-Current state: `cargo test -p turin-projects` = 152 passing. `cargo clippy -p turin-projects --all-targets --no-deps -- -D warnings` is clean. `rustfmt --edition 2024 --check` is clean on the crate's files.
+Current state: `cargo test -p turin-projects` = 158 passing. `cargo clippy -p turin-projects --all-targets --no-deps -- -D warnings` is clean. `rustfmt --edition 2024 --check` is clean on the crate's files.
 
 **Gate `scripts/check.sh -p turin-projects` does NOT exit 0 yet.** It stops at the first step, `cargo fmt --all --check`, which reports diffs only in `crates/git/` (`git_manager.rs`, `shared_git.rs`, `vcs_driver_registry.rs`). That code is on `main` (T06) and is not ours, so the PM must fix it or merge the fix. The build, test, and clippy steps run after fmt and were run separately: all pass.
 
@@ -57,7 +57,7 @@ All in `project_ports.rs`, `project_service.rs`, and `agent_session_scanner.rs`:
 ## Remaining (in order)
 
 1. **DONE (step 1).** `AgentSessionScanner.ts` discovery half and its FS cases. Commits `832428e`..`98550b8`.
-   Its deviations are in PORTING.md. The seams it needs, for the T22 wiring:
+   Its deviations are in PORTING.md. Seams the T22 wiring implements (all in place):
    - config-path seam: Claude and Codex home dirs, `ServerConfig` base and worktrees dirs, the
      `expandHomePath` rules, and `HostProcess`;
    - `CodexHomeLayout` seam (`provider/Drivers/CodexHomeLayout.ts`) and provider settings seams
@@ -73,17 +73,17 @@ All in `project_ports.rs`, `project_service.rs`, and `agent_session_scanner.rs`:
      record selector) for the bounded, streamed reads.
    - `AgentSessionDiscoveryHost` must carry canonical `base_dir` and `worktrees_dir` (see the PORTING
      realpath row).
-2. **`ProjectService.test.ts`, 4 cases not ported**: enrichment failure, invalidation on move,
-   slow metadata, update-after-delete lock wait. See the Known gaps.
-3. **`ProjectService.deletion.test.ts`, 4 cases** (thread-deletion cascade). Depends on the
-   `ThreadDeletions` seam; use fakes, as `ProjectService` tests do.
-4. `ProjectEnrichmentService.test.ts` logger-capture case and `ProjectFaviconResolver.test.ts`
+2. **DONE (step 2).** The 4 `ProjectService.test.ts` cases (enrichment failure, invalidation on move,
+   slow metadata, lock wait) and 2 `ProjectService.deletion.test.ts` cases (command-id collision, deletion
+   once threads are gone) are ported in `project_service.rs`. The other `deletion` cases map to existing
+   fake-based tests (partial cascade retry, settings cleanup). The legacy-transcript case is cut.
+3. `ProjectEnrichmentService.test.ts` logger-capture case and `ProjectFaviconResolver.test.ts`
    FileSystem-instrumented and `t3.json` cases stay open (Known gaps).
 
 ## Known gaps
 
-- `ProjectService.test.ts`: 4 cases not ported (enrichment failure, invalidation on move, slow
-  metadata, update-after-delete lock wait). `ProjectService.deletion.test.ts` (4 cases) is not ported.
+- `ProjectService.deletion.test.ts`: SQL-level assertions (event rows, outbox) are not portable; the
+  store-state equivalents are checked. The legacy-transcript case is cut with the legacy v1 importer.
 - `ProjectEnrichmentService.test.ts`: logger-capture case not ported.
 - `ProjectFaviconResolver.test.ts`: FileSystem-instrumented cases and the `t3.json` cases not ported.
 - `ProjectService` rejection receipt encoding is unverified against upstream (see seams).

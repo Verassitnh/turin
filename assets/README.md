@@ -45,8 +45,21 @@ Run `uv run assets/export-icons.py` from the repository root. It needs the `upst
 and Icon Composer 2+ (bundled with Xcode 26+). It finds `ictool` the way upstream's export script
 does. `ICON_COMPOSER_TOOL` wins outright. Otherwise it takes the newest 2+ build from
 `DEVELOPER_DIR`, `xcode-select -p`, a standalone `Icon Composer.app` in `/Applications` or
-`~/Applications`, or any `Xcode*.app` in `/Applications` or `~/Downloads`. Its output is deterministic, so
-`git status assets/` after a run shows whether the committed exports are stale.
+`~/Applications`, or any `Xcode*.app` in `/Applications` or `~/Downloads`.
+
+The Python dependencies are pinned in the script header with an `exclude-newer` cutoff and locked
+in `export-icons.py.lock`. The comparison sheets use Pillow's bundled font, not a system font.
+The committed exports were produced with this toolchain:
+
+- Icon Composer `ictool` 27.0 (bundle 129), from Xcode in `/Applications`, design generation 26
+- Python 3.14.3, numpy 2.5.4, Pillow 12.3.0 (zlib-ng 1.3.1, FreeType 2.14.3), pypng 0.20220715.0,
+  scipy 1.18.1
+- macOS `sips` and `iconutil`, on macOS 27.0
+
+With that toolchain, re-running the script reproduces every committed file byte-for-byte, so
+`git status assets/` shows whether the exports are stale. A different `ictool` build changes
+the ictool renders slightly, and a different zlib changes the PNG bytes but not the pixels. Both
+show up as modified files without any design change.
 
 | File | Size | Produced by |
 | --- | --- | --- |

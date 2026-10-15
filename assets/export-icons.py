@@ -1,7 +1,9 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.11"
-# dependencies = ["numpy", "pillow", "pypng", "scipy"]
+# requires-python = ">=3.12"
+# dependencies = ["numpy==2.5.4", "pillow==12.3.0", "pypng==0.20220715.0", "scipy==1.18.1"]
+# [tool.uv]
+# exclude-newer = "2026-10-14T00:00:00Z"
 # ///
 """Export Turin's prod icon assets from assets/prod/app-icon.icon.
 
@@ -380,11 +382,9 @@ def compile_bundle_icon(icon: Path, resources: Path) -> None:
 
 # --- comparison sheets ---
 
-def sheet_font() -> ImageFont.ImageFont:
-    try:
-        return ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 18)
-    except OSError:
-        return ImageFont.load_default()
+def sheet_font() -> ImageFont.FreeTypeFont:
+    # Pillow's bundled font, so the sheets don't depend on system fonts.
+    return ImageFont.load_default(size=18)
 
 
 def compare_sheet(out_dir: Path) -> None:

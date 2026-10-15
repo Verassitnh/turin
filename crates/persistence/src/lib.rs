@@ -56,3 +56,5 @@ pub use time::{format_utc_millis, utc_millis_now};
 mod behavior_tests;
 #[cfg(test)]
 mod migrations_test;
+#[cfg(test)]
+mod upstream_migration_tests;

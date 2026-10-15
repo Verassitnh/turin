@@ -1,6 +1,6 @@
 export const meta = {
   name: 'turin-qc',
-  description: 'Opus 5.5 quality-control gate for a Turin branch/worktree: dimension reviews, adversarial verify, ranked report',
+  description: 'Quality-control gate for a Turin branch/worktree: dimension reviews (Sonnet), adversarial verify (Haiku), ranked report (Sonnet); look-and-feel on Opus',
   whenToUse: 'Before merging any Turin task branch, and for cross-crate audits of main',
   phases: [
     { title: 'Review', detail: 'one reviewer per quality dimension' },
@@ -14,15 +14,18 @@ const WT = A.worktree
 const SCOPE = A.scope
 const UPSTREAM = A.upstream
 const CONTEXT = A.context || ''
+// Model policy (user, 2026-10-15): Sonnet/Haiku where reasonable; Opus only for look-and-feel judgement.
+const M = Object.assign({ review: 'sonnet', verify: 'haiku', lead: 'sonnet', lookAndFeel: 'opus' }, A.models || {})
 
-const BASE = `You are a QC reviewer (Claude Opus 5.5) for Turin, a faithful Rust/GPUI port of T3 Code (TypeScript/Effect).
+const BASE = `You are a QC reviewer for Turin, a faithful Rust/GPUI port of T3 Code (TypeScript/Effect).
 Checkout to review (read-only, do NOT edit or commit anything): ${WT}
 Read ${WT}/PORTING.md and ${WT}/AGENTS.md first: they define the porting rules, Effect->Rust mapping, keep/cut lists, and Deviations log.
 Upstream reference (read-only): ${WT}/upstream  (pingdotgg/t3code@ec1313c8).
 Scope under review: ${SCOPE}
 Upstream counterpart: ${UPSTREAM}
 ${CONTEXT}
-You may run read-only commands (cargo build/test/clippy with PATH=$HOME/.cargo/bin:$PATH DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer, small throwaway test programs in /tmp, node one-liners to check upstream behaviour). Never modify files in the checkout.
+You may run read-only commands (cargo build/test/clippy with PATH=$HOME/.cargo/bin:$PATH DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer, small throwaway test programs, node one-liners to check upstream behaviour). Never modify files in the checkout.
+STORAGE (disk is nearly full): put throwaway crates under /tmp/turin-scratch-qc-<your-label>/, build them with CARGO_TARGET_DIR=/tmp/turin-scratch-target (shared, do not create other target dirs), and run rm -rf on your scratch dir before you finish. Never copy user databases (~/.t3/userdata/*.sqlite) anywhere.
 Report only concrete, evidenced problems with file:line. No style nits unless they violate PORTING.md. If nothing is wrong in your dimension, return an empty list.`
 
 const DIMENSIONS = A.dimensions || [
@@ -67,11 +70,11 @@ const VERDICT = {
 
 const results = await pipeline(
   DIMENSIONS,
-  d => agent(`${BASE}\n\n${d.prompt}`, { label: `review:${d.key}`, phase: 'Review', schema: FINDINGS, effort: 'high' }),
+  d => agent(`${BASE}\n\n${d.prompt}`, { label: `review:${d.key}`, phase: 'Review', schema: FINDINGS, effort: 'high', model: d.key === 'look-and-feel' ? M.lookAndFeel : M.review }),
   (review, d) => parallel((review?.findings || []).map((f, i) => () =>
     parallel([0, 1].map(k => () => agent(
       `${BASE}\n\nYou are skeptic #${k + 1}. Another reviewer (dimension: ${d.key}) claims:\n${JSON.stringify(f, null, 2)}\n\nTry hard to REFUTE it: re-read the cited code and upstream, run checks. refuted=true if the claim is wrong, already handled, intentionally logged in Deviations, or not actually a problem. If it is real, refuted=false and give adjustedSeverity.`,
-      { label: `verify:${d.key}#${i}.${k}`, phase: 'Verify', schema: VERDICT, effort: 'high' },
+      { label: `verify:${d.key}#${i}.${k}`, phase: 'Verify', schema: VERDICT, effort: 'high', model: M.verify },
     ))).then(vs => {
       const ok = vs.filter(Boolean)
       const upheld = ok.filter(v => !v.refuted)
@@ -88,6 +91,6 @@ log(`${all.length} findings raised, ${confirmed.length} survived verification, $
 phase('Report')
 const report = await agent(
   `${BASE}\n\nYou are the QC lead. Confirmed findings (survived adversarial verification):\n${JSON.stringify(confirmed, null, 2)}\n\nDeduplicate overlapping findings, rank by severity, and write a concise fix list for the implementing agent: each item = severity, file:line, problem, required fix. Then a one-line verdict: PASS (no critical/high) or FAIL. Plain text, no preamble.`,
-  { label: 'qc-lead', phase: 'Report', effort: 'high' },
+  { label: 'qc-lead', phase: 'Report', effort: 'high', model: M.lead },
 )
 return { confirmed, rejectedCount: rejected, report }

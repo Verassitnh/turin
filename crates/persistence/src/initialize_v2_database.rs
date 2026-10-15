@@ -3,7 +3,10 @@
 //! Seed V2 once. Its copied legacy tables remain the source for lazy transcript import.
 
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
+use rusqlite::backup::StepResult;
 use rusqlite::{Connection, OpenFlags, backup::Backup};
 
 use crate::errors::PersistenceError;
@@ -64,8 +67,37 @@ fn backup_sqlite(source: &Path, snapshot: &Path) -> Result<(), rusqlite::Error> 
     let src = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut dst = Connection::open(snapshot)?;
     let backup = Backup::new(&src, &mut dst)?;
-    backup.step(-1)?;
-    Ok(())
+    // `step` returns `Ok(Busy)` / `Ok(Locked)` for a partial copy. Only `Done`
+    // may be linked. Anything else is an import error and the temp dir is removed.
+    let mut pauses = 0u32;
+    loop {
+        match backup.step(64)? {
+            StepResult::Done => return Ok(()),
+            StepResult::More => pauses = 0,
+            StepResult::Busy | StepResult::Locked => {
+                pauses += 1;
+                if pauses > 100 {
+                    return Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error {
+                            code: rusqlite::ErrorCode::DatabaseBusy,
+                            extended_code: rusqlite::ffi::SQLITE_BUSY,
+                        },
+                        Some("sqlite backup did not finish".into()),
+                    ));
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            _ => {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error {
+                        code: rusqlite::ErrorCode::DatabaseBusy,
+                        extended_code: rusqlite::ffi::SQLITE_BUSY,
+                    },
+                    Some("sqlite backup did not finish".into()),
+                ));
+            }
+        }
+    }
 }
 
 fn import_err(

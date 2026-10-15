@@ -576,7 +576,7 @@ async fn v2_accept_for_session_writes_a_grant_and_replies_once() {
 }
 
 #[tokio::test]
-async fn v2_session_created_links_a_subagent() {
+async fn v2_task_reveals_its_child_and_keys_one_subagent_record() {
     let script = script(|request| {
         if request.method == "PUT" || request.method == "PATCH" {
             return FakeResponse::empty(204);
@@ -590,12 +590,11 @@ async fn v2_session_created_links_a_subagent() {
         FakeResponse::json(200, r#"{"data":{}}"#)
     })
     .await;
-    let client = V2Client::connect(&script.server.url, "pw").unwrap();
     let session = OpenCodeV2Session::open(
         ProviderInstanceId::new("opencode").unwrap(),
         ProviderSessionId::new("provider-session").unwrap(),
         "/work",
-        client,
+        V2Client::connect(&script.server.url, "pw").unwrap(),
         None,
     )
     .unwrap();
@@ -612,27 +611,40 @@ async fn v2_session_created_links_a_subagent() {
         .await
         .unwrap();
     session.start_turn(turn(thread, "delegate")).await.unwrap();
+    // The link alone names no subagent: ownership only, as upstream's relatedSessionOwners.
     script
         .frames
         .send(Some(sse(
             r#"{"id":"evt2","type":"session.created","data":{"id":"child_1","parentID":"ses_1"}}"#,
         )))
         .unwrap();
-    let found = tokio::time::timeout(Duration::from_secs(2), async {
-        while let Some(event) = events.next().await {
-            if let Ok(ProviderAdapterV2Event::SubagentUpdated { subagent, .. }) = event {
-                return subagent
-                    .native_task_ref
-                    .as_ref()
-                    .and_then(|native| native.native_id.as_ref())
-                    .map(|id| id.as_str().to_owned());
-            }
-        }
-        None
-    })
-    .await
-    .unwrap();
-    assert_eq!(found.as_deref(), Some("child_1"));
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"evt3","type":"session.tool.success","data":{"sessionID":"ses_1","id":"call_t","name":"task","status":"completed","input":{"prompt":"look"},"metadata":{"sessionID":"child_1"},"output":"seen"}}).to_string(),
+        )))
+        .unwrap();
+    let seen = events_until(&mut events, |value| value["type"] == "subagent.updated").await;
+    let record = of_type(&seen, "subagent.updated")
+        .into_iter()
+        .next()
+        .expect("subagent record")
+        .clone();
+    assert_eq!(
+        record["subagent"]["id"],
+        json!(derive_node("call_t")),
+        "{seen:#?}"
+    );
+    assert_eq!(
+        record["subagent"]["childThreadId"],
+        json!(derive_thread("child_1"))
+    );
+    assert!(
+        of_type(&seen, "app_thread.created")
+            .iter()
+            .any(|event| event["app_thread"]["id"] == json!(derive_thread("child_1"))),
+        "{seen:#?}"
+    );
     session.close().await;
 }
 
@@ -1961,4 +1973,117 @@ fn derive_thread(native: &str) -> String {
     )
     .as_str()
     .to_owned()
+}
+
+#[tokio::test]
+async fn v2_child_execution_is_a_turn_under_a_root_turn_with_the_task_prompt() {
+    let script = script(|request| {
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread, "delegate")).await.unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"evt1","type":"session.tool.success","data":{"sessionID":"ses_1","id":"call_t","name":"task","status":"running","input":{"prompt":"look"},"metadata":{"sessionID":"child_1"}}}).to_string(),
+        )))
+        .unwrap();
+    events_until(&mut events, |value| value["type"] == "subagent.updated").await;
+
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"evt2","type":"session.execution.started","data":{"sessionID":"child_1"}})
+                .to_string(),
+        )))
+        .unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"evt3","type":"session.text.ended","data":{"sessionID":"child_1","assistantMessageID":"msg_k","ordinal":0,"text":"found it"}}).to_string(),
+        )))
+        .unwrap();
+    let running = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "assistant_message"
+            && value["turn_item"]["text"] == "found it"
+    })
+    .await;
+    let root = of_type(&running, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["kind"] == "root_turn")
+        .expect("child root_turn node");
+    assert_eq!(
+        root["node"]["id"],
+        json!(derive_node("child_1:turn:1:root"))
+    );
+    assert_eq!(root["node"]["threadId"], json!(derive_thread("child_1")));
+    let prompt = of_type(&running, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["type"] == "user_message")
+        .expect("the task prompt, as a user message");
+    assert_eq!(prompt["turn_item"]["text"], "look");
+    assert_eq!(prompt["turn_item"]["senderThreadId"], "thread_1");
+    assert_eq!(
+        prompt["turn_item"]["threadId"],
+        json!(derive_thread("child_1"))
+    );
+    let text = of_type(&running, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["text"] == "found it")
+        .expect("child text");
+    // The text has its own node, rooted at the child's root_turn.
+    let text_node = of_type(&running, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["id"] == text["turn_item"]["nodeId"])
+        .expect("text node");
+    assert_eq!(text_node["node"]["rootNodeId"], root["node"]["id"]);
+
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"evt4","type":"session.execution.succeeded","data":{"sessionID":"child_1"}}).to_string(),
+        )))
+        .unwrap();
+    let done = events_until(&mut events, |value| {
+        value["type"] == "provider_turn.updated" && value["provider_turn"]["status"] == "completed"
+    })
+    .await;
+    assert!(
+        of_type(&done, "node.updated")
+            .iter()
+            .any(|event| event["node"]["kind"] == "root_turn"
+                && event["node"]["status"] == "completed"),
+        "{done:#?}"
+    );
+    session.close().await;
 }

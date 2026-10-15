@@ -17,9 +17,11 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use turin_contracts::{
-    MessageId, PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId, UtcDateTime,
+    MessageId, NodeId, PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId,
+    TrimmedNonEmptyString, UtcDateTime,
+    model_selection::ModelSelection,
     orchestration_v2::{
-        OrchestrationV2Actor, OrchestrationV2ConversationMessage,
+        OrchestrationV2Actor, OrchestrationV2AppThread, OrchestrationV2ConversationMessage,
         OrchestrationV2ConversationMessageRole, OrchestrationV2CreationSource,
         OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeKind,
         OrchestrationV2ExecutionNodeStatus, OrchestrationV2ProviderFailureClass,
@@ -29,7 +31,6 @@ use turin_contracts::{
         OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus,
         OrchestrationV2ResponseCapability, OrchestrationV2RuntimeRequest,
         OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
-        OrchestrationV2Subagent, OrchestrationV2SubagentOrigin, OrchestrationV2SubagentStatus,
         OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
@@ -41,13 +42,18 @@ use turin_provider_core::id_allocator::{IdAllocator, derive};
 use turin_provider_core::provider_continuation_requests::{
     ProviderContinuationDelivery, ProviderContinuationRequest, ProviderContinuationRequests,
 };
+use turin_provider_core::subagent_projection::{
+    SubagentChildThreadInput, SubagentConversationArtifactsInput, make_subagent_child_thread,
+    make_subagent_conversation_artifacts, subagent_thread_title,
+};
 
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
 use crate::adapter::records::{
     Compaction, NodeOf, NodeTiming, RequestBody, SubagentCall, TextBlock, assistant_message,
     compaction_turn_item, execution_node, next_ordinal, node_status_of, request_node,
-    request_turn_item, settle_request_item, settle_request_node, subagent_records, text_turn_item,
+    request_turn_item, root_turn_node, settle_request_item, settle_request_node, subagent_records,
+    text_turn_item,
 };
 use crate::events::V2StreamEvent;
 use crate::permission_rules::{SessionPermissionRule, session_permission_rules};
@@ -72,6 +78,8 @@ struct V2Turn {
     /// The compaction running in this turn: its native id, and when it started.
     compaction: Option<(String, UtcDateTime)>,
     compactions: u64,
+    /// The app thread the turn runs for: a child thread's parent.
+    app_thread: OrchestrationV2AppThread,
     before: Option<String>,
 }
 
@@ -116,8 +124,22 @@ struct Pending {
     item: OrchestrationV2TurnItem,
 }
 
+/// A child session a `task` call revealed (upstream's child `ThreadState`): its app thread, its
+/// provider thread, the task's prompt, and the turns its executions run.
+struct V2Child {
+    thread: OrchestrationV2AppThread,
+    provider_thread: OrchestrationV2ProviderThread,
+    parent_thread: ThreadId,
+    prompt: String,
+    /// Executions started so far; upstream numbers the child's turns by it.
+    turns: u64,
+    turn: Option<V2Turn>,
+}
+
 struct V2Inner {
     threads: HashMap<String, V2Thread>,
+    /// Child sessions a `task` call revealed, by child session id.
+    subagents: HashMap<String, V2Child>,
     pending: HashMap<String, Pending>,
     children: HashMap<String, String>,
     windows: HashMap<String, u64>,
@@ -191,6 +213,7 @@ impl OpenCodeV2Session {
                 pending: HashMap::new(),
                 children: HashMap::new(),
                 windows: HashMap::new(),
+                subagents: HashMap::new(),
                 stream_dead: None,
                 wakes: HashMap::new(),
                 reports: HashMap::new(),
@@ -432,6 +455,11 @@ impl OpenCodeV2Session {
     fn on_event(&self, event_type: &str, data: &Value) {
         let session_id = str_field(data, "sessionID");
         if let Some(session_id) = &session_id
+            && self.child_execution(session_id, event_type)
+        {
+            return;
+        }
+        if let Some(session_id) = &session_id
             && self.park_or_wake(session_id, event_type, data)
         {
             return;
@@ -560,28 +588,12 @@ impl OpenCodeV2Session {
         }
     }
 
+    /// Ownership only (upstream `relatedSessionOwners`): the subagent record comes from the
+    /// task call that names the child, so the link and the task key one record.
     fn link_child(&self, child: &str, parent: &str) {
         let mut guard = self.inner.lock();
-        if !guard.threads.contains_key(parent) {
-            return;
-        }
-        guard.children.insert(child.to_owned(), parent.to_owned());
-        let subagent = guard.threads.get(parent).and_then(|thread| {
-            let turn = thread.active.as_ref()?;
-            Some(subagent_for(
-                &self.instance_id,
-                &thread.provider_thread,
-                &turn.thread_id,
-                &turn.provider_turn,
-                child,
-            ))
-        });
-        drop(guard);
-        if let Some(subagent) = subagent {
-            self.emit(ProviderAdapterV2Event::SubagentUpdated {
-                driver: self.driver.clone(),
-                subagent,
-            });
+        if guard.threads.contains_key(parent) {
+            guard.children.insert(child.to_owned(), parent.to_owned());
         }
     }
 
@@ -601,11 +613,7 @@ impl OpenCodeV2Session {
         let mut events = Vec::new();
         {
             let mut guard = self.inner.lock();
-            let Some(turn) = guard
-                .threads
-                .get_mut(session_id)
-                .and_then(|thread| thread.active.as_mut())
-            else {
+            let Some(turn) = active_turn_mut(&mut guard, session_id) else {
                 return;
             };
             let block = turn
@@ -649,11 +657,7 @@ impl OpenCodeV2Session {
         let mut events = Vec::new();
         {
             let mut guard = self.inner.lock();
-            let Some(turn) = guard
-                .threads
-                .get_mut(session_id)
-                .and_then(|thread| thread.active.as_mut())
-            else {
+            let Some(turn) = active_turn_mut(&mut guard, session_id) else {
                 return;
             };
             self.block_events(turn, part_id, reasoning, text, true, now, now, &mut events);
@@ -755,7 +759,8 @@ impl OpenCodeV2Session {
         let mut events = Vec::new();
         {
             let mut guard = self.inner.lock();
-            let Some(turn) = guard
+            let inner: &mut V2Inner = &mut guard;
+            let Some(turn) = inner
                 .threads
                 .get_mut(session_id)
                 .and_then(|thread| thread.active.as_mut())
@@ -772,9 +777,6 @@ impl OpenCodeV2Session {
                 "error" | "failed" => OrchestrationV2TurnItemStatus::Failed,
                 _ => OrchestrationV2TurnItemStatus::Running,
             };
-            if name == "task" || name == "subagent" {
-                turn.usage.has_subagents = true;
-            }
             let now = UtcDateTime::now();
             let started_at = *turn.tool_started.entry(call_id.to_owned()).or_insert(now);
             let completed_at = matches!(
@@ -794,9 +796,16 @@ impl OpenCodeV2Session {
                 native_item_id: call_id,
                 weak_ref: false,
             };
+            let input = state.get("input").cloned().unwrap_or_else(|| json!({}));
+            let output = state
+                .get("output")
+                .or_else(|| state.pointer("/state/output"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             if name == "task" || name == "subagent" {
-                // `emitSubagent`: a task call is a subagent, not a tool call.
-                let input = state.get("input").cloned().unwrap_or_else(|| json!({}));
+                turn.usage.has_subagents = true;
+                // `emitSubagent`: a task call is a subagent, not a tool call. The child thread
+                // exists from the first update that names the child session.
                 let prompt = input
                     .get("prompt")
                     .and_then(Value::as_str)
@@ -806,17 +815,37 @@ impl OpenCodeV2Session {
                     .get("title")
                     .and_then(Value::as_str)
                     .or_else(|| input.get("description").and_then(Value::as_str));
-                let result = state
-                    .get("output")
-                    .or_else(|| state.pointer("/state/output"))
-                    .and_then(Value::as_str)
-                    .map(subagent_output);
+                let child_session = state
+                    .pointer("/metadata/sessionId")
+                    .or_else(|| state.pointer("/metadata/sessionID"))
+                    .or_else(|| state.pointer("/state/metadata/sessionID"))
+                    .and_then(Value::as_str);
+                let subagent_node = derive::node_from_provider_item(&self.driver, call_id);
+                let mut child = None;
+                if let Some(child_session) = child_session {
+                    inner
+                        .children
+                        .insert(child_session.to_owned(), session_id.to_owned());
+                    self.ensure_child(
+                        &mut inner.subagents,
+                        turn,
+                        child_session,
+                        &prompt,
+                        title,
+                        &subagent_node,
+                    );
+                    child = inner
+                        .subagents
+                        .get(child_session)
+                        .map(|child| (child.thread.id.clone(), child.provider_thread.id.clone()));
+                }
+                let result = output.as_deref().map(subagent_output);
                 let ordinal = item_ordinal(turn, call_id);
                 let records = subagent_records(
                     &self.driver,
                     SubagentCall {
                         instance_id: &self.instance_id,
-                        child: None,
+                        child,
                         of,
                         ordinal,
                         prompt: &prompt,
@@ -825,7 +854,7 @@ impl OpenCodeV2Session {
                         started_at,
                         completed_at,
                         result,
-                        child_session: None,
+                        child_session,
                         now,
                     },
                 );
@@ -855,19 +884,7 @@ impl OpenCodeV2Session {
                         },
                     ),
                 });
-                let input = state.get("input").cloned().unwrap_or_else(|| json!({}));
-                let output = state
-                    .get("output")
-                    .or_else(|| state.pointer("/state/output"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                let shown = output.as_deref().map(|text| {
-                    if name == "task" || name == "subagent" {
-                        subagent_output(text)
-                    } else {
-                        text.to_owned()
-                    }
-                });
+                let shown = output.as_deref().map(str::to_owned);
                 let base = tool_base(
                     turn,
                     &self.driver,
@@ -1165,16 +1182,262 @@ impl OpenCodeV2Session {
         }
     }
 
+    /// `emitSubagent`'s child thread: created the first time a task reveals its child session.
+    fn ensure_child(
+        &self,
+        subagents: &mut HashMap<String, V2Child>,
+        parent: &V2Turn,
+        child_session: &str,
+        prompt: &str,
+        title: Option<&str>,
+        subagent_node: &NodeId,
+    ) {
+        if subagents.contains_key(child_session) {
+            return;
+        }
+        let now = UtcDateTime::now();
+        let ordinal = subagents.len() as u64 + 1;
+        let thread_id = derive::thread_from_provider_thread(
+            &self.driver,
+            Some(&self.instance_id),
+            child_session,
+        );
+        let mut provider_thread = make_thread(
+            &self.instance_id,
+            &self.provider_session_id,
+            &thread_id,
+            child_session,
+            None,
+            now,
+        );
+        provider_thread.owner_node_id = Some(subagent_node.clone());
+        let child_title =
+            subagent_thread_title(parent.app_thread.title.as_str(), title, prompt, ordinal);
+        let thread = make_subagent_child_thread(SubagentChildThreadInput {
+            parent_thread: &parent.app_thread,
+            child_thread_id: thread_id.clone(),
+            parent_node_id: subagent_node.clone(),
+            active_provider_thread_id: Some(provider_thread.id.clone()),
+            provider_instance_id: self.instance_id.clone(),
+            model_selection: ModelSelection {
+                instance_id: self.instance_id.clone(),
+                model: parent.app_thread.model_selection.model.clone(),
+                options: None,
+            },
+            title: TrimmedNonEmptyString::new(child_title)
+                .unwrap_or_else(|_| TrimmedNonEmptyString::new("Subagent").expect("literal")),
+            now,
+            created_by: OrchestrationV2Actor::Agent,
+            creation_source: OrchestrationV2CreationSource::Provider,
+        });
+        self.emit(ProviderAdapterV2Event::AppThreadCreated {
+            driver: self.driver.clone(),
+            app_thread: thread.clone(),
+        });
+        self.emit(ProviderAdapterV2Event::ProviderThreadUpdated {
+            driver: self.driver.clone(),
+            provider_thread: provider_thread.clone(),
+            retained_native_turn_ids: None,
+        });
+        subagents.insert(
+            child_session.to_owned(),
+            V2Child {
+                thread,
+                provider_thread,
+                parent_thread: parent.thread_id.clone(),
+                prompt: prompt.to_owned(),
+                turns: 0,
+                turn: None,
+            },
+        );
+    }
+
+    /// A child session's executions are its turns (upstream `startChildTurn` and the end of a
+    /// child's execution). Returns true when the event is one of them.
+    fn child_execution(&self, session_id: &str, event_type: &str) -> bool {
+        let end = match event_type {
+            "session.execution.started" => None,
+            "session.execution.succeeded" => Some(ProviderAdapterV2TurnTerminalStatus::Completed),
+            "session.execution.failed" => Some(ProviderAdapterV2TurnTerminalStatus::Failed),
+            "session.execution.interrupted" => {
+                Some(ProviderAdapterV2TurnTerminalStatus::Interrupted)
+            }
+            _ => return false,
+        };
+        let mut guard = self.inner.lock();
+        let Some(child) = guard.subagents.get_mut(session_id) else {
+            return false;
+        };
+        match end {
+            None => self.start_child_turn(child, session_id, UtcDateTime::now()),
+            Some(status) => self.finish_child_turn(child, status),
+        }
+        true
+    }
+
+    /// `startChildTurn`: an execution of the child opens its turn, under a `root_turn`. The
+    /// task's prompt opens the conversation as a user message from the parent thread.
+    fn start_child_turn(&self, child: &mut V2Child, child_session: &str, now: UtcDateTime) {
+        if child.turn.is_some() {
+            return;
+        }
+        child.turns += 1;
+        let native_turn = format!("{child_session}:turn:{}", child.turns);
+        let root = derive::node_from_provider_item(&self.driver, &format!("{native_turn}:root"));
+        let provider_turn_id = derive::provider_turn(&self.driver, &native_turn);
+        let provider_turn = OrchestrationV2ProviderTurn {
+            id: provider_turn_id.clone(),
+            provider_thread_id: child.provider_thread.id.clone(),
+            node_id: root.clone(),
+            run_attempt_id: None,
+            native_turn_ref: Some(native_ref(&native_turn, true)),
+            ordinal: PositiveInt::new(child.turns).expect("child turn ordinals start at one"),
+            status: OrchestrationV2ProviderTurnStatus::Running,
+            started_at: Some(now),
+            completed_at: None,
+            token_usage: None,
+            turn_token_usage: None,
+        };
+        let node = root_turn_node(
+            &child.thread.id,
+            &root,
+            &child.provider_thread.id,
+            &provider_turn_id,
+            provider_turn.native_turn_ref.clone(),
+            OrchestrationV2ExecutionNodeStatus::Running,
+            now,
+            None,
+        );
+        let thread_id = child.thread.id.clone();
+        let provider_thread_id = child.provider_thread.id.clone();
+        child.turn = Some(V2Turn {
+            provider_turn: provider_turn.clone(),
+            thread_id: thread_id.clone(),
+            run_ordinal: 0,
+            interrupted: false,
+            finalized: false,
+            usage: UsageAccum::new(),
+            item_ordinals: HashMap::new(),
+            next_item_ordinal: 1,
+            text_blocks: HashMap::new(),
+            tool_started: HashMap::new(),
+            compaction: None,
+            compactions: 0,
+            app_thread: child.thread.clone(),
+            before: None,
+        });
+        self.emit(ProviderAdapterV2Event::NodeUpdated {
+            driver: self.driver.clone(),
+            node,
+        });
+        self.emit(ProviderAdapterV2Event::ProviderTurnUpdated {
+            driver: self.driver.clone(),
+            thread_id: Some(thread_id.clone()),
+            provider_turn,
+        });
+        if child.prompt.is_empty() {
+            return;
+        }
+        let native_prompt = format!("{native_turn}:prompt");
+        let prompt = child.prompt.clone();
+        let parent_thread = child.parent_thread.clone();
+        let turn = child.turn.as_mut().expect("the turn was just installed");
+        let ordinal = item_ordinal(turn, &native_prompt);
+        let artifacts = make_subagent_conversation_artifacts(SubagentConversationArtifactsInput {
+            message_id: derive::message_from_provider_item(&self.driver, &native_prompt),
+            sender_thread_id: Some(parent_thread),
+            turn_item_id: derive::turn_item_from_provider_item(&self.driver, &native_prompt),
+            thread_id,
+            root_node_id: root,
+            provider_thread_id: Some(provider_thread_id),
+            provider_turn_id: Some(provider_turn_id),
+            native_item_ref: Some(native_ref(&native_prompt, true)),
+            role: OrchestrationV2ConversationMessageRole::User,
+            text: prompt,
+            ordinal,
+            now,
+        });
+        self.emit(ProviderAdapterV2Event::MessageUpdated {
+            driver: self.driver.clone(),
+            message: artifacts.message,
+        });
+        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: self.driver.clone(),
+            turn_item: artifacts.turn_item,
+        });
+    }
+
+    /// The end of a child's execution: its open text is final, its root node and provider turn
+    /// settle with the terminal status (upstream `finishTurn` for a subagent).
+    fn finish_child_turn(&self, child: &mut V2Child, status: ProviderAdapterV2TurnTerminalStatus) {
+        let Some(mut turn) = child.turn.take() else {
+            return;
+        };
+        let now = UtcDateTime::now();
+        let mut events = Vec::new();
+        let open: Vec<(String, TextBlockState)> = turn.text_blocks.drain().collect();
+        for (native, block) in open {
+            let reasoning = native.contains(":reasoning:");
+            self.block_events(
+                &mut turn,
+                &native,
+                reasoning,
+                &block.text,
+                true,
+                block.started_at,
+                now,
+                &mut events,
+            );
+        }
+        let (provider_status, node_status) = match status {
+            ProviderAdapterV2TurnTerminalStatus::Completed => (
+                OrchestrationV2ProviderTurnStatus::Completed,
+                OrchestrationV2ExecutionNodeStatus::Completed,
+            ),
+            ProviderAdapterV2TurnTerminalStatus::Interrupted => (
+                OrchestrationV2ProviderTurnStatus::Interrupted,
+                OrchestrationV2ExecutionNodeStatus::Interrupted,
+            ),
+            ProviderAdapterV2TurnTerminalStatus::Failed => (
+                OrchestrationV2ProviderTurnStatus::Failed,
+                OrchestrationV2ExecutionNodeStatus::Failed,
+            ),
+            ProviderAdapterV2TurnTerminalStatus::Cancelled => (
+                OrchestrationV2ProviderTurnStatus::Cancelled,
+                OrchestrationV2ExecutionNodeStatus::Cancelled,
+            ),
+        };
+        turn.provider_turn.status = provider_status;
+        turn.provider_turn.completed_at = Some(now);
+        events.push(ProviderAdapterV2Event::NodeUpdated {
+            driver: self.driver.clone(),
+            node: root_turn_node(
+                &child.thread.id,
+                &turn.provider_turn.node_id,
+                &child.provider_thread.id,
+                &turn.provider_turn.id,
+                turn.provider_turn.native_turn_ref.clone(),
+                node_status,
+                turn.provider_turn.started_at.unwrap_or(now),
+                Some(now),
+            ),
+        });
+        events.push(ProviderAdapterV2Event::ProviderTurnUpdated {
+            driver: self.driver.clone(),
+            thread_id: Some(child.thread.id.clone()),
+            provider_turn: turn.provider_turn,
+        });
+        for event in events {
+            self.emit(event);
+        }
+    }
+
     /// `emitCompaction`: the turn's compaction item. A `/compact`, or OpenCode's own when the
     /// context fills, runs inside the turn's execution. Its summary is the text it carried.
     fn compaction(&self, session_id: &str, event_type: &str, data: &Value) {
         let now = UtcDateTime::now();
         let mut guard = self.inner.lock();
-        let Some(turn) = guard
-            .threads
-            .get_mut(session_id)
-            .and_then(|thread| thread.active.as_mut())
-        else {
+        let Some(turn) = active_turn_mut(&mut guard, session_id) else {
             return;
         };
         let (native, title, status, started_at, completed_at, summary) = match event_type {
@@ -1826,6 +2089,7 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                 tool_started: HashMap::new(),
                 compaction: None,
                 compactions: 0,
+                app_thread: input.app_thread.clone(),
                 before: None,
             });
         }
@@ -2543,6 +2807,24 @@ fn make_thread(
     thread
 }
 
+/// The turn running in `session`: a thread's active turn, or a child session's turn.
+fn active_turn_mut<'a>(inner: &'a mut V2Inner, session: &str) -> Option<&'a mut V2Turn> {
+    if inner
+        .threads
+        .get(session)
+        .is_some_and(|thread| thread.active.is_some())
+    {
+        return inner
+            .threads
+            .get_mut(session)
+            .and_then(|thread| thread.active.as_mut());
+    }
+    inner
+        .subagents
+        .get_mut(session)
+        .and_then(|child| child.turn.as_mut())
+}
+
 fn item_ordinal(turn: &mut V2Turn, native_id: &str) -> u64 {
     next_ordinal(
         &mut turn.item_ordinals,
@@ -2574,42 +2856,6 @@ fn tool_base(
         started_at: Some(started_at),
         completed_at,
         updated_at: UtcDateTime::now(),
-    }
-}
-
-fn subagent_for(
-    instance_id: &ProviderInstanceId,
-    thread: &OrchestrationV2ProviderThread,
-    thread_id: &ThreadId,
-    turn: &OrchestrationV2ProviderTurn,
-    child_session: &str,
-) -> OrchestrationV2Subagent {
-    let now = UtcDateTime::now();
-    OrchestrationV2Subagent {
-        id: derive::node_from_provider_item(&opencode_driver(), child_session),
-        thread_id: thread_id.clone(),
-        run_id: None,
-        parent_node_id: turn.node_id.clone(),
-        origin: OrchestrationV2SubagentOrigin::ProviderNative,
-        created_by: OrchestrationV2Actor::Agent,
-        driver: opencode_driver(),
-        provider_instance_id: instance_id.clone(),
-        provider_thread_id: Some(thread.id.clone()),
-        child_thread_id: None,
-        native_task_ref: Some(native_ref(child_session, false)),
-        prompt: String::new(),
-        title: None,
-        model: None,
-        model_selection: None,
-        completion_wake: None,
-        completion_delivery: None,
-        status: OrchestrationV2SubagentStatus::Running,
-        progress: None,
-        workflow: None,
-        result: None,
-        started_at: Some(now),
-        completed_at: None,
-        updated_at: now,
     }
 }
 

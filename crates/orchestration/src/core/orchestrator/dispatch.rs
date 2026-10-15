@@ -15,7 +15,7 @@ use turin_contracts::{
 use turin_persistence::ReceiptStatus;
 use turin_provider_core::id_allocator::IdAllocator;
 
-use super::Orchestrator;
+use super::{Orchestrator, thread_lifecycle};
 use crate::pipeline::command_receipt_store::CommandReceipt;
 use crate::pipeline::effect_outbox::PendingEffect;
 use crate::pipeline::event_sink::{CancelUnsettled, CommandCommit};
@@ -393,6 +393,15 @@ fn may_plan_no_events(command: &OrchestrationV2ServerCommand) -> bool {
     )
 }
 
+/// A refusal `Orchestrator.ts` raises as `OrchestratorDispatchError` for this
+/// command. Recorded as a rejected receipt by [`record_rejection`].
+pub(super) fn dispatch_failure(
+    command: &OrchestrationV2ServerCommand,
+    cause: impl Into<BoxError>,
+) -> OrchestratorError {
+    dispatch_error(command_id(command), &command_type(command), cause)
+}
+
 fn dispatch_error(
     command_id: &CommandId,
     command_type: &str,
@@ -594,12 +603,15 @@ async fn record_rejection(
     cause
 }
 
-/// `dispatchOnce`: routes the command to its handler. `Ok(false)` means no
-/// handler is ported for this kind, so nothing was decided.
+/// `dispatchOnce`: routes the command to its handler group. `Ok(false)` means
+/// no handler is ported for this kind, so nothing was decided.
 async fn decide(
-    _orchestrator: &Orchestrator,
-    _command: &OrchestrationV2ServerCommand,
-    _decision: &mut Decision,
+    orchestrator: &Orchestrator,
+    command: &OrchestrationV2ServerCommand,
+    decision: &mut Decision,
 ) -> Result<bool, OrchestratorError> {
+    if thread_lifecycle::decide(orchestrator, command, decision).await? {
+        return Ok(true);
+    }
     Ok(false)
 }

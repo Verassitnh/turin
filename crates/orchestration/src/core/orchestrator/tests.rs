@@ -7,9 +7,12 @@
 use std::sync::Arc;
 
 use futures::{FutureExt, StreamExt};
+use serde_json::json;
 use turin_contracts::{
     CommandId, ThreadId, UtcDateTime,
-    orchestration_v2::{OrchestrationV2Command, OrchestrationV2ServerCommand},
+    orchestration_v2::{
+        OrchestrationV2Command, OrchestrationV2DomainEvent, OrchestrationV2ServerCommand,
+    },
 };
 use turin_persistence::{Db, OrchestrationEventStore, ReceiptStatus};
 
@@ -185,4 +188,169 @@ async fn the_event_log_is_readable_through_the_port() {
         .expect("stream opens on an empty log");
     // Replay is empty and the live tail is open, so nothing is ready yet.
     assert!(stream.next().now_or_never().is_none());
+}
+
+fn create_command(command: &str, thread_id: &str, title: &str) -> OrchestrationV2ServerCommand {
+    serde_json::from_value(json!({
+        "type": "thread.create",
+        "createdBy": "user",
+        "creationSource": "web",
+        "commandId": command,
+        "threadId": thread_id,
+        "projectId": "project:test",
+        "title": title,
+        "modelSelection": {"instanceId": "codex", "model": "gpt-test"},
+        "runtimeMode": "full-access",
+        "interactionMode": "default",
+    }))
+    .expect("thread.create decodes")
+}
+
+fn visit_command(command: &str, thread_id: &str, visited_at: &str) -> OrchestrationV2ServerCommand {
+    serde_json::from_value(json!({
+        "type": "thread.visit",
+        "commandId": command,
+        "threadId": thread_id,
+        "visitedAt": visited_at,
+    }))
+    .expect("thread.visit decodes")
+}
+
+#[tokio::test]
+async fn thread_create_writes_the_thread_once_and_replays_on_retry() {
+    let (orchestrator, _) = harness().await;
+    let command = create_command("command:create", "thread:new", "First thread");
+
+    let first = orchestrator
+        .dispatch(command.clone())
+        .await
+        .expect("create commits");
+
+    assert_eq!(first.stored_events.len(), 1);
+    assert!(matches!(
+        first.stored_events[0].event,
+        OrchestrationV2DomainEvent::ThreadCreated { .. }
+    ));
+    let projection = orchestrator
+        .get_thread_projection(&thread("thread:new"))
+        .await
+        .expect("thread reads back");
+    assert_eq!(projection.thread.title.as_str(), "First thread");
+    assert_eq!(projection.thread.snoozed_until, Some(None));
+
+    // The same command again answers from its receipt and writes nothing.
+    let replay = orchestrator.dispatch(command).await.expect("replays");
+    assert_eq!(replay.sequence, first.sequence);
+    assert_eq!(replay.stored_events.len(), 1);
+}
+
+#[tokio::test]
+async fn thread_visit_moves_last_visited_forward_only() {
+    let (orchestrator, _) = harness().await;
+    let id = thread("thread:visited");
+    orchestrator
+        .dispatch(create_command(
+            "command:create-visited",
+            "thread:visited",
+            "Visited",
+        ))
+        .await
+        .expect("create commits");
+
+    let later = orchestrator
+        .dispatch(visit_command(
+            "command:visit-late",
+            "thread:visited",
+            "2026-01-01T00:00:05.000Z",
+        ))
+        .await
+        .expect("visit commits");
+    assert!(matches!(
+        later.stored_events[0].event,
+        OrchestrationV2DomainEvent::ThreadVisited { .. }
+    ));
+    let visited = orchestrator.get_thread_projection(&id).await.unwrap();
+    assert!(visited.thread.last_visited_at.is_some());
+    let stamp = visited.thread.last_visited_at;
+
+    // An earlier visit is still recorded, but it does not move the watermark.
+    orchestrator
+        .dispatch(visit_command(
+            "command:visit-early",
+            "thread:visited",
+            "2026-01-01T00:00:02.000Z",
+        ))
+        .await
+        .expect("earlier visit commits");
+    let after = orchestrator.get_thread_projection(&id).await.unwrap();
+    assert_eq!(after.thread.last_visited_at, stamp);
+}
+
+#[tokio::test]
+async fn an_invalid_visit_time_is_refused_and_the_refusal_is_replayed() {
+    let (orchestrator, _) = harness().await;
+    orchestrator
+        .dispatch(create_command(
+            "command:create-bad",
+            "thread:bad",
+            "Bad visit",
+        ))
+        .await
+        .expect("create commits");
+    let command = visit_command("command:visit-bad", "thread:bad", "not-a-time");
+
+    let error = orchestrator
+        .dispatch(command.clone())
+        .await
+        .expect_err("an invalid timestamp is refused");
+    assert!(
+        matches!(error, OrchestratorError::Dispatch { .. }),
+        "{error:?}"
+    );
+
+    // Upstream stores the dispatch error's message, not the detail behind it.
+    let replay = orchestrator
+        .dispatch(command)
+        .await
+        .expect_err("the rejected receipt replays");
+    assert!(
+        matches!(
+            replay,
+            OrchestratorError::CommandPreviouslyRejected { ref detail, .. }
+                if detail == "Failed to dispatch orchestration command thread.visit (command:visit-bad)."
+        ),
+        "{replay:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_imported_native_thread_is_not_ported_and_leaves_no_receipt() {
+    let (orchestrator, receipts) = harness().await;
+    let mut command = serde_json::to_value(create_command(
+        "command:import",
+        "thread:import",
+        "Imported",
+    ))
+    .expect("command encodes");
+    command["importedNativeThread"] = json!({
+        "ref": {"driver": "codex", "nativeId": "native-1", "strength": "strong"},
+    });
+    let command: OrchestrationV2ServerCommand =
+        serde_json::from_value(command).expect("imported create decodes");
+
+    let error = orchestrator
+        .dispatch(command)
+        .await
+        .expect_err("imported threads are not ported");
+    assert!(
+        matches!(error, OrchestratorError::CommandRejected { .. }),
+        "{error:?}"
+    );
+    assert!(
+        receipts
+            .get_by_command_id(command_id("command:import"))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

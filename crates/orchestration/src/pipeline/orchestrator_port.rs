@@ -51,7 +51,8 @@ pub fn mode_text<T: serde::Serialize>(mode: &T) -> String {
 /// `OrchestratorV2Error`.
 #[derive(Debug, thiserror::Error)]
 pub enum OrchestratorError {
-    #[error("Orchestration command {command_type} ({command_id}) failed.")]
+    /// Its text is what a rejected receipt stores, as upstream's `message` does.
+    #[error("Failed to dispatch orchestration command {command_type} ({command_id}).")]
     Dispatch {
         command_id: CommandId,
         command_type: String,

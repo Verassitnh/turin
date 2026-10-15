@@ -7,8 +7,7 @@
 
 use serde_json::Value;
 use turin_acp::cursor::{
-    AskAnswer, AskQuestionParams, AskQuestionResult, CreatePlanParams, CreatePlanResult, CursorTodo,
-    TodoStatus,
+    AskAnswer, AskQuestionParams, AskQuestionResult, CreatePlanResult, CursorTodo, TodoStatus,
 };
 use turin_contracts::base_schemas::TrimmedNonEmptyString;
 use turin_contracts::orchestration_v2::{
@@ -44,7 +43,8 @@ pub fn user_input_questions(params: &AskQuestionParams) -> Vec<OrchestrationV2Us
                 .filter_map(|option| {
                     Some(OrchestrationV2UserInputQuestionOption {
                         label: trimmed(&option.label).or_else(|| trimmed(&option.id))?,
-                        description: trimmed(&option.label).unwrap_or_else(|| trimmed(&option.id).unwrap()),
+                        description: trimmed(&option.label)
+                            .unwrap_or_else(|| trimmed(&option.id).unwrap()),
                         value: Some(option.id.clone()),
                     })
                 })
@@ -77,7 +77,9 @@ pub fn plan_steps(todos: &[CursorTodo]) -> Vec<OrchestrationV2PlanStep> {
                 status: match todo.status {
                     TodoStatus::Completed => OrchestrationV2PlanStepStatus::Completed,
                     TodoStatus::InProgress => OrchestrationV2PlanStepStatus::Running,
-                    TodoStatus::Pending | TodoStatus::Cancelled => OrchestrationV2PlanStepStatus::Pending,
+                    TodoStatus::Pending | TodoStatus::Cancelled => {
+                        OrchestrationV2PlanStepStatus::Pending
+                    }
                 },
                 duration_anchor_at: None,
                 duration_ms: None,
@@ -168,7 +170,9 @@ mod tests {
         }])));
         assert_eq!(answered["outcome"]["outcome"], "answered");
         assert_eq!(answered["outcome"]["answers"][0]["questionId"], "q1");
-        assert!(serde_json::from_value::<AskQuestionResult>(json!({"outcome": "answered"})).is_err());
+        assert!(
+            serde_json::from_value::<AskQuestionResult>(json!({"outcome": "answered"})).is_err()
+        );
 
         let accepted = nested_outcome(&plan_result(PlanDisposition::Accepted {
             plan_uri: Some("file:///plan.md".to_owned()),

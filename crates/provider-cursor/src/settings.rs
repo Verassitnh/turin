@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use turin_contracts::model::CustomModelSetting;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CursorSettings {
     #[serde(default)]
@@ -29,17 +29,6 @@ pub struct CursorSettings {
     pub api_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_models: Vec<CustomModelSetting>,
-}
-
-impl Default for CursorSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            binary_path: None,
-            api_endpoint: None,
-            custom_models: Vec::new(),
-        }
-    }
 }
 
 impl CursorSettings {

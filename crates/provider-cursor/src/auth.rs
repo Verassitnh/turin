@@ -84,7 +84,9 @@ pub fn require_cursor_login_method(method_id: &str) -> Result<(), CursorError> {
 }
 
 pub fn is_auth_required_message(message: &str) -> bool {
-    message.to_ascii_lowercase().contains("authentication required")
+    message
+        .to_ascii_lowercase()
+        .contains("authentication required")
 }
 
 pub fn is_auth_required_error(error: &AcpError) -> bool {
@@ -155,9 +157,7 @@ pub fn status_from_credential_file(path: &Path) -> CursorSignInStatus {
 pub const ACP_ARGS: &[&str] = &["acp"];
 
 pub fn launch_is_unforced(args: &[&str]) -> bool {
-    !args
-        .iter()
-        .any(|arg| *arg == "--force" || *arg == "--yolo")
+    !args.iter().any(|arg| *arg == "--force" || *arg == "--yolo")
 }
 
 #[cfg(test)]
@@ -168,11 +168,8 @@ mod tests {
 
     #[test]
     fn authenticate_is_explicit_cursor_login_only() {
-        assert!(!AUTHENTICATE_ON_AUTH_REQUIRED);
-        assert_eq!(
-            authenticate_params(),
-            json!({"methodId": "cursor_login"})
-        );
+        const { assert!(!AUTHENTICATE_ON_AUTH_REQUIRED) };
+        assert_eq!(authenticate_params(), json!({"methodId": "cursor_login"}));
         assert!(require_cursor_login_method("cursor_login").is_ok());
         assert!(require_cursor_login_method("api_key").is_err());
         assert!(launch_is_unforced(ACP_ARGS));

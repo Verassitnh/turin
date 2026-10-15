@@ -129,7 +129,11 @@ pub fn negotiate_capabilities(
     session_setup: Option<&Value>,
 ) -> OrchestrationV2ProviderCapabilities {
     let mut capabilities = cursor_capabilities();
-    let load = initialize.agent_capabilities.get("loadSession").and_then(Value::as_bool) == Some(true);
+    let load = initialize
+        .agent_capabilities
+        .get("loadSession")
+        .and_then(Value::as_bool)
+        == Some(true);
     capabilities.threads.can_read_thread_snapshot = load;
     let has_model_config = session_setup.is_some_and(|setup| {
         setup
@@ -141,7 +145,10 @@ pub fn negotiate_capabilities(
                         || option.get("category").and_then(Value::as_str) == Some("model")
                 })
             })
-            || setup.get("models").and_then(Value::as_array).is_some_and(|models| !models.is_empty())
+            || setup
+                .get("models")
+                .and_then(Value::as_array)
+                .is_some_and(|models| !models.is_empty())
     });
     capabilities.sessions.supports_model_switch_in_session = has_model_config;
     capabilities.threads.can_fork_thread = false;

@@ -97,7 +97,12 @@ impl CursorError {
 
 impl fmt::Display for CursorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Cursor {} failed. {}", self.operation.as_str(), self.detail)
+        write!(
+            f,
+            "Cursor {} failed. {}",
+            self.operation.as_str(),
+            self.detail
+        )
     }
 }
 

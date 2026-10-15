@@ -35,12 +35,19 @@ pub struct PermissionRequest {
 pub fn parse_permission_request(value: &Value) -> PermissionRequest {
     let tool = value.get("toolCall");
     PermissionRequest {
-        session_id: value.get("sessionId").and_then(Value::as_str).map(str::to_owned),
+        session_id: value
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         title: value
             .get("title")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .or_else(|| tool.and_then(|tool| tool.get("title")).and_then(Value::as_str).map(str::to_owned)),
+            .or_else(|| {
+                tool.and_then(|tool| tool.get("title"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            }),
         tool_call_id: tool
             .and_then(|tool| tool.get("toolCallId"))
             .and_then(Value::as_str)
@@ -58,8 +65,16 @@ pub fn parse_permission_request(value: &Value) -> PermissionRequest {
                     .filter_map(|option| {
                         Some(PermissionOption {
                             option_id: option.get("optionId")?.as_str()?.to_owned(),
-                            name: option.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
-                            kind: option.get("kind").and_then(Value::as_str).unwrap_or("").to_owned(),
+                            name: option
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned(),
+                            kind: option
+                                .get("kind")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned(),
                         })
                     })
                     .collect()
@@ -82,7 +97,11 @@ pub fn approval_options(request: &PermissionRequest) -> Vec<ProviderApprovalOpti
     if let Some(option) = option_for_kind(request, "allow_once") {
         options.push(card_option(
             ProviderApprovalDecision::Accept,
-            if option.name.is_empty() { "Allow once" } else { &option.name },
+            if option.name.is_empty() {
+                "Allow once"
+            } else {
+                &option.name
+            },
         ));
     }
     options.push(card_option(
@@ -140,7 +159,9 @@ pub fn answer_for_decision(
     decision: ProviderApprovalDecision,
 ) -> PermissionAnswer {
     let kind = match decision {
-        ProviderApprovalDecision::Accept | ProviderApprovalDecision::AcceptForSession => "allow_once",
+        ProviderApprovalDecision::Accept | ProviderApprovalDecision::AcceptForSession => {
+            "allow_once"
+        }
         ProviderApprovalDecision::AcceptAlways => "allow_always",
         ProviderApprovalDecision::Decline => "reject_once",
         ProviderApprovalDecision::Cancel => {
@@ -198,15 +219,21 @@ mod tests {
         let request = sample();
         assert_eq!(
             answer_for_decision(&request, ProviderApprovalDecision::Accept),
-            PermissionAnswer::Selected { option_id: "once".to_owned() }
+            PermissionAnswer::Selected {
+                option_id: "once".to_owned()
+            }
         );
         assert_eq!(
             answer_for_decision(&request, ProviderApprovalDecision::AcceptForSession),
-            PermissionAnswer::Selected { option_id: "once".to_owned() }
+            PermissionAnswer::Selected {
+                option_id: "once".to_owned()
+            }
         );
         assert_eq!(
             answer_for_decision(&request, ProviderApprovalDecision::AcceptAlways),
-            PermissionAnswer::Selected { option_id: "always".to_owned() }
+            PermissionAnswer::Selected {
+                option_id: "always".to_owned()
+            }
         );
         let labels: Vec<_> = approval_options(&request)
             .iter()
@@ -214,9 +241,13 @@ mod tests {
             .collect();
         assert!(labels.iter().any(|label| label == ALWAYS_ALLOW_LABEL));
         assert!(labels.iter().any(|label| label == ALLOW_FOR_THREAD_LABEL));
-        assert!(!permission_result(&PermissionAnswer::Selected { option_id: "once".into() })
+        assert!(
+            !permission_result(&PermissionAnswer::Selected {
+                option_id: "once".into()
+            })
             .to_string()
-            .contains("allow_always"));
+            .contains("allow_always")
+        );
     }
 
     #[test]
@@ -231,7 +262,9 @@ mod tests {
         assert!(is_ask_question_fallback(&request));
         assert_eq!(
             answer_for_decision(&request, ProviderApprovalDecision::Decline),
-            PermissionAnswer::Selected { option_id: ASK_QUESTION_SKIP_OPTION.to_owned() }
+            PermissionAnswer::Selected {
+                option_id: ASK_QUESTION_SKIP_OPTION.to_owned()
+            }
         );
     }
 }

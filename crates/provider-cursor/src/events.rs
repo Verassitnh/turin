@@ -59,7 +59,10 @@ pub fn parse_session_update(params: &Value) -> Vec<CursorUpdate> {
         "agent_message_chunk" => content_text(update.get("content"))
             .map(|text| CursorUpdate::Text {
                 text,
-                message_id: update.get("messageId").and_then(Value::as_str).map(str::to_owned),
+                message_id: update
+                    .get("messageId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
             })
             .into_iter()
             .collect(),
@@ -79,8 +82,12 @@ pub fn parse_session_update(params: &Value) -> Vec<CursorUpdate> {
                 }]
             }
         }
-        "available_commands_update" => vec![CursorUpdate::Commands { raw: params.clone() }],
-        "config_option_update" => vec![CursorUpdate::Config { raw: params.clone() }],
+        "available_commands_update" => vec![CursorUpdate::Commands {
+            raw: params.clone(),
+        }],
+        "config_option_update" => vec![CursorUpdate::Config {
+            raw: params.clone(),
+        }],
         "current_mode_update" => update
             .get("currentModeId")
             .and_then(Value::as_str)
@@ -91,7 +98,9 @@ pub fn parse_session_update(params: &Value) -> Vec<CursorUpdate> {
             })
             .into_iter()
             .collect(),
-        "usage_update" | "state_update" => vec![CursorUpdate::Usage { raw: params.clone() }],
+        "usage_update" | "state_update" => vec![CursorUpdate::Usage {
+            raw: params.clone(),
+        }],
         other => vec![CursorUpdate::Unknown {
             session_update: other.to_owned(),
             raw: params.clone(),
@@ -110,8 +119,14 @@ fn parse_tool(update: &Value) -> Option<CursorUpdate> {
     };
     Some(CursorUpdate::Tool {
         tool_call_id,
-        title: update.get("title").and_then(Value::as_str).map(str::to_owned),
-        kind: update.get("kind").and_then(Value::as_str).map(str::to_owned),
+        title: update
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        kind: update
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         status: status.to_owned(),
         raw: update.clone(),
     })
@@ -124,8 +139,12 @@ fn plan_entries(entries: Option<&Value>) -> Vec<PlanStep> {
     entries
         .iter()
         .enumerate()
-        .filter_map(|(index, entry)| {
-            let content = entry.get("content").and_then(Value::as_str).unwrap_or("").trim();
+        .map(|(index, entry)| {
+            let content = entry
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
             let text = if content.is_empty() {
                 format!("Step {}", index + 1)
             } else {
@@ -136,10 +155,10 @@ fn plan_entries(entries: Option<&Value>) -> Vec<PlanStep> {
                 Some("in_progress" | "inProgress") => "inProgress",
                 _ => "pending",
             };
-            Some(PlanStep {
+            PlanStep {
                 text,
                 status: status.to_owned(),
-            })
+            }
         })
         .collect()
 }
@@ -150,7 +169,11 @@ fn content_text(content: Option<&Value>) -> Option<String> {
         return None;
     }
     let text = content.get("text").and_then(Value::as_str)?;
-    if text.is_empty() { None } else { Some(text.to_owned()) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_owned())
+    }
 }
 
 #[cfg(test)]
@@ -175,7 +198,11 @@ mod tests {
             }
         }));
         match &tool[0] {
-            CursorUpdate::Tool { tool_call_id, status, .. } => {
+            CursorUpdate::Tool {
+                tool_call_id,
+                status,
+                ..
+            } => {
                 assert_eq!(tool_call_id, "t1");
                 assert_eq!(status, "completed");
             }

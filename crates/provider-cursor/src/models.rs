@@ -38,7 +38,9 @@ pub fn config_updates(catalog: &[AvailableModel], selection: &ModelSelection) ->
         value: Value::String(selection.model.as_str().to_owned()),
         type_name: None,
     }];
-    let model = catalog.iter().find(|model| model.value == selection.model.as_str());
+    let model = catalog
+        .iter()
+        .find(|model| model.value == selection.model.as_str());
     let Some(options) = &selection.options else {
         return updates;
     };
@@ -48,21 +50,32 @@ pub fn config_updates(catalog: &[AvailableModel], selection: &ModelSelection) ->
             continue;
         }
         if let Some(model) = model
-            && !model.config_options.iter().any(|candidate| candidate.id == id)
+            && !model
+                .config_options
+                .iter()
+                .any(|candidate| candidate.id == id)
         {
             continue;
         }
         let catalog_type = model
-            .and_then(|model| model.config_options.iter().find(|candidate| candidate.id == id))
+            .and_then(|model| {
+                model
+                    .config_options
+                    .iter()
+                    .find(|candidate| candidate.id == id)
+            })
             .map(|candidate| candidate.type_name.as_str());
         let (value, type_name) = match &option.value {
             ProviderOptionSelectionValue::Bool(flag) => {
                 (Value::Bool(*flag), Some("boolean".to_owned()))
             }
-            ProviderOptionSelectionValue::Str(text) if catalog_type == Some("boolean") => {
-                (Value::Bool(text.as_str() == "true"), Some("boolean".to_owned()))
+            ProviderOptionSelectionValue::Str(text) if catalog_type == Some("boolean") => (
+                Value::Bool(text.as_str() == "true"),
+                Some("boolean".to_owned()),
+            ),
+            ProviderOptionSelectionValue::Str(text) => {
+                (Value::String(text.as_str().to_owned()), None)
             }
-            ProviderOptionSelectionValue::Str(text) => (Value::String(text.as_str().to_owned()), None),
         };
         updates.push(ConfigUpdate {
             config_id: id.to_owned(),
@@ -104,11 +117,15 @@ mod tests {
             options: Some(vec![
                 ProviderOptionSelection {
                     id: TrimmedNonEmptyString::new("reasoning").unwrap(),
-                    value: ProviderOptionSelectionValue::Str(TrimmedNonEmptyString::new("high").unwrap()),
+                    value: ProviderOptionSelectionValue::Str(
+                        TrimmedNonEmptyString::new("high").unwrap(),
+                    ),
                 },
                 ProviderOptionSelection {
                     id: TrimmedNonEmptyString::new("unknown").unwrap(),
-                    value: ProviderOptionSelectionValue::Str(TrimmedNonEmptyString::new("x").unwrap()),
+                    value: ProviderOptionSelectionValue::Str(
+                        TrimmedNonEmptyString::new("x").unwrap(),
+                    ),
                 },
             ]),
         };

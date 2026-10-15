@@ -2,6 +2,7 @@
 
 pub mod changed_files_tree;
 pub mod chat_header;
+pub mod composer_pending_panels;
 pub mod composer_surface;
 pub mod markdown;
 pub mod message_copy_button;

@@ -135,6 +135,9 @@ icon_assets!(
 
 /// The composer's send arrow (ComposerPrimaryActions.tsx).
 pub const SEND_ARROW: &str = "brand/send-arrow.svg";
+/// Lucide `chevron-down` at `stroke-width` 2.25 (ComposerControl.tsx); the
+/// stock `IconName::ChevronDown` is stroke 2.
+pub const CHEVRON_DOWN: &str = "brand/chevron-down.svg";
 
 /// The pull request list's empty-state drawing: a branch stopped short of the base line
 /// (PullRequestListEmptyState.tsx `BranchMark`, unjoined).
@@ -145,6 +148,10 @@ pub const SMILE_PLUS: &str = "brand/smile-plus.svg";
 
 const BRAND: &[(&str, &[u8])] = &[
     (SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg")),
+    (
+        CHEVRON_DOWN,
+        include_bytes!("../assets/brand/chevron-down.svg"),
+    ),
     (BRANCH_MARK, include_bytes!("../assets/brand/branch-mark.svg")),
     (SMILE_PLUS, include_bytes!("../assets/brand/smile-plus.svg")),
 ];

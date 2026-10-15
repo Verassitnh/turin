@@ -25,6 +25,10 @@ pub struct AppearanceContrast {
 }
 
 impl AppearanceContrast {
+    /// Takes a `u32` and clamps it to `50..=200`. Upstream's `AppearanceContrast`
+    /// is a `Schema.Int` range-checked at decode (contracts/settings.ts), so
+    /// settings decode must reject out-of-range values before they reach here.
+    /// Schema-valid inputs behave identically.
     pub fn new(contrast: u32) -> Self {
         let contrast = contrast.clamp(MIN_APPEARANCE_CONTRAST, MAX_APPEARANCE_CONTRAST) as f32;
         let boost = (contrast - 100.).max(0.);

@@ -7,8 +7,8 @@
 //! must use `drag_region::no_drag`, since the breadcrumb sits in a drag region.
 
 use gpui_kit::{
-    AnyElement, App, FontWeight, IntoElement, ParentElement, RenderOnce, SharedString, Styled as _,
-    Window, div, rems,
+    AnyElement, App, FontWeight, IntoElement, ParentElement, Refineable as _, RenderOnce,
+    SharedString, StyleRefinement, Styled, Window, div, rems,
 };
 
 use crate::theme::ActiveAppTheme;
@@ -47,10 +47,14 @@ impl RenderOnce for WorkspaceBreadcrumb {
 
 /// `WorkspaceBreadcrumbItem`: `flex min-w-0 items-center font-medium`;
 /// current → `text-foreground`, otherwise `shrink-0 text-muted-foreground`.
+/// Refinements (`.flex_shrink(1.)` for upstream's `className="shrink"`,
+/// `.min_w(rems(2.5)).flex_1()` for `min-w-10 flex-1`) apply last, so they
+/// override the base like tailwind-merge does.
 #[derive(IntoElement)]
 pub struct WorkspaceBreadcrumbItem {
     current: bool,
     children: Vec<AnyElement>,
+    style: StyleRefinement,
 }
 
 impl WorkspaceBreadcrumbItem {
@@ -58,7 +62,14 @@ impl WorkspaceBreadcrumbItem {
         Self {
             current,
             children: Vec::new(),
+            style: StyleRefinement::default(),
         }
+    }
+}
+
+impl Styled for WorkspaceBreadcrumbItem {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
     }
 }
 
@@ -71,17 +82,19 @@ impl ParentElement for WorkspaceBreadcrumbItem {
 impl RenderOnce for WorkspaceBreadcrumbItem {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme();
-        let item = div()
+        let mut item = div()
             .flex()
             .min_w_0()
             .items_center()
             .font_weight(FontWeight::MEDIUM)
             .children(self.children);
         if self.current {
-            item.text_color(theme.foreground)
+            item = item.text_color(theme.foreground);
         } else {
-            item.flex_shrink_0().text_color(theme.muted_foreground)
+            item = item.flex_shrink_0().text_color(theme.muted_foreground);
         }
+        item.style().refine(&self.style);
+        item
     }
 }
 

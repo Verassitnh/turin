@@ -20,7 +20,7 @@ pub fn nullable_iso(value: Option<&UtcDateTime>) -> Option<String> {
 
 /// `DateTime.toEpochMillis`.
 pub fn epoch_millis(value: &UtcDateTime) -> i64 {
-    value.0.timestamp_millis()
+    value.as_datetime().timestamp_millis()
 }
 
 /// JS `Date.parse` for the ISO strings the app stores: RFC 3339 with an

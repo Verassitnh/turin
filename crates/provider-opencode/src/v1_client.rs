@@ -589,11 +589,7 @@ mod tests {
             .with_silent_timeout(Duration::from_millis(200));
         let mut events = client.events().await.unwrap();
         let opened = server.requests.recv().await.unwrap();
-        assert!(
-            opened.target.starts_with("/event?"),
-            "{}",
-            opened.target
-        );
+        assert!(opened.target.starts_with("/event?"), "{}", opened.target);
         assert!(
             opened.target.contains("directory=%2Fwork"),
             "{}",
@@ -650,9 +646,7 @@ mod tests {
     async fn one_event_subscription_per_client() {
         let server = FakeServer::spawn(|_| {
             FakeResponse::sse(
-                vec![
-                    b"data: {\"type\":\"server.connected\",\"properties\":{}}\n\n".to_vec(),
-                ],
+                vec![b"data: {\"type\":\"server.connected\",\"properties\":{}}\n\n".to_vec()],
                 true,
             )
         })
@@ -660,11 +654,7 @@ mod tests {
         let client = V1Client::new(&server.url, "/work", None).unwrap();
         let first = client.events().await.unwrap();
         match client.clone().events().await {
-            Err(err) => assert!(
-                err.detail.contains("already open"),
-                "{}",
-                err.detail
-            ),
+            Err(err) => assert!(err.detail.contains("already open"), "{}", err.detail),
             Ok(_) => panic!("a second subscription opened"),
         }
         drop(first);

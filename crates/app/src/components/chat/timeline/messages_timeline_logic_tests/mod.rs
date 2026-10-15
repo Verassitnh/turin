@@ -19,7 +19,7 @@ pub(super) use crate::components::chat::timeline::session_logic::{
 };
 pub(super) use crate::components::chat::timeline::turn_item::{
     CheckpointFileSummary, ProjectedTurnItem, ProjectedVisibility, ProviderFailure,
-    ProviderFailureClass, ProviderRequestKind, ProviderRetry, ToolActivityIcon,
+    ProviderFailureClass, ProviderRequestKind, ProviderRetry, ToolActivityIcon, ToolActivitySource,
     ToolActivitySurface, TurnItem, TurnItemPayload, TurnItemStatus, TurnItemType,
 };
 pub(super) use crate::components::chat::timeline::types::{

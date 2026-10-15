@@ -33,5 +33,6 @@ pub mod thread_fork_service;
 pub mod thread_lifecycle_service;
 pub mod thread_management_service;
 pub mod thread_message_intake;
+pub mod thread_title_context;
 pub mod user_facing_errors;
 pub mod user_input_attachments;

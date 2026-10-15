@@ -65,10 +65,10 @@ mod file_paths {
         d: D,
     ) -> Result<Option<Vec<GitFilePath>>, D::Error> {
         let values = Option::<Vec<GitFilePath>>::deserialize(d)?;
-        if let Some(paths) = &values {
-            if paths.is_empty() {
-                return Err(serde::de::Error::custom("filePaths must not be empty"));
-            }
+        if let Some(paths) = &values
+            && paths.is_empty()
+        {
+            return Err(serde::de::Error::custom("filePaths must not be empty"));
         }
         Ok(values)
     }
@@ -830,6 +830,21 @@ pub enum GitActionProgressEvent {
     },
 }
 
+impl std::fmt::Display for GitCommandFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::AuthenticationFailed => "authentication_failed",
+            Self::BranchAlreadyExists => "branch_already_exists",
+            Self::BranchCheckedOutInWorktree => "branch_checked_out_in_worktree",
+            Self::HostKeyUnverified => "host_key_unverified",
+            Self::NotARepository => "not_a_repository",
+            Self::PathAlreadyExists => "path_already_exists",
+            Self::RemoteUnreachable => "remote_unreachable",
+            Self::TagWouldBeClobbered => "tag_would_be_clobbered",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1013,20 +1028,5 @@ mod tests {
             parsed.toast.cta,
             GitRunStackedActionToastCta::RunAction { ref action, .. } if action.kind == GitStackedAction::CreatePr
         ));
-    }
-}
-
-impl std::fmt::Display for GitCommandFailureReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::AuthenticationFailed => "authentication_failed",
-            Self::BranchAlreadyExists => "branch_already_exists",
-            Self::BranchCheckedOutInWorktree => "branch_checked_out_in_worktree",
-            Self::HostKeyUnverified => "host_key_unverified",
-            Self::NotARepository => "not_a_repository",
-            Self::PathAlreadyExists => "path_already_exists",
-            Self::RemoteUnreachable => "remote_unreachable",
-            Self::TagWouldBeClobbered => "tag_would_be_clobbered",
-        })
     }
 }

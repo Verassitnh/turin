@@ -287,7 +287,7 @@ mod tests {
         // IsoDateTime is a pass-through string.
         assert_eq!(ok.resets_at.as_deref(), Some("2026-01-01T00:00:00Z"));
         assert_eq!(
-            serde_json::to_value(&window_ok()).unwrap()["usedPercent"],
+            serde_json::to_value(window_ok()).unwrap()["usedPercent"],
             json!(0)
         );
         for used in [-0.1, 100.1] {

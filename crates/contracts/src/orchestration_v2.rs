@@ -6487,11 +6487,7 @@ mod tests {
         let OrchestrationV2ThreadStreamItem::Snapshot { projection, .. } = &items[0] else {
             panic!("expected a snapshot");
         };
-        let ids: Vec<&str> = projection
-            .turn_items
-            .iter()
-            .map(|item| item_id(item))
-            .collect();
+        let ids: Vec<&str> = projection.turn_items.iter().map(item_id).collect();
         assert_eq!(ids, vec!["item-known"]);
         let visible_ids: Vec<&str> = projection
             .visible_turn_items

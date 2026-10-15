@@ -1836,7 +1836,7 @@ mod tests {
         };
         // Compare through JSON so a future PositiveInt newtype still matches.
         assert_eq!(
-            serde_json::to_value(&payload.usage.max_tokens).unwrap(),
+            serde_json::to_value(payload.usage.max_tokens).unwrap(),
             json!(200000)
         );
         assert_eq!(

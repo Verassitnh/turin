@@ -89,10 +89,10 @@ mod attachment_bounds {
         d: D,
     ) -> Result<Option<Vec<ChatAttachment>>, D::Error> {
         let attachments = Option::<Vec<ChatAttachment>>::deserialize(d)?;
-        if let Some(attachments) = &attachments {
-            if let Some(error) = get_provider_attachment_limit_error(attachments) {
-                return Err(serde::de::Error::custom(error));
-            }
+        if let Some(attachments) = &attachments
+            && let Some(error) = get_provider_attachment_limit_error(attachments)
+        {
+            return Err(serde::de::Error::custom(error));
         }
         Ok(attachments)
     }
@@ -101,14 +101,14 @@ mod attachment_bounds {
         d: D,
     ) -> Result<Option<TrimmedNonEmptyString>, D::Error> {
         let value = <Option<TrimmedNonEmptyString> as serde::Deserialize>::deserialize(d)?;
-        if let Some(text) = &value {
-            if
+        if let Some(text) = &value
+            &&
             // `Schema.isMaxLength` counts UTF-16 code units.
-            text.as_str().encode_utf16().count() > PROVIDER_SEND_TURN_MAX_INPUT_CHARS {
-                return Err(serde::de::Error::custom(format!(
-                    "turn input can be at most {PROVIDER_SEND_TURN_MAX_INPUT_CHARS} chars"
-                )));
-            }
+            text.as_str().encode_utf16().count() > PROVIDER_SEND_TURN_MAX_INPUT_CHARS
+        {
+            return Err(serde::de::Error::custom(format!(
+                "turn input can be at most {PROVIDER_SEND_TURN_MAX_INPUT_CHARS} chars"
+            )));
         }
         Ok(value)
     }

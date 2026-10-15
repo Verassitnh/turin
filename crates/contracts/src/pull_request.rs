@@ -28,6 +28,7 @@ macro_rules! checked_field {
             #[allow(unused_imports)]
             use super::*;
 
+            #[allow(clippy::ptr_arg)]
             fn check($v: &$ty) -> Option<&'static str> {
                 $check
             }

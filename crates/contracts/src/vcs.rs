@@ -435,6 +435,35 @@ pub enum VcsError {
     UnsupportedOperation(VcsUnsupportedOperationError),
 }
 
+impl std::fmt::Display for VcsProcessStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+            Self::ExitCode => "exitCode",
+        })
+    }
+}
+
+impl std::fmt::Display for VcsProcessOutputStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        })
+    }
+}
+
+impl std::fmt::Display for VcsDriverKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Git => "git",
+            Self::Jj => "jj",
+            Self::Unknown => "unknown",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -770,34 +799,5 @@ mod tests {
         let mut bad = capabilities;
         bad["ignoreClassifier"] = json!("fallback");
         assert!(serde_json::from_value::<VcsDriverCapabilities>(bad).is_err());
-    }
-}
-
-impl std::fmt::Display for VcsProcessStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Stdout => "stdout",
-            Self::Stderr => "stderr",
-            Self::ExitCode => "exitCode",
-        })
-    }
-}
-
-impl std::fmt::Display for VcsProcessOutputStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Stdout => "stdout",
-            Self::Stderr => "stderr",
-        })
-    }
-}
-
-impl std::fmt::Display for VcsDriverKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Git => "git",
-            Self::Jj => "jj",
-            Self::Unknown => "unknown",
-        })
     }
 }

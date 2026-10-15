@@ -709,10 +709,12 @@ pub mod omitted_when_null {
 /// `Option<T>` (which maps `Schema.optionalKey` / `Schema.NullOr`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "_tag")]
+#[derive(Default)]
 pub enum EffectOption<T> {
     #[serde(rename = "Some")]
     Some { value: Box<T> },
     #[serde(rename = "None")]
+    #[default]
     None,
 }
 
@@ -733,12 +735,6 @@ impl<T> EffectOption<T> {
             Self::Some { value } => Some(*value),
             Self::None => None,
         }
-    }
-}
-
-impl<T> Default for EffectOption<T> {
-    fn default() -> Self {
-        Self::None
     }
 }
 

@@ -34,12 +34,12 @@ mod checks {
         d: D,
     ) -> Result<Option<String>, D::Error> {
         let value = Option::<String>::deserialize(d)?;
-        if let Some(value) = &value {
-            if utf16_len(value) > N {
-                return Err(D::Error::custom(format!(
-                    "expected a string of at most {N} characters"
-                )));
-            }
+        if let Some(value) = &value
+            && utf16_len(value) > N
+        {
+            return Err(D::Error::custom(format!(
+                "expected a string of at most {N} characters"
+            )));
         }
         Ok(value)
     }

@@ -146,76 +146,159 @@ impl TurnItemVisibility {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use OrchestrationV2RunAttemptStatus as Attempt;
+    use OrchestrationV2RunStatus as Run;
+    use TimelineItemType::*;
+
+    fn run_id() -> RunId {
+        RunId::new("run:timeline-visibility").unwrap()
+    }
+
+    fn node_id() -> NodeId {
+        NodeId::new("node:timeline-visibility").unwrap()
+    }
 
     fn item(item_type: TimelineItemType) -> TimelineTurnItem {
         TimelineTurnItem {
             item_type,
-            run_id: Some(RunId::new("run:timeline-visibility")),
-            node_id: Some(NodeId::new("node:timeline-visibility")),
+            run_id: Some(run_id()),
+            node_id: Some(node_id()),
             input_intent: None,
         }
     }
 
-    #[test]
-    fn timeline_visibility_matches_both_paths() {
-        let run = TimelineRun {
-            id: RunId::new("run:timeline-visibility"),
-            status: OrchestrationV2RunStatus::Running,
-        };
-        let superseded = TimelineRunAttempt {
-            run_id: run.id.clone(),
-            root_node_id: NodeId::new("node:timeline-visibility"),
-            status: OrchestrationV2RunAttemptStatus::Superseded,
-        };
-        let result = item(TimelineItemType::RunInterruptResult);
-        let request = item(TimelineItemType::RunInterruptRequest);
-        let cases = [
-            (
-                vec![run.clone()],
-                vec![superseded.clone()],
-                vec![result.clone()],
-                false,
-            ),
-            (
-                vec![run.clone()],
-                vec![superseded.clone()],
-                vec![request, result.clone()],
-                true,
-            ),
-            (vec![run.clone()], vec![], vec![result.clone()], true),
-            (
-                vec![TimelineRun {
-                    status: OrchestrationV2RunStatus::RolledBack,
-                    ..run.clone()
-                }],
-                vec![],
-                vec![result.clone()],
-                false,
-            ),
-        ];
-        for (runs, attempts, items, expected) in cases {
-            assert_eq!(
-                is_orchestration_v2_turn_item_visible(&result, &runs, &attempts, &items),
-                expected
-            );
-            assert_eq!(
-                create_orchestration_v2_turn_item_visibility(&runs, &attempts, &items)
-                    .is_visible(&result),
-                expected
-            );
+    fn user(intent: OrchestrationV2UserMessageInputIntent) -> TimelineTurnItem {
+        TimelineTurnItem {
+            input_intent: Some(intent),
+            ..item(UserMessage)
         }
-        let mut queued = item(TimelineItemType::UserMessage);
-        queued.input_intent = Some(OrchestrationV2UserMessageInputIntent::QueuedTurn);
-        let runs = [TimelineRun {
-            status: OrchestrationV2RunStatus::Cancelled,
-            ..run
-        }];
-        assert!(!is_orchestration_v2_turn_item_visible(
-            &queued,
-            &runs,
-            &[],
-            &[]
+    }
+
+    fn runs(status: Run) -> Vec<TimelineRun> {
+        vec![TimelineRun {
+            id: run_id(),
+            status,
+        }]
+    }
+
+    fn attempt(root: NodeId, status: Attempt) -> TimelineRunAttempt {
+        TimelineRunAttempt {
+            run_id: run_id(),
+            root_node_id: root,
+            status,
+        }
+    }
+
+    /// Mirrors upstream's `describe.each` over the point and indexed checks.
+    fn is_visible(
+        item: &TimelineTurnItem,
+        runs: &[TimelineRun],
+        attempts: &[TimelineRunAttempt],
+        items: &[TimelineTurnItem],
+    ) -> bool {
+        let point = is_orchestration_v2_turn_item_visible(item, runs, attempts, items);
+        let indexed =
+            create_orchestration_v2_turn_item_visibility(runs, attempts, items).is_visible(item);
+        assert_eq!(point, indexed, "point and indexed visibility disagree");
+        point
+    }
+
+    #[test]
+    fn hides_unpaired_interruption_results_from_superseded_attempts() {
+        assert!(!is_visible(
+            &item(RunInterruptResult),
+            &runs(Run::Running),
+            &[attempt(node_id(), Attempt::Superseded)],
+            &[item(RunInterruptResult)],
         ));
-        assert!(!create_orchestration_v2_turn_item_visibility(&runs, &[], &[]).is_visible(&queued));
+    }
+
+    #[test]
+    fn keeps_paired_interruption_results_from_superseded_attempts() {
+        assert!(is_visible(
+            &item(RunInterruptResult),
+            &runs(Run::Running),
+            &[attempt(node_id(), Attempt::Superseded)],
+            &[item(RunInterruptRequest), item(RunInterruptResult)],
+        ));
+    }
+
+    #[test]
+    fn keeps_interruption_results_from_terminal_attempts_without_a_request() {
+        assert!(is_visible(
+            &item(RunInterruptResult),
+            &runs(Run::Interrupted),
+            &[attempt(node_id(), Attempt::Interrupted)],
+            &[item(RunInterruptResult)],
+        ));
+    }
+
+    #[test]
+    fn keeps_interruption_results_from_terminal_attempts_with_a_request() {
+        assert!(is_visible(
+            &item(RunInterruptResult),
+            &runs(Run::Interrupted),
+            &[attempt(node_id(), Attempt::Interrupted)],
+            &[item(RunInterruptRequest), item(RunInterruptResult)],
+        ));
+    }
+
+    #[test]
+    fn hides_queued_user_messages_once_their_run_is_cancelled() {
+        let queued = user(OrchestrationV2UserMessageInputIntent::QueuedTurn);
+        assert!(!is_visible(
+            &queued,
+            &runs(Run::Cancelled),
+            &[],
+            std::slice::from_ref(&queued),
+        ));
+    }
+
+    #[test]
+    fn keeps_queued_user_messages_while_their_run_is_queued() {
+        let queued = user(OrchestrationV2UserMessageInputIntent::QueuedTurn);
+        assert!(is_visible(
+            &queued,
+            &runs(Run::Queued),
+            &[],
+            std::slice::from_ref(&queued),
+        ));
+    }
+
+    #[test]
+    fn keeps_non_queued_user_messages_on_cancelled_runs() {
+        let start = user(OrchestrationV2UserMessageInputIntent::TurnStart);
+        assert!(is_visible(
+            &start,
+            &runs(Run::Cancelled),
+            &[],
+            std::slice::from_ref(&start),
+        ));
+    }
+
+    #[test]
+    fn does_not_hide_an_interruption_because_another_attempt_was_superseded() {
+        assert!(is_visible(
+            &item(RunInterruptResult),
+            &runs(Run::Interrupted),
+            &[
+                attempt(
+                    NodeId::new("node:timeline-visibility:older").unwrap(),
+                    Attempt::Superseded,
+                ),
+                attempt(node_id(), Attempt::Interrupted),
+            ],
+            &[item(RunInterruptResult)],
+        ));
+    }
+
+    #[test]
+    fn rolled_back_runs_hide_their_items() {
+        assert!(!is_visible(
+            &item(RunInterruptResult),
+            &runs(Run::RolledBack),
+            &[],
+            &[item(RunInterruptResult)],
+        ));
     }
 }

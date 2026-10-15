@@ -58,19 +58,22 @@ impl T3Import {
         snapshot::snapshot(src.as_ref())
     }
 
-    /// Ledger of a snapshot: what is recorded, and which Turin migrations would run.
+    /// Ledger of a database: what is recorded, and which Turin migrations would run.
     ///
-    /// Refuses when the snapshot is newer than this build or when a recorded
-    /// id would make the migrator skip a Turin migration.
-    pub fn plan(snapshot: impl AsRef<Path>) -> Result<ImportPlan, T3ImportError> {
-        let conn = snapshot::open_snapshot(snapshot.as_ref())?;
+    /// Opens `path` with `SQLITE_OPEN_READ_ONLY`, so it is safe on a T3 file
+    /// that is in use. A missing path is an error, not a new file. Refuses when
+    /// the ledger is newer than this build or would make the migrator skip a
+    /// Turin migration.
+    pub fn plan(path: impl AsRef<Path>) -> Result<ImportPlan, T3ImportError> {
+        let conn = snapshot::open_read_only(path.as_ref())?;
         plan(&conn)
     }
 
-    /// Apply pending Turin migrations on the snapshot, then check schema, row
-    /// counts, and event-store reads. The snapshot file is modified in place.
-    pub fn migrate_and_verify(snapshot: impl AsRef<Path>) -> Result<ImportReport, T3ImportError> {
-        let conn = snapshot::open_snapshot(snapshot.as_ref())?;
+    /// Apply pending Turin migrations to a snapshot, then check schema, row
+    /// counts, and event-store reads. Only a [`T3Snapshot`] is accepted, so the
+    /// live T3 file cannot reach the writable open.
+    pub fn migrate_and_verify(snapshot: &T3Snapshot) -> Result<ImportReport, T3ImportError> {
+        let conn = snapshot::open_snapshot(snapshot.path())?;
         migrate_and_verify(&conn)
     }
 

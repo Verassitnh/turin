@@ -198,7 +198,7 @@ fn migrate_preserves_rows_and_matches_a_fresh_schema() {
     drop(conn);
 
     let snapshot = T3Import::snapshot(&path).unwrap();
-    let report = T3Import::migrate_and_verify(snapshot.path()).unwrap();
+    let report = T3Import::migrate_and_verify(&snapshot).unwrap();
     assert_eq!(
         report.applied,
         vec![(62, "ThreadFailureLookupIndex".to_owned())]
@@ -234,7 +234,8 @@ fn unknown_event_types_are_counted_and_legacy_rows_stay_out_of_the_read_model() 
     .unwrap();
     drop(conn);
 
-    let report = T3Import::migrate_and_verify(&path).unwrap();
+    let snapshot = T3Import::snapshot(&path).unwrap();
+    let report = T3Import::migrate_and_verify(&snapshot).unwrap();
     assert_eq!(report.events.decoded, 1);
     assert_eq!(report.events.by_type["thread.created"], 1);
     assert_eq!(report.events.unknown, 1);
@@ -263,7 +264,10 @@ fn a_bad_payload_fails_verification() {
     .unwrap();
     drop(conn);
 
-    let message = T3Import::migrate_and_verify(&path).unwrap_err().to_string();
+    let snapshot = T3Import::snapshot(&path).unwrap();
+    let message = T3Import::migrate_and_verify(&snapshot)
+        .unwrap_err()
+        .to_string();
     assert!(message.contains("project.created"), "{message}");
     assert!(message.contains("invalid json or value"), "{message}");
     assert!(!message.contains("not-json"), "{message}");
@@ -404,4 +408,27 @@ fn a_copy_that_keeps_restarting_gives_up_at_the_deadline() {
     assert!(err.to_string().contains("t3Import.snapshot.step"), "{err}");
     assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
     assert!(!dest.exists());
+}
+
+#[test]
+fn plan_never_creates_a_missing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing.sqlite");
+    let err = T3Import::plan(&path).unwrap_err();
+    assert!(matches!(err, T3ImportError::Persistence(_)), "{err}");
+    assert!(!path.exists());
+}
+
+#[test]
+fn the_read_only_open_refuses_writes_and_leaves_the_file_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = file_db(dir.path(), "statev2.sqlite", None);
+    let before = checksum(&path);
+    let conn = super::snapshot::open_read_only(&path).unwrap();
+    let err = conn
+        .execute("DELETE FROM effect_sql_migrations", [])
+        .unwrap_err();
+    assert!(err.to_string().contains("readonly"), "{err}");
+    drop(conn);
+    assert_eq!(checksum(&path), before);
 }

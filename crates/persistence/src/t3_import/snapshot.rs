@@ -193,6 +193,21 @@ fn busy_err() -> rusqlite::Error {
     )
 }
 
+/// Opens a database this module never writes: the live T3 file, or a copy
+/// that is only read. `immutable` is not used: it skips the WAL and ignores
+/// concurrent writers, so a file in use would read as stale or torn.
+pub(crate) fn open_read_only(path: &Path) -> Result<Connection, T3ImportError> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|err| crate::errors::PersistenceError::sql("t3Import.openReadOnly", &err))?;
+    conn.busy_timeout(BUSY)
+        .map_err(|err| crate::errors::PersistenceError::sql("t3Import.busyTimeout", &err))?;
+    conn.execute_batch("PRAGMA query_only = ON;")
+        .map_err(|err| crate::errors::PersistenceError::sql("t3Import.queryOnly", &err))?;
+    Ok(conn)
+}
+
+/// Read-write open. Only for copies this module made (snapshots, the import
+/// work copy, and the fresh-schema reference).
 pub(crate) fn open_snapshot(path: &Path) -> Result<Connection, T3ImportError> {
     let conn = Connection::open(path)
         .map_err(|err| crate::errors::PersistenceError::sql("t3Import.open", &err))?;

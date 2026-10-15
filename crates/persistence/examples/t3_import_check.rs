@@ -21,7 +21,7 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match T3Import::migrate_and_verify(snapshot.path()) {
+    match T3Import::migrate_and_verify(&snapshot) {
         Ok(report) => {
             print_report(&report);
             ExitCode::SUCCESS

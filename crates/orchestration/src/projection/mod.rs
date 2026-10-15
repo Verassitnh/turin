@@ -1,5 +1,6 @@
 //! Read model for orchestration-v2.
 
+pub mod assistant_streaming;
 pub mod error;
 pub mod event;
 pub mod project_commands;
@@ -9,6 +10,8 @@ pub mod shared;
 pub(crate) mod sql;
 pub mod store;
 pub mod thread_history_paging;
+pub mod thread_live_event_coalescer;
+pub mod thread_search;
 pub mod turn_item;
 pub mod turn_item_position_store;
 

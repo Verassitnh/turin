@@ -2,8 +2,6 @@
 //! (`project`), provider rows (`changeRequest`), a clock that moves with tokio's paused time
 //! (`TestClock`), and the service wired to in-memory ports (`makeService`).
 
-#![allow(dead_code)] // scripted helpers the service tests still to be ported will use
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -124,10 +122,6 @@ impl ProjectSpec {
     }
     pub fn host(mut self, host: impl Into<String>) -> Self {
         self.host = Some(host.into());
-        self
-    }
-    pub fn remote_url(mut self, remote_url: &str) -> Self {
-        self.remote_url = Some(remote_url.to_owned());
         self
     }
     /// A project with no repository identity at all.
@@ -649,23 +643,6 @@ impl FakeProvider {
         self
     }
 
-    /// A host that never claimed the member (`updateChangeRequest: undefined`).
-    pub fn without_update_change_request(mut self) -> Self {
-        self.update_change_request = None;
-        self
-    }
-
-    pub fn without_update_comment(mut self) -> Self {
-        self.update_comment = None;
-        self
-    }
-
-    /// A host with no merge message rewrite (`mergeMessageRewrite: undefined`).
-    pub fn without_merge_message_rewrite(mut self) -> Self {
-        self.rewrite = false;
-        self
-    }
-
     pub fn into_arc(self) -> Arc<dyn PullRequestProviderApi> {
         Arc::new(self)
     }
@@ -787,7 +764,6 @@ pub struct ServiceOptions {
 pub struct Harness {
     pub service: PullRequestService,
     pub clock: Arc<TestClock>,
-    pub rate_limits: Arc<SourceControlRateLimit>,
 }
 
 impl Harness {
@@ -816,11 +792,7 @@ impl Harness {
             read_cache: Arc::new(PullRequestReadCache::memory(clock.clone())),
             clock: clock.clone(),
         });
-        Self {
-            service,
-            clock,
-            rate_limits,
-        }
+        Self { service, clock }
     }
 }
 

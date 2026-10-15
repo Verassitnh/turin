@@ -30,6 +30,7 @@ mod part_l;
 mod part_m;
 mod part_n;
 mod part_o;
+mod part_p;
 
 pub(super) fn counter() -> Arc<AtomicUsize> {
     Arc::new(AtomicUsize::new(0))
@@ -89,4 +90,9 @@ pub(super) fn summary_of(
 /// `service.list(input)` as JSON, the shape every listing assertion reads.
 pub(super) async fn list_json(service: &PullRequestService, value: Value) -> Value {
     serde_json::to_value(service.list(&input(value)).await.unwrap()).unwrap()
+}
+
+/// `{ ...ref }` as the JSON a test puts in an input object.
+pub(super) fn ref_json_value(reference: &turin_contracts::pull_request::PullRequestRef) -> Value {
+    serde_json::to_value(reference).unwrap()
 }

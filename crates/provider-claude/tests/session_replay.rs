@@ -3,6 +3,7 @@
 //! runtime. No paid turns run.
 #![cfg(unix)]
 
+use futures::FutureExt as _;
 use futures::StreamExt;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -10,7 +11,8 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use turin_contracts::{
     model_selection::ModelSelection,
     orchestration_v2::{
-        OrchestrationV2AppThread, OrchestrationV2ExecutionNodeKind, OrchestrationV2PlanArtifact,
+        OrchestrationV2Actor, OrchestrationV2AppThread, OrchestrationV2CreationSource,
+        OrchestrationV2ExecutionNodeKind, OrchestrationV2PlanArtifact,
         OrchestrationV2ProviderThread, OrchestrationV2ProviderTurn,
         OrchestrationV2ProviderTurnStatus, OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
     },
@@ -31,6 +33,9 @@ use turin_provider_core::provider_adapter::{
     ProviderAdapterV2TurnMessage, ProviderAdapterV2TurnTerminalStatus, ProviderEventStream,
     ProviderSessionRuntime,
 };
+use turin_provider_core::provider_continuation_requests::{
+    ProviderContinuationRequest, ProviderContinuationRequests,
+};
 
 /// Plays the recorded session in order. A prompt (`user`) consumes the next
 /// `prompt.offer`, then replays inbound frames up to the next outbound entry.
@@ -43,8 +48,14 @@ with open(os.environ["FAKE_ARGV"], "a") as log:
     log.write(json.dumps(sys.argv) + "\n")
 pending = [json.loads(line) for line in open(os.environ["FAKE_FIXTURE"]) if line.strip()]
 
+# The transcript names the prompt uuid it expects; the CLI echoes the uuid it was sent.
+uuid_map = {}
+
 def emit(value):
-    print(json.dumps(value), flush=True)
+    text = json.dumps(value)
+    for expected, actual in uuid_map.items():
+        text = text.replace(expected, actual)
+    print(text, flush=True)
 
 def wait_response(request_id):
     # The CLI blocks a turn on a permission callback until the host answers.
@@ -63,9 +74,12 @@ def drain():
         elif entry["type"] == "runtime_exit":
             sys.exit(0)
 
-def consume(prefix):
+def consume(prefix, message=None):
     if pending and pending[0]["type"] == "expect_outbound" and pending[0]["label"].startswith(prefix):
-        pending.pop(0)
+        expect = pending.pop(0)
+        expected = ((expect.get("frame") or {}).get("message") or {}).get("uuid")
+        if expected and message and message.get("uuid"):
+            uuid_map[expected] = message["uuid"]
         drain()
 
 while pending and not (pending[0]["type"] == "expect_outbound" and pending[0]["label"].startswith("query.open")):
@@ -78,7 +92,7 @@ for line in sys.stdin:
         continue
     message = json.loads(line)
     if message.get("type") == "user":
-        consume("prompt.offer")
+        consume("prompt.offer", message)
     elif message.get("type") == "control_request":
         request = message.get("request") or {}
         body = {"models": [], "commands": [], "account": {}} if request.get("subtype") == "initialize" else {}
@@ -102,12 +116,26 @@ fn id<T: DeserializeOwned>(value: &str) -> T {
 struct Harness {
     dir: PathBuf,
     adapter: ClaudeProviderAdapter,
+    /// Wake-turn offers the adapter makes (what the host's continuation worker drains).
+    requests: Arc<ProviderContinuationRequests>,
 }
 
 impl Harness {
     /// Replays a bundled upstream fixture.
     fn fixture(name: &str) -> Self {
         Self::with_transcript(fixture(name).display().to_string(), None)
+    }
+
+    /// Replays a bundled fixture with its trailing `runtime_exit` removed. The
+    /// CLI process stays up, as it does while a wake turn waits for its continuation.
+    fn fixture_held(name: &str) -> Self {
+        let body = std::fs::read_to_string(fixture(name)).unwrap();
+        let entries: Vec<Value> = body
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|entry| entry["type"] != "runtime_exit")
+            .collect();
+        Self::lines(&entries)
     }
 
     /// Replays inline NDJSON entries (for shapes the fixtures do not cover).
@@ -139,6 +167,7 @@ impl Harness {
         );
         let settings: ClaudeSettings =
             serde_json::from_value(json!({ "binaryPath": script.display().to_string() })).unwrap();
+        let requests = Arc::new(ProviderContinuationRequests::queue());
         let adapter = ClaudeProviderAdapter::new(
             id::<ProviderInstanceId>("claudeAgent"),
             settings,
@@ -146,8 +175,13 @@ impl Harness {
             Some(env),
             None,
             String::new(),
-        );
-        Self { dir, adapter }
+        )
+        .with_continuation_requests(Arc::clone(&requests));
+        Self {
+            dir,
+            adapter,
+            requests,
+        }
     }
 
     fn model(&self) -> ModelSelection {
@@ -236,6 +270,24 @@ impl Harness {
             runtime_policy: self.policy(),
             app_context: None,
         }
+    }
+}
+
+impl Harness {
+    /// A continuation turn: the adapter's own offer, which has no prompt to send.
+    fn continuation_input(
+        &self,
+        provider_thread: OrchestrationV2ProviderThread,
+    ) -> ProviderAdapterV2TurnInput {
+        let mut input = self.turn_input(provider_thread, "");
+        input.message.created_by = OrchestrationV2Actor::Agent;
+        input.message.creation_source = OrchestrationV2CreationSource::Provider;
+        input.run_id = id("run-2");
+        input.run_ordinal = 2;
+        input.attempt_id = id("attempt-2");
+        input.root_node_id = id("node-2");
+        input.provider_turn_ordinal = 2;
+        input
     }
 }
 
@@ -1195,6 +1247,114 @@ async fn subagent_frames_stay_out_of_the_parent_turn() {
     assert_eq!(last["title"], "Agent A");
     assert_eq!(last["model"], "haiku");
     assert_eq!(subagents[1]["progress"], "running echo");
+}
+
+/// Next offer the adapter makes, or a failure if none comes.
+async fn next_offer(harness: &Harness) -> ProviderContinuationRequest {
+    tokio::time::timeout(Duration::from_secs(5), harness.requests.take())
+        .await
+        .expect("the adapter offers a wake turn")
+}
+
+/// Claude wakes an idle thread on its own when a background command finishes:
+/// the notification, the wake turn's `init` and output arrive with no prompt.
+/// The adapter offers a continuation for it, and the continuation drains the
+/// buffered wake into its turn.
+#[tokio::test]
+async fn native_background_wake_is_offered_and_drained_into_a_continuation() {
+    let harness = Harness::fixture_held("claude_background_task_wake");
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    let thread = with_transcript_session(thread, "7901ee61-9647-498d-b68d-ecdcb93bae84");
+    runtime
+        .start_turn(harness.turn_input(thread.clone(), "Start the background command"))
+        .await
+        .expect("start turn");
+    let (_seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+
+    let offer = next_offer(&harness).await;
+    assert_eq!(offer.thread_id.as_str(), "thread-1");
+    assert_eq!(offer.driver.as_str(), "claudeAgent");
+    assert!(
+        offer
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("completed")),
+        "{:?}",
+        offer.detail
+    );
+    assert!(
+        offer.notification.is_some(),
+        "the background command is named"
+    );
+    assert!(
+        harness.requests.take().now_or_never().is_none(),
+        "one wake, one offer"
+    );
+
+    runtime
+        .start_turn(harness.continuation_input(thread))
+        .await
+        .expect("start continuation");
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    assert_eq!(assistant_texts(&seen), vec!["WAKE_DONE".to_owned()]);
+}
+
+/// On a CLI that echoes the prompt on its first frame, a turn that a peer
+/// message queued behind it is another turn's: its reply goes to a continuation
+/// and not to the prompt that was offered (upstream `claude_compact_after_peer_turn`).
+#[tokio::test]
+async fn fixture_compact_after_peer_turn_echo_holds_the_peer_turn_for_a_continuation() {
+    let harness = Harness::fixture_held("claude_compact_after_peer_turn");
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    let thread = with_transcript_session(thread, "c0de0c0d-5e55-4c0a-9a7c-0000000000c1");
+    runtime
+        .start_turn(harness.turn_input(
+            thread.clone(),
+            "Reply with exactly: compact probe first turn",
+        ))
+        .await
+        .expect("start first turn");
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    assert_eq!(
+        assistant_texts(&seen),
+        vec!["compact probe first turn".to_owned()]
+    );
+
+    runtime
+        .start_turn(harness.turn_input(thread.clone(), "/compact"))
+        .await
+        .expect("start compact turn");
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    assert!(
+        !assistant_texts(&seen).iter().any(|text| text == "PEER_ACK"),
+        "the peer's reply is not this prompt's"
+    );
+    let compaction = turn_items(&seen)
+        .iter()
+        .filter_map(|item| serde_json::to_value(item).ok())
+        .any(|item| item["type"] == "compaction");
+    assert!(
+        compaction,
+        "/compact ends on its own result with the compaction it ran"
+    );
+
+    let offer = next_offer(&harness).await;
+    assert_eq!(offer.thread_id.as_str(), "thread-1");
+    runtime
+        .start_turn(harness.continuation_input(thread))
+        .await
+        .expect("start continuation");
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    assert_eq!(assistant_texts(&seen), vec!["PEER_ACK".to_owned()]);
 }
 
 /// A `/goal` is read from the transcript: its synthetic output sets it, and a

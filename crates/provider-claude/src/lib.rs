@@ -15,4 +15,5 @@ pub mod claude_subagents;
 pub mod claude_tool_titles;
 pub mod claude_turn_items;
 pub mod claude_turn_token_usage;
+pub mod claude_wake;
 pub mod claude_workflow_progress;

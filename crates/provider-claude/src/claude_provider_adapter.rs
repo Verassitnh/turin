@@ -2,11 +2,17 @@
 // `ProviderAdapterV2Error` is the provider-core trait's error type; boxing it
 // here would only diverge from the trait.
 #![allow(clippy::result_large_err)]
+use crate::claude_adapter_v2::project_frame;
 use crate::claude_background_tasks::{
-    Roster, is_opaque_task_type, parse_roster_entry, pending_task,
+    Roster, is_opaque_task_type, parse_roster_entry, pending_task, task_id as roster_task_id,
 };
 use crate::claude_goal::next_claude_goal;
 use crate::claude_tool_titles::{ToolPresentation, fallback_presentation, presentations_from_meta};
+use crate::claude_wake::{
+    PromptEchoMode, WakeEvidence, WakeState, echoed_prompt_uuids, frame_tool_use_ids,
+    is_gated_frame, is_result_for_other_turn, is_task_notification, is_task_started, is_turn_start,
+    prompt_lifecycle, summary_of, task_id_of, tool_use_ids,
+};
 use crate::{
     claude_adapter_v2::{ClaudeAdapterEvent, ClaudeAdapterV2, ClaudeHostRequest},
     claude_model_catalog::ClaudeModelCatalog,
@@ -42,9 +48,10 @@ use turin_contracts::{
     PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId, TrimmedNonEmptyString, UtcDateTime,
     model_selection::ModelSelection,
     orchestration_v2::{
-        OrchestrationV2ConversationMessage, OrchestrationV2NativeRefStrength,
-        OrchestrationV2ProviderCapabilities, OrchestrationV2ProviderGoal,
-        OrchestrationV2ProviderGoalStatus, OrchestrationV2ProviderRef,
+        OrchestrationV2Actor, OrchestrationV2ConversationMessage, OrchestrationV2CreationSource,
+        OrchestrationV2NativeRefStrength, OrchestrationV2NotificationOutcome,
+        OrchestrationV2PendingBackgroundTask, OrchestrationV2ProviderCapabilities,
+        OrchestrationV2ProviderGoal, OrchestrationV2ProviderGoalStatus, OrchestrationV2ProviderRef,
         OrchestrationV2ProviderSession, OrchestrationV2ProviderSessionStatus,
         OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadDisposition,
         OrchestrationV2ProviderThreadForkedFrom, OrchestrationV2ProviderThreadStatus,
@@ -60,6 +67,9 @@ use turin_contracts::{
 use turin_provider_core::{
     failure::{ProviderFailureInput, make_provider_failure},
     id_allocator::{IdAllocator, derive},
+    notification::{
+        BackgroundWork, BackgroundWorkKind, BackgroundWorkReport, background_work_notification,
+    },
     provider_adapter::{
         ProviderAdapterErrorKind, ProviderAdapterV2, ProviderAdapterV2EnsureThreadInput,
         ProviderAdapterV2Error, ProviderAdapterV2Event, ProviderAdapterV2ForkThreadInput,
@@ -72,6 +82,7 @@ use turin_provider_core::{
         ProviderAdapterV2TurnInput, ProviderAdapterV2TurnTerminalStatus, ProviderEventStream,
         ProviderSessionRuntime,
     },
+    provider_continuation_requests::{ProviderContinuationRequest, ProviderContinuationRequests},
     rt::BoxFuture,
     selection_transition::{ProviderSelectionTransitionInput, ProviderSelectionTransitionPlan},
 };
@@ -288,6 +299,8 @@ fn make_thread(
 }
 
 pub struct ClaudeProviderAdapter {
+    /// Offers for wake turns. Dropped unless the host supplies a queue.
+    continuation_requests: Arc<ProviderContinuationRequests>,
     instance_id: ProviderInstanceId,
     driver: ProviderDriverKind,
     settings: ClaudeSettings,
@@ -306,6 +319,7 @@ impl ClaudeProviderAdapter {
         runtime_instructions: String,
     ) -> Self {
         Self {
+            continuation_requests: Arc::new(ProviderContinuationRequests::dropping()),
             instance_id,
             driver: driver(),
             settings,
@@ -314,6 +328,17 @@ impl ClaudeProviderAdapter {
             attachments_dir,
             runtime_instructions,
         }
+    }
+}
+
+impl ClaudeProviderAdapter {
+    /// Sends wake-turn offers to `requests`, which the host drains.
+    pub fn with_continuation_requests(
+        mut self,
+        requests: Arc<ProviderContinuationRequests>,
+    ) -> Self {
+        self.continuation_requests = requests;
+        self
     }
 }
 
@@ -382,6 +407,9 @@ impl ProviderAdapterV2 for ClaudeProviderAdapter {
             last_thread: None,
             goal: None,
             goal_seeded: false,
+            echo_mode: PromptEchoMode::Unknown,
+            wake: WakeState::default(),
+            continuation: Arc::clone(&self.continuation_requests),
             pending_requests: HashMap::new(),
             commands: command_rx,
             events,
@@ -619,6 +647,16 @@ struct ActiveTurn {
     goal_checked: bool,
     /// When the buffered thinking text is next flushed, if any is waiting.
     thinking_flush_at: Option<tokio::time::Instant>,
+    /// The uuid this turn's prompt was sent with. `None` for a continuation,
+    /// which has no prompt to echo (upstream `promptUuid`).
+    prompt_uuid: Option<String>,
+    /// The echo has confirmed the prompt, so its root output is no longer gated.
+    echo_confirmed: bool,
+    prompt_started: bool,
+    /// Root frames that arrived before the echo (upstream `gatedFramesBeforeEcho`).
+    gated_before_echo: u64,
+    /// Root output held for the echo (upstream `heldRootFrames`), in arrival order.
+    held: Vec<ClaudeAdapterEvent>,
     scope: TurnScope,
     item_ordinals: ItemOrdinals,
     tool_calls: HashMap<String, TrackedTool>,
@@ -703,6 +741,12 @@ struct ClaudeActor {
     /// The session's `/goal` (upstream `goalsByNativeThread`), seeded once from the thread.
     goal: Option<OrchestrationV2ProviderGoal>,
     goal_seeded: bool,
+    /// Upstream `PromptEchoMode` of the live query. Reset when the process is replaced.
+    echo_mode: PromptEchoMode,
+    /// The thread's wake state (see `claude_wake.rs`).
+    wake: WakeState,
+    /// Where wake turns are offered (upstream `continuationRequests`).
+    continuation: Arc<ProviderContinuationRequests>,
     pending_requests: HashMap<RuntimeRequestId, PendingRequest>,
     commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedSender<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>,
@@ -727,7 +771,7 @@ impl ClaudeActor {
             match action {
                 Action::Command(Some(command)) => self.command(command).await,
                 Action::Command(None) => break,
-                Action::Event(Some(event)) => self.event(event).await,
+                Action::Event(Some(event)) => self.event(event),
                 Action::Event(None) => {
                     self.claude = None;
                     self.host_requests = None;
@@ -856,6 +900,8 @@ impl ClaudeActor {
                 .map_err(|e| protocol_error(e.to_string()))?;
             self.host_requests = claude.take_requests();
             self.claude = Some(claude);
+            // The echo mode is per live query.
+            self.echo_mode = PromptEchoMode::Unknown;
             self.selection = input.model_selection.clone();
         } else if self.selection != input.model_selection {
             // Upstream applies a changed selection to the live query.
@@ -868,6 +914,9 @@ impl ClaudeActor {
                 .map_err(|e| protocol_error(e.to_string()))?;
             self.selection = input.model_selection.clone();
         }
+        // Upstream: a continuation is offered by the adapter and has no prompt of its own.
+        let continuation = input.message.created_by == OrchestrationV2Actor::Agent
+            && input.message.creation_source == OrchestrationV2CreationSource::Provider;
         let native_turn_id = format!("turn:{}", input.attempt_id);
         let now = UtcDateTime::now();
         let ordinal = PositiveInt::new(input.provider_turn_ordinal.max(1) as u64)
@@ -904,17 +953,28 @@ impl ClaudeActor {
             provider_thread: thread.clone(),
             retained_native_turn_ids: None,
         });
-        let compiled = compile_claude_model_selection(&input.model_selection, &self.catalog);
-        let text = apply_claude_prompt_effort_prefix(
-            &input.message.text,
-            compiled.prompt_effort.as_deref(),
-        );
-        let prompt_uuid = uuid::Uuid::new_v4().to_string();
-        self.claude
-            .as_mut()
-            .ok_or_else(|| protocol_error("Claude session is not running"))?
-            .send_prompt(text, Some(prompt_uuid), None)
-            .map_err(|e| protocol_error(e.to_string()))?;
+        self.wake.route = Some((input.thread_id.clone(), input.provider_thread.id.clone()));
+        // A continuation has no prompt: it drains what the wake buffered.
+        let prompt_uuid = if continuation {
+            if self.claude.is_none() {
+                return Err(protocol_error("Claude session is not running"));
+            }
+            None
+        } else {
+            let prompt_uuid = uuid::Uuid::new_v4().to_string();
+            self.wake.start_user_turn();
+            let compiled = compile_claude_model_selection(&input.model_selection, &self.catalog);
+            let text = apply_claude_prompt_effort_prefix(
+                &input.message.text,
+                compiled.prompt_effort.as_deref(),
+            );
+            self.claude
+                .as_mut()
+                .ok_or_else(|| protocol_error("Claude session is not running"))?
+                .send_prompt(text, Some(prompt_uuid.clone()), None)
+                .map_err(|e| protocol_error(e.to_string()))?;
+            Some(prompt_uuid)
+        };
         let scope = TurnScope {
             driver: driver(),
             thread_id: input.thread_id.clone(),
@@ -953,10 +1013,18 @@ impl ClaudeActor {
             last_assistant: None,
             goal_checked: false,
             thinking_flush_at: None,
+            prompt_uuid: prompt_uuid.clone(),
+            echo_confirmed: false,
+            prompt_started: false,
+            gated_before_echo: 0,
+            held: Vec::new(),
             scope,
             item_ordinals: ItemOrdinals::new(),
             tool_calls: HashMap::new(),
         });
+        if continuation {
+            self.drain_wake();
+        }
         Ok(())
     }
     /// Upstream `stopSubagent`. A confirmed task answers at once. Otherwise the
@@ -1339,7 +1407,23 @@ impl ClaudeActor {
         });
         self.pending_requests.insert(id, pending);
     }
-    async fn event(&mut self, event: ClaudeAdapterEvent) {
+    /// Upstream `handleSdkMessage`: while the active turn's prompt is unconfirmed,
+    /// root output waits for the echo that says which turn it belongs to.
+    fn event(&mut self, event: ClaudeAdapterEvent) {
+        let gated = match (self.active.as_ref(), event_raw(&event)) {
+            (Some(active), Some(raw)) if !active.echo_confirmed => active
+                .prompt_uuid
+                .clone()
+                .map(|prompt_uuid| (prompt_uuid, raw.clone())),
+            _ => None,
+        };
+        match gated {
+            Some((prompt_uuid, raw)) => self.gate(&prompt_uuid, &raw, event),
+            None => self.route(event),
+        }
+    }
+    /// Routes one event to its handler, without the prompt-echo gate.
+    fn route(&mut self, event: ClaudeAdapterEvent) {
         match event {
             ClaudeAdapterEvent::Assistant(frame) => self.assistant(frame),
             ClaudeAdapterEvent::User(frame) => self.user(frame),
@@ -1347,11 +1431,142 @@ impl ClaudeActor {
             ClaudeAdapterEvent::Background(frame) => self.background(frame),
             ClaudeAdapterEvent::Stream(frame) => self.stream(frame),
             ClaudeAdapterEvent::Result(frame) => self.result(frame),
+            ClaudeAdapterEvent::RateLimit(frame) => self.rate_limit(frame),
+            ClaudeAdapterEvent::Init { frame, .. } => self.init(frame),
             ClaudeAdapterEvent::Error(error) => self.fail_active(&error),
             ClaudeAdapterEvent::Eof => {
                 self.fail_active("Claude Code process exited before turn result")
             }
             _ => {}
+        }
+    }
+    /// Upstream `handleSdkMessage` for an unconfirmed prompt. The echo confirms
+    /// it, a lifecycle frame names it, and root output is gated until then.
+    fn gate(&mut self, prompt_uuid: &str, raw: &Value, event: ClaudeAdapterEvent) {
+        if echoed_prompt_uuids(raw).contains(&prompt_uuid) {
+            if matches!(
+                self.echo_mode,
+                PromptEchoMode::Unknown | PromptEchoMode::Acknowledged
+            ) {
+                let first = self
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.gated_before_echo == 0);
+                self.echo_mode = if type_is(raw, "result") || !first {
+                    PromptEchoMode::ResultOnly
+                } else {
+                    PromptEchoMode::Early
+                };
+            }
+            self.release_held();
+            self.route(event);
+            return;
+        }
+        if let Some((uuid, state)) = prompt_lifecycle(raw)
+            && uuid == prompt_uuid
+        {
+            if self.echo_mode == PromptEchoMode::Unknown {
+                self.echo_mode = PromptEchoMode::Acknowledged;
+            }
+            if state == "started"
+                && let Some(active) = self.active.as_mut()
+            {
+                active.prompt_started = true;
+            }
+            // Claude finishes a prompt whose uuid its transcript already holds
+            // without starting it, and no turn will ever answer it.
+            let unstarted = state == "completed"
+                && self
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| !active.prompt_started);
+            if unstarted {
+                self.fail_active(
+                    "Claude acknowledged the message but never started a turn for it.",
+                );
+                return;
+            }
+        }
+        if !is_gated_frame(raw) {
+            // Frames the held turn produced through its own tool uses follow it.
+            let held_tools = self.held_tool_use_ids();
+            if frame_tool_use_ids(raw)
+                .iter()
+                .any(|id| held_tools.iter().any(|held| held == id))
+            {
+                if let Some(active) = self.active.as_mut() {
+                    active.held.push(event);
+                }
+                return;
+            }
+            self.route(event);
+            return;
+        }
+        if let Some(active) = self.active.as_mut() {
+            active.gated_before_echo += 1;
+        }
+        if type_is(raw, "result") && is_result_for_other_turn(raw, prompt_uuid, self.echo_mode) {
+            let held = self
+                .active
+                .as_mut()
+                .map(|active| {
+                    active.gated_before_echo = 0;
+                    std::mem::take(&mut active.held)
+                })
+                .unwrap_or_default();
+            // A result with no turns is lifecycle debris, so the held output waits for its owner.
+            if raw.get("num_turns").and_then(Value::as_u64) == Some(0) {
+                if let Some(active) = self.active.as_mut() {
+                    active.held.extend(held);
+                }
+                return;
+            }
+            if self.echo_mode == PromptEchoMode::Early {
+                // The held turn ran before this prompt's turn, which still follows on the stream.
+                for frame in held.iter().filter_map(event_raw) {
+                    self.buffer_wake(frame);
+                }
+                self.buffer_wake(raw);
+                return;
+            }
+            // Its output already streamed into this turn, so only its result stays out.
+            if raw.pointer("/origin/kind").and_then(Value::as_str) == Some("task-notification") {
+                self.wake.reports.clear();
+            }
+            return;
+        }
+        if self.echo_mode != PromptEchoMode::Early {
+            self.route(event);
+            return;
+        }
+        if !type_is(raw, "result") {
+            if let Some(active) = self.active.as_mut() {
+                active.held.push(event);
+            }
+            return;
+        }
+        // A result from no other turn settles the prompt's turn.
+        self.release_held();
+        self.route(event);
+    }
+    /// The tool_use ids of the root frames held for the echo.
+    fn held_tool_use_ids(&self) -> Vec<String> {
+        self.active
+            .as_ref()
+            .into_iter()
+            .flat_map(|active| active.held.iter().filter_map(event_raw))
+            .flat_map(|raw| tool_use_ids(raw).into_iter().map(str::to_owned))
+            .collect()
+    }
+    /// Gives the held root output to the active turn (upstream `releaseHeldRootFrames`).
+    fn release_held(&mut self) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        active.echo_confirmed = true;
+        let held = std::mem::take(&mut active.held);
+        for event in held {
+            self.route(event);
         }
     }
     fn assistant(&mut self, frame: turin_claude_protocol::Frame) {
@@ -1391,6 +1606,10 @@ impl ClaudeActor {
             for event in self.subagents.child_assistant(owner, &frame.raw, now) {
                 self.emit(event);
             }
+            return;
+        }
+        if self.active.is_none() {
+            self.buffer_wake(&frame.raw);
             return;
         }
         let events = match self.active.as_mut() {
@@ -1443,26 +1662,45 @@ impl ClaudeActor {
     /// turn is active, so this does not depend on one.
     fn background(&mut self, frame: turin_claude_protocol::Frame) {
         let now = UtcDateTime::now();
+        let subtype = frame.raw.get("subtype").and_then(Value::as_str);
+        let idle = self.active.is_none();
+        // While the root is idle, a frame is wake material before the roster and
+        // registry see it: a notification's wake eligibility and its report read
+        // the roster as it was.
+        if idle {
+            self.buffer_wake(&frame.raw);
+        }
         let roster_changed = self.background_roster(&frame.raw);
-        let events = match frame.raw.get("subtype").and_then(Value::as_str) {
-            Some("task_started") => {
-                // A task's turn item is numbered in the turn that is running, if any.
-                let active = &mut self.active;
-                let mut turn_item_ordinal = |native: &str| match active.as_mut() {
-                    Some(active) => item_ordinal(
-                        &mut active.item_ordinals,
-                        active.input.provider_turn_ordinal,
-                        native,
-                    ),
-                    None => 0,
-                };
-                self.subagents
-                    .started(&frame.raw, now, &mut turn_item_ordinal)
+        // Upstream projects an idle task only when a notification settles it. Its
+        // start (and any progress) is replayed with the continuation that drains it.
+        let buffered_start = task_id_of(&frame.raw).is_some_and(|id| {
+            self.wake
+                .has_buffered(|entry| is_task_started(entry) && task_id_of(entry) == Some(id))
+        });
+        let skip_registry = idle && (subtype != Some("task_notification") || buffered_start);
+        let events = if skip_registry {
+            Vec::new()
+        } else {
+            match subtype {
+                Some("task_started") => {
+                    // A task's turn item is numbered in the turn that is running, if any.
+                    let active = &mut self.active;
+                    let mut turn_item_ordinal = |native: &str| match active.as_mut() {
+                        Some(active) => item_ordinal(
+                            &mut active.item_ordinals,
+                            active.input.provider_turn_ordinal,
+                            native,
+                        ),
+                        None => 0,
+                    };
+                    self.subagents
+                        .started(&frame.raw, now, &mut turn_item_ordinal)
+                }
+                Some("task_progress") => self.subagents.progress(&frame.raw, now),
+                Some("task_updated") => self.subagents.updated(&frame.raw, now),
+                Some("task_notification") => self.subagents.notified(&frame.raw, now),
+                _ => Vec::new(),
             }
-            Some("task_progress") => self.subagents.progress(&frame.raw, now),
-            Some("task_updated") => self.subagents.updated(&frame.raw, now),
-            Some("task_notification") => self.subagents.notified(&frame.raw, now),
-            _ => Vec::new(),
         };
         for event in events {
             self.emit(event);
@@ -1474,6 +1712,199 @@ impl ClaudeActor {
         if roster_changed {
             self.emit_roster();
         }
+    }
+    /// Upstream `bufferWakeMessage`. Parks a frame that arrived while the root is
+    /// idle, and offers a continuation when the frame says Claude is waking the
+    /// thread: a subagent's notification, a native turn's start or output after a
+    /// background task's notification, or a result.
+    fn buffer_wake(&mut self, raw: &Value) {
+        let task_id = task_id_of(raw).map(str::to_owned);
+        let view = task_id
+            .as_deref()
+            .and_then(|id| self.subagents.wake_view(id));
+        let notification = is_task_notification(raw);
+        let pending_task = notification
+            && task_id
+                .as_deref()
+                .is_some_and(|id| self.wake.eligible.contains(id));
+        let buffered_start = task_id.as_deref().is_some_and(|id| {
+            self.wake
+                .has_buffered(|entry| is_task_started(entry) && task_id_of(entry) == Some(id))
+        });
+        let nested = notification && !pending_task && view.as_ref().is_some_and(|view| view.nested);
+        let pending_subagent = notification
+            && !pending_task
+            && !nested
+            && view.as_ref().is_some_and(|view| view.running)
+            || (notification && !pending_task && !nested && buffered_start);
+        let evidence = WakeEvidence {
+            pending_task_notification: pending_task,
+            pending_subagent_notification: pending_subagent,
+            nested_subagent_notification: nested,
+            known_subagent_task_started: is_task_started(raw) && view.is_some(),
+            new_subagent_task_started: is_task_started(raw)
+                && !is_opaque_task_type(raw.get("task_type").and_then(Value::as_str)),
+        };
+        if !evidence.is_evidence(raw) {
+            return;
+        }
+        let summary = if notification { summary_of(raw) } else { None };
+        self.wake.buffer.push(raw.clone());
+        if let Some(summary) = summary {
+            self.wake.detail = Some(summary.to_owned());
+        }
+        if pending_task {
+            let report = self.opaque_task_report(task_id.as_deref().unwrap_or_default(), raw);
+            self.wake
+                .record_report(task_id.as_deref().unwrap_or_default(), report);
+        } else if pending_subagent {
+            let label = view
+                .as_ref()
+                .and_then(|view| view.title.clone())
+                .or_else(|| {
+                    self.wake
+                        .buffer
+                        .iter()
+                        .find(|entry| {
+                            is_task_started(entry) && task_id_of(entry) == task_id.as_deref()
+                        })
+                        .and_then(|entry| entry.get("description").and_then(Value::as_str))
+                        .map(str::to_owned)
+                });
+            let report = BackgroundWorkReport {
+                work: BackgroundWork {
+                    label,
+                    kind: BackgroundWorkKind::Subagent {
+                        child_thread_id: view
+                            .as_ref()
+                            .and_then(|view| view.child_thread_id.clone()),
+                    },
+                },
+                outcome: notification_outcome(raw),
+            };
+            self.wake
+                .record_report(task_id.as_deref().unwrap_or_default(), report);
+        }
+        if pending_task && let Some(id) = task_id.as_deref() {
+            // The first idle notification wakes the root once. A duplicate is buffered only.
+            self.wake.eligible.remove(id);
+            self.wake.tombstones.insert(id.to_owned());
+        }
+        // A notification counts as a wake only with a root frame behind it, since
+        // a background subagent keeps streaming while the root is idle.
+        let native_opaque_wake = self.wake.has_buffered(is_task_notification)
+            && matches!(type_of(raw), Some("assistant" | "user"))
+            && raw.get("parent_tool_use_id").is_none_or(Value::is_null);
+        let offers =
+            pending_subagent || native_opaque_wake || is_turn_start(raw) || type_is(raw, "result");
+        if offers {
+            self.offer_continuation();
+        }
+    }
+    /// Upstream `opaqueTaskWakeReport`: reads the roster, or the task's last
+    /// known entry, before the notification clears it.
+    fn opaque_task_report(&mut self, task_id: &str, notification: &Value) -> BackgroundWorkReport {
+        let task = self
+            .roster
+            .tasks()
+            .iter()
+            .find(|task| roster_task_id(task) == task_id)
+            .cloned()
+            .or_else(|| self.wake.last_known.remove(task_id));
+        let kind = match task {
+            Some(OrchestrationV2PendingBackgroundTask::Monitor { .. }) => {
+                BackgroundWorkKind::Monitor
+            }
+            Some(OrchestrationV2PendingBackgroundTask::BackgroundTask { .. }) => {
+                BackgroundWorkKind::BackgroundTask
+            }
+            _ => BackgroundWorkKind::Command { exit_code: None },
+        };
+        let label = task
+            .as_ref()
+            .and_then(|task| task.description().map(|d| d.as_str().to_owned()));
+        BackgroundWorkReport {
+            work: BackgroundWork { label, kind },
+            outcome: notification_outcome(notification),
+        }
+    }
+    /// Upstream `offer` in `bufferWakeMessage`: asks the host for a continuation
+    /// once per wake, and hands it the reports and the notification summary.
+    fn offer_continuation(&mut self) {
+        let Some((thread_id, provider_thread_id)) = self.wake.route.clone() else {
+            return;
+        };
+        if self.wake.requested {
+            return;
+        }
+        self.wake.requested = true;
+        let reports = self.wake.take_reports();
+        self.continuation.offer(ProviderContinuationRequest {
+            thread_id,
+            provider_thread_id,
+            driver: driver(),
+            detail: self.wake.detail.clone(),
+            notification: background_work_notification(&reports),
+            delegated_completion: None,
+            delivery: None,
+            message_id: None,
+            dispatch_if_current: None,
+            clear_if_current: None,
+        });
+    }
+    /// A rate-limit frame while idle is parked, so a continuation can show it (upstream).
+    fn rate_limit(&mut self, frame: turin_claude_protocol::Frame) {
+        if self.active.is_none() {
+            self.buffer_wake(&frame.raw);
+        }
+    }
+    /// The `init` every turn opens with. While idle it is the wake turn starting.
+    fn init(&mut self, frame: turin_claude_protocol::Frame) {
+        if self.active.is_none() {
+            self.buffer_wake(&frame.raw);
+        }
+    }
+    /// Upstream `startTurn` for a continuation: the frames the wake buffered replay
+    /// into this turn, the result last. With no buffer the turn settles at once.
+    /// A buffered `init` or native output means Claude is still working on the wake
+    /// turn, so the turn stays open for it.
+    fn drain_wake(&mut self) {
+        self.wake.requested = false;
+        let drained = std::mem::take(&mut self.wake.buffer);
+        if drained.is_empty() {
+            self.finish_turn(ProviderAdapterV2TurnTerminalStatus::Completed, &json!({}));
+            return;
+        }
+        let has_opaque_notification = drained.iter().any(|entry| {
+            is_task_notification(entry)
+                && task_id_of(entry).is_some_and(|id| self.wake.tombstones.contains(id))
+        });
+        let has_native_wake = drained.iter().any(|entry| {
+            matches!(type_of(entry), Some("user" | "assistant")) || is_turn_start(entry)
+        });
+        let (results, rest): (Vec<Value>, Vec<Value>) = drained
+            .into_iter()
+            .partition(|entry| type_is(entry, "result"));
+        for entry in rest {
+            if let Some(id) = task_id_of(&entry).filter(|_| is_task_notification(&entry)) {
+                self.wake.tombstones.remove(id);
+            }
+            self.replay(&entry);
+        }
+        if let Some(last) = results.last() {
+            self.replay(last);
+            return;
+        }
+        if has_opaque_notification && !has_native_wake {
+            self.finish_turn(ProviderAdapterV2TurnTerminalStatus::Completed, &json!({}));
+        }
+    }
+    /// Routes a buffered frame as if it had arrived live.
+    fn replay(&mut self, raw: &Value) {
+        let Ok(frame) = turin_claude_protocol::Frame::decode(raw.clone()) else {
+            return;
+        };
+        self.route(project_frame(frame));
     }
     /// The roster edges of a background frame: a `background_tasks_changed`
     /// snapshot, a non-subagent task_started, or its task_notification.
@@ -1497,6 +1928,11 @@ impl ClaudeActor {
                     .collect();
                 // A monitor the snapshot no longer lists has ended.
                 self.monitor_tasks.retain(|id| listed.contains(id.as_str()));
+                for task in &tasks {
+                    let id = roster_task_id(task).to_owned();
+                    self.wake.last_known.insert(id.clone(), task.clone());
+                    self.wake.eligible.insert(id);
+                }
                 self.roster.replace(tasks);
                 true
             }
@@ -1520,6 +1956,9 @@ impl ClaudeActor {
                 else {
                     return false;
                 };
+                let id = roster_task_id(&task).to_owned();
+                self.wake.last_known.insert(id.clone(), task.clone());
+                self.wake.eligible.insert(id);
                 self.roster.upsert(task);
                 true
             }
@@ -1648,7 +2087,9 @@ impl ClaudeActor {
         }
         self.track_goal(&frame.raw);
         let mut events = self.workflow_handles(&frame);
-        if let Some(active) = self.active.as_mut() {
+        if self.active.is_none() {
+            self.buffer_wake(&frame.raw);
+        } else if let Some(active) = self.active.as_mut() {
             events.extend(tool_result_events(&mut self.plans, active, &frame));
         }
         for event in events {
@@ -1691,6 +2132,7 @@ impl ClaudeActor {
         // The turn's buffered thinking text is written before the turn ends (upstream `flushTurn`).
         self.flush_thinking();
         let Some(active) = self.active.as_mut() else {
+            self.buffer_wake(&frame.raw);
             return;
         };
         let result = &frame.raw;
@@ -1714,6 +2156,14 @@ impl ClaudeActor {
         } else {
             ProviderAdapterV2TurnTerminalStatus::Completed
         };
+        self.finish_turn(status, &frame.raw);
+    }
+    /// Ends the active turn with `status`, reading the native `result` frame for usage and failure.
+    fn finish_turn(&mut self, status: ProviderAdapterV2TurnTerminalStatus, result: &Value) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        active.held.clear();
         let now = UtcDateTime::now();
         let usage = normalize_claude_turn_token_usage(
             Some(result),
@@ -2219,6 +2669,40 @@ fn assistant_text_events(
 
 fn parent_tool_use_id(frame: &turin_claude_protocol::Frame) -> Option<&str> {
     frame.raw.get("parent_tool_use_id").and_then(Value::as_str)
+}
+
+/// The frame an event carries, for the events that carry one.
+fn event_raw(event: &ClaudeAdapterEvent) -> Option<&Value> {
+    match event {
+        ClaudeAdapterEvent::Assistant(frame)
+        | ClaudeAdapterEvent::User(frame)
+        | ClaudeAdapterEvent::Compaction(frame)
+        | ClaudeAdapterEvent::Background(frame)
+        | ClaudeAdapterEvent::Stream(frame)
+        | ClaudeAdapterEvent::Result(frame)
+        | ClaudeAdapterEvent::RateLimit(frame)
+        | ClaudeAdapterEvent::Hook(frame)
+        | ClaudeAdapterEvent::Other(frame) => Some(&frame.raw),
+        ClaudeAdapterEvent::Init { frame, .. } => Some(&frame.raw),
+        _ => None,
+    }
+}
+
+fn type_of(raw: &Value) -> Option<&str> {
+    raw.get("type").and_then(Value::as_str)
+}
+
+fn type_is(raw: &Value, kind: &str) -> bool {
+    type_of(raw) == Some(kind)
+}
+
+/// Upstream `claudeTaskOutcome` for a notification's status.
+fn notification_outcome(raw: &Value) -> OrchestrationV2NotificationOutcome {
+    match raw.get("status").and_then(Value::as_str) {
+        Some("completed") => OrchestrationV2NotificationOutcome::Completed,
+        Some("stopped") => OrchestrationV2NotificationOutcome::Cancelled,
+        _ => OrchestrationV2NotificationOutcome::Failed,
+    }
 }
 
 /// `tool_result` blocks finish the tracked tool call they answer. A finished

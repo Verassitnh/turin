@@ -94,6 +94,16 @@ struct Task {
     /// Set by a native terminal frame (upstream `confirmedOutcome`). A Stop
     /// is answered from it, and a resume clears it.
     confirmed: Option<ProviderAdapterV2SubagentOutcome>,
+    /// Launched by another subagent (upstream `nestedSubagentTaskIds`).
+    nested: bool,
+}
+
+/// What the wake path needs to know about a task (upstream reads the session registry).
+pub struct WakeView {
+    pub running: bool,
+    pub nested: bool,
+    pub title: Option<String>,
+    pub child_thread_id: Option<ThreadId>,
 }
 
 /// What `stopSubagent` checks before it asks the CLI to stop a task.
@@ -261,6 +271,7 @@ impl SubagentRegistry {
                 )
             })
             .flatten();
+        let nested = launch.owner_tool_use_id.is_some();
         let prompt = launch.prompt.clone().or_else(|| text(raw, "prompt"));
         let title = launch
             .description
@@ -268,6 +279,7 @@ impl SubagentRegistry {
             .or_else(|| text(raw, "description"));
         let previous = self.tasks.remove(&task_id);
         let is_new = previous.is_none();
+        let previous_nested = previous.as_ref().map_or(nested, |task| task.nested);
         let (subagent, ids, turn_item_ordinal, child) = match previous {
             Some(previous) => {
                 // A resume: the record reopens. Its previous answer and progress no
@@ -337,6 +349,7 @@ impl SubagentRegistry {
             provider_turn_id: scope.provider_turn_id.clone(),
             root_node_id: scope.root_node_id.clone(),
             confirmed: None,
+            nested: previous_nested,
         };
         let mut events = Vec::new();
         if is_new {
@@ -407,6 +420,17 @@ impl SubagentRegistry {
         }
         self.tasks.insert(task_id, task);
         events
+    }
+
+    /// What the wake path reads about a task. `None` for an unknown task.
+    pub fn wake_view(&self, task_id: &str) -> Option<WakeView> {
+        let task = self.tasks.get(task_id)?;
+        Some(WakeView {
+            running: task.subagent.status == OrchestrationV2SubagentStatus::Running,
+            nested: task.nested,
+            title: task.subagent.title.clone(),
+            child_thread_id: task.subagent.child_thread_id.clone(),
+        })
     }
 
     /// What `stopSubagent` needs to know about a task. `None` for an unknown task.

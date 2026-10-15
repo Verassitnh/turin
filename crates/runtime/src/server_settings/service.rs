@@ -35,7 +35,7 @@ use super::legacy::{
 };
 use super::{
     decode_legacy_file, decode_settings_json, normalize_server_settings,
-    resolve_text_generation_provider, sparse_settings_json,
+    resolve_text_generation_provider, sparse_settings_json_retaining,
 };
 use crate::persistence_reader::{
     LegacyProjectSettingsRow, ProviderHistoryRow, legacy_project_settings_rows, provider_history,
@@ -65,29 +65,58 @@ fn settings_error(
     }
 }
 
+/// Runs blocking filesystem work on the blocking pool, so the async workers stay free.
+async fn blocking<T, F>(work: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|error| std::panic::resume_unwind(error.into_panic()))
+}
+
+/// What a settings-link change means for the destination watch.
+enum LinkTargetUpdate {
+    Keep,
+    Clear,
+    Watch(PathBuf, RecommendedWatcher),
+}
+
 /// Points the watch at the destination of a settings symlink, or drops it when
 /// the settings path is not a link. Upstream `watchLinkTarget`. A destination
-/// that does not exist yet is still watched, so its creation reloads.
-fn refresh_link_target_watch(
-    settings_path: &Path,
-    events: &mpsc::UnboundedSender<()>,
+/// that does not exist yet is still watched, so its creation reloads. The link
+/// is read and the destination directory created on the blocking pool.
+async fn refresh_link_target_watch(
+    settings_path: PathBuf,
+    events: mpsc::UnboundedSender<()>,
     current: &mut Option<(PathBuf, RecommendedWatcher)>,
 ) {
-    let own = lexical_absolute(settings_path).ok();
-    let target = resolve_symlink_target(settings_path)
-        .ok()
-        .filter(|target| Some(target) != own.as_ref());
-    match target {
-        None => *current = None,
-        Some(target) if current.as_ref().map(|(path, _)| path) != Some(&target) => {
-            if let Some(parent) = target.parent() {
-                let _ = std::fs::create_dir_all(parent);
+    let known = current.as_ref().map(|(path, _)| path.clone());
+    let update = blocking(move || {
+        let own = lexical_absolute(&settings_path).ok();
+        let target = resolve_symlink_target(&settings_path)
+            .ok()
+            .filter(|target| Some(target) != own.as_ref());
+        match target {
+            None => LinkTargetUpdate::Clear,
+            Some(target) if known.as_ref() != Some(&target) => {
+                if let Some(parent) = target.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match watch_file(&target, events) {
+                    Ok(watcher) => LinkTargetUpdate::Watch(target, watcher),
+                    Err(_) => LinkTargetUpdate::Clear,
+                }
             }
-            *current = watch_file(&target, events.clone())
-                .ok()
-                .map(|watcher| (target, watcher));
+            Some(_) => LinkTargetUpdate::Keep,
         }
-        Some(_) => {}
+    })
+    .await;
+    match update {
+        LinkTargetUpdate::Keep => {}
+        LinkTargetUpdate::Clear => *current = None,
+        LinkTargetUpdate::Watch(target, watcher) => *current = Some((target, watcher)),
     }
 }
 
@@ -256,12 +285,16 @@ pub struct ServerSettingsService {
     secrets: Arc<dyn SecretStore>,
     db: Db,
     write_lock: AsyncMutex<()>,
+    /// Upstream `startedRef` and `startedDeferred`: the first startup's outcome,
+    /// returned to every later call.
+    started: AsyncMutex<Option<Result<(), ServerSettingsError>>>,
     cache: Mutex<Option<ServerSettings>>,
     subscribers: Mutex<Vec<mpsc::UnboundedSender<ServerSettings>>>,
 }
 
 /// Owns the settings file watch and the task that reloads on change. Dropping
 /// it stops watching.
+#[derive(Debug)]
 pub struct SettingsWatcher {
     task: JoinHandle<()>,
 }
@@ -303,6 +336,7 @@ impl ServerSettingsService {
             secrets,
             db,
             write_lock: AsyncMutex::new(()),
+            started: AsyncMutex::new(None),
             cache: Mutex::new(None),
             subscribers: Mutex::new(Vec::new()),
         })
@@ -314,44 +348,78 @@ impl ServerSettingsService {
 
     /// Port of `start`: prepare the directory, attach the watcher, and load the
     /// settings once. Must run inside a tokio runtime.
-    pub async fn start(self: &Arc<Self>) -> Result<SettingsWatcher, ServerSettingsError> {
+    ///
+    /// Idempotent as upstream is. The first call returns the watcher guard. A
+    /// later call returns `Ok(None)` after a successful start, or the first
+    /// startup's error, and never spawns a second watcher.
+    pub async fn start(self: &Arc<Self>) -> Result<Option<SettingsWatcher>, ServerSettingsError> {
+        let mut started = self.started.lock().await;
+        match &*started {
+            Some(Ok(())) => return Ok(None),
+            Some(Err(error)) => return Err(error.clone()),
+            None => {}
+        }
+        match self.start_watching().await {
+            Ok(watcher) => {
+                *started = Some(Ok(()));
+                Ok(Some(watcher))
+            }
+            Err(error) => {
+                *started = Some(Err(error.clone()));
+                Err(error)
+            }
+        }
+    }
+
+    async fn start_watching(self: &Arc<Self>) -> Result<SettingsWatcher, ServerSettingsError> {
         let directory = self
             .settings_path
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default();
-        std::fs::create_dir_all(&directory).map_err(|error| {
-            settings_error(
-                &self.settings_path,
-                ServerSettingsOperation::PrepareDirectory,
-                None,
-                None,
-                error,
-            )
-        })?;
+        blocking(move || std::fs::create_dir_all(&directory))
+            .await
+            .map_err(|error| {
+                settings_error(
+                    &self.settings_path,
+                    ServerSettingsOperation::PrepareDirectory,
+                    None,
+                    None,
+                    error,
+                )
+            })?;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let link_watcher = watch_file(&self.settings_path, tx.clone()).map_err(|error| {
-            settings_error(
-                &self.settings_path,
-                ServerSettingsOperation::PrepareDirectory,
-                None,
-                None,
-                error,
-            )
-        })?;
+        let watched_path = self.settings_path.clone();
+        let link_events = tx.clone();
+        let link_watcher = blocking(move || watch_file(&watched_path, link_events))
+            .await
+            .map_err(|error| {
+                settings_error(
+                    &self.settings_path,
+                    ServerSettingsOperation::PrepareDirectory,
+                    None,
+                    None,
+                    error,
+                )
+            })?;
         // A symlinked settings file is written in its destination's directory,
         // which a watch on the link's directory never sees. The link is resolved
         // again on every change, so repointing it moves the target watch along.
         let mut target_watch = None;
-        refresh_link_target_watch(&self.settings_path, &tx, &mut target_watch);
+        refresh_link_target_watch(self.settings_path.clone(), tx.clone(), &mut target_watch).await;
 
         let this = Arc::clone(self);
         let task = tokio::spawn(async move {
             // Owned by the task so that aborting it stops every watch.
             let _link_watcher = link_watcher;
             while next_debounced(&mut rx, WATCH_DEBOUNCE).await.is_some() {
-                refresh_link_target_watch(&this.settings_path, &tx, &mut target_watch);
+                refresh_link_target_watch(
+                    this.settings_path.clone(),
+                    tx.clone(),
+                    &mut target_watch,
+                )
+                .await;
                 // Upstream logs and keeps watching when a reload fails.
                 if let Err(error) = this.revalidate_and_emit().await {
                     tracing::warn!(error = %error, "settings reload failed");
@@ -359,9 +427,11 @@ impl ServerSettingsService {
             }
         });
 
+        // Owned from here on, so a failed first load aborts the watcher task.
+        let watcher = SettingsWatcher { task };
         *self.cache.lock() = None;
         self.cached_settings().await?;
-        Ok(SettingsWatcher { task })
+        Ok(watcher)
     }
 
     /// Port of `getSettings`: the cached settings with secrets materialized.
@@ -397,6 +467,10 @@ impl ServerSettingsService {
         mutation: &ProviderInstanceMutation,
         patch: Option<&ServerSettingsPatch>,
     ) -> Result<ServerSettings, ServerSettingsError> {
+        // Upstream `patch = {}`: the empty patch still applies, so the settings are
+        // normalized the same way whether or not a patch is given.
+        let default_patch = ServerSettingsPatch::default();
+        let patch = patch.unwrap_or(&default_patch);
         self.update_and_persist(|current| {
             if let ProviderInstanceMutation::Create { instance_id, .. } = mutation
                 && current.provider_instances.contains_key(instance_id)
@@ -409,18 +483,15 @@ impl ServerSettingsService {
                     "provider instance already exists",
                 ));
             }
-            let patched = match patch {
-                Some(patch) => apply_server_settings_patch(&current, patch).map_err(|error| {
-                    settings_error(
-                        &self.settings_path,
-                        ServerSettingsOperation::Normalize,
-                        None,
-                        None,
-                        error,
-                    )
-                })?,
-                None => current,
-            };
+            let patched = apply_server_settings_patch(&current, patch).map_err(|error| {
+                settings_error(
+                    &self.settings_path,
+                    ServerSettingsOperation::Normalize,
+                    None,
+                    None,
+                    error,
+                )
+            })?;
             Ok(apply_provider_instance_mutation(patched, mutation))
         })
         .await
@@ -487,18 +558,25 @@ impl ServerSettingsService {
         // A file that failed to decode stays on disk for the user to repair.
         let mut trusted = true;
 
-        if path.try_exists().map_err(|error| {
-            settings_error(
-                &path,
-                ServerSettingsOperation::CheckExists,
-                None,
-                None,
-                error,
-            )
-        })? {
-            let raw = std::fs::read_to_string(&path).map_err(|error| {
-                settings_error(&path, ServerSettingsOperation::ReadFile, None, None, error)
+        let exists_path = path.clone();
+        let exists = blocking(move || exists_path.try_exists())
+            .await
+            .map_err(|error| {
+                settings_error(
+                    &path,
+                    ServerSettingsOperation::CheckExists,
+                    None,
+                    None,
+                    error,
+                )
             })?;
+        if exists {
+            let read_path = path.clone();
+            let raw = blocking(move || std::fs::read_to_string(read_path))
+                .await
+                .map_err(|error| {
+                    settings_error(&path, ServerSettingsOperation::ReadFile, None, None, error)
+                })?;
             let decoded = decode_settings_json(&raw);
             let legacy = decode_legacy_file(&raw);
             if let Ok(legacy_object) = &legacy {
@@ -585,6 +663,18 @@ impl ServerSettingsService {
         }
         let has_legacy_source_control =
             trusted && copy_ok && (legacy_sc.bitbucket.is_some() || legacy_sc.github.is_some());
+        // A failed copy keeps the retired objects in the file. Upstream rewrites
+        // without them, which orphans the old secret: nothing reads it again.
+        // Keeping them lets the next load retry the copy.
+        let mut retained = Object::new();
+        if trusted && !copy_ok {
+            if let Some(github) = &legacy_sc.github {
+                retained.insert("github".into(), Value::Object(github.clone()));
+            }
+            if let Some(bitbucket) = &legacy_sc.bitbucket {
+                retained.insert("bitbucket".into(), Value::Object(bitbucket.clone()));
+            }
+        }
         if has_legacy_source_control {
             migrate_legacy_source_control_settings(&mut value, &legacy_sc);
         } else {
@@ -607,7 +697,7 @@ impl ServerSettingsService {
             || (trusted && legacy_providers.is_some())
             || has_legacy_source_control
         {
-            self.write_settings(&migrated)?;
+            self.write_settings(&migrated, &retained).await?;
             for SecretMove { from, .. } in &secret_moves {
                 let _ = self.secrets.remove(from).await;
             }
@@ -760,9 +850,14 @@ impl ServerSettingsService {
         })
     }
 
-    /// Writes the sparse settings file atomically.
-    fn write_settings(&self, settings: &ServerSettings) -> Result<(), ServerSettingsError> {
-        let text = sparse_settings_json(settings).map_err(|error| {
+    /// Writes the sparse settings file atomically, on the blocking pool. Keys in
+    /// `retained` are written beside the settings unchanged.
+    async fn write_settings(
+        &self,
+        settings: &ServerSettings,
+        retained: &Object,
+    ) -> Result<(), ServerSettingsError> {
+        let text = sparse_settings_json_retaining(settings, retained).map_err(|error| {
             settings_error(
                 &self.settings_path,
                 ServerSettingsOperation::WriteFile,
@@ -771,15 +866,18 @@ impl ServerSettingsService {
                 error,
             )
         })?;
-        write_file_string_atomically(&self.settings_path, &text).map_err(|error| {
-            settings_error(
-                &self.settings_path,
-                ServerSettingsOperation::WriteFile,
-                None,
-                None,
-                error,
-            )
-        })
+        let path = self.settings_path.clone();
+        blocking(move || write_file_string_atomically(&path, &text))
+            .await
+            .map_err(|error| {
+                settings_error(
+                    &self.settings_path,
+                    ServerSettingsOperation::WriteFile,
+                    None,
+                    None,
+                    error,
+                )
+            })
     }
 
     /// Runs a store change, recording what each write replaced. A later failure
@@ -896,7 +994,7 @@ impl ServerSettingsService {
                 return Err(error);
             }
         };
-        if let Err(error) = self.write_settings(&next) {
+        if let Err(error) = self.write_settings(&next, &Object::new()).await {
             self.rollback_secret_writes(applied).await;
             return Err(error);
         }

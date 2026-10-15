@@ -2383,4 +2383,147 @@ mod service {
         assert_eq!(settings["projectSettingsOverrides"], json!({}));
         assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), broken);
     }
+
+    // Regression tests for the QC report (wf_2cc40aee-4cb).
+
+    /// Retired github keys survive a failed secret copy when the same load also
+    /// rewrites the file (here: the retired `providers` map forces the write).
+    #[tokio::test]
+    async fn retired_github_keys_survive_a_failed_copy_when_the_file_is_rewritten_anyway() {
+        let fx = fixture().await;
+        let github = json!({
+            "hosts": {"github.com": {"account": "work"}},
+            "tokens": {"github.com": SECRET_REDACTED},
+        });
+        write_raw_settings(
+            &fx.path,
+            &json!({
+                "providers": {"codex": {"binaryPath": "/x"}},
+                "github": github,
+            })
+            .to_string(),
+        );
+        let failing = ServerSettingsService::new(&fx.path, Arc::new(ReadFailing), fx.db.clone());
+        failing.get_settings().await.unwrap();
+        let raw = read_file(&fx.path);
+        assert!(
+            raw.get("providers").is_none(),
+            "the providers migration still rewrites the file"
+        );
+        assert_eq!(
+            raw["github"], github,
+            "the retired github object is kept for a retry"
+        );
+
+        // The next load, with a working store, completes the move.
+        let legacy_name = format!(
+            "github-token-{}",
+            <base64::engine::GeneralPurpose as base64::Engine>::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                "github.com",
+            )
+        );
+        fx.secrets.set(&legacy_name, b"ghp_saved").await.unwrap();
+        let retry = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let loaded = settings_value(&retry.get_settings().await.unwrap());
+        assert_eq!(
+            loaded["sourceControlHosts"]["github"]["tokens"],
+            json!({"github.com": "ghp_saved"})
+        );
+        assert!(read_file(&fx.path).get("github").is_none());
+        assert!(fx.secrets.get(&legacy_name).await.unwrap().is_none());
+    }
+
+    /// Same as above, but the rewrite comes from an unfolded project row.
+    #[tokio::test]
+    async fn retired_github_keys_survive_a_failed_copy_when_a_project_fold_rewrites_the_file() {
+        let fx = fixture().await;
+        let github = json!({
+            "hosts": {},
+            "tokens": {"github.com": SECRET_REDACTED},
+        });
+        fx.db
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO projection_projects (project_id, title, workspace_root, auto_pull, scripts_json, created_at, updated_at)
+                     VALUES ('project-fold', 'Project', '/tmp/project-fold', 1, '[]', '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z')",
+                    [],
+                )
+                .map_err(|err| turin_persistence::PersistenceError::sql("test.insertFoldProject", &err))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        write_raw_settings(&fx.path, &json!({"github": github}).to_string());
+        let failing = ServerSettingsService::new(&fx.path, Arc::new(ReadFailing), fx.db.clone());
+        let loaded = settings_value(&failing.get_settings().await.unwrap());
+        assert_eq!(loaded["projectSettingsFolded"], json!(true));
+        assert_eq!(read_file(&fx.path)["github"], github);
+    }
+
+    /// A provider mutation with no patch still applies the empty patch, so the
+    /// stored settings are normalized the same way as with `Some(empty)`.
+    #[tokio::test]
+    async fn a_provider_mutation_without_a_patch_still_normalizes_the_settings() {
+        let fx = fixture().await;
+        // The legacy interval alias becomes a custom background override on apply.
+        write_raw_settings(
+            &fx.path,
+            &json!({"automaticGitFetchInterval": 10_000}).to_string(),
+        );
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let mutation = serde_json::from_value::<ProviderInstanceMutation>(json!({
+            "operation": "create",
+            "instanceId": "codex_normalized",
+            "instance": {"driver": "codex", "config": {}},
+        }))
+        .unwrap();
+        service
+            .update_provider_instance(&mutation, None)
+            .await
+            .unwrap();
+        let saved = read_file(&fx.path);
+        assert_eq!(saved["backgroundActivity"]["profile"], json!("custom"));
+        assert_eq!(
+            saved["backgroundActivity"]["overrides"]["automaticGitFetchInterval"],
+            json!(10_000)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_reports_the_same_error_on_a_second_call_without_a_second_watcher() {
+        let fx = fixture().await;
+        // The settings path cannot be created under a regular file.
+        let blocker = fx.dir.path().join("blocker");
+        std::fs::write(&blocker, "x").unwrap();
+        let path = blocker.join("settings.json");
+        let service = ServerSettingsService::new(&path, fx.secrets.clone(), fx.db.clone());
+        let first = service.start().await.unwrap_err();
+        let second = service.start().await.unwrap_err();
+        assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn a_successful_start_returns_its_watcher_once() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        assert!(service.start().await.unwrap().is_some());
+        assert!(service.start().await.unwrap().is_none());
+    }
+}
+
+#[test]
+fn a_decode_error_does_not_quote_the_rejected_value() {
+    // The field is a bool, so a string credential here is a type error serde
+    // would otherwise echo into the warn log.
+    let error =
+        decode_settings_json(r#"{"enableProviderUpdateChecks":"sk-live-SECRET123"}"#).unwrap_err();
+    assert!(
+        !error.contains("SECRET123"),
+        "decode error leaks the value: {error}"
+    );
+    assert!(
+        error.contains("line"),
+        "position is still reported: {error}"
+    );
 }

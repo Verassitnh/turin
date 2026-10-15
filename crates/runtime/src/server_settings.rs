@@ -39,10 +39,21 @@ fn migrate_response_streaming_mode(value: &mut Value) {
     }
 }
 
+/// Reports a decode failure by category and position. serde's own message
+/// quotes the rejected value, which can be a credential in a mistyped field.
+fn summarize_decode_error(error: serde_json::Error) -> String {
+    format!(
+        "{:?} at line {} column {}",
+        error.classify(),
+        error.line(),
+        error.column()
+    )
+}
+
 /// `ServerSettingsJson`: the decode of a settings file. Retired `token`
 /// streaming mode decodes as `paragraph` at the top level and per project.
 pub fn decode_settings_json(raw: &str) -> Result<ServerSettings, String> {
-    let mut value = parse_lenient_json(raw).map_err(|error| error.to_string())?;
+    let mut value = parse_lenient_json(raw).map_err(summarize_decode_error)?;
     if !value.is_object() {
         return Err("expected a JSON object".to_owned());
     }
@@ -58,14 +69,14 @@ pub fn decode_settings_json(raw: &str) -> Result<ServerSettings, String> {
             }
         }
     }
-    serde_json::from_value(value).map_err(|error| error.to_string())
+    serde_json::from_value(value).map_err(summarize_decode_error)
 }
 
 /// `LegacyProviderSettingsJson`: the retired `providers`, `bitbucket` and
 /// `github` keys, read without their old schemas. Each present key must be an
 /// object. Returns the raw object when that holds.
 pub fn decode_legacy_file(raw: &str) -> Result<Object, String> {
-    let value = parse_lenient_json(raw).map_err(|error| error.to_string())?;
+    let value = parse_lenient_json(raw).map_err(summarize_decode_error)?;
     let Value::Object(object) = value else {
         return Err("expected a JSON object".to_owned());
     };
@@ -107,9 +118,25 @@ pub fn strip_default(current: &Value, defaults: &Value) -> Option<Value> {
 
 /// The sparse JSON text written to the settings file, with a trailing newline.
 pub fn sparse_settings_json(settings: &ServerSettings) -> serde_json::Result<String> {
+    sparse_settings_json_retaining(settings, &Map::new())
+}
+
+/// [`sparse_settings_json`] with `retained` keys written beside the settings
+/// unchanged. The load path uses it to keep retired keys whose copy failed.
+pub fn sparse_settings_json_retaining(
+    settings: &ServerSettings,
+    retained: &Object,
+) -> serde_json::Result<String> {
     let current = serde_json::to_value(settings)?;
     let defaults = serde_json::to_value(default_server_settings())?;
-    let sparse = strip_default(&current, &defaults).unwrap_or_else(|| json!({}));
+    let mut sparse = strip_default(&current, &defaults).unwrap_or_else(|| json!({}));
+    if let Value::Object(object) = &mut sparse {
+        object.extend(
+            retained
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+    }
     Ok(format!("{}\n", serde_json::to_string_pretty(&sparse)?))
 }
 

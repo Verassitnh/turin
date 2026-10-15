@@ -507,13 +507,12 @@ fn process_exit(status: Option<std::process::ExitStatus>) -> ProcessExit {
     }
 }
 fn exit_error(exit: &ProcessExit, tail: &str) -> String {
-    let mut message = if let Some(signal) = exit.signal {
-        format!("Claude Code process exited with signal {signal}")
-    } else {
-        format!(
-            "Claude Code process exited with code {}",
-            exit.code.unwrap_or(0)
-        )
+    let mut message = match (exit.signal, exit.code) {
+        (Some(signal), _) => format!("Claude Code process exited with signal {signal}"),
+        (None, Some(code)) => format!("Claude Code process exited with code {code}"),
+        // The reaper has not reported a status (or wait() failed), so the child may still be
+        // running. Report what we know instead of inventing a code.
+        (None, None) => "Claude Code process closed stdout without reporting an exit status".into(),
     };
     let tail = tail.trim();
     if !tail.is_empty() {
@@ -1195,6 +1194,34 @@ for line in sys.stdin:
             "{text}"
         );
         assert!(text.contains("Error: not logged in"), "{text}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    /// Closes stdout without answering initialize and keeps running past the 2s exit wait. The child
+    /// is alive, so the spawn error must not claim it exited with code 0.
+    #[tokio::test]
+    async fn spawn_does_not_invent_an_exit_code_while_the_cli_is_still_running() {
+        let dir =
+            std::env::temp_dir().join(format!("turin-claude-unknown-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import os,sys,time
+sys.stdin.readline()
+os.close(1)
+time.sleep(3)
+"#,
+        );
+        let error = match ClaudeSession::spawn(options, Arc::new(Accept)).await {
+            Err(error) => error,
+            Ok(_) => panic!("spawn succeeded"),
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("closed stdout without reporting an exit status"),
+            "{text}"
+        );
+        assert!(!text.contains("code 0"), "{text}");
         fs::remove_dir_all(dir).unwrap();
     }
     #[tokio::test]

@@ -1216,3 +1216,109 @@ async fn bash_output_comes_from_the_structured_streams() {
         vec![json!("out\nwarn"), json!("Command started in background")]
     );
 }
+
+/// Thinking deltas stream into the reasoning item. The completed block then
+/// replaces its text under the same native id.
+#[tokio::test]
+async fn thinking_deltas_stream_into_the_reasoning_item() {
+    let stream = |event: Value| {
+        json!({
+            "type": "stream_event", "event": event, "parent_tool_use_id": null,
+            "session_id": "todo-session", "uuid": "00000000-0000-4000-8000-000000000601",
+        })
+    };
+    let harness = one_turn(vec![
+        stream(json!({"type": "message_start", "message": {"id": "msg_think"}})),
+        stream(json!({"type": "content_block_start", "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""}})),
+        stream(json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Plan"}})),
+        stream(json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": " it"}})),
+        stream(json!({"type": "content_block_stop", "index": 0})),
+        json!({
+            "type": "assistant",
+            "message": {"id": "msg_think", "role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Plan it"}
+            ]},
+            "uuid": "00000000-0000-4000-8000-000000000602", "session_id": "todo-session",
+        }),
+    ]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Think"))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    let reasoning: Vec<(String, bool, String)> = turn_items(&seen)
+        .iter()
+        .filter_map(|item| serde_json::to_value(item).ok())
+        .filter(|item| item["type"] == "reasoning")
+        .map(|item| {
+            (
+                item["text"].as_str().unwrap_or_default().to_owned(),
+                item["streaming"] == true,
+                item["status"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    let at =
+        |text: &str, streaming: bool, status: &str| (text.to_owned(), streaming, status.to_owned());
+    assert_eq!(
+        reasoning,
+        vec![
+            at("Plan", true, "running"),
+            at("Plan it", true, "running"),
+            at("Plan it", false, "completed"),
+            at("Plan it", false, "completed"),
+        ]
+    );
+}
+
+/// On Claude 5.1+, a tool call right after a second thinking block takes that
+/// block's text as its preamble. The first thinking block stays reasoning.
+#[tokio::test]
+async fn thinking_before_a_tool_call_becomes_the_preamble_on_claude_5_1() {
+    let harness = one_turn(vec![
+        json!({
+            "type": "assistant",
+            "message": {"id": "msg_pre", "role": "assistant", "model": "claude-sonnet-5-5", "content": [
+                {"type": "thinking", "thinking": "First thought"},
+                {"type": "thinking", "thinking": "Reading the file now"},
+                {"type": "tool_use", "id": "toolu_pre", "name": "Read", "input": {"file_path": "a.rs"}}
+            ]},
+            "uuid": "00000000-0000-4000-8000-000000000701", "session_id": "todo-session",
+        }),
+        user_tool_result(
+            "00000000-0000-4000-8000-000000000702",
+            None,
+            "toolu_pre",
+            "fn a() {}",
+            Value::Null,
+        ),
+    ]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Preamble"))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    assert_eq!(
+        assistant_texts(&seen),
+        vec!["Reading the file now".to_owned()]
+    );
+    let kinds: Vec<String> = turn_items(&seen)
+        .iter()
+        .filter_map(|item| serde_json::to_value(item).ok())
+        .map(|item| item["type"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(kinds.contains(&"reasoning".to_owned()), "{kinds:?}");
+}

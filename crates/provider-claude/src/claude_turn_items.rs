@@ -181,14 +181,28 @@ pub fn command_output_text(value: &Value, fallback: Option<&Value>) -> String {
 }
 
 /// Upstream `reasoning` turn item for one completed thinking block, titled
-/// "Thinking". Upstream streams the text first. Turin emits the block once
-/// it completes, so the item is never streaming.
+/// "Thinking".
 pub fn reasoning_item(
     scope: &TurnScope,
     native_item_id: &str,
     ordinal: u64,
     text: &str,
     at: turin_contracts::UtcDateTime,
+) -> OrchestrationV2TurnItem {
+    streaming_reasoning_item(scope, native_item_id, ordinal, text, at, at, true)
+}
+
+/// Upstream reasoning item as its thinking block streams: `running` and
+/// `streaming` until the block stops, then `completed`. The item keeps its
+/// native id, so the completed block replaces the streamed text in place.
+pub fn streaming_reasoning_item(
+    scope: &TurnScope,
+    native_item_id: &str,
+    ordinal: u64,
+    text: &str,
+    started_at: turin_contracts::UtcDateTime,
+    updated_at: turin_contracts::UtcDateTime,
+    completed: bool,
 ) -> OrchestrationV2TurnItem {
     let driver = &scope.driver;
     decode(json!({
@@ -198,9 +212,12 @@ pub fn reasoning_item(
         "nodeId": scope.root_node_id, "providerThreadId": scope.provider_thread_id,
         "providerTurnId": scope.provider_turn_id,
         "nativeItemRef": native_ref(driver, native_item_id),
-        "parentItemId": null, "ordinal": ordinal, "status": "completed",
-        "title": "Thinking", "startedAt": at, "completedAt": at, "updatedAt": at,
-        "text": text, "streaming": false,
+        "parentItemId": null, "ordinal": ordinal,
+        "status": if completed { "completed" } else { "running" },
+        "title": "Thinking", "startedAt": started_at,
+        "completedAt": if completed { json!(updated_at) } else { Value::Null },
+        "updatedAt": updated_at,
+        "text": text, "streaming": !completed,
     }))
 }
 

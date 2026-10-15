@@ -15,7 +15,7 @@ use crate::{
     claude_subagents::{SubagentRegistry, SubagentScope},
     claude_turn_items::{
         ItemOrdinals, ToolCall, TurnScope, assistant_artifacts, compaction_item, item_ordinal,
-        reasoning_item, tool_call_artifacts,
+        reasoning_item, streaming_reasoning_item, tool_call_artifacts,
     },
     claude_turn_token_usage::normalize_claude_turn_token_usage,
     claude_workflow_progress::parse_claude_workflow_run_handles,
@@ -558,10 +558,41 @@ struct ActiveTurn {
     native_message_cursor: Option<String>,
     /// Thinking blocks seen per assistant message id, for their item ids.
     thinking_blocks: HashMap<String, u64>,
+    /// The message and thinking block the stream is writing now.
+    stream: StreamState,
+    /// The thinking block the last content block left open.
+    last_thinking: Option<LastThinking>,
     last_assistant: Option<OrchestrationV2ConversationMessage>,
     scope: TurnScope,
     item_ordinals: ItemOrdinals,
     tool_calls: HashMap<String, TrackedTool>,
+}
+
+/// A completed thinking block that the next content block may turn into text.
+struct LastThinking {
+    message_id: String,
+    native: String,
+    text: String,
+    /// The block before it was also thinking in the same message.
+    follows_thinking: bool,
+}
+
+/// The streamed `stream_event` view of the current message. Thinking blocks
+/// stream into reasoning items, which the completed block then replaces.
+#[derive(Default)]
+struct StreamState {
+    message_id: Option<String>,
+    /// Keyed by the stream's block index.
+    thinking: HashMap<u64, StreamedThinking>,
+    /// Thinking blocks started in this message. Numbers their item ids the way
+    /// the completed message does.
+    thinking_started: u64,
+}
+struct StreamedThinking {
+    native: String,
+    ordinal: u64,
+    started_at: UtcDateTime,
+    text: String,
 }
 
 /// A tool call from its `tool_use` block until its `tool_result`.
@@ -835,6 +866,8 @@ impl ClaudeActor {
             interrupted: false,
             native_message_cursor: None,
             thinking_blocks: HashMap::new(),
+            stream: StreamState::default(),
+            last_thinking: None,
             last_assistant: None,
             scope,
             item_ordinals: ItemOrdinals::new(),
@@ -1178,6 +1211,7 @@ impl ClaudeActor {
             ClaudeAdapterEvent::User(frame) => self.user(frame),
             ClaudeAdapterEvent::Compaction(frame) => self.compaction(frame),
             ClaudeAdapterEvent::Background(frame) => self.background(frame),
+            ClaudeAdapterEvent::Stream(frame) => self.stream(frame),
             ClaudeAdapterEvent::Result(frame) => self.result(frame),
             ClaudeAdapterEvent::Error(error) => self.fail_active(&error),
             ClaudeAdapterEvent::Eof => {
@@ -1217,6 +1251,19 @@ impl ClaudeActor {
                 }
                 assistant_events(&mut self.plans, active, &frame)
             }
+            None => return,
+        };
+        for event in events {
+            self.emit(event);
+        }
+    }
+    /// Stream deltas. A subagent's stream belongs to the subagent.
+    fn stream(&mut self, frame: turin_claude_protocol::Frame) {
+        if parent_tool_use_id(&frame).is_some() {
+            return;
+        }
+        let events = match self.active.as_mut() {
+            Some(active) => stream_events(active, &frame),
             None => return,
         };
         for event in events {
@@ -1512,6 +1559,103 @@ impl ClaudeActor {
     }
 }
 
+/// Upstream `stream_event`, thinking only. A thinking block streams into its
+/// reasoning item as each delta arrives. Upstream coalesces these at 50 ms
+/// (`ProviderTextDeltaCoalescer`, not yet ported), so each delta emits here.
+/// Text deltas are not streamed: the completed assistant message carries them.
+fn stream_events(
+    active: &mut ActiveTurn,
+    frame: &turin_claude_protocol::Frame,
+) -> Vec<ProviderAdapterV2Event> {
+    let event = frame.raw.get("event").unwrap_or(&Value::Null);
+    let index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
+    let now = UtcDateTime::now();
+    let mut events = Vec::new();
+    match event.get("type").and_then(Value::as_str) {
+        Some("message_start") => {
+            active.stream = StreamState {
+                message_id: event
+                    .pointer("/message/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                ..Default::default()
+            };
+        }
+        Some("content_block_start")
+            if event.pointer("/content_block/type").and_then(Value::as_str) == Some("thinking") =>
+        {
+            let Some(message_id) = active.stream.message_id.clone() else {
+                return events;
+            };
+            let in_message = active.stream.thinking_started;
+            active.stream.thinking_started += 1;
+            let native = format!("{message_id}:thinking:{in_message}");
+            let ordinal = item_ordinal(
+                &mut active.item_ordinals,
+                active.input.provider_turn_ordinal,
+                &native,
+            );
+            let text = event
+                .pointer("/content_block/thinking")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let block = StreamedThinking {
+                native,
+                ordinal,
+                started_at: now,
+                text,
+            };
+            // A block with no text yet has nothing to show.
+            if !block.text.is_empty() {
+                events.push(reasoning_update(&active.scope, &block, now, false));
+            }
+            active.stream.thinking.insert(index, block);
+        }
+        Some("content_block_delta")
+            if event.pointer("/delta/type").and_then(Value::as_str) == Some("thinking_delta") =>
+        {
+            let delta = event
+                .pointer("/delta/thinking")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Some(block) = active.stream.thinking.get_mut(&index) {
+                block.text.push_str(delta);
+                events.push(reasoning_update(&active.scope, block, now, false));
+            }
+        }
+        Some("content_block_stop") => {
+            if let Some(block) = active.stream.thinking.remove(&index) {
+                if !block.text.is_empty() {
+                    events.push(reasoning_update(&active.scope, &block, now, true));
+                }
+            }
+        }
+        _ => {}
+    }
+    events
+}
+
+fn reasoning_update(
+    scope: &TurnScope,
+    block: &StreamedThinking,
+    now: UtcDateTime,
+    completed: bool,
+) -> ProviderAdapterV2Event {
+    ProviderAdapterV2Event::TurnItemUpdated {
+        driver: driver(),
+        turn_item: streaming_reasoning_item(
+            scope,
+            &block.native,
+            block.ordinal,
+            &block.text,
+            block.started_at,
+            now,
+            completed,
+        ),
+    }
+}
+
 /// Assistant text blocks become a node, message, and turn item. `tool_use`
 /// blocks start a tool call. Completed thinking blocks become reasoning items.
 fn assistant_events(
@@ -1544,8 +1688,32 @@ fn assistant_events(
         })
         .collect();
     let presentations = presentations_from_meta(&frame.raw, &tool_names);
+    let model = frame
+        .raw
+        .pointer("/message/model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     for (index, block) in blocks.iter().enumerate() {
-        match block.get("type").and_then(Value::as_str) {
+        let block_type = block.get("type").and_then(Value::as_str);
+        if block_type != Some("thinking") {
+            // Any other block closes the open thinking block. A tool call right
+            // after a second thinking block takes that block's text instead.
+            let update = active.last_thinking.take();
+            if let Some(update) = update.filter(|u| {
+                block_type == Some("tool_use")
+                    && u.message_id == message_id
+                    && u.follows_thinking
+                    && claude_writes_updates_as_thinking(model)
+            }) {
+                events.extend(assistant_text_events(
+                    active,
+                    &update.native,
+                    &update.text,
+                    now,
+                ));
+            }
+        }
+        match block_type {
             Some("text") => {
                 let text = block
                     .get("text")
@@ -1555,25 +1723,7 @@ fn assistant_events(
                     continue;
                 }
                 let native = format!("{message_id}:text:{index}");
-                let ordinal = item_ordinal(
-                    &mut active.item_ordinals,
-                    active.input.provider_turn_ordinal,
-                    &native,
-                );
-                let artifacts = assistant_artifacts(&active.scope, &native, ordinal, text, now);
-                active.last_assistant = Some(artifacts.message.clone());
-                events.push(ProviderAdapterV2Event::NodeUpdated {
-                    driver: driver(),
-                    node: artifacts.node,
-                });
-                events.push(ProviderAdapterV2Event::MessageUpdated {
-                    driver: driver(),
-                    message: artifacts.message,
-                });
-                events.push(ProviderAdapterV2Event::TurnItemUpdated {
-                    driver: driver(),
-                    turn_item: artifacts.turn_item,
-                });
+                events.extend(assistant_text_events(active, &native, text, now));
             }
             Some("thinking") => {
                 let index = active
@@ -1586,10 +1736,18 @@ fn assistant_events(
                     .get("thinking")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
+                let native = format!("{message_id}:thinking:{block_index}");
+                let previous = active.last_thinking.take();
+                let follows_thinking = previous.is_some_and(|p| p.message_id == message_id);
+                active.last_thinking = (!text.trim().is_empty()).then(|| LastThinking {
+                    message_id: message_id.clone(),
+                    native: native.clone(),
+                    text: text.to_owned(),
+                    follows_thinking,
+                });
                 if text.is_empty() {
                     continue;
                 }
-                let native = format!("{message_id}:thinking:{block_index}");
                 let ordinal = item_ordinal(
                     &mut active.item_ordinals,
                     active.input.provider_turn_ordinal,
@@ -1672,6 +1830,54 @@ fn assistant_events(
         }
     }
     events
+}
+
+/// Upstream `claudeWritesUpdatesAsThinking`: Claude 5.1 and later write the
+/// text before a tool call as a thinking block.
+fn claude_writes_updates_as_thinking(model: &str) -> bool {
+    static MODEL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"claude-[a-z]+-(\d+)(?:-(\d{1,2})\b)?").expect("valid model pattern")
+    });
+    let Some(captures) = MODEL.captures(model) else {
+        return false;
+    };
+    let major: u64 = captures[1].parse().unwrap_or(0);
+    let minor: u64 = captures
+        .get(2)
+        .and_then(|m| m.as_str().parse().ok())
+        .unwrap_or(0);
+    major > 5 || (major == 5 && minor >= 1)
+}
+
+/// The item a text block or a thinking block turned into assistant text.
+/// `native` is its provider item id, so a later update replaces it in place.
+fn assistant_text_events(
+    active: &mut ActiveTurn,
+    native: &str,
+    text: &str,
+    now: UtcDateTime,
+) -> Vec<ProviderAdapterV2Event> {
+    let ordinal = item_ordinal(
+        &mut active.item_ordinals,
+        active.input.provider_turn_ordinal,
+        native,
+    );
+    let artifacts = assistant_artifacts(&active.scope, native, ordinal, text, now);
+    active.last_assistant = Some(artifacts.message.clone());
+    vec![
+        ProviderAdapterV2Event::NodeUpdated {
+            driver: driver(),
+            node: artifacts.node,
+        },
+        ProviderAdapterV2Event::MessageUpdated {
+            driver: driver(),
+            message: artifacts.message,
+        },
+        ProviderAdapterV2Event::TurnItemUpdated {
+            driver: driver(),
+            turn_item: artifacts.turn_item,
+        },
+    ]
 }
 
 fn parent_tool_use_id(frame: &turin_claude_protocol::Frame) -> Option<&str> {
@@ -1817,5 +2023,30 @@ fn terminal_item_status(status: ProviderAdapterV2TurnTerminalStatus) -> &'static
         ProviderAdapterV2TurnTerminalStatus::Interrupted => "interrupted",
         ProviderAdapterV2TurnTerminalStatus::Cancelled => "cancelled",
         ProviderAdapterV2TurnTerminalStatus::Failed => "failed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_writes_updates_from_claude_5_1() {
+        for model in [
+            "claude-sonnet-5-1",
+            "claude-haiku-5-5",
+            "claude-fable-6",
+            "claude-opus-5-12",
+        ] {
+            assert!(claude_writes_updates_as_thinking(model), "{model}");
+        }
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5-20251001",
+            "gpt-5",
+        ] {
+            assert!(!claude_writes_updates_as_thinking(model), "{model}");
+        }
     }
 }

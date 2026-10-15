@@ -22,3 +22,4 @@ async-trait.workspace = true
 parking_lot.workspace = true
 tokio-stream.workspace = true
 futures.workspace = true
+regex.workspace = true

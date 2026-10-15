@@ -12,20 +12,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use serde_json::{Value, json};
 use parking_lot::Mutex;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use turin_contracts::{
-    PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId,
-    UtcDateTime,
+    PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId, UtcDateTime,
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2ConversationMessage,
         OrchestrationV2ConversationMessageRole, OrchestrationV2CreationSource,
-        OrchestrationV2ProviderFailureClass,
-        OrchestrationV2ProviderSession, OrchestrationV2ProviderSessionStatus,
-        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadDisposition,
-        OrchestrationV2ProviderThreadStatus,
+        OrchestrationV2ProviderFailureClass, OrchestrationV2ProviderSession,
+        OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
+        OrchestrationV2ProviderThreadDisposition, OrchestrationV2ProviderThreadStatus,
         OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus,
         OrchestrationV2ResponseCapability, OrchestrationV2RuntimeRequest,
         OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
@@ -91,7 +89,9 @@ pub struct OpenCodeV1Session {
     client: V1Client,
     inner: Mutex<V1Inner>,
     tx: mpsc::UnboundedSender<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>,
-    rx: Mutex<Option<mpsc::UnboundedReceiver<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>>>,
+    rx: Mutex<
+        Option<mpsc::UnboundedReceiver<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>>,
+    >,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -176,9 +176,10 @@ impl OpenCodeV1Session {
             loop {
                 match stream.next().await {
                     Some(Ok(event)) => self.on_event(event).await,
-                    Some(Err(EventStreamError::Silent { .. })) | Some(Err(_)) => break,
+                    Some(Err(EventStreamError::Silent)) | Some(Err(_)) => break,
                     None => {
-                        self.fail_stream("OpenCode event stream ended unexpectedly.").await;
+                        self.fail_stream("OpenCode event stream ended unexpectedly.")
+                            .await;
                         return;
                     }
                 }
@@ -203,19 +204,19 @@ impl OpenCodeV1Session {
         session.updated_at = UtcDateTime::now();
         let mut terminals = Vec::new();
         for thread in guard.threads.values_mut() {
-            if let Some(turn) = thread.active.as_mut() {
-                if !turn.finalized {
-                    turn.finalized = true;
-                    turn.provider_turn.status = OrchestrationV2ProviderTurnStatus::Failed;
-                    turn.provider_turn.completed_at = Some(UtcDateTime::now());
-                    terminals.push((
-                        thread.provider_thread.id.clone(),
-                        turn.provider_turn.clone(),
-                        turn.run_ordinal,
-                    ));
-                    thread.active = None;
-                    thread.provider_thread.status = OrchestrationV2ProviderThreadStatus::Error;
-                }
+            if let Some(turn) = thread.active.as_mut()
+                && !turn.finalized
+            {
+                turn.finalized = true;
+                turn.provider_turn.status = OrchestrationV2ProviderTurnStatus::Failed;
+                turn.provider_turn.completed_at = Some(UtcDateTime::now());
+                terminals.push((
+                    thread.provider_thread.id.clone(),
+                    turn.provider_turn.clone(),
+                    turn.run_ordinal,
+                ));
+                thread.active = None;
+                thread.provider_thread.status = OrchestrationV2ProviderThreadStatus::Error;
             }
         }
         drop(guard);
@@ -260,28 +261,33 @@ impl OpenCodeV1Session {
             "session.created" | "session.updated" => {
                 let info = props.get("info").cloned().unwrap_or(Value::Null);
                 let id = info.get("id").and_then(Value::as_str).map(str::to_owned);
-                let parent = info.get("parentID").and_then(Value::as_str).map(str::to_owned);
-                if let (Some(id), Some(parent)) = (id, parent) {
-                    if guard.threads.contains_key(&parent) {
-                        guard.children.insert(id.clone(), parent.clone());
-                        if let Some(thread) = guard.threads.get(&parent) {
-                            if let Some(turn) = thread.active.as_ref() {
-                                let subagent = subagent_for(
-                                    &self.instance_id,
-                                    &thread.provider_thread,
-                                    &turn.thread_id,
-                                    turn.provider_turn.run_attempt_id.as_ref().map(|_| turn.provider_turn.node_id.clone()),
-                                    &id,
-                                    &turn.provider_turn,
-                                );
-                                drop(guard);
-                                self.emit(ProviderAdapterV2Event::SubagentUpdated {
-                                    driver: self.driver.clone(),
-                                    subagent,
-                                });
-                                return;
-                            }
-                        }
+                let parent = info
+                    .get("parentID")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                if let (Some(id), Some(parent)) = (id, parent)
+                    && guard.threads.contains_key(&parent)
+                {
+                    guard.children.insert(id.clone(), parent.clone());
+                    if let Some(thread) = guard.threads.get(&parent)
+                        && let Some(turn) = thread.active.as_ref()
+                    {
+                        let subagent = subagent_for(
+                            &self.instance_id,
+                            &thread.provider_thread,
+                            &turn.thread_id,
+                            turn.provider_turn
+                                .run_attempt_id
+                                .as_ref()
+                                .map(|_| turn.provider_turn.node_id.clone()),
+                            &id,
+                            &turn.provider_turn,
+                        );
+                        drop(guard);
+                        self.emit(ProviderAdapterV2Event::SubagentUpdated {
+                            driver: self.driver.clone(),
+                            subagent,
+                        });
                     }
                 }
             }
@@ -291,7 +297,11 @@ impl OpenCodeV1Session {
                     .get("status")
                     .and_then(|status| status.get("type"))
                     .and_then(Value::as_str)
-                    .unwrap_or(if event.event_type == "session.idle" { "idle" } else { "" });
+                    .unwrap_or(if event.event_type == "session.idle" {
+                        "idle"
+                    } else {
+                        ""
+                    });
                 if let Some(session_id) = session_id {
                     if status_type == "idle" {
                         guard.busy.remove(&session_id);
@@ -300,15 +310,14 @@ impl OpenCodeV1Session {
                     }
                     if status_type == "idle" {
                         self.settle_idle(&mut guard, &session_id);
-                    } else if status_type == "busy" {
-                        if let Some(thread) = guard.threads.get_mut(&session_id) {
-                            if let Some(turn) = thread.active.as_mut() {
-                                let _ = advance_open_code_prompt_admission(
-                                    &mut turn.admission,
-                                    OpenCodeAdmissionSignal::Busy,
-                                );
-                            }
-                        }
+                    } else if status_type == "busy"
+                        && let Some(thread) = guard.threads.get_mut(&session_id)
+                        && let Some(turn) = thread.active.as_mut()
+                    {
+                        let _ = advance_open_code_prompt_admission(
+                            &mut turn.admission,
+                            OpenCodeAdmissionSignal::Busy,
+                        );
                     }
                 }
             }
@@ -340,29 +349,29 @@ impl OpenCodeV1Session {
                 let session_id = str_field(&info, "sessionID");
                 let role = info.get("role").and_then(Value::as_str);
                 let message_id = str_field(&info, "id");
-                if let (Some(session_id), Some("user"), Some(_)) = (session_id, role, message_id) {
-                    if let Some(thread) = guard.threads.get_mut(&session_id) {
-                        if let Some(turn) = thread.active.as_mut() {
-                            let _ = advance_open_code_prompt_admission(
-                                &mut turn.admission,
-                                OpenCodeAdmissionSignal::UserMessage,
-                            );
-                        }
-                    }
+                if let (Some(session_id), Some("user"), Some(_)) = (session_id, role, message_id)
+                    && let Some(thread) = guard.threads.get_mut(&session_id)
+                    && let Some(turn) = thread.active.as_mut()
+                {
+                    let _ = advance_open_code_prompt_admission(
+                        &mut turn.admission,
+                        OpenCodeAdmissionSignal::UserMessage,
+                    );
                 }
                 if role == Some("assistant") {
-                    let completed = info.get("time").and_then(|time| time.get("completed")).is_some();
-                    if completed {
-                        if let Some(session_id) = str_field(&info, "sessionID") {
-                            if let Some(thread) = guard.threads.get_mut(&session_id) {
-                                if let Some(turn) = thread.active.as_mut() {
-                                    let _ = advance_open_code_prompt_admission(
-                                        &mut turn.admission,
-                                        OpenCodeAdmissionSignal::AssistantCompleted,
-                                    );
-                                }
-                            }
-                        }
+                    let completed = info
+                        .get("time")
+                        .and_then(|time| time.get("completed"))
+                        .is_some();
+                    if completed
+                        && let Some(session_id) = str_field(&info, "sessionID")
+                        && let Some(thread) = guard.threads.get_mut(&session_id)
+                        && let Some(turn) = thread.active.as_mut()
+                    {
+                        let _ = advance_open_code_prompt_admission(
+                            &mut turn.admission,
+                            OpenCodeAdmissionSignal::AssistantCompleted,
+                        );
                     }
                 }
             }
@@ -396,7 +405,8 @@ impl OpenCodeV1Session {
         let Some(turn) = thread.active.as_mut() else {
             return;
         };
-        let action = advance_open_code_prompt_admission(&mut turn.admission, OpenCodeAdmissionSignal::Idle);
+        let action =
+            advance_open_code_prompt_admission(&mut turn.admission, OpenCodeAdmissionSignal::Idle);
         if action == OpenCodeAdmissionAction::Hold {
             return;
         }
@@ -405,7 +415,13 @@ impl OpenCodeV1Session {
         } else {
             ProviderAdapterV2TurnTerminalStatus::Completed
         };
-        self.finish_active(guard, session_id, status, None, OrchestrationV2ProviderThreadDisposition::Reusable);
+        self.finish_active(
+            guard,
+            session_id,
+            status,
+            None,
+            OrchestrationV2ProviderThreadDisposition::Reusable,
+        );
     }
 
     fn finish_active(
@@ -428,10 +444,18 @@ impl OpenCodeV1Session {
         }
         turn.finalized = true;
         turn.provider_turn.status = match status {
-            ProviderAdapterV2TurnTerminalStatus::Completed => OrchestrationV2ProviderTurnStatus::Completed,
-            ProviderAdapterV2TurnTerminalStatus::Interrupted => OrchestrationV2ProviderTurnStatus::Interrupted,
-            ProviderAdapterV2TurnTerminalStatus::Cancelled => OrchestrationV2ProviderTurnStatus::Cancelled,
-            ProviderAdapterV2TurnTerminalStatus::Failed => OrchestrationV2ProviderTurnStatus::Failed,
+            ProviderAdapterV2TurnTerminalStatus::Completed => {
+                OrchestrationV2ProviderTurnStatus::Completed
+            }
+            ProviderAdapterV2TurnTerminalStatus::Interrupted => {
+                OrchestrationV2ProviderTurnStatus::Interrupted
+            }
+            ProviderAdapterV2TurnTerminalStatus::Cancelled => {
+                OrchestrationV2ProviderTurnStatus::Cancelled
+            }
+            ProviderAdapterV2TurnTerminalStatus::Failed => {
+                OrchestrationV2ProviderTurnStatus::Failed
+            }
         };
         turn.provider_turn.completed_at = Some(UtcDateTime::now());
         turn.provider_turn.turn_token_usage = Some(
@@ -441,7 +465,11 @@ impl OpenCodeV1Session {
         let provider_turn = turn.provider_turn.clone();
         let run_ordinal = turn.run_ordinal.max(1) as u64;
         let thread_id = turn.thread_id.clone();
-        if let Some(stored) = thread.turns.iter_mut().find(|item| item.id == provider_turn.id) {
+        if let Some(stored) = thread
+            .turns
+            .iter_mut()
+            .find(|item| item.id == provider_turn.id)
+        {
             *stored = provider_turn.clone();
         }
         thread.provider_thread.status = OrchestrationV2ProviderThreadStatus::Idle;
@@ -485,7 +513,9 @@ impl OpenCodeV1Session {
         let Some(thread) = guard.threads.get_mut(&session_id) else {
             return;
         };
-        let Some(turn) = thread.active.as_mut() else { return };
+        let Some(turn) = thread.active.as_mut() else {
+            return;
+        };
         let part_type = part.get("type").and_then(Value::as_str).unwrap_or("");
         let part_id = str_field(&part, "id")
             .or_else(|| str_field(props, "partID"))
@@ -505,7 +535,14 @@ impl OpenCodeV1Session {
                     slot.push_str(delta);
                     slot.clone()
                 };
-                let item = text_item(turn, &self.driver, &part_id, &text, field == "reasoning", true);
+                let item = text_item(
+                    turn,
+                    &self.driver,
+                    &part_id,
+                    &text,
+                    field == "reasoning",
+                    true,
+                );
                 self.emit(ProviderAdapterV2Event::TurnItemUpdated {
                     driver: self.driver.clone(),
                     turn_item: item,
@@ -514,9 +551,20 @@ impl OpenCodeV1Session {
             return;
         }
         if part_type == "text" || part_type == "reasoning" {
-            let text = part.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
+            let text = part
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
             turn.texts.insert(part_id.clone(), text.clone());
-            let item = text_item(turn, &self.driver, &part_id, &text, part_type == "reasoning", false);
+            let item = text_item(
+                turn,
+                &self.driver,
+                &part_id,
+                &text,
+                part_type == "reasoning",
+                false,
+            );
             self.emit(ProviderAdapterV2Event::TurnItemUpdated {
                 driver: self.driver.clone(),
                 turn_item: item,
@@ -530,7 +578,10 @@ impl OpenCodeV1Session {
                 .unwrap_or("tool")
                 .to_owned();
             let state = part.get("state").cloned().unwrap_or(Value::Null);
-            let status_name = state.get("status").and_then(Value::as_str).unwrap_or("running");
+            let status_name = state
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("running");
             let status = match status_name {
                 "pending" => OrchestrationV2TurnItemStatus::Pending,
                 "completed" => OrchestrationV2TurnItemStatus::Completed,
@@ -554,13 +605,7 @@ impl OpenCodeV1Session {
                 }
             }
             let base = tool_base(turn, &self.driver, &call_id, status);
-            let item = open_code_tool_turn_item(
-                base,
-                &name,
-                &input,
-                output,
-                state.get("metadata"),
-            );
+            let item = open_code_tool_turn_item(base, &name, &input, output, state.get("metadata"));
             self.emit(ProviderAdapterV2Event::TurnItemUpdated {
                 driver: self.driver.clone(),
                 turn_item: item,
@@ -580,23 +625,27 @@ impl OpenCodeV1Session {
             return;
         }
         let Some((provider_turn_id, thread_id)) = guard.threads.get(&owner).and_then(|thread| {
-            thread.active.as_ref().map(|turn| {
-                (turn.provider_turn.id.clone(), turn.thread_id.clone())
-            })
+            thread
+                .active
+                .as_ref()
+                .map(|turn| (turn.provider_turn.id.clone(), turn.thread_id.clone()))
         }) else {
             return;
         };
-        let request_id = IdAllocator.runtime_request(
-            &self.driver,
-            Some(&provider_turn_id),
-            Some(&native_id),
-        );
+        let request_id =
+            IdAllocator.runtime_request(&self.driver, Some(&provider_turn_id), Some(&native_id));
         let kind = if event_type == "question.asked" {
             "user_input"
         } else {
             open_code_permission_request_kind(
-                props.get("permission").and_then(Value::as_str).unwrap_or("bash"),
-                props.get("tool").and_then(|tool| tool.get("name")).and_then(Value::as_str),
+                props
+                    .get("permission")
+                    .and_then(Value::as_str)
+                    .unwrap_or("bash"),
+                props
+                    .get("tool")
+                    .and_then(|tool| tool.get("name"))
+                    .and_then(Value::as_str),
             )
         };
         let now = UtcDateTime::now();
@@ -756,7 +805,9 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
         let native_id = created
             .get("id")
             .and_then(Value::as_str)
-            .ok_or_else(|| ProviderAdapterV2Error::protocol("OpenCode session.create returned no id"))?
+            .ok_or_else(|| {
+                ProviderAdapterV2Error::protocol("OpenCode session.create returned no id")
+            })?
             .to_owned();
         let now = UtcDateTime::now();
         let provider_thread = make_thread(
@@ -767,15 +818,15 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
             input.existing_provider_thread,
             now,
         );
-        self.inner
-            .lock()
-            .threads
-            .insert(native_id, V1Thread {
+        self.inner.lock().threads.insert(
+            native_id,
+            V1Thread {
                 provider_thread: provider_thread.clone(),
                 active: None,
                 turns: Vec::new(),
                 requests: Vec::new(),
-            });
+            },
+        );
         self.emit(ProviderAdapterV2Event::ProviderThreadUpdated {
             driver: self.driver.clone(),
             provider_thread: provider_thread.clone(),
@@ -800,7 +851,10 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
                     input.provider_thread.id
                 ))
             })?;
-        self.client.get_session(&native_id).await.map_err(http_err)?;
+        self.client
+            .get_session(&native_id)
+            .await
+            .map_err(http_err)?;
         let mut thread = input.provider_thread;
         thread.provider_session_id = Some(self.provider_session_id.clone());
         thread.status = OrchestrationV2ProviderThreadStatus::Idle;
@@ -817,7 +871,10 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
         Ok(thread)
     }
 
-    async fn start_turn(&self, input: ProviderAdapterV2TurnInput) -> Result<(), ProviderAdapterV2Error> {
+    async fn start_turn(
+        &self,
+        input: ProviderAdapterV2TurnInput,
+    ) -> Result<(), ProviderAdapterV2Error> {
         let session_id = {
             let guard = self.inner.lock();
             if guard.stream_dead.is_some() {
@@ -826,7 +883,12 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
                 ));
             }
             let session_id = Self::require_session(&guard, &input.provider_thread)?;
-            if guard.threads.get(&session_id).and_then(|thread| thread.active.as_ref()).is_some() {
+            if guard
+                .threads
+                .get(&session_id)
+                .and_then(|thread| thread.active.as_ref())
+                .is_some()
+            {
                 return Err(ProviderAdapterV2Error::protocol(format!(
                     "OpenCode provider thread {} already has an active turn",
                     input.provider_thread.id
@@ -834,8 +896,12 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
             }
             session_id
         };
-        let parsed = parse_open_code_model_slug(input.model_selection.model.as_str())
-            .ok_or_else(|| ProviderAdapterV2Error::protocol(malformed_model(input.model_selection.model.as_str())))?;
+        let parsed =
+            parse_open_code_model_slug(input.model_selection.model.as_str()).ok_or_else(|| {
+                ProviderAdapterV2Error::protocol(malformed_model(
+                    input.model_selection.model.as_str(),
+                ))
+            })?;
         let text = input.message.text.trim().to_owned();
         let bare = input.message.attachments.is_empty();
         let is_compact = bare && text == "/compact";
@@ -860,7 +926,9 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
         {
             let mut guard = self.inner.lock();
             let thread = guard.threads.get_mut(&session_id).ok_or_else(|| {
-                ProviderAdapterV2Error::protocol(format!("OpenCode session {session_id} is not registered"))
+                ProviderAdapterV2Error::protocol(format!(
+                    "OpenCode session {session_id} is not registered"
+                ))
             })?;
             thread.turns.push(provider_turn.clone());
             thread.provider_thread.status = OrchestrationV2ProviderThreadStatus::Active;
@@ -900,7 +968,8 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
                 .map(|_| ())
                 .map_err(http_err)
         } else {
-            self.submit_prompt(&session_id, &input, &parsed, &text).await
+            self.submit_prompt(&session_id, &input, &parsed, &text)
+                .await
         };
         if let Err(err) = result {
             let mut guard = self.inner.lock();
@@ -915,7 +984,11 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
         }
         if !is_compact {
             let mut guard = self.inner.lock();
-            if let Some(turn) = guard.threads.get_mut(&session_id).and_then(|thread| thread.active.as_mut()) {
+            if let Some(turn) = guard
+                .threads
+                .get_mut(&session_id)
+                .and_then(|thread| thread.active.as_mut())
+            {
                 let action = advance_open_code_prompt_admission(
                     &mut turn.admission,
                     OpenCodeAdmissionSignal::Accepted,
@@ -945,7 +1018,10 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
         Some(Box::pin(async move { self.start_turn(input).await }))
     }
 
-    async fn steer_turn(&self, input: ProviderAdapterV2SteerInput) -> Result<(), ProviderAdapterV2Error> {
+    async fn steer_turn(
+        &self,
+        input: ProviderAdapterV2SteerInput,
+    ) -> Result<(), ProviderAdapterV2Error> {
         let session_id = {
             let guard = self.inner.lock();
             Self::require_session(&guard, &input.provider_thread)?.to_owned()
@@ -965,25 +1041,38 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
             .map_err(http_err)
     }
 
-    async fn interrupt_turn(&self, input: ProviderAdapterV2InterruptInput) -> Result<(), ProviderAdapterV2Error> {
+    async fn interrupt_turn(
+        &self,
+        input: ProviderAdapterV2InterruptInput,
+    ) -> Result<(), ProviderAdapterV2Error> {
         let session_id = {
             let guard = self.inner.lock();
             let session_id = Self::require_session(&guard, &input.provider_thread)?.to_owned();
-            if let Some(turn) = guard.threads.get(&session_id).and_then(|thread| thread.active.as_ref()) {
-                if turn.provider_turn.id != input.provider_turn_id {
-                    return Ok(());
-                }
+            if let Some(turn) = guard
+                .threads
+                .get(&session_id)
+                .and_then(|thread| thread.active.as_ref())
+                && turn.provider_turn.id != input.provider_turn_id
+            {
+                return Ok(());
             }
             session_id
         };
         {
             let mut guard = self.inner.lock();
-            if let Some(turn) = guard.threads.get_mut(&session_id).and_then(|thread| thread.active.as_mut()) {
+            if let Some(turn) = guard
+                .threads
+                .get_mut(&session_id)
+                .and_then(|thread| thread.active.as_mut())
+            {
                 turn.interrupted = true;
                 cancel_open_code_prompt_admission(&mut turn.admission);
             }
         }
-        self.client.abort_session(&session_id).await.map_err(http_err)?;
+        self.client
+            .abort_session(&session_id)
+            .await
+            .map_err(http_err)?;
         let children: Vec<String> = {
             let guard = self.inner.lock();
             guard
@@ -1009,7 +1098,13 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
                 .pending
                 .values()
                 .find(|pending| pending.request_id == input.request_id)
-                .map(|pending| (pending.native_id.clone(), pending.kind, pending.question.clone()))
+                .map(|pending| {
+                    (
+                        pending.native_id.clone(),
+                        pending.kind,
+                        pending.question.clone(),
+                    )
+                })
                 .ok_or_else(|| {
                     ProviderAdapterV2Error::protocol(format!(
                         "No pending OpenCode request {}",
@@ -1061,8 +1156,16 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
             .and_then(|native| native.native_id.as_ref())
             .map(|id| id.as_str().to_owned())
             .ok_or_else(|| ProviderAdapterV2Error::protocol("OpenCode snapshot has no session"))?;
-        let native = self.client.get_session(&session_id).await.map_err(http_err)?;
-        let messages = self.client.session_messages(&session_id).await.map_err(http_err)?;
+        let native = self
+            .client
+            .get_session(&session_id)
+            .await
+            .map_err(http_err)?;
+        let messages = self
+            .client
+            .session_messages(&session_id)
+            .await
+            .map_err(http_err)?;
         let revert = native.pointer("/revert/messageID").and_then(Value::as_str);
         let guard = self.inner.lock();
         let stored = guard.threads.get(&session_id);
@@ -1070,8 +1173,12 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
             input.provider_thread,
             &messages,
             revert,
-            stored.map(|thread| thread.turns.clone()).unwrap_or_default(),
-            stored.map(|thread| thread.requests.clone()).unwrap_or_default(),
+            stored
+                .map(|thread| thread.turns.clone())
+                .unwrap_or_default(),
+            stored
+                .map(|thread| thread.requests.clone())
+                .unwrap_or_default(),
         ))
     }
 
@@ -1088,22 +1195,41 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
             .ok_or_else(|| ProviderAdapterV2Error::protocol("OpenCode rollback has no session"))?;
         {
             let guard = self.inner.lock();
-            if guard.threads.get(&session_id).and_then(|thread| thread.active.as_ref()).is_some() {
+            if guard
+                .threads
+                .get(&session_id)
+                .and_then(|thread| thread.active.as_ref())
+                .is_some()
+            {
                 return Err(ProviderAdapterV2Error::protocol(format!(
                     "Cannot roll back OpenCode thread {} while a turn is active",
                     input.provider_thread.id
                 )));
             }
         }
-        let messages = self.client.session_messages(&session_id).await.map_err(http_err)?;
+        let messages = self
+            .client
+            .session_messages(&session_id)
+            .await
+            .map_err(http_err)?;
         let boundary = match &input.target {
-            ProviderAdapterV2RollbackTarget::ThreadStart { .. } => messages.iter().find_map(|entry| {
-                (entry.pointer("/info/role").and_then(Value::as_str) == Some("user"))
-                    .then(|| entry.pointer("/info/id").and_then(Value::as_str).map(str::to_owned))
-                    .flatten()
-            }),
+            ProviderAdapterV2RollbackTarget::ThreadStart { .. } => {
+                messages.iter().find_map(|entry| {
+                    (entry.pointer("/info/role").and_then(Value::as_str) == Some("user"))
+                        .then(|| {
+                            entry
+                                .pointer("/info/id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .flatten()
+                })
+            }
             ProviderAdapterV2RollbackTarget::ProviderTurn { provider_turn, .. } => {
-                open_code_boundary_after_provider_turn(&input.provider_thread_turns, &provider_turn.id)
+                open_code_boundary_after_provider_turn(
+                    &input.provider_thread_turns,
+                    &provider_turn.id,
+                )
             }
         };
         let mut retained = input.provider_thread.clone();
@@ -1147,13 +1273,20 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
             .map(|id| id.as_str().to_owned())
             .ok_or_else(|| ProviderAdapterV2Error::protocol("OpenCode fork has no session"))?;
         let boundary = input.provider_turn_id.as_ref().and_then(|turn_id| {
-            open_code_boundary_after_provider_turn(input.source_provider_turns.as_deref().unwrap_or(&[]), turn_id)
+            open_code_boundary_after_provider_turn(
+                input.source_provider_turns.as_deref().unwrap_or(&[]),
+                turn_id,
+            )
         });
         let body = match boundary {
             Some(boundary) => json!({ "messageID": boundary }),
             None => json!({}),
         };
-        let forked = self.client.fork_session(&session_id, &body).await.map_err(http_err)?;
+        let forked = self
+            .client
+            .fork_session(&session_id, &body)
+            .await
+            .map_err(http_err)?;
         let fork_id = forked
             .get("id")
             .and_then(Value::as_str)
@@ -1195,14 +1328,18 @@ impl OpenCodeV1Session {
         };
         if let Some(command) = command {
             let commands = self.client.list_commands().await.unwrap_or_default();
-            if commands.iter().any(|entry| entry.get("name").and_then(Value::as_str) == Some(command.name.as_str()))
-            {
+            if commands.iter().any(|entry| {
+                entry.get("name").and_then(Value::as_str) == Some(command.name.as_str())
+            }) {
                 let mut body = json!({
                     "command": command.name,
                     "arguments": command.text,
                     "model": format!("{}/{}", parsed.provider_id, parsed.model_id),
                 });
-                let agent = agent_for(input.runtime_policy.interaction_mode, &input.model_selection);
+                let agent = agent_for(
+                    input.runtime_policy.interaction_mode,
+                    &input.model_selection,
+                );
                 body["agent"] = json!(agent);
                 if let Some(variant) = model_option(&input.model_selection, "variant") {
                     body["variant"] = json!(variant);
@@ -1224,14 +1361,20 @@ impl OpenCodeV1Session {
         if let Some(variant) = model_option(&input.model_selection, "variant") {
             body["variant"] = json!(variant);
         }
-        let agent = agent_for(input.runtime_policy.interaction_mode, &input.model_selection);
+        let agent = agent_for(
+            input.runtime_policy.interaction_mode,
+            &input.model_selection,
+        );
         if input.runtime_policy.interaction_mode
             == turin_contracts::provider_policy::ProviderInteractionMode::Plan
             || model_option(&input.model_selection, "agent").is_some()
         {
             body["agent"] = json!(agent);
         }
-        self.client.prompt_async(session_id, &body).await.map_err(http_err)
+        self.client
+            .prompt_async(session_id, &body)
+            .await
+            .map_err(http_err)
     }
 }
 
@@ -1294,7 +1437,12 @@ fn make_thread(
     thread
 }
 
-fn tool_base(turn: &mut V1Turn, driver: &ProviderDriverKind, native_id: &str, status: OrchestrationV2TurnItemStatus) -> ToolItemBase {
+fn tool_base(
+    turn: &mut V1Turn,
+    driver: &ProviderDriverKind,
+    native_id: &str,
+    status: OrchestrationV2TurnItemStatus,
+) -> ToolItemBase {
     let ordinal = turn.next_ordinal;
     turn.next_ordinal += 1;
     ToolItemBase {
@@ -1391,7 +1539,8 @@ fn subagent_for(
 ) -> OrchestrationV2Subagent {
     let now = UtcDateTime::now();
     OrchestrationV2Subagent {
-        id: parent_node.unwrap_or_else(|| derive::node_from_provider_item(&opencode_driver(), child_session)),
+        id: parent_node
+            .unwrap_or_else(|| derive::node_from_provider_item(&opencode_driver(), child_session)),
         thread_id: thread_id.clone(),
         run_id: None,
         parent_node_id: turn.node_id.clone(),
@@ -1426,7 +1575,10 @@ fn question_rows(
         return answers
             .values()
             .map(|value| match value {
-                Value::Array(items) => items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect(),
+                Value::Array(items) => items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect(),
                 Value::String(text) if !text.trim().is_empty() => vec![text.clone()],
                 _ => Vec::new(),
             })
@@ -1437,7 +1589,10 @@ fn question_rows(
         .enumerate()
         .map(|(index, question)| {
             let header = question.get("header").and_then(Value::as_str).unwrap_or("");
-            let prompt = question.get("question").and_then(Value::as_str).unwrap_or("");
+            let prompt = question
+                .get("question")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let id = open_code_question_id(index, header);
             let raw = answers
                 .get(&id)
@@ -1460,7 +1615,13 @@ fn open_code_question_id(index: usize, header: &str) -> String {
         .trim()
         .to_ascii_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>();
     if header.is_empty() {
         format!("question-{index}")
@@ -1479,11 +1640,17 @@ fn snapshot_from(
     let now = UtcDateTime::now();
     let mut out = Vec::new();
     for entry in messages {
-        let id = entry.pointer("/info/id").and_then(Value::as_str).unwrap_or("");
+        let id = entry
+            .pointer("/info/id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if Some(id) == revert {
             break;
         }
-        let role = entry.pointer("/info/role").and_then(Value::as_str).unwrap_or("assistant");
+        let role = entry
+            .pointer("/info/role")
+            .and_then(Value::as_str)
+            .unwrap_or("assistant");
         let text = entry
             .get("parts")
             .and_then(Value::as_array)

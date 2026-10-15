@@ -16,11 +16,11 @@ mod session_tests;
 pub use api::{
     ProviderAdapterV2, ProviderAdapterV2Error, ProviderAdapterV2Event, ProviderSessionRuntime,
 };
+pub use driver::{OpenCodeAdapter, OpenCodeSettings, shared_provider_session_id};
 pub use logic::{
     approves, commands_from_list, format_probe_error, models_from_provider_list,
     open_code_child_permission_rules, pending_status, permission_rule_equals, select_generation,
     session_grant_label, skills_from_list, v1_capabilities, v1_rules_as_session, v2_capabilities,
 };
-pub use driver::{OpenCodeAdapter, OpenCodeSettings, shared_provider_session_id};
 pub use v1::OpenCodeV1Session;
 pub use v2::OpenCodeV2Session;

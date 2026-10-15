@@ -36,7 +36,8 @@ use turin_contracts::{
     provider_instance::ProviderDriverKind,
     provider_policy::{ProviderApprovalDecision, ProviderInteractionMode, RuntimeMode},
     provider_runtime::{
-        MainAgentUsageScope, TurnTokenUsage, TurnTokenUsageCompleteStatus, TurnTokenUsagePartialStatus,
+        MainAgentUsageScope, TurnTokenUsage, TurnTokenUsageCompleteStatus,
+        TurnTokenUsagePartialStatus,
     },
 };
 use turin_provider_core::server_provider::{
@@ -160,7 +161,10 @@ const RESTRICTED: [&str; 7] = [
 ];
 
 fn record_string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(Value::as_str).filter(|text| !text.trim().is_empty())
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
 }
 
 /// Port of `openCodePermissionRules` in `server/adapter.ts`.
@@ -180,10 +184,8 @@ pub fn open_code_permission_rules(
     };
     let externally_sandboxed = sandbox_type == Some("externalSandbox");
     let danger_full_access = sandbox_type == Some("dangerFullAccess");
-    let implicit_full_access =
-        sandbox_type.is_none() && runtime_mode == RuntimeMode::FullAccess;
-    if !requires_approval && (externally_sandboxed || danger_full_access || implicit_full_access)
-    {
+    let implicit_full_access = sandbox_type.is_none() && runtime_mode == RuntimeMode::FullAccess;
+    if !requires_approval && (externally_sandboxed || danger_full_access || implicit_full_access) {
         return vec![v1_rule("*", "*", "allow")];
     }
     let mut rules = vec![v1_rule("*", "*", "deny")];
@@ -208,7 +210,11 @@ pub fn open_code_permission_rules(
     {
         rules.push(v1_rule("edit", "*", "allow"));
     }
-    if !requires_approval && sandbox_policy.and_then(|p| p.get("networkAccess")).and_then(Value::as_bool) == Some(true)
+    if !requires_approval
+        && sandbox_policy
+            .and_then(|p| p.get("networkAccess"))
+            .and_then(Value::as_bool)
+            == Some(true)
     {
         for permission in ["webfetch", "websearch", "codesearch"] {
             rules.push(v1_rule(permission, "*", "allow"));
@@ -220,14 +226,16 @@ pub fn open_code_permission_rules(
             rules.push(v1_rule("external_directory", "*", "allow"));
         }
     }
-    if !requires_approval && sandbox_type == Some("workspaceWrite") {
-        if let Some(roots) = sandbox_policy.and_then(|p| p.get("writableRoots")).and_then(Value::as_array)
-        {
-            for root in roots {
-                if let Some(root) = root.as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                    let pattern = format!("{}/*", root.trim_end_matches('/'));
-                    rules.push(v1_rule("external_directory", &pattern, "allow"));
-                }
+    if !requires_approval
+        && sandbox_type == Some("workspaceWrite")
+        && let Some(roots) = sandbox_policy
+            .and_then(|p| p.get("writableRoots"))
+            .and_then(Value::as_array)
+    {
+        for root in roots {
+            if let Some(root) = root.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                let pattern = format!("{}/*", root.trim_end_matches('/'));
+                rules.push(v1_rule("external_directory", &pattern, "allow"));
             }
         }
     }
@@ -235,7 +243,9 @@ pub fn open_code_permission_rules(
 }
 
 pub fn permission_rule_equals(left: &V1PermissionRule, right: &V1PermissionRule) -> bool {
-    left.permission == right.permission && left.pattern == right.pattern && left.action == right.action
+    left.permission == right.permission
+        && left.pattern == right.pattern
+        && left.action == right.action
 }
 
 /// Port of `openCodeChildPermissionRules`.
@@ -250,14 +260,20 @@ pub fn open_code_child_permission_rules(
         .collect();
     let mut rules = parent.to_vec();
     for child in native_child {
-        if !inherited.iter().any(|inherited| permission_rule_equals(child, inherited)) {
+        if !inherited
+            .iter()
+            .any(|inherited| permission_rule_equals(child, inherited))
+        {
             rules.push(child.clone());
         }
     }
     rules
 }
 
-pub fn open_code_permission_request_kind(permission: &str, tool_name: Option<&str>) -> &'static str {
+pub fn open_code_permission_request_kind(
+    permission: &str,
+    tool_name: Option<&str>,
+) -> &'static str {
     let normalized = permission.to_ascii_lowercase();
     let tool = tool_name.unwrap_or("").to_ascii_lowercase();
     if matches!(
@@ -388,7 +404,10 @@ pub fn command_of(text: &str) -> Option<SlashCommand> {
     let captures = COMMAND_RE.captures(text.trim())?;
     Some(SlashCommand {
         name: captures.get(1)?.as_str().to_owned(),
-        text: captures.get(2).map(|m| m.as_str().to_owned()).unwrap_or_default(),
+        text: captures
+            .get(2)
+            .map(|m| m.as_str().to_owned())
+            .unwrap_or_default(),
     })
 }
 
@@ -447,7 +466,9 @@ fn skill_name_ok(name: &str) -> bool {
         if matches!(suffix.as_str(), "k" | "m" | "b" | "t") {
             return false;
         }
-        if suffix.starts_with('e') && suffix[1..].chars().all(|c| c.is_ascii_digit()) && suffix.len() > 1
+        if suffix.starts_with('e')
+            && suffix[1..].chars().all(|c| c.is_ascii_digit())
+            && suffix.len() > 1
         {
             return false;
         }
@@ -511,7 +532,10 @@ pub fn boundary_after(
         })
         .collect();
     later.sort_by_key(|turn| turn.ordinal);
-    if later.iter().any(|turn| prompt_of(turn).is_none() && !is_wake_turn(turn)) {
+    if later
+        .iter()
+        .any(|turn| prompt_of(turn).is_none() && !is_wake_turn(turn))
+    {
         return Err(
             "This OpenCode conversation has turns from an earlier T3 Code version, so it can't be cut there."
                 .to_owned(),
@@ -589,28 +613,27 @@ pub fn form_questions(form: &NativeForm) -> Result<Vec<OrchestrationV2UserInputQ
             .unwrap_or(&[])
             .iter()
             .map(|option| {
-                let label = text_or(option.label.as_deref(), &text_or(option.value.as_deref(), "Option"));
+                let label = text_or(
+                    option.label.as_deref(),
+                    &text_or(option.value.as_deref(), "Option"),
+                );
                 let description = text_or(option.description.as_deref(), &label);
                 OrchestrationV2UserInputQuestionOption {
-                    label: TrimmedNonEmptyString::new(&label).unwrap_or_else(|_| {
-                        TrimmedNonEmptyString::new("Option").expect("literal")
-                    }),
-                    description: TrimmedNonEmptyString::new(&description).unwrap_or_else(|_| {
-                        TrimmedNonEmptyString::new("Option").expect("literal")
-                    }),
+                    label: TrimmedNonEmptyString::new(&label)
+                        .unwrap_or_else(|_| TrimmedNonEmptyString::new("Option").expect("literal")),
+                    description: TrimmedNonEmptyString::new(&description)
+                        .unwrap_or_else(|_| TrimmedNonEmptyString::new("Option").expect("literal")),
                     value: option.value.clone(),
                 }
             })
             .collect::<Vec<_>>();
         let allow_custom = field.custom == Some(true) || options.is_empty();
         questions.push(OrchestrationV2UserInputQuestion {
-            id: TrimmedNonEmptyString::new(&field.key).unwrap_or_else(|_| {
-                TrimmedNonEmptyString::new("question").expect("literal")
-            }),
-            header: TrimmedNonEmptyString::new(&header).unwrap_or_else(|_| {
-                TrimmedNonEmptyString::new("Question").expect("literal")
-            }),
-            question: TrimmedNonEmptyString::new(&text_or(field.description.as_deref(), &header))
+            id: TrimmedNonEmptyString::new(&field.key)
+                .unwrap_or_else(|_| TrimmedNonEmptyString::new("question").expect("literal")),
+            header: TrimmedNonEmptyString::new(&header)
+                .unwrap_or_else(|_| TrimmedNonEmptyString::new("Question").expect("literal")),
+            question: TrimmedNonEmptyString::new(text_or(field.description.as_deref(), &header))
                 .unwrap_or_else(|_| TrimmedNonEmptyString::new("Question").expect("literal")),
             options,
             multi_select: Some(field.field_type == "multiselect"),
@@ -752,7 +775,11 @@ fn json_u64(value: &Value, key: &str) -> Option<u64> {
     value.get(key).and_then(|n| {
         n.as_u64()
             .or_else(|| n.as_i64().filter(|n| *n >= 0).map(|n| n as u64))
-            .or_else(|| n.as_f64().filter(|n| n.is_finite() && *n >= 0.0).map(|n| n as u64))
+            .or_else(|| {
+                n.as_f64()
+                    .filter(|n| n.is_finite() && *n >= 0.0)
+                    .map(|n| n as u64)
+            })
     })
 }
 
@@ -803,10 +830,10 @@ pub fn open_code_tool_projection_kind(tool_name: &str) -> &'static str {
 fn value_string(input: &Value, keys: &[&str]) -> Option<String> {
     let object = input.as_object()?;
     for key in keys {
-        if let Some(value) = object.get(*key).and_then(Value::as_str) {
-            if !value.trim().is_empty() {
-                return Some(value.to_owned());
-            }
+        if let Some(value) = object.get(*key).and_then(Value::as_str)
+            && !value.trim().is_empty()
+        {
+            return Some(value.to_owned());
         }
     }
     None
@@ -842,7 +869,8 @@ fn format_read_tool_label(path: &str) -> String {
 }
 
 fn format_search_tool_label(input: &Value, pattern: Option<&str>) -> Option<String> {
-    let query = value_string(input, &["pattern", "query", "searchTerm", "regex"]).or_else(|| pattern.map(str::to_owned));
+    let query = value_string(input, &["pattern", "query", "searchTerm", "regex"])
+        .or_else(|| pattern.map(str::to_owned));
     let glob = value_string(input, &["glob", "globPattern", "include"]);
     let target = value_string(input, &["path", "filePath", "directory"]).and_then(|path| {
         path.rsplit(['/', '\\'])
@@ -896,99 +924,128 @@ pub fn open_code_tool_turn_item(
     match open_code_tool_projection_kind(name) {
         "command_execution" => {
             let exit_code = value_i64(metadata, &["exit", "exitCode"]);
-            let command = value_string(input, &["command", "cmd"]).unwrap_or_else(|| stable_json(input));
-            tool_item!(base, CommandExecution {
-                input: command,
-                output: output.map(str::to_owned),
-                output_omitted: None,
-                output_indicates_failure: None,
-                exit_code: exit_code,
-            })
+            let command =
+                value_string(input, &["command", "cmd"]).unwrap_or_else(|| stable_json(input));
+            tool_item!(
+                base,
+                CommandExecution {
+                    input: command,
+                    output: output.map(str::to_owned),
+                    output_omitted: None,
+                    output_indicates_failure: None,
+                    exit_code: exit_code,
+                }
+            )
         }
         "file_change" => {
             let diff = value_string(metadata, &["diff", "patch"]).or_else(|| {
                 (base.status == OrchestrationV2TurnItemStatus::Failed)
-                    .then(|| output.filter(|text| !text.trim().is_empty()).map(str::to_owned))
+                    .then(|| {
+                        output
+                            .filter(|text| !text.trim().is_empty())
+                            .map(str::to_owned)
+                    })
                     .flatten()
             });
-            let raw_name = value_string(input, &["filePath", "path", "file"]).unwrap_or_else(|| name.to_owned());
+            let raw_name = value_string(input, &["filePath", "path", "file"])
+                .unwrap_or_else(|| name.to_owned());
             let file_name = TrimmedNonEmptyString::new(raw_name).unwrap_or_else(|_| {
-                TrimmedNonEmptyString::new(name).unwrap_or_else(|_| {
-                    TrimmedNonEmptyString::new("file").expect("literal")
-                })
+                TrimmedNonEmptyString::new(name)
+                    .unwrap_or_else(|_| TrimmedNonEmptyString::new("file").expect("literal"))
             });
-            tool_item!(base, FileChange {
-                file_name: file_name,
-                additions: None,
-                deletions: None,
-                diff_str: diff,
-                old_str: value_string(input, &["oldString", "oldText"]),
-                new_str: value_string(input, &["newString", "content", "newText"]),
-                changes: None,
-            })
+            tool_item!(
+                base,
+                FileChange {
+                    file_name: file_name,
+                    additions: None,
+                    deletions: None,
+                    diff_str: diff,
+                    old_str: value_string(input, &["oldString", "oldText"]),
+                    new_str: value_string(input, &["newString", "content", "newText"]),
+                    changes: None,
+                }
+            )
         }
         "file_search" => {
             let pattern = value_string(input, &["pattern", "query", "path", "filePath"]);
-            let search_root = value_string(input, &["path", "filePath"]).or_else(|| pattern.clone());
+            let search_root =
+                value_string(input, &["path", "filePath"]).or_else(|| pattern.clone());
             let title = format_search_tool_label(input, pattern.as_deref()).or(base.title.clone());
             let mut titled = base;
             titled.title = title;
-            let results = match (output.map(str::trim).filter(|text| !text.is_empty()), search_root) {
+            let results = match (
+                output.map(str::trim).filter(|text| !text.is_empty()),
+                search_root,
+            ) {
                 (Some(output), Some(root)) => Some(vec![OrchestrationV2FileSearchResult {
-                    file_name: TrimmedNonEmptyString::new(root).unwrap_or_else(|_| {
-                        TrimmedNonEmptyString::new("search").expect("literal")
-                    }),
+                    file_name: TrimmedNonEmptyString::new(root)
+                        .unwrap_or_else(|_| TrimmedNonEmptyString::new("search").expect("literal")),
                     line: None,
                     column: None,
                     preview: Some(output.chars().take(SEARCH_PREVIEW_MAX_CHARS).collect()),
                 }]),
                 _ => None,
             };
-            tool_item!(titled, FileSearch { pattern: pattern, results: results })
+            tool_item!(
+                titled,
+                FileSearch {
+                    pattern: pattern,
+                    results: results
+                }
+            )
         }
         "web_search" => {
             let pattern = value_string(input, &["query", "url", "pattern"]);
             let url = value_string(input, &["url"]);
-            let results = output.map(str::trim).filter(|text| !text.is_empty()).map(|output| {
-                vec![OrchestrationV2WebSearchResult {
-                    title: None,
-                    url: url.and_then(|url| TrimmedNonEmptyString::new(url).ok()),
-                    snippet: Some(output.chars().take(SEARCH_PREVIEW_MAX_CHARS).collect()),
-                }]
-            });
+            let results = output
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(|output| {
+                    vec![OrchestrationV2WebSearchResult {
+                        title: None,
+                        url: url.and_then(|url| TrimmedNonEmptyString::new(url).ok()),
+                        snippet: Some(output.chars().take(SEARCH_PREVIEW_MAX_CHARS).collect()),
+                    }]
+                });
             let patterns = pattern.map(|pattern| vec![pattern]);
-            tool_item!(base, WebSearch {
-                patterns: patterns,
-                results: results,
-            })
+            tool_item!(
+                base,
+                WebSearch {
+                    patterns: patterns,
+                    results: results,
+                }
+            )
         }
         _ => {
             let read_path = value_string(input, &["filePath", "path", "file"]);
             let mut titled = base;
-            if name.eq_ignore_ascii_case("read") {
-                if let Some(path) = &read_path {
-                    titled.title = Some(format_read_tool_label(path));
-                }
+            if name.eq_ignore_ascii_case("read")
+                && let Some(path) = &read_path
+            {
+                titled.title = Some(format_read_tool_label(path));
             }
-            tool_item!(titled, DynamicTool {
-                tool_name: TrimmedNonEmptyString::new(name).ok(),
-                viewed_image_path: None,
-                input: input.clone(),
-                output: output.map(|text| Value::String(text.to_owned())),
-                output_omitted: None,
-            })
+            tool_item!(
+                titled,
+                DynamicTool {
+                    tool_name: TrimmedNonEmptyString::new(name).ok(),
+                    viewed_image_path: None,
+                    input: input.clone(),
+                    output: output.map(|text| Value::String(text.to_owned())),
+                    output_omitted: None,
+                }
+            )
         }
     }
 }
 
 pub fn subagent_output(text: &str) -> String {
     let trimmed = text.trim();
-    if let Some(rest) = trimmed.strip_prefix("<subagent") {
-        if let Some(body_at) = rest.find('>') {
-            let body = &rest[body_at + 1..];
-            if let Some(end) = body.rfind("</subagent>") {
-                return body[..end].trim_matches('\n').to_owned();
-            }
+    if let Some(rest) = trimmed.strip_prefix("<subagent")
+        && let Some(body_at) = rest.find('>')
+    {
+        let body = &rest[body_at + 1..];
+        if let Some(end) = body.rfind("</subagent>") {
+            return body[..end].trim_matches('\n').to_owned();
         }
     }
     text.to_owned()
@@ -1076,13 +1133,11 @@ fn select_descriptor(
         options: options
             .into_iter()
             .map(|(value, is_default)| ProviderOptionChoice {
-                id: TrimmedNonEmptyString::new(&value).unwrap_or_else(|_| {
-                    TrimmedNonEmptyString::new("option").expect("literal")
-                }),
+                id: TrimmedNonEmptyString::new(&value)
+                    .unwrap_or_else(|_| TrimmedNonEmptyString::new("option").expect("literal")),
                 label: TrimmedNonEmptyString::new(title_case_slug(&value)).unwrap_or_else(|_| {
-                    TrimmedNonEmptyString::new(&value).unwrap_or_else(|_| {
-                        TrimmedNonEmptyString::new("Option").expect("literal")
-                    })
+                    TrimmedNonEmptyString::new(&value)
+                        .unwrap_or_else(|_| TrimmedNonEmptyString::new("Option").expect("literal"))
                 }),
                 description: None,
                 is_default: is_default.then_some(true),
@@ -1093,7 +1148,11 @@ fn select_descriptor(
     })
 }
 
-fn capabilities_for(provider_id: &str, model: &ProviderModel, agents: &[AgentEntry]) -> ModelCapabilities {
+fn capabilities_for(
+    provider_id: &str,
+    model: &ProviderModel,
+    agents: &[AgentEntry],
+) -> ModelCapabilities {
     let mut variants: Vec<String> = model
         .variants
         .as_ref()
@@ -1113,9 +1172,7 @@ fn capabilities_for(provider_id: &str, model: &ProviderModel, agents: &[AgentEnt
     let primary: Vec<_> = agents
         .iter()
         .filter(|agent| agent.hidden != Some(true))
-        .filter(|agent| {
-            matches!(agent.mode.as_deref(), Some("primary") | Some("all") | None)
-        })
+        .filter(|agent| matches!(agent.mode.as_deref(), Some("primary") | Some("all") | None))
         .collect();
     let default_agent = primary
         .iter()
@@ -1293,7 +1350,12 @@ pub fn commands_from_list(commands: &[Value]) -> Vec<ServerProviderSlashCommand>
     out
 }
 
-pub fn format_probe_error(detail: Option<&str>, external: bool, phase: &str, server_url: &str) -> (bool, String) {
+pub fn format_probe_error(
+    detail: Option<&str>,
+    external: bool,
+    phase: &str,
+    server_url: &str,
+) -> (bool, String) {
     let lower = detail.unwrap_or("").to_ascii_lowercase();
     if external {
         if lower.contains("401")
@@ -1307,9 +1369,16 @@ pub fn format_probe_error(detail: Option<&str>, external: bool, phase: &str, ser
                     .to_owned(),
             );
         }
-        if ["econnrefused", "enotfound", "fetch failed", "timed out", "timeout", "socket hang up"]
-            .iter()
-            .any(|needle| lower.contains(needle))
+        if [
+            "econnrefused",
+            "enotfound",
+            "fetch failed",
+            "timed out",
+            "timeout",
+            "socket hang up",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
         {
             return (
                 true,
@@ -1352,7 +1421,10 @@ pub fn format_probe_error(detail: Option<&str>, external: bool, phase: &str, ser
     )
 }
 
-pub fn provider_failure(class: OrchestrationV2ProviderFailureClass, message: &str) -> OrchestrationV2ProviderFailure {
+pub fn provider_failure(
+    class: OrchestrationV2ProviderFailureClass,
+    message: &str,
+) -> OrchestrationV2ProviderFailure {
     let trimmed = message.trim();
     let message = if trimmed.is_empty() {
         "OpenCode request failed".to_owned()
@@ -1361,8 +1433,9 @@ pub fn provider_failure(class: OrchestrationV2ProviderFailureClass, message: &st
     };
     OrchestrationV2ProviderFailure {
         class,
-        message: OrchestrationV2ProviderFailureMessage::new(message)
-            .unwrap_or_else(|_| OrchestrationV2ProviderFailureMessage::new("OpenCode request failed").expect("literal")),
+        message: OrchestrationV2ProviderFailureMessage::new(message).unwrap_or_else(|_| {
+            OrchestrationV2ProviderFailureMessage::new("OpenCode request failed").expect("literal")
+        }),
         code: None,
         retryable: None,
         reset_at: None,
@@ -1383,6 +1456,7 @@ pub fn native_ref(native_id: &str, weak: bool) -> OrchestrationV2ProviderRef {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn caps(
     sessions: OrchestrationV2SessionCapabilities,
     threads: OrchestrationV2ThreadCapabilities,
@@ -1608,7 +1682,10 @@ pub fn context_window_of(model: &Value) -> Option<u64> {
     json_u64(limit, "input").or_else(|| json_u64(limit, "context"))
 }
 
-pub fn pending_status(enabled: bool, server_url: &str) -> (ServerProviderState, ServerProviderAuth, String) {
+pub fn pending_status(
+    enabled: bool,
+    server_url: &str,
+) -> (ServerProviderState, ServerProviderAuth, String) {
     let message = if !enabled {
         if server_url.trim().is_empty() {
             "OpenCode is disabled in T3 Code settings.".to_owned()
@@ -1658,7 +1735,10 @@ mod tests {
             OpenCodeAdmissionAction::Hold
         );
         assert_eq!(
-            advance_open_code_prompt_admission(&mut admission, OpenCodeAdmissionSignal::UserMessage),
+            advance_open_code_prompt_admission(
+                &mut admission,
+                OpenCodeAdmissionSignal::UserMessage
+            ),
             OpenCodeAdmissionAction::ReconcileIdle
         );
     }
@@ -1698,7 +1778,10 @@ mod tests {
     #[test]
     fn permission_families_map_to_request_kinds() {
         assert_eq!(open_code_permission_request_kind("bash", None), "command");
-        assert_eq!(open_code_permission_request_kind("edit", None), "file-change");
+        assert_eq!(
+            open_code_permission_request_kind("edit", None),
+            "file-change"
+        );
         assert_eq!(open_code_permission_request_kind("read", None), "file-read");
         assert_eq!(
             open_code_permission_request_kind("external_directory", None),
@@ -1748,7 +1831,11 @@ mod tests {
             &parent,
             &[v1_rule("task", "*", "deny"), v1_rule("*", "*", "deny")],
         );
-        assert!(child.iter().any(|rule| rule.permission == "task" && rule.action == "deny"));
+        assert!(
+            child
+                .iter()
+                .any(|rule| rule.permission == "task" && rule.action == "deny")
+        );
         let deny_star = child
             .iter()
             .filter(|rule| rule.permission == "*" && rule.pattern == "*" && rule.action == "deny")
@@ -1773,9 +1860,18 @@ mod tests {
     fn declined_note_names_the_action_and_resources() {
         assert!(declined_note("shell", &[]).contains("declined the shell request."));
         assert!(declined_note("shell", &["pwd".into()]).contains("(pwd)"));
-        assert_eq!(v2_permission_decision(ProviderApprovalDecision::Decline), "reject");
-        assert_eq!(v2_permission_decision(ProviderApprovalDecision::AcceptForSession), "once");
-        assert_eq!(v1_permission_reply(ProviderApprovalDecision::AcceptForSession), "always");
+        assert_eq!(
+            v2_permission_decision(ProviderApprovalDecision::Decline),
+            "reject"
+        );
+        assert_eq!(
+            v2_permission_decision(ProviderApprovalDecision::AcceptForSession),
+            "once"
+        );
+        assert_eq!(
+            v1_permission_reply(ProviderApprovalDecision::AcceptForSession),
+            "always"
+        );
     }
 
     #[test]
@@ -1785,7 +1881,10 @@ mod tests {
         assert_eq!(command.text, "branch");
         assert!(command_of("hello").is_none());
         let known = HashSet::from(["commit".to_owned()]);
-        assert_eq!(skills_named("use $commit please", &known), vec!["commit".to_owned()]);
+        assert_eq!(
+            skills_named("use $commit please", &known),
+            vec!["commit".to_owned()]
+        );
         assert!(skills_named("costs $20 today", &known).is_empty());
     }
 

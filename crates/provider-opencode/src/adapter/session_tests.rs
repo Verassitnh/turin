@@ -17,12 +17,12 @@ use turin_contracts::{
     provider_policy::{ProviderApprovalDecision, ProviderInteractionMode, RuntimeMode},
 };
 
+use crate::OpenCodeGeneration;
 use crate::adapter::api::*;
 use crate::adapter::v1::OpenCodeV1Session;
 use crate::adapter::v2::OpenCodeV2Session;
 use crate::test_support::{FakeResponse, FakeServer, Recorded};
 use crate::v2_client::V2Client;
-use crate::OpenCodeGeneration;
 
 fn sse(payload: &str) -> Vec<u8> {
     format!("data: {payload}\n\n").into_bytes()
@@ -71,7 +71,10 @@ fn policy(mode: RuntimeMode) -> ProviderAdapterV2RuntimePolicy {
     }
 }
 
-fn turn(thread: turin_contracts::orchestration_v2::OrchestrationV2ProviderThread, text: &str) -> ProviderAdapterV2TurnInput {
+fn turn(
+    thread: turin_contracts::orchestration_v2::OrchestrationV2ProviderThread,
+    text: &str,
+) -> ProviderAdapterV2TurnInput {
     ProviderAdapterV2TurnInput {
         app_thread: app_thread(),
         thread_id: ThreadId::new("thread_1").unwrap(),
@@ -107,7 +110,9 @@ async fn script(reply: impl Fn(Recorded) -> FakeResponse + Send + Sync + 'static
     let (frames, rx) = mpsc::unbounded_channel();
     let rx = Arc::new(Mutex::new(Some(rx)));
     let server = FakeServer::spawn(move |request| {
-        if request.method == "GET" && (request.target.contains("/event") || request.target.contains("/api/event")) {
+        if request.method == "GET"
+            && (request.target.contains("/event") || request.target.contains("/api/event"))
+        {
             let mut response = FakeResponse::sse(Vec::new(), true);
             response.follow = rx.lock().take();
             return response;
@@ -169,7 +174,10 @@ async fn v1_prompt_sends_system_and_model() {
         .await
         .unwrap();
     session.start_turn(turn(thread, "hello")).await.unwrap();
-    let prompt = await_request(&mut script.server, |request| request.target.contains("prompt_async")).await;
+    let prompt = await_request(&mut script.server, |request| {
+        request.target.contains("prompt_async")
+    })
+    .await;
     let body = body(&prompt);
     assert_eq!(body["model"]["providerID"], "openai");
     assert_eq!(body["model"]["modelID"], "gpt");
@@ -214,7 +222,10 @@ async fn v1_slash_command_posts_the_command_route() {
         })
         .await
         .unwrap();
-    session.start_turn(turn(thread, "/review the diff")).await.unwrap();
+    session
+        .start_turn(turn(thread, "/review the diff"))
+        .await
+        .unwrap();
     let command = await_request(&mut script.server, |request| {
         request.method == "POST" && request.target.contains("/command")
     })
@@ -257,7 +268,10 @@ async fn v1_compact_posts_summarize() {
         .await
         .unwrap();
     session.start_turn(turn(thread, "/compact")).await.unwrap();
-    let summarize = await_request(&mut script.server, |request| request.target.contains("/summarize")).await;
+    let summarize = await_request(&mut script.server, |request| {
+        request.target.contains("/summarize")
+    })
+    .await;
     assert_eq!(body(&summarize)["providerID"], "openai");
     session.close().await;
 }
@@ -316,7 +330,10 @@ async fn v1_accept_for_session_replies_always() {
         })
         .await
         .unwrap();
-    let reply = await_request(&mut script.server, |request| request.target.contains("/permission/")).await;
+    let reply = await_request(&mut script.server, |request| {
+        request.target.contains("/permission/")
+    })
+    .await;
     assert_eq!(body(&reply)["reply"], "always");
     session.close().await;
 }
@@ -363,12 +380,28 @@ async fn v2_prompt_writes_instructions_and_has_no_system_field() {
         .await
         .unwrap();
     session.start_turn(turn(thread, "hello")).await.unwrap();
-    let instructions = await_request(&mut script.server, |request| request.target.contains("instructions/entries")).await;
-    assert_eq!(body(&instructions)["value"].as_str().unwrap().contains("OpenCode"), true);
-    let prompt = await_request(&mut script.server, |request| request.target.contains("/prompt")).await;
+    let instructions = await_request(&mut script.server, |request| {
+        request.target.contains("instructions/entries")
+    })
+    .await;
+    assert!(
+        body(&instructions)["value"]
+            .as_str()
+            .unwrap()
+            .contains("OpenCode")
+    );
+    let prompt = await_request(&mut script.server, |request| {
+        request.target.contains("/prompt")
+    })
+    .await;
     let body = body(&prompt);
     assert!(body.get("system").is_none());
-    assert!(body["id"].as_str().unwrap().starts_with("msg_t3_turn_ses_1:"));
+    assert!(
+        body["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("msg_t3_turn_ses_1:")
+    );
     assert_eq!(body["text"], "hello");
     session.close().await;
 }
@@ -432,10 +465,21 @@ async fn v2_decline_posts_the_note_then_rejects_with_the_message() {
         })
         .await
         .unwrap();
-    let synthetic = await_request(&mut script.server, |request| request.target.contains("/synthetic")).await;
-    assert!(body(&synthetic)["text"].as_str().unwrap().contains("declined"));
+    let synthetic = await_request(&mut script.server, |request| {
+        request.target.contains("/synthetic")
+    })
+    .await;
+    assert!(
+        body(&synthetic)["text"]
+            .as_str()
+            .unwrap()
+            .contains("declined")
+    );
     assert_eq!(body(&synthetic)["resume"], false);
-    let reply = await_request(&mut script.server, |request| request.target.contains("/reply")).await;
+    let reply = await_request(&mut script.server, |request| {
+        request.target.contains("/reply")
+    })
+    .await;
     assert_eq!(body(&reply)["decision"], "reject");
     assert_eq!(body(&reply)["message"], "The user declined this request.");
     session.close().await;
@@ -508,7 +552,11 @@ async fn v2_accept_for_session_writes_a_grant_and_replies_once() {
         parsed
             .get("permissions")
             .and_then(Value::as_array)
-            .is_some_and(|rules| rules.iter().any(|rule| rule["action"] == "edit" && rule["effect"] == "allow"))
+            .is_some_and(|rules| {
+                rules
+                    .iter()
+                    .any(|rule| rule["action"] == "edit" && rule["effect"] == "allow")
+            })
     })
     .await;
     let parsed = body(&patch);
@@ -519,7 +567,10 @@ async fn v2_accept_for_session_writes_a_grant_and_replies_once() {
             .iter()
             .any(|rule| rule["action"] == "edit" && rule["effect"] == "allow")
     );
-    let reply = await_request(&mut script.server, |request| request.target.contains("/reply")).await;
+    let reply = await_request(&mut script.server, |request| {
+        request.target.contains("/reply")
+    })
+    .await;
     assert_eq!(body(&reply)["decision"], "once");
     session.close().await;
 }
@@ -527,6 +578,9 @@ async fn v2_accept_for_session_writes_a_grant_and_replies_once() {
 #[tokio::test]
 async fn v2_session_created_links_a_subagent() {
     let script = script(|request| {
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
         if request.method == "GET" && request.target.contains("/api/model") {
             return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
         }
@@ -606,12 +660,13 @@ async fn a_failed_probe_selects_v1_capabilities() {
     );
 }
 
-async fn next_request(
-    events: &mut ProviderEventStream,
-) -> turin_contracts::RuntimeRequestId {
+async fn next_request(events: &mut ProviderEventStream) -> turin_contracts::RuntimeRequestId {
     tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(event) = events.next().await {
-            if let Ok(ProviderAdapterV2Event::RuntimeRequestUpdated { runtime_request, .. }) = event {
+            if let Ok(ProviderAdapterV2Event::RuntimeRequestUpdated {
+                runtime_request, ..
+            }) = event
+            {
                 return runtime_request.id;
             }
         }
@@ -630,7 +685,8 @@ async fn adapter_live_smoke_creates_a_session_without_a_prompt() {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         format!("{home}/.opencode/bin/opencode")
     });
-    let directory = std::env::temp_dir().join(format!("t3-opencode-adapter-{}", std::process::id()));
+    let directory =
+        std::env::temp_dir().join(format!("t3-opencode-adapter-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let adapter = crate::OpenCodeAdapter::new(
         ProviderInstanceId::new("opencode").unwrap(),
@@ -667,6 +723,12 @@ async fn adapter_live_smoke_creates_a_session_without_a_prompt() {
         })
         .await
         .unwrap();
-    assert!(thread.native_thread_ref.as_ref().and_then(|native| native.native_id.as_ref()).is_some());
+    assert!(
+        thread
+            .native_thread_ref
+            .as_ref()
+            .and_then(|native| native.native_id.as_ref())
+            .is_some()
+    );
     drop(runtime);
 }

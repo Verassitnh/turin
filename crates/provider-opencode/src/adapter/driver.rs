@@ -19,15 +19,16 @@ use crate::adapter::api::*;
 use crate::adapter::logic::{opencode_driver, select_generation, v1_capabilities, v2_capabilities};
 use crate::adapter::v1::OpenCodeV1Session;
 use crate::adapter::v2::OpenCodeV2Session;
+use crate::error::OpenCodeRuntimeError;
 use crate::runtime::{
     ConnectOpenCodeServer, OpenCodeServerProcess, connect_to_open_code_server, default_v1_verify,
 };
 use crate::v2_client::V2Client;
 use crate::v2_server::{OpenCode2Config, OpenCode2Server};
 use crate::version_probe::{
-    OpenCodeBinary, OpenCodeCommandResult, OpenCodeGeneration, ProbeSettings, probe_open_code_runtime,
+    OpenCodeBinary, OpenCodeCommandResult, OpenCodeGeneration, ProbeSettings,
+    probe_open_code_runtime,
 };
-use crate::error::OpenCodeRuntimeError;
 
 /// Settings the OpenCode driver reads. Mirrors `OpenCodeSettings` in
 /// `server/settings.ts`: enabled, binary path, external server URL, password.
@@ -140,6 +141,7 @@ impl OpenCodeAdapter {
 struct CommandBinary;
 
 impl OpenCodeBinary for CommandBinary {
+    #[allow(clippy::manual_async_fn)]
     fn run_version<'a>(
         &'a self,
         binary_path: &'a str,
@@ -154,9 +156,10 @@ impl OpenCodeBinary for CommandBinary {
                     command.env(key, value);
                 }
             }
-            let output = command.output().await.map_err(|err| {
-                OpenCodeRuntimeError::new("probeOpenCodeBinary", err.to_string())
-            })?;
+            let output = command
+                .output()
+                .await
+                .map_err(|err| OpenCodeRuntimeError::new("probeOpenCodeBinary", err.to_string()))?;
             Ok(OpenCodeCommandResult {
                 stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -176,7 +179,9 @@ impl ProviderAdapterV2 for OpenCodeAdapter {
         &self.driver
     }
 
-    async fn get_capabilities(&self) -> Result<OrchestrationV2ProviderCapabilities, ProviderAdapterV2Error> {
+    async fn get_capabilities(
+        &self,
+    ) -> Result<OrchestrationV2ProviderCapabilities, ProviderAdapterV2Error> {
         Ok(match self.generation() {
             OpenCodeGeneration::V2 => v2_capabilities(),
             OpenCodeGeneration::V1 => v1_capabilities(),
@@ -199,7 +204,11 @@ impl ProviderAdapterV2 for OpenCodeAdapter {
             .cwd
             .clone()
             .filter(|cwd| !cwd.trim().is_empty())
-            .unwrap_or_else(|| std::env::current_dir().map(|path| path.display().to_string()).unwrap_or_else(|_| ".".to_owned()));
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| ".".to_owned())
+            });
         let model = input.model_selection.model.as_str();
         if let Some(endpoint) = &self.endpoint {
             return open_endpoint(
@@ -271,9 +280,13 @@ impl ProviderAdapterV2 for OpenCodeAdapter {
                 })
                 .map_err(|err| ProviderAdapterV2Error::protocol(err.detail))?;
                 let connection = server
-                    .with_connection(|connection| async move { Ok::<_, OpenCodeRuntimeError>(connection) })
+                    .with_connection(|connection| async move {
+                        Ok::<_, OpenCodeRuntimeError>(connection)
+                    })
                     .await
-                    .map_err(|err: OpenCodeRuntimeError| ProviderAdapterV2Error::protocol(err.detail))?;
+                    .map_err(|err: OpenCodeRuntimeError| {
+                        ProviderAdapterV2Error::protocol(err.detail)
+                    })?;
                 let session = OpenCodeV2Session::open(
                     self.instance_id.clone(),
                     input.provider_session_id,
@@ -356,7 +369,9 @@ impl ProviderSessionRuntime for OpenCodeSession {
             SessionKind::V2(session) => session.provider_session_id(),
         }
     }
-    fn provider_session(&self) -> &turin_contracts::orchestration_v2::OrchestrationV2ProviderSession {
+    fn provider_session(
+        &self,
+    ) -> &turin_contracts::orchestration_v2::OrchestrationV2ProviderSession {
         match &self.kind {
             SessionKind::V1(session) => session.provider_session(),
             SessionKind::V2(session) => session.provider_session(),
@@ -389,7 +404,10 @@ impl ProviderSessionRuntime for OpenCodeSession {
     async fn ensure_thread(
         &self,
         input: ProviderAdapterV2EnsureThreadInput,
-    ) -> Result<turin_contracts::orchestration_v2::OrchestrationV2ProviderThread, ProviderAdapterV2Error> {
+    ) -> Result<
+        turin_contracts::orchestration_v2::OrchestrationV2ProviderThread,
+        ProviderAdapterV2Error,
+    > {
         match &self.kind {
             SessionKind::V1(session) => session.ensure_thread(input).await,
             SessionKind::V2(session) => session.ensure_thread(input).await,
@@ -398,13 +416,19 @@ impl ProviderSessionRuntime for OpenCodeSession {
     async fn resume_thread(
         &self,
         input: ProviderAdapterV2ResumeThreadInput,
-    ) -> Result<turin_contracts::orchestration_v2::OrchestrationV2ProviderThread, ProviderAdapterV2Error> {
+    ) -> Result<
+        turin_contracts::orchestration_v2::OrchestrationV2ProviderThread,
+        ProviderAdapterV2Error,
+    > {
         match &self.kind {
             SessionKind::V1(session) => session.resume_thread(input).await,
             SessionKind::V2(session) => session.resume_thread(input).await,
         }
     }
-    async fn start_turn(&self, input: ProviderAdapterV2TurnInput) -> Result<(), ProviderAdapterV2Error> {
+    async fn start_turn(
+        &self,
+        input: ProviderAdapterV2TurnInput,
+    ) -> Result<(), ProviderAdapterV2Error> {
         match &self.kind {
             SessionKind::V1(session) => session.start_turn(input).await,
             SessionKind::V2(session) => session.start_turn(input).await,
@@ -419,13 +443,19 @@ impl ProviderSessionRuntime for OpenCodeSession {
             SessionKind::V2(session) => session.compact_thread(input),
         }
     }
-    async fn steer_turn(&self, input: ProviderAdapterV2SteerInput) -> Result<(), ProviderAdapterV2Error> {
+    async fn steer_turn(
+        &self,
+        input: ProviderAdapterV2SteerInput,
+    ) -> Result<(), ProviderAdapterV2Error> {
         match &self.kind {
             SessionKind::V1(session) => session.steer_turn(input).await,
             SessionKind::V2(session) => session.steer_turn(input).await,
         }
     }
-    async fn interrupt_turn(&self, input: ProviderAdapterV2InterruptInput) -> Result<(), ProviderAdapterV2Error> {
+    async fn interrupt_turn(
+        &self,
+        input: ProviderAdapterV2InterruptInput,
+    ) -> Result<(), ProviderAdapterV2Error> {
         match &self.kind {
             SessionKind::V1(session) => session.interrupt_turn(input).await,
             SessionKind::V2(session) => session.interrupt_turn(input).await,
@@ -461,7 +491,10 @@ impl ProviderSessionRuntime for OpenCodeSession {
     async fn fork_thread(
         &self,
         input: ProviderAdapterV2ForkThreadInput,
-    ) -> Result<turin_contracts::orchestration_v2::OrchestrationV2ProviderThread, ProviderAdapterV2Error> {
+    ) -> Result<
+        turin_contracts::orchestration_v2::OrchestrationV2ProviderThread,
+        ProviderAdapterV2Error,
+    > {
         match &self.kind {
             SessionKind::V1(session) => session.fork_thread(input).await,
             SessionKind::V2(session) => session.fork_thread(input).await,
@@ -470,6 +503,8 @@ impl ProviderSessionRuntime for OpenCodeSession {
 }
 
 /// Stable provider-session id for one app thread, matching `derive.provider_session`.
-pub fn shared_provider_session_id(instance_id: &ProviderInstanceId) -> turin_contracts::ProviderSessionId {
+pub fn shared_provider_session_id(
+    instance_id: &ProviderInstanceId,
+) -> turin_contracts::ProviderSessionId {
     derive::provider_session(instance_id)
 }

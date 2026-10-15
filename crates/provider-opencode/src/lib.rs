@@ -4,6 +4,8 @@
 //! inside the exact response envelopes. Fields the adapter reads are named by
 //! the typed structs in `adapter`.
 
+// `ProviderAdapterV2Error` is provider-core's error type and cannot be boxed here.
+#[allow(clippy::result_large_err)]
 mod adapter;
 mod auth;
 mod error;
@@ -27,6 +29,14 @@ mod live;
 #[cfg(test)]
 mod test_support;
 
+pub use adapter::{
+    OpenCodeAdapter, OpenCodeSettings, OpenCodeV1Session, OpenCodeV2Session, ProviderAdapterV2,
+    ProviderAdapterV2Error, ProviderAdapterV2Event, ProviderSessionRuntime, approves,
+    commands_from_list, format_probe_error, models_from_provider_list,
+    open_code_child_permission_rules, pending_status, permission_rule_equals, select_generation,
+    session_grant_label, shared_provider_session_id, skills_from_list, v1_capabilities,
+    v1_rules_as_session, v2_capabilities,
+};
 pub use auth::{OPENCODE_USERNAME, basic_authorization, encode_uri_component};
 pub use error::{
     EventStreamError, OpenCodeRuntimeError, SilentStreamError, open_code_runtime_error_detail,
@@ -54,14 +64,6 @@ pub use v2_client::{
 pub use v2_server::{
     OpenCode2Config, OpenCode2Connection, OpenCode2Server, generate_password, server_environment,
     verify_server,
-};
-pub use adapter::{
-    OpenCodeAdapter, OpenCodeSettings, OpenCodeV1Session, OpenCodeV2Session, ProviderAdapterV2,
-    ProviderAdapterV2Error, ProviderAdapterV2Event, ProviderSessionRuntime, approves,
-    commands_from_list, format_probe_error, models_from_provider_list,
-    open_code_child_permission_rules, pending_status, permission_rule_equals, select_generation,
-    session_grant_label, shared_provider_session_id, skills_from_list, v1_capabilities,
-    v1_rules_as_session, v2_capabilities,
 };
 pub use version_probe::{
     MINIMUM_OPENCODE_VERSION, OPENCODE_SERVER_PROBE_TIMEOUT, OPENCODE_VERSION_PROBE_TIMEOUT,

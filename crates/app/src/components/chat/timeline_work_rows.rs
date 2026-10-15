@@ -297,6 +297,7 @@ fn mono_style(cx: &RowCx, color: Hsla) -> FlowSpanStyle {
         chrome: None,
         link: None,
         background: None,
+        atomic: false,
     }
 }
 

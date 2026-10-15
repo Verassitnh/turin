@@ -4,6 +4,7 @@
 pub mod chat_markdown;
 pub mod code_highlight;
 pub mod inline_flow;
+pub mod markdown_links;
 pub mod markdown_pipeline;
 
 pub use chat_markdown::ChatMarkdown;

@@ -206,16 +206,8 @@ impl MessagesTimeline {
         let started = std::time::Instant::now();
         let snapshot = self.store.read(cx).snapshot().clone();
         let input = self.rows_input(&snapshot);
-        let t_input = started.elapsed();
         let projection = derive_messages_timeline_rows_with_state(input, self.projection.as_ref());
-        let t_derive = started.elapsed();
         self.stable = compute_stable_messages_timeline_rows(projection.rows.clone(), &self.stable);
-        tracing::debug!(
-            input_us = t_input.as_micros() as u64,
-            derive_us = (t_derive - t_input).as_micros() as u64,
-            stable_us = (started.elapsed() - t_derive).as_micros() as u64,
-            "timeline phases"
-        );
         self.projection = Some(projection);
         let next = self.stable.result.clone();
         let previous = std::mem::replace(&mut self.rows, next.clone());

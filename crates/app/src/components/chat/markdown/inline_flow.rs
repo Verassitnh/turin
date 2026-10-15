@@ -38,6 +38,11 @@ pub struct SpanChrome {
     pub radius: Pixels,
     pub pad_x: Pixels,
     pub pad_y: Pixels,
+    /// Extra room before the text for a leading icon (file chips).
+    pub leading: Pixels,
+    /// `(icon, color, size, offset)` painted in the leading room, `offset`
+    /// after the box's padding.
+    pub icon: Option<(gpui_kit::assets::IconName, Hsla, Pixels, Pixels)>,
 }
 
 /// Resolved style for one span of [`FlowText`].
@@ -56,6 +61,8 @@ pub struct FlowSpanStyle {
     pub link: Option<usize>,
     /// Syntax-highlight color override for code tokens.
     pub background: Option<Hsla>,
+    /// Never break inside this span (`inline-flex` chips).
+    pub atomic: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -101,6 +108,8 @@ struct Fragment {
     descent: Pixels,
     chrome_left: bool,
     chrome_right: bool,
+    /// The fragment begins its span (where a leading icon goes).
+    starts_span: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -264,7 +273,12 @@ impl Measurer<'_> {
             && let Some(chrome) = self.content.spans[span_ix].style.chrome
             && (range.start == start || line_start)
         {
-            pad += chrome.pad_x + chrome.border.map_or(px(0.), |_| px(1.));
+            let leading = if range.start == start {
+                chrome.leading
+            } else {
+                px(0.)
+            };
+            pad += chrome.pad_x + leading + chrome.border.map_or(px(0.), |_| px(1.));
         }
         if end > start
             && let Some((span_ix, _)) = self.span_at(end - 1)
@@ -280,7 +294,8 @@ impl Measurer<'_> {
                 && offset > start
                 && span_end < end
             {
-                pad += (chrome.pad_x + chrome.border.map_or(px(0.), |_| px(1.))) * 2.;
+                pad +=
+                    (chrome.pad_x + chrome.border.map_or(px(0.), |_| px(1.))) * 2. + chrome.leading;
             }
             offset = span_end;
         }
@@ -294,9 +309,13 @@ fn trim_trailing_ws(text: &str, start: usize, end: usize) -> usize {
 }
 
 /// Atoms between break opportunities and forced breaks.
+#[cfg(test)]
 fn atoms(text: &str, white_space: WhiteSpace) -> Vec<(usize, usize, bool)> {
+    atoms_with(text, break_opportunities(text, white_space))
+}
+
+fn atoms_with(text: &str, breaks: Vec<usize>) -> Vec<(usize, usize, bool)> {
     // (start, end, forced_break_after)
-    let breaks = break_opportunities(text, white_space);
     let mut out = Vec::new();
     let mut start = 0;
     let mut bi = 0;
@@ -344,7 +363,16 @@ fn compute_layout(
     let mut line_x = px(0.);
     let mut line_has_content = false;
     let mut min_content = px(0.);
-    for (a_start, a_end, forced) in atoms(text, white_space) {
+    let mut breaks = break_opportunities(text, white_space);
+    let mut offset = 0;
+    for span in &content.spans {
+        let end = offset + span.len;
+        if span.style.atomic {
+            breaks.retain(|&b| b <= offset || b >= end);
+        }
+        offset = end;
+    }
+    for (a_start, a_end, forced) in atoms_with(text, breaks) {
         let content_end = trim_trailing_ws(text, a_start, a_end);
         let mut start = a_start;
         loop {
@@ -411,6 +439,13 @@ fn compute_layout(
         line_ranges.push(line_start..text.len());
     }
 
+    let mut span_starts = Vec::with_capacity(content.spans.len());
+    let mut span_offset = 0;
+    for span in &content.spans {
+        span_starts.push(span_offset);
+        span_offset += span.len;
+    }
+
     // 2. Build fragments and line boxes.
     let (strut_ascent, strut_descent, strut_line_height) = strut;
     let mut lines = Vec::with_capacity(line_ranges.len());
@@ -443,8 +478,12 @@ fn compute_layout(
             let continues = fragments
                 .last()
                 .is_some_and(|last: &Fragment| last.span_ix == seg.span_ix);
+            let starts_span = a == span_starts[seg.span_ix];
             if !continues {
                 x += pad;
+                if starts_span {
+                    x += style.chrome.map_or(px(0.), |c| c.leading);
+                }
             }
             let width = piece.width();
             if let Some(last) = fragments.last_mut()
@@ -464,6 +503,7 @@ fn compute_layout(
                 ascent,
                 descent,
                 chrome_left: style.chrome.is_some() && !continues,
+                starts_span,
                 chrome_right: false,
             });
             x += width;
@@ -974,12 +1014,19 @@ impl Element for InlineFlow {
         for line in &layout.lines {
             let baseline_y = bounds.origin.y + line.top + line.baseline;
             let mut open_box: Option<(Pixels, usize)> = None;
+            let mut open_icon = false;
             for frag in &line.fragments {
                 let style = &self.content.spans[frag.span_ix].style;
                 if let Some(chrome) = style.chrome {
                     let border = chrome.border.map_or(px(0.), |_| px(1.));
                     if frag.chrome_left || open_box.is_none() {
-                        open_box = Some((frag.x - chrome.pad_x - border, frag.span_ix));
+                        let leading = if frag.starts_span {
+                            chrome.leading
+                        } else {
+                            px(0.)
+                        };
+                        open_box = Some((frag.x - chrome.pad_x - border - leading, frag.span_ix));
+                        open_icon = frag.starts_span;
                     }
                     if frag.chrome_right || frag.range.end >= line.range.end {
                         let (left, _) = open_box.take().unwrap_or((frag.x, frag.span_ix));
@@ -997,6 +1044,20 @@ impl Element for InlineFlow {
                             border_color: chrome.border.unwrap_or(transparent_black()),
                             border_style: Default::default(),
                         });
+                        if let Some((icon, color, icon_size, offset)) =
+                            chrome.icon.filter(|_| open_icon)
+                        {
+                            let x = bounds.origin.x + left + border + chrome.pad_x + offset;
+                            let y = (top + bottom) / 2. - icon_size / 2.;
+                            let _ = window.paint_svg(
+                                Bounds::new(point(x, y), size(icon_size, icon_size)),
+                                icon.path(),
+                                None,
+                                gpui_kit::TransformationMatrix::unit(),
+                                color,
+                                cx,
+                            );
+                        }
                     }
                 } else {
                     open_box = None;

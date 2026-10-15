@@ -39,6 +39,7 @@ icon_assets!(
         FolderPlus,
         GitBranch,
         GitFork,
+        Github,
         GitPullRequestArrow,
         Globe,
         Hammer,

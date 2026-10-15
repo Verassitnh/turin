@@ -23,6 +23,10 @@ use gpui_kit::{
 
 use super::code_highlight::highlight_code;
 use super::inline_flow::{FlowSpan, FlowSpanStyle, FlowText, InlineFlow, SpanChrome, WhiteSpace};
+use super::markdown_links::{
+    file_link_label, inline_code_file_path_candidate, is_markdown_file_link_label,
+    parse_markdown_file_link,
+};
 use super::markdown_pipeline::{
     AlertKind, Align, Block, Inlines, ListItem, MarkdownDocument, Marks, parse_chat_markdown,
 };
@@ -171,25 +175,144 @@ impl Md<'_> {
         self.rem(0.65)
     }
 
-    /// FlowText for inline content.
+    /// FlowText for inline content. Path-shaped inline code and links to
+    /// files become file chips (`MarkdownFileLink`), labelled with the
+    /// file name the way `fileLinkLabel` does.
     fn flow_text(&self, inlines: &Inlines, inherit: Inherit) -> FlowText {
         let theme = self.theme;
+        let mut text = String::with_capacity(inlines.text.len());
         let mut spans = Vec::with_capacity(inlines.runs.len());
-        for (range, marks) in inlines.run_ranges() {
+        let mut links: Vec<SharedString> = inlines
+            .links
+            .iter()
+            .map(|link| SharedString::from(link.clone()))
+            .collect();
+        let runs: Vec<_> = inlines.run_ranges().collect();
+        let mut ix = 0;
+        while ix < runs.len() {
+            let (range, marks) = runs[ix].clone();
+            let run_text = &inlines.text[range.clone()];
+            if marks.code
+                && marks.link.is_none()
+                && let Some(path) = inline_code_file_path_candidate(run_text)
+            {
+                links.push(path.clone().into());
+                self.push_chip(
+                    &mut text,
+                    &mut spans,
+                    &file_link_label(&path),
+                    links.len() - 1,
+                    inherit,
+                );
+                ix += 1;
+                continue;
+            }
+            if let Some(link) = marks.link
+                && (ix == 0 || runs[ix - 1].1.link != Some(link))
+                && let Some(path) = inlines
+                    .links
+                    .get(link)
+                    .and_then(|url| parse_markdown_file_link(url))
+            {
+                let group_end = runs[ix..]
+                    .iter()
+                    .position(|(_, m)| m.link != Some(link))
+                    .map_or(runs.len(), |offset| ix + offset);
+                let label: String = runs[ix..group_end]
+                    .iter()
+                    .map(|(r, _)| &inlines.text[r.clone()])
+                    .collect();
+                if is_markdown_file_link_label(&label, &path) {
+                    self.push_chip(
+                        &mut text,
+                        &mut spans,
+                        &file_link_label(&path),
+                        link,
+                        inherit,
+                    );
+                    ix = group_end;
+                    continue;
+                }
+            }
+            text.push_str(run_text);
+            let mut style = self.span_style(marks, inherit, theme);
+            // `MarkdownLinkFavicon` leads an external link (first run only):
+            // `ms-[0.25em] me-[0.2em] size-[14px]`, GitHub's mark or a globe.
+            if let Some(link) = marks.link
+                && (ix == 0 || runs[ix - 1].1.link != Some(link))
+                && let Some(host) = inlines
+                    .links
+                    .get(link)
+                    .and_then(|url| external_link_host(url))
+            {
+                let icon = if host == "github.com" || host.ends_with(".github.com") {
+                    IconName::Github
+                } else {
+                    IconName::Globe
+                };
+                style.chrome = Some(SpanChrome {
+                    background: gpui_kit::transparent_black(),
+                    border: None,
+                    radius: px(0.),
+                    pad_x: px(0.),
+                    pad_y: px(0.),
+                    leading: inherit.size * 0.45 + px(14.),
+                    icon: Some((icon, style.color, px(14.), inherit.size * 0.25)),
+                });
+            }
             spans.push(FlowSpan {
                 len: range.len(),
-                style: self.span_style(marks, inherit, theme),
+                style,
             });
+            ix += 1;
         }
         FlowText {
-            text: inlines.text.clone().into(),
+            text: text.into(),
             spans,
-            links: inlines
-                .links
-                .iter()
-                .map(|link| SharedString::from(link.clone()))
-                .collect(),
+            links,
         }
+    }
+
+    /// `ContextChip kind="mention"` + `FileTagChipContent`: `h-[1.41em]
+    /// rounded-[0.5em] border px-[0.5em] gap-[0.33em] font-medium
+    /// text-[0.86em]`, icon `size-[1.17em]`.
+    fn push_chip(
+        &self,
+        text: &mut String,
+        spans: &mut Vec<FlowSpan>,
+        label: &str,
+        link: usize,
+        inherit: Inherit,
+    ) {
+        let theme = self.theme;
+        let accent: Hsla = color("oklch(0.62 0.11 215)");
+        let size = inherit.size * 0.86;
+        let foreground: Hsla = color_mix(MixSpace::Oklab, accent, 0.22, theme.foreground).into();
+        text.push_str(label);
+        spans.push(FlowSpan {
+            len: label.len(),
+            style: FlowSpanStyle {
+                family: self.fonts.sans.clone(),
+                weight: FontWeight::MEDIUM,
+                italic: false,
+                size,
+                line_height: 1.,
+                color: foreground,
+                strikethrough: false,
+                chrome: Some(SpanChrome {
+                    background: with_alpha(accent, 0.11).into(),
+                    border: Some(color_mix(MixSpace::Oklab, accent, 0.34, theme.border).into()),
+                    radius: size * 0.5,
+                    pad_x: size * 0.5,
+                    pad_y: size * 0.1,
+                    leading: size * 1.5,
+                    icon: Some((IconName::FileText, foreground, size * 1.17, px(0.))),
+                }),
+                link: Some(link),
+                background: None,
+                atomic: true,
+            },
+        });
     }
 
     fn span_style(&self, marks: Marks, inherit: Inherit, theme: &AppTheme) -> FlowSpanStyle {
@@ -204,6 +327,7 @@ impl Md<'_> {
             chrome: None,
             link: marks.link,
             background: None,
+            atomic: false,
         };
         if marks.strong {
             // Preflight `font-weight: bolder`.
@@ -224,6 +348,8 @@ impl Md<'_> {
                 radius: self.rem(0.375),
                 pad_x: self.rem(0.35),
                 pad_y: self.rem(0.1),
+                leading: px(0.),
+                icon: None,
             });
         }
         if marks.link.is_some() {
@@ -712,6 +838,7 @@ impl Md<'_> {
             chrome: None,
             link: None,
             background: None,
+            atomic: false,
         };
         for (range, color) in &highlighted.tokens {
             if range.start < cursor || range.end > code_text.len() {
@@ -1003,6 +1130,16 @@ fn extract_fence_title(meta: &str) -> Option<String> {
     .then(|| first.to_string())
 }
 
+/// Host of an `http(s)` link, for its favicon.
+fn external_link_host(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let host = rest.split(['/', '?', '#']).next()?.split('@').next_back()?;
+    let host = host.split(':').next()?.to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
 /// CSS `tab-size: 8`.
 fn expand_tabs(code: &str) -> String {
     if !code.contains('\t') {
@@ -1236,6 +1373,7 @@ mod tests {
                 chrome: None,
                 link: None,
                 background: None,
+                atomic: false,
             },
         }];
         assert_eq!(retarget_spans_for_tabs("a\tb", spans)[0].len, 9);

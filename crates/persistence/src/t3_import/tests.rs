@@ -384,7 +384,8 @@ fn churning_source(dir: &Path) -> (PathBuf, Arc<AtomicBool>, JoinHandle<()>) {
         ",
     )
     .unwrap();
-    for id in 0..300 {
+    // About 1000 pages: a copy one page per step cannot finish inside the test deadline.
+    for id in 0..1000 {
         conn.execute(
             "INSERT INTO blobs (id, body) VALUES (?1, zeroblob(4000))",
             params![id],

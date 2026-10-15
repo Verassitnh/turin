@@ -14,11 +14,12 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use turin_contracts::orchestration_v2::{
     OrchestrationV2DelegatedCompletionCohort, OrchestrationV2DelegatedCompletionCohortDisposition,
-    OrchestrationV2DelegatedCompletionTaskDelivery, OrchestrationV2DelegatedCompletionTaskDeliveryState,
-    OrchestrationV2DomainEvent, OrchestrationV2ExecutionNodeStatus,
-    OrchestrationV2ProviderSessionStatus, OrchestrationV2RunAttemptStatus, OrchestrationV2RunStatus,
-    OrchestrationV2RuntimeRequestStatus, OrchestrationV2ResponseCapability,
-    OrchestrationV2SubagentOrigin, OrchestrationV2ThreadProjection,
+    OrchestrationV2DelegatedCompletionTaskDelivery,
+    OrchestrationV2DelegatedCompletionTaskDeliveryState, OrchestrationV2DomainEvent,
+    OrchestrationV2ExecutionNodeStatus, OrchestrationV2ProviderSessionStatus,
+    OrchestrationV2ResponseCapability, OrchestrationV2RunAttemptStatus, OrchestrationV2RunStatus,
+    OrchestrationV2RuntimeRequestStatus, OrchestrationV2SubagentOrigin,
+    OrchestrationV2ThreadProjection,
 };
 use turin_contracts::{CommandId, PositiveInt, ThreadId, UtcDateTime};
 use turin_provider_core::id_allocator::IdAllocator;
@@ -69,8 +70,8 @@ impl Emitter<'_> {
                 target.insert(key.clone(), value.clone());
             }
         }
-        let event = serde_json::from_value(event)
-            .map_err(|source| ThreadDeletionError { kind, source })?;
+        let event =
+            serde_json::from_value(event).map_err(|source| ThreadDeletionError { kind, source })?;
         self.events.push(event);
         Ok(())
     }
@@ -152,7 +153,8 @@ pub fn plan_thread_deletion(
             *slot = cancelled;
         }
     }
-    let active_by_id = |run_id: &turin_contracts::RunId| active_runs.iter().find(|r| &r.id == run_id);
+    let active_by_id =
+        |run_id: &turin_contracts::RunId| active_runs.iter().find(|r| &r.id == run_id);
 
     for attempt in &projection.attempts {
         let Some(run) = active_by_id(&attempt.run_id) else {
@@ -171,7 +173,10 @@ pub fn plan_thread_deletion(
                 "nodeId": attempt.root_node_id,
                 "providerInstanceId": run.provider_instance_id,
             }),
-            with_fields(attempt, json!({ "status": "cancelled", "completedAt": now })),
+            with_fields(
+                attempt,
+                json!({ "status": "cancelled", "completedAt": now }),
+            ),
         )?;
     }
     for node in &projection.nodes {
@@ -242,7 +247,9 @@ pub fn plan_thread_deletion(
         let next_generation = parent_run
             .delegated_completion
             .as_ref()
-            .map_or(PositiveInt::new(1).expect("one"), |cohort| cohort.next_generation);
+            .map_or(PositiveInt::new(1).expect("one"), |cohort| {
+                cohort.next_generation
+            });
         let mut disposed = parent_run.clone();
         disposed.delegated_completion = Some(OrchestrationV2DelegatedCompletionCohort {
             disposition: OrchestrationV2DelegatedCompletionCohortDisposition::Disposed,
@@ -302,7 +309,10 @@ pub fn plan_thread_deletion(
                 envelope,
                 serde_json::to_value(&updated).unwrap_or(Value::Null),
             )?;
-            if let Some(slot) = subagents.iter_mut().find(|candidate| candidate.id == task.id) {
+            if let Some(slot) = subagents
+                .iter_mut()
+                .find(|candidate| candidate.id == task.id)
+            {
                 *slot = updated;
             }
         }
@@ -347,7 +357,10 @@ pub fn plan_thread_deletion(
         request,
         available_at: None,
     };
-    effects.push(cleanup("terminal.cleanup", EffectRequest::TerminalCleanup {}));
+    effects.push(cleanup(
+        "terminal.cleanup",
+        EffectRequest::TerminalCleanup {},
+    ));
     effects.push(cleanup("preview.cleanup", EffectRequest::PreviewCleanup {}));
     let mut seen = HashSet::new();
     let attachment_ids: Vec<String> = attachment_ids

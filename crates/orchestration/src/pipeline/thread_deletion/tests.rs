@@ -8,20 +8,40 @@ use serde_json::json;
 use turin_contracts::orchestration_v2::OrchestrationV2ThreadProjection;
 
 const THREAD: &str = "thread:delete-plan";
-const STATUSES: [&str; 6] = ["preparing", "queued", "starting", "running", "waiting", "completed"];
+const STATUSES: [&str; 6] = [
+    "preparing",
+    "queued",
+    "starting",
+    "running",
+    "waiting",
+    "completed",
+];
 
 fn make_projection(extra: Value) -> OrchestrationV2ThreadProjection {
     let runs: Vec<Value> = STATUSES
         .iter()
         .enumerate()
         .map(|(index, status)| {
-            let mut run = run_json(&format!("run:delete-plan:{status}"), THREAD, index as u64 + 1, status);
+            let mut run = run_json(
+                &format!("run:delete-plan:{status}"),
+                THREAD,
+                index as u64 + 1,
+                status,
+            );
             run["providerThreadId"] = json!("provider-thread:delete-plan");
             run["rootNodeId"] = json!(format!("node:delete-plan:{status}"));
             run["activeAttemptId"] = json!(format!("attempt:delete-plan:{status}"));
-            run["queuePosition"] = if *status == "queued" { json!(1) } else { Value::Null };
+            run["queuePosition"] = if *status == "queued" {
+                json!(1)
+            } else {
+                Value::Null
+            };
             run["startedAt"] = json!("2026-09-01T00:00:00.000Z");
-            run["completedAt"] = if *status == "completed" { json!("2026-09-01T00:00:00.000Z") } else { Value::Null };
+            run["completedAt"] = if *status == "completed" {
+                json!("2026-09-01T00:00:00.000Z")
+            } else {
+                Value::Null
+            };
             run
         })
         .collect();
@@ -72,7 +92,8 @@ fn make_projection(extra: Value) -> OrchestrationV2ThreadProjection {
     }
     let mut records = projection(THREAD, "project:delete-plan", fields);
     records.thread.branch = Some(turin_contracts::TrimmedNonEmptyString::new("feature").unwrap());
-    records.thread.worktree_path = Some(turin_contracts::TrimmedNonEmptyString::new("/workspace/feature").unwrap());
+    records.thread.worktree_path =
+        Some(turin_contracts::TrimmedNonEmptyString::new("/workspace/feature").unwrap());
     records
 }
 
@@ -127,13 +148,19 @@ fn cancels_active_work_without_reviving_a_run_while_disposing_delegated_completi
     assert_eq!(deleted["worktreePath"], "/workspace/feature");
     assert!(projection.thread.deleted_at.is_none());
 
-    // Every active run is cancelled once; the completed one is left alone.
+    // Every active run is cancelled; the completed one is left alone. The
+    // sixth update is the cohort disposal of the already-cancelled run.
     let run_updates = events_of(&plan, "run.updated");
+    assert_eq!(run_updates.len(), 6);
     let cancelled: Vec<_> = run_updates
         .iter()
         .filter(|event| event["payload"]["status"] == "cancelled")
         .collect();
-    assert_eq!(cancelled.len(), 5);
+    let cancelled_ids: HashSet<&str> = cancelled
+        .iter()
+        .map(|event| event["payload"]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(cancelled_ids.len(), 5);
     for event in &cancelled {
         assert_eq!(event["payload"]["completedAt"], "2026-09-04T00:00:00.000Z");
         assert!(event["payload"]["queuePosition"].is_null());
@@ -152,7 +179,12 @@ fn cancels_active_work_without_reviving_a_run_while_disposing_delegated_completi
     );
     for attempt in events_of(&plan, "run-attempt.updated") {
         assert_eq!(attempt["payload"]["status"], "cancelled");
-        assert!(!attempt["payload"]["runId"].as_str().unwrap().ends_with(":completed"));
+        assert!(
+            !attempt["payload"]["runId"]
+                .as_str()
+                .unwrap()
+                .ends_with(":completed")
+        );
     }
     assert_eq!(events_of(&plan, "run-attempt.updated").len(), 5);
     assert_eq!(events_of(&plan, "node.updated").len(), 5);
@@ -180,7 +212,10 @@ fn cancels_active_work_without_reviving_a_run_while_disposing_delegated_completi
     );
     let tasks = events_of(&plan, "subagent.updated");
     assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0]["payload"]["completionDelivery"]["state"], "disposed");
+    assert_eq!(
+        tasks[0]["payload"]["completionDelivery"]["state"],
+        "disposed"
+    );
     assert_eq!(tasks[0]["nodeId"], "task:delete-plan");
 }
 
@@ -207,7 +242,10 @@ fn queues_provider_and_resource_cleanup_and_preserves_an_earlier_deletion_timest
     );
     let detached = events_of(&plan, "provider-session.detached");
     assert_eq!(detached.len(), 1);
-    assert_eq!(detached[0]["payload"]["providerSessionId"], "session:delete-plan:running");
+    assert_eq!(
+        detached[0]["payload"]["providerSessionId"],
+        "session:delete-plan:running"
+    );
     let requests: Vec<Value> = plan
         .effects
         .iter()

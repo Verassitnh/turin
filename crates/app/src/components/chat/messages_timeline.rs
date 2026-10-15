@@ -203,10 +203,19 @@ impl MessagesTimeline {
 
     /// Re-derives rows and splices the list over the changed range only.
     fn recompute(&mut self, cx: &mut Context<Self>) {
+        let started = std::time::Instant::now();
         let snapshot = self.store.read(cx).snapshot().clone();
         let input = self.rows_input(&snapshot);
+        let t_input = started.elapsed();
         let projection = derive_messages_timeline_rows_with_state(input, self.projection.as_ref());
+        let t_derive = started.elapsed();
         self.stable = compute_stable_messages_timeline_rows(projection.rows.clone(), &self.stable);
+        tracing::debug!(
+            input_us = t_input.as_micros() as u64,
+            derive_us = (t_derive - t_input).as_micros() as u64,
+            stable_us = (started.elapsed() - t_derive).as_micros() as u64,
+            "timeline phases"
+        );
         self.projection = Some(projection);
         let next = self.stable.result.clone();
         let previous = std::mem::replace(&mut self.rows, next.clone());
@@ -231,6 +240,12 @@ impl MessagesTimeline {
                 self.list.splice(old_range, count);
             }
         }
+        tracing::debug!(
+            entries = snapshot.timeline_entries.len(),
+            rows = self.rows.len(),
+            elapsed_us = started.elapsed().as_micros() as u64,
+            "timeline rows derived"
+        );
         self.update_ticker(snapshot.is_working, cx);
     }
 
@@ -260,6 +275,7 @@ impl MessagesTimeline {
             return div().h(rems(1.)).into_any_element();
         }
         let row = self.rows[ix - 1].clone();
+        tracing::trace!(ix, kind = row.kind().as_str(), "render timeline row");
         let row_cx = RowCx {
             theme: cx.app_theme().clone(),
             view: cx.entity(),

@@ -1677,7 +1677,8 @@ fn timeline_row_entries(entries: &[TimelineEntry]) -> Vec<TimelineEntry> {
 /// `MessagesTimelineRowsInput`). Absent optional sets are empty.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MessagesTimelineRowsInput {
-    pub timeline_entries: Vec<TimelineEntry>,
+    /// Shared so a recompute never deep-copies the thread.
+    pub timeline_entries: Arc<Vec<TimelineEntry>>,
     pub latest_run: Option<TimelineLatestRun>,
     pub running_run_id: Option<String>,
     pub expanded_run_ids: HashSet<String>,
@@ -2529,7 +2530,7 @@ fn replace_streaming_message_rows(
         return None;
     }
     let mut replacements: HashMap<&str, (&ChatMessage, &TimelineEntry)> = HashMap::new();
-    for (entry, previous_entry) in input.timeline_entries.iter().zip(previous_entries) {
+    for (entry, previous_entry) in input.timeline_entries.iter().zip(previous_entries.iter()) {
         if entry == previous_entry {
             continue;
         }

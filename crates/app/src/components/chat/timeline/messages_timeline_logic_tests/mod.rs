@@ -193,7 +193,7 @@ pub(super) fn rows_input(
     is_working: bool,
 ) -> MessagesTimelineRowsInput {
     MessagesTimelineRowsInput {
-        timeline_entries,
+        timeline_entries: Arc::new(timeline_entries),
         is_working,
         ..Default::default()
     }

@@ -908,7 +908,13 @@ fn add_working_turns(b: &mut ThreadBuilder) {
 pub fn startup_thread() -> FixtureThread {
     match std::env::var("TURIN_FIXTURE").as_deref() {
         Ok("working") => working_thread(),
-        Ok("stress") => long_thread(1200),
+        Ok("stress") => {
+            let start = Utc::now() - Duration::hours(300);
+            let mut b = ThreadBuilder::new("thread-stress", "Stress", start);
+            add_settled_turns(&mut b, 1200);
+            add_working_turns(&mut b);
+            b.build_working()
+        }
         Ok("short") => long_thread(6),
         _ => {
             let start = Utc::now() - Duration::hours(30);

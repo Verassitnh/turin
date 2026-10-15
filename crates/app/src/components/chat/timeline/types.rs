@@ -343,7 +343,7 @@ pub struct PendingUserInput {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThreadTimelineSnapshot {
     pub thread_id: String,
-    pub timeline_entries: Vec<TimelineEntry>,
+    pub timeline_entries: std::sync::Arc<Vec<TimelineEntry>>,
     pub latest_run: Option<TimelineLatestRun>,
     pub running_run_id: Option<String>,
     pub is_working: bool,

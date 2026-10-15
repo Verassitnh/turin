@@ -80,6 +80,7 @@ impl ThreadTimelineStore {
 /// Builds a snapshot from fixture turn items the way the client runtime
 /// would from a projection.
 pub fn snapshot_from_fixture(thread: &FixtureThread) -> ThreadTimelineSnapshot {
+    let started = std::time::Instant::now();
     let timeline_entries = derive_timeline_entries_from_visible_turn_items(&TimelineEntriesInput {
         visible_turn_items: thread.items.clone(),
         ..Default::default()
@@ -91,9 +92,9 @@ pub fn snapshot_from_fixture(thread: &FixtureThread) -> ThreadTimelineSnapshot {
             RunStatus::Running | RunStatus::Starting | RunStatus::Waiting
         )
     });
-    ThreadTimelineSnapshot {
+    let snapshot = ThreadTimelineSnapshot {
         thread_id: thread.thread_id.clone(),
-        timeline_entries,
+        timeline_entries: Arc::new(timeline_entries),
         running_run_id: running.map(|run| run.run_id.clone()),
         is_working: running.is_some(),
         active_turn_started_at: running.and_then(|run| run.started_at.clone()),
@@ -104,7 +105,13 @@ pub fn snapshot_from_fixture(thread: &FixtureThread) -> ThreadTimelineSnapshot {
         pending_user_inputs: thread.pending_user_inputs.clone(),
         workspace_root: thread.workspace_root.clone(),
         ..Default::default()
-    }
+    };
+    tracing::debug!(
+        items = thread.items.len(),
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "timeline entries derived"
+    );
+    snapshot
 }
 
 /// Fixture-backed source. Streams the open assistant message in small

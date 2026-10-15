@@ -595,7 +595,13 @@ struct FlowRetained {
     selection: Option<TextSelectionHandle>,
     /// Text the last paint selected, for copy.
     selected: Rc<RefCell<String>>,
-    hovered_link: Option<usize>,
+    /// Shared with the mouse handlers, which run outside paint.
+    links: Rc<RefCell<LinkInteraction>>,
+}
+
+#[derive(Default)]
+struct LinkInteraction {
+    hovered: Option<usize>,
     pressed_at: Option<Point<Pixels>>,
 }
 
@@ -707,8 +713,7 @@ impl Element for InlineFlow {
                     cache: Rc::default(),
                     selection: None,
                     selected: Rc::default(),
-                    hovered_link: None,
-                    pressed_at: None,
+                    links: Rc::default(),
                 });
                 (retained.cache.clone(), retained)
             },
@@ -822,8 +827,7 @@ impl Element for InlineFlow {
                         cache: cache.clone(),
                         selection: None,
                         selected: Rc::default(),
-                        hovered_link: None,
-                        pressed_at: None,
+                        links: Rc::default(),
                     });
                     let handle = retained
                         .selection
@@ -863,25 +867,25 @@ impl Element for InlineFlow {
             return;
         };
         let global_id = global_id.expect("InlineFlow has an id");
-        let (handle, selected_text, hovered_link) =
+        let (handle, selected_text, interaction) =
             window.with_element_state(global_id, |retained: Option<FlowRetained>, _| {
                 let retained = retained.unwrap_or_else(|| FlowRetained {
                     cache: cache.clone(),
                     selection: None,
                     selected: Rc::default(),
-                    hovered_link: None,
-                    pressed_at: None,
+                    links: Rc::default(),
                 });
                 (
                     (
                         retained.selection.clone(),
                         retained.selected.clone(),
-                        retained.hovered_link,
+                        retained.links.clone(),
                     ),
                     retained,
                 )
             });
 
+        let hovered_link = interaction.borrow().hovered;
         let c = cache.borrow();
         let Some(layout) = c.layout.as_ref() else {
             return;
@@ -1044,7 +1048,7 @@ impl Element for InlineFlow {
             }
             let links = prepaint.link_hitboxes.clone();
             let hitbox = prepaint.hitbox.clone();
-            let id = global_id.clone();
+            let state = interaction.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, _| {
                 if !phase.bubble() {
                     return;
@@ -1053,43 +1057,30 @@ impl Element for InlineFlow {
                     .iter()
                     .find(|(_, b)| b.contains(&event.position) && hitbox.is_hovered(window))
                     .map(|(link, _)| *link);
-                if now != hovered {
-                    window.with_element_state(&id, |retained: Option<FlowRetained>, _| {
-                        let mut retained = retained.expect("retained flow state");
-                        retained.hovered_link = now;
-                        ((), retained)
-                    });
+                if now != state.borrow().hovered {
+                    state.borrow_mut().hovered = now;
                     window.refresh();
                 }
             });
             let links = prepaint.link_hitboxes.clone();
-            let id = global_id.clone();
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, _| {
+            let state = interaction.clone();
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, _| {
                 if phase.bubble()
                     && event.button == MouseButton::Left
                     && links.iter().any(|(_, b)| b.contains(&event.position))
                 {
-                    window.with_element_state(&id, |retained: Option<FlowRetained>, _| {
-                        let mut retained = retained.expect("retained flow state");
-                        retained.pressed_at = Some(event.position);
-                        ((), retained)
-                    });
+                    state.borrow_mut().pressed_at = Some(event.position);
                 }
             });
             let links = prepaint.link_hitboxes.clone();
             let urls = self.content.links.clone();
             let on_link = self.on_link.clone();
-            let id = global_id.clone();
+            let state = interaction.clone();
             window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
                 if !phase.bubble() || event.button != MouseButton::Left {
                     return;
                 }
-                let pressed =
-                    window.with_element_state(&id, |retained: Option<FlowRetained>, _| {
-                        let mut retained = retained.expect("retained flow state");
-                        let pressed = retained.pressed_at.take();
-                        (pressed, retained)
-                    });
+                let pressed = state.borrow_mut().pressed_at.take();
                 let Some(pressed) = pressed else {
                     return;
                 };

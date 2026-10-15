@@ -5,6 +5,7 @@ pub mod detach_stack_frame;
 pub mod git_patch_path;
 pub mod git_vcs_driver;
 pub mod git_vcs_driver_core;
+pub mod link_created_pull_request;
 pub mod process;
 pub mod remote_refs;
 pub mod shared_git;

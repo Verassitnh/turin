@@ -1961,3 +1961,126 @@ async fn streams_large_transcripts_across_providers_without_hiding_projects() {
     assert_eq!(*double.reopened_bytes.lock(), 5 * sixteen_mib);
 }
 
+#[tokio::test]
+async fn skips_excessive_records_without_blocking_an_older_valid_transcript() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture.workspace("t3code-record-budget-workspace-");
+    for (session_id, padding, mtime_ms) in [
+        ("excessive", "\n".repeat(100_001), now),
+        ("older", String::new(), now - 1_000.0),
+    ] {
+        let contents = [
+            json!({"type": "session_meta", "payload": {"id": session_id, "cwd": workspace.path()}}).to_string(),
+            json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Imported prompt"}}).to_string(),
+        ]
+        .join("\n");
+        write_transcript(
+            &fixture.codex_rollout("2026", "08", "24", &format!("rollout-{session_id}.jsonl")),
+            &format!("{contents}{padding}"),
+            mtime_ms,
+        );
+    }
+
+    let outcomes = collect_outcomes(&fixture.scanner(), workspace.path(), &[]).await;
+
+    let tags: Vec<&str> = outcomes.iter().map(outcome_tag).collect();
+    assert_eq!(tags, vec!["Skipped", "Importable"]);
+    assert_eq!(importable_session_ids(&outcomes), vec!["older".to_owned()]);
+}
+
+/// Records of one transcript, in the shape `source` writes. `later_cwd` appends a
+/// trailing record that carries only a `cwd`.
+fn replacement_contents(
+    source: AgentSessionSource,
+    cwd: &Path,
+    text: &str,
+    later_cwd: Option<&Path>,
+) -> String {
+    let mut records = match source {
+        AgentSessionSource::Codex => vec![
+            json!({"type": "session_meta", "payload": {"id": "replacement-session", "cwd": cwd}}),
+            json!({"type": "event_msg", "payload": {"type": "user_message", "message": text}}),
+        ],
+        AgentSessionSource::ClaudeAgent => vec![json!({
+            "type": "user",
+            "cwd": cwd,
+            "sessionId": "replacement-session",
+            "message": {"content": text},
+        })],
+    };
+    if let Some(later) = later_cwd {
+        records.push(json!({ "cwd": later }));
+    }
+    records
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rechecks_snapshot_cwd_after_replacement() {
+    for source in [AgentSessionSource::ClaudeAgent, AgentSessionSource::Codex] {
+        for replacement in ["same root", "other root", "symlink alias", "other then same"] {
+            let mut fixture = Fixture::new();
+            let now = ms("2026-08-24T12:00:00.000Z");
+            fixture.now_ms = Some(now);
+            let scratch = fixture.workspace("t3code-replaced-cwd-");
+            let workspace = scratch.path().join("original");
+            let other_workspace = scratch.path().join("other");
+            let alias = scratch.path().join("alias");
+            fs::create_dir_all(&workspace).expect("workspace");
+            fs::create_dir_all(&other_workspace).expect("other");
+            if replacement == "symlink alias" {
+                std::os::unix::fs::symlink(&workspace, &alias).expect("symlink");
+            }
+            let file_path = match source {
+                AgentSessionSource::Codex => {
+                    fixture.codex_rollout("2026", "08", "24", "rollout-replaced.jsonl")
+                }
+                AgentSessionSource::ClaudeAgent => fixture.claude_transcript("p", "replaced.jsonl"),
+            };
+            write_transcript(
+                &file_path,
+                &replacement_contents(source, &workspace, "Original prompt", None),
+                now,
+            );
+            let scanner = fixture.scanner();
+            let scan = scanner.scan().await.expect("scan");
+            assert_eq!(paths(&scan), vec![workspace.to_string_lossy().into_owned()], "{replacement}");
+
+            let replacement_cwd = match replacement {
+                "symlink alias" => alias.as_path(),
+                "same root" => workspace.as_path(),
+                _ => other_workspace.as_path(),
+            };
+            let later = (replacement == "other then same").then_some(workspace.as_path());
+            fs::remove_file(&file_path).expect("remove");
+            write_transcript(
+                &file_path,
+                &replacement_contents(source, replacement_cwd, "Replacement prompt", later),
+                now,
+            );
+
+            let outcomes = collect_outcomes(&scanner, &workspace, &[]).await;
+
+            if matches!(replacement, "same root" | "symlink alias") {
+                assert_eq!(outcomes.len(), 1, "{source:?} {replacement}");
+                assert_eq!(
+                    thread_messages(&[match &outcomes[0] {
+                        AgentSessionRecentThread::Importable { thread, .. } => thread.clone(),
+                        other => panic!("expected Importable, got {other:?}"),
+                    }]),
+                    vec![vec!["Replacement prompt".to_owned()]],
+                    "{source:?} {replacement}"
+                );
+            } else {
+                let tags: Vec<&str> = outcomes.iter().map(outcome_tag).collect();
+                assert_eq!(tags, vec!["Skipped"], "{source:?} {replacement}");
+            }
+        }
+    }
+}

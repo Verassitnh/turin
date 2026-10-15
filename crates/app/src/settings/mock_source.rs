@@ -301,6 +301,10 @@ impl SettingsSource for MockSettingsSource {
         self.publish(cx);
     }
 
+    fn open_keybindings_file(&self, _cx: &mut App) {
+        tracing::info!("mock settings: open keybindings.json");
+    }
+
     fn unarchive_thread(&self, thread_id: &str, cx: &mut App) {
         self.state
             .borrow_mut()

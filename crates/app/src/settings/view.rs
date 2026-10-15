@@ -103,6 +103,8 @@ pub struct SettingsView {
     pub(super) sidebar_open: bool,
     pub(super) panels: super::panels::PanelState,
     pub(super) dialog: Option<super::dialog::Dialog>,
+    /// Focus target of the keybinding recorder.
+    pub(super) capture_focus: gpui_kit::FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -130,6 +132,7 @@ impl SettingsView {
             sidebar_open: true,
             panels: Default::default(),
             dialog: None,
+            capture_focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
     }
@@ -147,7 +150,16 @@ impl SettingsView {
     // ── dev hooks (settings/demo.rs) ────────────────────────────────────
 
     pub(super) fn open_menu_for_demo(&mut self, id: String, cx: &mut Context<Self>) {
-        self.menus.open(id);
+        match id.as_str() {
+            // The first keybinding row's `when` builder.
+            "when-first" => {
+                if let Some(row) = self.first_keybinding_row_id(cx) {
+                    self.menus.open(format!("when-row:{row}"));
+                }
+            }
+            "kb-new" => self.panels.keybindings.adding = true,
+            _ => self.menus.open(id),
+        }
         cx.notify();
     }
 
@@ -209,6 +221,32 @@ impl SettingsView {
         cx: &mut Context<Self>,
         commit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
     ) -> Entity<InputState> {
+        self.input_with(id, value, placeholder, false, window, cx, commit)
+    }
+
+    /// Like [`Self::input`] but `commit` also runs on every change.
+    pub(super) fn input_live(
+        &mut self,
+        id: &str,
+        value: &str,
+        placeholder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        commit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Entity<InputState> {
+        self.input_with(id, value, placeholder, true, window, cx, commit)
+    }
+
+    fn input_with(
+        &mut self,
+        id: &str,
+        value: &str,
+        placeholder: &str,
+        live: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        commit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Entity<InputState> {
         let key = SharedString::from(id.to_owned());
         self.input_commits.insert(key.clone(), Rc::new(commit));
         if let Some(state) = self.inputs.get(&key) {
@@ -226,7 +264,9 @@ impl SettingsView {
         });
         let subscription_key = key.clone();
         let subscription = cx.subscribe_in(&state, window, move |this, state, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur)
+                || (live && matches!(event, InputEvent::Change))
+            {
                 let text = state.read(cx).value().to_string();
                 if let Some(commit) = this.input_commits.get(&subscription_key).cloned() {
                     commit(this, text, window, cx);

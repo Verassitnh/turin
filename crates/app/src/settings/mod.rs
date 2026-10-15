@@ -30,3 +30,4 @@ pub mod provider_meta;
 pub mod rows;
 pub mod view;
 pub mod demo;
+pub mod when_tree;

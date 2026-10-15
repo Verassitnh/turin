@@ -40,7 +40,8 @@ pub fn dialog_frame(
 ) -> AnyElement {
     let dark = theme.is_dark();
     let backdrop = with_alpha(theme.background, if dark { 0.64 } else { 0.60 });
-    let popup_bg = with_alpha(theme.background, 0.95);
+    // GPUI has no backdrop blur, so the glass fill is painted opaque.
+    let popup_bg = theme.background;
     let border = if dark {
         with_alpha(tokens::tw::WHITE, 0.08)
     } else {

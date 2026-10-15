@@ -18,7 +18,7 @@ use crate::components::drag_region::no_drag;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{self, RADIUS_LG, RADIUS_MD, RADIUS_SM, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
-use crate::ui::tooltip::{dropdown_glass_background, dropdown_glass_border};
+use crate::ui::tooltip::dropdown_glass_border;
 use crate::ui::{Icon, IconName};
 
 /// Which select / menu popup is open. One at a time, as with base-ui.
@@ -272,7 +272,7 @@ pub fn popup_list(
         .rounded(RADIUS_LG)
         .border_1()
         .border_color(dropdown_glass_border(&theme))
-        .bg(dropdown_glass_background(&theme))
+        .bg(theme.popover)
         .shadow(tokens::shadow_popover(dark))
         .text_color(theme.popover_foreground)
         .children(items.into_iter().map(move |item| {
@@ -388,6 +388,18 @@ pub fn text_field(
     mono: bool,
     cx: &App,
 ) -> Div {
+    text_field_leading(state, width, size, mono, None, cx)
+}
+
+/// [`text_field`] with an `InputGroupAddon` icon before the text.
+pub fn text_field_leading(
+    state: &gpui_kit::Entity<gpui_kit::component::input::InputState>,
+    width: Option<Pixels>,
+    size: FieldSize,
+    mono: bool,
+    leading: Option<AnyElement>,
+    cx: &App,
+) -> Div {
     let theme = cx.app_theme();
     let height = match size {
         FieldSize::Sm => px(28.),
@@ -412,6 +424,8 @@ pub fn text_field(
         .text_size(TEXT_SM.size)
         .when(mono, |this| this.font_family(theme.fonts.mono.clone()))
         .px(px(9.))
+        .gap(px(6.))
+        .children(leading)
         .child(
             gpui_kit::component::input::Input::new(state)
                 .appearance(false)

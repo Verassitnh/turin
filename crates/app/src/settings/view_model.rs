@@ -116,6 +116,8 @@ pub trait SettingsSource {
     fn update_server(&self, patch: Value, cx: &mut App);
     fn upsert_keybinding(&self, input: UpsertKeybinding, cx: &mut App);
     fn remove_keybinding(&self, input: RemoveKeybinding, cx: &mut App);
+    /// Opens `keybindings.json` in the preferred editor.
+    fn open_keybindings_file(&self, cx: &mut App);
     fn unarchive_thread(&self, thread_id: &str, cx: &mut App);
     fn delete_thread(&self, thread_id: &str, cx: &mut App);
 }

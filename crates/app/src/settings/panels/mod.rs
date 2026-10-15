@@ -3,6 +3,7 @@
 //! (`SettingsPageContainer`).
 
 mod general;
+mod keybindings;
 
 use gpui_kit::{
     AnyElement, Context, IntoElement, ParentElement as _, SharedString,
@@ -18,6 +19,7 @@ use crate::ui::scroll_area;
 #[derive(Default)]
 pub struct PanelState {
     pub legacy_open: bool,
+    pub keybindings: keybindings::KeybindingsState,
 }
 
 /// `max-w-4xl`.
@@ -27,6 +29,7 @@ impl SettingsView {
     pub(super) fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let sections: Vec<AnyElement> = match self.route {
             SettingsRoute::Section(SettingsPath::General) => self.render_general(window, cx),
+            SettingsRoute::Section(SettingsPath::Keybindings) => self.render_keybindings(window, cx),
             _ => vec![div()
                 .text_color(cx.app_theme().muted_foreground)
                 .child(SharedString::from(format!(

@@ -11,6 +11,9 @@
 
 pub mod apply;
 pub mod canonical;
+pub mod control;
+#[cfg(test)]
+mod control_tests;
 #[cfg(test)]
 mod read_tests;
 pub mod recovery;
@@ -25,10 +28,10 @@ use std::sync::Arc;
 
 use rusqlite::Connection;
 use turin_contracts::orchestration_v2::{
-    OrchestrationV2AppThread, OrchestrationV2DomainEvent, OrchestrationV2ThreadProjection,
-    OrchestrationV2TurnItem,
+    OrchestrationV2AppThread, OrchestrationV2DomainEvent, OrchestrationV2PlanArtifact,
+    OrchestrationV2RuntimeRequest, OrchestrationV2ThreadProjection, OrchestrationV2TurnItem,
 };
-use turin_contracts::{RunId, ThreadId, TurnItemId};
+use turin_contracts::{ProviderTurnId, RunId, ThreadId, TurnItemId};
 use turin_persistence::Db;
 
 use crate::projection::error::{ProjectionStoreError, ReadFailure, keep_or_read};
@@ -378,6 +381,48 @@ impl ProjectionStore {
         .await
     }
 
+    /// `getPendingNativeUserInputs`.
+    pub async fn get_pending_native_user_inputs(
+        &self,
+        thread_id: &ThreadId,
+        provider_turn_id: &ProviderTurnId,
+    ) -> Result<control::PendingNativeUserInputs, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let provider_turn_id = provider_turn_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            control::pending_native_user_inputs(conn, &thread, &provider_turn_id)
+        })
+        .await
+    }
+
+    /// `getPlan`: `None` when the plan does not exist; errors if the thread does not.
+    pub async fn get_plan(
+        &self,
+        thread_id: &ThreadId,
+        plan_id: &str,
+    ) -> Result<Option<OrchestrationV2PlanArtifact>, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let plan_id = plan_id.to_owned();
+        self.read_for_thread(thread_id, true, move |conn| {
+            control::plan(conn, &thread, &plan_id)
+        })
+        .await
+    }
+
+    /// `getRuntimeRequest`: `None` when the request does not exist; errors if the thread does not.
+    pub async fn get_runtime_request(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+    ) -> Result<Option<OrchestrationV2RuntimeRequest>, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let request_id = request_id.to_owned();
+        self.read_for_thread(thread_id, true, move |conn| {
+            control::runtime_request(conn, &thread, &request_id)
+        })
+        .await
+    }
+
     /// `getRecoveryThreadIds`: threads a boot-time recovery pass of `kind` must visit.
     pub async fn get_recovery_thread_ids(
         &self,
@@ -417,7 +462,7 @@ fn shell_thread_id() -> ThreadId {
     ThreadId::new("thread:shell").expect("literal id")
 }
 
-fn read_thread(
+pub(crate) fn read_thread(
     conn: &Connection,
     thread_id: &ThreadId,
 ) -> Result<OrchestrationV2AppThread, ReadFailure> {

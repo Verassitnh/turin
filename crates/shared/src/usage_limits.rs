@@ -3,10 +3,9 @@
 //! Selection and pace maths for the provider limits view: which providers show,
 //! what "ahead of pace" means, and how a reset is phrased.
 //!
-//! `ServerProvider` lives in `turin-provider-core` here (upstream keeps it in
-//! contracts), so this module depends on that crate. Millisecond instants are
-//! `f64` to match JS `number` arithmetic; `Date.parse` failures are `None`
-//! where upstream compares `NaN`.
+//! Provider fields are read through [`UsageProviderInfo`], so this crate does not depend on the
+//! provider layer. Millisecond instants are `f64` to match JS `number` arithmetic; `Date.parse`
+//! failures are `None` where upstream compares `NaN`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -24,9 +23,6 @@ use turin_contracts::{
         UsageLimitSourceSnapshots, UsageLimitsReport, UsageLimitsReportAccount,
     },
 };
-use turin_provider_core::server_provider::{
-    ServerProvider, ServerProviderAuthStatus, ServerProviderSlashCommand,
-};
 
 use crate::js_string::locale_compare;
 use crate::usage_format::js_math_round;
@@ -37,11 +33,47 @@ const DAY: f64 = 24.0 * HOUR;
 
 pub const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/#settings/Usage";
 
-pub fn uses_chatgpt_sharing(provider: Option<&ServerProvider>) -> bool {
-    provider.is_some_and(|provider| {
-        provider.auth.status == ServerProviderAuthStatus::Authenticated
-            && provider.auth.subscription_sharing == Some(true)
-    })
+/// What the usage-limit views read from one provider instance. `ServerProvider` in
+/// `turin-provider-core` is expected to implement it, and so does the test fake in this module, so
+/// this crate does not depend on the provider layer.
+pub trait UsageProviderInfo: Clone {
+    /// A slash command in the provider's own type.
+    type SlashCommand: Clone;
+
+    fn instance_id(&self) -> &ProviderInstanceId;
+    fn driver(&self) -> &ProviderDriverKind;
+    fn enabled(&self) -> bool;
+    fn installed(&self) -> bool;
+    /// Upstream `isProviderAvailable`: an absent availability counts as available.
+    fn is_available(&self) -> bool;
+    fn display_name(&self) -> Option<&str>;
+    fn accent_color(&self) -> Option<&str>;
+    /// `auth.status === "authenticated"`.
+    fn is_authenticated(&self) -> bool;
+    fn auth_email(&self) -> Option<&str>;
+    fn auth_label(&self) -> Option<&str>;
+    fn auth_workspace_id(&self) -> Option<&str>;
+    /// `auth.subscriptionSharing === true`.
+    fn has_subscription_sharing(&self) -> bool;
+    fn usage_limits(&self) -> Option<&ServerProviderUsageLimits>;
+
+    /// The name of a command, to drop an earlier `usage-limits` entry.
+    fn command_name(command: &Self::SlashCommand) -> &str;
+    /// A command in the provider's own type with the given name and description.
+    fn make_slash_command(name: &str, description: &str) -> Self::SlashCommand;
+    fn slash_commands(&self) -> &[Self::SlashCommand];
+    fn set_slash_commands(&mut self, commands: Vec<Self::SlashCommand>);
+    /// Applies `map` to each workspace snapshot's commands, in place. A provider without
+    /// snapshots is left alone.
+    fn map_workspace_snapshot_commands<F>(&mut self, map: F)
+    where
+        F: FnMut(&[Self::SlashCommand]) -> Vec<Self::SlashCommand>;
+}
+
+/// `usesChatGptSharing`: verified sharing metadata, not the driver or the login type.
+pub fn uses_chatgpt_sharing<P: UsageProviderInfo>(provider: Option<&P>) -> bool {
+    provider
+        .is_some_and(|provider| provider.is_authenticated() && provider.has_subscription_sharing())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,14 +115,14 @@ fn cursor_usage_window_rank(id: &str) -> usize {
 /// Providers that belong on the Limits view: enabled, installed, and one whose
 /// driver reports subscription usage at all. A driver with no notion of usage
 /// never sets `usageLimits`, so it has no row rather than an empty one.
-pub fn providers_with_limits(providers: &[ServerProvider]) -> Vec<&ServerProvider> {
+pub fn providers_with_limits<P: UsageProviderInfo>(providers: &[P]) -> Vec<&P> {
     providers
         .iter()
         .filter(|provider| {
-            provider.enabled
-                && provider.installed
+            provider.enabled()
+                && provider.installed()
                 && provider.is_available()
-                && provider.usage_limits.is_some()
+                && provider.usage_limits().is_some()
         })
         .collect()
 }
@@ -98,14 +130,14 @@ pub fn providers_with_limits(providers: &[ServerProvider]) -> Vec<&ServerProvide
 /// What Limits needs from one connected environment: its label, its native
 /// providers, and its usage-limit sources. A null `serverConfig` upstream is
 /// the same as empty lists here.
-#[derive(Debug, Clone, Default)]
-pub struct LimitPresentation {
+#[derive(Debug, Clone)]
+pub struct LimitPresentation<P> {
     pub label: String,
-    pub providers: Vec<ServerProvider>,
+    pub providers: Vec<P>,
     pub usage_limit_sources: UsageLimitSourceSnapshots,
 }
 
-pub type LimitPresentations = IndexMap<EnvironmentId, LimitPresentation>;
+pub type LimitPresentations<P> = IndexMap<EnvironmentId, LimitPresentation<P>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalUsageLink {
@@ -116,26 +148,26 @@ pub struct ExternalUsageLink {
 }
 
 /// One destination per service, even when several accounts or environments use it.
-pub fn collect_external_usage_links(presentations: &LimitPresentations) -> Vec<ExternalUsageLink> {
+pub fn collect_external_usage_links<P: UsageProviderInfo>(
+    presentations: &LimitPresentations<P>,
+) -> Vec<ExternalUsageLink> {
     let mut links: IndexMap<String, ExternalUsageLink> = IndexMap::new();
     for presentation in presentations.values() {
         for provider in providers_with_limits(&presentation.providers) {
             let Some(external) = provider
-                .usage_limits
-                .as_ref()
+                .usage_limits()
                 .and_then(|limits| limits.external_usage.as_ref())
             else {
                 continue;
             };
-            if provider.auth.status != ServerProviderAuthStatus::Authenticated {
+            if !provider.is_authenticated() {
                 continue;
             }
             let account = format!(
                 "{} on {}",
                 provider
-                    .display_name
-                    .as_ref()
-                    .map_or(provider.instance_id.as_str(), |name| name.as_str()),
+                    .display_name()
+                    .unwrap_or_else(|| provider.instance_id().as_str()),
                 presentation.label
             );
             let url = external.url.as_str().to_owned();
@@ -147,8 +179,7 @@ pub fn collect_external_usage_links(presentations: &LimitPresentations) -> Vec<E
                 accounts.push(account);
             }
             let message = provider
-                .usage_limits
-                .as_ref()
+                .usage_limits()
                 .and_then(|limits| limits.unavailable.as_ref())
                 .and_then(|unavailable| unavailable.message.as_ref())
                 .map(|message| message.as_str().to_owned());
@@ -191,16 +222,12 @@ struct AccountReport<'a> {
     usage_limits: Option<&'a ServerProviderUsageLimits>,
 }
 
-fn native_report(provider: &ServerProvider) -> AccountReport<'_> {
+fn native_report<P: UsageProviderInfo>(provider: &P) -> AccountReport<'_> {
     AccountReport {
-        driver: provider.driver.as_str(),
-        email: provider.auth.email.as_ref().map(|email| email.as_str()),
-        workspace_id: provider
-            .auth
-            .workspace_id
-            .as_ref()
-            .map(|workspace| workspace.as_str()),
-        usage_limits: provider.usage_limits.as_ref(),
+        driver: provider.driver().as_str(),
+        email: provider.auth_email(),
+        workspace_id: provider.auth_workspace_id(),
+        usage_limits: provider.usage_limits(),
     }
 }
 
@@ -399,34 +426,23 @@ impl AccountMerger {
     }
 }
 
-fn native_limit_account(
+fn native_limit_account<P: UsageProviderInfo>(
     environment_id: &EnvironmentId,
     label: &str,
-    provider: &ServerProvider,
+    provider: &P,
     limits: &ServerProviderUsageLimits,
 ) -> LimitAccount {
     LimitAccount {
         key: format!(
             "{}:{}",
             environment_id.as_str(),
-            provider.instance_id.as_str()
+            provider.instance_id().as_str()
         ),
-        driver: provider.driver.clone(),
-        display_name: non_blank(provider.display_name.as_ref().map(|name| name.as_str())),
-        email: provider
-            .auth
-            .email
-            .as_ref()
-            .map(|email| email.as_str().to_owned()),
-        plan: provider
-            .auth
-            .label
-            .as_ref()
-            .map(|plan| plan.as_str().to_owned()),
-        accent_color: provider
-            .accent_color
-            .as_ref()
-            .map(|color| color.as_str().to_owned()),
+        driver: provider.driver().clone(),
+        display_name: non_blank(provider.display_name()),
+        email: provider.auth_email().map(str::to_owned),
+        plan: provider.auth_label().map(str::to_owned),
+        accent_color: provider.accent_color().map(str::to_owned),
         environments: vec![LimitEnvironment {
             environment_id: environment_id.clone(),
             label: label.to_owned(),
@@ -435,7 +451,7 @@ fn native_limit_account(
         redeem: Some(LimitRedeem {
             environment_id: environment_id.clone(),
             input: ProviderConsumeResetCreditInput::Instance {
-                instance_id: provider.instance_id.clone(),
+                instance_id: provider.instance_id().clone(),
             },
         }),
         limits: limits.clone(),
@@ -453,13 +469,15 @@ fn non_blank(value: Option<&str>) -> Option<String> {
 /// Every account with usable windows across the connected environments, one
 /// entry per distinct account. The freshest reads supply windows and credits;
 /// native instances supply names and environment labels.
-pub fn collect_limit_accounts(presentations: &LimitPresentations) -> Vec<LimitAccount> {
+pub fn collect_limit_accounts<P: UsageProviderInfo>(
+    presentations: &LimitPresentations<P>,
+) -> Vec<LimitAccount> {
     let mut merger = AccountMerger::default();
     let resolve_key = AccountKeyResolver::new(presentations.values().flat_map(|presentation| {
         presentation
             .providers
             .iter()
-            .filter(|provider| provider.enabled)
+            .filter(|provider| provider.enabled())
             .map(native_report)
             .chain(
                 presentation
@@ -470,7 +488,7 @@ pub fn collect_limit_accounts(presentations: &LimitPresentations) -> Vec<LimitAc
     }));
     for (environment_id, presentation) in presentations {
         for provider in providers_with_limits(&presentation.providers) {
-            let Some(limits) = provider.usage_limits.as_ref() else {
+            let Some(limits) = provider.usage_limits() else {
                 continue;
             };
             if limits_notice(limits).is_some() {
@@ -480,7 +498,7 @@ pub fn collect_limit_accounts(presentations: &LimitPresentations) -> Vec<LimitAc
                 format!(
                     "{}:{}",
                     environment_id.as_str(),
-                    provider.instance_id.as_str()
+                    provider.instance_id().as_str()
                 )
             });
             let account =
@@ -575,7 +593,9 @@ fn strip_json_suffix(id: &str) -> &str {
 /// provider whose probe failed. Accounts that can never report (API keys)
 /// are left out; there is nothing for the user to act on. The environment
 /// is named only when more than one is connected.
-pub fn collect_limit_notices(presentations: &LimitPresentations) -> Vec<String> {
+pub fn collect_limit_notices<P: UsageProviderInfo>(
+    presentations: &LimitPresentations<P>,
+) -> Vec<String> {
     let label = |environment_label: &str, subject: &str| {
         if presentations.len() > 1 {
             format!("{environment_label} · {subject}")
@@ -589,14 +609,14 @@ pub fn collect_limit_notices(presentations: &LimitPresentations) -> Vec<String> 
         for provider in providers_with_limits(&presentation.providers) {
             // An account that can never report (API key) is left out; one that
             // failed, or reported nothing at all, is worth a line.
-            if unavailable_reason(provider.usage_limits.as_ref())
+            if unavailable_reason(provider.usage_limits())
                 == Some(ServerProviderUsageUnavailableReason::Unsupported)
             {
                 continue;
             }
-            let notice = provider.usage_limits.as_ref().and_then(limits_notice);
-            let name = non_blank(provider.display_name.as_ref().map(|name| name.as_str()))
-                .unwrap_or_else(|| provider.driver.as_str().to_owned());
+            let notice = provider.usage_limits().and_then(limits_notice);
+            let name = non_blank(provider.display_name())
+                .unwrap_or_else(|| provider.driver().as_str().to_owned());
             if let Some(notice) = notice {
                 notices.push(format!("{}: {notice}", label(environment_label, &name)));
             }
@@ -1056,14 +1076,9 @@ pub fn format_resets_in(window: &ServerProviderUsageWindow, now: f64) -> Option<
 
 pub const USAGE_LIMITS_COMMAND_NAME: &str = "usage-limits";
 
-/// Limit commands are served by T3 from the same snapshots as Usage → Limits.
-pub fn usage_limits_command() -> ServerProviderSlashCommand {
-    ServerProviderSlashCommand {
-        name: tne(USAGE_LIMITS_COMMAND_NAME),
-        description: Some(tne("Show this provider's usage limits")),
-        input: None,
-    }
-}
+/// Description of the `usage-limits` command: Limit commands are served by T3 from the same
+/// snapshots as Usage → Limits.
+pub const USAGE_LIMITS_COMMAND_DESCRIPTION: &str = "Show this provider's usage limits";
 
 /// Handled by the client without sending a turn; anything with arguments stays an ordinary prompt.
 pub fn is_usage_limits_command(prompt: &str) -> bool {
@@ -1073,14 +1088,14 @@ pub fn is_usage_limits_command(prompt: &str) -> bool {
 /// Whether Limits has anything to say about this driver. A source that failed to
 /// read keeps no accounts, so its error counts for every driver rather than
 /// disappearing until the next successful refresh.
-pub fn has_provider_usage_limits(
+pub fn has_provider_usage_limits<P: UsageProviderInfo>(
     driver: &str,
-    providers: &[ServerProvider],
+    providers: &[P],
     sources: &[UsageLimitSourceSnapshot],
 ) -> bool {
     providers_with_limits(providers)
         .iter()
-        .any(|provider| provider.driver.as_str() == driver)
+        .any(|provider| provider.driver().as_str() == driver)
         || sources.iter().any(|source| {
             source
                 .accounts
@@ -1119,57 +1134,58 @@ pub fn same_usage_limit_command_coverage(
 }
 
 /// Advertise on workspace catalogs too, which replace the global command list.
-pub fn with_usage_limits_commands(
-    providers: &[ServerProvider],
+pub fn with_usage_limits_commands<P: UsageProviderInfo>(
+    providers: &[P],
     sources: &[UsageLimitSourceSnapshot],
-) -> Vec<ServerProvider> {
-    let with_command = |items: &[ServerProviderSlashCommand]| -> Vec<ServerProviderSlashCommand> {
+) -> Vec<P> {
+    let with_command = |items: &[P::SlashCommand]| -> Vec<P::SlashCommand> {
         items
             .iter()
-            .filter(|command| command.name.as_str() != USAGE_LIMITS_COMMAND_NAME)
+            .filter(|command| P::command_name(command) != USAGE_LIMITS_COMMAND_NAME)
             .cloned()
-            .chain(std::iter::once(usage_limits_command()))
+            .chain(std::iter::once(P::make_slash_command(
+                USAGE_LIMITS_COMMAND_NAME,
+                USAGE_LIMITS_COMMAND_DESCRIPTION,
+            )))
             .collect()
     };
     providers
         .iter()
         .map(|provider| {
-            if !has_provider_usage_limits(provider.driver.as_str(), providers, sources) {
+            if !has_provider_usage_limits(provider.driver().as_str(), providers, sources) {
                 return provider.clone();
             }
             let mut next = provider.clone();
-            next.slash_commands = with_command(&provider.slash_commands);
-            if let Some(snapshots) = next.workspace_snapshots.as_mut() {
-                for snapshot in snapshots {
-                    snapshot.slash_commands = with_command(&snapshot.slash_commands);
-                }
-            }
+            next.set_slash_commands(with_command(provider.slash_commands()));
+            next.map_workspace_snapshot_commands(|snapshot: &[P::SlashCommand]| {
+                with_command(snapshot)
+            });
             next
         })
         .collect()
 }
 
 /// A point-in-time report; never refreshes or guesses which pooled account serves a turn.
-pub fn collect_provider_usage_limits(
+pub fn collect_provider_usage_limits<P: UsageProviderInfo>(
     instance_id: &ProviderInstanceId,
-    providers: &[ServerProvider],
+    providers: &[P],
     sources: &[UsageLimitSourceSnapshot],
     now: f64,
 ) -> Option<UsageLimitsReport> {
     let selected = providers
         .iter()
-        .find(|provider| provider.instance_id == *instance_id)?;
-    if !has_provider_usage_limits(selected.driver.as_str(), providers, sources) {
+        .find(|provider| provider.instance_id() == instance_id)?;
+    if !has_provider_usage_limits(selected.driver().as_str(), providers, sources) {
         return None;
     }
-    let native: Vec<&ServerProvider> = providers_with_limits(providers)
+    let native: Vec<&P> = providers_with_limits(providers)
         .into_iter()
-        .filter(|provider| provider.driver == selected.driver)
+        .filter(|provider| provider.driver() == selected.driver())
         .collect();
     let resolve_key = AccountKeyResolver::new(
         providers
             .iter()
-            .filter(|provider| provider.enabled)
+            .filter(|provider| provider.enabled())
             .map(native_report)
             .chain(
                 sources
@@ -1180,18 +1196,18 @@ pub fn collect_provider_usage_limits(
     let native_accounts: HashSet<String> = native
         .iter()
         .filter_map(|provider| {
-            let key = resolve_key.key(native_report(provider))?;
-            let limits = provider.usage_limits.as_ref()?;
+            let key = resolve_key.key(native_report(*provider))?;
+            let limits = provider.usage_limits()?;
             (!limits.windows.is_empty() && limits.unavailable.is_none()).then_some(key)
         })
         .collect();
     let mut accounts: Vec<UsageLimitsReportAccount> = Vec::new();
     let mut notices: Vec<String> = Vec::new();
     for provider in &native {
-        let Some(limits) = provider.usage_limits.as_ref() else {
+        let Some(limits) = provider.usage_limits() else {
             continue;
         };
-        let key = resolve_key.key(native_report(provider));
+        let key = resolve_key.key(native_report(*provider));
         // Two independent decisions. Which balance to *display* follows whichever
         // snapshot is fresher. Which path to *redeem through* always prefers the
         // hub, because only the hub path clears the routing cooldown it holds for
@@ -1231,17 +1247,17 @@ pub fn collect_provider_usage_limits(
             limits.reset_credits.is_none()
                 || is_later(&account.usage_limits.checked_at, &limits.checked_at)
         });
-        let display_name = non_blank(provider.display_name.as_ref().map(|name| name.as_str()))
-            .unwrap_or_else(|| provider.driver.as_str().to_owned());
+        let display_name = non_blank(provider.display_name())
+            .unwrap_or_else(|| provider.driver().as_str().to_owned());
         accounts.push(UsageLimitsReportAccount {
-            id: tne(provider.instance_id.as_str()),
-            driver: provider.driver.clone(),
+            id: tne(provider.instance_id().as_str()),
+            driver: provider.driver().clone(),
             label: tne(format!(
                 "{display_name} [{}]",
-                provider.instance_id.as_str()
+                provider.instance_id().as_str()
             )),
-            plan: provider.auth.label.clone(),
-            instance_id: Some(provider.instance_id.clone()),
+            plan: provider.auth_label().map(tne),
+            instance_id: Some(provider.instance_id().clone()),
             reset_credit_input: match (hub_credit_id, hub_credits) {
                 (Some(credit_id), Some((source, account))) => {
                     Some(ProviderConsumeResetCreditInput::Source(
@@ -1253,18 +1269,12 @@ pub fn collect_provider_usage_limits(
                     ))
                 }
                 _ => Some(ProviderConsumeResetCreditInput::Instance {
-                    instance_id: provider.instance_id.clone(),
+                    instance_id: provider.instance_id().clone(),
                 }),
             },
-            display_name: provider
-                .display_name
-                .as_ref()
-                .map(|name| name.as_str().to_owned()),
-            accent_color: provider
-                .accent_color
-                .as_ref()
-                .map(|color| color.as_str().to_owned()),
-            email: provider.auth.email.clone(),
+            display_name: provider.display_name().map(str::to_owned),
+            accent_color: provider.accent_color().map(str::to_owned),
+            email: provider.auth_email().map(tne),
             source_label: None,
             limits: match hub_credits {
                 Some((_, account)) if show_hub_credits => {
@@ -1280,7 +1290,7 @@ pub fn collect_provider_usage_limits(
         let matching: Vec<&UsageLimitSourceAccount> = source
             .accounts
             .iter()
-            .filter(|account| account.driver == selected.driver)
+            .filter(|account| account.driver == *selected.driver())
             .collect();
         for account in &matching {
             let key = resolve_key.key(source_report(account));
@@ -1350,9 +1360,131 @@ fn tne(value: impl AsRef<str>) -> TrimmedNonEmptyString {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
     use std::sync::Arc;
     use turin_contracts::usage_limit_source_id::UsageLimitSourceId;
+
+    /// Test stand-in for `ServerProvider`: the same wire keys, so fixtures stay JSON.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeProvider {
+        instance_id: ProviderInstanceId,
+        driver: ProviderDriverKind,
+        enabled: bool,
+        installed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        availability: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        accent_color: Option<String>,
+        auth: FakeAuth,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage_limits: Option<ServerProviderUsageLimits>,
+        #[serde(default)]
+        slash_commands: Vec<FakeCommand>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_snapshots: Option<Vec<FakeSnapshot>>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeAuth {
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        email: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subscription_sharing: Option<bool>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeCommand {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FakeSnapshot {
+        #[serde(default)]
+        slash_commands: Vec<FakeCommand>,
+    }
+
+    impl UsageProviderInfo for FakeProvider {
+        type SlashCommand = FakeCommand;
+
+        fn instance_id(&self) -> &ProviderInstanceId {
+            &self.instance_id
+        }
+        fn driver(&self) -> &ProviderDriverKind {
+            &self.driver
+        }
+        fn enabled(&self) -> bool {
+            self.enabled
+        }
+        fn installed(&self) -> bool {
+            self.installed
+        }
+        fn is_available(&self) -> bool {
+            self.availability.as_deref() != Some("unavailable")
+        }
+        fn display_name(&self) -> Option<&str> {
+            self.display_name.as_deref()
+        }
+        fn accent_color(&self) -> Option<&str> {
+            self.accent_color.as_deref()
+        }
+        fn is_authenticated(&self) -> bool {
+            self.auth.status == "authenticated"
+        }
+        fn auth_email(&self) -> Option<&str> {
+            self.auth.email.as_deref()
+        }
+        fn auth_label(&self) -> Option<&str> {
+            self.auth.label.as_deref()
+        }
+        fn auth_workspace_id(&self) -> Option<&str> {
+            self.auth.workspace_id.as_deref()
+        }
+        fn has_subscription_sharing(&self) -> bool {
+            self.auth.subscription_sharing == Some(true)
+        }
+        fn usage_limits(&self) -> Option<&ServerProviderUsageLimits> {
+            self.usage_limits.as_ref()
+        }
+        fn command_name(command: &FakeCommand) -> &str {
+            &command.name
+        }
+        fn make_slash_command(name: &str, description: &str) -> FakeCommand {
+            FakeCommand {
+                name: name.to_owned(),
+                description: Some(description.to_owned()),
+            }
+        }
+        fn slash_commands(&self) -> &[FakeCommand] {
+            &self.slash_commands
+        }
+        fn set_slash_commands(&mut self, commands: Vec<FakeCommand>) {
+            self.slash_commands = commands;
+        }
+        fn map_workspace_snapshot_commands<F>(&mut self, mut map: F)
+        where
+            F: FnMut(&[FakeCommand]) -> Vec<FakeCommand>,
+        {
+            for snapshot in self.workspace_snapshots.iter_mut().flatten() {
+                snapshot.slash_commands = map(&snapshot.slash_commands);
+            }
+        }
+    }
+
+    type ServerProvider = FakeProvider;
 
     fn ms(value: &str) -> f64 {
         parse_date_ms(value).expect("test instant parses")
@@ -1434,7 +1566,7 @@ mod tests {
         label: &str,
         providers: Vec<ServerProvider>,
         sources: Vec<UsageLimitSourceSnapshot>,
-    ) -> LimitPresentation {
+    ) -> LimitPresentation<FakeProvider> {
         LimitPresentation {
             label: label.to_owned(),
             providers,
@@ -1442,7 +1574,9 @@ mod tests {
         }
     }
 
-    fn map(entries: Vec<(&str, LimitPresentation)>) -> LimitPresentations {
+    fn map(
+        entries: Vec<(&str, LimitPresentation<FakeProvider>)>,
+    ) -> LimitPresentations<FakeProvider> {
         entries
             .into_iter()
             .map(|(id, presentation)| (env(id), presentation))
@@ -1591,7 +1725,7 @@ mod tests {
         assert_eq!(kept[0], &codex);
     }
 
-    fn laptop(providers: Vec<ServerProvider>) -> LimitPresentation {
+    fn laptop(providers: Vec<ServerProvider>) -> LimitPresentation<FakeProvider> {
         pres("Laptop", providers, vec![])
     }
 
@@ -2765,7 +2899,13 @@ mod tests {
             vec!["codex", "codex-work", "hub:oss"]
         );
         assert_eq!(report.accounts[0].instance_id, Some(instance("codex")));
-        assert_eq!(report.accounts[0].email, selected.auth.email);
+        assert_eq!(
+            report.accounts[0]
+                .email
+                .as_ref()
+                .map(|email| email.as_str()),
+            selected.auth.email.as_deref()
+        );
         assert_eq!(report.accounts[1].display_name.as_deref(), Some("Work"));
         assert_eq!(
             report.accounts[1]
@@ -3174,7 +3314,7 @@ mod tests {
             &codex,
             json!({"auth": {"status": "unauthenticated", "subscriptionSharing": true}}),
         ))));
-        assert!(!uses_chatgpt_sharing(None));
+        assert!(!uses_chatgpt_sharing::<FakeProvider>(None));
     }
 
     #[test]

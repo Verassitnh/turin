@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 turin-contracts.workspace = true
-turin-provider-core.workspace = true
 anyhow.workspace = true
 iana-time-zone.workspace = true
 indexmap.workspace = true

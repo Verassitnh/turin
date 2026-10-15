@@ -175,7 +175,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T09a | Codex app-server protocol: codegen types from JSON schema + stdio JSON-RPC client | `crates/codex-app-server` | Codex → Grok | **merged to main** (33 tests; QC PASS wf_d1ca0d2b-4c4, fixes T09ac) |
 | T09 | Codex provider: CodexAdapterV2 + provider/Codex* | `crates/provider-codex` | Codex | r3 active (Codex re-auth) |
-| T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok → Cursor Auto | r3 fixes done (16 items, 31 tests) → re-QC queued (Haiku) |
+| T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok → Cursor Auto | **merged to main** (36 tests; re-QC PASS wf_5cb03da3-528, fixes T10ac4) |
 | T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex | r3 active (Codex re-auth) |
 | T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | done → QC wf_118a9a5d-526 |
 | T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok → Cursor Auto | r3: process leak + unjustified cuts (92 tests) |
@@ -192,9 +192,9 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T15 | Sidebar (projects, threads, status, snooze, search, drag) | `crates/app/src/components/sidebar` | Opus | done (286 tests) → QC queued |
 | T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/components/chat` | Opus → Haiku (T16c fixes) | QC PASS → T16c fix round active |
-| T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus → Sonnet | active (base: T16) |
+| T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus → Sonnet | built (675 tests, screenshots) → QC running wf_ad0ea466-91d |
 | T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus → Sonnet | active (base: T16) |
-| T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Sonnet | paused (Claude budget; next Sonnet UI slot) |
+| T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Sonnet | active (Sonnet, base T16 + T14) |
 | T20 | Settings + keybindings UI | `crates/app/src/settings` | Opus | todo |
 
 ### Wave 5: glue
@@ -204,7 +204,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T21 | Hooks crate (orchestrator wiring later; UI parts → Opus) | `crates/hooks` | GLM → Sonnet | done (merged; re-QC PASS) |
 | T21c | Hooks trust covers all of `.turin/` + docs/test fixes from re-QC | `crates/hooks` | Sonnet | done (merged; security re-QC queued) |
 | T22 | App wiring: runtime bridge, end-to-end smoke with each provider | `crates/app` | Opus | todo |
-| T23 | T3 database import | `crates/persistence` | Grok → Cursor Auto | done (905 threads / 164,813 events decode, 0 errors) → QC queued |
+| T23 | T3 database import | `crates/persistence` | Grok → Cursor Auto | **merged to main** (95 tests; QC PASS wf_42a38ca2-bee, fixes T23c; accepts older DBs like upstream) |
 
 ### Brand
 

@@ -11,7 +11,9 @@ pub use launch::{
     InitializeOptions, LaunchOptions, LaunchSpec, Plugin, PromptBody, SDK_VERSION, Skills,
     SystemPrompt, Thinking, ThinkingDisplay, Tools,
 };
-pub use session::{ClaudeSession, ControlHandler, ControlRequest, InboundControl, SessionEvent};
+pub use session::{
+    ClaudeSession, ControlHandler, ControlRequest, InboundControl, ProcessExit, SessionEvent,
+};
 pub use transcript::{
     SessionInfo, SessionMessage, TranscriptOptions, fork_session, get_session_messages,
     get_subagent_messages, list_sessions, project_key,

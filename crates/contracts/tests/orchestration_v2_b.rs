@@ -1752,3 +1752,53 @@ fn turn_item_union_known_tags_match_serialized_tags() {
         .collect();
     assert_known_tags(&items);
 }
+
+// ---------------------------------------------------------------------------
+// Ported from orchestrationV2.test.ts: older peers ignore newer metadata
+// ---------------------------------------------------------------------------
+
+#[test]
+fn decoders_ignore_unknown_fields_from_newer_peers() {
+    // "negotiates bounded socket snapshots / compact turnItems": a decoder that
+    // predates an opt-in flag drops it instead of failing.
+    let input: OrchestrationV2SubscribeThreadInput = serde_json::from_value(json!({
+        "threadId": "thread-1", "afterSequence": 12,
+        "acceptBoundedSnapshot": true, "acceptCompactTurnItems": true, "fromTheFuture": 1,
+    }))
+    .unwrap();
+    assert_eq!(input.after_sequence, Some(12));
+    assert_eq!(input.accept_bounded_snapshot, Some(true));
+    assert_eq!(input.accept_compact_turn_items, Some(true));
+    assert_eq!(
+        serde_json::to_value(&input).unwrap(),
+        json!({
+            "threadId": "thread-1", "afterSequence": 12,
+            "acceptBoundedSnapshot": true, "acceptCompactTurnItems": true,
+        })
+    );
+    let bare: OrchestrationV2SubscribeThreadInput =
+        serde_json::from_value(json!({ "threadId": "thread-1" })).unwrap();
+    assert_eq!(bare.accept_bounded_snapshot, None);
+
+    // "lets legacy snapshot decoders ignore enrichment metadata".
+    let snapshot = json!({
+        "schemaVersion": 1, "snapshotSequence": 0, "projects": [], "threads": [], "archivedThreads": [],
+    });
+    let with_roots: OrchestrationV2ShellStreamItem = serde_json::from_value(json!({
+        "kind": "snapshot", "snapshot": snapshot,
+        "resolvedRepositoryIdentityRoots": ["/workspace/project"],
+        "fromTheFuture": true,
+    }))
+    .unwrap();
+    let OrchestrationV2ShellStreamItem::Snapshot {
+        resolved_repository_identity_roots,
+        ..
+    } = with_roots
+    else {
+        panic!("expected snapshot");
+    };
+    assert_eq!(
+        resolved_repository_identity_roots,
+        Some(vec!["/workspace/project".to_owned()])
+    );
+}

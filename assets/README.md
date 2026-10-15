@@ -27,8 +27,11 @@ than T3's. At 1.25 the T fills the tile about as fully as the T3 pair does at 10
 
 ## Exports
 
-Run `uv run assets/export-icons.py` from the repository root. It needs Xcode 26+ (or
-Icon Composer 2+) and the `upstream` checkout. Its output is deterministic, so
+Run `uv run assets/export-icons.py` from the repository root. It needs the `upstream` checkout
+and Icon Composer 2+ (bundled with Xcode 26+). It finds `ictool` the way upstream's export script
+does. `ICON_COMPOSER_TOOL` wins outright. Otherwise it takes the newest 2+ build from
+`DEVELOPER_DIR`, `xcode-select -p`, a standalone `Icon Composer.app` in `/Applications` or
+`~/Applications`, or any `Xcode*.app` in `/Applications` or `~/Downloads`. Its output is deterministic, so
 `git status assets/` after a run shows whether the committed exports are stale.
 
 | File | Size | Produced by |

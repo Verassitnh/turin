@@ -22,6 +22,8 @@ Run from the repository root:  uv run assets/export-icons.py
 from __future__ import annotations
 
 import io
+import json
+import os
 import re
 import shutil
 import struct
@@ -61,15 +63,52 @@ OUTPUTS = {
 }
 
 
-def find_ictool() -> str:
-    candidates = [
-        "/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool",
-        "/Applications/Icon Composer.app/Contents/Executables/ictool",
-    ]
-    for candidate in candidates:
-        if Path(candidate).exists():
-            return candidate
-    sys.exit("Icon Composer's ictool not found; install Xcode 26+ or Icon Composer 2+.")
+ICTOOL_IN_APP = ("Icon Composer.app", "Contents", "Executables", "ictool")
+
+
+def probe_ictool(path: Path) -> tuple[int, str] | None:
+    """(bundle-version, "short (bundle)") if path is an Icon Composer 2+ ictool, else None."""
+    if not path.is_file():
+        return None
+    try:
+        out = subprocess.run([str(path), "--version"], capture_output=True, text=True, timeout=30)
+        info = json.loads(out.stdout)
+        short, bundle = info["short-bundle-version"], info["bundle-version"]
+        if out.returncode != 0 or int(short.split(".")[0]) < 2:
+            return None
+        return int(bundle), f"{short} ({bundle})"
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        return None
+
+
+def find_ictool() -> tuple[str, str]:
+    """Same search as upstream's export-brand-icons.ts: ICON_COMPOSER_TOOL wins outright,
+    otherwise the newest Icon Composer 2+ among DEVELOPER_DIR, `xcode-select -p`, standalone
+    installs and any Xcode*.app in /Applications or ~/Downloads."""
+    configured = os.environ.get("ICON_COMPOSER_TOOL", "").strip()
+    if configured:
+        probed = probe_ictool(Path(configured))
+        if probed is None:
+            sys.exit(f"ICON_COMPOSER_TOOL is not an Icon Composer 2+ ictool: {configured}")
+        return configured, probed[1]
+
+    developer_dirs = [os.environ.get("DEVELOPER_DIR", "").strip()]
+    try:
+        developer_dirs.append(subprocess.run(["xcode-select", "-p"], capture_output=True, text=True).stdout.strip())
+    except OSError:
+        pass
+    home = Path.home()
+    candidates = [Path(d).parent.joinpath("Applications", *ICTOOL_IN_APP) for d in developer_dirs if d]
+    candidates += [Path("/Applications", *ICTOOL_IN_APP), home.joinpath("Applications", *ICTOOL_IN_APP)]
+    for directory in (Path("/Applications"), home / "Downloads"):
+        candidates += [xcode.joinpath("Contents", "Applications", *ICTOOL_IN_APP)
+                       for xcode in sorted(directory.glob("Xcode*.app"))]
+    probed = [(p, str(c)) for c in dict.fromkeys(candidates) if (p := probe_ictool(c))]
+    if not probed:
+        sys.exit("No Icon Composer 2+ ictool found (design generation 26 needs it). Install Xcode 26+ "
+                 "or Icon Composer 2+, or set ICON_COMPOSER_TOOL to Icon Composer.app/Contents/Executables/ictool.")
+    (_, version), path = max(probed, key=lambda item: item[0][0])
+    return path, version
 
 
 def ictool_png(tool: str, icon: Path, size: int, out: Path) -> bytes:
@@ -262,9 +301,8 @@ def compare_sheet(out: Path) -> None:
 
 
 def main() -> None:
-    tool = find_ictool()
-    version = subprocess.run([tool, "--version"], capture_output=True, text=True).stdout
-    print("ictool", " ".join(version.split()))
+    tool, version = find_ictool()
+    print(f"ictool {version}: {tool}")
 
     turin_t = svg_paths(SOURCE / "Assets" / "text.svg")[0]
     upstream_mark = svg_paths(UPSTREAM_PROD / "app-icon.icon" / "Assets" / "text.svg")[0]

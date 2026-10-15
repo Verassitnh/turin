@@ -15,6 +15,8 @@ turin-git = { path = "crates/git" }
 turin-source-control = { path = "crates/source-control" }
 turin-provider-core = { path = "crates/provider-core" }
 turin-codex-app-server = { path = "crates/codex-app-server" }
+turin-claude-protocol = { path = "crates/claude-protocol" }
+turin-acp = { path = "crates/acp" }
 turin-provider-codex = { path = "crates/provider-codex" }
 turin-provider-claude = { path = "crates/provider-claude" }
 turin-provider-opencode = { path = "crates/provider-opencode" }

@@ -665,12 +665,12 @@ impl CodexInstallation {
         if record.version != version {
             return Err(installation_error("resolve", MSG_RECORD_WRONG_VERSION));
         }
-        self.from_directory(&directory, version, &record.target)
+        self.executable_in_directory(&directory, version, &record.target)
             .await
     }
 
     /// `fromDirectory`: checks the package manifest and the required binaries.
-    async fn from_directory(
+    async fn executable_in_directory(
         &self,
         directory: &Path,
         version: &str,
@@ -997,7 +997,7 @@ impl CodexInstallation {
             state.message = Some("Checking Codex.".to_owned());
         });
         let executable = self
-            .from_directory(&runtime, &release.version, &release.target)
+            .executable_in_directory(&runtime, &release.version, &release.target)
             .await?;
         self.validate(&executable, &release.version).await?;
         let record = serde_json::to_vec(&InstalledRelease {

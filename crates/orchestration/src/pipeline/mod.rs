@@ -20,6 +20,8 @@ pub mod event_store;
 pub mod hooks_bridge;
 pub mod notification_mailbox;
 pub mod orchestrator_port;
+pub mod project_commands;
+pub mod resource_cleanup_service;
 pub mod runtime_policy;
 pub mod seams;
 pub mod task;

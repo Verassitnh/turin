@@ -25,7 +25,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-unicode-segmentation = "1"
+unicode-segmentation.workspace = true
 url.workspace = true
 uuid.workspace = true
 

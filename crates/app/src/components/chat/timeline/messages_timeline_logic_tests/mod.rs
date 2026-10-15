@@ -18,9 +18,10 @@ pub(super) use crate::components::chat::timeline::session_logic::{
     TimelineEntriesInput, derive_timeline_entries_from_visible_turn_items,
 };
 pub(super) use crate::components::chat::timeline::turn_item::{
-    CheckpointFileSummary, ProjectedTurnItem, ProjectedVisibility, ProviderFailure,
-    ProviderFailureClass, ProviderRequestKind, ProviderRetry, ToolActivityIcon, ToolActivitySource,
-    ToolActivitySurface, TurnItem, TurnItemPayload, TurnItemStatus, TurnItemType,
+    CheckpointFileSummary, NotificationOutcome, NotificationSource, ProjectedTurnItem,
+    ProjectedVisibility, ProviderFailure, ProviderFailureClass, ProviderRequestKind, ProviderRetry,
+    ToolActivityIcon, ToolActivitySource, ToolActivitySurface, TurnItem, TurnItemPayload,
+    TurnItemStatus, TurnItemType,
 };
 pub(super) use crate::components::chat::timeline::types::{
     Actor, AttemptStatus, ChatMessage, CheckpointStatus, CreationSource, InputIntent, MessageRole,
@@ -43,6 +44,7 @@ mod derive_rows_steers;
 mod derive_rows_streaming;
 mod derive_rows_timing;
 mod derive_rows_v2;
+mod derive_rows_wakes;
 mod derive_rows_work_groups;
 mod helpers;
 mod stable_rows;

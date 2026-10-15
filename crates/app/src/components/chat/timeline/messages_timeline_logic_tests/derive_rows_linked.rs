@@ -135,3 +135,71 @@ fn groups_adjacent_subagents_without_merging_across_a_resource_or_run_boundary()
         other => panic!("expected a grouped subagent row, got {other:?}"),
     }
 }
+
+#[test]
+fn keeps_created_chat_summaries_after_the_final_answer_and_folds_only_their_timeline_rows() {
+    let entries = vec![
+        message_entry(
+            "intro",
+            "2026-09-08T10:00:00Z",
+            assistant_message(
+                "intro",
+                "Creating the chat",
+                Some(RESOURCE_RUN),
+                "2026-09-08T10:00:00Z",
+                "2026-09-08T10:00:00Z",
+                false,
+            ),
+        ),
+        thread_created_event("created", RESOURCE_RUN),
+        message_entry(
+            "final",
+            "2026-09-08T10:00:04Z",
+            assistant_message(
+                "final",
+                "Chat is ready",
+                Some(RESOURCE_RUN),
+                "2026-09-08T10:00:04Z",
+                "2026-09-08T10:00:04Z",
+                false,
+            ),
+        ),
+    ];
+
+    let collapsed = derive(&rows_input(entries.clone(), false));
+    assert_eq!(
+        ids(&collapsed),
+        vec![
+            "turn-fold:resource-run",
+            "final",
+            "summary:created",
+            "assistant-meta:final",
+        ]
+    );
+    match collapsed.iter().find(|row| row.id() == "summary:created") {
+        Some(row) => assert!(matches!(
+            &row.content,
+            Row::Event {
+                resource_summary: true,
+                ..
+            }
+        )),
+        None => panic!("expected the created-chat summary row"),
+    }
+
+    let expanded = derive(&MessagesTimelineRowsInput {
+        expanded_run_ids: set(&[RESOURCE_RUN]),
+        ..rows_input(entries, false)
+    });
+    assert_eq!(
+        ids(&expanded),
+        vec![
+            "turn-fold:resource-run",
+            "intro",
+            "created",
+            "final",
+            "summary:created",
+            "assistant-meta:final",
+        ]
+    );
+}

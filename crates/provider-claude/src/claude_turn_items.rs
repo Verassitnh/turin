@@ -3,20 +3,21 @@
 //! table, and the proposed-plan capture. Items are assembled in the contract's
 //! wire shape and decoded, so the contract types validate every one.
 //!
+//! Plan and todo projections live in `claude_plan_items`.
+//!
 //! Titles from upstream's `formatReadToolLabel`, `formatSearchToolLabel`,
 //! `dynamicToolTitle`, and `mcpToolPresentation` are not ported; those rows are
 //! `title: null`.
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use turin_contracts::{
-    NodeId, PlanId, ProviderThreadId, ProviderTurnId, RunId, ThreadId,
+    NodeId, ProviderThreadId, ProviderTurnId, RunId, ThreadId,
     orchestration_v2::{
-        OrchestrationV2ConversationMessage, OrchestrationV2ExecutionNode,
-        OrchestrationV2PlanArtifact, OrchestrationV2TurnItem,
+        OrchestrationV2ConversationMessage, OrchestrationV2ExecutionNode, OrchestrationV2TurnItem,
     },
     provider_instance::ProviderDriverKind,
 };
-use turin_provider_core::id_allocator::{IdAllocator, derive};
+use turin_provider_core::id_allocator::derive;
 
 /// `(driver, native item id) -> ordinal` for one provider turn.
 pub type ItemOrdinals = HashMap<String, u64>;
@@ -237,25 +238,6 @@ pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallAr
     }
     let turn_item = decode(Value::Object(item));
     ToolCallArtifacts { node, turn_item }
-}
-
-/// The ExitPlanMode plan as a plan artifact (`plan.updated`). Upstream keeps
-/// the plan as a draft until the user decides, so it is a draft here too.
-pub fn proposed_plan_artifact(
-    scope: &TurnScope,
-    plan_id: PlanId,
-    markdown: &str,
-) -> OrchestrationV2PlanArtifact {
-    decode(json!({
-        "kind": "proposed_plan", "id": plan_id, "threadId": scope.thread_id,
-        "runId": scope.run_id, "nodeId": scope.root_node_id, "status": "draft",
-        "markdown": markdown,
-    }))
-}
-
-/// Plan ids are generated per plan, as upstream does for ExitPlanMode plans.
-pub fn new_plan_id(scope: &TurnScope) -> PlanId {
-    IdAllocator.plan(&scope.thread_id, Some(&scope.run_id), &scope.driver)
 }
 
 #[cfg(test)]

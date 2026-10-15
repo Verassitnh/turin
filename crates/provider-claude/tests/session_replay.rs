@@ -541,6 +541,17 @@ async fn exit_plan_mode_capture_emits_the_plan_and_completes() {
         }
         other => panic!("expected a proposed plan, got {other:?}"),
     }
+    // The plan is also a turn item, so the timeline shows it in place.
+    let proposed: Vec<_> = turn_items(&seen)
+        .into_iter()
+        .filter_map(|item| match item {
+            OrchestrationV2TurnItem::ProposedPlan { markdown, .. } => Some(markdown),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(proposed, ["1. Read the config\n2. Change the default"]);
+    let plan = serde_json::to_value(&plans[0]).unwrap();
+    assert_eq!(plan["status"], "active");
 }
 
 /// Inline transcript for one prompt: the given frames, then a success result.

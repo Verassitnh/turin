@@ -12,8 +12,7 @@ use crate::{
     },
     claude_query_options::{ClaudeQueryOptionsInput, make_claude_query_options},
     claude_turn_items::{
-        ItemOrdinals, ToolCall, TurnScope, assistant_artifacts, item_ordinal, new_plan_id,
-        proposed_plan_artifact, tool_call_artifacts,
+        ItemOrdinals, ToolCall, TurnScope, assistant_artifacts, item_ordinal, tool_call_artifacts,
     },
     claude_turn_token_usage::normalize_claude_turn_token_usage,
 };
@@ -882,13 +881,25 @@ impl ClaudeActor {
             ClaudeHostRequest::Hook { reply, .. } => {
                 let _ = reply.send(Some(json!({})));
             }
-            ClaudeHostRequest::ProposedPlan { markdown, ack, .. } => {
-                let plan_id = new_plan_id(&active.scope);
-                let plan = proposed_plan_artifact(&active.scope, plan_id, &markdown);
-                self.emit(ProviderAdapterV2Event::PlanUpdated {
-                    driver: driver(),
-                    plan,
-                });
+            ClaudeHostRequest::ProposedPlan {
+                tool_use_id,
+                markdown,
+                ack,
+            } => {
+                let events = match self.active.as_mut() {
+                    Some(active) => project_plan(
+                        &mut self.plans,
+                        &active.scope,
+                        active.input.provider_turn_ordinal,
+                        &mut active.item_ordinals,
+                        &tool_use_id,
+                        PlanBody::ProposedPlan(&markdown),
+                    ),
+                    None => vec![],
+                };
+                for event in events {
+                    self.emit(event);
+                }
                 let _ = ack.send(());
             }
         }

@@ -522,6 +522,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_or_empty_password_sends_no_authorization() {
+        let server = FakeServer::spawn(|request| {
+            assert!(request.authorization.is_none());
+            FakeResponse::json(200, r#"{"healthy":true,"version":"1.19.0"}"#)
+        })
+        .await;
+        for password in [None, Some("")] {
+            V1Client::new(&server.url, "/work", password)
+                .unwrap()
+                .health()
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn html_is_not_a_v1_api_response() {
         let server = FakeServer::spawn(|_| FakeResponse {
             status: 200,

@@ -34,7 +34,7 @@ pub use runtime::{
     ConnectOpenCodeServer, OpenCodeServerConnection, OpenCodeServerProcess, StartOpenCodeServer,
     VerifyFn, VerifyInput, connect_to_open_code_server, default_v1_verify,
     parse_server_url_from_output, resolve_open_code_config_content,
-    resolve_open_code_server_password, start_open_code_server_process,
+    resolve_open_code_server_password, start_open_code_server_process, v1_client_password,
     verify_open_code_server_version,
 };
 pub use semver::{compare_semver_versions, parse_semver};

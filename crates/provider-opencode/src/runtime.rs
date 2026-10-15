@@ -94,6 +94,20 @@ pub fn resolve_open_code_server_password(
     }
 }
 
+/// Password the v1 session client sends as Basic auth.
+///
+/// `createOpenCodeSdkClient` adds the header only when `serverPassword` is
+/// non-empty. The v1 adapter passes one only for an external server with a
+/// configured password (`adapter.ts`). A spawned server still gets the resolved
+/// password, including an inherited `OPENCODE_SERVER_PASSWORD`, in its process
+/// environment and on the readiness client.
+pub fn v1_client_password(external: bool, configured: Option<&str>) -> Option<&str> {
+    if !external {
+        return None;
+    }
+    configured.filter(|password| !password.is_empty())
+}
+
 pub struct OpenCodeServerProcess {
     pub url: String,
     pub server_password: Option<String>,
@@ -124,6 +138,15 @@ pub struct OpenCodeServerConnection {
     pub version: String,
     pub external: bool,
     pub process: Option<OpenCodeServerProcess>,
+}
+
+impl OpenCodeServerConnection {
+    /// Password to give `V1Client` for session calls. Local servers keep the
+    /// resolved password on the process; only an external configured password
+    /// is copied onto the client.
+    pub fn v1_client_password(&self) -> Option<&str> {
+        v1_client_password(self.external, self.server_password.as_deref())
+    }
 }
 
 impl std::fmt::Debug for OpenCodeServerProcess {
@@ -650,6 +673,28 @@ done
             resolve_open_code_config_content(Some(&env)),
             "{\"provider\":{}}"
         );
+    }
+
+    #[test]
+    fn password_resolution_prefers_an_explicit_value_and_skips_env_when_external() {
+        let mut environment = BTreeMap::new();
+        environment.insert("OPENCODE_SERVER_PASSWORD".into(), "from-map".into());
+        assert_eq!(
+            resolve_open_code_server_password(false, None, Some(&environment)).as_deref(),
+            Some("from-map")
+        );
+        assert_eq!(
+            resolve_open_code_server_password(true, None, Some(&environment)).as_deref(),
+            None
+        );
+        assert_eq!(
+            resolve_open_code_server_password(false, Some("set"), Some(&environment)).as_deref(),
+            Some("set")
+        );
+        assert_eq!(v1_client_password(false, Some("set")), None);
+        assert_eq!(v1_client_password(true, None), None);
+        assert_eq!(v1_client_password(true, Some("")), None);
+        assert_eq!(v1_client_password(true, Some("set")), Some("set"));
     }
 
     #[test]

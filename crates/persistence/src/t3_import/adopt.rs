@@ -8,9 +8,10 @@
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use super::T3ImportError;
-use super::snapshot::open_snapshot;
+use super::snapshot::{open_snapshot, remove_stale_dirs};
 use super::verify::{ImportReport, migrate_and_verify};
 
 /// File name inside the Turin data directory. Mirrors T3's `statev2.sqlite`.
@@ -23,6 +24,7 @@ pub(crate) fn import_into(
 ) -> Result<ImportReport, T3ImportError> {
     std::fs::create_dir_all(turin_data_dir)
         .map_err(|err| T3ImportError::io("create turin data directory", err))?;
+    remove_stale_dirs(turin_data_dir, ".t3-import-", SystemTime::now());
     let destination = turin_data_dir.join(TURIN_DATABASE_FILE);
     if destination.exists() {
         return Err(T3ImportError::DestinationExists {

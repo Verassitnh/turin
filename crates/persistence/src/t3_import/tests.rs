@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use rusqlite::{Connection, params};
 
 use crate::migrations::{RunMigrationsOptions, migration_manifest, run_migrations};
 
-use super::snapshot::{CopyLimits, backup_with_limits};
+use super::snapshot::{CopyLimits, STALE_AFTER, backup_with_limits, remove_stale_dirs};
 use super::*;
 
 fn file_db(dir: &Path, name: &str, through: Option<i64>) -> PathBuf {
@@ -462,4 +462,73 @@ fn the_copy_is_never_created_over_an_existing_file() {
     let err = super::snapshot::backup_to(&src, &dest).unwrap_err();
     assert!(err.to_string().contains("create t3 import copy"), "{err}");
     assert_eq!(std::fs::read(&dest).unwrap(), b"keep me");
+}
+
+fn dir_last_changed_at(path: &Path, when: SystemTime) {
+    std::fs::File::open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+#[test]
+fn recent_import_dirs_are_kept() {
+    let parent = tempfile::tempdir().unwrap();
+    let work = parent.path().join(".t3-import-1");
+    std::fs::create_dir(&work).unwrap();
+    remove_stale_dirs(parent.path(), ".t3-import-", SystemTime::now());
+    assert!(work.is_dir());
+}
+
+#[test]
+fn stale_import_dirs_are_removed_and_other_entries_are_kept() {
+    let parent = tempfile::tempdir().unwrap();
+    let stale = parent.path().join(".t3-import-1");
+    std::fs::create_dir(&stale).unwrap();
+    let old = SystemTime::now() - STALE_AFTER - Duration::from_secs(60);
+    dir_last_changed_at(&stale, old);
+    let other_prefix = parent.path().join("unrelated");
+    std::fs::create_dir(&other_prefix).unwrap();
+    dir_last_changed_at(&other_prefix, old);
+    let stale_file = parent.path().join(".t3-import-file");
+    std::fs::write(&stale_file, b"not a dir").unwrap();
+    dir_last_changed_at(parent.path(), SystemTime::now());
+
+    remove_stale_dirs(parent.path(), ".t3-import-", SystemTime::now());
+
+    assert!(!stale.exists());
+    assert!(other_prefix.is_dir());
+    assert!(stale_file.is_file());
+}
+
+#[test]
+fn a_stale_dir_with_a_recent_file_is_kept() {
+    let parent = tempfile::tempdir().unwrap();
+    let live = parent.path().join(".t3-import-live");
+    std::fs::create_dir(&live).unwrap();
+    std::fs::write(live.join("statev2.sqlite"), b"copy in progress").unwrap();
+    let old = SystemTime::now() - STALE_AFTER - Duration::from_secs(60);
+    dir_last_changed_at(&live, old);
+
+    remove_stale_dirs(parent.path(), ".t3-import-", SystemTime::now());
+
+    assert!(live.join("statev2.sqlite").is_file());
+}
+
+#[test]
+fn import_into_clears_stale_work_dirs_first() {
+    let src_dir = tempfile::tempdir().unwrap();
+    let src = file_db(src_dir.path(), "source.sqlite", None);
+    let turin = tempfile::tempdir().unwrap();
+    let stale = turin.path().join(".t3-import-killed");
+    std::fs::create_dir(&stale).unwrap();
+    dir_last_changed_at(
+        &stale,
+        SystemTime::now() - STALE_AFTER - Duration::from_secs(60),
+    );
+
+    T3Import::import_into(&src, turin.path()).unwrap();
+
+    assert!(!stale.exists());
+    assert!(turin.path().join(TURIN_DATABASE_FILE).is_file());
 }

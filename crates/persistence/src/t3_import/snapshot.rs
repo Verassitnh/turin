@@ -6,7 +6,7 @@ use std::fs::{OpenOptions, Permissions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{Connection, OpenFlags};
@@ -19,6 +19,9 @@ const STEP_PAUSE: Duration = Duration::from_millis(25);
 /// on a database T3 is still writing.
 const MAX_PAUSES: u32 = 1_200;
 const SNAPSHOT_DIR: &str = "/tmp";
+/// Work directories older than this are left by an import that was killed
+/// before its `Drop` ran. Their copy of the T3 database is removed.
+pub(crate) const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// Bounds on one copy. A writer that commits between steps makes SQLite start
 /// the copy again from page 1, and each restart still returns `More`. Without
@@ -55,6 +58,11 @@ impl T3Snapshot {
 }
 
 pub(crate) fn snapshot(src: &Path) -> Result<T3Snapshot, T3ImportError> {
+    remove_stale_dirs(
+        Path::new(SNAPSHOT_DIR),
+        "turin-t3-import-",
+        SystemTime::now(),
+    );
     let dir = private_tempdir("turin-t3-import-", Path::new(SNAPSHOT_DIR))?;
     let path = dir.path().join("statev2.sqlite");
     backup_to(src, &path)?;
@@ -72,6 +80,47 @@ pub(crate) fn private_tempdir(
         .permissions(Permissions::from_mode(0o700))
         .tempdir_in(parent)
         .map_err(|err| T3ImportError::io("create t3 import directory", err))
+}
+
+/// Removes directories in `parent` whose name starts with `prefix` and that
+/// have not changed for [`STALE_AFTER`] as of `now`. Failures are ignored: a
+/// directory another process is still using must not fail this import.
+/// Symlinks are never followed.
+pub(crate) fn remove_stale_dirs(parent: &Path, prefix: &str, now: SystemTime) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(prefix) {
+            continue;
+        }
+        let path = entry.path();
+        let is_dir = std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir());
+        if !is_dir {
+            continue;
+        }
+        let stale = last_changed(&path)
+            .and_then(|changed| now.duration_since(changed).ok())
+            .is_some_and(|age| age > STALE_AFTER);
+        if stale {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// The newest change to `path` or to one of its direct children. Writing the
+/// copy does not touch the directory's own mtime, so a live import is seen
+/// through its files.
+fn last_changed(path: &Path) -> Option<SystemTime> {
+    let mut newest = std::fs::symlink_metadata(path).ok()?.modified().ok()?;
+    if let Ok(children) = std::fs::read_dir(path) {
+        for child in children.flatten() {
+            if let Ok(modified) = child.metadata().and_then(|meta| meta.modified()) {
+                newest = newest.max(modified);
+            }
+        }
+    }
+    Some(newest)
 }
 
 pub(crate) fn backup_to(src: &Path, dest: &Path) -> Result<(), T3ImportError> {

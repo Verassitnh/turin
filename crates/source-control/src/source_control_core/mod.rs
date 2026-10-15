@@ -12,6 +12,8 @@ pub mod pull_request_provider;
 pub mod rate_limit;
 pub mod redacted;
 pub mod source_control_provider;
+#[cfg(test)]
+pub(crate) mod test_process;
 
 /// A boxed error that keeps a failure's raw cause for logs (upstream `Schema.Defect()` /
 /// `cause: unknown`). Never put it on a transport.

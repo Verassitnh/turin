@@ -538,7 +538,11 @@ impl Sidebar {
                 });
 
         // ── Woke pill (an action: dismisses the notification) ──────────
-        let woke_button = |size: gpui_kit::Rems, weak: gpui_kit::WeakEntity<Sidebar>| {
+        // Card pills use `text-warning`; the slim row uses `text-warning-foreground`
+        // (upstream Sidebar.tsx slim Woke pill). Both underline on hover.
+        let woke_button = |size: gpui_kit::Rems,
+                           color: Hsla,
+                           weak: gpui_kit::WeakEntity<Sidebar>| {
             let thread_ref = thread_ref.clone();
             let woke = woke_at.clone().unwrap_or_default();
             div()
@@ -549,7 +553,8 @@ impl Sidebar {
                 .cursor(CursorStyle::PointingHand)
                 .font_weight(FontWeight::MEDIUM)
                 .text_size(TEXT_XS.size)
-                .text_color(theme.warning)
+                .text_color(color)
+                .hover(|style| style.underline())
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
@@ -559,11 +564,7 @@ impl Sidebar {
                         .ok();
                 })
                 .tooltip(|window, cx| Tooltip::new("Dismiss Woke notification").build(window, cx))
-                .child(
-                    Icon::new(IconName::AlarmClock)
-                        .size(size)
-                        .color(theme.warning),
-                )
+                .child(Icon::new(IconName::AlarmClock).size(size).color(color))
                 .child("Woke")
                 .into_any_element()
         };
@@ -639,7 +640,7 @@ impl Sidebar {
                         .child(snooze_wake_label(until, &now))
                         .into_any_element()
                 } else if is_woke {
-                    woke_button(rems(0.75), weak.clone())
+                    woke_button(rems(0.75), theme.warning_foreground, weak.clone())
                 } else {
                     div()
                         .text_size(TEXT_XS.size)
@@ -727,7 +728,7 @@ impl Sidebar {
             RowVariant::Card => {
                 let status_label: AnyElement = match &top {
                     Some(top) if top.kind == SidebarV2TopStatusKind::Woke => {
-                        woke_button(rems(1.), weak.clone())
+                        woke_button(rems(1.), theme.warning, weak.clone())
                     }
                     Some(top) => div()
                         .flex()

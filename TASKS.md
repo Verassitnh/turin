@@ -20,7 +20,7 @@ PM (Claude Opus 5.5) owns this file. Agents don't edit it; they report back.
 **Throughput rule (user, 2026-10-14): run the maximum number of agents the
 dependency graph allows, everything async.** Never wait on a merge when a
 dependent can branch from the in-flight branch it needs (rebase later; QC fix
-rounds merge in). Caps: Codex 4, Opus UI 4, Grok 3, GLM 3, Sonnet 2, QC
+rounds merge in). Caps: Codex 4, Opus UI 4, Grok 3, GLM 3, Sonnet 2 (4 while GLM is out of OpenRouter credits), QC
 workflows unlimited. Cheap models still go first on mechanical work. Cheap
 models go first on anything mechanical; escalate to Codex only on failure or
 when the logic is subtle (state machines, protocol framing, concurrency).
@@ -55,7 +55,7 @@ when the logic is subtle (state machines, protocol framing, concurrency).
 |---|---|---|
 | wf_c926ef06-3ca | T03 design system + shell (+ look-and-feel) | FAIL: 1 high, 4 medium, 27 low. docs/qc/wf_c926ef06-3ca-T03-design-system.md |
 | wf_9dc37bfd-861 | T04b protocol docs fix round | running |
-| wf_e8a1a7c1-d53 | T21 hooks (spec, lifecycle, security/trust, process) | running |
+| wf_e8a1a7c1-d53 | T21 hooks (spec, lifecycle, security/trust, process) | FAIL: 2 high, 5 medium, 6 low. docs/qc/wf_e8a1a7c1-d53-T21-hooks.md |
 | wf_d6d58e6c-789 | T24 app icon (visual fidelity, reproducibility) | PASS: 1 medium, 6 low; T scale needs user decision. docs/qc/wf_d6d58e6c-789-T24-icon.md |
 | wf_8b97ef76-9c9 | T02 persistence | PASS: 15 medium, 27 low → T02b. docs/qc/wf_8b97ef76-9c9-T02-persistence.md |
 | wf_b2f290b9-219 | T00a fix round (base_schemas helpers) | PASS: 6 low → T00c |
@@ -72,7 +72,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T00 | Foundation fixes from QC wf_6ce02f2f-38c (docs part done by PM; helpers: Codex died on auth expiry → Sonnet r2) | `crates/contracts/src/base_schemas.rs` | Codex → Sonnet | done (merged) |
 | T00c | QC low items: UtcDateTime parse bounds/leap/zone-less, private field; `forward_compatible_*::optional` | `crates/contracts/src/base_schemas.rs` | Sonnet | todo (after T01 merges, to avoid conflicts) |
-| T01 | Port all kept contracts modules | `crates/contracts` | GLM | active |
+| T01 | Port all kept contracts modules | `crates/contracts` | GLM → Sonnet | active r2 (GLM out of credits; Sonnet finishing) |
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | done (merged; QC PASS) |
 | T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | active |
 | T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | QC FAIL (1 high) → fix round r4 active; sidebar items moved to T15 |
@@ -82,10 +82,10 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T05a | Shared utils, contract-free files | `crates/shared` | GLM | active |
+| T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet | active r2 (GLM out of credits) |
 | T05b | Shared utils, contract-dependent files | `crates/shared` | GLM | todo (after T01) |
 | T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok | active (base: T01 branch) |
-| T07 | Source control: core + GitHub driver, PR service, review guides, viewed files | `crates/source-control` | GLM | active (base: T01 branch) |
+| T07 | Source control: core + GitHub driver, PR service, review guides, viewed files | `crates/source-control` | GLM → Sonnet | active r2 (base: T01 branch) |
 | T08 | Provider core: adapter trait, registry, catalog, model manifests, auth/credentials | `crates/provider-core` | Codex | active (base: T01 branch) |
 
 ### Wave 3: engines (after wave 2)
@@ -118,7 +118,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T21 | Hooks crate (orchestrator wiring later; UI parts → Opus) | `crates/hooks` | GLM | review (QC wf_e8a1a7c1-d53) |
+| T21 | Hooks crate (orchestrator wiring later; UI parts → Opus) | `crates/hooks` | GLM → Sonnet | QC FAIL (2 high: trust gate, pgid) → T21b fix round |
 | T22 | App wiring: runtime bridge, end-to-end smoke with each provider | `crates/app` | Opus | todo |
 | T23 | T3 database import | `crates/persistence` | Grok | todo |
 

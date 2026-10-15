@@ -191,7 +191,28 @@ timeout_secs = 300
 ```
 
 Hooks get event JSON on stdin and `TURIN_*` env vars (`TURIN_EVENT`,
-`TURIN_PROJECT_ID`, `TURIN_THREAD_ID`, `TURIN_CWD`, …).
+`TURIN_PROJECT_ID`, `TURIN_THREAD_ID`, `TURIN_CWD`, …); inherited `TURIN_*`
+vars are scrubbed first.
+
+**Trust (QC wf_e8a1a7c1-d53).** Global `~/.turin/hooks.toml` is trusted.
+Project `.turin/hooks.toml` never runs until the user approves it: approval is
+stored outside the repo (`~/.turin/trusted-hooks.json`: canonical project root
+→ SHA-256 of the exact file bytes). Any change (git pull, branch switch, an
+agent editing the file) invalidates it; hot reload re-checks the hash and drops
+untrusted project hooks while keeping global ones. Untrusted/changed project
+hooks surface as a pending status the UI shows with an "Approve" action.
+Rationale: upstream never auto-runs repo-supplied commands (`t3.json` scripts
+are import-only).
+
+**Return protocol.** A blocking `thread.created` hook may print, as its last
+stdout line, a JSON object `{"worktreePath": "...", "branch": "..."}` (both
+optional). The orchestrator then binds the new thread to that workspace, which
+is how hooks replace upstream's launch-into-worktree flow. Malformed or absent
+output = no change.
+
+**Environment.** Hooks inherit the app's environment; PATH hydration from the
+login shell (upstream `fixPath` / `readEnvironmentFromLoginShell`) happens once
+at app startup (T05b/T22), not per hook.
 
 ## Deviations
 

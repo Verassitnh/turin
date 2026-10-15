@@ -9,7 +9,7 @@
 use serde_json::Value;
 use turin_contracts::{
     IsoDateTime, TrimmedNonEmptyString, provider_instance::ProviderDriverKind,
-    provider_usage_limits::ServerProviderUsageLimits,
+    provider_policy::RuntimeMode, provider_usage_limits::ServerProviderUsageLimits,
 };
 use turin_provider_core::{
     server_provider::{
@@ -23,9 +23,11 @@ use turin_provider_core::{
 };
 
 use crate::adapter::{
-    commands_from_list, format_probe_error, models_from_provider_list, opencode_driver,
-    pending_status, skills_from_list,
+    commands_from_list, format_probe_error, models_from_provider_list,
+    open_code2_model_capabilities, opencode_driver, pending_status, skills_from_list,
 };
+use crate::open_code2_catalog::{OpenCode2Model, load_open_code2_catalog};
+use crate::v2_client::V2Client;
 use crate::version_probe::MINIMUM_OPENCODE_VERSION;
 
 /// `OPENCODE_PRESENTATION` in `status.ts`.
@@ -38,6 +40,20 @@ fn presentation() -> ServerProviderPresentation {
         supported_runtime_modes: None,
         requires_new_thread_for_model_change: None,
         supports_conversation_rollback: None,
+    }
+}
+
+/// `OPENCODE_2_PRESENTATION`: the 2.x server supports the interaction toggle and every runtime mode.
+fn presentation_v2() -> ServerProviderPresentation {
+    ServerProviderPresentation {
+        show_interaction_mode_toggle: Some(true),
+        supported_runtime_modes: Some(vec![
+            RuntimeMode::ApprovalRequired,
+            RuntimeMode::AutoAcceptEdits,
+            RuntimeMode::Auto,
+            RuntimeMode::FullAccess,
+        ]),
+        ..presentation()
     }
 }
 
@@ -59,6 +75,11 @@ pub enum ProbeOutcome<'a> {
     Failed { detail: &'a str, phase: &'a str },
     /// A 1.x server answered. `version` is what it reported.
     Ready(V1Inventory<'a>),
+    /// A 2.x server answered. `models` is `None` when its catalog could not be read.
+    Ready2 {
+        version: &'a str,
+        models: Option<&'a [OpenCode2Model]>,
+    },
 }
 
 /// The 1.x inventory: the `provider.list` payload, its agents, commands and skills.
@@ -70,6 +91,28 @@ pub struct V1Inventory<'a> {
     pub skills: &'a [Value],
 }
 
+/// The 2.x snapshot read from a live server: loads its catalog on `client` for `directory`,
+/// then builds the draft. A failed catalog read is the snapshot's own error state.
+pub async fn build_open_code2_snapshot(
+    client: &V2Client,
+    directory: &str,
+    enabled: bool,
+    checked_at: IsoDateTime,
+    version: &str,
+) -> ServerProviderDraft {
+    let models = load_open_code2_catalog(client, directory).await.ok();
+    build_open_code_snapshot(OpenCodeSnapshotInput {
+        enabled,
+        server_url: "",
+        checked_at,
+        outcome: ProbeOutcome::Ready2 {
+            version,
+            models: models.as_deref(),
+        },
+        usage_limits: None,
+    })
+}
+
 /// Builds the snapshot draft for one OpenCode instance.
 pub fn build_open_code_snapshot(input: OpenCodeSnapshotInput<'_>) -> ServerProviderDraft {
     let usage_limits = input.usage_limits.clone();
@@ -79,6 +122,9 @@ pub fn build_open_code_snapshot(input: OpenCodeSnapshotInput<'_>) -> ServerProvi
 }
 
 fn build_draft(input: OpenCodeSnapshotInput<'_>) -> ServerProviderDraft {
+    if let ProbeOutcome::Ready2 { version, models } = input.outcome {
+        return v2_draft(&input.checked_at, input.enabled, version, models);
+    }
     let external = !input.server_url.trim().is_empty();
     if !input.enabled {
         let (_, _, message) = pending_status(false, input.server_url);
@@ -136,6 +182,7 @@ fn build_draft(input: OpenCodeSnapshotInput<'_>) -> ServerProviderDraft {
                 Vec::new(),
             )
         }
+        ProbeOutcome::Ready2 { .. } => unreachable!("handled above"),
         ProbeOutcome::Ready(inventory) => {
             if is_too_old(inventory.version) {
                 return draft(
@@ -218,10 +265,30 @@ fn draft(
     slash_commands: Vec<ServerProviderSlashCommand>,
     skills: Vec<ServerProviderSkill>,
 ) -> ServerProviderDraft {
+    draft_with(
+        presentation(),
+        checked_at,
+        enabled,
+        probe,
+        models,
+        slash_commands,
+        skills,
+    )
+}
+
+fn draft_with(
+    presentation: ServerProviderPresentation,
+    checked_at: &IsoDateTime,
+    enabled: bool,
+    probe: ProviderProbeResult,
+    models: Vec<ServerProviderModel>,
+    slash_commands: Vec<ServerProviderSlashCommand>,
+    skills: Vec<ServerProviderSkill>,
+) -> ServerProviderDraft {
     let driver: ProviderDriverKind = opencode_driver();
     build_server_provider(BuildServerProviderInput {
         driver: Some(&driver),
-        presentation: presentation(),
+        presentation,
         enabled,
         checked_at: checked_at.clone(),
         models,
@@ -233,7 +300,102 @@ fn draft(
     })
 }
 
-/// `providerList.connected.length`, read from either the `{data}` envelope or the bare body.
+/// `checkOpenCode2`: a 2.x server is ready when its catalog lists models, and the models
+/// are sorted by name. Compaction is every session's command.
+fn v2_draft(
+    checked_at: &IsoDateTime,
+    enabled: bool,
+    version: &str,
+    models: Option<&[OpenCode2Model]>,
+) -> ServerProviderDraft {
+    let probe = |status, auth_status, message: String| ProviderProbeResult {
+        installed: true,
+        version: Some(version.to_owned()),
+        status,
+        auth: ServerProviderAuth::with_status(auth_status),
+        message: Some(message),
+        usage_limits: None,
+    };
+    let compact = commands_from_list(&[]);
+    let Some(models) = models else {
+        return draft_with(
+            presentation_v2(),
+            checked_at,
+            enabled,
+            probe(
+                ServerProviderState::Error,
+                ServerProviderAuthStatus::Unknown,
+                "OpenCode could not load its model list.".to_owned(),
+            ),
+            Vec::new(),
+            compact,
+            Vec::new(),
+        );
+    };
+    let mut listed: Vec<ServerProviderModel> = models.iter().map(v2_model).collect();
+    listed.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
+    let count = listed.len();
+    let probe = if count > 0 {
+        probe(
+            ServerProviderState::Ready,
+            ServerProviderAuthStatus::Authenticated,
+            format!(
+                "OpenCode {version} lists {count} model{}.",
+                if count == 1 { "" } else { "s" }
+            ),
+        )
+    } else {
+        probe(
+            ServerProviderState::Warning,
+            ServerProviderAuthStatus::Unknown,
+            "OpenCode 2 is running, but it did not list any models yet.".to_owned(),
+        )
+    };
+    draft_with(
+        presentation_v2(),
+        checked_at,
+        enabled,
+        probe,
+        listed,
+        compact,
+        Vec::new(),
+    )
+}
+
+/// One 2.x model. Its provider name is the sub-provider label, unless that is OpenCode itself.
+fn v2_model(model: &OpenCode2Model) -> ServerProviderModel {
+    let label = model
+        .provider_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&model.provider_id);
+    let sub_provider = if label.eq_ignore_ascii_case("opencode") {
+        None
+    } else {
+        TrimmedNonEmptyString::new(label).ok()
+    };
+    ServerProviderModel {
+        slug: TrimmedNonEmptyString::new(format!("{}/{}", model.provider_id, model.id))
+            .unwrap_or_else(|_| TrimmedNonEmptyString::new("model").expect("literal")),
+        name: TrimmedNonEmptyString::new(model.name.trim())
+            .or_else(|_| TrimmedNonEmptyString::new(model.id.as_str()))
+            .expect("model id is not blank"),
+        short_name: None,
+        sub_provider,
+        aliases: None,
+        badge: None,
+        is_custom: false,
+        is_default: None,
+        is_legacy: None,
+        capabilities: Some(open_code2_model_capabilities(
+            &model.provider_id,
+            &model.variants,
+        )),
+    }
+}
+
+/// `providerList.connected.length`, read from either
 fn connected_count(payload: &Value) -> usize {
     let body = payload.get("data").unwrap_or(payload);
     body.get("connected")
@@ -358,5 +520,103 @@ mod tests {
         assert_eq!(draft.status, ServerProviderState::Error);
         assert!(draft.models.is_empty());
         assert!(message(&draft).contains("too old"), "{}", message(&draft));
+    }
+
+    fn v2_model_fixture(provider: Option<&str>, name: &str, variants: &[&str]) -> OpenCode2Model {
+        OpenCode2Model {
+            provider_id: "zen".to_owned(),
+            id: name.to_lowercase(),
+            name: name.to_owned(),
+            provider_name: provider.map(str::to_owned),
+            variants: variants.iter().map(|v| (*v).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_2x_server_with_models_is_ready_and_lists_them_by_name() {
+        let models = [
+            v2_model_fixture(Some("OpenCode Zen"), "Zed", &["high", "low"]),
+            v2_model_fixture(Some("OpenCode"), "Alpha", &[]),
+        ];
+        let draft = build_open_code_snapshot(OpenCodeSnapshotInput {
+            enabled: true,
+            server_url: "",
+            checked_at: checked_at(),
+            outcome: ProbeOutcome::Ready2 {
+                version: "2.0.28",
+                models: Some(&models),
+            },
+            usage_limits: None,
+        });
+        assert_eq!(draft.status, ServerProviderState::Ready);
+        assert_eq!(draft.auth.status, ServerProviderAuthStatus::Authenticated);
+        assert_eq!(draft.models[0].name.as_str(), "Alpha");
+        assert_eq!(
+            draft.models[0].sub_provider, None,
+            "OpenCode is not a sub-provider"
+        );
+        assert_eq!(
+            draft.models[1].sub_provider.as_ref().map(|s| s.as_str()),
+            Some("OpenCode Zen")
+        );
+        assert_eq!(message(&draft), "OpenCode 2.0.28 lists 2 models.");
+        assert_eq!(draft.show_interaction_mode_toggle, Some(true));
+        assert_eq!(draft.slash_commands[0].name.as_str(), "compact");
+    }
+
+    #[test]
+    fn a_2x_server_that_lists_nothing_is_a_warning_and_a_failed_catalog_an_error() {
+        let empty = build_open_code_snapshot(OpenCodeSnapshotInput {
+            enabled: true,
+            server_url: "",
+            checked_at: checked_at(),
+            outcome: ProbeOutcome::Ready2 {
+                version: "2.0.28",
+                models: Some(&[]),
+            },
+            usage_limits: None,
+        });
+        assert_eq!(empty.status, ServerProviderState::Warning);
+        assert_eq!(
+            message(&empty),
+            "OpenCode 2 is running, but it did not list any models yet."
+        );
+        let failed = build_open_code_snapshot(OpenCodeSnapshotInput {
+            enabled: true,
+            server_url: "",
+            checked_at: checked_at(),
+            outcome: ProbeOutcome::Ready2 {
+                version: "2.0.28",
+                models: None,
+            },
+            usage_limits: None,
+        });
+        assert_eq!(failed.status, ServerProviderState::Error);
+        assert_eq!(message(&failed), "OpenCode could not load its model list.");
+        assert!(failed.models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_2x_snapshot_loads_the_catalog_from_the_server() {
+        let server = crate::test_support::FakeServer::spawn(|request| {
+            if request.target.contains("/api/model") {
+                return crate::test_support::FakeResponse::json(
+                    200,
+                    r#"{"location":{},"data":[{"providerID":"zen","id":"big","name":"Big","variants":[]}]}"#,
+                );
+            }
+            crate::test_support::FakeResponse::json(200, r#"{"location":{},"data":[]}"#)
+        })
+        .await;
+        let client = V2Client::connect(&server.url, "pw").unwrap();
+        let draft = build_open_code2_snapshot(&client, "/work", true, checked_at(), "2.0.28").await;
+        assert_eq!(draft.status, ServerProviderState::Ready);
+        assert_eq!(draft.models.len(), 1);
+        assert_eq!(draft.models[0].slug.as_str(), "zen/big");
+        // No provider was named, so the sub-provider is the provider id.
+        assert_eq!(
+            draft.models[0].sub_provider.as_ref().map(|s| s.as_str()),
+            Some("zen")
+        );
     }
 }

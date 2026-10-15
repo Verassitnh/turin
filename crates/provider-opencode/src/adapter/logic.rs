@@ -1209,6 +1209,33 @@ fn capabilities_for(
     }
 }
 
+/// `openCode2ModelCapabilities`: one "Reasoning" select built from the model's variants.
+/// Unlike the 1.x capabilities there is no agent option and no default variant list.
+pub fn open_code2_model_capabilities(provider_id: &str, variants: &[String]) -> ModelCapabilities {
+    let mut descriptors = Vec::new();
+    if !variants.is_empty() {
+        let default_variant = infer_default_variant(provider_id, variants);
+        let options = variants
+            .iter()
+            .map(|value| {
+                (
+                    value.clone(),
+                    default_variant.as_deref() == Some(value.as_str()),
+                )
+            })
+            .collect();
+        descriptors.push(select_descriptor(
+            "variant",
+            "Reasoning",
+            options,
+            default_variant.as_deref(),
+        ));
+    }
+    ModelCapabilities {
+        option_descriptors: Some(descriptors),
+    }
+}
+
 /// Connected providers from `GET /provider` or v2 `{data: ...}`.
 pub fn models_from_provider_list(payload: &Value, agents: &[Value]) -> Vec<ServerProviderModel> {
     let list: ProviderList = if payload.get("data").is_some() {

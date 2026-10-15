@@ -13,6 +13,7 @@ mod error;
 mod events;
 mod http_client;
 mod ledger;
+mod open_code2_catalog;
 mod permission_rules;
 mod process_group;
 mod protocol_log;
@@ -48,6 +49,7 @@ pub use error::{
 };
 pub use events::{V1Event, V2Event, V2StreamEvent, decode_v1_event, decode_v2_event};
 pub use ledger::{OpenCodeServerLedger, ServerLease};
+pub use open_code2_catalog::{OpenCode2Model, PROVIDER_NAME_TIMEOUT, load_open_code2_catalog};
 pub use permission_rules::{
     SessionPermissionRule, agent_path_allows, last_effect, rule, session_permission_rules,
 };
@@ -63,7 +65,10 @@ pub use runtime::{
 };
 pub use semver::{compare_semver_versions, parse_semver};
 pub use server_owner::{OpenCodeServerOwner, OwnerConfig};
-pub use snapshot::{OpenCodeSnapshotInput, ProbeOutcome, V1Inventory, build_open_code_snapshot};
+pub use snapshot::{
+    OpenCodeSnapshotInput, ProbeOutcome, V1Inventory, build_open_code_snapshot,
+    build_open_code2_snapshot,
+};
 pub use sse::{EventStream, SILENT_STREAM_TIMEOUT, SseFrame, decode_sse};
 pub use usage_limits::{GoUsageInput, OPENCODE_GO_USAGE_URL, read_open_code_go_usage_limits};
 pub use v1_client::{Health, OPENCODE_HEALTH_TIMEOUT, PermissionReply, QuestionReply, V1Client};

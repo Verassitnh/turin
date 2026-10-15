@@ -20,9 +20,9 @@ pub use api::{
 pub use driver::{OpenCodeAdapter, OpenCodeSettings, shared_provider_session_id};
 pub use logic::{
     approves, commands_from_list, format_probe_error, models_from_provider_list,
-    open_code_child_permission_rules, opencode_driver, pending_status, permission_rule_equals,
-    select_generation, session_grant_label, skills_from_list, v1_capabilities, v1_rules_as_session,
-    v2_capabilities,
+    open_code_child_permission_rules, open_code2_model_capabilities, opencode_driver,
+    pending_status, permission_rule_equals, select_generation, session_grant_label,
+    skills_from_list, v1_capabilities, v1_rules_as_session, v2_capabilities,
 };
 pub use v1::OpenCodeV1Session;
 pub use v2::OpenCodeV2Session;

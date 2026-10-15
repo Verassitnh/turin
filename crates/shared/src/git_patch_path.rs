@@ -108,7 +108,9 @@ fn unescape_body(body: &str) -> String {
     };
     let units: Vec<u16> = body.encode_utf16().collect();
     let unit_char = |index: usize| -> Option<char> {
-        units.get(index).and_then(|unit| char::from_u32(*unit as u32))
+        units
+            .get(index)
+            .and_then(|unit| char::from_u32(*unit as u32))
     };
     let mut at = 0usize;
     while at < units.len() {
@@ -185,10 +187,19 @@ mod tests {
     #[test]
     fn writes_gits_escape_for_a_character_the_header_would_read_as_its_own() {
         assert_eq!(quote_git_patch_path("tab\tfile.txt"), "\"tab\\tfile.txt\"");
-        assert_eq!(quote_git_patch_path("line\nfile.txt"), "\"line\\nfile.txt\"");
+        assert_eq!(
+            quote_git_patch_path("line\nfile.txt"),
+            "\"line\\nfile.txt\""
+        );
         assert_eq!(quote_git_patch_path("quo\"te.txt"), "\"quo\\\"te.txt\"");
-        assert_eq!(quote_git_patch_path("back\\slash.txt"), "\"back\\\\slash.txt\"");
-        assert_eq!(quote_git_patch_path(&format!("ring{BELL}.txt")), "\"ring\\a.txt\"");
+        assert_eq!(
+            quote_git_patch_path("back\\slash.txt"),
+            "\"back\\\\slash.txt\""
+        );
+        assert_eq!(
+            quote_git_patch_path(&format!("ring{BELL}.txt")),
+            "\"ring\\a.txt\""
+        );
     }
 
     #[test]
@@ -197,7 +208,10 @@ mod tests {
             quote_git_patch_path(&format!("unit{UNIT_SEPARATOR}.txt")),
             "\"unit\\037.txt\""
         );
-        assert_eq!(quote_git_patch_path(&format!("del{DELETE}.txt")), "\"del\\177.txt\"");
+        assert_eq!(
+            quote_git_patch_path(&format!("del{DELETE}.txt")),
+            "\"del\\177.txt\""
+        );
     }
 
     #[test]
@@ -254,7 +268,10 @@ mod tests {
             unquote_git_patch_path("\"caf\\303\\251/r\\303\\251sum\\303\\251.ts\""),
             "café/résumé.ts"
         );
-        assert_eq!(unquote_git_patch_path("\"\\360\\237\\232\\200.ts\""), "🚀.ts");
+        assert_eq!(
+            unquote_git_patch_path("\"\\360\\237\\232\\200.ts\""),
+            "🚀.ts"
+        );
     }
 
     #[test]

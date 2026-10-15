@@ -1,40 +1,56 @@
 //! Port of upstream/packages/shared/src/proposedPlanText.ts
 
+use crate::js_string::JS_WS;
+use turin_contracts::base_schemas::js_trim;
+
+/// JS `.` (no `s` flag) and `$`/`^` under `/m` all treat these as line terminators.
+const LINE_TERMINATORS: &str = r"\n\r\x{2028}\x{2029}";
+
+/// `/^\s{0,3}#{1,6}\s+(.+)$/m`, with JS `\s`, `.`, `^`, `$` semantics spelled out.
 fn heading_pattern() -> &'static regex::Regex {
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     PATTERN.get_or_init(|| {
-        // (?m) mirrors the upstream /m flag; `\s` and `.` behave like JS.
-        regex::Regex::new(r"(?m)^\s{0,3}#{1,6}\s+(.+)$").expect("static regex is valid")
+        regex::Regex::new(&format!(
+            r"(?m)(?:^|[\r\x{{2028}}\x{{2029}}])[{ws}]{{0,3}}#{{1,6}}[{ws}]+([^{lt}]+)(?:[\r\x{{2028}}\x{{2029}}]|$)",
+            ws = JS_WS,
+            lt = LINE_TERMINATORS
+        ))
+        .expect("static regex is valid")
     })
 }
 
+/// `/^\s{0,3}#{1,6}\s+(.+)$/` (single line, no `m`).
 fn heading_text_pattern() -> &'static regex::Regex {
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    PATTERN.get_or_init(|| regex::Regex::new(r"^\s{0,3}#{1,6}\s+(.+)$").expect("static regex is valid"))
+    PATTERN.get_or_init(|| {
+        regex::Regex::new(&format!(
+            r"^[{ws}]{{0,3}}#{{1,6}}[{ws}]+([^{lt}]+)$",
+            ws = JS_WS,
+            lt = LINE_TERMINATORS
+        ))
+        .expect("static regex is valid")
+    })
 }
 
 pub fn proposed_plan_title(plan_markdown: &str) -> Option<String> {
-    let heading = heading_pattern()
-        .captures(plan_markdown)?
-        .get(1)?
-        .as_str();
-    let heading = turin_contracts::base_schemas::js_trim(heading);
+    let heading = heading_pattern().captures(plan_markdown)?.get(1)?.as_str();
+    let heading = js_trim(heading);
     (!heading.is_empty()).then(|| heading.to_owned())
 }
 
 /// JS `String.prototype.trimEnd` (same whitespace set as `trim`).
 fn js_trim_end(value: &str) -> &str {
-    let trimmed = value.trim_end_matches(crate::js_string::is_js_whitespace_char);
-    trimmed
+    (value.trim_end_matches(crate::js_string::is_js_whitespace_char)) as _
 }
 
 pub fn strip_displayed_plan_markdown(plan_markdown: &str) -> String {
     let trimmed = js_trim_end(plan_markdown);
     let lines: Vec<&str> = split_crlf(trimmed);
     let mut source_lines: Vec<&str> = lines;
-    if source_lines.first().is_some_and(|first| {
-        regex_first_line_heading().is_match(first)
-    }) {
+    if source_lines
+        .first()
+        .is_some_and(|first| regex_first_line_heading().is_match(first))
+    {
         source_lines.remove(0);
     }
     while source_lines
@@ -66,7 +82,10 @@ pub fn strip_displayed_plan_markdown(plan_markdown: &str) -> String {
 // /^\s{0,3}#{1,6}\s+/
 fn regex_first_line_heading() -> &'static regex::Regex {
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    PATTERN.get_or_init(|| regex::Regex::new(r"^\s{0,3}#{1,6}\s+").expect("static regex is valid"))
+    PATTERN.get_or_init(|| {
+        regex::Regex::new(&format!(r"^[{ws}]{{0,3}}#{{1,6}}[{ws}]+", ws = JS_WS))
+            .expect("static regex is valid")
+    })
 }
 
 /// `value.split(/\r?\n/)`
@@ -98,7 +117,10 @@ mod tests {
 
     #[test]
     fn reads_the_first_markdown_heading_as_the_plan_title() {
-        assert_eq!(proposed_plan_title("# Integrate RPC\n\nBody"), Some("Integrate RPC".to_owned()));
+        assert_eq!(
+            proposed_plan_title("# Integrate RPC\n\nBody"),
+            Some("Integrate RPC".to_owned())
+        );
     }
 
     #[test]

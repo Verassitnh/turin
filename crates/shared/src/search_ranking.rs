@@ -2,7 +2,9 @@
 
 use std::cmp::Ordering;
 
-use crate::js_string::{code_unit_cmp, utf16_len};
+use turin_contracts::base_schemas::js_trim;
+
+use crate::js_string::{locale_compare, utf16_len};
 
 pub struct RankedSearchResult<T> {
     pub item: T,
@@ -19,18 +21,15 @@ pub fn normalize_search_query(
     input: &str,
     options: Option<&NormalizeSearchQueryOptions<'_>>,
 ) -> String {
-    let trimmed = turin_contracts::base_schemas::js_trim(input);
+    let trimmed = js_trim(input);
     if trimmed.is_empty() {
         return String::new();
     }
     match options.and_then(|options| options.trim_leading_pattern) {
         Some(pattern) => {
-            // Upstream: trimmed.replace(pattern, "").toLowerCase() — a
-            // non-anchored regex replaces every match; the option's callers
-            // pass leading-anchored patterns.
-            pattern
-                .replace_all(trimmed, "")
-                .to_lowercase()
+            // Upstream: trimmed.replace(pattern, "").toLowerCase(); a
+            // non-global JS regex replaces the first match only.
+            pattern.replace(trimmed, "").to_lowercase()
         }
         None => trimmed.to_lowercase(),
     }
@@ -121,10 +120,10 @@ pub fn score_query_match(input: &ScoreQueryMatchInput<'_>) -> Option<i64> {
         return Some(input.exact_base);
     }
 
-    if let Some(prefix_base) = input.prefix_base {
-        if value.starts_with(query) {
-            return Some(prefix_base + length_penalty(value, query));
-        }
+    if let Some(prefix_base) = input.prefix_base
+        && value.starts_with(query)
+    {
+        return Some(prefix_base + length_penalty(value, query));
     }
 
     if let Some(boundary_base) = input.boundary_base {
@@ -135,28 +134,31 @@ pub fn score_query_match(input: &ScoreQueryMatchInput<'_>) -> Option<i64> {
         }
     }
 
-    if let Some(includes_base) = input.includes_base {
-        if let Some(includes_index) = value.find(query) {
-            let unit_index = utf16_len(&value[..includes_index]) as i64;
-            return Some(includes_base + unit_index * 2 + length_penalty(value, query));
-        }
+    if let Some(includes_base) = input.includes_base
+        && let Some(includes_index) = value.find(query)
+    {
+        let unit_index = utf16_len(&value[..includes_index]) as i64;
+        return Some(includes_base + unit_index * 2 + length_penalty(value, query));
     }
 
-    if let Some(fuzzy_base) = input.fuzzy_base {
-        if let Some(fuzzy_score) = score_subsequence_match(value, query) {
-            return Some(fuzzy_base + fuzzy_score);
-        }
+    if let Some(fuzzy_base) = input.fuzzy_base
+        && let Some(fuzzy_score) = score_subsequence_match(value, query)
+    {
+        return Some(fuzzy_base + fuzzy_score);
     }
 
     None
 }
 
-fn compare_ranked_search_results<T>(left: &RankedSearchResult<T>, right: &RankedSearchResult<T>) -> Ordering {
+fn compare_ranked_search_results<T>(
+    left: &RankedSearchResult<T>,
+    right: &RankedSearchResult<T>,
+) -> Ordering {
     let score_delta = left.score.cmp(&right.score);
     if score_delta != Ordering::Equal {
         return score_delta;
     }
-    code_unit_cmp(&left.tie_breaker, &right.tie_breaker)
+    locale_compare(&left.tie_breaker, &right.tie_breaker)
 }
 
 fn find_insertion_index<T>(

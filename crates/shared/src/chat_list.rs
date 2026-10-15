@@ -8,20 +8,15 @@ pub struct ChatListAnchoredEndSpace {
     pub anchor_offset: i64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ChatListAnchorOptions {
     pub anchor_offset: Option<i64>,
 }
 
-impl Default for ChatListAnchorOptions {
-    fn default() -> Self {
-        Self { anchor_offset: None }
-    }
-}
-
 pub fn resolve_chat_list_anchored_end_space<Item, AnchorId>(
     items: &[Item],
-    anchor_id: Option<&AnchorId>,
-    get_anchor_id: impl Fn(&Item) -> Option<&AnchorId>,
+    anchor_id: Option<AnchorId>,
+    get_anchor_id: impl Fn(&Item) -> Option<AnchorId>,
     options: ChatListAnchorOptions,
 ) -> Option<ChatListAnchoredEndSpace>
 where
@@ -57,9 +52,18 @@ mod tests {
     }
 
     const ROWS: [Row; 3] = [
-        Row { id: "first", anchorable: true },
-        Row { id: "ignored", anchorable: false },
-        Row { id: "latest", anchorable: true },
+        Row {
+            id: "first",
+            anchorable: true,
+        },
+        Row {
+            id: "ignored",
+            anchorable: false,
+        },
+        Row {
+            id: "latest",
+            anchorable: true,
+        },
     ];
 
     fn get_anchor_id(row: &Row) -> Option<&'static str> {
@@ -69,8 +73,16 @@ mod tests {
     #[test]
     fn anchors_only_the_first_eligible_row() {
         assert_eq!(
-            resolve_chat_list_anchored_end_space(&ROWS, Some("first"), get_anchor_id, Default::default()),
-            Some(ChatListAnchoredEndSpace { anchor_index: 0, anchor_offset: CHAT_LIST_ANCHOR_OFFSET })
+            resolve_chat_list_anchored_end_space(
+                &ROWS,
+                Some("first"),
+                get_anchor_id,
+                Default::default()
+            ),
+            Some(ChatListAnchoredEndSpace {
+                anchor_index: 0,
+                anchor_offset: CHAT_LIST_ANCHOR_OFFSET
+            })
         );
     }
 
@@ -81,16 +93,26 @@ mod tests {
                 &ROWS,
                 Some("first"),
                 get_anchor_id,
-                ChatListAnchorOptions { anchor_offset: Some(132) }
+                ChatListAnchorOptions {
+                    anchor_offset: Some(132)
+                }
             ),
-            Some(ChatListAnchoredEndSpace { anchor_index: 0, anchor_offset: 132 })
+            Some(ChatListAnchoredEndSpace {
+                anchor_index: 0,
+                anchor_offset: 132
+            })
         );
     }
 
     #[test]
     fn does_not_reserve_end_space_for_later_eligible_rows() {
         assert_eq!(
-            resolve_chat_list_anchored_end_space(&ROWS, Some("latest"), get_anchor_id, Default::default()),
+            resolve_chat_list_anchored_end_space(
+                &ROWS,
+                Some("latest"),
+                get_anchor_id,
+                Default::default()
+            ),
             None
         );
     }
@@ -98,19 +120,37 @@ mod tests {
     #[test]
     fn skips_ineligible_rows_before_the_first_anchor() {
         assert_eq!(
-            resolve_chat_list_anchored_end_space(&ROWS[1..], Some("latest"), get_anchor_id, Default::default()),
-            Some(ChatListAnchoredEndSpace { anchor_index: 1, anchor_offset: CHAT_LIST_ANCHOR_OFFSET })
+            resolve_chat_list_anchored_end_space(
+                &ROWS[1..],
+                Some("latest"),
+                get_anchor_id,
+                Default::default()
+            ),
+            Some(ChatListAnchoredEndSpace {
+                anchor_index: 1,
+                anchor_offset: CHAT_LIST_ANCHOR_OFFSET
+            })
         );
     }
 
     #[test]
     fn ignores_ineligible_rows_and_missing_anchors() {
         assert_eq!(
-            resolve_chat_list_anchored_end_space(&ROWS, Some("ignored"), get_anchor_id, Default::default()),
+            resolve_chat_list_anchored_end_space(
+                &ROWS,
+                Some("ignored"),
+                get_anchor_id,
+                Default::default()
+            ),
             None
         );
         assert_eq!(
-            resolve_chat_list_anchored_end_space(&ROWS, Some("missing"), get_anchor_id, Default::default()),
+            resolve_chat_list_anchored_end_space(
+                &ROWS,
+                Some("missing"),
+                get_anchor_id,
+                Default::default()
+            ),
             None
         );
         assert_eq!(

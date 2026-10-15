@@ -51,6 +51,7 @@ markdown = "1.0.0"
 url = "2"
 percent-encoding = "2"
 unicode-normalization = "0.1"
+indexmap = { version = "2", features = ["serde"] }
 
 gpui-kit = "0.7.3"
 

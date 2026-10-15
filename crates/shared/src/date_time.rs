@@ -2,18 +2,17 @@
 
 use std::cmp::Ordering;
 
-use chrono::{Datelike, NaiveDate};
-
 use crate::js_string::code_unit_cmp;
+use turin_contracts::base_schemas::js_trim;
 
 /// Upstream pattern:
-/// `/^(?:\d{4}|[+-]\d{6})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?|24:00(?::00(?:\.0+)?)?)(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/`
+/// `/^(?:[0-9]{4}|[+-][0-9]{6})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9](?:\.[0-9]+)?)?|24:00(?::00(?:\.0+)?)?)(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$/`
 /// checked with `Schema.isTrimmed()`, so surrounding whitespace fails too.
 fn zoned_iso_date_time_regex() -> &'static regex::Regex {
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     PATTERN.get_or_init(|| {
         regex::Regex::new(
-            r"^(?P<year>\d{4}|[+-]\d{6})-(?P<month>0[1-9]|1[0-2])-(?P<day>0[1-9]|[12]\d|3[01])T(?P<time>(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?|24:00(?::00(?:\.0+)?)?)(?P<zone>Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$",
+            r"^(?P<year>[0-9]{4}|[+-][0-9]{6})-(?P<month>0[1-9]|1[0-2])-(?P<day>0[1-9]|[12][0-9]|3[01])T(?P<time>(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9](?:\.[0-9]+)?)?|24:00(?::00(?:\.0+)?)?)(?P<zone>Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
         )
         .expect("static regex is valid")
     })
@@ -34,7 +33,7 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 /// Milliseconds since the Unix epoch, or `None` for anything the upstream
 /// schema or its calendar round-trip would reject.
 fn parse_timestamp(value: &str) -> Option<i64> {
-    if value != turin_contracts::base_schemas::js_trim(value) {
+    if value != js_trim(value) {
         return None;
     }
     let captures = zoned_iso_date_time_regex().captures(value)?;
@@ -55,15 +54,20 @@ fn parse_timestamp(value: &str) -> Option<i64> {
     if day > days_in_month(year, month) {
         return None;
     }
-    let Some(date) = NaiveDate::from_ymd_opt(year, month, day) else {
+    // `Date.parse` rejects the negative-zero year.
+    if year_text == "-000000" {
         return None;
-    };
+    }
 
     let time = captures.name("time")?.as_str();
     let (hour_text, rest) = time.split_once(':')?;
     let hour: i64 = hour_text.parse().ok()?;
     let (minute_text, rest) = rest.split_once(':').unwrap_or((rest, ""));
-    let minute: i64 = if minute_text.len() == 2 { minute_text.parse().ok()? } else { 0 };
+    let minute: i64 = if minute_text.len() == 2 {
+        minute_text.parse().ok()?
+    } else {
+        0
+    };
     let (second_text, fraction) = match rest.split_once('.') {
         Some((second_text, fraction)) => (second_text, Some(fraction)),
         None => (rest, None),
@@ -89,18 +93,27 @@ fn parse_timestamp(value: &str) -> Option<i64> {
         offset => {
             let sign: i64 = if offset.starts_with('-') { -1 } else { 1 };
             let (offset_hour, offset_minute) = offset[1..].split_once(':')?;
-            sign
-                * (offset_hour.parse::<i64>().ok()? * 60 + offset_minute.parse::<i64>().ok()?)
+            sign * (offset_hour.parse::<i64>().ok()? * 60 + offset_minute.parse::<i64>().ok()?)
                 * 60_000
         }
     };
 
-    let days_since_epoch = NaiveDate::from_ymd_opt(1970, 1, 1)?
-        .signed_duration_since(date)
-        .num_days();
-    let time_of_day_millis =
-        (hour * 60 + minute) * 60_000 + second * 1_000 + milliseconds;
-    Some(days_since_epoch * 86_400_000 + time_of_day_millis - offset_millis)
+    let time_of_day_millis = (hour * 60 + minute) * 60_000 + second * 1_000 + milliseconds;
+    let total = days_from_civil(i64::from(year), i64::from(month), i64::from(day)) * 86_400_000
+        + time_of_day_millis
+        - offset_millis;
+    // ECMAScript TimeClip: |t| <= 8.64e15.
+    (total.abs() <= 8_640_000_000_000_000).then_some(total)
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date (Hinnant's algorithm).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 /// Compare date-time strings by absolute time, with stable handling for
@@ -112,9 +125,7 @@ pub fn compare_date_time_strings(left: &str, right: &str) -> Ordering {
     match (left_timestamp, right_timestamp) {
         (Some(_), None) => Ordering::Greater,
         (None, Some(_)) => Ordering::Less,
-        (Some(left_timestamp), Some(right_timestamp)) => {
-            left_timestamp.cmp(&right_timestamp)
-        }
+        (Some(left_timestamp), Some(right_timestamp)) => left_timestamp.cmp(&right_timestamp),
         (None, None) => code_unit_cmp(left, right),
     }
 }
@@ -170,11 +181,31 @@ mod tests {
             "2026-09-01T25:00Z",
         ];
         for value in malformed {
-            assert_eq!(compare_date_time_strings(value, valid), Ordering::Less, "{value}");
-            assert_eq!(compare_date_time_strings(valid, value), Ordering::Greater, "{value}");
-            assert_eq!(compare_date_time_strings(value, "invalid"), Ordering::Less, "{value}");
-            assert_eq!(compare_date_time_strings("invalid", value), Ordering::Greater, "{value}");
-            assert_eq!(compare_date_time_strings(value, value), Ordering::Equal, "{value}");
+            assert_eq!(
+                compare_date_time_strings(value, valid),
+                Ordering::Less,
+                "{value}"
+            );
+            assert_eq!(
+                compare_date_time_strings(valid, value),
+                Ordering::Greater,
+                "{value}"
+            );
+            assert_eq!(
+                compare_date_time_strings(value, "invalid"),
+                Ordering::Less,
+                "{value}"
+            );
+            assert_eq!(
+                compare_date_time_strings("invalid", value),
+                Ordering::Greater,
+                "{value}"
+            );
+            assert_eq!(
+                compare_date_time_strings(value, value),
+                Ordering::Equal,
+                "{value}"
+            );
         }
     }
 
@@ -183,8 +214,14 @@ mod tests {
         let equal_pairs = [
             ("2024-02-29T12:00:00Z", "2024-02-29T17:30:00+05:30"),
             ("2000-02-29T00:00:00.100Z", "2000-02-28T20:30:00.1-03:30"),
-            ("0000-01-01T00:00:00.000Z", "+000000-01-01T00:00:00.000+00:00"),
-            ("+010000-01-01T00:00:00.000Z", "9999-12-31T23:00:00.000-01:00"),
+            (
+                "0000-01-01T00:00:00.000Z",
+                "+000000-01-01T00:00:00.000+00:00",
+            ),
+            (
+                "+010000-01-01T00:00:00.000Z",
+                "9999-12-31T23:00:00.000-01:00",
+            ),
             ("2026-09-01T24:00:00Z", "2026-09-02T00:00:00Z"),
             ("2026-09-01T24:00:00.0000Z", "2026-09-02T00:00:00.000Z"),
             ("2024-02-29T24:00:00+05:30", "2024-03-01T00:00:00+05:30"),
@@ -195,7 +232,11 @@ mod tests {
             ("2026-09-01T24:00+05:30", "2026-09-02T00:00:00+05:30"),
         ];
         for (left, right) in equal_pairs {
-            assert_eq!(compare_date_time_strings(left, right), Ordering::Equal, "{left} vs {right}");
+            assert_eq!(
+                compare_date_time_strings(left, right),
+                Ordering::Equal,
+                "{left} vs {right}"
+            );
         }
     }
 
@@ -213,7 +254,10 @@ mod tests {
 
     #[test]
     fn returns_zero_for_equal_malformed_date_time_strings() {
-        assert_eq!(compare_date_time_strings("invalid", "invalid"), Ordering::Equal);
+        assert_eq!(
+            compare_date_time_strings("invalid", "invalid"),
+            Ordering::Equal
+        );
     }
 
     #[test]
@@ -234,7 +278,7 @@ mod tests {
 
         for values in permutations {
             let mut sorted = values;
-            sorted.sort_by(compare_date_time_strings);
+            sorted.sort_by(|left, right| compare_date_time_strings(left, right));
             assert_eq!(sorted, expected);
         }
     }

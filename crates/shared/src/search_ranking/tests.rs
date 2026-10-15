@@ -17,7 +17,9 @@ fn normalize_can_strip_leading_trigger_characters() {
     assert_eq!(
         normalize_search_query(
             "  $ui",
-            Some(&NormalizeSearchQueryOptions { trim_leading_pattern: Some(&pattern) })
+            Some(&NormalizeSearchQueryOptions {
+                trim_leading_pattern: Some(&pattern)
+            })
         ),
         "ui"
     );
@@ -94,20 +96,42 @@ fn scores_tighter_subsequences_ahead_of_looser_ones() {
 #[test]
 fn keeps_the_best_ranked_candidates_within_the_limit() {
     let mut ranked = vec![
-        RankedSearchResult { item: "b", score: 20, tie_breaker: "b".to_owned() },
-        RankedSearchResult { item: "d", score: 40, tie_breaker: "d".to_owned() },
+        RankedSearchResult {
+            item: "b",
+            score: 20,
+            tie_breaker: "b".to_owned(),
+        },
+        RankedSearchResult {
+            item: "d",
+            score: 40,
+            tie_breaker: "d".to_owned(),
+        },
     ];
 
     insert_ranked_search_result(
         &mut ranked,
-        RankedSearchResult { item: "a", score: 10, tie_breaker: "a".to_owned() },
+        RankedSearchResult {
+            item: "a",
+            score: 10,
+            tie_breaker: "a".to_owned(),
+        },
         2,
     );
     insert_ranked_search_result(
         &mut ranked,
-        RankedSearchResult { item: "c", score: 30, tie_breaker: "c".to_owned() },
+        RankedSearchResult {
+            item: "c",
+            score: 30,
+            tie_breaker: "c".to_owned(),
+        },
         2,
     );
 
-    assert_eq!(ranked.into_iter().map(|entry| entry.item).collect::<Vec<_>(), ["a", "b"]);
+    assert_eq!(
+        ranked
+            .into_iter()
+            .map(|entry| entry.item)
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
 }

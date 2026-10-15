@@ -18,14 +18,14 @@ pub struct ComposerInlineToken {
     pub end: usize,
 }
 
+#[derive(Debug, Clone, Default)]
 pub struct CollectComposerInlineTokensOptions {
     pub preserve_trailing_from: Vec<ComposerInlineToken>,
 }
 
-impl Default for CollectComposerInlineTokensOptions {
-    fn default() -> Self {
-        Self { preserve_trailing_from: Vec::new() }
-    }
+/// JS `.` (no `s` flag) does not match line terminators.
+fn is_line_terminator(ch: char) -> bool {
+    matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}')
 }
 
 /// `text` indexed by char with its UTF-16 length; keeps JS unit arithmetic
@@ -100,36 +100,35 @@ fn scan_skill_tokens(text: &str, units: &CharUnits, tokens: &mut Vec<ComposerInl
     let mut index = 0usize;
     while index < units.len() {
         let ch = units.chars[index];
-        if units.starts_token_here(index) && is_currency_symbol(ch) {
-            if index + 1 < units.len() && units.chars[index + 1].is_ascii_alphanumeric() {
-                let name_start = index + 1;
-                let mut cursor = name_start + 1;
-                let mut has_letter = units.chars[name_start].is_ascii_alphabetic();
-                while cursor < units.len() && is_skill_name_char(units.chars[cursor]) {
-                    has_letter = has_letter || units.chars[cursor].is_ascii_alphabetic();
-                    cursor += 1;
-                }
-                // (?=\s): while typing, a token only becomes a chip once a
-                // delimiter follows it.
-                // (?!...): reject `[0-9][0-9_]*(suffix)?(\s|$)` amounts.
-                let looks_like_amount = looks_like_compact_amount(units, index + 1);
-                if has_letter
-                    && units.followed_by_whitespace(cursor)
-                    && !looks_like_amount
-                {
-                    let start = units.unit_at(index) + ch.len_utf16();
-                    let end = units.unit_at(cursor);
-                    tokens.push(ComposerInlineToken {
-                        kind: ComposerInlineTokenKind::Skill,
-                        value: units.chars[name_start..cursor].iter().collect(),
-                        source: units.slice_text(text, start, end).to_owned(),
-                        start,
-                        end,
-                    });
-                    // Global matching resumes after this token.
-                    index = cursor;
-                    continue;
-                }
+        if units.starts_token_here(index)
+            && is_currency_symbol(ch)
+            && index + 1 < units.len()
+            && units.chars[index + 1].is_ascii_alphanumeric()
+        {
+            let name_start = index + 1;
+            let mut cursor = name_start + 1;
+            let mut has_letter = units.chars[name_start].is_ascii_alphabetic();
+            while cursor < units.len() && is_skill_name_char(units.chars[cursor]) {
+                has_letter = has_letter || units.chars[cursor].is_ascii_alphabetic();
+                cursor += 1;
+            }
+            // (?=\s): while typing, a token only becomes a chip once a
+            // delimiter follows it.
+            // (?!...): reject `[0-9][0-9_]*(suffix)?(\s|$)` amounts.
+            let looks_like_amount = looks_like_compact_amount(units, index + 1);
+            if has_letter && units.followed_by_whitespace(cursor) && !looks_like_amount {
+                let start = units.unit_at(index);
+                let end = units.unit_at(cursor);
+                tokens.push(ComposerInlineToken {
+                    kind: ComposerInlineTokenKind::Skill,
+                    value: units.chars[name_start..cursor].iter().collect(),
+                    source: units.slice_text(text, start, end).to_owned(),
+                    start,
+                    end,
+                });
+                // Global matching resumes after this token.
+                index = cursor;
+                continue;
             }
         }
         index += 1;
@@ -169,10 +168,12 @@ fn unescape_backslashes(value: &str) -> String {
     let mut chars = value.chars();
     while let Some(ch) = chars.next() {
         if ch == '\\' {
-            if let Some(escaped) = chars.next() {
-                result.push(escaped);
-            } else {
-                result.push(ch);
+            match chars.clone().next() {
+                Some(escaped) if !is_line_terminator(escaped) => {
+                    chars.next();
+                    result.push(escaped);
+                }
+                _ => result.push(ch),
             }
         } else {
             result.push(ch);
@@ -186,7 +187,7 @@ fn is_scoped_package_reference(value: &str) -> bool {
     static SCOPED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     SCOPED
         .get_or_init(|| {
-            regex::Regex::new(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*(?:/[^\s@\"]+)*$")
+            regex::Regex::new(r#"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*(?:/[^\s@"]+)*$"#)
                 .expect("valid regex")
         })
         .is_match(value)
@@ -207,17 +208,19 @@ fn scan_mention_tokens(text: &str, units: &CharUnits, tokens: &mut Vec<ComposerI
                 let mut closed = false;
                 while cursor < units.len() {
                     let c = units.chars[cursor];
-                    if c == '\\' && cursor + 1 < units.len() {
-                        cursor += 2;
-                        continue;
+                    if c == '\\' {
+                        // `\\.`: the escaped char must exist and not be a line terminator.
+                        if cursor + 1 < units.len() && !is_line_terminator(units.chars[cursor + 1])
+                        {
+                            cursor += 2;
+                            continue;
+                        }
+                        break;
                     }
                     if c == '"' {
                         cursor += 1;
                         closed = true;
                         break;
-                    }
-                    if c == '\\' {
-                        break; // trailing lone backslash cannot close
                     }
                     cursor += 1;
                 }
@@ -237,14 +240,18 @@ fn scan_mention_tokens(text: &str, units: &CharUnits, tokens: &mut Vec<ComposerI
                 {
                     cursor += 1;
                 }
-                value = (units.followed_by_whitespace(cursor) && cursor > body_start)
-                    .then(|| (units.chars[body_start..cursor].iter().collect::<String>(), false));
+                value = (units.followed_by_whitespace(cursor) && cursor > body_start).then(|| {
+                    (
+                        units.chars[body_start..cursor].iter().collect::<String>(),
+                        false,
+                    )
+                });
             }
             if let Some((value, quoted)) = value {
                 // Autocomplete emits canonical file links, so ambiguous bare
                 // @scope/package text stays a package.
                 if !value.is_empty() && (quoted || !is_scoped_package_reference(&value)) {
-                    let start = units.unit_at(index) + 1; // after the '@'
+                    let start = units.unit_at(index);
                     let end = units.unit_at(cursor);
                     tokens.push(ComposerInlineToken {
                         kind: ComposerInlineTokenKind::Mention,
@@ -290,15 +297,21 @@ const MAX_FILE_LINK_LABEL_LENGTH: usize = 512;
 
 /// Canonical file links: `(^|\s)\[((?:\\.|[^\]\\\\]){0,512})\]\(([^)\s]+)\)(?=\s)`.
 fn scan_file_link_tokens(text: &str, units: &CharUnits, tokens: &mut Vec<ComposerInlineToken>) {
+    // A link needs a `]` somewhere after its `[`; past the last one no
+    // attempt can succeed, which keeps unterminated bracket runs linear.
+    let Some(last_close) = units.chars.iter().rposition(|ch| *ch == ']') else {
+        return;
+    };
     let mut index = 0usize;
-    while index < units.len() {
+    while index < last_close {
         let ch = units.chars[index];
-        if units.starts_token_here(index) && ch == '[' {
-            if let Some(token) = scan_file_link_at(text, units, index) {
-                index = token_end_index(units, token.end);
-                tokens.push(token);
-                continue;
-            }
+        if units.starts_token_here(index)
+            && ch == '['
+            && let Some(token) = scan_file_link_at(text, units, index)
+        {
+            index = token_end_index(units, token.end);
+            tokens.push(token);
+            continue;
         }
         index += 1;
     }
@@ -309,17 +322,13 @@ fn token_end_index(units: &CharUnits, end_units: usize) -> usize {
     units.offsets.partition_point(|offset| *offset < end_units)
 }
 
-fn scan_file_link_at(
-    text: &str,
-    units: &CharUnits,
-    index: usize,
-) -> Option<ComposerInlineToken> {
+fn scan_file_link_at(text: &str, units: &CharUnits, index: usize) -> Option<ComposerInlineToken> {
     // Label body: `(?:\\.|[^\]\\]){0,512}`.
     let mut cursor = index + 1;
     let mut body_units = 0usize;
     while cursor < units.len() {
         let c = units.chars[cursor];
-        if c == '\\' && cursor + 1 < units.len() {
+        if c == '\\' && cursor + 1 < units.len() && !is_line_terminator(units.chars[cursor + 1]) {
             let pair_units = c.len_utf16() + units.chars[cursor + 1].len_utf16();
             if body_units + pair_units > MAX_FILE_LINK_LABEL_LENGTH {
                 return None;
@@ -367,8 +376,11 @@ fn scan_file_link_at(
     let destination_end = cursor;
     cursor += 1; // ')'
 
-    let label: String = unescape_backslashes(&units.chars[index + 1..label_end].iter().collect());
-    let encoded_path: String = units.chars[destination_start..destination_end].iter().collect();
+    let label: String =
+        unescape_backslashes(&units.chars[index + 1..label_end].iter().collect::<String>());
+    let encoded_path: String = units.chars[destination_start..destination_end]
+        .iter()
+        .collect();
     // Preserve malformed source rather than dropping a user-authored token.
     let path = decode_uri_component(&encoded_path).unwrap_or_else(|_| encoded_path.clone());
     let separator_index = path.rfind('/').max(path.rfind('\\'));
@@ -380,7 +392,7 @@ fn scan_file_link_at(
     if path.is_empty() || has_external_scheme || label != basename {
         return None;
     }
-    let start = units.unit_at(index) + 1; // after the '['
+    let start = units.unit_at(index);
     let end = units.unit_at(cursor);
     Some(ComposerInlineToken {
         kind: ComposerInlineTokenKind::Mention,

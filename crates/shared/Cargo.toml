@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 turin-contracts.workspace = true
 anyhow.workspace = true
+indexmap.workspace = true
 chrono.workspace = true
 markdown.workspace = true
 percent-encoding.workspace = true

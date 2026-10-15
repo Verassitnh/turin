@@ -12,35 +12,11 @@ pub fn utf16_len(value: &str) -> usize {
     value.chars().map(|c| c.len_utf16()).sum()
 }
 
-/// `String.prototype[index]`: the UTF-16 code unit at `index`, if any.
+/// `String.prototype.charCodeAt(index)`: the UTF-16 code unit at `index`, if any.
 ///
-/// A code unit from a surrogate pair is returned as its lone surrogate (as a
-/// `char`, since all UTF-16 code units fit in a `char`), exactly like the
-/// broken substring JavaScript hands back.
-pub fn char_code_unit_at(value: &str, index: usize) -> Option<char> {
-    let mut units = 0usize;
-    for c in value.chars() {
-        let len = c.len_utf16();
-        if units == index {
-            // Return the first code unit of this char (for a surrogate pair
-            // this is the high surrogate, matching JS).
-            return Some(if len == 2 { high_surrogate(c) } else { c });
-        }
-        if units + len > index {
-            // Index landed inside a surrogate pair: impossible for real UTF-16
-            // (units advance by 2), so this arm is unreachable.
-            return None;
-        }
-        units += len;
-    }
-    None
-}
-
-/// The high surrogate of an astral char (call only when `c.len_utf16() == 2`).
-fn high_surrogate(c: char) -> char {
-    let code = c as u32;
-    let high = 0xd800 + ((code - 0x1_0000) >> 10);
-    char::from_u32(high).expect("valid high surrogate")
+/// A surrogate-pair half comes back as the lone surrogate, as in JS.
+pub fn char_code_unit_at(value: &str, index: usize) -> Option<u16> {
+    value.encode_utf16().nth(index)
 }
 
 /// `String.prototype.slice(start, end)` with UTF-16 indices (clamped like JS:
@@ -52,27 +28,24 @@ fn high_surrogate(c: char) -> char {
 /// a pair on the paths that matter (all offsets come from matching whole
 /// needles or ASCII delimiters).
 pub fn slice_utf16(value: &str, start: usize, end: usize) -> &str {
-    let end = end.min(utf16_len(value));
-    let start = start.min(end);
-    let mut unit_start = 0usize;
-    let mut byte_start = None;
-    let mut byte_end = None;
+    let mut byte_start = value.len();
+    let mut byte_end = value.len();
     let mut units = 0usize;
     for (byte, c) in value.char_indices() {
-        if units == start {
-            byte_start = Some(byte);
+        let len = c.len_utf16();
+        if byte_start == value.len() && units >= start {
+            byte_start = byte;
         }
-        units += c.len_utf16();
-        if units == end {
-            byte_end = Some(byte + c.len_utf8());
+        if units + len > end {
+            byte_end = byte;
             break;
         }
+        units += len;
     }
-    match (byte_start, byte_end) {
-        (Some(a), Some(b)) => &value[a..b],
-        (Some(a), None) => &value[a..],
-        _ => "",
+    if byte_start >= byte_end {
+        return "";
     }
+    &value[byte_start..byte_end]
 }
 
 /// `String.prototype.indexOf(searchElement, fromIndex)` with UTF-16 indices.
@@ -136,15 +109,80 @@ pub fn last_index_of_utf16(value: &str, needle: &str, from_index: usize) -> Opti
     None
 }
 
-/// `String.prototype.localeCompare` fallback used by upstream when inputs are
-/// malformed: plain code-unit comparison (JS `<`/`>` on strings).
+/// UTF-16 code-unit order, i.e. JS `<` / `>` on strings.
 pub fn code_unit_cmp(left: &str, right: &str) -> std::cmp::Ordering {
-    let left: Vec<u16> = left.encode_utf16().collect();
-    let right: Vec<u16> = right.encode_utf16().collect();
-    left.cmp(&right)
+    left.encode_utf16().cmp(right.encode_utf16())
 }
 
-/// JS `\s` whitespace test on a `char` (Unicode whitespace, including BOM).
+/// ICU root-collation order of ASCII punctuation and symbols (after
+/// whitespace, before digits), as `localeCompare` sees it in en-US.
+const COLLATION_PUNCTUATION: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
+
+/// Approximates `String.prototype.localeCompare` in the default en-US locale
+/// (ICU root collation) without an ICU dependency.
+///
+/// Three levels, like ICU: base characters (whitespace < punctuation <
+/// digits < letters, letters case-insensitively), then accents, then case
+/// (lowercase before uppercase). Characters outside ASCII letters/digits fall
+/// back to code point order after the letters.
+pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
+    use unicode_normalization::UnicodeNormalization;
+
+    struct Key {
+        primary: Vec<u32>,
+        secondary: Vec<u32>,
+        tertiary: Vec<u8>,
+    }
+
+    fn key(value: &str) -> Key {
+        let mut primary = Vec::new();
+        let mut secondary = Vec::new();
+        let mut tertiary = Vec::new();
+        for c in value.nfd() {
+            if ('\u{0300}'..='\u{036f}').contains(&c) {
+                // Accent: attach to the previous base character.
+                if let Some(last) = secondary.last_mut() {
+                    *last = *last * 1000 + (c as u32 - 0x2ff);
+                }
+                continue;
+            }
+            let lowered = c.to_lowercase().next().unwrap_or(c);
+            let weight = if is_js_whitespace_char(c) || c.is_control() {
+                c as u32
+            } else if let Some(index) = COLLATION_PUNCTUATION.find(c) {
+                1_000 + index as u32
+            } else if c.is_ascii_digit() {
+                2_000 + (c as u32 - '0' as u32)
+            } else if lowered.is_ascii_lowercase() {
+                3_000 + (lowered as u32 - 'a' as u32)
+            } else {
+                4_000 + lowered as u32
+            };
+            primary.push(weight);
+            secondary.push(0);
+            tertiary.push(u8::from(c != lowered));
+        }
+        Key {
+            primary,
+            secondary,
+            tertiary,
+        }
+    }
+
+    let (left, right) = (key(left), key(right));
+    left.primary
+        .cmp(&right.primary)
+        .then_with(|| left.secondary.cmp(&right.secondary))
+        .then_with(|| left.tertiary.cmp(&right.tertiary))
+}
+
+/// Body of a regex character class equal to JS `\s`. Rust's `\s` differs
+/// (it has U+0085 and lacks U+FEFF), so patterns ported from JS splice this in:
+/// `format!("[{JS_WS}]")` for `\s`, `format!("[^{JS_WS}]")` for `\S`.
+pub const JS_WS: &str = r"\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
+
+/// JS `\s` whitespace test on a `char`: WhiteSpace + LineTerminator, so U+FEFF
+/// is in and U+0085 is out (unlike Rust's `char::is_whitespace`).
 pub fn is_js_whitespace_char(ch: char) -> bool {
     matches!(
         ch,
@@ -154,31 +192,36 @@ pub fn is_js_whitespace_char(ch: char) -> bool {
             | '\u{000c}'
             | '\u{000d}'
             | '\u{0020}'
-            | '\u{0085}'
             | '\u{00a0}'
             | '\u{1680}'
-            | '\u{2000}'..='\u{200a}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202f}'
-            | '\u{205f}'
-            | '\u{3000}'
-            | '\u{feff}'
+            | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
     )
 }
+
+/// JS `URIError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("URI malformed")]
+pub struct UriError;
 
 /// JS `decodeURIComponent`: every `%` must start a two-hex-digit escape and the
 /// decoded bytes must be valid UTF-8; otherwise this fails (JS throws
 /// `URIError`, which callers catch).
-pub fn decode_uri_component(value: &str) -> Result<String, ()> {
+pub fn decode_uri_component(value: &str) -> Result<String, UriError> {
     let bytes = value.as_bytes();
     let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' {
-            let hex = bytes.get(index + 1..index + 3).ok_or(())?;
-            let high = (hex[0] as char).to_digit(16).ok_or(())?;
-            let low = (hex[1] as char).to_digit(16).ok_or(())?;
+            let hex = bytes.get(index + 1..index + 3).ok_or(UriError)?;
+            let high = (hex[0] as char).to_digit(16).ok_or(UriError)?;
+            let low = (hex[1] as char).to_digit(16).ok_or(UriError)?;
             decoded.push((high * 16 + low) as u8);
             index += 3;
         } else {
@@ -186,7 +229,7 @@ pub fn decode_uri_component(value: &str) -> Result<String, ()> {
             index += 1;
         }
     }
-    String::from_utf8(decoded).map_err(|_| ())
+    String::from_utf8(decoded).map_err(|_| UriError)
 }
 
 /// JS `encodeURI`: escapes everything except RFC 2396 unreserved and reserved
@@ -194,6 +237,9 @@ pub fn decode_uri_component(value: &str) -> Result<String, ()> {
 pub fn encode_uri(value: &str) -> String {
     const ESCAPE: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
         .add(b' ')
+        .add(b'%')
+        .add(b'[')
+        .add(b']')
         .add(b'"')
         .add(b'<')
         .add(b'>')
@@ -212,7 +258,7 @@ mod tests {
 
     #[test]
     fn utf16_len_counts_surrogate_pairs_as_two() {
-        assert_eq!(utf16_len("aİ"), 3);
+        assert_eq!(utf16_len("aİ"), 2);
         assert_eq!(utf16_len("a😀"), 3);
     }
 
@@ -220,9 +266,10 @@ mod tests {
     fn char_code_unit_at_returns_high_surrogate_inside_pair() {
         // "😀" is U+1F600, one char but two UTF-16 units.
         let value = "a😀";
-        assert_eq!(char_code_unit_at(value, 0), Some('a'));
-        assert_eq!(char_code_unit_at(value, 1), Some('\u{d83d}'));
-        assert_eq!(char_code_unit_at(value, 2), None);
+        assert_eq!(char_code_unit_at(value, 0), Some(u16::from(b'a')));
+        assert_eq!(char_code_unit_at(value, 1), Some(0xd83d));
+        assert_eq!(char_code_unit_at(value, 2), Some(0xde00));
+        assert_eq!(char_code_unit_at(value, 3), None);
     }
 
     #[test]
@@ -258,10 +305,31 @@ mod tests {
     }
 
     #[test]
+    fn locale_compare_matches_icu_for_common_cases() {
+        use std::cmp::Ordering::{Greater, Less};
+        assert_eq!(locale_compare("a", "B"), Less);
+        assert_eq!(locale_compare("a", "A"), Less);
+        assert_eq!(locale_compare("A", "b"), Less);
+        assert_eq!(locale_compare("a-b", "ab"), Less);
+        assert_eq!(locale_compare("10", "9"), Less);
+        assert_eq!(locale_compare("9", "a"), Less);
+        assert_eq!(locale_compare("resume", "r\u{e9}sum\u{e9}"), Less);
+        assert_eq!(locale_compare("b", "r\u{e9}sum\u{e9}"), Less);
+        assert_eq!(locale_compare("same", "same"), std::cmp::Ordering::Equal);
+        assert_eq!(locale_compare("ab", "a"), Greater);
+    }
+
+    #[test]
     fn code_unit_cmp_orders_by_units() {
         // "invalid-a" > "invalid-B" because 'a' (0x61) > 'B' (0x42).
-        assert_eq!(code_unit_cmp("invalid-a", "invalid-B"), std::cmp::Ordering::Greater);
-        assert_eq!(code_unit_cmp("invalid-B", "invalid-a"), std::cmp::Ordering::Less);
+        assert_eq!(
+            code_unit_cmp("invalid-a", "invalid-B"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            code_unit_cmp("invalid-B", "invalid-a"),
+            std::cmp::Ordering::Less
+        );
         assert_eq!(code_unit_cmp("same", "same"), std::cmp::Ordering::Equal);
     }
 }

@@ -1,5 +1,7 @@
 //! Port of upstream/packages/shared/src/path.ts
 
+use crate::js_string::{slice_utf16, utf16_len};
+use turin_contracts::base_schemas::js_trim;
 use unicode_normalization::UnicodeNormalization;
 
 pub fn is_windows_drive_path(value: &str) -> bool {
@@ -43,9 +45,9 @@ fn is_root_path(value: &str) -> bool {
         (Some(drive), Some(':'), Some(sep), None) if drive.is_ascii_alphabetic() && (sep == '/' || sep == '\\'))
 }
 
-fn trim_trailing_path_separators(value: &str) -> &str {
+fn trim_trailing_path_separators(value: &str) -> String {
     if value.is_empty() || is_root_path(value) {
-        return value;
+        return value.to_owned();
     }
     let trimmed = if value.starts_with('/') {
         value.trim_end_matches('/')
@@ -53,23 +55,23 @@ fn trim_trailing_path_separators(value: &str) -> &str {
         value.trim_end_matches(['/', '\\'])
     };
     if trimmed.is_empty() {
-        return value;
+        return value.to_owned();
     }
     if is_bare_drive(trimmed) {
-        return trimmed;
+        return format!("{trimmed}\\");
     }
-    trimmed
+    trimmed.to_owned()
 }
 
 fn is_bare_drive(value: &str) -> bool {
-    // /^[a-zA-Z]:$/ — the caller appends the separator back.
+    // /^[a-zA-Z]:$/
     let mut chars = value.chars();
     matches!((chars.next(), chars.next(), chars.next()),
         (Some(drive), Some(':'), None) if drive.is_ascii_alphabetic())
 }
 
 pub fn normalize_project_path_for_dispatch(value: &str) -> String {
-    trim_trailing_path_separators(turin_contracts::base_schemas::js_trim(value)).to_owned()
+    trim_trailing_path_separators(js_trim(value))
 }
 
 pub fn normalize_project_path_for_comparison(value: &str) -> String {
@@ -93,7 +95,7 @@ fn is_windows_reserved_name(slug: &str) -> bool {
 /// Folder name for a project started from just a name ("Pinball Stats" becomes
 /// "pinball-stats").
 pub fn new_project_folder_name(name: &str) -> String {
-    let nfkd: String = turin_contracts::base_schemas::js_trim(name).nfkd().collect();
+    let nfkd: String = name.nfkd().collect();
     // Strip combining marks (U+0300..U+036F), like upstream's literal class.
     let stripped: String = nfkd
         .chars()
@@ -159,12 +161,13 @@ pub fn file_basename(path: &str) -> String {
 }
 
 pub fn workspace_relative_file_path(path: &str, workspace_root: Option<&str>) -> Option<String> {
-    let workspace_root = workspace_root?;
-    let normalized_path = strip_slash_prefixed_windows_drive(&path.replace('\\', "/"));
-    let normalized_root =
-        strip_slash_prefixed_windows_drive(&workspace_root.replace('\\', "/"))
-            .trim_end_matches('/')
-            .to_owned();
+    let workspace_root = workspace_root.filter(|root| !root.is_empty())?;
+    let slashed_path = path.replace('\\', "/");
+    let normalized_path = strip_slash_prefixed_windows_drive(&slashed_path);
+    let slashed_root = workspace_root.replace('\\', "/");
+    let normalized_root = strip_slash_prefixed_windows_drive(&slashed_root)
+        .trim_end_matches('/')
+        .to_owned();
     let case_insensitive =
         is_windows_absolute_path(strip_slash_prefixed_windows_drive(workspace_root));
     let path_for_compare = if case_insensitive {
@@ -184,8 +187,8 @@ pub fn workspace_relative_file_path(path: &str, workspace_root: Option<&str>) ->
         return None;
     }
     // Upstream slices by the original-case root's UTF-16 length.
-    let skip = normalized_root.chars().count() + 1;
-    Some(normalized_path.chars().skip(skip).collect())
+    let skip = utf16_len(&normalized_root) + 1;
+    Some(slice_utf16(normalized_path, skip, usize::MAX).to_owned())
 }
 
 pub fn is_absolute_path(value: &str) -> bool {
@@ -259,9 +262,18 @@ mod tests {
     fn normalizes_a_bare_windows_drive_root_like_one_with_a_separator() {
         assert_eq!(normalize_project_path_for_dispatch("C:"), "C:\\");
         assert_eq!(normalize_project_path_for_comparison("C:"), "c:\\");
-        assert_eq!(normalize_project_path_for_comparison("C:"), normalize_project_path_for_comparison("C:\\"));
-        assert_eq!(normalize_project_path_for_comparison("C:"), normalize_project_path_for_comparison("C:/"));
-        assert_eq!(normalize_project_path_for_dispatch("C:\\repo\\"), "C:\\repo");
+        assert_eq!(
+            normalize_project_path_for_comparison("C:"),
+            normalize_project_path_for_comparison("C:\\")
+        );
+        assert_eq!(
+            normalize_project_path_for_comparison("C:"),
+            normalize_project_path_for_comparison("C:/")
+        );
+        assert_eq!(
+            normalize_project_path_for_dispatch("C:\\repo\\"),
+            "C:\\repo"
+        );
     }
 
     #[test]
@@ -271,7 +283,10 @@ mod tests {
         assert_eq!(new_project_folder_name("../../etc"), "etc");
         // Nothing usable left, so the server falls back to a fixed name.
         assert_eq!(new_project_folder_name("🎱🎱"), "project");
-        assert_eq!(new_project_folder_name(&format!("{} b", "a".repeat(63))), "a".repeat(63));
+        assert_eq!(
+            new_project_folder_name(&format!("{} b", "a".repeat(63))),
+            "a".repeat(63)
+        );
         // Windows cannot make folders with device names.
         assert_eq!(new_project_folder_name("Con"), "con-project");
         assert_eq!(new_project_folder_name("LPT1"), "lpt1-project");
@@ -295,19 +310,66 @@ mod tests {
     #[test]
     fn computes_workspace_relative_paths() {
         let cases: &[(&str, &str, Option<&str>)] = &[
-            ("/repo/project/src/main.ts", "/repo/project", Some("src/main.ts")),
-            ("/repo/project/src/main.ts", "/repo/project/", Some("src/main.ts")),
-            ("C:\\Users\\mike\\t3code\\apps\\web\\a.ts", "C:/Users/mike/t3code", Some("apps/web/a.ts")),
-            ("/C:/Users/mike/t3code/apps/web/a.ts", "C:/Users/mike/t3code", Some("apps/web/a.ts")),
+            (
+                "/repo/project/src/main.ts",
+                "/repo/project",
+                Some("src/main.ts"),
+            ),
+            (
+                "/repo/project/src/main.ts",
+                "/repo/project/",
+                Some("src/main.ts"),
+            ),
+            (
+                "C:\\Users\\mike\\t3code\\apps\\web\\a.ts",
+                "C:/Users/mike/t3code",
+                Some("apps/web/a.ts"),
+            ),
+            (
+                "/C:/Users/mike/t3code/apps/web/a.ts",
+                "C:/Users/mike/t3code",
+                Some("apps/web/a.ts"),
+            ),
             ("/Repo/Project/src/main.ts", "/repo/project", None),
             ("/tmp/case/project/probe.txt", "/tmp/case/Project", None),
             ("//tmp/case/project/probe.txt", "//tmp/case/Project", None),
-            ("/tmp/case/Project/probe.txt", "/tmp/case/Project", Some("probe.txt")),
-            ("C:/USERS/mike/t3code/main.ts", "c:/users/MIKE/t3code", Some("main.ts")),
-            ("/C:/USERS/mike/t3code/main.ts", "/c:/users/MIKE/t3code", Some("main.ts")),
+            (
+                "/tmp/case/Project/probe.txt",
+                "/tmp/case/Project",
+                Some("probe.txt"),
+            ),
+            (
+                "C:/USERS/mike/t3code/main.ts",
+                "c:/users/MIKE/t3code",
+                Some("main.ts"),
+            ),
+            (
+                "/C:/USERS/mike/t3code/main.ts",
+                "/c:/users/MIKE/t3code",
+                Some("main.ts"),
+            ),
+            (
+                "\\\\server\\share\\PROJECT\\main.ts",
+                "\\\\Server\\Share\\Project",
+                Some("main.ts"),
+            ),
+            ("/tmp/repo/file.ts", "/", Some("tmp/repo/file.ts")),
+            ("C:/Users/MIKE/main.ts", "c:/", Some("Users/MIKE/main.ts")),
+            (
+                "\\\\server\\SHARE\\file.ts",
+                "\\\\Server\\Share\\",
+                Some("file.ts"),
+            ),
+            ("/tmp/repo/file.ts ", "/tmp/repo", Some("file.ts ")),
+            ("/tmp/report.ts", "/repo/project", None),
+            ("/repo/project-two/a.ts", "/repo/project", None),
         ];
         for (path, root, expected) in cases {
-            assert_eq!(workspace_relative_file_path(path, Some(root)), expected.map(str::to_owned), "{path}");
+            assert_eq!(
+                workspace_relative_file_path(path, Some(root)),
+                expected.map(str::to_owned),
+                "{path}"
+            );
         }
         assert_eq!(workspace_relative_file_path("/repo/a", None), None);
     }

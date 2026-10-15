@@ -23,7 +23,11 @@ fn classifies_file_link_labels() {
         ("", "/repo/src/example.ts", true),
     ];
     for (label, href, expected) in cases {
-        assert_eq!(is_markdown_file_link_label(label, href), *expected, "{label} / {href}");
+        assert_eq!(
+            is_markdown_file_link_label(label, href),
+            *expected,
+            "{label} / {href}"
+        );
     }
 }
 
@@ -31,8 +35,14 @@ fn classifies_file_link_labels() {
 fn distinguishes_file_paths_from_code_and_hostnames_in_inline_code() {
     let cases: &[(&str, Option<&str>)] = &[
         ("src\\main.ts", Some("src/main.ts")),
-        ("C:\\Users\\demo\\image.png", Some("C:\\Users\\demo\\image.png")),
-        ("\\\\server\\share\\image.png", Some("\\\\server\\share\\image.png")),
+        (
+            "C:\\Users\\demo\\image.png",
+            Some("C:\\Users\\demo\\image.png"),
+        ),
+        (
+            "\\\\server\\share\\image.png",
+            Some("\\\\server\\share\\image.png"),
+        ),
         ("conf.d/nginx.conf", Some("conf.d/nginx.conf")),
         ("script.pl:10", Some("script.pl:10")),
         ("node.meta", None),
@@ -48,7 +58,10 @@ fn distinguishes_file_paths_from_code_and_hostnames_in_inline_code() {
         ("meta-llama/Llama-3.1-8B", None),
         ("share/man/ls.1", Some("share/man/ls.1")),
         ("usr/lib/libfoo.so.1", Some("usr/lib/libfoo.so.1")),
-        ("vendor/jquery-3.6.0.min.js", Some("vendor/jquery-3.6.0.min.js")),
+        (
+            "vendor/jquery-3.6.0.min.js",
+            Some("vendor/jquery-3.6.0.min.js"),
+        ),
         ("./models/glm-5.3", Some("./models/glm-5.3")),
     ];
     for (source, candidate) in cases {
@@ -63,22 +76,49 @@ fn distinguishes_file_paths_from_code_and_hostnames_in_inline_code() {
 #[test]
 fn recognizes_file_links() {
     let cases = [
-        ("/Users/julius/project/AGENTS.md", "/Users/julius/project/AGENTS.md"),
+        (
+            "/Users/julius/project/AGENTS.md",
+            "/Users/julius/project/AGENTS.md",
+        ),
         ("/home/me/notes.md", "/home/me/notes.md"),
         ("/usr/local/bin/tool", "/usr/local/bin/tool"),
         ("/workspace/Makefile", "/workspace/Makefile"),
         ("/tmp/favicons/", "/tmp/favicons/"),
-        ("C:\\Users\\mike\\project\\src\\main.ts", "C:\\Users\\mike\\project\\src\\main.ts"),
+        (
+            "C:\\Users\\mike\\project\\src\\main.ts",
+            "C:\\Users\\mike\\project\\src\\main.ts",
+        ),
         ("C:%5Crepo%5Cimage.png", "C:\\repo\\image.png"),
-        ("\\\\server\\share\\image.png", "\\\\server\\share\\image.png"),
-        ("/D:/Programme/t3code/OpenInPicker.tsx", "D:/Programme/t3code/OpenInPicker.tsx"),
-        ("</D:/Programme/t3code/ChatMarkdown.tsx:1>", "D:/Programme/t3code/ChatMarkdown.tsx"),
-        ("file:///Users/julius/project/file%2520name.md", "/Users/julius/project/file%20name.md"),
-        ("file://server/share/workspace-image.svg", "\\\\server\\share\\workspace-image.svg"),
+        (
+            "\\\\server\\share\\image.png",
+            "\\\\server\\share\\image.png",
+        ),
+        (
+            "/D:/Programme/t3code/OpenInPicker.tsx",
+            "D:/Programme/t3code/OpenInPicker.tsx",
+        ),
+        (
+            "</D:/Programme/t3code/ChatMarkdown.tsx:1>",
+            "D:/Programme/t3code/ChatMarkdown.tsx",
+        ),
+        (
+            "file:///Users/julius/project/file%2520name.md",
+            "/Users/julius/project/file%20name.md",
+        ),
+        (
+            "file://server/share/workspace-image.svg",
+            "\\\\server\\share\\workspace-image.svg",
+        ),
         ("file://localhost/home/me/notes.md", "/home/me/notes.md"),
         ("apps/mobile/src/index.ts:10", "apps/mobile/src/index.ts"),
-        ("docs/My%20Folder/checklist.xml", "docs/My Folder/checklist.xml"),
-        ("Updated%20cutover%20checklist.md", "Updated cutover checklist.md"),
+        (
+            "docs/My%20Folder/checklist.xml",
+            "docs/My Folder/checklist.xml",
+        ),
+        (
+            "Updated%20cutover%20checklist.md",
+            "Updated cutover checklist.md",
+        ),
         ("./scripts/deploy", "./scripts/deploy"),
         ("~/notes/today.md", "~/notes/today.md"),
         ("AGENTS.md", "AGENTS.md"),
@@ -86,7 +126,8 @@ fn recognizes_file_links() {
         ("/tmp/clip%23one.mp4#t=2", "/tmp/clip#one.mp4"),
     ];
     for (href, path) in cases {
-        let parsed = parse_markdown_file_link(href).unwrap_or_else(|| panic!("{href} should parse"));
+        let parsed =
+            parse_markdown_file_link(href).unwrap_or_else(|| panic!("{href} should parse"));
         assert_eq!(parsed.path, path, "{href}");
     }
 }
@@ -114,15 +155,27 @@ fn does_not_treat_non_files_as_files() {
 fn accepts_conventional_extensionless_names_with_or_without_a_position() {
     assert_eq!(
         parse_markdown_file_link("Makefile"),
-        Some(FilePathPosition { path: "Makefile".into(), line: None, column: None })
+        Some(FilePathPosition {
+            path: "Makefile".into(),
+            line: None,
+            column: None
+        })
     );
     assert_eq!(
         parse_markdown_file_link("Dockerfile:8"),
-        Some(FilePathPosition { path: "Dockerfile".into(), line: Some(8), column: None })
+        Some(FilePathPosition {
+            path: "Dockerfile".into(),
+            line: Some(8),
+            column: None
+        })
     );
     assert_eq!(
         parse_markdown_file_link("/srv/app/Makefile"),
-        Some(FilePathPosition { path: "/srv/app/Makefile".into(), line: None, column: None })
+        Some(FilePathPosition {
+            path: "/srv/app/Makefile".into(),
+            line: None,
+            column: None
+        })
     );
 }
 
@@ -161,19 +214,50 @@ fn extracts_links_from_incomplete_and_nested_text() {
         ("[](a".repeat(16_000), vec![]),
         ("[](<a".repeat(16_000), vec![]),
         ("[x](https://e.com/".repeat(8_000), vec![]),
-        ("[a](<foo)bar> invalid [b](ok)".to_owned(), vec!["<foo", "ok"]),
+        (
+            "[a](<foo)bar> invalid [b](ok)".to_owned(),
+            vec!["<foo", "ok"],
+        ),
         ("[a](foo \"mixed title') [b](< >)".to_owned(), vec!["foo"]),
-        ("[a](<one [b](two)> invalid [c](ok)".to_owned(), vec!["two", "ok"]),
-        (format!("```text\n{}{}", "[unfinished item\n".repeat(8_000), "```"), vec![]),
-        ("[[[nested](src/main.ts) [unfinished".to_owned(), vec!["src/main.ts"]),
-        ("[outer [inner] invalid [valid](src/main.ts)".to_owned(), vec!["src/main.ts"]),
-        ("[bad](missing title [valid](src/main.ts)".to_owned(), vec!["src/main.ts"]),
-        ("```text\n[link](src/main.ts)\n```".to_owned(), vec!["src/main.ts"]),
-        ("[empty]() [valid](src/main.ts 'title')".to_owned(), vec!["src/main.ts"]),
-        ("[angle](<src/My File.ts> \"title\")".to_owned(), vec!["src/My File.ts"]),
+        (
+            "[a](<one [b](two)> invalid [c](ok)".to_owned(),
+            vec!["two", "ok"],
+        ),
+        (
+            format!("```text\n{}{}", "[unfinished item\n".repeat(8_000), "```"),
+            vec![],
+        ),
+        (
+            "[[[nested](src/main.ts) [unfinished".to_owned(),
+            vec!["src/main.ts"],
+        ),
+        (
+            "[outer [inner] invalid [valid](src/main.ts)".to_owned(),
+            vec!["src/main.ts"],
+        ),
+        (
+            "[bad](missing title [valid](src/main.ts)".to_owned(),
+            vec!["src/main.ts"],
+        ),
+        (
+            "```text\n[link](src/main.ts)\n```".to_owned(),
+            vec!["src/main.ts"],
+        ),
+        (
+            "[empty]() [valid](src/main.ts 'title')".to_owned(),
+            vec!["src/main.ts"],
+        ),
+        (
+            "[angle](<src/My File.ts> \"title\")".to_owned(),
+            vec!["src/My File.ts"],
+        ),
     ];
     for (markdown, hrefs) in cases {
-        assert_eq!(extract_markdown_link_hrefs(&markdown), hrefs, "{markdown:.80}");
+        assert_eq!(
+            extract_markdown_link_hrefs(&markdown),
+            hrefs,
+            "{markdown:.80}"
+        );
     }
 }
 
@@ -208,7 +292,11 @@ fn resolves_absolute_posix_file_paths() {
 #[test]
 fn resolves_relative_file_paths_against_cwd() {
     assert_eq!(
-        resolve_markdown_file_link_target(Some("src/processRunner.ts:71"), Some("/Users/julius/project"), None),
+        resolve_markdown_file_link_target(
+            Some("src/processRunner.ts:71"),
+            Some("/Users/julius/project"),
+            None
+        ),
         Some("/Users/julius/project/src/processRunner.ts:71".to_owned())
     );
 }
@@ -216,7 +304,11 @@ fn resolves_relative_file_paths_against_cwd() {
 #[test]
 fn does_not_treat_filename_line_references_as_external_schemes() {
     assert_eq!(
-        resolve_markdown_file_link_target(Some("script.ts:10"), Some("/Users/julius/project"), None),
+        resolve_markdown_file_link_target(
+            Some("script.ts:10"),
+            Some("/Users/julius/project"),
+            None
+        ),
         Some("/Users/julius/project/script.ts:10".to_owned())
     );
 }
@@ -232,16 +324,27 @@ fn resolves_bare_file_names_against_cwd() {
 #[test]
 fn maps_line_anchors_to_editor_line_suffixes() {
     assert_eq!(
-        resolve_markdown_file_link_target(Some("/Users/julius/project/src/main.ts#L42C7"), None, None),
+        resolve_markdown_file_link_target(
+            Some("/Users/julius/project/src/main.ts#L42C7"),
+            None,
+            None
+        ),
         Some("/Users/julius/project/src/main.ts:42:7".to_owned())
     );
 }
 
 #[test]
 fn ignores_external_urls() {
-    assert_eq!(resolve_markdown_file_link_target(Some("https://example.com/docs"), None, None), None);
     assert_eq!(
-        resolve_markdown_file_link_target(Some("//cdn.example.com/clip.mp4"), Some("/workspace"), None),
+        resolve_markdown_file_link_target(Some("https://example.com/docs"), None, None),
+        None
+    );
+    assert_eq!(
+        resolve_markdown_file_link_target(
+            Some("//cdn.example.com/clip.mp4"),
+            Some("/workspace"),
+            None
+        ),
         None
     );
 }
@@ -249,7 +352,11 @@ fn ignores_external_urls() {
 #[test]
 fn does_not_double_decode_file_urls() {
     assert_eq!(
-        resolve_markdown_file_link_target(Some("file:///Users/julius/project/file%2520name.md"), None, None),
+        resolve_markdown_file_link_target(
+            Some("file:///Users/julius/project/file%2520name.md"),
+            None,
+            None
+        ),
         Some("/Users/julius/project/file%20name.md".to_owned())
     );
 }
@@ -257,7 +364,11 @@ fn does_not_double_decode_file_urls() {
 #[test]
 fn resolves_file_uri_authorities_as_windows_unc_paths() {
     assert_eq!(
-        resolve_markdown_file_link_target(Some("file://server/share/workspace-image.svg"), None, None),
+        resolve_markdown_file_link_target(
+            Some("file://server/share/workspace-image.svg"),
+            None,
+            None
+        ),
         Some("\\\\server\\share\\workspace-image.svg".to_owned())
     );
 }
@@ -304,7 +415,10 @@ fn resolves_angle_bracketed_windows_drive_paths() {
 
 #[test]
 fn does_not_treat_app_routes_as_file_links_even_with_a_line_anchor() {
-    assert_eq!(resolve_markdown_file_link_target(Some("/chat/settings"), None, None), None);
+    assert_eq!(
+        resolve_markdown_file_link_target(Some("/chat/settings"), None, None),
+        None
+    );
     assert_eq!(
         resolve_markdown_file_link_target(Some("/chat/settings#L3"), Some("/repo"), None),
         None
@@ -321,5 +435,8 @@ fn decodes_an_encoded_drive_colon_in_a_file_uri_before_dropping_its_slash() {
 
 #[test]
 fn extracts_inline_code_spans_outside_fences() {
-    assert_eq!(extract_inline_code_spans("a `code` b ```fenced `not` code``` c `x`"), vec!["code", "x"]);
+    assert_eq!(
+        extract_inline_code_spans("a `code` b ```fenced `not` code``` c `x`"),
+        vec!["code", "x"]
+    );
 }

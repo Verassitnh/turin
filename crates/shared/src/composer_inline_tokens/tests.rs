@@ -63,17 +63,38 @@ fn leaves_currency_amounts_as_text() {
 
 #[test]
 fn leaves_digits_only_dollar_amounts_and_compact_monetary_expressions_as_text() {
-    assert_eq!(collect_composer_inline_tokens("I'll pay $20 tomorrow", Default::default()), vec![]);
-    assert_eq!(collect_composer_inline_tokens("Budget is $1_000 total", Default::default()), vec![]);
-    assert_eq!(collect_composer_inline_tokens("Budget is $20k tomorrow", Default::default()), vec![]);
-    assert_eq!(collect_composer_inline_tokens("Cost is $100M total", Default::default()), vec![]);
-    assert_eq!(collect_composer_inline_tokens("Limit is $1e6 here", Default::default()), vec![]);
+    assert_eq!(
+        collect_composer_inline_tokens("I'll pay $20 tomorrow", Default::default()),
+        vec![]
+    );
+    assert_eq!(
+        collect_composer_inline_tokens("Budget is $1_000 total", Default::default()),
+        vec![]
+    );
+    assert_eq!(
+        collect_composer_inline_tokens("Budget is $20k tomorrow", Default::default()),
+        vec![]
+    );
+    assert_eq!(
+        collect_composer_inline_tokens("Cost is $100M total", Default::default()),
+        vec![]
+    );
+    assert_eq!(
+        collect_composer_inline_tokens("Limit is $1e6 here", Default::default()),
+        vec![]
+    );
 }
 
 #[test]
 fn does_not_convert_incomplete_trailing_tokens() {
-    assert_eq!(collect_composer_inline_tokens("Use $ui", Default::default()), vec![]);
-    assert_eq!(collect_composer_inline_tokens("Inspect @AGENTS.md", Default::default()), vec![]);
+    assert_eq!(
+        collect_composer_inline_tokens("Use $ui", Default::default()),
+        vec![]
+    );
+    assert_eq!(
+        collect_composer_inline_tokens("Inspect @AGENTS.md", Default::default()),
+        vec![]
+    );
 }
 
 #[test]
@@ -82,9 +103,14 @@ fn keeps_the_delimiter_after_a_token_outside_its_source_range() {
 
     assert_eq!(
         collect_composer_inline_tokens(text, Default::default()),
-        vec![mention("package.json", "[package.json](package.json)", 8, 36)]
+        vec![mention(
+            "package.json",
+            "[package.json](package.json)",
+            8,
+            36
+        )]
     );
-    assert_eq!(crate::js_string::slice_utf16(text, 36), " next");
+    assert_eq!(crate::js_string::slice_utf16(text, 36, usize::MAX), " next");
 }
 
 #[test]
@@ -95,20 +121,30 @@ fn preserves_a_confirmed_pill_when_only_its_trailing_delimiter_is_removed() {
     assert_eq!(
         collect_composer_inline_tokens(
             with_delimiter.trim_end(),
-            CollectComposerInlineTokensOptions { preserve_trailing_from: confirmed }
+            CollectComposerInlineTokensOptions {
+                preserve_trailing_from: confirmed
+            }
         ),
-        vec![mention("package.json", "[package.json](package.json)", 0, 28)]
+        vec![mention(
+            "package.json",
+            "[package.json](package.json)",
+            0,
+            28
+        )]
     );
 }
 
 #[test]
 fn does_not_preserve_a_pill_after_its_source_is_edited() {
-    let confirmed = collect_composer_inline_tokens("[package.json](package.json) ", Default::default());
+    let confirmed =
+        collect_composer_inline_tokens("[package.json](package.json) ", Default::default());
 
     assert_eq!(
         collect_composer_inline_tokens(
             "[package.json](package-json)",
-            CollectComposerInlineTokensOptions { preserve_trailing_from: confirmed }
+            CollectComposerInlineTokensOptions {
+                preserve_trailing_from: confirmed
+            }
         ),
         vec![]
     );
@@ -117,7 +153,10 @@ fn does_not_preserve_a_pill_after_its_source_is_edited() {
 #[test]
 fn ignores_normal_web_links() {
     assert_eq!(
-        collect_composer_inline_tokens("Read [docs](https://example.com) first", Default::default()),
+        collect_composer_inline_tokens(
+            "Read [docs](https://example.com) first",
+            Default::default()
+        ),
         vec![]
     );
 }
@@ -138,7 +177,10 @@ fn keeps_scoped_package_references_as_plain_text() {
 
 #[test]
 fn keeps_scoped_package_references_plain_across_incomplete_input_and_ime_whitespace() {
-    assert_eq!(collect_composer_inline_tokens("Install @expo/ui", Default::default()), vec![]);
+    assert_eq!(
+        collect_composer_inline_tokens("Install @expo/ui", Default::default()),
+        vec![]
+    );
     assert_eq!(
         collect_composer_inline_tokens("入力 @expo/ui　を追加", Default::default()),
         vec![]
@@ -183,7 +225,10 @@ fn still_collects_a_file_link_whose_label_is_at_the_length_cap() {
 fn leaves_a_file_link_past_the_label_cap_as_plain_text() {
     let label = format!("{}.tsx", "a".repeat(509));
     assert_eq!(
-        collect_composer_inline_tokens(&format!("see [{label}](src/{label}) ok"), Default::default()),
+        collect_composer_inline_tokens(
+            &format!("see [{label}](src/{label}) ok"),
+            Default::default()
+        ),
         vec![]
     );
 }
@@ -212,6 +257,9 @@ fn stays_fast_on_unterminated_bracket_runs() {
     // whitespace: this input took seconds.
     let started = std::time::Instant::now();
     let text: String = " [".repeat(40_000);
-    assert_eq!(collect_composer_inline_tokens(&text, Default::default()), vec![]);
+    assert_eq!(
+        collect_composer_inline_tokens(&text, Default::default()),
+        vec![]
+    );
     assert!(started.elapsed().as_millis() < 1_000);
 }

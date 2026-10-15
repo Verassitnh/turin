@@ -2,7 +2,8 @@
 
 use std::cmp::Ordering;
 
-use crate::js_string::code_unit_cmp;
+use crate::js_string::{is_js_whitespace_char, locale_compare};
+use turin_contracts::base_schemas::js_trim;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedSemver {
@@ -21,11 +22,11 @@ fn is_number_segment(segment: &str) -> bool {
 /// `-prerelease` suffix. Empty/garbage input stays empty; inputs with more
 /// than three segments are left untouched.
 pub fn normalize_semver_version(version: &str) -> String {
-    let trimmed = turin_contracts::base_schemas::js_trim(version);
-    let (main, prerelease) = split_once_str(&trimmed, '-');
+    let trimmed = js_trim(version);
+    let (main, prerelease) = split_two_on_dash(trimmed);
     let mut segments: Vec<String> = Vec::new();
     for segment in main.split('.') {
-        let trimmed_segment = turin_contracts::base_schemas::js_trim(segment);
+        let trimmed_segment = js_trim(segment);
         if !trimmed_segment.is_empty() {
             segments.push(trimmed_segment.to_owned());
         }
@@ -41,24 +42,27 @@ pub fn normalize_semver_version(version: &str) -> String {
     }
 
     let joined = segments.join(".");
-    match prerelease {
+    match prerelease.filter(|prerelease| !prerelease.is_empty()) {
         Some(prerelease) => format!("{joined}-{prerelease}"),
         None => joined,
     }
 }
 
-/// JS `version.trim().split("-", 2)`: at most one split, remainder kept.
-fn split_once_str(value: &str, delimiter: char) -> (&str, Option<&str>) {
-    match value.split_once(delimiter) {
-        Some((a, b)) => (a, Some(b)),
-        None => (value, None),
-    }
+/// JS `value.split("-", 2)`: the limit drops everything after the second
+/// piece, it does not keep the remainder.
+fn split_two_on_dash(value: &str) -> (&str, Option<&str>) {
+    let mut pieces = value.split('-');
+    let main = pieces.next().unwrap_or("");
+    (main, pieces.next())
 }
 
 pub fn parse_semver(value: &str) -> Option<ParsedSemver> {
     let normalized = normalize_semver_version(value);
-    let normalized = normalized.strip_prefix('v').unwrap_or(&normalized).to_owned();
-    let (main, prerelease) = split_once_str(&normalized, '-');
+    let normalized = normalized
+        .strip_prefix('v')
+        .unwrap_or(&normalized)
+        .to_owned();
+    let (main, prerelease) = split_two_on_dash(&normalized);
     let segments: Vec<&str> = main.split('.').collect();
     if segments.len() != 3 {
         return None;
@@ -97,7 +101,7 @@ fn parse_prerelease_segments(prerelease: Option<&str>) -> Vec<String> {
     };
     prerelease
         .split('.')
-        .map(|segment| turin_contracts::base_schemas::js_trim(segment))
+        .map(js_trim)
         .filter(|segment| !segment.is_empty())
         .map(str::to_owned)
         .collect()
@@ -118,9 +122,7 @@ fn compare_prerelease_identifier(left: &str, right: &str) -> Ordering {
     if right_numeric {
         return Ordering::Greater;
     }
-    // Upstream uses localeCompare; the default en locale sorts like code units
-    // for these identifier strings.
-    code_unit_cmp(left, right)
+    locale_compare(left, right)
 }
 
 pub fn compare_semver_versions(left: &str, right: &str) -> Ordering {
@@ -129,7 +131,7 @@ pub fn compare_semver_versions(left: &str, right: &str) -> Ordering {
     let (parsed_left, parsed_right) = match (parsed_left, parsed_right) {
         (Some(left), Some(right)) => (left, right),
         // Upstream falls back to localeCompare on either side failing to parse.
-        _ => return code_unit_cmp(left, right),
+        _ => return locale_compare(left, right),
     };
 
     match parsed_left.major.cmp(&parsed_right.major) {
@@ -155,7 +157,10 @@ pub fn compare_semver_versions(left: &str, right: &str) -> Ordering {
         return Ordering::Less;
     }
 
-    let length = parsed_left.prerelease.len().max(parsed_right.prerelease.len());
+    let length = parsed_left
+        .prerelease
+        .len()
+        .max(parsed_right.prerelease.len());
     for index in 0..length {
         let left_identifier = parsed_left.prerelease.get(index);
         let right_identifier = parsed_right.prerelease.get(index);
@@ -181,17 +186,16 @@ pub fn compare_semver_versions(left: &str, right: &str) -> Ordering {
 /// Supports space-separated comparators with `^ >= > <= < =` operators and
 /// `||` range groups, mirroring upstream's supported syntax exactly.
 pub fn satisfies_semver_range(raw_version: &str, range: &str) -> bool {
-    let normalized_version = turin_contracts::base_schemas::js_trim(
-        raw_version.strip_prefix('v').unwrap_or(raw_version),
-    );
-    let Some(version) = parse_range_version(&normalized_version) else {
+    let trimmed_version = js_trim(raw_version);
+    let normalized_version = trimmed_version.strip_prefix('v').unwrap_or(trimmed_version);
+    let Some(version) = parse_installed_version(normalized_version) else {
         return false;
     };
 
     range.split("||").any(|group| {
         let comparators: Vec<&str> = group
             .trim()
-            .split(char::is_whitespace)
+            .split(is_js_whitespace_char)
             .filter(|token| !token.is_empty())
             .collect();
         if comparators.is_empty() {
@@ -234,75 +238,70 @@ struct RangeVersion {
 }
 
 /// `/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-[0-9A-Za-z.-]+)?$/`
-fn parse_range_version(normalized: &str) -> Option<RangeVersion> {
-    let (main, prerelease) = split_once_str(normalized, '-');
+fn parse_installed_version(normalized: &str) -> Option<RangeVersion> {
+    let (main, prerelease) = match normalized.split_once('-') {
+        Some((main, prerelease)) => (main, Some(prerelease)),
+        None => (normalized, None),
+    };
     if let Some(prerelease) = prerelease {
         // The regex requires at least one `[0-9A-Za-z.-]` character after `-`.
         if prerelease.is_empty()
-            || !prerelease.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+            || !prerelease
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
         {
             return None;
         }
     }
-    let segments: Vec<&str> = main.split('.').collect();
-    if segments.is_empty() || segments.len() > 3 {
+    parse_dotted_numbers(main)
+}
+
+/// `\d+(?:\.\d+){0,2}`, missing minor/patch read as 0.
+fn parse_dotted_numbers(value: &str) -> Option<RangeVersion> {
+    let segments: Vec<&str> = value.split('.').collect();
+    if segments.len() > 3 || !segments.iter().all(|segment| is_number_segment(segment)) {
         return None;
     }
-    let major = segments.first()?;
-    if !is_number_segment(major) {
-        return None;
-    }
-    let minor = match segments.get(1) {
-        Some(segment) => {
-            if !is_number_segment(segment) {
-                return None;
-            }
-            parse_int(segment)?
-        }
-        None => 0,
+    let number = |index: usize| -> Option<i64> {
+        segments
+            .get(index)
+            .map_or(Some(0), |segment| parse_int(segment))
     };
-    let patch = match segments.get(2) {
-        Some(segment) => {
-            if !is_number_segment(segment) {
-                return None;
-            }
-            parse_int(segment)?
-        }
-        None => 0,
-    };
-    Some(RangeVersion { major: parse_int(major)?, minor, patch })
+    Some(RangeVersion {
+        major: number(0)?,
+        minor: number(1)?,
+        patch: number(2)?,
+    })
 }
 
 /// `/^(\^|>=|>|<=|<|=)?\s*v?(\d+(?:\.\d+){0,2})$/`
-fn parse_comparator(comparator: &str) -> Option<(&str, RangeVersion)> {
-    let (operator, rest) = match comparator.as_bytes().first() {
-        Some(b'^') => ("^", &comparator[1..]),
-        Some(b'>') => {
-            if comparator.starts_with(">=") {
-                (">=", &comparator[2..])
-            } else {
-                (">", &comparator[1..])
-            }
-        }
-        Some(b'<') => {
-            if comparator.starts_with("<=") {
-                ("<=", &comparator[2..])
-            } else {
-                ("<", &comparator[1..])
-            }
-        }
-        Some(b'=') => ("=", &comparator[1..]),
-        _ => ("=", comparator),
-    };
-    let rest = rest.trim_start();
+fn parse_comparator(comparator: &str) -> Option<(&'static str, RangeVersion)> {
+    let (operator, rest) = [
+        ("^", "^"),
+        (">=", ">="),
+        (">", ">"),
+        ("<=", "<="),
+        ("<", "<"),
+        ("=", "="),
+    ]
+    .iter()
+    .find_map(|(prefix, operator)| {
+        comparator
+            .strip_prefix(prefix)
+            .map(|rest| (*operator, rest))
+    })
+    .unwrap_or(("=", comparator));
+    let rest = rest.trim_start_matches(is_js_whitespace_char);
     let rest = rest.strip_prefix('v').unwrap_or(rest);
-    let target = parse_range_version(rest)?;
-    Some((operator, target))
+    Some((operator, parse_dotted_numbers(rest)?))
 }
 
 fn compare_components(version: &RangeVersion, target: &RangeVersion) -> Ordering {
     version.major.cmp(&target.major).then_with(|| {
-        version.minor.cmp(&target.minor).then_with(|| version.patch.cmp(&target.patch))
+        version
+            .minor
+            .cmp(&target.minor)
+            .then_with(|| version.patch.cmp(&target.patch))
     })
 }
 
@@ -334,7 +333,12 @@ mod tests {
         assert_eq!(normalize_semver_version("20-rc.1"), "20.0.0-rc.1");
         assert_eq!(
             parse_semver("20"),
-            Some(ParsedSemver { major: 20, minor: 0, patch: 0, prerelease: vec![] })
+            Some(ParsedSemver {
+                major: 20,
+                minor: 0,
+                patch: 0,
+                prerelease: vec![]
+            })
         );
     }
 
@@ -354,12 +358,18 @@ mod tests {
 
     #[test]
     fn compares_prerelease_versions_before_stable_versions() {
-        assert_eq!(compare_semver_versions("2.1.111-beta.1", "2.1.111"), Ordering::Less);
+        assert_eq!(
+            compare_semver_versions("2.1.111-beta.1", "2.1.111"),
+            Ordering::Less
+        );
     }
 
     #[test]
     fn falls_back_to_lexical_comparison_for_malformed_numeric_segments() {
-        assert_eq!(compare_semver_versions("1.2.3abc", "1.2.10"), Ordering::Greater);
+        assert_eq!(
+            compare_semver_versions("1.2.3abc", "1.2.10"),
+            Ordering::Greater
+        );
     }
 
     #[test]
@@ -382,5 +392,23 @@ mod tests {
     fn rejects_invalid_versions_and_unsupported_range_syntax() {
         assert!(!satisfies_semver_range("not-a-version", ">=24.0"));
         assert!(!satisfies_semver_range("24.10.0", "~24.10"));
+    }
+}
+
+#[cfg(test)]
+mod divergence_tests {
+    use super::*;
+
+    #[test]
+    fn split_limit_drops_the_remainder_like_js() {
+        assert_eq!(normalize_semver_version("1.2.3-beta-1"), "1.2.3-beta");
+        assert_eq!(normalize_semver_version("1.2.3-"), "1.2.3");
+    }
+
+    #[test]
+    fn range_trims_before_stripping_v_and_rejects_prerelease_targets() {
+        assert!(satisfies_semver_range(" v24.10.0 ", ">=24.10"));
+        assert!(!satisfies_semver_range("24.10.0", ">=24.10.0-beta"));
+        assert!(satisfies_semver_range("24.10.0-rc.1", ">=v24"));
     }
 }

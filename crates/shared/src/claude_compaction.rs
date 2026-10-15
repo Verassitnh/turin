@@ -14,13 +14,10 @@ fn group_thousands(value: i64) -> String {
         grouped = format!(",{}", &digits[split..]) + &grouped;
         digits.truncate(split);
     }
-    format!("{}{grouped}{sign}", digits, sign = if value < 0 { "-" } else { "" })
+    format!("{}{digits}{grouped}", if value < 0 { "-" } else { "" })
 }
 
-pub fn format_claude_resume_compaction_question(
-    age_minutes: i64,
-    estimated_tokens: i64,
-) -> String {
+pub fn format_claude_resume_compaction_question(age_minutes: i64, estimated_tokens: i64) -> String {
     let age_label = if age_minutes >= 60 {
         format!("{}h {}m", age_minutes / 60, age_minutes % 60)
     } else {
@@ -36,7 +33,7 @@ fn question_pattern() -> &'static regex::Regex {
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     PATTERN.get_or_init(|| {
         regex::Regex::new(
-            r"^This session is (?:\d+h \d+m|\d+m) old and uses \d{1,3}(?:,\d{3})* tokens\. Compact it before continuing\?$",
+            r"^This session is (?:[0-9]+h [0-9]+m|[0-9]+m) old and uses [0-9]{1,3}(?:,[0-9]{3})* tokens\. Compact it before continuing\?$",
         )
         .expect("static regex is valid")
     })
@@ -52,15 +49,13 @@ mod tests {
 
     #[test]
     fn matches_its_own_formatted_question() {
-        let inputs = [
-            (145i64, 275_123i64),
-            (70, 100_000),
-            (59, 1_234_567),
-            (0, 0),
-        ];
+        let inputs = [(145i64, 275_123i64), (70, 100_000), (59, 1_234_567), (0, 0)];
         for (age_minutes, estimated_tokens) in inputs {
             let question = format_claude_resume_compaction_question(age_minutes, estimated_tokens);
-            assert!(is_claude_resume_compaction_question(&question), "{question}");
+            assert!(
+                is_claude_resume_compaction_question(&question),
+                "{question}"
+            );
         }
     }
 

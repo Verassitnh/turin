@@ -115,9 +115,15 @@ mod tests {
 
     #[test]
     fn finds_non_overlapping_occurrences_without_invalidating_unicode_offsets() {
-        assert_eq!(find_thread_search_occurrences("Deploy the Deployment", "deploy"), vec![0, 11]);
+        assert_eq!(
+            find_thread_search_occurrences("Deploy the Deployment", "deploy"),
+            vec![0, 11]
+        );
         assert_eq!(find_thread_search_occurrences("aaaa", "aa"), vec![0, 2]);
-        assert_eq!(find_thread_search_occurrences("İİİ needle", "needle"), vec![4]);
+        assert_eq!(
+            find_thread_search_occurrences("İİİ needle", "needle"),
+            vec![4]
+        );
     }
 
     #[test]
@@ -126,18 +132,40 @@ mod tests {
         assert_eq!(
             parts,
             vec![
-                ThreadSearchTextPart { text: "one".into(), highlighted: false, start: 0 },
-                ThreadSearchTextPart { text: "TWO".into(), highlighted: true, start: 4 },
-                ThreadSearchTextPart { text: " three ".into(), highlighted: false, start: 7 },
-                ThreadSearchTextPart { text: "two".into(), highlighted: true, start: 14 },
+                ThreadSearchTextPart {
+                    text: "one ".into(),
+                    highlighted: false,
+                    start: 0
+                },
+                ThreadSearchTextPart {
+                    text: "TWO".into(),
+                    highlighted: true,
+                    start: 4
+                },
+                ThreadSearchTextPart {
+                    text: " three ".into(),
+                    highlighted: false,
+                    start: 7
+                },
+                ThreadSearchTextPart {
+                    text: "two".into(),
+                    highlighted: true,
+                    start: 14
+                },
             ]
         );
     }
 
     #[test]
     fn matches_both_greek_sigma_forms_without_changing_source_offsets() {
-        assert_eq!(find_thread_search_occurrences("ΟΣ ος οσ", "Σ"), vec![1, 4, 7]);
-        assert_eq!(find_thread_search_occurrences("ΟΣ ος οσ", "ς"), vec![1, 4, 7]);
+        assert_eq!(
+            find_thread_search_occurrences("ΟΣ ος οσ", "Σ"),
+            vec![1, 4, 7]
+        );
+        assert_eq!(
+            find_thread_search_occurrences("ΟΣ ος οσ", "ς"),
+            vec![1, 4, 7]
+        );
         assert_eq!(find_thread_search_occurrences("İ ΟΣ", "Σ"), vec![3]);
     }
 }

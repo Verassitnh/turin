@@ -1,6 +1,7 @@
 //! Port of upstream/packages/shared/src/composerTrigger.ts
 
-use crate::js_string::{last_index_of_utf16, slice_utf16, utf16_len};
+use crate::js_string::{is_js_whitespace_char, last_index_of_utf16, slice_utf16, utf16_len};
+use turin_contracts::base_schemas::js_trim;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposerTriggerKind {
@@ -9,6 +10,13 @@ pub enum ComposerTriggerKind {
     SlashCommand,
     SlashModel,
     Skill,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerSlashCommand {
+    Model,
+    Plan,
+    Default,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +84,7 @@ fn is_whitespace_char(ch: char) -> bool {
 pub fn detect_composer_trigger(
     text: &str,
     cursor_input: f64,
-    is_whitespace_char_override: Option<fn(char) -> bool>,
+    is_whitespace_char_override: Option<&dyn Fn(char) -> bool>,
 ) -> Option<ComposerTrigger> {
     let cursor = clamp_cursor(text, cursor_input);
     let line_start = last_index_of_utf16(text, "\n", cursor.saturating_sub(1))
@@ -108,18 +116,20 @@ pub fn detect_composer_trigger(
         if let Some(query) = slash_model_query(line_prefix) {
             return Some(ComposerTrigger {
                 kind: ComposerTriggerKind::SlashModel,
-                query: turin_contracts::base_schemas::js_trim(&query).to_owned(),
+                query: js_trim(&query).to_owned(),
                 range_start: line_start,
                 range_end: cursor,
             });
         }
     }
 
-    let ws_check = is_whitespace_char_override.unwrap_or(is_whitespace_char);
+    let ws_check: &dyn Fn(char) -> bool =
+        is_whitespace_char_override.unwrap_or(&is_whitespace_char);
     let units: Vec<u16> = text.encode_utf16().collect();
     let unit_at = |index: usize| -> char {
-        // Upstream compares single UTF-16 units against ASCII delimiters.
-        char::from_u32(units[index] as u32).unwrap_or(' ')
+        // Upstream hands the predicate one UTF-16 unit; a lone surrogate
+        // cannot be a `char`, so it becomes U+FFFD (never whitespace).
+        char::from_u32(u32::from(units[index])).unwrap_or('\u{fffd}')
     };
     let mut token_idx = cursor as i64 - 1;
     while token_idx >= 0 && !ws_check(unit_at(token_idx as usize)) {
@@ -128,10 +138,10 @@ pub fn detect_composer_trigger(
     let token_start = (token_idx + 1) as usize;
 
     let token = slice_utf16(text, token_start, cursor);
-    if token.starts_with('/') {
+    if let Some(command) = token.strip_prefix('/') {
         return Some(ComposerTrigger {
             kind: ComposerTriggerKind::SlashCommand,
-            query: token[1..].to_owned(),
+            query: command.to_owned(),
             range_start: token_start,
             range_end: cursor,
         });
@@ -152,13 +162,11 @@ pub fn detect_composer_trigger(
             range_end: cursor,
         });
     }
-    if !token.starts_with('@') {
-        return None;
-    }
+    let path_query = token.strip_prefix('@')?;
 
     Some(ComposerTrigger {
         kind: ComposerTriggerKind::Path,
-        query: token[1..].to_owned(),
+        query: path_query.to_owned(),
         range_start: token_start,
         range_end: cursor,
     })
@@ -168,39 +176,50 @@ pub fn detect_composer_trigger(
 /// the full JS whitespace complement.
 fn strip_slash_command_query(line_prefix: &str) -> Option<String> {
     let rest = &line_prefix[1..];
-    if rest.chars().any(crate::js_string::is_js_whitespace_char) {
+    if rest.chars().any(is_js_whitespace_char) {
         return None;
     }
     Some(rest.to_owned())
 }
 
 /// `^\/model(?:\s+(.*))?$` — the captured query is trimmed by the caller.
+///
+/// `\s+` may swallow line terminators but `.` may not, so every terminator in
+/// the remainder has to sit inside the leading whitespace run.
 fn slash_model_query(line_prefix: &str) -> Option<String> {
-    let rest = &line_prefix[1..];
-    let after = rest.strip_prefix("model")?;
+    let after = line_prefix.strip_prefix("/model")?;
     if after.is_empty() {
         return Some(String::new());
     }
-    if after
-        .chars()
-        .next()
-        .is_some_and(crate::js_string::is_js_whitespace_char)
-    {
-        return Some(after.to_owned());
+    if !after.chars().next().is_some_and(is_js_whitespace_char) {
+        return None;
     }
-    None
+    let is_line_terminator = |c: char| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}');
+    let tail = match after.rfind(is_line_terminator) {
+        Some(last) => {
+            let (head, tail) = after.split_at(last + 1);
+            if !head.chars().all(is_js_whitespace_char) {
+                return None;
+            }
+            tail
+        }
+        None => after,
+    };
+    Some(tail.to_owned())
 }
 
 /// `^#([\p{L}\p{N}][\p{L}\p{N}_-]*)?$`
 fn pull_request_query(token: &str) -> Option<String> {
     static PULL_REQUEST: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let pattern = PULL_REQUEST.get_or_init(|| {
-        regex::Regex::new(r"^#([\p{L}\p{N}][\p{L}\p{N}_-]*)?$")
-            .expect("valid regex")
+        regex::Regex::new(r"^#([\p{L}\p{N}][\p{L}\p{N}_-]*)?$").expect("valid regex")
     });
-    pattern
-        .captures(token)
-        .map(|captures| captures.get(1).map(|m| m.as_str().to_owned()).unwrap_or_default())
+    pattern.captures(token).map(|captures| {
+        captures
+            .get(1)
+            .map(|m| m.as_str().to_owned())
+            .unwrap_or_default()
+    })
 }
 
 /// `^\p{Sc}` — returns the sigil's UTF-16 length.
@@ -274,7 +293,11 @@ mod tests {
     #[test]
     fn does_not_trigger_for_non_commands() {
         for text in ["Use/review", "https://example.com/review", "Use /review "] {
-            assert_eq!(detect_composer_trigger(text, utf16_len(text) as f64, None), None, "{text}");
+            assert_eq!(
+                detect_composer_trigger(text, utf16_len(text) as f64, None),
+                None,
+                "{text}"
+            );
         }
     }
 

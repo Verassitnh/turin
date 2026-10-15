@@ -1,17 +1,16 @@
 //! Port of upstream/packages/shared/src/markdownLinks.ts
 
 use crate::file_links::{
-    format_file_path_position, parse_file_url_href, resolve_path_link_target,
-    split_file_path_position, FilePathPosition,
+    FilePathPosition, format_file_path_position, parse_file_url_href, resolve_path_link_target,
+    split_file_path_position,
 };
 use crate::js_string::{decode_uri_component, is_js_whitespace_char};
 use crate::path::{is_windows_absolute_path, strip_slash_prefixed_windows_drive};
+use turin_contracts::base_schemas::js_trim;
 
 // /^(~\/|\.{1,2}\/)/
 fn is_relative_path_prefix(value: &str) -> bool {
-    value.starts_with("~/")
-        || value.starts_with("./")
-        || value.starts_with("../")
+    value.starts_with("~/") || value.starts_with("./") || value.starts_with("../")
 }
 
 fn looks_like_hostname(segment: &str, has_position: bool) -> bool {
@@ -41,16 +40,15 @@ fn looks_like_hostname(segment: &str, has_position: bool) -> bool {
 // These allowlists avoid classifying dotted directories such as `conf.d/`
 // or filenames such as `Makefile.in:12` as hosts.
 const GENERIC_HOSTNAME_TLDS: &[&str] = &[
-    "com", "net", "org", "io", "dev", "app", "ai", "co", "edu", "gov", "mil", "info", "biz",
-    "xyz", "me", "tv", "cc", "gg", "chat", "cloud", "site", "online", "tech", "store", "link",
+    "com", "net", "org", "io", "dev", "app", "ai", "co", "edu", "gov", "mil", "info", "biz", "xyz",
+    "me", "tv", "cc", "gg", "chat", "cloud", "site", "online", "tech", "store", "link",
 ];
 
 // Country codes also name file extensions. A :line suffix makes `.pl`
 // and `.pt` files more likely than hostnames.
 const COUNTRY_HOSTNAME_TLDS: &[&str] = &[
-    "uk", "de", "fr", "nl", "se", "no", "fi", "dk", "pl", "ch", "at", "be", "es", "it", "pt",
-    "eu", "us", "ca", "au", "nz", "jp", "kr", "cn", "br", "ru", "mx", "ie", "cz", "tr", "sg",
-    "hk",
+    "uk", "de", "fr", "nl", "se", "no", "fi", "dk", "pl", "ch", "at", "be", "es", "it", "pt", "eu",
+    "us", "ca", "au", "nz", "jp", "kr", "cn", "br", "ru", "mx", "ie", "cz", "tr", "sg", "hk",
 ];
 
 // `Name:digits` also matches `error:1`, `port:3000`, and `TODO:12`.
@@ -168,7 +166,7 @@ fn is_position_only(value: &str) -> bool {
         None => (value, None),
     };
     let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
-    digits(number) && second.map_or(true, digits)
+    digits(number) && second.is_none_or(digits)
 }
 
 // /\d\.\d[^.]*$/ — a final dot between digits marks a version or model id
@@ -243,8 +241,12 @@ fn strip_position_suffix(value: &str) -> &str {
 /// Picks path-shaped inline code for the client's markdown file-link resolver.
 /// It does not resolve paths or turn plain prose and fenced code into links.
 pub fn inline_code_file_path_candidate(code_text: &str) -> Option<String> {
-    let trimmed = turin_contracts::base_schemas::js_trim(code_text);
-    if trimmed.is_empty() || trimmed.chars().any(|c| is_js_whitespace_char(c) || c == '`') {
+    let trimmed = js_trim(code_text);
+    if trimmed.is_empty()
+        || trimmed
+            .chars()
+            .any(|c| is_js_whitespace_char(c) || c == '`')
+    {
         return None;
     }
 
@@ -296,7 +298,7 @@ pub fn safe_decode_uri_component(value: &str) -> String {
 }
 
 pub fn normalize_markdown_link_destination(value: &str) -> &str {
-    let trimmed = turin_contracts::base_schemas::js_trim(value);
+    let trimmed = js_trim(value);
     if trimmed.starts_with('<') && trimmed.ends_with('>') && trimmed.len() >= 2 {
         &trimmed[1..trimmed.len() - 1]
     } else {
@@ -332,10 +334,7 @@ pub fn is_markdown_file_link_label(label: &str, href: &str) -> bool {
         let stripped = slashed.strip_prefix("./").unwrap_or(&slashed);
         stripped.trim_end_matches('/').to_owned()
     };
-    let label_position = split_file_path_position(
-        turin_contracts::base_schemas::js_trim(label),
-        "",
-    );
+    let label_position = split_file_path_position(js_trim(label), "");
     if (label_position.line.is_some() && label_position.line != destination.line)
         || (label_position.column.is_some() && label_position.column != destination.column)
     {
@@ -354,15 +353,17 @@ pub fn is_markdown_file_link_label(label: &str, href: &str) -> bool {
 }
 
 pub fn is_relative_file_path(path: &str) -> bool {
-    is_relative_path_prefix(path)
-        || (!path.starts_with('/') && !is_windows_absolute_path(path))
+    is_relative_path_prefix(path) || (!path.starts_with('/') && !is_windows_absolute_path(path))
 }
 
 fn looks_like_posix_filesystem_path(path: &str) -> bool {
     if !path.starts_with('/') {
         return false;
     }
-    if POSIX_FILE_ROOT_PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
+    if POSIX_FILE_ROOT_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+    {
         return true;
     }
     if ends_with_position_suffix(path) {
@@ -408,18 +409,15 @@ pub fn parse_markdown_file_link(href: &str) -> Option<FilePathPosition> {
     }
 
     let (path, hash) = if normalized.to_lowercase().starts_with("file:") {
-        parse_file_url_href(normalized).unwrap_or_else(|| {
-            let (path, hash) = split_markdown_link_search_and_hash(normalized);
-            (path, hash)
-        })
+        parse_file_url_href(normalized)
+            .unwrap_or_else(|| split_markdown_link_search_and_hash(normalized))
     } else {
-        let (path, hash) = split_markdown_link_search_and_hash(normalized);
-        (path, hash)
+        split_markdown_link_search_and_hash(normalized)
     };
     // A percent-encoded drive colon (`/c%3A/`) only becomes strippable once decoded.
-    let path =
-        strip_slash_prefixed_windows_drive(&safe_decode_uri_component(turin_contracts::base_schemas::js_trim(&path)));
-    let hash = safe_decode_uri_component(turin_contracts::base_schemas::js_trim(&hash));
+    let decoded_path = safe_decode_uri_component(js_trim(&path));
+    let path = strip_slash_prefixed_windows_drive(&decoded_path);
+    let hash = safe_decode_uri_component(js_trim(&hash));
     if path.is_empty() || has_external_scheme(path) {
         return None;
     }
@@ -460,8 +458,8 @@ fn split_fenced_code_segments(markdown: &str) -> Vec<&str> {
 static INLINE_CODE_SPAN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
 pub fn extract_inline_code_spans(text: &str) -> Vec<String> {
-    let pattern = INLINE_CODE_SPAN
-        .get_or_init(|| regex::Regex::new(r"`([^`\n]+)`").expect("valid regex"));
+    let pattern =
+        INLINE_CODE_SPAN.get_or_init(|| regex::Regex::new(r"`([^`\n]+)`").expect("valid regex"));
     let mut spans: Vec<String> = Vec::new();
     let segments = split_fenced_code_segments(text);
     for (index, segment) in segments.iter().enumerate() {
@@ -469,9 +467,7 @@ pub fn extract_inline_code_spans(text: &str) -> Vec<String> {
             continue;
         }
         for captures in pattern.captures_iter(segment) {
-            let span = turin_contracts::base_schemas::js_trim(
-                captures.get(1).map(|m| m.as_str()).unwrap_or_default(),
-            );
+            let span = js_trim(captures.get(1).map(|m| m.as_str()).unwrap_or_default());
             if !span.is_empty() {
                 spans.push(span.to_owned());
             }
@@ -526,7 +522,9 @@ fn markdown_link_tail_scanner(markdown: &str) -> impl FnMut(usize) -> Option<usi
         if char_at(markdown, end) == Some(')') {
             return Some(end + 1);
         }
-        if end == start || (char_at(markdown, end) != Some('"') && char_at(markdown, end) != Some('\'')) {
+        if end == start
+            || (char_at(markdown, end) != Some('"') && char_at(markdown, end) != Some('\''))
+        {
             return None;
         }
         let quote_end = title_end(end + 1);
@@ -556,14 +554,16 @@ struct LinkDestinationSpan {
     end: usize,
 }
 
-fn markdown_link_destination_scanner(markdown: &str) -> impl FnMut(usize) -> Option<LinkDestinationSpan> + '_ {
+fn markdown_link_destination_scanner(
+    markdown: &str,
+) -> impl FnMut(usize) -> Option<LinkDestinationSpan> + '_ {
     let mut whitespace_end = markdown_run_end_finder(markdown, is_not_whitespace);
     let mut angle_end = markdown_run_end_finder(markdown, is_angle_end);
     let mut bare_end = markdown_run_end_finder(markdown, is_bare_end);
     // Separate caches keep each branch's searches moving forward even when an
     // angle destination fails and falls back to an ordinary destination.
-    let angle_tail = markdown_link_tail_scanner(markdown);
-    let bare_tail = markdown_link_tail_scanner(markdown);
+    let mut angle_tail = markdown_link_tail_scanner(markdown);
+    let mut bare_tail = markdown_link_tail_scanner(markdown);
     move |start: usize| {
         if char_at(markdown, start) != Some('(') {
             return None;
@@ -571,10 +571,15 @@ fn markdown_link_destination_scanner(markdown: &str) -> impl FnMut(usize) -> Opt
         let href_start = whitespace_end(start + 1);
         if char_at(markdown, href_start) == Some('<') {
             let href_end = angle_end(href_start + 1);
-            if href_end > href_start + 1 && char_at(markdown, href_end) == Some('>') {
-                if let Some(end) = angle_tail(href_end + 1) {
-                    return Some(LinkDestinationSpan { href_start: href_start + 1, href_end, end });
-                }
+            if href_end > href_start + 1
+                && char_at(markdown, href_end) == Some('>')
+                && let Some(end) = angle_tail(href_end + 1)
+            {
+                return Some(LinkDestinationSpan {
+                    href_start: href_start + 1,
+                    href_end,
+                    end,
+                });
             }
         }
         let href_end = bare_end(href_start);
@@ -582,7 +587,11 @@ fn markdown_link_destination_scanner(markdown: &str) -> impl FnMut(usize) -> Opt
             return None;
         }
         let end = bare_tail(href_end)?;
-        Some(LinkDestinationSpan { href_start, href_end, end })
+        Some(LinkDestinationSpan {
+            href_start,
+            href_end,
+            end,
+        })
     }
 }
 
@@ -594,7 +603,9 @@ pub fn extract_markdown_link_hrefs(markdown: &str) -> Vec<String> {
         let Some(label_start) = markdown[cursor..].find('[').map(|offset| cursor + offset) else {
             break;
         };
-        let Some(label_end) = markdown[label_start + 1..].find(']').map(|offset| label_start + 1 + offset)
+        let Some(label_end) = markdown[label_start + 1..]
+            .find(']')
+            .map(|offset| label_start + 1 + offset)
         else {
             break;
         };
@@ -606,7 +617,7 @@ pub fn extract_markdown_link_hrefs(markdown: &str) -> Vec<String> {
             continue;
         };
         cursor = destination.end;
-        let href = turin_contracts::base_schemas::js_trim(&markdown[destination.href_start..destination.href_end]);
+        let href = js_trim(&markdown[destination.href_start..destination.href_end]);
         if !href.is_empty() {
             hrefs.push(href.to_owned());
         }
@@ -629,13 +640,14 @@ pub fn resolve_markdown_file_link_target(
     if !is_relative_file_path(&path_with_position) {
         return Some(path_with_position);
     }
-    let base_dir = base_dir.or(cwd)?;
+    let base_dir = base_dir.or(cwd).filter(|dir| !dir.is_empty())?;
     Some(resolve_path_link_target(&path_with_position, base_dir))
 }
 
 pub fn is_windows_drive_path_href(href: &str) -> bool {
     // /^[A-Za-z]:[\\/]/
-    let mut chars = safe_decode_uri_component(href).chars();
+    let decoded = safe_decode_uri_component(href);
+    let mut chars = decoded.chars();
     matches!((chars.next(), chars.next(), chars.next()),
         (Some(drive), Some(':'), Some(sep)) if drive.is_ascii_alphabetic() && (sep == '/' || sep == '\\'))
 }

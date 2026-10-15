@@ -258,13 +258,96 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
-/// Line text as the parser sees it: a trailing CR is part of the terminator.
+/// Deepest container nesting a line may keep. serde_json refuses past 128, and
+/// usage fields sit within a handful of levels, so deeper containers are cut.
+const MAX_LINE_DEPTH: usize = 64;
+
+/// Line text as the parser sees it: a trailing CR is part of the terminator, and
+/// containers nested past `MAX_LINE_DEPTH` are replaced by `null`, as the
+/// streaming reader discards them. No format reads that deep.
 fn line_text(line: &[u8]) -> String {
     let content = match line.last() {
         Some(&CARRIAGE_RETURN) => &line[..line.len() - 1],
         _ => line,
     };
-    String::from_utf8_lossy(content).into_owned()
+    String::from_utf8_lossy(&cap_nesting(content, MAX_LINE_DEPTH)).into_owned()
+}
+
+/// Index just past the container that opens at `start`, or the end of `bytes`
+/// when it never closes.
+fn container_end(bytes: &[u8], start: usize) -> usize {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut i = start;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if in_string {
+            match byte {
+                b'\\' => i += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+        } else {
+            match byte {
+                b'"' => in_string = true,
+                b'[' | b'{' => depth += 1,
+                b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// Replaces every container nested deeper than `max_depth` with `null`. The
+/// result is still JSON with the same shallow structure; without a nested
+/// container the input is borrowed unchanged.
+fn cap_nesting(bytes: &[u8], max_depth: usize) -> std::borrow::Cow<'_, [u8]> {
+    let mut out: Option<Vec<u8>> = None;
+    let mut emitted = 0;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if in_string {
+            match byte {
+                b'\\' => i += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+        } else {
+            match byte {
+                b'"' => in_string = true,
+                b'[' | b'{' if depth == max_depth => {
+                    let end = container_end(bytes, i);
+                    out.get_or_insert_with(|| Vec::with_capacity(bytes.len()))
+                        .extend_from_slice(&bytes[emitted..i]);
+                    out.get_or_insert_with(Vec::new).extend_from_slice(b"null");
+                    emitted = end;
+                    i = end;
+                    continue;
+                }
+                b'[' | b'{' => depth += 1,
+                b']' | b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    match out {
+        None => std::borrow::Cow::Borrowed(bytes),
+        Some(mut out) => {
+            out.extend_from_slice(&bytes[emitted..]);
+            std::borrow::Cow::Owned(out)
+        }
+    }
 }
 
 /// Streams one transcript and returns the usage records it contains, or `None`
@@ -725,5 +808,353 @@ mod tests {
         assert!(gate("{\"text\":\"日本語 é\",\"usage\":1}".as_bytes()));
         assert!(gate(&[&invalid[..], b"\"usage\"", &invalid[..]].concat()));
         assert!(!gate("{\"text\":\"日本語 é usage\"}".as_bytes()));
+    }
+
+    /// Matches `usageTranscriptStreaming.test.ts`: large irrelevant content must not
+    /// change what a line yields. The cases that depend on the real provider formats
+    /// (Pi, Grok, fork-copy suppression, fast-mode cost) are not ported here.
+    mod streaming {
+        use super::*;
+        use serde_json::Value;
+
+        const TIMESTAMP: &str = "2026-08-01T10:00:00Z";
+
+        fn content() -> String {
+            "工具 output \\\" usage token_count ".repeat(40_000)
+        }
+
+        fn claude_json(id: &str, output: u64, tool_text: Option<&str>) -> Value {
+            let content = match tool_text {
+                Some(text) => json!([{ "type": "tool_use", "input": { "text": text } }]),
+                None => json!([]),
+            };
+            json!({
+                "type": "assistant",
+                "timestamp": TIMESTAMP,
+                "sessionId": "s1",
+                "requestId": format!("r-{id}"),
+                "costUSD": 0.25,
+                "message": {
+                    "content": content,
+                    "id": id,
+                    "model": "claude-fable-5",
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": output,
+                        "cache_read_input_tokens": 20,
+                        "cache_creation_input_tokens": 5,
+                        "speed": "fast",
+                    },
+                },
+            })
+        }
+
+        fn codex_lines() -> Vec<Value> {
+            vec![
+                json!({ "type": "session_meta", "timestamp": TIMESTAMP, "payload": { "id": "s1" } }),
+                json!({ "type": "turn_context", "timestamp": TIMESTAMP, "payload": { "model": "gpt-5.6-sol" } }),
+                json!({
+                    "type": "event_msg",
+                    "timestamp": TIMESTAMP,
+                    "payload": {
+                        "type": "token_count",
+                        "info": { "last_token_usage": { "input_tokens": 100, "output_tokens": 99 } },
+                    },
+                }),
+            ]
+        }
+
+        fn lines_text(lines: &[Value]) -> String {
+            lines.iter().map(|line| format!("{line}\n")).collect()
+        }
+
+        fn write_lines(dir: &tempfile::TempDir, name: &str, lines: &[Value]) -> PathBuf {
+            write(dir, name, &lines_text(lines))
+        }
+
+        fn outputs_of(records: &[UsageRecord]) -> Vec<u64> {
+            records
+                .iter()
+                .map(|record| record.totals.output_tokens)
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn matches_ordinary_claude_and_codex_records_with_large_irrelevant_fields_in_either_order()
+         {
+            let dir = tempfile::tempdir().unwrap();
+            let small_claude = vec![claude_json("m1", 99, None)];
+            let cases = [
+                ("claude", small_claude, claude_format()),
+                ("codex", codex_lines(), codex_format()),
+            ];
+            for (name, small, format) in cases {
+                let expected = read_transcript_records(
+                    &write_lines(&dir, &format!("{name}-small.jsonl"), &small),
+                    &format,
+                    None,
+                )
+                .await
+                .unwrap();
+                for padding_first in [true, false] {
+                    let large: Vec<Value> = small
+                        .iter()
+                        .map(|record| {
+                            let mut padded = serde_json::Map::new();
+                            if padding_first {
+                                padded.insert("padding".to_owned(), json!(content()));
+                            }
+                            padded.extend(record.as_object().unwrap().clone());
+                            if !padding_first {
+                                padded.insert("padding".to_owned(), json!(content()));
+                            }
+                            Value::Object(padded)
+                        })
+                        .collect();
+                    let path = write_lines(&dir, &format!("{name}-large.jsonl"), &large);
+                    let actual = read_transcript_records(&path, &format, None).await.unwrap();
+                    assert_eq!(
+                        actual.records, expected.records,
+                        "{name} padding_first={padding_first}"
+                    );
+                    assert_eq!(actual.position.state, expected.position.state, "{name}");
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn does_not_count_usage_looking_text_or_nested_objects_inside_tool_output() {
+            let dir = tempfile::tempdir().unwrap();
+            let inner = claude_json("m1", 99, None);
+            let lines = [
+                json!({ "type": "user", "padding": content(), "toolOutput": inner }),
+                json!({ "padding": content(), "message": { "content": inner.to_string() } }),
+                json!({ "type": "assistant", "timestamp": TIMESTAMP, "message": { "model": "claude-fable-5", "content": [inner] } }),
+            ];
+            let path = write_lines(&dir, "tool-output.jsonl", &lines);
+            let result = read_transcript_records(&path, &claude_format(), None)
+                .await
+                .unwrap();
+            assert!(result.records.is_empty());
+        }
+
+        #[tokio::test]
+        async fn replays_partial_utf8_and_json_tails_commits_exact_crlf_offsets_and_replaces_the_tail_once()
+         {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("tail.jsonl");
+            let first = format!("{}\r\n", claude_json("first", 5, Some(&content())));
+            let second = serde_json::to_vec(&claude_json("second", 7, Some(&content()))).unwrap();
+            // Split inside the 3-byte "工" so the cut lands mid-character.
+            let split = second
+                .windows(3)
+                .rposition(|window| window == "工".as_bytes())
+                .unwrap()
+                + 1;
+            let mut partial_bytes = first.clone().into_bytes();
+            partial_bytes.extend_from_slice(&second[..split]);
+            std::fs::write(&path, &partial_bytes).unwrap();
+
+            let partial = read_transcript_records(&path, &claude_format(), None)
+                .await
+                .unwrap();
+            assert_eq!(outputs_of(&partial.records), vec![5]);
+            assert!(partial.tail_records.is_empty());
+            assert_eq!(partial.position.resume_offset, first.len() as u64);
+
+            append_bytes(&path, &second[split..]);
+            let complete =
+                read_transcript_records(&path, &claude_format(), Some(&partial.position))
+                    .await
+                    .unwrap();
+            assert!(complete.resumed);
+            assert!(complete.records.is_empty());
+            assert_eq!(outputs_of(&complete.tail_records), vec![7]);
+            assert_eq!(complete.position.resume_offset, first.len() as u64);
+
+            append_bytes(
+                &path,
+                format!("\r\n{}\n", claude_json("third", 11, Some(&content()))).as_bytes(),
+            );
+            let appended =
+                read_transcript_records(&path, &claude_format(), Some(&complete.position))
+                    .await
+                    .unwrap();
+            assert_eq!(outputs_of(&appended.records), vec![7, 11]);
+            assert!(appended.tail_records.is_empty());
+            assert_eq!(
+                appended.position.resume_offset,
+                std::fs::metadata(&path).unwrap().len()
+            );
+
+            let full = read_transcript_records(&path, &claude_format(), None)
+                .await
+                .unwrap();
+            let stitched: Vec<UsageRecord> = partial
+                .records
+                .iter()
+                .chain(&appended.records)
+                .cloned()
+                .collect();
+            assert_eq!(stitched, full.records);
+        }
+
+        #[tokio::test]
+        async fn preserves_codex_model_switches_and_duplicate_suppression_across_resumes() {
+            let dir = tempfile::tempdir().unwrap();
+            let lines = codex_lines();
+            let padded = |value: &Value| {
+                let mut padded = serde_json::Map::new();
+                padded.insert("padding".to_owned(), json!(content()));
+                padded.extend(value.as_object().unwrap().clone());
+                Value::Object(padded)
+            };
+            let path = write_lines(
+                &dir,
+                "history.jsonl",
+                &lines.iter().map(padded).collect::<Vec<_>>(),
+            );
+            let format = codex_format();
+            let first = read_transcript_records(&path, &format, None).await.unwrap();
+            assert_eq!(outputs_of(&first.records), vec![99]);
+
+            // A repeated token event (same timestamp and output) is suppressed; the
+            // model switch and the new event after it are not.
+            append_bytes(
+                &path,
+                lines_text(&[
+                    padded(&lines[2]),
+                    json!({ "type": "turn_context", "payload": { "padding": content(), "model": "gpt-6" } }),
+                    json!({
+                        "type": "event_msg",
+                        "timestamp": TIMESTAMP,
+                        "payload": {
+                            "type": "token_count",
+                            "padding": content(),
+                            "info": { "last_token_usage": { "input_tokens": 200, "output_tokens": 101 } },
+                        },
+                    }),
+                ])
+                .as_bytes(),
+            );
+            let resumed = read_transcript_records(&path, &format, Some(&first.position))
+                .await
+                .unwrap();
+            assert!(resumed.resumed);
+            assert_eq!(resumed.records.len(), 1);
+            assert_eq!(resumed.records[0].model, "gpt-6");
+            assert_eq!(resumed.records[0].session_id, "s1");
+            assert_eq!(resumed.records[0].totals.output_tokens, 101);
+
+            let full = read_transcript_records(&path, &format, None).await.unwrap();
+            let stitched: Vec<UsageRecord> = first
+                .records
+                .iter()
+                .chain(&resumed.records)
+                .cloned()
+                .collect();
+            assert_eq!(stitched, full.records);
+        }
+
+        #[tokio::test]
+        async fn rejects_malformed_large_lines_without_accepting_partial_usage_or_losing_following_lines()
+         {
+            let dir = tempfile::tempdir().unwrap();
+            let valid = serde_json::to_string(&claude_json("m1", 99, Some(&content()))).unwrap();
+            let good = serde_json::to_string(&claude_json("good", 7, Some(&content()))).unwrap();
+            let body = [
+                format!("{valid} junk"),
+                valid[..valid.len() - 1].to_owned(),
+                format!("{valid}{valid}"),
+                good,
+            ]
+            .join("\n")
+                + "\n";
+            let path = write(&dir, "broken.jsonl", &body);
+            let result = read_transcript_records(&path, &claude_format(), None)
+                .await
+                .unwrap();
+            assert_eq!(outputs_of(&result.records), vec![7]);
+        }
+
+        #[tokio::test]
+        async fn matches_the_same_record_for_reordered_escaped_duplicate_and_unusual_keys() {
+            let dir = tempfile::tempdir().unwrap();
+            let small = serde_json::to_string(&claude_json("m1", 99, None)).unwrap();
+            let variants = [
+                small.replacen("\"message\":", "\"mess\\u0061ge\":", 1),
+                small.replacen("\"costUSD\":0.25", "\"costUSD\":5,\"costUSD\":0.25", 1),
+                small.replacen(
+                    "\"type\":\"assistant\"",
+                    "\"type\":\"user\",\"type\":\"assistant\"",
+                    1,
+                ),
+                small.replacen(
+                    "\"message\":",
+                    "\"__proto__\":{\"type\":\"user\"},\"message\":",
+                    1,
+                ),
+                small.replacen(
+                    "\"message\":",
+                    "\"message.usage\":{\"output_tokens\":1234},\"message\":",
+                    1,
+                ),
+            ];
+            let format = claude_format();
+            for line in variants {
+                let expected = read_transcript_records(
+                    &write(&dir, "odd.jsonl", &format!("{line}\n")),
+                    &format,
+                    None,
+                )
+                .await
+                .unwrap();
+                let padded = format!("{{\"padding\":{},{}\n", json!(content()), &line[1..]);
+                let actual =
+                    read_transcript_records(&write(&dir, "odd.jsonl", &padded), &format, None)
+                        .await
+                        .unwrap();
+                assert_eq!(actual.records, expected.records, "{line}");
+            }
+        }
+
+        #[tokio::test]
+        async fn reads_usage_after_deeply_nested_discarded_tool_content() {
+            let dir = tempfile::tempdir().unwrap();
+            let record = serde_json::to_string(&claude_json("m1", 99, None)).unwrap();
+            let nested = format!("{}0{}", "[".repeat(300), "]".repeat(300));
+            let path = write(
+                &dir,
+                "deep.jsonl",
+                &format!("{{\"toolOutput\":{nested},{}\n", &record[1..]),
+            );
+            let result = read_transcript_records(&path, &claude_format(), None)
+                .await
+                .unwrap();
+            assert_eq!(outputs_of(&result.records), vec![99]);
+        }
+
+        #[test]
+        fn cap_nesting_borrows_shallow_lines_and_nulls_only_the_deep_containers() {
+            let shallow = br#"{"a":[1,{"b":"]]"}]}"#;
+            assert!(matches!(
+                cap_nesting(shallow, 4),
+                std::borrow::Cow::Borrowed(_)
+            ));
+
+            let deep = format!("{}1{}", "[".repeat(10), "]".repeat(10));
+            let capped = cap_nesting(deep.as_bytes(), 3);
+            assert_eq!(std::str::from_utf8(&capped).unwrap(), "[[[null]]]");
+        }
+
+        fn append_bytes(path: &Path, bytes: &[u8]) {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .unwrap()
+                .write_all(bytes)
+                .unwrap();
+        }
     }
 }

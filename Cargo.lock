@@ -7048,6 +7048,7 @@ dependencies = [
  "gpui-kit",
  "markdown",
  "pretty_assertions",
+ "regex",
  "serde",
  "serde_json",
  "tokio",

@@ -1053,3 +1053,33 @@ fn payload_on_a_method_without_schema_reports_only_its_kind() {
     assert_eq!(error.data, Some(json!({"payloadKind": "object"})));
     assert!(!json!(error).to_string().contains(secret));
 }
+
+#[tokio::test]
+async fn invalid_utf8_in_a_frame_is_replaced_and_the_session_survives() {
+    let (protocol, _peer_reader, mut peer_writer) = pair();
+    peer_writer
+        .write_all(b"{\"method\":\"event\",\"params\":{\"text\":\"bad\xff\"}}\r\n")
+        .await
+        .unwrap();
+    write_frame(
+        &mut peer_writer,
+        json!({"method":"event","params":{"text":"next"}}),
+    )
+    .await;
+    assert_eq!(
+        timeout(Duration::from_secs(1), protocol.next_notification())
+            .await
+            .expect("session ended on invalid UTF-8")
+            .unwrap()
+            .params,
+        Some(json!({"text":"bad\u{fffd}"}))
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(1), protocol.next_notification())
+            .await
+            .expect("session ended on invalid UTF-8")
+            .unwrap()
+            .params,
+        Some(json!({"text":"next"}))
+    );
+}

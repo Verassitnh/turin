@@ -43,6 +43,12 @@ does. `ICON_COMPOSER_TOOL` wins outright. Otherwise it takes the newest 2+ build
 | `turin-black.icns` | 16–1024 | `sips` downscales of the macOS PNG, packed with `iconutil` |
 | `compare-t3-vs-turin.png` | – | Side-by-side comparison with upstream at 1024, 180, 32 and 16 |
 
+Every raster, including each ICO and ICNS member, is 8-bit RGBA sRGB with an `sRGB` chunk, the
+same format as upstream's exports. Icon Composer 27 writes 16-bit Display P3. The script decodes
+that at full depth and converts P3 to sRGB (both use the sRGB curve and D65 white). It then
+rounds to 8 bits. Rendering upstream's own `.icon` through this path gives a mean difference of
+0.16 levels from upstream's committed 1024 PNG.
+
 ### macOS PNG
 
 Upstream exports this PNG by hand with Icon Composer's GUI-only **macOS pre-Tahoe** preset

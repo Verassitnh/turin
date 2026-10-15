@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["numpy", "pillow", "scipy"]
+# dependencies = ["numpy", "pillow", "pypng", "scipy"]
 # ///
 """Export Turin's prod icon assets from assets/prod/app-icon.icon.
 
@@ -33,7 +33,9 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import png
 from PIL import Image, ImageDraw, ImageFont
+from PIL.PngImagePlugin import PngInfo
 from scipy import ndimage
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -118,10 +120,59 @@ def ictool_png(tool: str, icon: Path, size: int, out: Path) -> bytes:
          "--design-generation", DESIGN_GENERATION],
         check=True, capture_output=True,
     )
-    data = out.read_bytes()
-    w, h = struct.unpack(">II", data[16:24])
-    assert (w, h) == (size, size), f"ictool produced {w}x{h}, expected {size}"
-    return data
+    image = to_srgb8(out.read_bytes())
+    assert image.size == (size, size), f"ictool produced {image.size}, expected {size}"
+    return srgb_png(image)
+
+
+# --- colour normalisation ---
+# Icon Composer 27 writes 16-bit Display P3 PNGs; upstream's committed exports (and everything
+# here) are 8-bit RGBA sRGB with an sRGB chunk. Both spaces share the sRGB transfer curve and D65.
+P3_TO_SRGB = np.array([[1.2249401, -0.2249404, 0.0],
+                       [-0.0420569, 1.0420571, 0.0],
+                       [-0.0196376, -0.0786361, 1.0982735]])
+
+
+SRGB_CHRM = struct.pack(">8I", 31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000)
+
+
+def png_chunks(data: bytes) -> dict[str, bytes]:
+    chunks, i = {}, 8
+    while i < len(data):
+        (n,), kind = struct.unpack(">I", data[i:i + 4]), data[i + 4:i + 8].decode("latin-1")
+        chunks.setdefault(kind, data[i + 8:i + 8 + n])
+        i += 12 + n
+    return chunks
+
+
+def to_srgb8(data: bytes) -> Image.Image:
+    """Decode a PNG at full bit depth and return it as 8-bit RGBA in sRGB."""
+    width, height, rows, info = png.Reader(bytes=data).asDirect()
+    assert info["planes"] == 4, "expected an RGBA PNG"
+    pixels = np.vstack([np.asarray(row, dtype=np.float64) for row in rows]).reshape(height, width, 4)
+    pixels /= 2 ** info["bitdepth"] - 1
+    chunks = png_chunks(data)
+    cicp_primaries = chunks["cICP"][0] if "cICP" in chunks else None
+    iccp_name = chunks["iCCP"].split(b"\0")[0] if "iCCP" in chunks else b""
+    if cicp_primaries == 12 or b"P3" in iccp_name:
+        rgb = pixels[..., :3]
+        linear = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+        linear = np.clip((linear[..., None, :] * P3_TO_SRGB).sum(-1), 0, 1)
+        pixels[..., :3] = np.where(linear <= 0.0031308, linear * 12.92, 1.055 * linear ** (1 / 2.4) - 0.055)
+    elif not ("sRGB" in chunks or cicp_primaries == 1 or b"sRGB" in iccp_name
+            or chunks.get("cHRM") == SRGB_CHRM  # sips writes gAMA 1/2.2 + sRGB primaries
+            or not chunks.keys() & {"iCCP", "cICP", "gAMA", "cHRM"}):
+        sys.exit(f"unexpected PNG colour space (iCCP {iccp_name!r}, cICP primaries {cicp_primaries})")
+    return Image.fromarray(np.rint(pixels * 255).astype(np.uint8))
+
+
+def srgb_png(image: Image.Image) -> bytes:
+    """8-bit RGBA PNG with an sRGB chunk (perceptual intent), matching upstream's exports."""
+    info = PngInfo()
+    info.add(b"sRGB", b"\x00")
+    buf = io.BytesIO()
+    image.convert("RGBA").save(buf, "PNG", optimize=True, pnginfo=info)
+    return buf.getvalue()
 
 
 def encode_png_ico(images: list[tuple[int, bytes]]) -> bytes:
@@ -207,7 +258,7 @@ def coverage(d: str, size: int, k: float, b: float, ss: int = 8) -> np.ndarray:
 # --- macOS pre-Tahoe ---
 
 def macos_pre_tahoe(upstream_png: Path, upstream_mark: str, upstream_t: str, turin_t: str) -> Image.Image:
-    up = np.asarray(Image.open(upstream_png).convert("RGBA")).astype(float)
+    up = np.asarray(to_srgb8(upstream_png.read_bytes())).astype(float)
     rgb, alpha = up[..., :3], up[..., 3]
 
     # Affine map upstream T -> Turin T, derived from the two paths' bounding boxes.
@@ -245,7 +296,7 @@ def macos_pre_tahoe(upstream_png: Path, upstream_mark: str, upstream_t: str, tur
     # 4. Composite with Turin's exact coverage.
     cov = coverage(turin_t, 1024, MAC_K, MAC_B)[..., None]
     out = base * (1 - cov) + shaded * cov
-    return Image.fromarray(np.dstack([np.clip(np.rint(out), 0, 255), alpha]).astype(np.uint8), "RGBA")
+    return Image.fromarray(np.dstack([np.clip(np.rint(out), 0, 255), alpha]).astype(np.uint8))
 
 
 def build_icns(macos_png: Path, out: Path, tmp: Path) -> None:
@@ -260,6 +311,7 @@ def build_icns(macos_png: Path, out: Path, tmp: Path) -> None:
             else:
                 subprocess.run(["sips", "-z", str(px), str(px), str(macos_png), "--out", str(iconset / name)],
                                check=True, capture_output=True)
+                (iconset / name).write_bytes(srgb_png(to_srgb8((iconset / name).read_bytes())))
     subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(out)], check=True)
 
 
@@ -297,7 +349,7 @@ def compare_sheet(out: Path) -> None:
                 big = shown.resize((d * z, d * z), Image.NEAREST)
                 sheet.alpha_composite(big, (x + d + pad, y + (512 - d * z) // 2))
             x += w + pad
-    sheet.convert("RGB").save(out, optimize=True)
+    out.write_bytes(srgb_png(sheet))
 
 
 def main() -> None:
@@ -323,9 +375,7 @@ def main() -> None:
         (PROD / OUTPUTS["windows_ico"]).write_bytes(ico)
 
         mac = macos_pre_tahoe(UPSTREAM_PROD / "black-macos-1024.png", upstream_mark, upstream_t, turin_t)
-        buf = io.BytesIO()
-        mac.save(buf, "PNG", optimize=True)
-        (PROD / OUTPUTS["macos"]).write_bytes(buf.getvalue())
+        (PROD / OUTPUTS["macos"]).write_bytes(srgb_png(mac))
 
         build_icns(PROD / OUTPUTS["macos"], PROD / OUTPUTS["icns"], tmp)
 

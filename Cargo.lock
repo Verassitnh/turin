@@ -6957,7 +6957,10 @@ dependencies = [
 name = "turin-acp"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "futures",
+ "libc",
+ "parking_lot",
+ "pretty_assertions",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -7062,12 +7065,25 @@ name = "turin-orchestration"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "indexmap",
+ "parking_lot",
+ "pretty_assertions",
+ "regex",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
  "turin-contracts",
+ "turin-persistence",
+ "unicode-segmentation",
+ "url",
 ]
 
 [[package]]
@@ -7162,10 +7178,17 @@ name = "turin-provider-opencode"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "getrandom 0.2.17",
+ "pretty_assertions",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-stream",
  "tracing",
  "turin-contracts",
 ]

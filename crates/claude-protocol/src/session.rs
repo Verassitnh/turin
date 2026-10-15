@@ -574,6 +574,9 @@ async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
     loop {
         match lines.next().await {
             Some(Ok(line)) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
                 let value: Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
                     Err(e) => {
@@ -919,6 +922,42 @@ for line in sys.stdin:
             error.to_string().contains("claude process closed"),
             "{error}"
         );
+        session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn blank_stdout_lines_are_skipped() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-blank-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        sys.stdout.write("\n   \n\t\n")
+        print(json.dumps({"type":"system","subtype":"status","status":"after-blank"}),flush=True)
+"#,
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                SessionEvent::Frame(frame) => {
+                    assert_eq!(frame.raw["status"], "after-blank");
+                    break;
+                }
+                SessionEvent::Error(error) => panic!("blank line surfaced as an error: {error}"),
+                _ => {}
+            }
+        }
         session.shutdown().await.unwrap();
         fs::remove_dir_all(dir).unwrap();
     }

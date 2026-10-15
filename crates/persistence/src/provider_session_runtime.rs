@@ -234,6 +234,8 @@ FROM provider_session_runtime
 WHERE thread_id = ?1
 ";
 
+// Runtime writes can carry stale payloads. Only recordImportedTranscript may
+// change source records, so restore that field from the row being updated.
 const UPSERT_SQL: &str = "
 INSERT INTO provider_session_runtime (
   thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode,

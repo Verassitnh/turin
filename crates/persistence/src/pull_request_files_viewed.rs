@@ -4,10 +4,16 @@ use rusqlite::{Connection, params};
 
 use crate::errors::PersistenceError;
 
-/// How many marks one read of this store carries.
+/// How many marks one read of this store carries. Every one of them is a path
+/// held for as long as the caller holds the read, so an unbounded read of a
+/// change request with thousands of marks is paid for again per scope.
+/// Matched to what the GitHub reader walks in one go.
 pub const MAX_FILES_VIEWED_ROWS: i64 = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Host is part of the scope because the same `group/project` exists on
+/// gitlab.com and on a self-managed instance, and the viewer because signing
+/// in as somebody else must not inherit their ticks.
 pub struct PullRequestFilesViewedScope {
     pub provider: String,
     pub host: String,
@@ -36,6 +42,9 @@ pub struct PullRequestFilesViewedPage {
     pub truncated: bool,
 }
 
+/// Ordered by path and read one row past the ceiling, so the same marks come
+/// back on every read rather than a window that shuffles, and having more than
+/// were carried is known rather than guessed at from a full page.
 pub fn list(
     conn: &Connection,
     scope: &PullRequestFilesViewedScope,
@@ -79,7 +88,10 @@ pub fn list(
     Ok(PullRequestFilesViewedPage { files, truncated })
 }
 
-/// One statement per file, inside the caller's transaction.
+/// One statement per file rather than one for the batch: a mixed batch of
+/// clears and un-clears has no single statement. The caller wraps the batch
+/// in one transaction so a failure part way through does not leave some files
+/// cleared and the rest not.
 pub fn set(
     conn: &Connection,
     scope: &PullRequestFilesViewedScope,

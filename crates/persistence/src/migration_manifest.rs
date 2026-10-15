@@ -346,6 +346,8 @@ pub static MIGRATIONS: &[MigrationSpec] = &[
         sql: include_str!("../sql/054_ProjectionThreadsAutoSettleDisabledAt.sql"),
         kind: MigrationKind::AddColumnIfMissing,
     },
+    // Released as 53 and 54 in V2 previews. Preserve this migration's schema.
+    // Future V2 schema changes need new migrations.
     MigrationSpec {
         id: 55,
         name: "OrchestrationV2",

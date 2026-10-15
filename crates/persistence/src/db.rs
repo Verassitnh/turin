@@ -305,12 +305,24 @@ fn finish_writer(conn: &Connection) -> Result<(), PersistenceError> {
             to_migration_inclusive: None,
         },
     )?;
+    // Without sqlite_stat1 the planner guesses at index selectivity. 0x10012
+    // analyzes tables whose indexes lack stats or whose row count changed 10x.
     conn.execute_batch("PRAGMA optimize = 0x10012;")
         .map_err(|err| PersistenceError::sql("sqlite.optimize", &err))?;
     Ok(())
 }
 
 fn apply_writer_pragmas(conn: &Connection) -> Result<(), PersistenceError> {
+    // busy_timeout: CLI and server write from separate processes; wait rather
+    // than fail with SQLITE_BUSY.
+    // synchronous NORMAL: FULL fsyncs the WAL on every commit. Every provider
+    // event is its own commit, so that stalls the writer. In WAL mode NORMAL
+    // only fsyncs at checkpoints. An app crash loses nothing; an OS crash or
+    // power loss can roll back commits since the last checkpoint.
+    // checkpoint_fullfsync: checkpoints are the only sync, and macOS fsync()
+    // does not flush the drive cache. Other platforms ignore it.
+    // journal_size_limit: PASSIVE checkpoints never shrink the -wal file, so
+    // it otherwise keeps its largest size until the last connection closes.
     let sql = format!(
         "
         PRAGMA busy_timeout = 5000;

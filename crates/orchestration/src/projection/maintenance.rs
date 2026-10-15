@@ -168,8 +168,29 @@ impl ProjectionMaintenance {
     /// `thread.created`'s high-water mark, all in one write transaction, then
     /// verify.
     pub async fn rebuild(&self) -> Result<ProjectionVerification, ProjectionMaintenanceError> {
+        self.rebuild_with_fault(None).await
+    }
+
+    /// `rebuild`, failing once `applied` events have been replayed and another
+    /// page is requested. The write transaction rolls back, so the prior
+    /// projection stays. Test-only: exercises the rollback path.
+    #[cfg(test)]
+    pub(crate) async fn rebuild_failing_after(
+        &self,
+        applied: usize,
+    ) -> Result<ProjectionVerification, ProjectionMaintenanceError> {
+        self.rebuild_with_fault(Some(applied)).await
+    }
+
+    async fn rebuild_with_fault(
+        &self,
+        fail_after: Option<usize>,
+    ) -> Result<ProjectionVerification, ProjectionMaintenanceError> {
         let wrap = ProjectionMaintenanceError::wrap("rebuild");
-        self.db().write(rebuild_in).await.map_err(wrap)?;
+        self.db()
+            .write(move |tx| rebuild_in(tx, fail_after))
+            .await
+            .map_err(wrap)?;
         self.db()
             .read(verify_in)
             .await
@@ -395,7 +416,7 @@ fn verify_in(conn: &Connection) -> Result<ProjectionVerification, PersistenceErr
 /// The `rebuild` write body: clear projections, replay events up to the
 /// current high-water mark, then stamp the metadata row. One transaction, so a
 /// live append cannot interleave with the replay.
-fn rebuild_in(tx: &Transaction<'_>) -> Result<(), PersistenceError> {
+fn rebuild_in(tx: &Transaction<'_>, fail_after: Option<usize>) -> Result<(), PersistenceError> {
     let operation = "ProjectionMaintenance.rebuild";
     let through_sequence: i64 = tx
         .query_row(
@@ -412,11 +433,18 @@ fn rebuild_in(tx: &Transaction<'_>) -> Result<(), PersistenceError> {
     }
 
     let mut last_sequence = 0_i64;
+    let mut applied = 0_usize;
     loop {
+        if let Some(limit) = fail_after
+            && applied >= limit
+        {
+            return Err(decode_error(operation, "injected replay failure"));
+        }
         let page = read_replay_page(tx, last_sequence, through_sequence)?;
         let page_len = page.len() as i64;
         for (sequence, event) in page {
             apply_event(tx, &event)?;
+            applied += 1;
             if let OrchestrationV2DomainEvent::TurnItemUpdated { payload, .. } = &event {
                 let common = turn_item::common(payload);
                 tx.execute(

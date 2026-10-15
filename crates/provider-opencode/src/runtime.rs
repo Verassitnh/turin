@@ -327,11 +327,10 @@ pub async fn start_open_code_server_process(
         format!("--hostname={hostname}"),
         format!("--port={port}"),
     ];
-    let recorded = match &input.ledger {
+    let lease = match &input.ledger {
         Some(ledger) => ledger.track(pid, port, &serve_args).await,
         None => None,
     };
-    let mut recorded = Some(std::sync::Mutex::new(recorded));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (exit_tx, exit_rx) = watch::channel(None);
@@ -361,7 +360,22 @@ pub async fn start_open_code_server_process(
         let _ = exit_tx_task.send(Some(code));
     }));
 
-    let mut exit_watch = exit_rx.clone();
+    // The group is owned from here on. If this future is dropped while it waits
+    // for readiness or verify, `Drop` SIGKILLs the group and aborts the readers,
+    // the same as upstream closing the Scope that owns the child.
+    let mut process = OpenCodeServerProcess {
+        url: String::new(),
+        server_password: server_password.clone(),
+        version: String::new(),
+        pid,
+        exit_tx,
+        exit_rx,
+        tasks: std::sync::Mutex::new(tasks),
+        stopped: AtomicBool::new(false),
+        shutdown_grace,
+        lease: std::sync::Mutex::new(lease),
+    };
+    let mut exit_watch = process.exit_rx.clone();
     let ready = tokio::time::timeout(timeout, async {
         tokio::select! {
             url = url_rx.recv() => url,
@@ -373,45 +387,21 @@ pub async fn start_open_code_server_process(
     let url = match ready {
         Ok(Some(url)) => url,
         Ok(None) => {
-            if exit_rx.borrow().is_none() {
+            if process.exit_rx.borrow().is_none() {
                 let _ = tokio::time::timeout(Duration::from_secs(2), exit_watch.changed()).await;
             }
-            let code = exit_rx.borrow().unwrap_or(-1);
+            let code = process.exit_rx.borrow().unwrap_or(-1);
             tokio::time::sleep(Duration::from_millis(20)).await;
             let stdout = stdout_log.lock().await.clone();
             let stderr = stderr_log.lock().await.clone();
-            let failed = OpenCodeServerProcess {
-                url: String::new(),
-                server_password: server_password.clone(),
-                version: String::new(),
-                pid,
-                exit_tx,
-                exit_rx,
-                tasks: std::sync::Mutex::new(tasks),
-                stopped: AtomicBool::new(false),
-                shutdown_grace,
-                lease: recorded.take().expect("lease"),
-            };
-            failed.shutdown().await;
+            process.shutdown().await;
             return Err(OpenCodeRuntimeError::new(
                 "startOpenCodeServerProcess",
                 startup_exit_detail(code, &stdout, &stderr),
             ));
         }
         Err(_elapsed) => {
-            let failed = OpenCodeServerProcess {
-                url: String::new(),
-                server_password: server_password.clone(),
-                version: String::new(),
-                pid,
-                exit_tx,
-                exit_rx,
-                tasks: std::sync::Mutex::new(tasks),
-                stopped: AtomicBool::new(false),
-                shutdown_grace,
-                lease: recorded.take().expect("lease"),
-            };
-            failed.shutdown().await;
+            process.shutdown().await;
             return Err(OpenCodeRuntimeError::new(
                 "startOpenCodeServerProcess",
                 format!(
@@ -423,18 +413,7 @@ pub async fn start_open_code_server_process(
     };
     capture.store(false, Ordering::SeqCst);
 
-    let mut process = OpenCodeServerProcess {
-        url: url.clone(),
-        server_password: server_password.clone(),
-        version: String::new(),
-        pid,
-        exit_tx,
-        exit_rx,
-        tasks: std::sync::Mutex::new(tasks),
-        stopped: AtomicBool::new(false),
-        shutdown_grace,
-        lease: recorded.take().expect("lease"),
-    };
+    process.url = url.clone();
     match verify(VerifyInput {
         url,
         server_password: server_password.clone(),
@@ -870,6 +849,58 @@ done
             .parse()
             .unwrap();
         assert!(!alive(pid));
+    }
+
+    #[tokio::test]
+    async fn dropping_a_start_while_it_waits_kills_the_group() {
+        let binary = write_fake_opencode();
+        let pid_file = temp_file("cancel-pid");
+        let child_file = temp_file("cancel-child");
+        let mut environment = BTreeMap::new();
+        environment.insert("TURIN_TEST_SILENT".into(), "1".into());
+        environment.insert("TURIN_TEST_PID".into(), pid_file.display().to_string());
+        environment.insert("TURIN_TEST_CHILD".into(), child_file.display().to_string());
+        let start = start_open_code_server_process(
+            StartOpenCodeServer {
+                binary_path: binary.display().to_string(),
+                directory: "/work".into(),
+                server_password: None,
+                environment: Some(environment),
+                hostname: None,
+                port: Some(9),
+                timeout: Some(Duration::from_secs(30)),
+                shutdown_grace: Some(grace()),
+                ledger: None,
+            },
+            ok_verify(),
+        );
+        // The start never sees a listening line, so the caller's deadline drops it.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), start)
+                .await
+                .is_err()
+        );
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let child: u32 = std::fs::read_to_string(&child_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        for _ in 0..100 {
+            if !alive(pid) && !alive(child) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!alive(pid), "server group {pid} survived the dropped start");
+        assert!(
+            !alive(child),
+            "server child {child} survived the dropped start"
+        );
     }
 
     #[tokio::test]

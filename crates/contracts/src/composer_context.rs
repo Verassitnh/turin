@@ -302,6 +302,9 @@ pub struct TerminalContextRecord {
     pub text: String,
 }
 
+/// `Number.MAX_SAFE_INTEGER`, the bound on terminal line numbers.
+const TERMINAL_LINE_MAX: u64 = (1 << 53) - 1;
+
 impl<'de> Deserialize<'de> for TerminalContextRecord {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -325,6 +328,12 @@ impl<'de> Deserialize<'de> for TerminalContextRecord {
         if raw.line_end < raw.line_start {
             return Err(serde::de::Error::custom(
                 "terminal context lineEnd must be >= lineStart",
+            ));
+        }
+        // Upstream's `Schema.Int` is a safe integer, so a line number past 2^53 - 1 fails the record.
+        if raw.line_start > TERMINAL_LINE_MAX || raw.line_end > TERMINAL_LINE_MAX {
+            return Err(serde::de::Error::custom(
+                "terminal context line numbers must be safe integers",
             ));
         }
         Ok(Self {
@@ -1307,5 +1316,30 @@ mod tests {
         assert!(encoded.get("elementIds").is_none());
         assert!(encoded.get("regionCount").is_none());
         assert_eq!(encoded["elements"][0]["source"], Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod qc_regressions {
+    use super::*;
+
+    #[test]
+    fn terminal_line_numbers_must_be_safe_integers() {
+        let record = |start: u64, end: u64| {
+            serde_json::json!({
+                "version": 1,
+                "contextId": "ctx-safe",
+                "label": "term",
+                "kind": "terminal",
+                "terminalId": "t1",
+                "terminalLabel": "bash",
+                "lineStart": start,
+                "lineEnd": end,
+                "text": "out",
+            })
+        };
+        let max_safe = (1_u64 << 53) - 1;
+        assert!(serde_json::from_value::<ComposerContextRecord>(record(1, max_safe)).is_ok());
+        assert!(serde_json::from_value::<ComposerContextRecord>(record(1, max_safe + 1)).is_err());
     }
 }

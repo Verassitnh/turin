@@ -1,0 +1,23 @@
+[package]
+name = "turin-text-generation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tempfile.workspace = true
+turin-contracts.workspace = true
+turin-provider-core.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+libc.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true

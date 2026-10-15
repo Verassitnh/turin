@@ -10,6 +10,9 @@ use std::{
     },
 };
 use tokio::sync::{mpsc, oneshot};
+use turin_contracts::provider_policy::ProviderApprovalDecision;
+
+use crate::codex_mcp_elicitation::to_mcp_elicitation_response;
 use turin_codex_app_server::{
     client::Client, errors::AppServerError, extensions::legacy_approval_reply,
 };
@@ -212,101 +215,24 @@ pub fn response(method: &str, params: &Value, decision: Decision) -> Value {
     }
 }
 
+/// Maps the broker's choice to the MCP elicitation wire response.
+fn elicitation_response(params: &Value, choice: &str) -> Value {
+    let decision = match choice {
+        "accept" => ProviderApprovalDecision::Accept,
+        "acceptForSession" => ProviderApprovalDecision::AcceptForSession,
+        "acceptAlways" => ProviderApprovalDecision::AcceptAlways,
+        "decline" => ProviderApprovalDecision::Decline,
+        "cancel" => ProviderApprovalDecision::Cancel,
+        _ => return json!({"action":"decline"}),
+    };
+    to_mcp_elicitation_response(params, decision)
+}
+
 fn as_answer(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         _ => value.to_string(),
     }
-}
-
-fn persistence(value: &str) -> Option<&'static str> {
-    let lower = value.to_ascii_lowercase();
-    if lower.contains("session") {
-        Some("session")
-    } else if ["always", "permanent", "forever", "persistent"]
-        .iter()
-        .any(|s| lower.contains(s))
-    {
-        Some("always")
-    } else {
-        None
-    }
-}
-
-fn elicitation_response(params: &Value, choice: &str) -> Value {
-    if matches!(choice, "decline" | "cancel") {
-        return json!({"action":choice});
-    }
-    if params.get("mode").and_then(Value::as_str) == Some("url") {
-        return json!({"action":"decline"});
-    }
-    let persist = match choice {
-        "acceptForSession" => Some("session"),
-        "acceptAlways" => Some("always"),
-        _ => None,
-    };
-    let form = params.get("requestedSchema").filter(|v| v.is_object());
-    let mut content = serde_json::Map::new();
-    if let Some(properties) = form
-        .and_then(|f| f.get("properties"))
-        .and_then(Value::as_object)
-    {
-        for (key, field) in properties {
-            let choices = field
-                .get("oneOf")
-                .and_then(Value::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.get("const").and_then(Value::as_str))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_else(|| {
-                    field
-                        .get("enum")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .collect()
-                });
-            let selected = choices.into_iter().find(|value| match persist {
-                Some(want) => persistence(value) == Some(want),
-                None => {
-                    persistence(value).is_none()
-                        && ["once", "accept", "approve", "allow"]
-                            .iter()
-                            .any(|s| value.to_ascii_lowercase().contains(s))
-                }
-            });
-            if let Some(value) = selected {
-                content.insert(key.clone(), json!(value));
-            } else if field.get("type").and_then(Value::as_str) == Some("boolean")
-                && (persistence(key).is_some() || key.eq_ignore_ascii_case("persist"))
-            {
-                content.insert(key.clone(), json!(choice == "acceptAlways"));
-            } else if let Some(default) = field.get("default").filter(|v| !v.is_null()) {
-                content.insert(key.clone(), default.clone());
-            }
-        }
-    }
-    if form
-        .and_then(|f| f.get("required"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .any(|key| !content.contains_key(key))
-    {
-        return json!({"action":"decline"});
-    }
-    let mut response = json!({"action":"accept"});
-    if let Some(persist) = persist {
-        response["_meta"] = json!({"persist":persist});
-    }
-    if form.is_some() {
-        response["content"] = Value::Object(content);
-    }
-    response
 }
 
 #[cfg(test)]

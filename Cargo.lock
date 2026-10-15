@@ -6842,6 +6842,7 @@ dependencies = [
  "tokio",
  "tracing",
  "turin-contracts",
+ "url",
 ]
 
 [[package]]

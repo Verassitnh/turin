@@ -7,6 +7,8 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use rusqlite::{Connection, params};
+use turin_contracts::js_trim;
+use url::Url;
 
 use crate::errors::PersistenceError;
 
@@ -81,15 +83,15 @@ fn parse_legacy_linked_pull_request(json: &str) -> Option<Linked> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
     let object = value.as_object()?;
     let repository = object.get("repository")?.as_str()?;
-    if repository.trim().is_empty() {
+    if js_trim(repository).is_empty() {
         return None;
     }
-    let number = object.get("number")?.as_i64()?;
+    let number = integral_number(object.get("number")?)?;
     if number < 1 {
         return None;
     }
     let url = object.get("url")?.as_str()?;
-    if url.trim().is_empty() {
+    if js_trim(url).is_empty() {
         return None;
     }
     Some(Linked {
@@ -111,14 +113,14 @@ fn legacy_thread_pull_request_key(linked: &Linked) -> Key {
     let host = http_hostname(&linked.url).unwrap_or_else(|| "unknown".to_owned());
     Key {
         host: {
-            let host = host.trim().to_ascii_lowercase();
+            let host = js_trim(&host).to_lowercase();
             if host.is_empty() {
                 "unknown".to_owned()
             } else {
                 host
             }
         },
-        repository: linked.repository.trim().to_ascii_lowercase(),
+        repository: js_trim(&linked.repository).to_lowercase(),
     }
 }
 
@@ -128,7 +130,7 @@ fn normalize_thread_pull_request_key(key: &ChangeRequestLink) -> Key {
         key.authority.clone().unwrap_or_else(|| key.host.clone()),
         key.repository
     );
-    let canonical = canonical_repository_key(&identity.trim().to_ascii_lowercase());
+    let canonical = canonical_repository_key(&js_trim(&identity).to_lowercase());
     let separator = canonical.find('/').unwrap_or(canonical.len());
     Key {
         host: canonical[..separator].to_owned(),
@@ -192,33 +194,45 @@ struct HttpUrl {
 }
 
 fn parse_http_url(input: &str) -> Option<HttpUrl> {
-    let rest = input
-        .strip_prefix("https://")
-        .or_else(|| input.strip_prefix("http://"))?;
-    let (authority, path) = match rest.find('/') {
-        Some(index) => (&rest[..index], &rest[index..]),
-        None => (rest, "/"),
-    };
-    let authority = authority
-        .rsplit_once('@')
-        .map(|(_, host)| host)
-        .unwrap_or(authority);
-    if authority.is_empty() {
+    let url = Url::parse(input).ok()?;
+    if url.scheme() != "http" && url.scheme() != "https" {
         return None;
     }
-    let host = authority.split(':').next()?.to_ascii_lowercase();
+    let host = url.host_str()?.to_lowercase();
     if host.is_empty() {
         return None;
     }
+    // `URL.host` keeps a non-default port and drops the scheme default.
+    let authority = match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.clone(),
+    };
     Some(HttpUrl {
         host,
-        authority: authority.to_ascii_lowercase(),
-        path: path.to_owned(),
+        authority,
+        path: url.path().to_owned(),
     })
 }
 
 fn http_hostname(input: &str) -> Option<String> {
-    parse_http_url(input).map(|url| url.host)
+    let url = Url::parse(input).ok()?;
+    let host = url.host_str()?.to_lowercase();
+    if host.is_empty() { None } else { Some(host) }
+}
+
+/// `Number.isInteger`: a finite value with no fraction, including `12.0`.
+fn integral_number(value: &serde_json::Value) -> Option<i64> {
+    if let Some(number) = value.as_i64() {
+        return Some(number);
+    }
+    let number = value.as_f64()?;
+    if !number.is_finite() || number.fract() != 0.0 {
+        return None;
+    }
+    if !(i64::MIN as f64..=i64::MAX as f64).contains(&number) {
+        return None;
+    }
+    Some(number as i64)
 }
 
 fn is_host_of(hostname: &str, apex: &str, label: Option<&str>) -> bool {
@@ -241,7 +255,7 @@ fn capture(host: &str, path: &str, re: &Regex, _unused: bool) -> Option<ChangeRe
     }
     Some(ChangeRequestLink {
         host: host.to_owned(),
-        repository: repository.to_ascii_lowercase(),
+        repository: repository.to_lowercase(),
         number,
         authority: None,
     })
@@ -297,5 +311,51 @@ mod tests {
         });
         assert_eq!(azure.host, "dev.azure.com");
         assert_eq!(azure.repository, "org-a/project/_git/web");
+    }
+
+    #[test]
+    fn query_uppercase_scheme_and_default_port_match_whatwg() {
+        let queried = legacy_thread_pull_request_key(&Linked {
+            repository: "web".into(),
+            number: 7,
+            url: "https://dev.azure.com/org-a/project/_git/web/pullrequest/7?_a=overview".into(),
+        });
+        assert_eq!(queried.host, "dev.azure.com");
+        assert_eq!(queried.repository, "org-a/project/_git/web");
+
+        let upper = legacy_thread_pull_request_key(&Linked {
+            repository: "Org/Repo".into(),
+            number: 12,
+            url: "HTTPS://github.com/Org/Repo/pull/12".into(),
+        });
+        assert_eq!(upper.host, "github.com");
+        assert_eq!(upper.repository, "org/repo");
+
+        let port = legacy_thread_pull_request_key(&Linked {
+            repository: "org/repo".into(),
+            number: 5,
+            url: "https://codeberg.org:443/org/repo/pulls/5".into(),
+        });
+        assert_eq!(port.host, "codeberg.org");
+        assert_eq!(port.repository, "org/repo");
+    }
+
+    #[test]
+    fn integral_floats_are_accepted_and_blank_js_trim_is_skipped() {
+        let linked = parse_legacy_linked_pull_request(
+            r#"{"repository":"acme/widgets","number":12.0,"url":"https://github.com/acme/widgets/pull/12"}"#,
+        )
+        .unwrap();
+        assert_eq!(linked.number, 12);
+        assert!(parse_legacy_linked_pull_request(
+            "{\"repository\":\"\u{feff}\",\"number\":1,\"url\":\"https://github.com/a/b/pull/1\"}"
+        )
+        .is_none());
+        assert!(
+            parse_legacy_linked_pull_request(
+                r#"{"repository":"acme/widgets","number":12.5,"url":"https://github.com/acme/widgets/pull/12"}"#
+            )
+            .is_none()
+        );
     }
 }

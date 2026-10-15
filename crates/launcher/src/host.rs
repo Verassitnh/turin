@@ -149,7 +149,7 @@ pub fn resolve_command_path(command: &str, env: &Env) -> Option<PathBuf> {
     }
     let mut seen = HashSet::new();
     for entry in path_value.split(':') {
-        let entry = entry.trim();
+        let entry = strip_wrapping_quotes(entry.trim());
         if entry.is_empty() || !seen.insert(entry) {
             continue;
         }
@@ -159,6 +159,12 @@ pub fn resolve_command_path(command: &str, env: &Env) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Upstream `stripWrappingQuotes` (`/^"+|"+$/g`): drops every leading and
+/// trailing `"`, so a PATH entry written as `"/opt/x/bin"` still matches.
+fn strip_wrapping_quotes(value: &str) -> &str {
+    value.trim_matches('"')
 }
 
 /// `is_file` plus any execute bit set. Approximates `access(X_OK)` without
@@ -217,6 +223,20 @@ mod tests {
             resolve_command_path("tool", &Env::from([("PATH".to_owned(), String::new())])),
             None
         );
+    }
+
+    #[test]
+    fn wrapping_double_quotes_on_path_entries_are_stripped() {
+        let home = tempfile::tempdir().unwrap();
+        let tool = home.path().join("bin/tool");
+        write_executable(&tool);
+        let bin = home.path().join("bin");
+        let env = Env::from([(
+            "PATH".to_owned(),
+            format!("  \"{}\"  :/usr/bin", bin.display()),
+        )]);
+
+        assert_eq!(resolve_command_path("tool", &env), Some(tool));
     }
 
     #[test]

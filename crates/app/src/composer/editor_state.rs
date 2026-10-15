@@ -2013,6 +2013,7 @@ fn align_with_sibling(item: &ItemPrefix, sibling: &ItemPrefix, after_sibling: bo
     }
 }
 
+mod ime;
 mod input;
 
 #[cfg(test)]

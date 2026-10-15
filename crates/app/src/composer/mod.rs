@@ -38,3 +38,5 @@ pub mod catalog;
 pub mod model_picker;
 pub mod attachment_files;
 pub mod draft_store;
+pub mod skills;
+pub mod command_items;

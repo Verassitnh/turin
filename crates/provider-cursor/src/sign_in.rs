@@ -8,13 +8,11 @@
 //! store, and Turin does not delete it.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use chrono::Utc;
 use futures::stream::{self, Stream, StreamExt};
 use tokio::sync::watch;
 use turin_acp::{AcpClient, SpawnCommand, spawn};
-use turin_contracts::base_schemas::UtcDateTime;
 use turin_contracts::provider_instance::ProviderInstanceId;
 use turin_contracts::provider_setup::{
     ProviderAuthMethod, ProviderAuthMethodType, ProviderAuthPhase, ProviderAuthState,
@@ -29,8 +27,6 @@ use turin_provider_core::rt::BoxFuture;
 use crate::auth::{ACP_ARGS, authenticate_params};
 use crate::error::{CursorError, CursorOperation};
 
-/// Upstream `AUTH_TIMEOUT_MS`. It is the expiry the UI shows.
-const AUTH_TIMEOUT: Duration = Duration::from_secs(300);
 const BROWSER_METHOD_NAME: &str = "Sign in with Cursor";
 
 /// The state the controller publishes, and which client owns the flow.
@@ -190,14 +186,13 @@ impl Shared {
                 "Could not start Cursor sign-in. Try again.",
             )
         })?;
-        let expires_at = UtcDateTime::from_datetime(
-            Utc::now() + chrono::Duration::from_std(AUTH_TIMEOUT).expect("auth timeout"),
-        );
+        // No expiry is shown: cursor-agent's own login poll bounds the flow, and
+        // cancel ends it sooner.
         let starting = state(
             &self.instance_id,
             ProviderAuthPhase::Starting,
             Some(operation_id.clone()),
-            Some(expires_at.to_string()),
+            None,
         );
         let mut starting = starting;
         starting.message = Some("Starting Cursor sign-in.".to_owned());

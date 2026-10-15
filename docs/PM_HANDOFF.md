@@ -1,0 +1,45 @@
+# PM handoff (resume point)
+
+Written by the PM (Claude Opus 5.5) before an app restart on 2026-10-14.
+Read this, TASKS.md and PORTING.md to resume.
+
+## Paths
+- Main checkout: `/Users/jackson/.t3/scratch/2026-10-15-consider-creating-a-t3-code-21b503f2/turin` (branch `main`, origin = github.com/Verassitnh/turin, private)
+- Upstream: `../upstream` (pingdotgg/t3code@ec1313c8)
+- Agent worktrees: `../turin-wt/<task-id>` (branch `task/<task-id>`)
+- QC workflow script: `scripts/qc/turin-qc.workflow.js` (run via the Workflow tool with `scriptPath`; args: worktree, scope, upstream, context, optional dimensions)
+- Build env: `PATH=$HOME/.cargo/bin:$PATH DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`
+
+## Delegated tasks (T3 delegate_task; check with task_status)
+| Task | Model | taskId suffix (prefix `node:delegated-task:command%3Amcp%3Ae30e345b-6629-40c5-a2b3-27cc96f9edcf%3Adelegate-task%3A`) | State at handoff |
+|---|---|---|---|
+| T01 contracts | openrouter/z-ai/glm-5.3 (opencode) | `turin-T01-r1` | running; told to commit WIP + merge main (T00a landed) |
+| T03 design system | claude-opus-5-5 (claudeAgent) | `turin-T03-r2-opus` | running; told to commit WIP |
+| T02 persistence | grok-4.7 (cursor) | `turin-T02-r1` | done; branch in QC |
+| T04 protocols | gpt-6-sol (codex) | `turin-T04-r1` | done; branch in QC |
+| T00a helpers | gpt-6-sol → claude-sonnet-5-5 | `turin-T00a-r2-sonnet` | merged to main |
+
+Child thread ids are the same strings with `node:` replaced by `thread:`.
+
+After the restart the MCP session prefix changed for new tasks:
+`node:delegated-task:command%3Amcp%3A51608ea3-eaef-438d-89cb-e132943c1fa6%3A…`
+| T03 r3 (resume in same child thread) | claude-opus-5-5 | `…%3Athread-send%3Aturin-T03-r3-resume` | running |
+| T09a codex-app-server | gpt-6-sol (codex) | `…%3Adelegate-task%3Aturin-T09a-r1` | running |
+
+QC runs wf_8b97ef76-9c9 (T02) and wf_42618e43-71a (T04) were resumed after the restart (same run ids).
+
+## QC workflow runs in flight (lost if the session dies; re-run with same args)
+| Run | Target | Worktree | Notes |
+|---|---|---|---|
+| wf_42618e43-71a | T04 protocol docs | `../turin-wt/T04-protocols` | custom dimensions: accuracy, completeness, rust-viability (Cursor via `cursor-agent acp`? OpenCode 1.19 vs 2.x) |
+| wf_8b97ef76-9c9 | T02 persistence | `../turin-wt/T02-persistence` | default dimensions; schema diff vs upstream |
+
+## Decisions pending
+- Cursor provider: leaning `cursor-agent acp` (ACP over stdio) by porting upstream effect-acp + AcpAdapterV2, instead of in-process `@cursor/sdk`. Waiting on T04 QC.
+- OpenCode: installed CLI 1.19.0 vs upstream's 2.x client; pick adapter generation after T04 QC.
+
+## Next actions
+1. Collect T04 + T02 QC results → fix rounds or merge.
+2. When T01 finishes → QC → merge → dispatch wave 2: T05 shared (GLM), T06 git (Grok), T07 source-control (Grok), T08 provider-core (Codex, now logged in again).
+3. T00c (Sonnet): QC low items in base_schemas after T01 merges.
+4. Push task branches to origin on every check-in.

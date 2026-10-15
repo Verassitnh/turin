@@ -3,6 +3,7 @@
 pub mod agent_scope;
 pub mod array;
 pub mod atomic_write;
+pub mod change_request_url;
 pub mod chat_list;
 pub mod claude_compaction;
 pub mod cli_args;
@@ -42,7 +43,9 @@ pub mod schema_json;
 pub mod search_ranking;
 pub mod semver;
 pub mod shell;
+pub mod source_control;
 pub mod r#struct;
 pub mod symlink;
+pub mod thread_links;
 pub mod thread_search;
 pub mod video;

@@ -32,15 +32,23 @@ pub struct V1Client {
 }
 
 impl V1Client {
+    /// `directory` is the session cwd. An empty value is rejected: the 1.x
+    /// server otherwise runs the request in its own cwd and turns never finish.
+    /// Non-GET requests send it as `x-opencode-directory` (percent-encoded).
+    /// GET and HEAD send `?directory=` instead.
     pub fn new(
         base_url: &str,
-        directory: Option<&str>,
+        directory: &str,
         server_password: Option<&str>,
     ) -> Result<Self, OpenCodeRuntimeError> {
-        let mut http = HttpClient::new(base_url, server_password.unwrap_or(""), false)?;
-        if let Some(directory) = directory {
-            http = http.with_directory(directory);
+        if directory.is_empty() {
+            return Err(OpenCodeRuntimeError::new(
+                "v1.client",
+                "OpenCode v1 requests need a directory.",
+            ));
         }
+        let http = HttpClient::new(base_url, server_password.unwrap_or(""), false)?
+            .with_directory(directory);
         Ok(Self {
             http,
             silent_timeout: SILENT_STREAM_TIMEOUT,
@@ -402,6 +410,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_empty_directory_is_rejected() {
+        let err = V1Client::new("http://127.0.0.1:1", "", None).unwrap_err();
+        assert!(err.detail.contains("directory"), "{}", err.detail);
+    }
+
+    #[test]
     fn permission_replies_use_the_sdk_v2_route() {
         let path = permission_reply_path("req/1");
         assert_eq!(path, "/permission/req%2F1/reply");
@@ -426,7 +440,7 @@ mod tests {
             FakeResponse::json(200, r#"{"healthy":true,"version":"1.19.0"}"#)
         })
         .await;
-        let client = V1Client::new(&server.url, Some("/work"), Some("pässwörd")).unwrap();
+        let client = V1Client::new(&server.url, "/work", Some("pässwörd")).unwrap();
         let health = client.health().await.unwrap();
         assert_eq!(health.version, "1.19.0");
         assert!(health.healthy);
@@ -448,7 +462,7 @@ mod tests {
             FakeResponse::json(200, r#"{"id":"ses_1","title":"t"}"#)
         })
         .await;
-        let client = V1Client::new(&server.url, Some("/work dir"), Some("pw")).unwrap();
+        let client = V1Client::new(&server.url, "/work dir", Some("pw")).unwrap();
         let session = client
             .create_session(&json!({
                 "permission": [{"permission": "*", "pattern": "*", "action": "allow"}]
@@ -468,7 +482,7 @@ mod tests {
             hold: false,
         })
         .await;
-        let client = V1Client::new(&server.url, None, None).unwrap();
+        let client = V1Client::new(&server.url, "/work", None).unwrap();
         let err = client.health().await.unwrap_err();
         assert!(err.detail.contains("text/html"), "{}", err.detail);
     }
@@ -482,7 +496,7 @@ mod tests {
             )
         })
         .await;
-        let client = V1Client::new(&server.url, Some("/work"), Some("pw"))
+        let client = V1Client::new(&server.url, "/work", Some("pw"))
             .unwrap()
             .with_silent_timeout(Duration::from_millis(200));
         let mut events = client.events().await.unwrap();
@@ -513,7 +527,7 @@ mod tests {
             FakeResponse::json(200, "true")
         })
         .await;
-        let client = V1Client::new(&server.url, None, Some("pw")).unwrap();
+        let client = V1Client::new(&server.url, "/work", Some("pw")).unwrap();
         client
             .prompt_async(
                 "ses",

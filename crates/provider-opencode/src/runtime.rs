@@ -60,7 +60,7 @@ pub fn default_v1_verify() -> VerifyFn {
         Box::pin(async move {
             let client = V1Client::new(
                 &input.url,
-                Some(&input.directory),
+                &input.directory,
                 input.server_password.as_deref(),
             )?;
             verify_open_code_server_version(&client).await
@@ -792,7 +792,7 @@ done
             crate::test_support::FakeResponse::json(200, r#"{"healthy":true,"version":"1.0.0"}"#)
         })
         .await;
-        let client = V1Client::new(&server.url, None, None).unwrap();
+        let client = V1Client::new(&server.url, "/work", None).unwrap();
         let err = verify_open_code_server_version(&client).await.unwrap_err();
         assert!(err.detail.contains("too old"), "{}", err.detail);
     }

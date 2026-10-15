@@ -36,7 +36,7 @@ async fn installed_opencode_serves_health_and_events() {
     .expect("opencode serve");
     let client = V1Client::new(
         &process.url,
-        Some(&directory),
+        &directory,
         process.server_password.as_deref(),
     )
     .unwrap();

@@ -7595,13 +7595,24 @@ dependencies = [
 name = "turin-provider-cursor"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "dirs 6.0.0",
+ "futures",
+ "pretty_assertions",
+ "regex",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "turin-acp",
  "turin-contracts",
+ "turin-provider-core",
 ]
 
 [[package]]

@@ -32,6 +32,8 @@ Haiku (skeptics, mechanical edits). Grok carries the bulk of backend ports
 while Codex/GLM are out. Keep concurrent Claude agents ≤ 8 and QC workflows ≤ 2
 to stay under the Claude session limit (hit once on 2026-10-14 ~20:45).
 
+**Codex 401s (2026-10-15):** T3's Codex app-server gets the access token once at launch; when the Codex daemon refreshes `~/.codex/auth.json` the old token dies → every Codex turn 401s. Fix: kill T3's `codex app-server -c model_provider=...` process; T3 respawns it with the fresh token. Resume the failed threads.
+
 **Outage (2026-10-15 12:18 UTC): Grok hit Cursor's plan usage limit ("You're out of usage. Switch to Auto"). T06, T10a, T11, T12, T23 moved to Cursor Auto (`cursor`/`default`) in their own threads; trailer `Model: cursor-auto (cursor)`. Back to grok-4.7 when usage resets.**
 
 **Throughput rule (user, 2026-10-14): run the maximum number of agents the
@@ -153,9 +155,9 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok | done → QC wf_5bf4fe41-dd5 |
 | T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok → Cursor Auto | done (26 tests, real provider-core traits) → QC queued |
 | T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex → Sonnet | r2 active (Codex usage limit again) |
-| T13b | Orchestrator write side: EventSink/Store, outbox/worker, receipts, command policy, thread lifecycle services | `crates/orchestration/src/pipeline/**` | Codex → Sonnet | r2 active (Codex usage limit again) |
+| T13b | Orchestrator write side: EventSink/Store, outbox/worker, receipts, command policy, thread lifecycle services | `crates/orchestration/src/pipeline/**` | Codex → Sonnet → Cursor Auto | r3 active (from docs/handoff/T13b.md) |
 | T13c | Orchestrator core + provider run services (Orchestrator.ts, ProviderSessionManager, RunExecution, ingest, recovery, checkpoints, PR reactors) | `crates/orchestration/src/core/**` | Codex (high) | todo (after T13a/b + T08) |
-| T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus → Sonnet | r2 active (logic → Sonnet per model policy) |
+| T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus → Sonnet → Cursor Auto | r3 active (from docs/handoff/T14.md; 451 tests) |
 
 ### Wave 4: UI (after T03 + T14)
 

@@ -433,3 +433,30 @@ pub fn text_field_leading(
                 .focus_bordered(false),
         )
 }
+
+/// A `Textarea` frame: `Input`'s border and fill around a multi-line state,
+/// `min-h` of `rows` lines plus padding.
+pub fn textarea_field(
+    state: &gpui_kit::Entity<gpui_kit::component::input::TextareaState>,
+    rows: usize,
+    cx: &App,
+) -> Div {
+    let theme = cx.app_theme();
+    div()
+        .flex()
+        .w_full()
+        .min_h(px(rows as f32 * 20. + 14.))
+        .rounded(RADIUS_LG)
+        .border_1()
+        .border_color(theme.input)
+        .bg(if theme.is_dark() {
+            with_alpha(theme.input, 0.32).into()
+        } else {
+            theme.background
+        })
+        .shadow(tokens::shadow_xs(0.05))
+        .text_size(TEXT_SM.size)
+        .px(px(9.))
+        .py(px(6.))
+        .child(gpui_kit::component::input::Textarea::new(state))
+}

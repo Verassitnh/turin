@@ -6,6 +6,7 @@ mod appearance;
 mod general;
 mod keybindings;
 mod providers;
+mod source_control;
 
 use gpui_kit::{
     AnyElement, Context, IntoElement, ParentElement as _, SharedString,
@@ -24,6 +25,11 @@ pub struct PanelState {
     pub typography_advanced: bool,
     pub keybindings: keybindings::KeybindingsState,
     pub providers: providers::ProvidersState,
+    pub source_control: source_control::SourceControlState,
+    /// Dev hook (`TURIN_SETTINGS_SCROLL`): page scroll offset in px and the
+    /// renders left to apply it (the first layouts clamp it to zero).
+    pub demo_scroll: Option<(f32, u8)>,
+    pub page_scroll: gpui_kit::ScrollHandle,
 }
 
 /// `max-w-4xl`.
@@ -31,11 +37,17 @@ const READABLE_WIDTH: f32 = 896.;
 
 impl SettingsView {
     pub(super) fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if let Some((offset, frames)) = self.panels.demo_scroll {
+            self.panels.page_scroll.set_offset(gpui_kit::point(px(0.), px(-offset)));
+            self.panels.demo_scroll = (frames > 1).then_some((offset, frames - 1));
+            cx.notify();
+        }
         let sections: Vec<AnyElement> = match self.route {
             SettingsRoute::Section(SettingsPath::General) => self.render_general(window, cx),
             SettingsRoute::Section(SettingsPath::Appearance) => self.render_appearance(window, cx),
             SettingsRoute::Section(SettingsPath::Keybindings) => self.render_keybindings(window, cx),
             SettingsRoute::Section(SettingsPath::Providers) => self.render_providers(window, cx),
+            SettingsRoute::Section(SettingsPath::SourceControl) => self.render_source_control(window, cx),
             _ => vec![div()
                 .text_color(cx.app_theme().muted_foreground)
                 .child(SharedString::from(format!(
@@ -50,23 +62,34 @@ impl SettingsView {
     /// `SettingsPageContainer` + `WorkspacePageContainer`: a scrolling column,
     /// `mx-auto max-w-4xl gap-8 px-6 pt-6 pb-12`.
     pub(super) fn page_container(&mut self, children: Vec<AnyElement>, _cx: &mut Context<Self>) -> AnyElement {
+        use gpui_kit::component::scroll::ScrollableElement as _;
+        use gpui_kit::{InteractiveElement as _, StatefulInteractiveElement as _};
+        let handle = self.panels.page_scroll.clone();
         div()
             .flex_1()
             .min_h_0()
+            .relative()
             .child(
-                scroll_area("settings-page").child(
-                    div()
-                        .mx_auto()
-                        .flex()
-                        .flex_col()
-                        .gap_8()
-                        .w_full()
-                        .max_w(px(READABLE_WIDTH))
-                        .px_6()
-                        .pt_6()
-                        .pb(px(48.))
-                        .children(children),
-                ),
+                div()
+                    .id("settings-page")
+                    .size_full()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&handle)
+                    .child(
+                        div()
+                            .mx_auto()
+                            .flex()
+                            .flex_col()
+                            .gap_8()
+                            .w_full()
+                            .max_w(px(READABLE_WIDTH))
+                            .px_6()
+                            .pt_6()
+                            .pb(px(48.))
+                            .children(children),
+                    )
+                    .vertical_scrollbar(&handle),
             )
             .into_any_element()
     }

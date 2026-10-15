@@ -95,6 +95,8 @@ pub struct SettingsViewModel {
     pub environment: EnvironmentInfo,
     pub keybindings: KeybindingsViewModel,
     pub providers: Vec<ServerProvider>,
+    /// `sourceControlEnvironment.discovery` of the local environment.
+    pub source_control: turin_contracts::source_control::SourceControlDiscoveryResult,
     pub projects: Vec<SettingsProject>,
     pub archived_threads: Vec<ArchivedThread>,
 }
@@ -137,6 +139,8 @@ pub trait SettingsSource {
     fn remove_keybinding(&self, input: RemoveKeybinding, cx: &mut App);
     /// `refreshServerProviders({ refreshModels: true })`.
     fn refresh_providers(&self, cx: &mut App);
+    /// `sourceControlEnvironment.discovery` refresh (the Rescan button).
+    fn rescan_source_control(&self, cx: &mut App);
     /// `updateProvider`: run the provider CLI's update command.
     fn update_provider(&self, instance_id: &str, target_version: Option<String>, cx: &mut App);
     /// Starts / ends the provider account sign-in (the in-app auth flow of

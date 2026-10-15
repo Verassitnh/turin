@@ -159,6 +159,7 @@ fn mock_view_model() -> SettingsViewModel {
             config_path: "/Users/dev/.turin/keybindings.json".into(),
         },
         providers: mock_providers(),
+        source_control: mock_source_control(),
         projects: mock_projects(),
         archived_threads: mock_archived_threads(),
     }
@@ -334,6 +335,10 @@ impl SettingsSource for MockSettingsSource {
         self.publish(cx);
     }
 
+    fn rescan_source_control(&self, cx: &mut App) {
+        self.publish(cx);
+    }
+
     fn refresh_providers(&self, cx: &mut App) {
         {
             let mut state = self.state.borrow_mut();
@@ -390,4 +395,58 @@ impl SettingsSource for MockSettingsSource {
     fn delete_thread(&self, thread_id: &str, cx: &mut App) {
         self.unarchive_thread(thread_id, cx);
     }
+}
+
+/// Discovery of a typical machine: git installed, jj not supported yet, GitHub
+/// through `gh` with two logins.
+fn mock_source_control() -> turin_contracts::source_control::SourceControlDiscoveryResult {
+    let some = |value: &str| json!({ "_tag": "Some", "value": value });
+    let none = || json!({ "_tag": "None" });
+    serde_json::from_value(json!({
+        "versionControlSystems": [
+            {
+                "kind": "git",
+                "implemented": true,
+                "label": "Git",
+                "executable": "git",
+                "status": "available",
+                "version": some("2.47.0"),
+                "installHint": "Install Git from git-scm.com.",
+                "detail": none(),
+            },
+            {
+                "kind": "jj",
+                "implemented": false,
+                "label": "Jujutsu",
+                "executable": "jj",
+                "status": "missing",
+                "version": none(),
+                "installHint": "Install Jujutsu with your package manager.",
+                "detail": none(),
+            },
+        ],
+        "sourceControlProviders": [
+            {
+                "kind": "github",
+                "label": "GitHub",
+                "executable": "gh",
+                "status": "available",
+                "version": some("2.62.0"),
+                "installHint": "Install the GitHub CLI from cli.github.com.",
+                "detail": none(),
+                "auth": {
+                    "status": "authenticated",
+                    "account": some("octocat"),
+                    "host": some("github.com"),
+                    "detail": none(),
+                    "accounts": [
+                        { "host": "github.com", "account": "octocat", "active": true, "authenticated": true },
+                        { "host": "github.com", "account": "work-account", "active": false, "authenticated": true },
+                        { "host": "git.example.com", "account": "octo-enterprise", "active": true, "authenticated": true },
+                    ],
+                },
+            },
+        ],
+    }))
+    .expect("mock source control discovery")
 }

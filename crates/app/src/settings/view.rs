@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, FontWeight, InteractiveElement as _,
@@ -98,6 +98,7 @@ pub struct SettingsView {
     pub(super) menus: MenuState,
     pub(super) inputs: HashMap<SharedString, Entity<InputState>>,
     input_commits: HashMap<SharedString, InputCommit>,
+    pub(super) textareas: HashMap<SharedString, Entity<TextareaState>>,
     pub(super) nav_search: Entity<InputState>,
     pub(super) nav_query: String,
     pub(super) sidebar_open: bool,
@@ -129,6 +130,7 @@ impl SettingsView {
             menus: MenuState::default(),
             inputs: HashMap::new(),
             input_commits: HashMap::new(),
+            textareas: HashMap::new(),
             nav_search,
             nav_query: String::new(),
             sidebar_open: true,
@@ -143,6 +145,7 @@ impl SettingsView {
 
     pub fn set_route(&mut self, route: SettingsRoute, cx: &mut Context<Self>) {
         self.route = route;
+        self.panels.page_scroll.set_offset(gpui_kit::point(px(0.), px(0.)));
         self.menus.close();
         cx.notify();
     }
@@ -162,7 +165,15 @@ impl SettingsView {
                 }
             }
             "kb-new" => self.panels.keybindings.adding = true,
+            other if other.starts_with("scroll:") => {
+                if let Ok(offset) = other["scroll:".len()..].parse::<f32>() {
+                    self.panels.demo_scroll = Some((offset, 30));
+                }
+            }
             "add-hub" => self.dialog = Some(super::dialog::Dialog::AddHub),
+            other if other.starts_with("expand:") => {
+                self.panels.source_control.expanded.insert(other["expand:".len()..].to_owned());
+            }
             other if other.starts_with("provider:") => {
                 self.panels.providers.selected = Some(other["provider:".len()..].to_owned());
             }
@@ -243,6 +254,65 @@ impl SettingsView {
         commit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
     ) -> Entity<InputState> {
         self.input_with(id, value, placeholder, true, window, cx, commit)
+    }
+
+    /// A multi-line input (`Textarea`, `rows={rows}`); `commit` runs on blur.
+    pub(super) fn textarea(
+        &mut self,
+        id: &str,
+        value: &str,
+        placeholder: &str,
+        rows: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        commit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Entity<TextareaState> {
+        let key = SharedString::from(id.to_owned());
+        self.input_commits.insert(key.clone(), Rc::new(commit));
+        if let Some(state) = self.textareas.get(&key) {
+            let state = state.clone();
+            let focused = state.read(cx).focus_handle(cx).is_focused(window);
+            if !focused && state.read(cx).value() != value {
+                state.update(cx, |state, cx| state.set_value(value.to_owned(), window, cx));
+            }
+            return state;
+        }
+        let state = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(rows)
+                .placeholder(placeholder.to_owned())
+                .default_value(value.to_owned())
+        });
+        let subscription_key = key.clone();
+        let subscription = cx.subscribe_in(&state, window, move |this, state, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::Blur) {
+                let text = state.read(cx).value().to_string();
+                if let Some(commit) = this.input_commits.get(&subscription_key).cloned() {
+                    commit(this, text, window, cx);
+                }
+            }
+        });
+        self._subscriptions.push(subscription);
+        self.textareas.insert(key, state.clone());
+        state
+    }
+
+    /// A masked single-line input with no commit hook (`SecretInput`); callers
+    /// read it from [`Self::inputs`] when their button is pressed.
+    pub(super) fn secret_input(
+        &mut self,
+        id: &str,
+        placeholder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        let key = SharedString::from(id.to_owned());
+        if let Some(state) = self.inputs.get(&key) {
+            return state.clone();
+        }
+        let state = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(placeholder.to_owned()));
+        self.inputs.insert(key, state.clone());
+        state
     }
 
     fn input_with(

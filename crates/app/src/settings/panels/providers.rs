@@ -1906,9 +1906,8 @@ impl SettingsView {
     fn provider_advanced_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let vm = self.vm(cx);
         let resolved = turin_shared::server_settings::resolve_server_background_activity_settings(&vm.server);
-        let defaults = turin_shared::server_settings::resolve_server_background_activity_settings(
-            &turin_contracts::settings::default_server_settings(),
-        );
+        let base = turin_shared::server_settings::get_background_activity_base_profile(&vm.server.background_activity);
+        let defaults = turin_shared::server_settings::get_background_activity_preset_settings(base);
         let seconds = duration_to_seconds(resolved.provider_health_refresh_interval);
         let default_seconds = duration_to_seconds(defaults.provider_health_refresh_interval);
         let (id, title) = searchable_setting("provider-health-check-interval");

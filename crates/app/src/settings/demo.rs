@@ -4,7 +4,8 @@
 //!
 //! - `TURIN_SETTINGS=general|appearance|keybindings|providers|source-control|
 //!   projects|storage|archived|licenses`: the page to open.
-//! - `TURIN_SETTINGS_OPEN=<menu id>`: opens that select / picker (`default-model`).
+//! - `TURIN_SETTINGS_OPEN=<id>[,<id>..]`: opens selects / pickers / dialogs (`default-model`,
+//!   `expand:<row>`, `provider:<instance>`, `scroll:<px>`, `add-hub`, ...).
 //! - `TURIN_SETTINGS_QUERY=<text>`: types into the sidebar search.
 //! - `TURIN_SETTINGS_SHOT=<file.png>`: captures the window after it settled and quits.
 
@@ -31,8 +32,8 @@ pub fn open_if_requested(options: WindowOptions, cx: &mut App) -> bool {
         let view = cx.new(|cx| SettingsView::new(store, window, cx));
         view.update(cx, |view, cx| {
             view.set_route(route, cx);
-            if let Some(menu) = &open_menu {
-                view.open_menu_for_demo(menu.clone(), cx);
+            for menu in open_menu.iter().flat_map(|menus| menus.split(',')).filter(|menu| !menu.is_empty()) {
+                view.open_menu_for_demo(menu.to_owned(), cx);
             }
             if let Some(query) = &query {
                 view.set_nav_query_for_demo(query.clone(), window, cx);

@@ -7,6 +7,7 @@
 //! shapes. See PORTING.md "No client/server split".
 
 pub mod archived_threads;
+pub mod checkpoint_diff;
 pub mod client_state;
 pub mod command_result;
 pub mod composer_dispatch;

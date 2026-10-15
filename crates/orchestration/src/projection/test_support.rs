@@ -259,3 +259,91 @@ pub fn capabilities() -> Value {
             "nativeRequestIds": "weak"}
     })
 }
+
+/// Insert a run row straight into the table (the SQL-seeded tests do this to
+/// build histories without a thousand events).
+pub fn insert_run_row(conn: &rusqlite::Connection, run: &Value) {
+    conn.execute(
+        "INSERT INTO orchestration_v2_projection_runs (
+            run_id, thread_id, ordinal, provider, provider_thread_id, status,
+            requested_at, completed_at, payload_json
+        ) VALUES (?1, ?2, ?3, 'codex', ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            run["id"].as_str(),
+            run["threadId"].as_str(),
+            run["ordinal"].as_i64(),
+            run["providerThreadId"].as_str(),
+            run["status"].as_str(),
+            run["requestedAt"].as_str(),
+            run["completedAt"].as_str(),
+            run.to_string(),
+        ],
+    )
+    .expect("insert run row");
+}
+
+/// Insert a turn item row straight into the table, columns taken from the payload.
+pub fn insert_item_row(conn: &rusqlite::Connection, item: &Value) {
+    conn.execute(
+        "INSERT INTO orchestration_v2_projection_turn_items (
+            turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
+            parent_item_id, ordinal, type, status, updated_at, payload_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        rusqlite::params![
+            item["id"].as_str(),
+            item["threadId"].as_str(),
+            item["runId"].as_str(),
+            item["nodeId"].as_str(),
+            item["providerThreadId"].as_str(),
+            item["providerTurnId"].as_str(),
+            item["parentItemId"].as_str(),
+            item["ordinal"].as_i64(),
+            item["type"].as_str(),
+            item["status"].as_str(),
+            item["updatedAt"].as_str(),
+            item.to_string(),
+        ],
+    )
+    .expect("insert item row");
+}
+
+/// Run `f` in one write transaction and wait for it.
+pub async fn seed<F>(store: &ProjectionStore, f: F)
+where
+    F: FnOnce(&rusqlite::Connection) + Send + 'static,
+{
+    store
+        .db()
+        .write(move |tx| {
+            f(tx);
+            Ok(())
+        })
+        .await
+        .expect("seed");
+}
+
+pub fn tid(id: &str) -> turin_contracts::ThreadId {
+    turin_contracts::ThreadId::new(id).unwrap()
+}
+
+/// `EXPLAIN QUERY PLAN` details of `sql`, with every `?N` bound to NULL.
+pub async fn query_plan(
+    store: &ProjectionStore,
+    sql: &'static str,
+    params: usize,
+) -> Vec<(i64, String)> {
+    store
+        .db()
+        .read(move |conn| {
+            let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let values = vec![rusqlite::types::Value::Null; params];
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(values.iter()), |row| {
+                    Ok((row.get::<_, i64>(1)?, row.get::<_, String>(3)?))
+                })
+                .unwrap();
+            Ok(rows.map(Result::unwrap).collect())
+        })
+        .await
+        .unwrap()
+}

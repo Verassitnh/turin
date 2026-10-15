@@ -85,8 +85,8 @@ fn parse_frontmatter_boolean(value: &Yaml) -> Option<bool> {
         Yaml::Integer(1) => Some(true),
         Yaml::Integer(0) => Some(false),
         Yaml::Real(text) => match text.parse::<f64>().ok()? {
-            number if number == 1.0 => Some(true),
-            number if number == 0.0 => Some(false),
+            1.0 => Some(true),
+            0.0 => Some(false),
             _ => None,
         },
         Yaml::String(text) => match text.trim().to_lowercase().as_str() {
@@ -457,7 +457,7 @@ fn discover_claude_skills_for(
                     description: description.as_deref().and_then(tne),
                     path: path_tne,
                     scope: tne(scope.as_str()),
-                    enabled: override_.map_or(true, |o| o.enabled),
+                    enabled: override_.is_none_or(|o| o.enabled),
                     display_name: None,
                     short_description: None,
                     user_invocation_only: user_invocation_only.then_some(true),

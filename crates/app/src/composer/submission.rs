@@ -1,11 +1,10 @@
 //! Port of upstream/apps/web/src/components/chat/composerSubmission.ts
 //!
-//! Prompt length validation and the send gate. Assistant citations are not
-//! ported, so the provider input is the trimmed prompt (upstream takes the max
-//! with the citation-expanded length).
+//! Prompt length validation and the send gate.
 
 use turin_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_INPUT_CHARS;
 
+use crate::components::chat::timeline::assistant_citations::expand_assistant_citations_for_provider;
 use crate::composer::js_string::utf16_len;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +35,10 @@ pub fn format_en_us(value: usize) -> String {
 /// `getComposerPromptLengthValidationMessage`.
 pub fn get_composer_prompt_length_validation_message(prompt: &str) -> Option<String> {
     let normalized = turin_contracts::base_schemas::js_trim(prompt);
-    let input_length = utf16_len(normalized);
+    // Upstream measures the longer of the prompt and its citation expansion:
+    // each citation adds its quote block, which can outgrow the marker.
+    let expanded = expand_assistant_citations_for_provider(normalized);
+    let input_length = utf16_len(normalized).max(utf16_len(&expanded));
     let excess = input_length.checked_sub(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)?;
     if excess == 0 {
         return None;
@@ -166,6 +168,39 @@ mod tests {
         assert!(!prevented.get());
         let padded = format!("  {}  ", "x".repeat(LIMIT));
         assert!(get_composer_prompt_length_validation_message(&padded).is_none());
+    }
+
+    #[test]
+    fn measures_the_citation_expansion_when_it_is_longer() {
+        use crate::components::chat::timeline::assistant_citations::{
+            AssistantCitation, expand_assistant_citations_for_provider,
+            serialize_assistant_citation,
+        };
+        // Each distinct short marker expands to a quote block several times its size.
+        let prompt = (0..500)
+            .map(|index| {
+                serialize_assistant_citation(&AssistantCitation {
+                    version: 1,
+                    environment_id: "e".into(),
+                    thread_id: "t".into(),
+                    message_id: format!("m{index}"),
+                    text: "a".into(),
+                    comment: None,
+                    start: 0,
+                    end: 1,
+                    prefix: String::new(),
+                    suffix: String::new(),
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let raw = utf16_len(&prompt);
+        let expanded = utf16_len(&expand_assistant_citations_for_provider(&prompt));
+        assert!(
+            raw <= LIMIT && expanded > LIMIT,
+            "raw {raw}, expanded {expanded}"
+        );
+        assert!(get_composer_prompt_length_validation_message(&prompt).is_some());
     }
 
     #[test]

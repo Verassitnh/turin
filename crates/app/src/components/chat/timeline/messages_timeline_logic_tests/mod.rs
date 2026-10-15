@@ -42,6 +42,7 @@ mod derive_rows_notices;
 mod derive_rows_runless;
 mod derive_rows_steers;
 mod derive_rows_streaming;
+mod derive_rows_subagents;
 mod derive_rows_timing;
 mod derive_rows_v2;
 mod derive_rows_wakes;

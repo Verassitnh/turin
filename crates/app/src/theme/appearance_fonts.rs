@@ -34,8 +34,19 @@ pub const DEFAULT_SANS_FONT_STACK: &str =
 pub const DEFAULT_CODE_FONT_STACK: &str =
     r#""SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace"#;
 
+/// index.css `--font-mono`, what code surfaces use while no custom code
+/// font is set (`applyAppearanceFontVariables` removes the override).
+pub const INDEX_CSS_MONO_STACK: &str =
+    r#"ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace"#;
+
 /// GPUI's name for the platform UI face (San Francisco on macOS).
 pub const SYSTEM_UI_FONT: &str = ".SystemUIFont";
+
+/// CoreText's alias for the system monospaced face (SF Mono), which is what
+/// `ui-monospace` renders in WebKit/Chromium on macOS. SF Mono itself is a
+/// hidden system family, so `"SF Mono"` / `"SFMono-Regular"` never appear in
+/// the installed-family list and must map here too.
+pub const SYSTEM_MONO_FONT: &str = ".AppleSystemUIFontMonospaced";
 
 fn quote_font_family_name(name: &str) -> String {
     let bare = name.trim();
@@ -142,8 +153,14 @@ pub fn resolve_font_family(stack: &str, is_installed: impl Fn(&str) -> bool) -> 
             "-apple-system" | "BlinkMacSystemFont" | "system-ui" | "sans-serif" => {
                 return Some(SYSTEM_UI_FONT.to_string());
             }
+            "ui-monospace" if cfg!(target_os = "macos") => {
+                return Some(SYSTEM_MONO_FONT.to_string());
+            }
             "ui-monospace" | "monospace" => return None,
             name if is_installed(name) => return Some(name.to_string()),
+            "SF Mono" | "SFMono-Regular" if cfg!(target_os = "macos") => {
+                return Some(SYSTEM_MONO_FONT.to_string());
+            }
             _ => {}
         }
     }
@@ -162,8 +179,8 @@ pub struct ResolvedFonts {
     pub size_code: f32,
 }
 
-/// The mono face to use when nothing in the stack is installed; Menlo ships
-/// with every macOS.
+/// The mono face to use when nothing in the stack resolves (non-macOS
+/// without any listed family).
 pub const FALLBACK_MONO_FONT: &str = "Menlo";
 
 pub fn resolve_appearance_fonts(
@@ -175,11 +192,14 @@ pub fn resolve_appearance_fonts(
         &is_installed,
     )
     .unwrap_or_else(|| SYSTEM_UI_FONT.to_string());
-    let mono = resolve_font_family(
-        &appearance_font_stack(&preferences.code, DEFAULT_CODE_FONT_STACK),
-        &is_installed,
-    )
-    .unwrap_or_else(|| FALLBACK_MONO_FONT.to_string());
+    // A custom code font is prepended to DEFAULT_CODE_FONT_STACK; without
+    // one, index.css's `--font-mono` (ui-monospace first) applies.
+    let mono_stack = match css_font_families(&preferences.code) {
+        Some(families) => format!("{families}, {DEFAULT_CODE_FONT_STACK}"),
+        None => INDEX_CSS_MONO_STACK.to_string(),
+    };
+    let mono = resolve_font_family(&mono_stack, &is_installed)
+        .unwrap_or_else(|| FALLBACK_MONO_FONT.to_string());
     let composer = css_font_families(&preferences.composer)
         .and_then(|stack| resolve_font_family(&stack, &is_installed))
         .unwrap_or_else(|| sans.clone());
@@ -230,12 +250,18 @@ mod tests {
     }
 
     #[test]
-    fn resolves_defaults_to_system_and_first_installed_mono() {
+    fn resolves_defaults_to_system_faces() {
         let fonts = resolve_appearance_fonts(&AppearanceFontPreferences::default(), |name| {
             name == "Menlo"
         });
         assert_eq!(fonts.sans, SYSTEM_UI_FONT);
-        assert_eq!(fonts.mono, "Menlo");
+        // index.css `ui-monospace` first: SF Mono on macOS, Menlo elsewhere.
+        let expected_mono = if cfg!(target_os = "macos") {
+            SYSTEM_MONO_FONT
+        } else {
+            "Menlo"
+        };
+        assert_eq!(fonts.mono, expected_mono);
         assert_eq!(fonts.composer, SYSTEM_UI_FONT);
         assert_eq!(fonts.size_interface, 16.);
         assert_eq!(fonts.size_prompt, 14.);
@@ -252,5 +278,19 @@ mod tests {
         let fonts = resolve_appearance_fonts(&preferences, |name| name == "SF Mono");
         assert_eq!(fonts.sans, SYSTEM_UI_FONT);
         assert_eq!(fonts.mono, "SF Mono");
+    }
+
+    #[test]
+    fn hidden_sf_mono_maps_to_the_system_monospaced_face() {
+        let preferences = AppearanceFontPreferences {
+            code: "SF Mono".into(),
+            ..Default::default()
+        };
+        let fonts = resolve_appearance_fonts(&preferences, |name| name == "Menlo");
+        if cfg!(target_os = "macos") {
+            assert_eq!(fonts.mono, SYSTEM_MONO_FONT);
+        } else {
+            assert_eq!(fonts.mono, "Menlo");
+        }
     }
 }

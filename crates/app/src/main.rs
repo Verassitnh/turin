@@ -3,6 +3,7 @@
 mod assets;
 mod branding;
 mod components;
+mod diff;
 mod hooks;
 mod project_icon_colors;
 mod project_identity;

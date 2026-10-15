@@ -11,6 +11,7 @@ pub mod claude_permission;
 pub mod claude_provider;
 pub mod claude_provider_adapter;
 pub mod claude_query_options;
+pub mod claude_reset_credit_coordinator;
 pub mod claude_reset_credits;
 pub mod claude_turn_items;
 pub mod claude_turn_token_usage;

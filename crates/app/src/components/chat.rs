@@ -8,6 +8,10 @@ pub mod markdown;
 pub mod message_copy_button;
 pub mod messages_timeline;
 pub mod panel_layout_controls;
+// Pure answer-draft logic; the pending-user-input card still keeps its drafts
+// in element state, so nothing calls these yet.
+#[allow(dead_code)]
+pub mod pending_user_input;
 // The ported timeline read model keeps upstream's full helper surface; the
 // view and T14's reducers call into it piecemeal.
 #[allow(dead_code)]

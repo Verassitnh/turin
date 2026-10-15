@@ -435,7 +435,21 @@ pub(crate) fn provider_name(provider: UsageProviderKind) -> &'static str {
 /// Rounds to micro-dollars. The split and speed figures need no more precision,
 /// and shorter numbers keep them cheap on the wire.
 fn round_usd(value: f64) -> f64 {
-    (value * 1e6).round() / 1e6
+    js_round(value * 1e6) / 1e6
+}
+
+/// JS `Math.round`: a tie rounds toward +infinity, so `-2.5` is `-2`. Rust's
+/// `f64::round` rounds ties away from zero. A zero result is `+0`, as JS gives
+/// for `-0.4`, so no negative zero reaches the payload.
+fn js_round(value: f64) -> f64 {
+    let floor = value.floor();
+    // `value - floor` is exact for any finite double, so this is the exact tie test.
+    let rounded = if value - floor >= 0.5 {
+        floor + 1.0
+    } else {
+        floor
+    };
+    if rounded == 0.0 { 0.0 } else { rounded }
 }
 
 /// A bucket mixes records from one model, but their cost provenance can differ
@@ -868,5 +882,15 @@ mod tests {
             .map(|bucket| bucket.model.as_str())
             .collect();
         assert_eq!(models, ["alpha-model", "Zeta-model"]);
+    }
+
+    #[test]
+    fn js_round_breaks_ties_toward_positive_infinity() {
+        assert_eq!(js_round(2.5), 3.0);
+        assert_eq!(js_round(-2.5), -2.0);
+        assert_eq!(js_round(-2.6), -3.0);
+        // The naive `(x + 0.5).floor()` gives 1 here; JS gives 0.
+        assert_eq!(js_round(0.499_999_999_999_999_94), 0.0);
+        assert!(js_round(-0.4).is_sign_positive());
     }
 }

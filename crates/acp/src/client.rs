@@ -4,7 +4,7 @@
 //! `extRequestHandlers` and `extNotificationHandlers`. A JSON-RPC request is
 //! never delivered to a notification handler.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,10 +49,94 @@ struct Handlers {
     ext_notifications: HashMap<String, NotifyHandler>,
     unknown_ext_request: Option<RequestHandler>,
     unknown_ext_notification: Option<UnknownNotificationHandler>,
-    session_updates: Vec<NotifyHandler>,
-    pending_session_updates: Vec<Value>,
-    elicitation_complete: Vec<NotifyHandler>,
-    pending_elicitation_complete: Vec<Value>,
+    session_updates: Arc<ReplayQueue>,
+    elicitation_complete: Arc<ReplayQueue>,
+}
+
+/// Bound on elicitation completions buffered before a handler registers. Upstream
+/// leaves its buffer unbounded; Turin drops the oldest (see PORTING.md Deviations).
+const MAX_BUFFERED_ELICITATIONS: usize = 32;
+
+/// Notification handlers plus the notifications that arrived before any handler
+/// was registered. Replay and live delivery share one FIFO and a single drainer,
+/// so they cannot interleave or reorder. Upstream flushes inline in the
+/// registering fiber (client.ts handleSessionUpdate), and live updates arriving
+/// during the flush queue behind it.
+#[derive(Default)]
+struct ReplayQueue {
+    state: Mutex<ReplayState>,
+}
+
+#[derive(Default)]
+struct ReplayState {
+    handlers: Vec<NotifyHandler>,
+    pending: VecDeque<Value>,
+    draining: bool,
+}
+
+impl ReplayQueue {
+    /// Queues one notification, then drains unless a drain is already running.
+    /// `capacity` bounds the pre-registration buffer, dropping the oldest entry.
+    async fn deliver(&self, params: Value, capacity: Option<usize>) {
+        let start = {
+            let mut state = self.state.lock();
+            if let Some(capacity) = capacity
+                && state.pending.len() >= capacity
+            {
+                state.pending.pop_front();
+            }
+            state.pending.push_back(params);
+            claim_drain(&mut state)
+        };
+        if start {
+            self.drain().await;
+        }
+    }
+
+    /// Adds a handler and replays anything buffered. The replay runs on a
+    /// spawned task because registration is synchronous. Without a runtime the
+    /// buffer waits for the next delivery, which drains it first.
+    fn register(self: Arc<Self>, handler: NotifyHandler) {
+        let start = {
+            let mut state = self.state.lock();
+            state.handlers.push(handler);
+            claim_drain(&mut state)
+        };
+        if !start {
+            return;
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move { self.drain().await });
+            }
+            Err(_) => self.state.lock().draining = false,
+        }
+    }
+
+    async fn drain(&self) {
+        loop {
+            let next = {
+                let mut state = self.state.lock();
+                match state.pending.pop_front() {
+                    Some(params) => (state.handlers.clone(), params),
+                    None => {
+                        state.draining = false;
+                        return;
+                    }
+                }
+            };
+            run_notify_handlers(&next.0, next.1).await;
+        }
+    }
+}
+
+/// Marks a drain as running when there is work and a handler to run it.
+fn claim_drain(state: &mut ReplayState) -> bool {
+    if state.draining || state.handlers.is_empty() || state.pending.is_empty() {
+        return false;
+    }
+    state.draining = true;
+    true
 }
 
 #[derive(Clone)]
@@ -415,21 +499,17 @@ impl AcpClient {
         F: Fn(Value) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), AcpError>> + Send + 'static,
     {
-        let handler = box_notify(handler);
-        let pending = {
-            let mut handlers = self.handlers.lock();
-            handlers.session_updates.push(Arc::clone(&handler));
-            std::mem::take(&mut handlers.pending_session_updates)
-        };
-        if pending.is_empty() {
-            return;
-        }
-        let handlers = { self.handlers.lock().session_updates.clone() };
-        tokio::spawn(async move {
-            for params in pending {
-                run_notify_handlers(&handlers, params).await;
-            }
-        });
+        let queue = Arc::clone(&self.handlers.lock().session_updates);
+        queue.register(box_notify(handler));
+    }
+
+    pub fn on_elicitation_complete<F, Fut>(&self, handler: F)
+    where
+        F: Fn(Value) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), AcpError>> + Send + 'static,
+    {
+        let queue = Arc::clone(&self.handlers.lock().elicitation_complete);
+        queue.register(box_notify(handler));
     }
 
     pub fn on_ext_request<F, Fut>(&self, method: impl Into<String>, handler: F)
@@ -670,32 +750,12 @@ fn client_notification_callback(
             match notification {
                 IncomingNotification::SessionUpdate { params } => {
                     complete_idle_prompt(&prompts, &params);
-                    let pending_or_handlers = {
-                        let mut handlers = handlers.lock();
-                        if handlers.session_updates.is_empty() {
-                            handlers.pending_session_updates.push(params);
-                            None
-                        } else {
-                            Some((handlers.session_updates.clone(), params))
-                        }
-                    };
-                    if let Some((list, params)) = pending_or_handlers {
-                        run_notify_handlers(&list, params).await;
-                    }
+                    let queue = Arc::clone(&handlers.lock().session_updates);
+                    queue.deliver(params, None).await;
                 }
                 IncomingNotification::ElicitationComplete { params, .. } => {
-                    let pending_or_handlers = {
-                        let mut handlers = handlers.lock();
-                        if handlers.elicitation_complete.is_empty() {
-                            handlers.pending_elicitation_complete.push(params);
-                            None
-                        } else {
-                            Some((handlers.elicitation_complete.clone(), params))
-                        }
-                    };
-                    if let Some((list, params)) = pending_or_handlers {
-                        run_notify_handlers(&list, params).await;
-                    }
+                    let queue = Arc::clone(&handlers.lock().elicitation_complete);
+                    queue.deliver(params, Some(MAX_BUFFERED_ELICITATIONS)).await;
                 }
                 IncomingNotification::Ext { method, params } => {
                     let (specific, unknown) = {
@@ -1223,6 +1283,64 @@ mod tests {
             .expect("second prompt did not complete")
             .unwrap();
         assert_eq!(second.unwrap()["stopReason"], "end_turn");
+    }
+
+    // Needs a multi-thread runtime so the replay task and the reader can overlap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn buffered_and_live_session_updates_replay_in_arrival_order() {
+        let (client, _read, mut write) = pair();
+        let update = |index: usize| {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"sessionId": format!("s{index}"), "update": {"sessionUpdate": "plan", "entries": []}}
+            })
+        };
+        for index in 0..2_000 {
+            write_value(&mut write, update(index)).await;
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while client
+            .handlers
+            .lock()
+            .session_updates
+            .state
+            .lock()
+            .pending
+            .len()
+            < 2_000
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "reader did not buffer"
+            );
+            tokio::task::yield_now().await;
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = Arc::clone(&seen);
+        client.on_session_update(move |params| {
+            let seen_cb = Arc::clone(&seen_cb);
+            async move {
+                let index: usize = params["sessionId"].as_str().unwrap()[1..].parse().unwrap();
+                seen_cb.lock().push(index);
+                tokio::task::yield_now().await;
+                Ok(())
+            }
+        });
+        // Live updates arrive while the replay is still draining.
+        for index in 2_000..2_050 {
+            write_value(&mut write, update(index)).await;
+        }
+        while seen.lock().len() < 2_050 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "handler saw {} updates",
+                seen.lock().len()
+            );
+            tokio::task::yield_now().await;
+        }
+        let order = seen.lock().clone();
+        assert_eq!(order, (0..2_050).collect::<Vec<_>>());
     }
 
     #[test]

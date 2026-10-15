@@ -370,7 +370,8 @@ impl Re {
     }
     fn ordered() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| Regex::new(r"^([ \t]*)(\d+[.)])([ \t]+|$)").unwrap())
+        // `[0-9]`, not `\d`: Rust's `\d` matches Unicode digits, JS's does not.
+        RE.get_or_init(|| Regex::new(r"^([ \t]*)([0-9]+[.)])([ \t]+|$)").unwrap())
     }
     fn bullet() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();

@@ -356,6 +356,14 @@ fn parses_rules_ahead_of_lists_and_emphasis() {
 }
 
 #[test]
+fn ordered_markers_take_ascii_digits_only() {
+    // ARABIC-INDIC DIGIT THREE is a Unicode `\d` but not a JS one.
+    let blocks = build_blocks("\u{0663}. foo\n3. bar", &label, BuildOptions::rich());
+    assert!(matches!(blocks[0], Block::Paragraph(_)));
+    assert!(matches!(blocks[1], Block::Item { .. }));
+}
+
+#[test]
 fn parses_the_blocks_it_renders_as_the_right_node_types() {
     let doc = build_doc(
         "# Title\n> quote\n---\n#1234 ref\n- - -",

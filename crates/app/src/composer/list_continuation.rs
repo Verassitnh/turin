@@ -39,7 +39,8 @@ fn parse_list_marker(line: &str) -> Option<(ListMarker, usize)> {
     static ORDERED: OnceLock<Regex> = OnceLock::new();
     static TASK: OnceLock<Regex> = OnceLock::new();
     static BULLET: OnceLock<Regex> = OnceLock::new();
-    let ordered = ORDERED.get_or_init(|| Regex::new(r"^(\d+)([.)])([ \t]+|\s*$)").unwrap());
+    // `[0-9]`, not `\d`: Rust's `\d` matches Unicode digits, JS's does not.
+    let ordered = ORDERED.get_or_init(|| Regex::new(r"^([0-9]+)([.)])([ \t]+|\s*$)").unwrap());
     let task = TASK.get_or_init(|| Regex::new(r"^-\s\[[ xX]\]([ \t]+|\s*$)").unwrap());
     let bullet = BULLET.get_or_init(|| Regex::new(r"^([-*+])([ \t]+|\s*$)").unwrap());
 
@@ -267,6 +268,12 @@ mod tests {
         let value = "1. @README.md go";
         let cursor = value.find("README").unwrap() + 2;
         assert_eq!(list_continuation_for_enter(value, cursor), None);
+    }
+
+    #[test]
+    fn ordered_markers_take_ascii_digits_only() {
+        // ARABIC-INDIC DIGIT THREE is a Unicode `\d` but not a JS one.
+        assert_eq!(list_continuation_for_enter("\u{0663}. foo", 6), None);
     }
 
     #[test]

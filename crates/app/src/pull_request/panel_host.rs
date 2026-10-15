@@ -169,3 +169,76 @@ impl Render for PullRequestPanelHost {
             )
     }
 }
+
+/// The thread view's right panel with the "Pull requests" surface active: the strip with its one
+/// tab, then the linked pull requests of the thread (upstream `RightPanelTabs` with
+/// `ThreadPullRequestsPanel`).
+pub struct ThreadPanelHost {
+    panel: Entity<super::thread_panel::ThreadPullRequestsPanel>,
+}
+
+impl ThreadPanelHost {
+    pub fn new(
+        store: Entity<PullRequestStore>,
+        thread_id: turin_contracts::ThreadId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let panel = cx.new(|cx| {
+            super::thread_panel::ThreadPullRequestsPanel::new(store, thread_id, window, cx)
+        });
+        Self { panel }
+    }
+}
+
+impl Render for ThreadPanelHost {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.app_theme().clone();
+        let tab = div()
+            .id("pr-thread-surface")
+            .on_mouse_down(MouseButton::Left, no_drag)
+            .flex()
+            .h_6()
+            .max_w(rems(9.))
+            .flex_shrink_0()
+            .items_center()
+            .gap(rems(0.125))
+            .pl(rems(0.375))
+            .pr_2()
+            .rounded(RADIUS_MD)
+            .bg(theme.accent)
+            .text_color(theme.foreground)
+            .text_size(TEXT_XS.size)
+            .child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .size(rems(1.))
+                    .items_center()
+                    .justify_center()
+                    .child(crate::ui::Icon::new(crate::ui::IconName::Link2).size(rems(0.75))),
+            )
+            .child(div().min_w_0().truncate().child("Pull requests"));
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .bg(theme.background)
+            .child(
+                div()
+                    .id("pr-thread-tab-bar")
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_1()
+                    .h(WORKSPACE_TOPBAR_HEIGHT)
+                    .pl_2()
+                    .pr(rems(7.))
+                    .child(tab)
+                    .drag_region(window, cx),
+            )
+            .child(div().flex_1().min_h_0().child(self.panel.clone()))
+    }
+}

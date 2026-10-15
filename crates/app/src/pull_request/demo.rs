@@ -23,6 +23,8 @@ use crate::components::app_sidebar_layout::AppSidebarLayout;
 pub enum Scenario {
     List(Option<String>),
     Detail { tab: Option<DetailTab>, number: Option<u64> },
+    /// The thread view's right panel on the linked pull requests of the demo thread.
+    Thread,
 }
 
 pub fn scenario_from_env() -> Option<Scenario> {
@@ -33,6 +35,7 @@ pub fn parse(value: &str) -> Option<Scenario> {
     let mut parts = value.split(':');
     match parts.next()? {
         "list" => Some(Scenario::List(parts.next().map(str::to_owned))),
+        "thread" => Some(Scenario::Thread),
         "detail" => Some(Scenario::Detail {
             tab: parts.next().and_then(DetailTab::parse),
             number: parts.next().and_then(|n| n.parse().ok()),
@@ -49,6 +52,20 @@ pub fn install(
     cx: &mut App,
 ) {
     let store: Entity<PullRequestStore> = MockPullRequestSource::start(cx);
+    if scenario == Scenario::Thread {
+        let thread_host = cx.new(|cx| {
+            super::panel_host::ThreadPanelHost::new(
+                store.clone(),
+                super::mock_source::demo_thread_id(),
+                window,
+                cx,
+            )
+        });
+        layout.update(cx, |layout, cx| {
+            layout.set_right_panel_content(Some(thread_host.into()), cx);
+        });
+        return;
+    }
     let host = cx.new(|cx| PullRequestPanelHost::new(store.clone(), cx));
     let page = cx.new(|cx| PullRequestsPage::new(store.clone(), window, cx));
     layout.update(cx, |layout, cx| {
@@ -73,6 +90,7 @@ pub fn install(
         .detach();
     match scenario {
         Scenario::List(preset) => apply_list_preset(&page, &store, preset.as_deref(), cx),
+        Scenario::Thread => {}
         Scenario::Detail { tab, number } => {
             let mut reference = demo_reference();
             if let Some(number) = number

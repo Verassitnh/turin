@@ -1,7 +1,7 @@
 //! Port of upstream/packages/shared/src/composerTrigger.ts
 
-use crate::js_string::{is_js_whitespace_char, last_index_of_utf16, slice_utf16, utf16_len};
-use turin_contracts::base_schemas::js_trim;
+use crate::js_string::{last_index_of_utf16, slice_utf16, utf16_len};
+use turin_contracts::base_schemas::{is_js_whitespace, js_trim};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposerTriggerKind {
@@ -176,7 +176,7 @@ pub fn detect_composer_trigger(
 /// the full JS whitespace complement.
 fn strip_slash_command_query(line_prefix: &str) -> Option<String> {
     let rest = &line_prefix[1..];
-    if rest.chars().any(is_js_whitespace_char) {
+    if rest.chars().any(is_js_whitespace) {
         return None;
     }
     Some(rest.to_owned())
@@ -191,14 +191,14 @@ fn slash_model_query(line_prefix: &str) -> Option<String> {
     if after.is_empty() {
         return Some(String::new());
     }
-    if !after.chars().next().is_some_and(is_js_whitespace_char) {
+    if !after.chars().next().is_some_and(is_js_whitespace) {
         return None;
     }
     let is_line_terminator = |c: char| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}');
     let tail = match after.rfind(is_line_terminator) {
         Some(last) => {
             let (head, tail) = after.split_at(last + 1);
-            if !head.chars().all(is_js_whitespace_char) {
+            if !head.chars().all(is_js_whitespace) {
                 return None;
             }
             tail

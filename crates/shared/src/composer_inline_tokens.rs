@@ -1,6 +1,7 @@
 //! Port of upstream/packages/shared/src/composerInlineTokens.ts
 
-use crate::js_string::{decode_uri_component, is_js_whitespace_char, slice_utf16, utf16_len};
+use crate::js_string::{decode_uri_component, slice_utf16, utf16_len};
+use turin_contracts::base_schemas::is_js_whitespace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposerInlineTokenKind {
@@ -64,13 +65,13 @@ impl CharUnits {
 
     fn starts_token_here(&self, index: usize) -> bool {
         // Upstream prefix `(^|\s)`: start of text or a JS whitespace char.
-        index == 0 || is_js_whitespace_char(self.chars[index - 1])
+        index == 0 || is_js_whitespace(self.chars[index - 1])
     }
 
     /// `(?=\s)`: an actual JS whitespace char must follow. End of text does
     /// not satisfy it, which is what keeps a half-typed token plain.
     fn followed_by_whitespace(&self, index: usize) -> bool {
-        index < self.len() && is_js_whitespace_char(self.chars[index])
+        index < self.len() && is_js_whitespace(self.chars[index])
     }
 
     /// `(?=\s|$)`: whitespace or end of text, for sent prompts.
@@ -176,7 +177,7 @@ fn looks_like_compact_amount(units: &CharUnits, index: usize) -> bool {
             after_suffix = exponent;
         }
     }
-    after_suffix == units.len() || is_js_whitespace_char(units.chars[after_suffix])
+    after_suffix == units.len() || is_js_whitespace(units.chars[after_suffix])
 }
 
 /// `text.replace(/\\(.)/g, "$1")`: every backslash-escaped char loses its backslash.
@@ -251,7 +252,7 @@ fn scan_mention_tokens(text: &str, units: &CharUnits, tokens: &mut Vec<ComposerI
                 // Unquoted: `[^\s@"]+`
                 let body_start = cursor;
                 while cursor < units.len()
-                    && !is_js_whitespace_char(units.chars[cursor])
+                    && !is_js_whitespace(units.chars[cursor])
                     && units.chars[cursor] != '@'
                     && units.chars[cursor] != '"'
                 {
@@ -391,7 +392,7 @@ fn scan_file_link_at(text: &str, units: &CharUnits, index: usize) -> Option<File
     let destination_start = cursor;
     while cursor < units.len()
         && units.chars[cursor] != ')'
-        && !is_js_whitespace_char(units.chars[cursor])
+        && !is_js_whitespace(units.chars[cursor])
     {
         cursor += 1;
     }

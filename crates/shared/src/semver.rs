@@ -2,8 +2,8 @@
 
 use std::cmp::Ordering;
 
-use crate::js_string::{is_js_whitespace_char, locale_compare};
-use turin_contracts::base_schemas::js_trim;
+use crate::js_string::locale_compare;
+use turin_contracts::base_schemas::{is_js_whitespace, js_trim};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedSemver {
@@ -195,7 +195,7 @@ pub fn satisfies_semver_range(raw_version: &str, range: &str) -> bool {
     range.split("||").any(|group| {
         let comparators: Vec<&str> = group
             .trim()
-            .split(is_js_whitespace_char)
+            .split(is_js_whitespace)
             .filter(|token| !token.is_empty())
             .collect();
         if comparators.is_empty() {
@@ -291,7 +291,7 @@ fn parse_comparator(comparator: &str) -> Option<(&'static str, RangeVersion)> {
             .map(|rest| (*operator, rest))
     })
     .unwrap_or(("=", comparator));
-    let rest = rest.trim_start_matches(is_js_whitespace_char);
+    let rest = rest.trim_start_matches(is_js_whitespace);
     let rest = rest.strip_prefix('v').unwrap_or(rest);
     Some((operator, parse_dotted_numbers(rest)?))
 }

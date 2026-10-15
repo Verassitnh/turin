@@ -7,6 +7,8 @@
 //! trimming; the helpers here cover UTF-16 indexing and searching so the ported
 //! logic keeps upstream's offsets and edge cases.
 
+use turin_contracts::base_schemas::JS_WHITESPACE_CHARS;
+
 /// Length of `value` in UTF-16 code units (`String.prototype.length`).
 pub fn utf16_len(value: &str) -> usize {
     value.chars().map(|c| c.len_utf16()).sum()
@@ -118,16 +120,6 @@ pub fn code_unit_cmp(left: &str, right: &str) -> std::cmp::Ordering {
 /// whitespace, before digits), as `localeCompare` sees it in en-US.
 const COLLATION_PUNCTUATION: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
 
-/// Every JS `\s` char (WhiteSpace + LineTerminator), in code point order.
-/// `locale_compare` ranks them by position so all whitespace sorts before
-/// punctuation, whatever the script.
-const JS_WHITESPACE_CHARS: [char; 25] = [
-    '\u{0009}', '\u{000a}', '\u{000b}', '\u{000c}', '\u{000d}', '\u{0020}', '\u{00a0}', '\u{1680}',
-    '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}',
-    '\u{2008}', '\u{2009}', '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}',
-    '\u{feff}',
-];
-
 /// Approximates `String.prototype.localeCompare` in the default en-US locale
 /// (ICU root collation) without an ICU dependency.
 ///
@@ -193,30 +185,6 @@ pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
 /// (it has U+0085 and lacks U+FEFF), so patterns ported from JS splice this in:
 /// `format!("[{JS_WS}]")` for `\s`, `format!("[^{JS_WS}]")` for `\S`.
 pub const JS_WS: &str = r"\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
-
-/// JS `\s` whitespace test on a `char`: WhiteSpace + LineTerminator, so U+FEFF
-/// is in and U+0085 is out (unlike Rust's `char::is_whitespace`).
-pub fn is_js_whitespace_char(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{0009}'
-            | '\u{000a}'
-            | '\u{000b}'
-            | '\u{000c}'
-            | '\u{000d}'
-            | '\u{0020}'
-            | '\u{00a0}'
-            | '\u{1680}'
-            | '\u{2000}'
-            ..='\u{200a}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202f}'
-                | '\u{205f}'
-                | '\u{3000}'
-                | '\u{feff}'
-    )
-}
 
 /// JS `URIError`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -377,24 +345,6 @@ mod tests {
             locale_compare("\u{2003}", "\u{2003}"),
             std::cmp::Ordering::Equal
         );
-    }
-
-    #[test]
-    fn js_whitespace_table_matches_the_predicate() {
-        let table: Vec<char> = JS_WHITESPACE_CHARS.to_vec();
-        let mut sorted = table.clone();
-        sorted.sort();
-        assert_eq!(table, sorted);
-        for code_point in 0..=0x10FFFFu32 {
-            let Some(ch) = char::from_u32(code_point) else {
-                continue;
-            };
-            assert_eq!(
-                table.contains(&ch),
-                is_js_whitespace_char(ch),
-                "U+{code_point:04X}"
-            );
-        }
     }
 
     #[test]

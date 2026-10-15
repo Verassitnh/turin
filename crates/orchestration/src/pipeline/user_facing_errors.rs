@@ -117,4 +117,76 @@ mod tests {
             Some("Codex cannot stop a run once it has started.")
         );
     }
+
+    #[test]
+    fn returns_the_deepest_actionable_domain_error() {
+        let value = serde_json::json!({
+            "message": "Failed to dispatch orchestration command checkpoint.rollback (command-1).",
+            "cause": {
+                "message": "Provider adapter failed while dispatching orchestration command command-1.",
+                "cause": {
+                    "message": "claudeAgent cannot satisfy rollback for command command-1: provider conversation rollback is unavailable"
+                }
+            }
+        });
+        assert_eq!(
+            user_facing_dispatch_error_message(&value).as_deref(),
+            Some(
+                "claudeAgent cannot satisfy rollback for command command-1: provider conversation rollback is unavailable"
+            )
+        );
+    }
+
+    #[test]
+    fn translates_policy_capability_rejections_into_provider_named_prose() {
+        let rollback_snapshot = serde_json::json!({
+            "message": "Failed to dispatch orchestration command checkpoint.rollback (command-1).",
+            "cause": {
+                "_tag": "CommandPolicyCapabilityUnsupportedError",
+                "commandId": "command-1",
+                "threadId": "thread-1",
+                "providerInstanceId": "pi",
+                "capability": "rollback_snapshot",
+                "detail": "rollback must return a provider thread snapshot",
+                "message": "pi cannot satisfy rollback_snapshot for command command-1: rollback must return a provider thread snapshot"
+            }
+        });
+        assert_eq!(
+            user_facing_dispatch_error_message(&rollback_snapshot).as_deref(),
+            Some(
+                "Pi did not report its rewound conversation state, so the checkpoint was not restored."
+            )
+        );
+        let rollback = serde_json::json!({
+            "message": "Failed to dispatch orchestration command checkpoint.rollback (command-2).",
+            "cause": {
+                "_tag": "CommandPolicyCapabilityUnsupportedError",
+                "commandId": "command-2",
+                "threadId": "thread-1",
+                "providerInstanceId": "grok",
+                "capability": "rollback",
+                "detail": "provider conversation rollback is unavailable"
+            }
+        });
+        assert_eq!(
+            user_facing_dispatch_error_message(&rollback).as_deref(),
+            Some(
+                "Grok cannot rewind its conversation, so this checkpoint cannot be restored on this thread."
+            )
+        );
+    }
+
+    #[test]
+    fn uses_explicit_detail_fields_as_user_facing_messages() {
+        let value = serde_json::json!({
+            "message": "Failed to dispatch orchestration command message.dispatch (command-1).",
+            "cause": {
+                "detail": "Claude provider thread provider-thread-1 has no live query."
+            }
+        });
+        assert_eq!(
+            user_facing_dispatch_error_message(&value).as_deref(),
+            Some("Claude provider thread provider-thread-1 has no live query.")
+        );
+    }
 }

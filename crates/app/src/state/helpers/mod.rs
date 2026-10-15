@@ -13,4 +13,7 @@ pub mod prompt_links;
 pub mod provider_skills;
 pub mod provider_types;
 pub mod provider_update_required_models;
+pub mod pull_request_markdown;
 pub mod shared_support;
+pub mod text_paste;
+pub mod user_message;

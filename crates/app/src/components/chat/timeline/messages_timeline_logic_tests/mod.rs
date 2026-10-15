@@ -30,6 +30,7 @@ pub(super) use crate::components::chat::timeline::types::{
 };
 pub(super) use MessagesTimelineRowContent as Row;
 
+mod computer_use_labels;
 mod derive_rows;
 mod derive_rows_attempts;
 mod derive_rows_compaction;

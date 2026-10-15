@@ -15,8 +15,14 @@ pub mod effect_outbox;
 pub mod effect_worker;
 pub mod event_sink;
 pub mod event_store;
+pub mod hooks_bridge;
 pub mod notification_mailbox;
+pub mod orchestrator_port;
 pub mod runtime_policy;
+pub mod seams;
 pub mod task;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod thread_command_executor;
+pub mod thread_management_service;
 pub mod user_facing_errors;

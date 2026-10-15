@@ -1,0 +1,872 @@
+//! Port of upstream/apps/server/src/review/ReviewService.ts
+//!
+//! Diff preview and unchanged-file expansion for the review panel. Every cwd is bound to the
+//! workspace (or a managed worktree, or a registered project) before any VCS command runs, so a
+//! review read cannot reach arbitrary directories on the host.
+//!
+//! The Effect services this reads (`ServerConfig`, `ServerSettingsService`, `ProjectStoreV2`,
+//! `VcsDriverRegistry`, `GitVcsDriver`, `HostProcess.HomeDirectory`) are passed in as the
+//! [`ReviewConfig`] value and the traits below. The real git and registry types implement them
+//! at the bottom of this file.
+
+#![allow(clippy::result_large_err)]
+
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use turin_contracts::base_schemas::{TrimmedNonEmptyString, UtcDateTime};
+use turin_contracts::git::GitCommandError;
+use turin_contracts::review::{
+    ReviewDiffFileContentsInput, ReviewDiffFileContentsResult, ReviewDiffPreviewError,
+    ReviewDiffPreviewInput, ReviewDiffPreviewResult,
+};
+use turin_contracts::vcs::{
+    VcsDriverKind, VcsError, VcsRepositoryDetectionError, VcsUnsupportedOperationError,
+};
+use turin_git::git_vcs_driver_core::GitVcsDriverCore;
+use turin_git::vcs_driver_registry::{VcsDriverRegistry, VcsDriverResolveInput};
+use turin_git::vcs_project_config::RequestedVcsKind;
+
+use crate::worktrees_directory::{
+    WorktreesSettings, is_filesystem_root, managed_worktrees_directories,
+};
+
+/// `ServerConfig` fields a review cwd is checked against.
+#[derive(Debug, Clone)]
+pub struct ReviewConfig {
+    /// `config.cwd`: the server's workspace root.
+    pub workspace_root: PathBuf,
+    /// `config.worktreesDir`: the default managed worktrees directory.
+    pub worktrees_dir: PathBuf,
+    /// `HostProcess.HomeDirectory`, used to expand `~` in worktree settings.
+    pub home: String,
+}
+
+/// The git half of `GitVcsDriver` that review reads use.
+#[async_trait]
+pub trait ReviewGit: Send + Sync {
+    async fn get_review_diff_preview(
+        &self,
+        input: &ReviewDiffPreviewInput,
+    ) -> Result<ReviewDiffPreviewResult, GitCommandError>;
+    async fn get_review_diff_file_contents(
+        &self,
+        input: &ReviewDiffFileContentsInput,
+    ) -> Result<ReviewDiffFileContentsResult, GitCommandError>;
+}
+
+/// `VcsDriverRegistry.detect` with `requestedKind: "auto"`, reduced to the kind of the match.
+#[async_trait]
+pub trait ReviewVcsDetector: Send + Sync {
+    async fn detect_kind(&self, cwd: &str) -> Result<Option<VcsDriverKind>, VcsError>;
+}
+
+/// `ServerSettingsService.getSettings`. An `Err` is read as empty settings, as upstream does.
+#[async_trait]
+pub trait ReviewSettings: Send + Sync {
+    async fn worktrees_settings(&self) -> Result<WorktreesSettings, String>;
+}
+
+/// `ProjectStoreV2.listShells`, reduced to each project's workspace root. An `Err` is read as
+/// no projects, as upstream does.
+#[async_trait]
+pub trait ReviewProjects: Send + Sync {
+    async fn project_workspace_roots(&self) -> Result<Vec<String>, String>;
+}
+
+pub struct ReviewService {
+    config: ReviewConfig,
+    git: Arc<dyn ReviewGit>,
+    vcs: Arc<dyn ReviewVcsDetector>,
+    settings: Arc<dyn ReviewSettings>,
+    projects: Arc<dyn ReviewProjects>,
+}
+
+impl ReviewService {
+    pub fn new(
+        config: ReviewConfig,
+        git: Arc<dyn ReviewGit>,
+        vcs: Arc<dyn ReviewVcsDetector>,
+        settings: Arc<dyn ReviewSettings>,
+        projects: Arc<dyn ReviewProjects>,
+    ) -> Self {
+        Self {
+            config,
+            git,
+            vcs,
+            settings,
+            projects,
+        }
+    }
+
+    pub async fn get_diff_preview(
+        &self,
+        input: &ReviewDiffPreviewInput,
+    ) -> Result<ReviewDiffPreviewResult, ReviewDiffPreviewError> {
+        let candidate = self
+            .assert_workspace_bound_cwd("ReviewService.getDiffPreview", input.cwd.as_str())
+            .await
+            .map_err(ReviewDiffPreviewError::Vcs)?;
+        assert_base_ref_is_not_an_option(
+            "ReviewService.getDiffPreview",
+            input.cwd.as_str(),
+            input.base_ref.as_ref(),
+        )?;
+        // Every VCS call gets the canonical cwd that was checked, never the raw spelling, which
+        // can name a different directory once symlinks are resolved.
+        let canonical_input = ReviewDiffPreviewInput {
+            cwd: review_cwd(&candidate).map_err(ReviewDiffPreviewError::Vcs)?,
+            ..input.clone()
+        };
+
+        let Some(kind) = self
+            .vcs
+            .detect_kind(canonical_input.cwd.as_str())
+            .await
+            .map_err(ReviewDiffPreviewError::Vcs)?
+        else {
+            return Ok(ReviewDiffPreviewResult {
+                cwd: input.cwd.clone(),
+                generated_at: UtcDateTime::now(),
+                sources: Vec::new(),
+            });
+        };
+
+        if kind != VcsDriverKind::Git {
+            return Err(ReviewDiffPreviewError::Vcs(VcsError::UnsupportedOperation(
+                VcsUnsupportedOperationError::VcsUnsupportedOperationError {
+                    operation: "ReviewService.getDiffPreview".to_owned(),
+                    kind,
+                    detail: format!("The {kind} VCS driver does not support review diff previews."),
+                },
+            )));
+        }
+        self.git
+            .get_review_diff_preview(&canonical_input)
+            .await
+            // The result reports the cwd the caller sent, as upstream does.
+            .map(|result| ReviewDiffPreviewResult {
+                cwd: input.cwd.clone(),
+                ..result
+            })
+            .map_err(ReviewDiffPreviewError::GitCommand)
+    }
+
+    pub async fn get_diff_file_contents(
+        &self,
+        input: &ReviewDiffFileContentsInput,
+    ) -> Result<ReviewDiffFileContentsResult, ReviewDiffPreviewError> {
+        let candidate = self
+            .assert_workspace_bound_cwd("ReviewService.getDiffFileContents", input.cwd.as_str())
+            .await
+            .map_err(ReviewDiffPreviewError::Vcs)?;
+        assert_base_ref_is_not_an_option(
+            "ReviewService.getDiffFileContents",
+            input.cwd.as_str(),
+            input.base_ref.as_ref(),
+        )?;
+        let canonical_input = ReviewDiffFileContentsInput {
+            cwd: review_cwd(&candidate).map_err(ReviewDiffPreviewError::Vcs)?,
+            ..input.clone()
+        };
+
+        let kind = self
+            .vcs
+            .detect_kind(canonical_input.cwd.as_str())
+            .await
+            .map_err(ReviewDiffPreviewError::Vcs)?;
+        if kind != Some(VcsDriverKind::Git) {
+            return Err(ReviewDiffPreviewError::Vcs(VcsError::UnsupportedOperation(
+                VcsUnsupportedOperationError::VcsUnsupportedOperationError {
+                    operation: "ReviewService.getDiffFileContents".to_owned(),
+                    kind: kind.unwrap_or(VcsDriverKind::Unknown),
+                    detail: "Unchanged diff expansion currently requires a Git repository."
+                        .to_owned(),
+                },
+            )));
+        }
+        self.git
+            .get_review_diff_file_contents(&canonical_input)
+            .await
+            .map_err(ReviewDiffPreviewError::GitCommand)
+    }
+
+    /// Rejects a cwd outside the workspace root, every managed worktrees directory, and every
+    /// registered project root. Upstream attributes the failure to the calling operation.
+    /// Returns the canonical cwd that was checked, which is the one the VCS calls must use.
+    async fn assert_workspace_bound_cwd(
+        &self,
+        operation: &'static str,
+        cwd: &str,
+    ) -> Result<PathBuf, VcsError> {
+        let settings = self.settings.worktrees_settings().await.unwrap_or_default();
+        let candidate = canonicalize_path_off_runtime(PathBuf::from(cwd)).await?;
+        let workspace_root =
+            canonicalize_path_off_runtime(self.config.workspace_root.clone()).await?;
+        // A managed root that cannot be resolved, or resolves to a filesystem root through a
+        // symlink, is skipped rather than failing every review.
+        let mut worktrees_roots = Vec::new();
+        for directory in
+            managed_worktrees_directories(&settings, &self.config.worktrees_dir, &self.config.home)
+        {
+            if let Ok(root) = canonicalize_path_off_runtime(directory).await
+                && !is_filesystem_root(&root)
+            {
+                worktrees_roots.push(root);
+            }
+        }
+
+        if is_within_root(&candidate, &workspace_root)
+            || worktrees_roots
+                .iter()
+                .any(|root| is_within_root(&candidate, root))
+        {
+            return Ok(candidate);
+        }
+
+        // Registered projects can live outside the server cwd, which is the home directory in
+        // packaged desktop builds, e.g. a repository on another Windows drive. Unreadable or
+        // unresolvable project roots grant nothing.
+        let projects = self
+            .projects
+            .project_workspace_roots()
+            .await
+            .unwrap_or_default();
+        for project in projects {
+            if let Ok(root) = canonicalize_path_off_runtime(PathBuf::from(project)).await
+                && is_within_root(&candidate, &root)
+            {
+                return Ok(candidate);
+            }
+        }
+
+        Err(VcsError::RepositoryDetection(
+            VcsRepositoryDetectionError::VcsRepositoryDetectionError {
+                operation: operation.to_owned(),
+                cwd: cwd.to_owned(),
+                detail: if operation == "ReviewService.getDiffPreview" {
+                    "Review diff preview cwd must stay within the configured workspace root."
+                        .to_owned()
+                } else {
+                    "Review diff file contents cwd must stay within the configured workspace root."
+                        .to_owned()
+                },
+                cause: None,
+            },
+        ))
+    }
+}
+
+/// The git driver passes `base_ref` to git unescaped, and git reads a leading `-` as an option:
+/// `--output=<path>` makes `git show` write a file at an arbitrary path. No valid ref starts with
+/// `-`, so it is rejected before any VCS command runs. This is a deviation from upstream, which
+/// passes the ref through as is.
+fn assert_base_ref_is_not_an_option(
+    operation: &'static str,
+    cwd: &str,
+    base_ref: Option<&TrimmedNonEmptyString>,
+) -> Result<(), ReviewDiffPreviewError> {
+    match base_ref {
+        Some(base_ref) if base_ref.as_str().starts_with('-') => {
+            Err(ReviewDiffPreviewError::Vcs(VcsError::RepositoryDetection(
+                VcsRepositoryDetectionError::VcsRepositoryDetectionError {
+                    operation: operation.to_owned(),
+                    cwd: cwd.to_owned(),
+                    detail: "Review base ref must not start with '-'.".to_owned(),
+                    cause: None,
+                },
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `path.resolve` followed by `fs.realPath`, except that each existing prefix is resolved as it is
+/// reached. A `..` after a symlink then climbs from the link's target, as the kernel does, instead
+/// of from the link's spelling (`ws/link/..` must not fold to `ws` when `link` points outside).
+/// A path that does not exist yet keeps its lexical form from that point on; any other failure
+/// (such as an interior NUL byte) is reported, not ignored.
+fn canonicalize_path(value: &Path) -> Result<PathBuf, VcsError> {
+    let absolute = std::path::absolute(value).unwrap_or_else(|_| value.to_path_buf());
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            // `/..` stays `/`, which `pop` already does at the root.
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                resolved.push(component.as_os_str());
+                match std::fs::canonicalize(&resolved) {
+                    Ok(canonical) => resolved = canonical,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(VcsError::RepositoryDetection(
+                            VcsRepositoryDetectionError::VcsRepositoryDetectionError {
+                                operation: "ReviewService.assertWorkspaceBoundCwd.canonicalizePath"
+                                    .to_owned(),
+                                cwd: absolute.display().to_string(),
+                                detail: "Failed to resolve a path while validating the review workspace."
+                                    .to_owned(),
+                                cause: Some(serde_json::Value::String(error.to_string())),
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+/// [`canonicalize_path`] on tokio's blocking pool. `realpath` can stall on a hung network mount,
+/// and that must not hold one of the runtime's worker threads.
+async fn canonicalize_path_off_runtime(value: PathBuf) -> Result<PathBuf, VcsError> {
+    tokio::task::spawn_blocking(move || canonicalize_path(&value))
+        .await
+        .unwrap_or_else(|error| std::panic::resume_unwind(error.into_panic()))
+}
+
+/// The canonical cwd as the `TrimmedNonEmptyString` the VCS inputs carry. A path that is not
+/// UTF-8 cannot be named in the review contracts, so it fails like any other unresolvable path.
+fn review_cwd(path: &Path) -> Result<TrimmedNonEmptyString, VcsError> {
+    path.to_str()
+        .and_then(|value| TrimmedNonEmptyString::new(value).ok())
+        .ok_or_else(|| {
+            VcsError::RepositoryDetection(
+                VcsRepositoryDetectionError::VcsRepositoryDetectionError {
+                    operation: "ReviewService.assertWorkspaceBoundCwd.canonicalizePath".to_owned(),
+                    cwd: path.display().to_string(),
+                    detail: "Failed to resolve a path while validating the review workspace."
+                        .to_owned(),
+                    cause: None,
+                },
+            )
+        })
+}
+
+/// Component-wise containment. Both sides are canonical absolute paths here.
+fn is_within_root(candidate: &Path, root: &Path) -> bool {
+    candidate.starts_with(root)
+}
+
+#[async_trait]
+impl ReviewGit for GitVcsDriverCore {
+    async fn get_review_diff_preview(
+        &self,
+        input: &ReviewDiffPreviewInput,
+    ) -> Result<ReviewDiffPreviewResult, GitCommandError> {
+        GitVcsDriverCore::get_review_diff_preview(self, input).await
+    }
+
+    async fn get_review_diff_file_contents(
+        &self,
+        input: &ReviewDiffFileContentsInput,
+    ) -> Result<ReviewDiffFileContentsResult, GitCommandError> {
+        GitVcsDriverCore::get_review_diff_file_contents(self, input).await
+    }
+}
+
+#[async_trait]
+impl ReviewVcsDetector for VcsDriverRegistry {
+    async fn detect_kind(&self, cwd: &str) -> Result<Option<VcsDriverKind>, VcsError> {
+        let handle = self
+            .detect(&VcsDriverResolveInput {
+                cwd: cwd.to_owned(),
+                requested_kind: Some(RequestedVcsKind::Auto),
+            })
+            .await?;
+        Ok(handle.map(|handle| handle.kind))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use tempfile::TempDir;
+    use turin_contracts::review::{ReviewDiffFileChangeType, ReviewDiffPreviewSourceKind};
+
+    use super::*;
+
+    /// Upstream's `GitVcsDriver` mock is never reached: every rejected cwd fails before detection,
+    /// and the accepted ones only return an empty preview.
+    struct UnusedGit;
+
+    #[async_trait]
+    impl ReviewGit for UnusedGit {
+        async fn get_review_diff_preview(
+            &self,
+            _input: &ReviewDiffPreviewInput,
+        ) -> Result<ReviewDiffPreviewResult, GitCommandError> {
+            unreachable!("git preview is not reached in ReviewService tests")
+        }
+
+        async fn get_review_diff_file_contents(
+            &self,
+            _input: &ReviewDiffFileContentsInput,
+        ) -> Result<ReviewDiffFileContentsResult, GitCommandError> {
+            unreachable!("git file contents are not reached in ReviewService tests")
+        }
+    }
+
+    struct FakeVcs {
+        kind: Option<VcsDriverKind>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl FakeVcs {
+        fn new(kind: Option<VcsDriverKind>) -> Arc<Self> {
+            Arc::new(Self {
+                kind,
+                calls: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ReviewVcsDetector for FakeVcs {
+        async fn detect_kind(&self, cwd: &str) -> Result<Option<VcsDriverKind>, VcsError> {
+            self.calls.lock().unwrap().push(cwd.to_owned());
+            Ok(self.kind)
+        }
+    }
+
+    struct FakeSettings(WorktreesSettings);
+
+    #[async_trait]
+    impl ReviewSettings for FakeSettings {
+        async fn worktrees_settings(&self) -> Result<WorktreesSettings, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct FakeProjects(Result<Vec<String>, String>);
+
+    #[async_trait]
+    impl ReviewProjects for FakeProjects {
+        async fn project_workspace_roots(&self) -> Result<Vec<String>, String> {
+            self.0.clone()
+        }
+    }
+
+    /// Removes a directory that `TempDir` cannot own because its name is not generated by it.
+    struct RemoveDirOnDrop(PathBuf);
+
+    impl Drop for RemoveDirOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct Fixture {
+        workspace: TempDir,
+        base: TempDir,
+    }
+
+    fn fixture() -> Fixture {
+        Fixture {
+            workspace: TempDir::with_prefix("t3-review-workspace-").unwrap(),
+            base: TempDir::with_prefix("t3-review-base-").unwrap(),
+        }
+    }
+
+    fn service(
+        fixture: &Fixture,
+        vcs: Arc<FakeVcs>,
+        settings: WorktreesSettings,
+        projects: Result<Vec<String>, String>,
+    ) -> ReviewService {
+        ReviewService::new(
+            ReviewConfig {
+                workspace_root: fixture.workspace.path().to_path_buf(),
+                worktrees_dir: fixture.base.path().join("worktrees"),
+                home: "/home/test".to_owned(),
+            },
+            Arc::new(UnusedGit),
+            vcs,
+            Arc::new(FakeSettings(settings)),
+            Arc::new(FakeProjects(projects)),
+        )
+    }
+
+    fn preview_input(cwd: &str) -> ReviewDiffPreviewInput {
+        ReviewDiffPreviewInput {
+            cwd: TrimmedNonEmptyString::new(cwd).unwrap(),
+            base_ref: None,
+            ignore_whitespace: None,
+            file: None,
+        }
+    }
+
+    fn file_contents_input(cwd: &str) -> ReviewDiffFileContentsInput {
+        ReviewDiffFileContentsInput {
+            cwd: TrimmedNonEmptyString::new(cwd).unwrap(),
+            source_kind: ReviewDiffPreviewSourceKind::WorkingTree,
+            change_type: ReviewDiffFileChangeType::Change,
+            base_ref: Some(TrimmedNonEmptyString::new("HEAD").unwrap()),
+            head_ref: None,
+            old_path: TrimmedNonEmptyString::new("file.ts").unwrap(),
+            new_path: TrimmedNonEmptyString::new("file.ts").unwrap(),
+        }
+    }
+
+    fn outside_error(operation: &str, cwd: &str) -> ReviewDiffPreviewError {
+        ReviewDiffPreviewError::Vcs(VcsError::RepositoryDetection(
+            VcsRepositoryDetectionError::VcsRepositoryDetectionError {
+                operation: operation.to_owned(),
+                cwd: cwd.to_owned(),
+                detail: if operation == "ReviewService.getDiffPreview" {
+                    "Review diff preview cwd must stay within the configured workspace root."
+                        .to_owned()
+                } else {
+                    "Review diff file contents cwd must stay within the configured workspace root."
+                        .to_owned()
+                },
+                cause: None,
+            },
+        ))
+    }
+
+    #[tokio::test]
+    async fn rejects_diff_preview_cwd_outside_the_configured_workspace_roots() {
+        let fixture = fixture();
+        let outside = TempDir::with_prefix("t3-review-outside-").unwrap();
+        let vcs = FakeVcs::new(None);
+        let cwd = outside.path().to_str().unwrap();
+        let error = service(
+            &fixture,
+            vcs.clone(),
+            WorktreesSettings::default(),
+            Ok(vec![]),
+        )
+        .get_diff_preview(&preview_input(cwd))
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, outside_error("ReviewService.getDiffPreview", cwd));
+        assert!(vcs.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn attributes_file_content_workspace_violations_to_the_file_content_operation() {
+        let fixture = fixture();
+        let outside = TempDir::with_prefix("t3-review-outside-").unwrap();
+        let vcs = FakeVcs::new(None);
+        let cwd = outside.path().to_str().unwrap();
+        let error = service(
+            &fixture,
+            vcs.clone(),
+            WorktreesSettings::default(),
+            Ok(vec![]),
+        )
+        .get_diff_file_contents(&file_contents_input(cwd))
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            outside_error("ReviewService.getDiffFileContents", cwd)
+        );
+        assert!(vcs.calls().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn allows_previous_custom_worktree_locations_but_never_a_filesystem_root() {
+        let fixture = fixture();
+        let previous = TempDir::with_prefix("t3-review-old-worktrees-").unwrap();
+        let outside = TempDir::with_prefix("t3-review-outside-").unwrap();
+        let previous_cwd = previous.path().to_str().unwrap();
+
+        let result = service(
+            &fixture,
+            FakeVcs::new(None),
+            WorktreesSettings {
+                worktrees_directory: "/".to_owned(),
+                previous_worktrees_directories: vec![previous_cwd.to_owned()],
+            },
+            Ok(vec![]),
+        )
+        .get_diff_preview(&preview_input(previous_cwd))
+        .await
+        .unwrap();
+        assert_eq!(result.cwd.as_str(), previous_cwd);
+
+        let root_link = fixture.base.path().join("root-link");
+        std::os::unix::fs::symlink("/", &root_link).unwrap();
+        let outside_cwd = outside.path().to_str().unwrap();
+        for worktrees_directory in ["/", root_link.to_str().unwrap()] {
+            let error = service(
+                &fixture,
+                FakeVcs::new(None),
+                WorktreesSettings {
+                    worktrees_directory: worktrees_directory.to_owned(),
+                    previous_worktrees_directories: vec![],
+                },
+                Ok(vec![]),
+            )
+            .get_diff_preview(&preview_input(outside_cwd))
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error,
+                outside_error("ReviewService.getDiffPreview", outside_cwd)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn allows_registered_project_roots_outside_the_server_cwd() {
+        let fixture = fixture();
+        let project_root = TempDir::with_prefix("t3-review-project-").unwrap();
+        let project_child = project_root.path().join("packages").join("app");
+        std::fs::create_dir_all(&project_child).unwrap();
+        // `<projectRoot>-sibling` shares the project root's string prefix but is not inside it,
+        // so a string-prefix containment check would wrongly accept it.
+        let sibling = RemoveDirOnDrop(PathBuf::from(format!(
+            "{}-sibling",
+            project_root.path().display()
+        )));
+        std::fs::create_dir(&sibling.0).unwrap();
+        let project_cwd = project_root.path().to_str().unwrap();
+        let child_cwd = project_child.to_str().unwrap();
+        let sibling_cwd = sibling.0.to_str().unwrap();
+
+        let review = |cwd: &str, projects: Result<Vec<String>, String>| {
+            let service = service(
+                &fixture,
+                FakeVcs::new(None),
+                WorktreesSettings::default(),
+                projects,
+            );
+            let cwd = cwd.to_owned();
+            async move { service.get_diff_preview(&preview_input(&cwd)).await }
+        };
+
+        let root_result = review(project_cwd, Ok(vec![project_cwd.to_owned()]))
+            .await
+            .unwrap();
+        assert_eq!(root_result.cwd.as_str(), project_cwd);
+        let child_result = review(child_cwd, Ok(vec![project_cwd.to_owned()]))
+            .await
+            .unwrap();
+        assert_eq!(child_result.cwd.as_str(), child_cwd);
+
+        for (cwd, projects) in [
+            (sibling_cwd, Ok(vec![project_cwd.to_owned()])),
+            (project_cwd, Ok(vec![])),
+            (project_cwd, Err("offline".to_owned())),
+        ] {
+            let error = review(cwd, projects).await.unwrap_err();
+            assert!(matches!(
+                error,
+                ReviewDiffPreviewError::Vcs(VcsError::RepositoryDetection(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn allows_diff_preview_cwd_inside_the_configured_workspace_root() {
+        let fixture = fixture();
+        let vcs = FakeVcs::new(None);
+        let workspace_cwd = fixture.workspace.path().to_str().unwrap();
+        let result = service(
+            &fixture,
+            vcs.clone(),
+            WorktreesSettings::default(),
+            Ok(vec![]),
+        )
+        .get_diff_preview(&preview_input(workspace_cwd))
+        .await
+        .unwrap();
+
+        assert_eq!(result.cwd.as_str(), workspace_cwd);
+        assert!(result.sources.is_empty());
+        // VCS detection sees the canonical cwd, not the raw spelling.
+        let canonical_workspace = fixture.workspace.path().canonicalize().unwrap();
+        assert_eq!(
+            vcs.calls(),
+            vec![canonical_workspace.to_str().unwrap().to_owned()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_dot_dot_after_a_symlink_that_leaves_the_workspace() {
+        let fixture = fixture();
+        let outside = TempDir::with_prefix("t3-review-outside-").unwrap();
+        let outside_inner = outside.path().join("inner");
+        std::fs::create_dir(&outside_inner).unwrap();
+        // `<workspace>/link/..` folds to the workspace when read lexically, but the kernel resolves
+        // it to the link target's parent, `outside/`, which is not inside the workspace.
+        let link = fixture.workspace.path().join("link");
+        std::os::unix::fs::symlink(&outside_inner, &link).unwrap();
+        let cwd = link.join("..");
+        let cwd = cwd.to_str().unwrap();
+        let vcs = FakeVcs::new(None);
+
+        let error = service(
+            &fixture,
+            vcs.clone(),
+            WorktreesSettings::default(),
+            Ok(vec![]),
+        )
+        .get_diff_preview(&preview_input(cwd))
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, outside_error("ReviewService.getDiffPreview", cwd));
+        assert!(vcs.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn preserves_unexpected_path_resolution_failures() {
+        let fixture = fixture();
+        let vcs = FakeVcs::new(None);
+        let invalid_cwd = format!("{}\0invalid", fixture.workspace.path().display());
+        let error = service(
+            &fixture,
+            vcs.clone(),
+            WorktreesSettings::default(),
+            Ok(vec![]),
+        )
+        .get_diff_preview(&preview_input(&invalid_cwd))
+        .await
+        .unwrap_err();
+
+        let ReviewDiffPreviewError::Vcs(VcsError::RepositoryDetection(
+            VcsRepositoryDetectionError::VcsRepositoryDetectionError {
+                operation,
+                cwd,
+                detail,
+                cause,
+            },
+        )) = error
+        else {
+            panic!("expected a repository detection error, got {error:?}");
+        };
+        assert_eq!(
+            operation,
+            "ReviewService.assertWorkspaceBoundCwd.canonicalizePath"
+        );
+        assert_eq!(cwd, invalid_cwd);
+        assert!(detail.contains("Failed to resolve a path"));
+        assert!(cause.is_some_and(|cause| cause.is_string()));
+        assert!(vcs.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn blocking_canonicalization_matches_the_inline_result() {
+        let fixture = fixture();
+        let existing = fixture.workspace.path().to_path_buf();
+        let missing = existing.join("missing").join("..").join("child");
+        let invalid = PathBuf::from(format!("{}\0invalid", existing.display()));
+        for path in [existing, missing, invalid] {
+            let inline = canonicalize_path(&path);
+            assert_eq!(canonicalize_path_off_runtime(path).await, inline);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_option_like_base_refs_before_any_vcs_command() {
+        let fixture = fixture();
+        let vcs = FakeVcs::new(Some(VcsDriverKind::Git));
+        let workspace_cwd = fixture.workspace.path().to_str().unwrap();
+
+        let mut preview = preview_input(workspace_cwd);
+        preview.base_ref = Some(TrimmedNonEmptyString::new("--output=written").unwrap());
+        let error = service(
+            &fixture,
+            vcs.clone(),
+            WorktreesSettings::default(),
+            Ok(vec![]),
+        )
+        .get_diff_preview(&preview)
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            ReviewDiffPreviewError::Vcs(VcsError::RepositoryDetection(
+                VcsRepositoryDetectionError::VcsRepositoryDetectionError {
+                    operation: "ReviewService.getDiffPreview".to_owned(),
+                    cwd: workspace_cwd.to_owned(),
+                    detail: "Review base ref must not start with '-'.".to_owned(),
+                    cause: None,
+                },
+            ))
+        );
+
+        let mut contents = file_contents_input(workspace_cwd);
+        contents.base_ref = Some(TrimmedNonEmptyString::new("-p").unwrap());
+        let error = service(
+            &fixture,
+            vcs.clone(),
+            WorktreesSettings::default(),
+            Ok(vec![]),
+        )
+        .get_diff_file_contents(&contents)
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ReviewDiffPreviewError::Vcs(VcsError::RepositoryDetection(
+                VcsRepositoryDetectionError::VcsRepositoryDetectionError { ref operation, .. }
+            )) if operation == "ReviewService.getDiffFileContents"
+        ));
+        assert!(vcs.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_git_repositories_are_unsupported_for_preview_and_expansion() {
+        let fixture = fixture();
+        let workspace_cwd = fixture.workspace.path().to_str().unwrap();
+
+        let preview = service(
+            &fixture,
+            FakeVcs::new(Some(VcsDriverKind::Jj)),
+            WorktreesSettings::default(),
+            Ok(vec![]),
+        )
+        .get_diff_preview(&preview_input(workspace_cwd))
+        .await
+        .unwrap_err();
+        assert_eq!(
+            preview,
+            ReviewDiffPreviewError::Vcs(VcsError::UnsupportedOperation(
+                VcsUnsupportedOperationError::VcsUnsupportedOperationError {
+                    operation: "ReviewService.getDiffPreview".to_owned(),
+                    kind: VcsDriverKind::Jj,
+                    detail: "The jj VCS driver does not support review diff previews.".to_owned(),
+                },
+            ))
+        );
+
+        let expansion = service(
+            &fixture,
+            FakeVcs::new(None),
+            WorktreesSettings::default(),
+            Ok(vec![]),
+        )
+        .get_diff_file_contents(&file_contents_input(workspace_cwd))
+        .await
+        .unwrap_err();
+        assert_eq!(
+            expansion,
+            ReviewDiffPreviewError::Vcs(VcsError::UnsupportedOperation(
+                VcsUnsupportedOperationError::VcsUnsupportedOperationError {
+                    operation: "ReviewService.getDiffFileContents".to_owned(),
+                    kind: VcsDriverKind::Unknown,
+                    detail: "Unchanged diff expansion currently requires a Git repository."
+                        .to_owned(),
+                },
+            ))
+        );
+    }
+}

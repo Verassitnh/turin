@@ -4,6 +4,7 @@
 //! `externalLauncher.ts` are cut (see PORTING.md Deviations).
 
 pub mod editor;
+pub mod editor_labels;
 pub mod external_launcher;
 pub mod host;
 pub mod icns;

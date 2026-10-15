@@ -6,7 +6,7 @@
 //! driver-specific config payload stays opaque here; each driver owns its own
 //! config schema.
 
-use crate::base_schemas::{ContractError, TrimmedNonEmptyString};
+use crate::base_schemas::{ContractError, TrimmedNonEmptyString, js_trim};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
@@ -27,7 +27,9 @@ fn is_slug(value: &str) -> bool {
         Some(first) if PROVIDER_SLUG_FIRST.contains(first) => {}
         _ => return false,
     }
-    value.len() <= PROVIDER_SLUG_MAX_CHARS && chars.all(|c| PROVIDER_SLUG_REST.contains(c))
+    // `Schema.isMaxLength` counts UTF-16 code units.
+    value.encode_utf16().count() <= PROVIDER_SLUG_MAX_CHARS
+        && chars.all(|c| PROVIDER_SLUG_REST.contains(c))
 }
 
 macro_rules! provider_slug {
@@ -40,7 +42,7 @@ macro_rules! provider_slug {
             /// Validates like upstream's branded slug schema: trimmed,
             /// non-empty, `^[a-zA-Z][a-zA-Z0-9_-]*$`, at most 64 chars.
             pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
-                let trimmed = value.as_ref().trim();
+                let trimmed = js_trim(value.as_ref());
                 if !is_slug(trimmed) {
                     return Err(ContractError {
                         expected: concat!("a slug matching ^[a-zA-Z][a-zA-Z0-9_-]*$ (<= 64 chars) for ", $brand),
@@ -102,7 +104,7 @@ provider_slug! {
 
 /// Whether a raw value is a well-formed driver-kind slug (upstream `isProviderDriverKind`).
 pub fn is_provider_driver_kind(value: &str) -> bool {
-    is_slug(value.trim())
+    is_slug(js_trim(value))
 }
 
 provider_slug! {
@@ -130,9 +132,9 @@ pub struct ProviderInstanceEnvironmentVariableName(String);
 
 impl ProviderInstanceEnvironmentVariableName {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
-        let trimmed = value.as_ref().trim();
+        let trimmed = js_trim(value.as_ref());
         let valid = !trimmed.is_empty()
-            && trimmed.len() <= ENVIRONMENT_VARIABLE_NAME_MAX_CHARS
+            && trimmed.encode_utf16().count() <= ENVIRONMENT_VARIABLE_NAME_MAX_CHARS
             && trimmed
                 .bytes()
                 .next()
@@ -206,8 +208,34 @@ pub struct ProviderInstanceConfig {
     pub environment: Option<ProviderInstanceEnvironment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `Schema.optionalKey(Schema.Unknown)`: absent is `None`, an explicit
+    /// `null` is preserved as `Some(Value::Null)`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_unknown"
+    )]
     pub config: Option<serde_json::Value>,
+}
+
+/// `Schema.optional(Schema.Unknown)` / `optionalKey(Schema.Unknown)`: plain
+/// `Option<Value>` would fold an explicit `null` into absent; this keeps it as
+/// `Some(Value::Null)`.
+pub mod optional_unknown {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<serde_json::Value>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<serde_json::Value>, D::Error> {
+        serde_json::Value::deserialize(d).map(Some)
+    }
 }
 
 /// Atomic mutation for one provider-instance map entry.
@@ -471,5 +499,74 @@ mod tests {
         assert_eq!(json, r#"{"operation":"remove","instanceId":"codex"}"#);
         let back: ProviderInstanceMutation = serde_json::from_str(&json).unwrap();
         assert_eq!(back, mutation);
+    }
+
+    #[test]
+    fn slug_trim_uses_js_semantics() {
+        // U+FEFF is JS whitespace, U+0085 is not.
+        assert_eq!(decode_driver("\u{feff}codex").unwrap().as_str(), "codex");
+        assert!(decode_driver("codex\u{85}").is_err());
+    }
+
+    #[test]
+    fn config_keeps_null_config_distinct_from_absent() {
+        let null: ProviderInstanceConfig =
+            serde_json::from_str(r#"{"driver":"codex","config":null}"#).unwrap();
+        assert_eq!(null.config, Some(serde_json::Value::Null));
+        assert_eq!(
+            serde_json::to_string(&null).unwrap(),
+            r#"{"driver":"codex","config":null}"#
+        );
+        let absent: ProviderInstanceConfig = serde_json::from_str(r#"{"driver":"codex"}"#).unwrap();
+        assert_eq!(absent.config, None);
+        assert_eq!(
+            serde_json::to_string(&absent).unwrap(),
+            r#"{"driver":"codex"}"#
+        );
+    }
+
+    #[test]
+    fn environment_variable_always_encodes_defaults() {
+        let var: ProviderInstanceEnvironmentVariable =
+            serde_json::from_str(r#"{"name":"A"}"#).unwrap();
+        assert_eq!(
+            serde_json::to_string(&var).unwrap(),
+            r#"{"name":"A","value":"","sensitive":false}"#
+        );
+        let redacted: ProviderInstanceEnvironmentVariable =
+            serde_json::from_str(r#"{"name":"A","valueRedacted":true}"#).unwrap();
+        assert_eq!(redacted.value_redacted, Some(true));
+    }
+
+    #[test]
+    fn mutation_decodes_all_operations_and_rejects_unknown() {
+        let create: ProviderInstanceMutation = serde_json::from_str(
+            r#"{"operation":"create","instanceId":"codex","instance":{"driver":"codex"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(create, ProviderInstanceMutation::Create { .. }));
+        let upsert: ProviderInstanceMutation = serde_json::from_str(
+            r#"{"operation":"upsert","instanceId":"codex","instance":{"driver":"codex"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(upsert, ProviderInstanceMutation::Upsert { .. }));
+        // Plain (non-forward-compatible) upstream union: unknown operations fail.
+        assert!(
+            serde_json::from_str::<ProviderInstanceMutation>(
+                r#"{"operation":"rename","instanceId":"codex"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn default_instance_id_is_driver_slug() {
+        let driver = ProviderDriverKind::new("claudeAgent").unwrap();
+        assert_eq!(
+            default_instance_id_for_driver(&driver).as_str(),
+            "claudeAgent"
+        );
+        assert!(is_provider_driver_kind("claudeAgent"));
+        assert!(!is_provider_driver_kind("1x"));
     }
 }

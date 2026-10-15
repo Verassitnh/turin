@@ -10,7 +10,7 @@ use crate::base_schemas::{
     ContractError, EventId, IsoDateTime, NonNegativeInt, PositiveInt, ProviderItemId,
     RuntimeItemId, RuntimeRequestId, RuntimeTaskId, ThreadId, TrimmedNonEmptyString, TurnId,
 };
-use crate::provider_instance::{ProviderDriverKind, ProviderInstanceId};
+use crate::provider_instance::{ProviderDriverKind, ProviderInstanceId, optional_unknown};
 use crate::provider_policy::ProviderApprovalOption;
 use crate::provider_usage_limits::ProviderUsageLimitsUpdate;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -38,12 +38,13 @@ pub struct RuntimeEventRawSource(String);
 impl RuntimeEventRawSource {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
         let raw = value.as_ref();
-        // The template's middle segment must be non-empty, so
-        // "acp..extension" does not match.
+        // `Schema.String` in a template literal also matches the empty string
+        // (checked against effect 4: "acp..extension" decodes), but the
+        // prefix and suffix cannot overlap, so "acp.extension" does not.
         let valid = KNOWN_RUNTIME_EVENT_RAW_SOURCES.contains(&raw)
             || (raw.starts_with("acp.")
                 && raw.ends_with(".extension")
-                && raw.len() > "acp..extension".len());
+                && raw.len() >= "acp..extension".len());
         if !valid {
             return Err(ContractError {
                 expected: "a known raw source or an \"acp.<name>.extension\" slug",
@@ -270,7 +271,11 @@ pub struct ProviderRuntimeEventBase {
 pub struct SessionStartedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<TrimmedNonEmptyString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_unknown"
+    )]
     pub resume: Option<serde_json::Value>,
 }
 
@@ -286,7 +291,11 @@ pub struct SessionStateChangedPayload {
     pub state: RuntimeSessionState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<TrimmedNonEmptyString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_unknown"
+    )]
     pub detail: Option<serde_json::Value>,
 }
 
@@ -316,7 +325,11 @@ pub struct ThreadStateChangedPayload {
     pub before_tokens: Option<NonNegativeInt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_tokens: Option<NonNegativeInt>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_unknown"
+    )]
     pub detail: Option<serde_json::Value>,
 }
 
@@ -495,7 +508,11 @@ pub struct TurnCompletedPayload {
         with = "crate::base_schemas::double_option"
     )]
     pub stop_reason: Option<Option<TrimmedNonEmptyString>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_unknown"
+    )]
     pub usage: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage: Option<UnknownRecord>,
@@ -566,7 +583,8 @@ fn trimmed_non_empty_at_most(
     value: TrimmedNonEmptyString,
     max_chars: usize,
 ) -> Result<TrimmedNonEmptyString, String> {
-    if value.as_str().len() > max_chars {
+    // `Schema.isMaxLength` counts UTF-16 code units.
+    if value.as_str().encode_utf16().count() > max_chars {
         Err(format!(
             "a trimmed, non-empty string of at most {max_chars} chars"
         ))
@@ -582,7 +600,7 @@ mod tool_activity_app_id {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<TrimmedNonEmptyString, D::Error> {
         let value = TrimmedNonEmptyString::deserialize(d)?;
         let raw = value.as_str();
-        if raw.len() > 512
+        if raw.encode_utf16().count() > 512
             || raw.is_empty()
             || !raw
                 .bytes()
@@ -739,7 +757,11 @@ pub struct ItemLifecyclePayload {
     pub tool_icon: Option<ToolActivityIcon>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_source: Option<ToolActivitySource>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_unknown"
+    )]
     pub data: Option<serde_json::Value>,
     /// Owning agent when this item ran inside a subagent (resolved from the
     /// SDK's parent_tool_use_id). Clients re-home attributed items out of the
@@ -771,7 +793,11 @@ pub struct RequestOpenedPayload {
     pub app_name: Option<TrimmedNonEmptyString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<ProviderApprovalOption>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_unknown"
+    )]
     pub args: Option<serde_json::Value>,
 }
 
@@ -781,7 +807,11 @@ pub struct RequestResolvedPayload {
     pub request_type: CanonicalRequestType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<TrimmedNonEmptyString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_unknown"
+    )]
     pub resolution: Option<serde_json::Value>,
 }
 
@@ -971,7 +1001,11 @@ pub struct TaskProgressPayload {
     pub description: TrimmedNonEmptyString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<TrimmedNonEmptyString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_unknown"
+    )]
     pub usage: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typed_usage: Option<RuntimeTaskUsage>,
@@ -1024,7 +1058,11 @@ pub struct TaskCompletedPayload {
     pub status: TaskCompletedStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<TrimmedNonEmptyString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_unknown"
+    )]
     pub usage: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typed_usage: Option<RuntimeTaskUsage>,
@@ -1159,7 +1197,11 @@ pub struct ConfigWarningPayload {
     pub details: Option<TrimmedNonEmptyString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<TrimmedNonEmptyString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_unknown"
+    )]
     pub range: Option<serde_json::Value>,
 }
 
@@ -1209,7 +1251,11 @@ pub struct ToolDeniedPayload {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeWarningPayload {
     pub message: TrimmedNonEmptyString,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_unknown"
+    )]
     pub detail: Option<serde_json::Value>,
 }
 
@@ -1221,7 +1267,11 @@ pub struct RuntimeErrorPayload {
     pub code: Option<TrimmedNonEmptyString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class: Option<RuntimeErrorClass>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_unknown"
+    )]
     pub detail: Option<serde_json::Value>,
 }
 
@@ -1809,7 +1859,8 @@ mod tests {
         );
 
         assert!(RuntimeEventRawSource::new("claude.sdk.unknown").is_err());
-        assert!(RuntimeEventRawSource::new("acp..extension").is_err());
+        assert!(RuntimeEventRawSource::new("acp..extension").is_ok());
+        assert!(RuntimeEventRawSource::new("acp.extension").is_err());
         assert!(RuntimeEventRawSource::new("acp.onlyprefix.").is_err());
         assert!(RuntimeEventRawSource::new("x.acp.mid.extension").is_err());
     }
@@ -1932,5 +1983,599 @@ mod tests {
         // Optional favicon keys stay omitted when unset.
         let icon_value = serde_json::to_value(&icon).unwrap();
         assert!(icon_value.get("faviconUrl").is_none());
+    }
+
+    fn event(kind: &str, payload: serde_json::Value) -> serde_json::Value {
+        json!({
+            "type": kind,
+            "eventId": "event-1",
+            "provider": "codex",
+            "threadId": "thread-1",
+            "createdAt": "2026-02-28T00:00:00.000Z",
+            "payload": payload,
+        })
+    }
+
+    /// One minimal valid payload per union member, in upstream union order.
+    fn minimal_events() -> Vec<(&'static str, serde_json::Value)> {
+        vec![
+            ("session.started", json!({})),
+            ("session.configured", json!({"config": {}})),
+            ("session.state.changed", json!({"state": "ready"})),
+            ("session.exited", json!({})),
+            ("thread.started", json!({})),
+            ("thread.state.changed", json!({"state": "active"})),
+            ("thread.metadata.updated", json!({})),
+            (
+                "thread.token-usage.updated",
+                json!({"usage": {"usedTokens": 1}}),
+            ),
+            ("thread.realtime.started", json!({})),
+            ("thread.realtime.item-added", json!({"item": null})),
+            ("thread.realtime.audio.delta", json!({"audio": {}})),
+            ("thread.realtime.error", json!({"message": "m"})),
+            ("thread.realtime.closed", json!({})),
+            ("turn.started", json!({})),
+            ("turn.completed", json!({"state": "completed"})),
+            ("turn.aborted", json!({"reason": "r"})),
+            ("turn.plan.updated", json!({"plan": []})),
+            ("turn.proposed.delta", json!({"delta": ""})),
+            ("turn.proposed.completed", json!({"planMarkdown": "p"})),
+            ("turn.diff.updated", json!({"unifiedDiff": ""})),
+            ("item.started", json!({"itemType": "unknown"})),
+            ("item.updated", json!({"itemType": "command_execution"})),
+            (
+                "item.completed",
+                json!({"itemType": "mcp_tool_call", "status": "inProgress"}),
+            ),
+            (
+                "content.delta",
+                json!({"streamKind": "reasoning_summary_text", "delta": ""}),
+            ),
+            (
+                "request.opened",
+                json!({"requestType": "apply_patch_approval"}),
+            ),
+            (
+                "request.resolved",
+                json!({"requestType": "auth_tokens_refresh"}),
+            ),
+            ("user-input.requested", json!({"questions": []})),
+            ("user-input.resolved", json!({"answers": {}})),
+            ("task.started", json!({"taskId": "t"})),
+            ("task.progress", json!({"taskId": "t", "description": "d"})),
+            ("task.updated", json!({"taskId": "t"})),
+            (
+                "task.completed",
+                json!({"taskId": "t", "status": "stopped"}),
+            ),
+            (
+                "hook.started",
+                json!({"hookId": "h", "hookName": "n", "hookEvent": "e"}),
+            ),
+            ("hook.progress", json!({"hookId": "h"})),
+            (
+                "hook.completed",
+                json!({"hookId": "h", "outcome": "success"}),
+            ),
+            ("tool.progress", json!({})),
+            ("tool.summary", json!({"summary": "s"})),
+            ("auth.status", json!({})),
+            ("account.updated", json!({"account": 1})),
+            (
+                "account.rate-limits.updated",
+                json!({"limits": {"windows": []}}),
+            ),
+            ("mcp.status.updated", json!({"status": null})),
+            ("mcp.oauth.completed", json!({"success": true})),
+            (
+                "model.rerouted",
+                json!({"fromModel": "a", "toModel": "b", "reason": "r"}),
+            ),
+            ("config.warning", json!({"summary": "s"})),
+            ("deprecation.notice", json!({"summary": "s"})),
+            ("files.persisted", json!({"files": []})),
+            ("tool.denied", json!({"toolName": "t"})),
+            ("runtime.warning", json!({"message": "m"})),
+            ("runtime.error", json!({"message": "m"})),
+        ]
+    }
+
+    #[test]
+    fn every_union_member_round_trips_byte_for_byte() {
+        let events = minimal_events();
+        assert_eq!(events.len(), 49, "ProviderRuntimeEventV2 has 49 members");
+        for (kind, payload) in events {
+            let input = event(kind, payload);
+            let decoded = decode(input.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), input, "{kind}");
+            // Unknown event types are NOT forward compatible here (plain union).
+            let mut unknown = input;
+            unknown["type"] = json!(format!("{kind}.future"));
+            assert!(decode(unknown).is_err(), "{kind}.future");
+        }
+    }
+
+    #[test]
+    fn unknown_payload_fields_keep_explicit_null_and_absent_distinct() {
+        let with_null = event("session.started", json!({"resume": null}));
+        let decoded = decode(with_null.clone()).unwrap();
+        let ProviderRuntimeEvent::SessionStarted { payload, .. } = &decoded else {
+            panic!("expected session.started");
+        };
+        assert_eq!(payload.resume, Some(serde_json::Value::Null));
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), with_null);
+        let absent = decode(event("session.started", json!({}))).unwrap();
+        let ProviderRuntimeEvent::SessionStarted { payload, .. } = &absent else {
+            panic!("expected session.started");
+        };
+        assert_eq!(payload.resume, None);
+        // Required Unknown stays `null` too.
+        let item = decode(event("thread.realtime.item-added", json!({"item": null}))).unwrap();
+        assert!(matches!(
+            item,
+            ProviderRuntimeEvent::ThreadRealtimeItemAdded { .. }
+        ));
+        assert!(decode(event("thread.realtime.item-added", json!({}))).is_err());
+    }
+
+    #[test]
+    fn nullable_optionals_are_tri_state() {
+        let decode_completed =
+            |payload: serde_json::Value| decode(event("turn.completed", payload)).unwrap();
+        for (payload, expected) in [
+            (json!({"state": "failed"}), None),
+            (json!({"state": "failed", "stopReason": null}), Some(None)),
+            (
+                json!({"state": "failed", "stopReason": " end_turn "}),
+                Some(Some("end_turn")),
+            ),
+        ] {
+            let ProviderRuntimeEvent::TurnCompleted {
+                payload: parsed, ..
+            } = decode_completed(payload.clone())
+            else {
+                panic!("expected turn.completed");
+            };
+            let got = parsed
+                .stop_reason
+                .as_ref()
+                .map(|inner| inner.as_ref().map(|v| v.as_str()));
+            assert_eq!(got, expected);
+            let encoded = serde_json::to_value(decode_completed(payload.clone())).unwrap();
+            match expected {
+                None => assert!(encoded["payload"].get("stopReason").is_none()),
+                Some(None) => assert_eq!(encoded["payload"]["stopReason"], json!(null)),
+                Some(Some(_)) => assert_eq!(encoded["payload"]["stopReason"], json!("end_turn")),
+            }
+        }
+        let plan = |payload: serde_json::Value| {
+            let ProviderRuntimeEvent::TurnPlanUpdated { payload, .. } =
+                decode(event("turn.plan.updated", payload)).unwrap()
+            else {
+                panic!("expected turn.plan.updated");
+            };
+            payload.explanation
+        };
+        assert_eq!(plan(json!({"plan": []})), None);
+        assert_eq!(plan(json!({"plan": [], "explanation": null})), Some(None));
+        assert!(matches!(
+            plan(json!({"plan": [], "explanation": "x"})),
+            Some(Some(_))
+        ));
+        assert!(
+            decode(event(
+                "turn.completed",
+                json!({"state": "completed", "stopReason": "  "})
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn turn_token_usage_union_semantics() {
+        let usage = |value: serde_json::Value| serde_json::from_value::<TurnTokenUsage>(value);
+        let base = json!({"usageScope": "main_agent", "hasSubagents": true});
+        let with = |extra: serde_json::Value| {
+            let mut value = base.clone();
+            for (k, v) in extra.as_object().unwrap() {
+                value[k] = v.clone();
+            }
+            value
+        };
+        assert!(matches!(
+            usage(with(
+                json!({"usageStatus": "complete", "inputTokens": 1, "outputTokens": 2})
+            )),
+            Ok(TurnTokenUsage::Complete { .. })
+        ));
+        // `complete` needs both totals, and `complete` is not a partial status.
+        assert!(usage(with(json!({"usageStatus": "complete", "inputTokens": 1}))).is_err());
+        assert!(matches!(
+            usage(with(json!({"usageStatus": "unavailable"}))),
+            Ok(TurnTokenUsage::Partial { .. })
+        ));
+        assert!(matches!(
+            usage(with(
+                json!({"usageStatus": "partial", "outputTokens": 3, "cacheCreationTokens": 4})
+            )),
+            Ok(TurnTokenUsage::Partial { .. })
+        ));
+        assert!(usage(with(json!({"usageStatus": "bogus"}))).is_err());
+        assert!(
+            usage(
+                json!({"usageStatus": "partial", "usageScope": "subagent", "hasSubagents": false})
+            )
+            .is_err()
+        );
+        assert!(usage(json!({"usageStatus": "partial", "usageScope": "main_agent"})).is_err());
+        // Negative counts are not NonNegativeInt.
+        assert!(usage(with(json!({"usageStatus": "partial", "inputTokens": -1}))).is_err());
+        // Encoding keeps camelCase keys and the literal status.
+        let encoded = serde_json::to_value(
+            usage(with(json!({"usageStatus": "complete", "inputTokens": 1, "outputTokens": 2, "cachedInputTokens": 0}))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(encoded["usageStatus"], json!("complete"));
+        assert_eq!(encoded["cachedInputTokens"], json!(0));
+        assert_eq!(encoded["usageScope"], json!("main_agent"));
+    }
+
+    #[test]
+    fn thread_token_usage_snapshot_checks() {
+        let snapshot =
+            |value: serde_json::Value| serde_json::from_value::<ThreadTokenUsageSnapshot>(value);
+        assert!(snapshot(json!({"usedTokens": 0})).is_ok());
+        assert!(snapshot(json!({"usedTokens": -1})).is_err());
+        // PositiveInt: zero is rejected for maxTokens / autoCompactThreshold.
+        assert!(snapshot(json!({"usedTokens": 1, "maxTokens": 0})).is_err());
+        assert!(snapshot(json!({"usedTokens": 1, "autoCompactThreshold": 0})).is_err());
+        assert!(
+            snapshot(json!({"usedTokens": 1, "maxTokens": 1, "autoCompactThreshold": 1})).is_ok()
+        );
+        // Fractional cost amounts survive (Schema.Number -> f64).
+        let ok =
+            snapshot(json!({"usedTokens": 1, "cost": {"amount": 0.0125, "currency": " USD "}}))
+                .unwrap();
+        let encoded = serde_json::to_value(&ok).unwrap();
+        assert_eq!(
+            encoded["cost"],
+            json!({"amount": 0.0125, "currency": "USD"})
+        );
+        assert!(
+            snapshot(json!({"usedTokens": 1, "cost": {"amount": 1, "currency": "x".repeat(33)}}))
+                .is_err()
+        );
+        assert!(
+            snapshot(json!({"usedTokens": 1, "cost": {"amount": 1, "currency": "x".repeat(32)}}))
+                .is_ok()
+        );
+        // 17 astral chars are 34 UTF-16 units.
+        assert!(
+            snapshot(
+                json!({"usedTokens": 1, "cost": {"amount": 1, "currency": "\u{1F600}".repeat(17)}})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn raw_source_template_matches_effect_semantics() {
+        assert!(RuntimeEventRawSource::new("acp..extension").is_ok());
+        assert!(RuntimeEventRawSource::new("acp.a.b.extension").is_ok());
+        assert!(RuntimeEventRawSource::new("acp.extension").is_err());
+        assert!(RuntimeEventRawSource::new("acp.x.extension\n").is_err());
+        assert!(
+            serde_json::from_value::<RuntimeEventRaw>(json!({"source": "codex.eventmsg"})).is_err(),
+            "payload is a required Unknown key"
+        );
+        let raw: RuntimeEventRaw =
+            serde_json::from_value(json!({"source": "codex.eventmsg", "payload": null})).unwrap();
+        assert_eq!(
+            serde_json::to_value(&raw).unwrap(),
+            json!({"source": "codex.eventmsg", "payload": null})
+        );
+    }
+
+    #[test]
+    fn literal_wire_names() {
+        let wire = |value: &dyn erased::Ser| value.to_json();
+        assert_eq!(
+            wire(&RuntimeContentStreamKind::ReasoningSummaryText),
+            json!("reasoning_summary_text")
+        );
+        assert_eq!(
+            wire(&RuntimeErrorClass::PermissionError),
+            json!("permission_error")
+        );
+        assert_eq!(wire(&RuntimeItemStatus::InProgress), json!("inProgress"));
+        assert_eq!(
+            wire(&RuntimePlanStepStatus::InProgress),
+            json!("inProgress")
+        );
+        assert_eq!(
+            wire(&CanonicalItemType::CollabAgentToolCall),
+            json!("collab_agent_tool_call")
+        );
+        assert_eq!(
+            wire(&CanonicalItemType::ContextCompaction),
+            json!("context_compaction")
+        );
+        assert_eq!(
+            wire(&CanonicalRequestType::McpElicitationApproval),
+            json!("mcp_elicitation_approval")
+        );
+        assert_eq!(wire(&ToolLifecycleItemType::ImageView), json!("image_view"));
+        assert_eq!(wire(&RuntimeTaskStatus::Interrupted), json!("interrupted"));
+        assert!(is_tool_lifecycle_item_type("web_search"));
+        assert!(!is_tool_lifecycle_item_type("user_message"));
+        // Every tool lifecycle type is also a canonical item type.
+        for kind in TOOL_LIFECYCLE_ITEM_TYPES {
+            assert!(
+                serde_json::from_value::<ToolLifecycleItemType>(json!(kind)).is_ok(),
+                "{kind}"
+            );
+            assert!(
+                serde_json::from_value::<CanonicalItemType>(json!(kind)).is_ok(),
+                "{kind}"
+            );
+        }
+        assert!(serde_json::from_value::<RuntimeSessionState>(json!("paused")).is_err());
+        assert!(serde_json::from_value::<RuntimeTurnState>(json!("running")).is_err());
+    }
+
+    mod erased {
+        pub trait Ser {
+            fn to_json(&self) -> serde_json::Value;
+        }
+        impl<T: serde::Serialize> Ser for T {
+            fn to_json(&self) -> serde_json::Value {
+                serde_json::to_value(self).unwrap()
+            }
+        }
+    }
+
+    #[test]
+    fn user_input_question_and_request_payloads() {
+        let parsed = decode(event(
+            "user-input.requested",
+            json!({
+                "questions": [{
+                    "id": "q", "header": "H", "question": "Q?",
+                    "options": [{"label": "A", "description": "", "value": "a"}],
+                    "allowCustomAnswer": true, "initialAnswer": "", "multiSelect": false,
+                }],
+                "responseMode": "message",
+            }),
+        ))
+        .unwrap();
+        let ProviderRuntimeEvent::UserInputRequested { payload, .. } = &parsed else {
+            panic!("expected user-input.requested");
+        };
+        // multiSelect only defaults at construction: decode keeps absent/explicit as-is.
+        assert_eq!(payload.questions[0].multi_select, Some(false));
+        assert_eq!(payload.questions[0].initial_answer.as_deref(), Some(""));
+        assert!(
+            decode(event(
+                "user-input.requested",
+                json!({"questions": [], "responseMode": "other"})
+            ))
+            .is_err()
+        );
+        let opened = decode(event(
+            "request.opened",
+            json!({
+                "requestType": "command_execution_approval",
+                "options": [{"decision": "acceptForSession", "label": "Always", "warning": "careful"}],
+                "args": {"cmd": "ls"},
+            }),
+        ))
+        .unwrap();
+        assert!(matches!(
+            &opened,
+            ProviderRuntimeEvent::RequestOpened { payload, .. }
+                if payload.options.as_ref().unwrap().len() == 1
+        ));
+        assert_eq!(
+            serde_json::to_value(&opened).unwrap()["payload"]["args"],
+            json!({"cmd": "ls"})
+        );
+    }
+
+    #[test]
+    fn task_linkage_flattens_for_every_task_payload() {
+        let linkage = json!({
+            "taskType": "local_workflow", "agentKind": "background", "agentId": "a",
+            "title": "T", "role": "r", "model": "m", "effort": "high", "toolUseId": "tu",
+            "parentAgentId": "pa", "workflowName": "wf", "agentIndex": 1, "phaseIndex": 2,
+            "phaseTitle": "pt", "phases": [{"index": 0, "title": "p0"}], "attempt": 3,
+            "runHandles": {"runId": "r1", "scriptPath": "s", "transcriptDir": "d", "sessionUrl": "https://x"},
+            "outputFile": "o", "agentPath": "/root/marlow", "timelineBypass": true,
+        });
+        for (kind, own) in [
+            ("task.started", json!({"taskId": "t", "description": "d"})),
+            (
+                "task.progress",
+                json!({"taskId": "t", "description": "d", "status": "waiting", "typedUsage": {"totalTokens": 5}}),
+            ),
+            (
+                "task.updated",
+                json!({"taskId": "t", "status": "idle", "endedAt": "2026-01-01T00:00:00Z", "isBackgrounded": true}),
+            ),
+            (
+                "task.completed",
+                json!({"taskId": "t", "status": "failed", "typedUsage": {"totalTokens": 5, "durationMs": 1}}),
+            ),
+        ] {
+            let mut payload = own.clone();
+            for (k, v) in linkage.as_object().unwrap() {
+                payload[k] = v.clone();
+            }
+            let input = event(kind, payload);
+            let decoded = decode(input.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), input, "{kind}");
+        }
+        assert!(
+            decode(event(
+                "task.started",
+                json!({"taskId": "t", "agentKind": "other"})
+            ))
+            .is_err()
+        );
+        assert!(decode(event("task.started", json!({"taskId": "t", "attempt": -1}))).is_err());
+        assert!(
+            decode(event(
+                "task.completed",
+                json!({"taskId": "t", "status": "running"})
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn misc_payload_checks() {
+        // Int fields accept negatives; NonNegativeInt does not.
+        assert!(
+            decode(event(
+                "content.delta",
+                json!({"streamKind": "unknown", "delta": "", "contentIndex": -1})
+            ))
+            .is_ok()
+        );
+        assert!(
+            decode(event(
+                "hook.completed",
+                json!({"hookId": "h", "outcome": "error", "exitCode": -1})
+            ))
+            .is_ok()
+        );
+        assert!(
+            decode(event(
+                "thread.state.changed",
+                json!({"state": "idle", "beforeTokens": -1})
+            ))
+            .is_err()
+        );
+        // Number fields keep fractions.
+        let tool = decode(event(
+            "tool.progress",
+            json!({"elapsedSeconds": 1.5, "taskId": "t"}),
+        ))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&tool).unwrap()["payload"]["elapsedSeconds"],
+            json!(1.5)
+        );
+        let completed = decode(event(
+            "turn.completed",
+            json!({"state": "completed", "totalCostUsd": 0.25, "modelUsage": {"b": 1, "a": 2}}),
+        ))
+        .unwrap();
+        let encoded = serde_json::to_string(&completed).unwrap();
+        assert!(encoded.contains(r#""totalCostUsd":0.25"#));
+        // Record key order is preserved.
+        assert!(encoded.find(r#""b":1"#).unwrap() < encoded.find(r#""a":2"#).unwrap());
+        // Blank trimmed strings are rejected; surrounding whitespace is trimmed.
+        assert!(decode(event("runtime.error", json!({"message": "   "}))).is_err());
+        let trimmed = decode(event(
+            "runtime.error",
+            json!({"message": " boom ", "class": "transport_error", "code": "E1"}),
+        ))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&trimmed).unwrap()["payload"]["message"],
+            json!("boom")
+        );
+        // Base routing keys.
+        let mut with_refs = event("turn.started", json!({"model": "m", "effort": "high"}));
+        with_refs["turnId"] = json!("turn-1");
+        with_refs["itemId"] = json!("item-1");
+        with_refs["requestId"] = json!("req-1");
+        with_refs["providerRefs"] =
+            json!({"providerTurnId": "pt", "providerItemId": "pi", "providerRequestId": "pr"});
+        with_refs["providerInstanceId"] = json!("codex_work");
+        let decoded = decode(with_refs.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), with_refs);
+        // Missing required base fields fail.
+        for key in ["eventId", "provider", "threadId", "createdAt"] {
+            let mut missing = event("turn.started", json!({}));
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(decode(missing).is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn files_persisted_and_rate_limits_nest_correctly() {
+        let files = event(
+            "files.persisted",
+            json!({
+                "files": [{"filename": "a.txt", "fileId": "f1"}],
+                "failed": [{"filename": "b.txt", "error": "nope"}],
+            }),
+        );
+        assert_eq!(
+            serde_json::to_value(decode(files.clone()).unwrap()).unwrap(),
+            files
+        );
+        let limits = event(
+            "account.rate-limits.updated",
+            json!({"limits": {"windows": [{"id": "five_hour", "kind": "session", "label": "5h", "usedPercent": 12.5}]}}),
+        );
+        assert_eq!(
+            serde_json::to_value(decode(limits.clone()).unwrap()).unwrap(),
+            limits
+        );
+        // ProviderUsageLimitsUpdate.windows is a plain array: a bad window fails the event.
+        assert!(decode(event(
+            "account.rate-limits.updated",
+            json!({"limits": {"windows": [{"id": "x", "kind": "session", "label": "l", "usedPercent": 101}]}}),
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn tool_activity_union_and_source_bounds() {
+        for bad in [
+            json!({"_tag": "unknown"}),
+            json!({"_tag": "native-app", "app": {"_tag": "app-id", "appId": ""}}),
+            json!({"_tag": "website", "pageUrl": "x".repeat(4097)}),
+            json!({"_tag": "themed-logo", "logoUrl": "u", "logoUrlDark": "x".repeat(4097)}),
+        ] {
+            assert!(
+                serde_json::from_value::<ToolActivityIcon>(bad.clone()).is_err(),
+                "{bad}"
+            );
+        }
+        let icon =
+            json!({"_tag": "native-app", "app": {"_tag": "display-name", "displayName": "Editor"}});
+        assert_eq!(
+            serde_json::to_value(serde_json::from_value::<ToolActivityIcon>(icon.clone()).unwrap())
+                .unwrap(),
+            icon
+        );
+        let source = |key: String, name: String| {
+            serde_json::from_value::<ToolActivitySource>(
+                json!({"key": key, "name": name, "kind": "integration"}),
+            )
+        };
+        assert!(source("k".repeat(512), "n".repeat(160)).is_ok());
+        assert!(source("k".repeat(513), "n".into()).is_err());
+        assert!(source("k".into(), "n".repeat(161)).is_err());
+        // 81 astral chars are 162 UTF-16 units.
+        assert!(source("k".into(), "\u{1F600}".repeat(81)).is_err());
+        let lifecycle = decode(event(
+            "item.completed",
+            json!({
+                "itemType": "web_search", "toolSurface": "browser",
+                "toolIcon": {"_tag": "themed-logo", "logoUrl": "https://l"},
+                "toolSource": {"key": "k", "name": "n", "kind": "browser"},
+                "agentId": "a", "parentToolUseId": "p", "data": {"x": 1},
+            }),
+        ))
+        .unwrap();
+        assert!(matches!(
+            lifecycle,
+            ProviderRuntimeEvent::ItemCompleted { .. }
+        ));
     }
 }

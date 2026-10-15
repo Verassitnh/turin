@@ -181,7 +181,7 @@ pub struct UsageLimitSourceConsumeResetCreditInput {
 /// `ProviderConsumeResetCreditInput`: an instance-owned credit or a
 /// source-owned one, told apart by their keys (untagged union upstream).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, rename_all_fields = "camelCase")]
 pub enum ProviderConsumeResetCreditInput {
     Instance { instance_id: ProviderInstanceId },
     Source(UsageLimitSourceConsumeResetCreditInput),
@@ -251,4 +251,161 @@ pub struct UsageLimitsReport {
     pub created_at: IsoDateTime,
     pub accounts: Vec<UsageLimitsReportAccount>,
     pub notices: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn window(id: &str, used: f64) -> serde_json::Value {
+        json!({"id": id, "kind": "session", "label": "Session", "usedPercent": used})
+    }
+
+    #[test]
+    fn window_bounds_and_optional_fields() {
+        let ok: ServerProviderUsageWindow = serde_json::from_value(json!({
+            "id": " five_hour ", "kind": "weekly", "label": "L", "usedPercent": 42.5,
+            "resetsAt": "2026-01-01T00:00:00Z", "windowDurationMins": 300,
+        }))
+        .unwrap();
+        assert_eq!(ok.id.as_str(), "five_hour");
+        assert_eq!(ok.used_percent, 42.5);
+        // IsoDateTime is a pass-through string.
+        assert_eq!(ok.resets_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(
+            serde_json::to_value(&window_ok()).unwrap()["usedPercent"],
+            json!(0.0)
+        );
+        for used in [-0.1, 100.1] {
+            assert!(
+                serde_json::from_value::<ServerProviderUsageWindow>(window("a", used)).is_err()
+            );
+        }
+        assert!(serde_json::from_value::<ServerProviderUsageWindow>(window("a", 0.0)).is_ok());
+        assert!(serde_json::from_value::<ServerProviderUsageWindow>(window("a", 100.0)).is_ok());
+        assert!(
+            serde_json::from_value::<ServerProviderUsageWindow>(
+                json!({"id": "a", "kind": "yearly", "label": "L", "usedPercent": 1})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ServerProviderUsageWindow>(
+                json!({"id": "a", "kind": "other", "label": "L", "usedPercent": 1, "windowDurationMins": -1})
+            )
+            .is_err()
+        );
+    }
+
+    fn window_ok() -> ServerProviderUsageWindow {
+        serde_json::from_value(window("a", 0.0)).unwrap()
+    }
+
+    #[test]
+    fn limits_windows_drop_undecodable_entries() {
+        let limits: ServerProviderUsageLimits = serde_json::from_value(json!({
+            "checkedAt": "2026-01-01T00:00:00Z",
+            "windows": [window("a", 10.0), window("b", 500.0), {"id": "c", "kind": "newKind"}, window("d", 1.0)],
+            "unavailable": {"reason": "probeFailed", "message": "boom"},
+            "externalUsage": {"label": "Dashboard", "url": "https://x"},
+            "resetCredits": {"availableCount": 2, "nextCreditId": "c1"},
+        }))
+        .unwrap();
+        let ids: Vec<_> = limits.windows.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["a", "d"]);
+        let encoded = serde_json::to_value(&limits).unwrap();
+        assert_eq!(encoded["windows"].as_array().unwrap().len(), 2);
+        assert_eq!(encoded["unavailable"]["reason"], json!("probeFailed"));
+        assert!(encoded.get("credentialFingerprint").is_none());
+        // `windows` is required even when empty.
+        assert!(
+            serde_json::from_value::<ServerProviderUsageLimits>(json!({"checkedAt": "x"})).is_err()
+        );
+        assert!(
+            serde_json::from_value::<ServerProviderUsageLimits>(
+                json!({"checkedAt": "x", "windows": [], "unavailable": {"reason": "nope"}})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn source_snapshot_keeps_literal_kind_and_drops_bad_accounts() {
+        let account = |driver: &str| {
+            json!({
+                "id": "acct", "driver": driver,
+                "usageLimits": {"checkedAt": "x", "windows": []},
+            })
+        };
+        let snapshot: UsageLimitSourceSnapshot = serde_json::from_value(json!({
+            "id": "src_1", "kind": "cliproxy", "label": "Proxy", "checkedAt": "x",
+            "accounts": [account("codex"), account("1bad")],
+        }))
+        .unwrap();
+        assert_eq!(snapshot.accounts.len(), 1);
+        assert!(
+            serde_json::from_value::<UsageLimitSourceSnapshot>(
+                json!({"id": "src_1", "kind": "other", "label": "P", "checkedAt": "x", "accounts": []})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn consume_reset_credit_input_union_uses_camel_case_keys() {
+        let instance: ProviderConsumeResetCreditInput =
+            serde_json::from_value(json!({"instanceId": "codex"})).unwrap();
+        assert!(matches!(
+            instance,
+            ProviderConsumeResetCreditInput::Instance { .. }
+        ));
+        assert_eq!(
+            serde_json::to_value(&instance).unwrap(),
+            json!({"instanceId": "codex"})
+        );
+        let source_json = json!({"sourceId": "src_1", "accountId": "a", "creditId": "c"});
+        let source: ProviderConsumeResetCreditInput =
+            serde_json::from_value(source_json.clone()).unwrap();
+        assert!(matches!(source, ProviderConsumeResetCreditInput::Source(_)));
+        assert_eq!(serde_json::to_value(&source).unwrap(), source_json);
+        assert!(serde_json::from_value::<ProviderConsumeResetCreditInput>(json!({})).is_err());
+    }
+
+    #[test]
+    fn outcome_error_and_report() {
+        for (outcome, wire) in [
+            (ProviderConsumeResetCreditOutcome::Reset, "reset"),
+            (
+                ProviderConsumeResetCreditOutcome::NothingToReset,
+                "nothingToReset",
+            ),
+            (ProviderConsumeResetCreditOutcome::NoCredit, "noCredit"),
+            (
+                ProviderConsumeResetCreditOutcome::AlreadyRedeemed,
+                "alreadyRedeemed",
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(outcome).unwrap(), json!(wire));
+        }
+        let error = UsageLimitSourceError::SourceError {
+            detail: "nope".into(),
+        };
+        assert_eq!(error.to_string(), "nope");
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            json!({"_tag": "UsageLimitSourceError", "detail": "nope"})
+        );
+        let report_json = json!({
+            "createdAt": "2026-01-01T00:00:00Z",
+            "accounts": [{
+                "id": "a", "driver": "codex", "label": "Codex", "instanceId": "codex",
+                "resetCreditInput": {"instanceId": "codex"}, "displayName": "", "accentColor": "#fff",
+                "limits": {"checkedAt": "x", "windows": [window("a", 1.0)]},
+            }],
+            "notices": ["hello"],
+        });
+        let report: UsageLimitsReport = serde_json::from_value(report_json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&report).unwrap(), report_json);
+    }
 }

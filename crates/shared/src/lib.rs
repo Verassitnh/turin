@@ -1,8 +1,8 @@
 //! turin-shared (see PORTING.md for upstream mapping)
 
-//TODO pub mod agent_scope;
+pub mod agent_scope;
 pub mod array;
-//TODO pub mod atomic_write;
+pub mod atomic_write;
 pub mod chat_list;
 pub mod claude_compaction;
 pub mod cli_args;
@@ -26,7 +26,7 @@ pub mod image_dimensions;
 pub mod js_string;
 pub mod keyed_coalescing_worker;
 pub mod keyed_lock;
-//TODO pub mod logging;
+pub mod logging;
 //TODO pub mod markdown_github_alerts;
 pub mod markdown_links;
 //TODO pub mod markdown_list_indentation;
@@ -36,10 +36,10 @@ pub mod prompt_links;
 pub mod proposed_plan_text;
 pub mod provider_auth_return_url;
 pub mod r#struct;
-//TODO pub mod schema_json;
+pub mod schema_json;
 pub mod search_ranking;
 pub mod semver;
 //TODO pub mod shell;
-//TODO pub mod symlink;
+pub mod symlink;
 pub mod thread_search;
 pub mod video;

@@ -18,13 +18,13 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use turin_contracts::keybindings::{
-    KeybindingCommand, KeybindingRule, KeybindingShortcut, KeybindingValue, KeybindingWhen,
-    KeybindingsConfigError, MAX_KEYBINDINGS_COUNT, ResolvedKeybindingRule,
+    KeybindingCommand, KeybindingRule, KeybindingValue, KeybindingWhen, KeybindingsConfigError,
+    MAX_KEYBINDINGS_COUNT,
 };
 
 use crate::shared_keybindings::{
-    DEFAULT_KEYBINDINGS, compile_resolved_keybinding_rule, compile_resolved_keybindings_config,
-    merge_with_default_keybindings, parse_keybinding_shortcut,
+    DEFAULT_KEYBINDINGS, ParsedShortcut, ResolvedKeybinding, compile_resolved_keybinding_rule,
+    compile_resolved_keybindings_config, merge_with_default_keybindings, parse_keybinding_shortcut,
 };
 use crate::support::atomic_write::write_file_string_atomically;
 use crate::support::file_watch::{WATCH_DEBOUNCE, next_debounced, watch_file};
@@ -44,7 +44,7 @@ pub enum ServerConfigIssue {
 /// `KeybindingsConfigState` and `KeybindingsChangeEvent` share one shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeybindingsConfigState {
-    pub keybindings: Vec<ResolvedKeybindingRule>,
+    pub keybindings: Vec<ResolvedKeybinding>,
     pub issues: Vec<ServerConfigIssue>,
 }
 
@@ -114,7 +114,7 @@ fn has_same_shortcut_context(left: &KeybindingRule, right: &KeybindingRule) -> b
 }
 
 /// `encodeShortcut`: canonical `mod+meta+ctrl+alt+shift+key` string.
-fn encode_shortcut(shortcut: &KeybindingShortcut) -> Option<String> {
+fn encode_shortcut(shortcut: &ParsedShortcut) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
     if shortcut.mod_key {
         parts.push("mod");
@@ -306,7 +306,7 @@ impl Keybindings {
     pub fn upsert_keybinding_rule(
         &self,
         input: UpsertKeybindingInput,
-    ) -> Result<Vec<ResolvedKeybindingRule>, KeybindingsConfigError> {
+    ) -> Result<Vec<ResolvedKeybinding>, KeybindingsConfigError> {
         let _write = self.write_lock.lock();
         let custom = self.load_writable_custom()?;
         let rule = input.rule;
@@ -335,7 +335,7 @@ impl Keybindings {
     pub fn remove_keybinding_rule(
         &self,
         target: &KeybindingRule,
-    ) -> Result<Vec<ResolvedKeybindingRule>, KeybindingsConfigError> {
+    ) -> Result<Vec<ResolvedKeybinding>, KeybindingsConfigError> {
         let _write = self.write_lock.lock();
         let custom = self.load_writable_custom()?;
         let next: Vec<KeybindingRule> = custom
@@ -491,7 +491,7 @@ impl Keybindings {
     fn publish_rules(
         &self,
         rules: &[KeybindingRule],
-    ) -> Result<Vec<ResolvedKeybindingRule>, KeybindingsConfigError> {
+    ) -> Result<Vec<ResolvedKeybinding>, KeybindingsConfigError> {
         let merged = merge_with_default_keybindings(compile_resolved_keybindings_config(rules));
         let state = KeybindingsConfigState {
             keybindings: merged.clone(),

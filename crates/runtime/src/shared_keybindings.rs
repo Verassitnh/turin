@@ -8,10 +8,46 @@ use std::sync::LazyLock;
 
 use turin_contracts::base_schemas::js_trim;
 use turin_contracts::keybindings::{
-    KeybindingCommand, KeybindingRule, KeybindingShortcut, KeybindingValue, KeybindingWhen,
-    KeybindingWhenNode, MAX_KEYBINDINGS_COUNT, MAX_WHEN_EXPRESSION_DEPTH,
-    MODEL_PICKER_JUMP_KEYBINDING_COMMANDS, ResolvedKeybindingRule, THREAD_JUMP_KEYBINDING_COMMANDS,
+    KeybindingCommand, KeybindingRule, KeybindingValue, KeybindingWhen, KeybindingWhenNode,
+    MAX_KEYBINDINGS_COUNT, MAX_WHEN_EXPRESSION_DEPTH, MODEL_PICKER_JUMP_KEYBINDING_COMMANDS,
+    THREAD_JUMP_KEYBINDING_COMMANDS,
 };
+
+/// Shortcut key as parsed. Upstream's parsed shortcut is a plain object, so
+/// `space` becomes `" "`. Contracts' `KeybindingValue` trims and rejects that,
+/// so the runtime keeps its own type and never goes through that check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortcutKey(String);
+
+impl ShortcutKey {
+    fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// `KeybindingShortcut` as parsed (contracts' type, with [`ShortcutKey`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedShortcut {
+    pub key: ShortcutKey,
+    pub meta_key: bool,
+    pub ctrl_key: bool,
+    pub shift_key: bool,
+    pub alt_key: bool,
+    pub mod_key: bool,
+}
+
+/// `ResolvedKeybinding` as the runtime holds it. Same fields as the
+/// contracts type, but the shortcut key is a [`ShortcutKey`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedKeybinding {
+    pub command: KeybindingCommand,
+    pub shortcut: ParsedShortcut,
+    pub when_ast: Option<KeybindingWhenNode>,
+}
 
 fn rule(key: &str, command: &str, when: Option<&str>) -> KeybindingRule {
     KeybindingRule {
@@ -193,7 +229,7 @@ fn normalize_key_token(token: &str) -> &str {
 /// `parseKeybindingShortcut`. Lowercases, splits on `+`, and treats a trailing
 /// `+` (e.g. `mod++`) as the literal `+` key. Returns `None` when the shortcut
 /// has an empty token, two keys, or no key.
-pub fn parse_keybinding_shortcut(value: &str) -> Option<KeybindingShortcut> {
+pub fn parse_keybinding_shortcut(value: &str) -> Option<ParsedShortcut> {
     let mut tokens: Vec<String> = value
         .to_lowercase()
         .split('+')
@@ -231,8 +267,8 @@ pub fn parse_keybinding_shortcut(value: &str) -> Option<KeybindingShortcut> {
     }
 
     let key = key?;
-    Some(KeybindingShortcut {
-        key: KeybindingValue::new(key).ok()?,
+    Some(ParsedShortcut {
+        key: ShortcutKey::new(key),
         meta_key,
         ctrl_key,
         shift_key,
@@ -392,15 +428,15 @@ pub fn parse_keybinding_when_expression(expression: &str) -> Option<KeybindingWh
     Some(ast)
 }
 
-/// `compileResolvedKeybindingRule`: `None` when the shortcut or the `when`
+/// `compileResolvedKeybinding`: `None` when the shortcut or the `when`
 /// expression does not parse.
-pub fn compile_resolved_keybinding_rule(rule: &KeybindingRule) -> Option<ResolvedKeybindingRule> {
+pub fn compile_resolved_keybinding_rule(rule: &KeybindingRule) -> Option<ResolvedKeybinding> {
     let shortcut = parse_keybinding_shortcut(rule.key.as_str())?;
     let when_ast = match &rule.when {
         Some(when) => Some(parse_keybinding_when_expression(when.as_str())?),
         None => None,
     };
-    Some(ResolvedKeybindingRule {
+    Some(ResolvedKeybinding {
         command: rule.command.clone(),
         shortcut,
         when_ast,
@@ -409,10 +445,8 @@ pub fn compile_resolved_keybinding_rule(rule: &KeybindingRule) -> Option<Resolve
 
 /// `compileResolvedKeybindingsConfig`: drops invalid rules, keeps the last
 /// [`MAX_KEYBINDINGS_COUNT`].
-pub fn compile_resolved_keybindings_config(
-    config: &[KeybindingRule],
-) -> Vec<ResolvedKeybindingRule> {
-    let compiled: Vec<ResolvedKeybindingRule> = config
+pub fn compile_resolved_keybindings_config(config: &[KeybindingRule]) -> Vec<ResolvedKeybinding> {
+    let compiled: Vec<ResolvedKeybinding> = config
         .iter()
         .filter_map(compile_resolved_keybinding_rule)
         .collect();
@@ -420,14 +454,12 @@ pub fn compile_resolved_keybindings_config(
 }
 
 /// `DEFAULT_RESOLVED_KEYBINDINGS`.
-pub static DEFAULT_RESOLVED_KEYBINDINGS: LazyLock<Vec<ResolvedKeybindingRule>> =
+pub static DEFAULT_RESOLVED_KEYBINDINGS: LazyLock<Vec<ResolvedKeybinding>> =
     LazyLock::new(|| compile_resolved_keybindings_config(&DEFAULT_KEYBINDINGS));
 
 /// `mergeWithDefaultKeybindings`: a default rule is dropped when the custom
 /// config rebinds its command; custom rules always come last so they win.
-pub fn merge_with_default_keybindings(
-    custom: Vec<ResolvedKeybindingRule>,
-) -> Vec<ResolvedKeybindingRule> {
+pub fn merge_with_default_keybindings(custom: Vec<ResolvedKeybinding>) -> Vec<ResolvedKeybinding> {
     if custom.is_empty() {
         return DEFAULT_RESOLVED_KEYBINDINGS.clone();
     }
@@ -435,7 +467,7 @@ pub fn merge_with_default_keybindings(
         .iter()
         .map(|binding| binding.command.as_str())
         .collect();
-    let mut merged: Vec<ResolvedKeybindingRule> = DEFAULT_RESOLVED_KEYBINDINGS
+    let mut merged: Vec<ResolvedKeybinding> = DEFAULT_RESOLVED_KEYBINDINGS
         .iter()
         .filter(|binding| !overridden.contains(binding.command.as_str()))
         .cloned()
@@ -444,7 +476,7 @@ pub fn merge_with_default_keybindings(
     keep_last_max(merged)
 }
 
-fn keep_last_max(mut rules: Vec<ResolvedKeybindingRule>) -> Vec<ResolvedKeybindingRule> {
+fn keep_last_max(mut rules: Vec<ResolvedKeybinding>) -> Vec<ResolvedKeybinding> {
     if rules.len() > MAX_KEYBINDINGS_COUNT {
         rules.drain(..rules.len() - MAX_KEYBINDINGS_COUNT);
     }
@@ -455,7 +487,7 @@ fn keep_last_max(mut rules: Vec<ResolvedKeybindingRule>) -> Vec<ResolvedKeybindi
 mod tests {
     use super::*;
 
-    fn shortcut(key: &str) -> Option<KeybindingShortcut> {
+    fn shortcut(key: &str) -> Option<ParsedShortcut> {
         parse_keybinding_shortcut(key)
     }
 
@@ -466,9 +498,7 @@ mod tests {
         assert!(parsed.meta_key && parsed.ctrl_key && parsed.alt_key);
         assert!(parsed.shift_key && parsed.mod_key);
         assert_eq!(shortcut("esc").unwrap().key.as_str(), "escape");
-        // Deviation: upstream maps `space` to a " " key, which `KeybindingValue`
-        // (trimmed, min length 1) cannot hold. Such rules are dropped.
-        assert!(shortcut("mod+space").is_none());
+        assert_eq!(shortcut("mod+space").unwrap().key.as_str(), " ");
     }
 
     #[test]
@@ -521,6 +551,18 @@ mod tests {
             ")".repeat(MAX_WHEN_EXPRESSION_DEPTH + 2)
         );
         assert!(parse_keybinding_when_expression(&deep).is_none());
+    }
+
+    #[test]
+    fn space_compiles_to_the_space_key_like_upstream() {
+        let rule = KeybindingRule {
+            key: KeybindingValue::new("mod+space").unwrap(),
+            command: KeybindingCommand::new("chat.new").unwrap(),
+            when: None,
+        };
+        let compiled = compile_resolved_keybinding_rule(&rule).unwrap();
+        assert_eq!(compiled.shortcut.key.as_str(), " ");
+        assert!(compiled.shortcut.mod_key);
     }
 
     #[test]

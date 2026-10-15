@@ -196,6 +196,7 @@ fn migrate_in_transaction(
 
 /// Re-executes one migration's body without touching the ledger.
 /// Upstream tests call the migration effect again after the id is already recorded.
+#[cfg(test)]
 pub(crate) fn rerun_migration_body(conn: &Connection, id: i64) -> Result<(), PersistenceError> {
     let migration = MIGRATIONS
         .iter()
@@ -306,6 +307,7 @@ fn sql_statements(sql: &str) -> Vec<&str> {
 }
 
 fn add_column_target(statement: &str) -> Option<(&str, &str)> {
+    let statement = strip_leading_sql_comments(statement);
     let parts: Vec<&str> = statement.split_whitespace().collect();
     if parts.len() >= 6
         && parts[0].eq_ignore_ascii_case("alter")
@@ -339,6 +341,20 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, P
         }
     }
     Ok(false)
+}
+
+fn strip_leading_sql_comments(sql: &str) -> &str {
+    let mut rest = sql;
+    loop {
+        let trimmed = rest.trim_start();
+        let Some(after) = trimmed.strip_prefix("--") else {
+            return trimmed;
+        };
+        let Some(newline) = after.find('\n') else {
+            return "";
+        };
+        rest = &after[newline + 1..];
+    }
 }
 
 fn is_ident(value: &str) -> bool {

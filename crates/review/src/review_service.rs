@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use turin_contracts::base_schemas::UtcDateTime;
+use turin_contracts::base_schemas::{TrimmedNonEmptyString, UtcDateTime};
 use turin_contracts::git::GitCommandError;
 use turin_contracts::review::{
     ReviewDiffFileContentsInput, ReviewDiffFileContentsResult, ReviewDiffPreviewError,
@@ -107,6 +107,11 @@ impl ReviewService {
         self.assert_workspace_bound_cwd("ReviewService.getDiffPreview", input.cwd.as_str())
             .await
             .map_err(ReviewDiffPreviewError::Vcs)?;
+        assert_base_ref_is_not_an_option(
+            "ReviewService.getDiffPreview",
+            input.cwd.as_str(),
+            input.base_ref.as_ref(),
+        )?;
 
         let Some(kind) = self
             .vcs
@@ -143,6 +148,11 @@ impl ReviewService {
         self.assert_workspace_bound_cwd("ReviewService.getDiffFileContents", input.cwd.as_str())
             .await
             .map_err(ReviewDiffPreviewError::Vcs)?;
+        assert_base_ref_is_not_an_option(
+            "ReviewService.getDiffFileContents",
+            input.cwd.as_str(),
+            input.base_ref.as_ref(),
+        )?;
 
         let kind = self
             .vcs
@@ -225,6 +235,30 @@ impl ReviewService {
     }
 }
 
+/// The git driver passes `base_ref` to git unescaped, and git reads a leading `-` as an option:
+/// `--output=<path>` makes `git show` write a file at an arbitrary path. No valid ref starts with
+/// `-`, so it is rejected before any VCS command runs. This is a deviation from upstream, which
+/// passes the ref through as is.
+fn assert_base_ref_is_not_an_option(
+    operation: &'static str,
+    cwd: &str,
+    base_ref: Option<&TrimmedNonEmptyString>,
+) -> Result<(), ReviewDiffPreviewError> {
+    match base_ref {
+        Some(base_ref) if base_ref.as_str().starts_with('-') => Err(
+            ReviewDiffPreviewError::Vcs(VcsError::RepositoryDetection(
+                VcsRepositoryDetectionError::VcsRepositoryDetectionError {
+                    operation: operation.to_owned(),
+                    cwd: cwd.to_owned(),
+                    detail: "Review base ref must not start with '-'.".to_owned(),
+                    cause: None,
+                },
+            )),
+        ),
+        _ => Ok(()),
+    }
+}
+
 /// `path.resolve` followed by `fs.realPath`. A path that does not exist yet keeps its resolved
 /// form; any other failure (such as an interior NUL byte) is reported, not ignored.
 fn canonicalize_path(value: &Path) -> Result<PathBuf, VcsError> {
@@ -285,7 +319,6 @@ mod tests {
     use std::sync::Mutex;
 
     use tempfile::TempDir;
-    use turin_contracts::base_schemas::TrimmedNonEmptyString;
     use turin_contracts::review::{ReviewDiffFileChangeType, ReviewDiffPreviewSourceKind};
 
     use super::*;
@@ -624,6 +657,55 @@ mod tests {
         assert_eq!(cwd, invalid_cwd);
         assert!(detail.contains("Failed to resolve a path"));
         assert!(cause.is_some_and(|cause| cause.is_string()));
+        assert!(vcs.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_option_like_base_refs_before_any_vcs_command() {
+        let fixture = fixture();
+        let vcs = FakeVcs::new(Some(VcsDriverKind::Git));
+        let workspace_cwd = fixture.workspace.path().to_str().unwrap();
+
+        let mut preview = preview_input(workspace_cwd);
+        preview.base_ref = Some(TrimmedNonEmptyString::new("--output=written").unwrap());
+        let error = service(
+            &fixture,
+            vcs.clone(),
+            WorktreesSettings::default(),
+            Ok(vec![]),
+        )
+        .get_diff_preview(&preview)
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            ReviewDiffPreviewError::Vcs(VcsError::RepositoryDetection(
+                VcsRepositoryDetectionError::VcsRepositoryDetectionError {
+                    operation: "ReviewService.getDiffPreview".to_owned(),
+                    cwd: workspace_cwd.to_owned(),
+                    detail: "Review base ref must not start with '-'.".to_owned(),
+                    cause: None,
+                },
+            ))
+        );
+
+        let mut contents = file_contents_input(workspace_cwd);
+        contents.base_ref = Some(TrimmedNonEmptyString::new("-p").unwrap());
+        let error = service(
+            &fixture,
+            vcs.clone(),
+            WorktreesSettings::default(),
+            Ok(vec![]),
+        )
+        .get_diff_file_contents(&contents)
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ReviewDiffPreviewError::Vcs(VcsError::RepositoryDetection(
+                VcsRepositoryDetectionError::VcsRepositoryDetectionError { ref operation, .. }
+            )) if operation == "ReviewService.getDiffFileContents"
+        ));
         assert!(vcs.calls().is_empty());
     }
 

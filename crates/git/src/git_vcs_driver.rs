@@ -410,10 +410,8 @@ impl VcsDriver for GitVcsDriver {
         let common = self.resolve_git_common_dir(&input.cwd).await?;
         let index_id = uuid::Uuid::new_v4();
         let temp_index = PathBuf::from(&common).join(format!("t3-checkpoint-index-{index_id}"));
-        let outcome = self.capture_with_index(input, &temp_index).await;
-        remove_force(&temp_index);
-        remove_force(PathBuf::from(format!("{}.lock", temp_index.display())));
-        outcome
+        let _cleanup = TempIndex(temp_index.clone());
+        self.capture_with_index(input, &temp_index).await
     }
 
     async fn has_checkpoint_ref(&self, input: &VcsHasCheckpointInput) -> Result<bool, VcsError> {
@@ -1313,6 +1311,18 @@ fn remove_force(path: impl AsRef<Path>) {
     let _ = std::fs::remove_file(path);
 }
 
+/// Removes a checkpoint temp index and its `.lock` when dropped. Upstream's
+/// `cleanupTempIndex` finalizer runs on interruption too, so a capture future
+/// dropped mid-run must not leave them in `.git/`.
+struct TempIndex(PathBuf);
+
+impl Drop for TempIndex {
+    fn drop(&mut self) {
+        remove_force(&self.0);
+        remove_force(PathBuf::from(format!("{}.lock", self.0.display())));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1389,6 +1399,18 @@ mod tests {
         let paths = vec!["a".repeat(100), "b".repeat(100)];
         let chunks = chunk_paths_for_check_ignore(&paths);
         assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn dropping_the_temp_index_guard_removes_the_index_and_its_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("t3-checkpoint-index-test");
+        let lock = PathBuf::from(format!("{}.lock", index.display()));
+        std::fs::write(&index, "index").unwrap();
+        std::fs::write(&lock, "lock").unwrap();
+        drop(TempIndex(index.clone()));
+        assert!(!index.exists());
+        assert!(!lock.exists());
     }
 
     #[test]

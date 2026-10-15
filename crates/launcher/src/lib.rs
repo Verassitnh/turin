@@ -3,4 +3,5 @@
 //! macOS-only: the Linux and Windows launch branches of upstream
 //! `externalLauncher.ts` are cut (see PORTING.md Deviations).
 
+pub mod editor;
 pub mod host;

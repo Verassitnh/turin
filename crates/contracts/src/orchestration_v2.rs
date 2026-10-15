@@ -3306,7 +3306,10 @@ pub struct OrchestrationV2RawProviderEvent {
     pub message_kind: OrchestrationV2RawProviderEventMessageKind,
     pub method: Option<TrimmedNonEmptyString>,
     pub json_rpc_id: Option<OrchestrationV2JsonRpcId>,
-    /// `Schema.Unknown`: an absent key decodes (to null).
+    /// `Schema.Unknown`. Upstream requires the key (an absent key fails with
+    /// "Missing key"); Turin defaults an absent key to `null` so rows persisted
+    /// without `payload` still load (DB safety, see PORTING.md Deviations).
+    /// Re-encode writes `"payload": null` in that case.
     #[serde(default)]
     pub payload: serde_json::Value,
     pub observed_at: UtcDateTime,

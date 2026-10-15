@@ -1283,6 +1283,47 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
         Ok(())
     }
 
+    /// Forgets an idle thread and the subagent sessions it owns, as upstream
+    /// `unloadThread` does. A thread with a running turn, or a subagent still
+    /// working, stays. MCP removal is cut with MCP.
+    fn unload_thread(
+        &self,
+        provider_thread: &OrchestrationV2ProviderThread,
+    ) -> Option<BoxFuture<'_, Result<(), ProviderAdapterV2Error>>> {
+        let native = provider_thread
+            .native_thread_ref
+            .as_ref()
+            .and_then(|native| native.native_id.as_ref())
+            .map(|id| id.as_str().to_owned());
+        if let Some(native) = native {
+            let mut guard = self.inner.lock();
+            let idle = guard
+                .threads
+                .get(&native)
+                .is_some_and(|thread| thread.active.is_none());
+            let children: Vec<String> = guard
+                .children
+                .iter()
+                .filter(|(_, parent)| **parent == native)
+                .map(|(child, _)| child.clone())
+                .collect();
+            let child_busy = children.iter().any(|child| {
+                guard
+                    .threads
+                    .get(child)
+                    .is_some_and(|thread| thread.active.is_some())
+            });
+            if idle && !child_busy {
+                guard.threads.remove(&native);
+                for child in children {
+                    guard.children.remove(&child);
+                    guard.threads.remove(&child);
+                }
+            }
+        }
+        Some(Box::pin(async { Ok(()) }))
+    }
+
     fn compact_thread(
         &self,
         mut input: ProviderAdapterV2TurnInput,

@@ -779,3 +779,87 @@ async fn v1_resubscribes_with_last_event_id_after_a_transport_error() {
     assert_eq!(second.last_event_id.as_deref(), Some("41"));
     session.close().await;
 }
+
+#[tokio::test]
+async fn v2_unload_forgets_an_idle_thread_and_keeps_a_busy_one() {
+    let script = script(|request| {
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let client = V2Client::connect(&script.server.url, "pw").unwrap();
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        client,
+        None,
+    )
+    .unwrap();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session
+        .start_turn(turn(thread.clone(), "busy"))
+        .await
+        .unwrap();
+    session
+        .unload_thread(&thread)
+        .expect("v2 implements unload_thread")
+        .await
+        .unwrap();
+    assert!(
+        session
+            .has_pending_background_work()
+            .unwrap()
+            .await
+            .unwrap(),
+        "a running turn must keep its thread"
+    );
+    session.close().await;
+
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let idle = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_2").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.unload_thread(&idle).unwrap().await.unwrap();
+    assert!(
+        session
+            .start_turn(turn(idle, "after unload"))
+            .await
+            .is_err(),
+        "an unloaded thread must be gone"
+    );
+    session.close().await;
+}

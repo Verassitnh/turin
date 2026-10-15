@@ -436,6 +436,15 @@ impl ProviderSessionRuntime for OpenCodeSession {
             SessionKind::V2(session) => session.start_turn(input).await,
         }
     }
+    fn unload_thread(
+        &self,
+        provider_thread: &turin_contracts::orchestration_v2::OrchestrationV2ProviderThread,
+    ) -> Option<BoxFuture<'_, Result<(), ProviderAdapterV2Error>>> {
+        match &self.kind {
+            SessionKind::V1(session) => session.unload_thread(provider_thread),
+            SessionKind::V2(session) => session.unload_thread(provider_thread),
+        }
+    }
     fn compact_thread(
         &self,
         input: ProviderAdapterV2TurnInput,

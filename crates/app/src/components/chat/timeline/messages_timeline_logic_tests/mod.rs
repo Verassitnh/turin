@@ -40,6 +40,7 @@ mod derive_rows_messages;
 mod derive_rows_metadata;
 mod derive_rows_notices;
 mod derive_rows_runless;
+mod derive_rows_runless_turns;
 mod derive_rows_steers;
 mod derive_rows_streaming;
 mod derive_rows_subagents;

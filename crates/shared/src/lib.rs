@@ -26,6 +26,7 @@ pub mod drainable_worker;
 pub mod favicon;
 pub mod file_links;
 pub mod file_preview;
+pub mod git;
 pub mod git_patch_path;
 pub mod github_markdown_links;
 pub mod github_media;

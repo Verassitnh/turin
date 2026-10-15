@@ -23,8 +23,9 @@ Every emitted conversation frame carries a top-level `type`; most have `uuid` an
 | stdout `stream_event` | `event` Anthropic streaming event, `parent_tool_use_id`, `uuid`, `session_id` | Partial text/thinking/tool JSON when partials enabled (`sdk.d.ts:5164`). |
 | stdout `assistant` | `message:{id,model,role:"assistant",content:block[],usage,…}`, `parent_tool_use_id:string\|null`, `uuid`, `session_id` | Completed *block*, not necessarily whole turn; consecutive frames may share message id (`sdk.d.ts:3399-3410`). |
 | stdout `result` | `subtype:"success"\|error subtype`, `is_error`, `num_turns`, `usage`, `modelUsage`, `total_cost_usd`, `permission_denials`, `terminal_reason?`, `errors?`, `api_error_status?`, `session_id` | Turn terminal. Cost/model usage are cumulative across turns in one process; use latest value, do not sum (`sdk.d.ts:5410-5460`). |
-| stdout `tool_progress` | top-level progress frame | Tool progress; not a system subtype. |
+| stdout `tool_progress` | `tool_use_id`, `tool_name`, `parent_tool_use_id`, `elapsed_time_seconds` | Top-level tool progress; no system subtype. |
 | stdout `rate_limit_event` | `rate_limit_info` | Rate limit state. |
+| stdout `auth_status` | auth state payload | Authentication state; preserve open fields (`SDKMessage`, sdk.d.ts:5019). |
 | stdout `command_lifecycle` | `command_uuid`, `state` | Slash command lifecycle. |
 | stdout `system/*` | subtype-specific (`task_started`, `task_progress`, `task_notification`, `compact_boundary`, `model_refusal_fallback`, `status`, `api_retry`, etc.) | Background/subagent lifecycle; may arrive after `result` (`sdk.d.ts:5019,5567-5650`). |
 
@@ -32,7 +33,7 @@ Example lines (minimal illustrative valid shapes; real CLI adds fields):
 
 ```jsonl
 {"type":"control_request","request_id":"init-1","request":{"subtype":"initialize","sdkMcpServers":[],"supportedDialogKinds":["resume_return"]}}
-{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"commands":[],"agents":[],"output_style":"default","available_output_styles":[],"models":[],"account":{}}}}
+{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"commands":[],"agents":[],"output_style":"default","available_output_styles":[],"models":[],"account":{"email":"user@example.com","subscriptionType":"pro","tokenSource":"login","apiKeySource":"none","apiProvider":"anthropic"}}}}
 {"type":"user","message":{"role":"user","content":"Inspect this file"},"parent_tool_use_id":null,"uuid":"prompt-1"}
 {"type":"control_request","request_id":"ask-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"pwd"},"tool_use_id":"toolu_1"}}
 {"type":"control_response","response":{"subtype":"success","request_id":"ask-1","response":{"behavior":"allow","updatedInput":{"command":"pwd"},"toolUseID":"toolu_1"}}}

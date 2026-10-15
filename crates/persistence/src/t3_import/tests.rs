@@ -160,6 +160,39 @@ fn plan_refuses_a_renamed_migration() {
 }
 
 #[test]
+fn plan_accepts_a_renamed_id_below_the_v2_range_like_upstream() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = file_db(dir.path(), "statev2.sqlite", None);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE effect_sql_migrations SET name = 'SiteLocal' WHERE migration_id = 5",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let plan = T3Import::plan(&path).unwrap();
+    assert_eq!(plan.latest_id, 62);
+    assert!(plan.pending.is_empty());
+}
+
+#[test]
+fn import_accepts_a_ledger_gap_below_the_v2_range_like_upstream() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = file_db(dir.path(), "source.sqlite", None);
+    let conn = Connection::open(&src).unwrap();
+    conn.execute(
+        "DELETE FROM effect_sql_migrations WHERE migration_id = 17",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let turin = tempfile::tempdir().unwrap();
+    let report = T3Import::import_into(&src, turin.path()).unwrap();
+    assert!(report.applied.is_empty());
+    assert!(turin.path().join(TURIN_DATABASE_FILE).is_file());
+}
+
+#[test]
 fn plan_refuses_a_gap_the_migrator_would_skip() {
     let dir = tempfile::tempdir().unwrap();
     let path = file_db(dir.path(), "statev2.sqlite", None);

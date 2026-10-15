@@ -12,7 +12,8 @@ use crate::legacy_pull_request_key::backfill_projection_thread_pull_requests;
 use crate::migration_manifest::{APPLICATION_EVENT_SOURCE_MARKER, MIGRATIONS, MigrationKind};
 
 const MIGRATIONS_TABLE: &str = "effect_sql_migrations";
-const FIRST_V2_MIGRATION_ID: i64 = 55;
+/// Upstream `FIRST_V2_MIGRATION_ID`. Ids below it are never refused, only warned about.
+pub(crate) const FIRST_V2_MIGRATION_ID: i64 = 55;
 
 const ENSURE_TABLE: &str = r#"
 CREATE TABLE IF NOT EXISTS "effect_sql_migrations" (

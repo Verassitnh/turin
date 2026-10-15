@@ -1,16 +1,19 @@
 //! Ledger check before any migration runs.
 //!
-//! Upstream's migrator skips every id at or below the highest recorded id,
-//! whatever name was stored. Import refuses that skip, and also refuses a
-//! recorded id or name this build does not have. A newer T3 would otherwise
-//! look "current" while carrying schema Turin has never created.
+//! Matches upstream `assertV2MigrationsCanRun` (`Migrations.ts`): only V2 ids
+//! (55 and up) are checked. The migrator skips every id at or below the
+//! highest recorded id, so a V2 id recorded under another name, or a V2 gap
+//! below the highest recorded id, would start without V2's schema. Ids below
+//! 55 are accepted as upstream accepts them, with a warning from
+//! `run_migrations`. A V2 id this build does not have is a newer T3 and is
+//! refused, since its schema has never been created here.
 
 use std::collections::BTreeMap;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::errors::PersistenceError;
-use crate::migrations::migration_manifest;
+use crate::migrations::{FIRST_V2_MIGRATION_ID, migration_manifest};
 
 use super::T3ImportError;
 
@@ -40,7 +43,10 @@ pub(crate) fn plan(conn: &Connection) -> Result<ImportPlan, T3ImportError> {
 
     let mut unknown = Vec::new();
     let mut mismatched = Vec::new();
-    for (id, name) in &recorded {
+    for (id, name) in recorded
+        .iter()
+        .filter(|(id, _)| *id >= FIRST_V2_MIGRATION_ID)
+    {
         match by_id.get(id) {
             None => unknown.push(format!("{id}_{name}")),
             Some(expected) if *expected != name => {
@@ -75,7 +81,7 @@ pub(crate) fn plan(conn: &Connection) -> Result<ImportPlan, T3ImportError> {
         .collect();
     let mut skipped = Vec::new();
     for (id, name) in &manifest {
-        if *id > latest_id {
+        if *id < FIRST_V2_MIGRATION_ID || *id > latest_id {
             continue;
         }
         match recorded_ids.get(id) {

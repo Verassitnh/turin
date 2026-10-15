@@ -11,9 +11,11 @@
 //! 1. The user points at a T3 v2 database (`~/.t3/userdata/statev2.sqlite`).
 //! 2. [`T3Import::import_into`] copies it with the SQLite online backup API
 //!    (`SQLITE_OPEN_READ_ONLY`, busy timeout). Uncommitted rows stay behind.
-//! 3. The copy's `effect_sql_migrations` ledger is checked. A recorded id or
-//!    name this build does not have is refused. A gap that the migrator would
-//!    skip is refused the same way `assertV2MigrationsCanRun` refuses.
+//! 3. The copy's `effect_sql_migrations` ledger is checked. A V2 id (55 and
+//!    up) this build does not have, or recorded under another name, is refused.
+//!    A V2 gap that the migrator would skip is refused the same way
+//!    `assertV2MigrationsCanRun` refuses. Earlier ids are accepted, as upstream
+//!    accepts them.
 //! 4. [`crate::run_migrations`] applies only Turin's pending migrations.
 //! 5. The copy is kept only when its normalized `sqlite_master` matches a
 //!    fresh Turin database, pre-existing row counts are unchanged, and every

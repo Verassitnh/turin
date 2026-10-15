@@ -51,7 +51,9 @@ pub fn expand_home_path(value: &str, home: &str) -> String {
         .strip_prefix("~/")
         .or_else(|| value.strip_prefix("~\\"))
     {
-        return normalize_lexical(&Path::new(home).join(rest))
+        // Node's `path.join(home, rest)` concatenates, so a `rest` that looks absolute (`~//etc`)
+        // stays under `home`. `Path::join` would replace `home` with `/etc` instead.
+        return normalize_lexical(Path::new(&format!("{home}/{rest}")))
             .to_string_lossy()
             .into_owned();
     }
@@ -147,6 +149,15 @@ mod tests {
             None
         );
         assert_eq!(resolve_worktrees_directory("~", default_dir, "/"), None);
+    }
+
+    #[test]
+    fn home_suffix_with_leading_separators_stays_under_home() {
+        assert_eq!(expand_home_path("~//etc", "/home/u"), "/home/u/etc");
+        assert_eq!(
+            resolve_worktrees_directory("~//etc", Path::new("/base/worktrees"), "/home/u"),
+            Some(PathBuf::from("/home/u/etc"))
+        );
     }
 
     #[test]

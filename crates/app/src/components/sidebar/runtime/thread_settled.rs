@@ -7,7 +7,9 @@
 // not ported yet (T14 reducers, the chat header menu, settings) use the rest.
 #![allow(dead_code)]
 
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Timelike};
+use chrono::{
+    DateTime, Datelike, Duration, Local, MappedLocalTime, NaiveDate, NaiveTime, TimeZone, Timelike,
+};
 
 use super::models::{EnvironmentThreadShell, RunStatus};
 use crate::timestamp_format::{
@@ -178,23 +180,34 @@ pub struct SnoozePreset {
 const EVENING_HOUR: u32 = 18;
 const MORNING_HOUR: u32 = 9;
 
+/// The instant a local time means when it is ambiguous (a DST fall-back fold):
+/// the earlier one, which is what `new Date("YYYY-MM-DDTHH:MM")` and
+/// `setHours` pick. Chrono's `earliest()`/`latest()` are not usable here:
+/// for `Local` it orders the fold by the tz database's local-time-type list,
+/// so `latest()` is the pre-transition instant on America/New_York.
+fn earlier_local_instant<Tz: TimeZone>(
+    mapped: MappedLocalTime<DateTime<Tz>>,
+) -> Option<DateTime<Tz>> {
+    match mapped {
+        MappedLocalTime::Single(instant) => Some(instant),
+        MappedLocalTime::Ambiguous(a, b) => Some(if a <= b { a } else { b }),
+        MappedLocalTime::None => None,
+    }
+}
+
 fn snooze_at_hour<Tz: TimeZone>(base: &DateTime<Tz>, hour: u32) -> DateTime<Tz> {
     let date = base.date_naive();
     let naive = date.and_time(NaiveTime::from_hms_opt(hour, 0, 0).expect("valid hour"));
-    // `setHours` on a skipped local hour moves forward; `earliest` matches
-    // the common case and falls back to the base instant.
-    base.timezone()
-        .from_local_datetime(&naive)
-        .earliest()
+    // `setHours` on a skipped local hour moves forward; the base instant is
+    // the fallback here.
+    earlier_local_instant(base.timezone().from_local_datetime(&naive))
         .unwrap_or_else(|| base.clone())
 }
 
 /// Calendar-day advance (DST-safe), as `setDate(getDate() + days)`.
 fn add_snooze_days<Tz: TimeZone>(base: &DateTime<Tz>, days: i64) -> DateTime<Tz> {
     let naive = base.naive_local() + Duration::days(days);
-    base.timezone()
-        .from_local_datetime(&naive)
-        .earliest()
+    earlier_local_instant(base.timezone().from_local_datetime(&naive))
         .unwrap_or_else(|| base.clone() + Duration::days(days))
 }
 
@@ -355,10 +368,12 @@ pub fn resolve_custom_snooze<Tz: TimeZone>(
             }
             let date_value = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
             let time_value = NaiveTime::parse_from_str(time, "%H:%M").ok()?;
-            let local = now
-                .timezone()
-                .from_local_datetime(&date_value.and_time(time_value))
-                .single()?;
+            // A fall-back fold is accepted at its earlier instant, as upstream
+            // does. A DST gap has no instant and is rejected here.
+            let local = earlier_local_instant(
+                now.timezone()
+                    .from_local_datetime(&date_value.and_time(time_value)),
+            )?;
             if local_snooze_date(&local) != *date || local_snooze_time(&local) != *time {
                 return None;
             }
@@ -389,6 +404,7 @@ mod tests {
     use super::super::models::fixtures::{runtime, shell};
     use super::super::models::{PendingSubagentRequest, ThreadRunSummary};
     use super::*;
+    use chrono::{FixedOffset, NaiveDateTime};
 
     const NOW: &str = "2026-04-10T12:00:00.000Z";
     const SNOOZED_AT: &str = "2026-04-10T09:00:00.000Z";
@@ -918,6 +934,154 @@ mod tests {
                 "{amount}"
             );
         }
+    }
+
+    /// America/New_York across the 2026 DST changes, fixed offsets only:
+    /// spring forward Sun 2026-03-08 02:00 EST → 03:00 EDT (07:00Z), fall
+    /// back Sun 2026-11-01 02:00 EDT → 01:00 EST (06:00Z). Local times in
+    /// 01:00–02:00 on fall-back day are ambiguous; 02:00–03:00 on spring-
+    /// forward day do not exist.
+    #[derive(Clone, Copy, Debug)]
+    struct NewYork2026;
+
+    impl NewYork2026 {
+        fn edt() -> FixedOffset {
+            FixedOffset::west_opt(4 * 3600).unwrap()
+        }
+        fn est() -> FixedOffset {
+            FixedOffset::west_opt(5 * 3600).unwrap()
+        }
+        fn spring_utc() -> NaiveDateTime {
+            NaiveDate::from_ymd_opt(2026, 3, 8)
+                .unwrap()
+                .and_hms_opt(7, 0, 0)
+                .unwrap()
+        }
+        fn fall_utc() -> NaiveDateTime {
+            NaiveDate::from_ymd_opt(2026, 11, 1)
+                .unwrap()
+                .and_hms_opt(6, 0, 0)
+                .unwrap()
+        }
+    }
+
+    impl TimeZone for NewYork2026 {
+        type Offset = FixedOffset;
+
+        fn from_offset(_: &FixedOffset) -> Self {
+            NewYork2026
+        }
+
+        fn offset_from_local_date(&self, local: &NaiveDate) -> MappedLocalTime<FixedOffset> {
+            self.offset_from_local_datetime(&local.and_time(NaiveTime::MIN))
+        }
+
+        fn offset_from_local_datetime(
+            &self,
+            local: &NaiveDateTime,
+        ) -> MappedLocalTime<FixedOffset> {
+            let date = |m, d| NaiveDate::from_ymd_opt(2026, m, d).unwrap();
+            let fold_start = date(11, 1).and_hms_opt(1, 0, 0).unwrap();
+            let fold_end = date(11, 1).and_hms_opt(2, 0, 0).unwrap();
+            let gap_start = date(3, 8).and_hms_opt(2, 0, 0).unwrap();
+            let gap_end = date(3, 8).and_hms_opt(3, 0, 0).unwrap();
+            if *local < gap_start {
+                MappedLocalTime::Single(Self::est())
+            } else if *local < gap_end {
+                MappedLocalTime::None
+            } else if *local < fold_start {
+                MappedLocalTime::Single(Self::edt())
+            } else if *local < fold_end {
+                // Listed later-instant first, as chrono's `Local` lists the
+                // fold, so nothing that relies on `earliest()` passes by accident.
+                MappedLocalTime::Ambiguous(Self::est(), Self::edt())
+            } else {
+                MappedLocalTime::Single(Self::est())
+            }
+        }
+
+        fn offset_from_utc_date(&self, utc: &NaiveDate) -> FixedOffset {
+            self.offset_from_utc_datetime(&utc.and_time(NaiveTime::MIN))
+        }
+
+        fn offset_from_utc_datetime(&self, utc: &NaiveDateTime) -> FixedOffset {
+            if *utc < Self::spring_utc() || *utc >= Self::fall_utc() {
+                Self::est()
+            } else {
+                Self::edt()
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_an_ambiguous_fall_back_time_at_its_earlier_instant() {
+        // 2026-10-31 12:00 EDT, a day before the fold.
+        let now = NewYork2026.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2026, 10, 31)
+                .unwrap()
+                .and_hms_opt(16, 0, 0)
+                .unwrap(),
+        );
+        // 01:30 happens twice: EDT (05:30Z) then EST (06:30Z). The earlier is
+        // the one `new Date("2026-11-01T01:30")` picks.
+        assert_eq!(
+            resolve_custom_snooze(
+                &CustomSnoozeInput::Date {
+                    date: "2026-11-01".into(),
+                    time: "01:30".into()
+                },
+                &now
+            ),
+            Some("2026-11-01T05:30:00.000Z".into())
+        );
+    }
+
+    #[test]
+    fn rejects_a_local_time_skipped_by_spring_forward() {
+        let now = NewYork2026.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2026, 3, 7)
+                .unwrap()
+                .and_hms_opt(17, 0, 0)
+                .unwrap(),
+        );
+        assert_eq!(
+            resolve_custom_snooze(
+                &CustomSnoozeInput::Date {
+                    date: "2026-03-08".into(),
+                    time: "02:30".into()
+                },
+                &now
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn earlier_local_instant_takes_the_smaller_instant_whatever_the_order() {
+        let early = NewYork2026.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2026, 11, 1)
+                .unwrap()
+                .and_hms_opt(5, 30, 0)
+                .unwrap(),
+        );
+        let late = NewYork2026.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2026, 11, 1)
+                .unwrap()
+                .and_hms_opt(6, 30, 0)
+                .unwrap(),
+        );
+        assert_eq!(
+            earlier_local_instant(MappedLocalTime::Ambiguous(late.clone(), early.clone())),
+            Some(early.clone())
+        );
+        assert_eq!(
+            earlier_local_instant(MappedLocalTime::Ambiguous(early.clone(), late)),
+            Some(early)
+        );
+        assert_eq!(
+            earlier_local_instant::<NewYork2026>(MappedLocalTime::None),
+            None
+        );
     }
 
     #[test]

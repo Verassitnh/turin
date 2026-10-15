@@ -1098,6 +1098,10 @@ mod tests {
             resolve_quick_action(Some(&git_status), false, false, true),
             hint("Push", true, "No local commits to push.")
         );
+        assert_eq!(
+            build_menu_items(Some(&git_status), false, true),
+            vec![commit_item(true), push_item(true), pr_item(true)]
+        );
     }
 
     #[test]

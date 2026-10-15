@@ -32,6 +32,8 @@ pub struct PullRequestPanelHost {
     store: Entity<PullRequestStore>,
     surfaces: Vec<OpenSurface>,
     active: usize,
+    /// A stack layer chosen inside a panel: opened on the next render, which has the window.
+    pending_open: Option<(EnvironmentId, PullRequestRef)>,
 }
 
 impl PullRequestPanelHost {
@@ -41,6 +43,7 @@ impl PullRequestPanelHost {
             store,
             surfaces: Vec::new(),
             active: 0,
+            pending_open: None,
         }
     }
 
@@ -59,8 +62,26 @@ impl PullRequestPanelHost {
             None => {
                 let store = self.store.clone();
                 let panel_reference = reference.clone();
+                let panel_environment = environment_id.clone();
                 let panel = cx.new(|cx| {
-                    PullRequestDetailPanel::new(store, environment_id, panel_reference, window, cx)
+                    PullRequestDetailPanel::new(store, panel_environment, panel_reference, window, cx)
+                });
+                // A stack layer chosen in the panel opens as another tab of this host.
+                let host = cx.entity().downgrade();
+                let select_environment = environment_id.clone();
+                panel.update(cx, |panel, cx| {
+                    panel.set_select_pull_request(
+                        std::rc::Rc::new(move |reference, cx| {
+                            let reference = reference.clone();
+                            let environment_id = select_environment.clone();
+                            host.update(cx, |host, cx| {
+                                host.pending_open = Some((environment_id, reference));
+                                cx.notify();
+                            })
+                            .ok();
+                        }),
+                        cx,
+                    )
                 });
                 self.surfaces.push(OpenSurface {
                     key,
@@ -88,6 +109,9 @@ impl PullRequestPanelHost {
 
 impl Render for PullRequestPanelHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((environment_id, reference)) = self.pending_open.take() {
+            self.open(environment_id, reference, None, window, cx);
+        }
         let theme = cx.app_theme().clone();
         let tabs: Vec<_> = self
             .surfaces

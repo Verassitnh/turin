@@ -46,3 +46,4 @@ pub mod time;
 pub fn local_environment_id() -> contracts::EnvironmentId {
     contracts::EnvironmentId::new("local").expect("static id is non-blank")
 }
+pub mod operations;

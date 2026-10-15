@@ -78,6 +78,37 @@ pub fn normalize_project_path_for_comparison(value: &str) -> String {
     normalized
 }
 
+/// Folder name for a project started from just a name ("Pinball Stats" becomes
+/// "pinball-stats"). The server uses it for `projects.createNew`, and clients
+/// use it to show the path before the server makes it.
+pub fn new_project_folder_name(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    static NON_ALNUM: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"[^a-z0-9]+").expect("static regex"));
+    static WINDOWS_RESERVED: LazyLock<Regex> = LazyLock::new(|| {
+        // Windows refuses these as file names, with or without an extension.
+        Regex::new(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])$").expect("static regex")
+    });
+    // NFKD, then drop combining marks (U+0300..U+036F), like `.replace(/[̀-ͯ]/g, "")`.
+    let stripped: String = name
+        .nfkd()
+        .filter(|c| !('\u{300}'..='\u{36f}').contains(c))
+        .collect::<String>()
+        .to_lowercase();
+    let dashed = NON_ALNUM.replace_all(&stripped, "-");
+    let leading_trimmed = dashed.trim_start_matches('-');
+    let sliced: String = leading_trimmed.chars().take(64).collect();
+    let slug = sliced.trim_end_matches('-').to_owned();
+    if slug.is_empty() {
+        return "project".to_owned();
+    }
+    if WINDOWS_RESERVED.is_match(&slug) {
+        format!("{slug}-project")
+    } else {
+        slug
+    }
+}
+
 static SLASH_PREFIXED_WINDOWS_DRIVE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^/[A-Za-z]:[\\/]").expect("static regex"));
 
@@ -151,6 +182,15 @@ pub fn resolve_workspace_file_path(path: &str, workspace_root: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derives_project_folder_names() {
+        assert_eq!(new_project_folder_name("Pinball Stats"), "pinball-stats");
+        assert_eq!(new_project_folder_name("  Crème brûlée!! "), "creme-brulee");
+        assert_eq!(new_project_folder_name("***"), "project");
+        assert_eq!(new_project_folder_name("con"), "con-project");
+        assert_eq!(new_project_folder_name(&"a".repeat(80)), "a".repeat(64));
+    }
 
     #[test]
     fn basename_ignores_trailing_separators() {

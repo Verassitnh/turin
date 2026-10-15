@@ -6,6 +6,7 @@ pub mod git_manager;
 pub mod git_patch_path;
 pub mod git_vcs_driver;
 pub mod git_vcs_driver_core;
+pub mod git_workflow_service;
 pub mod link_created_pull_request;
 pub mod process;
 pub mod remote_refs;

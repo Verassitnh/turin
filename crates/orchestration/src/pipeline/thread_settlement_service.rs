@@ -1089,3 +1089,5 @@ fn visible_thread_pull_requests_is_empty(thread: &ProjectionSettlementCandidate)
 
 #[cfg(test)]
 mod pure_tests;
+#[cfg(test)]
+mod service_tests;

@@ -16,13 +16,13 @@ use turin_contracts::{ProjectId, RunId, ThreadId, TrimmedNonEmptyString};
 
 const DAY: i64 = DAY_MS;
 // `Date.parse("2026-06-10T12:00:00.000Z")`
-const NOW_MS: i64 = 1_781_092_800_000;
+pub(super) const NOW_MS: i64 = 1_781_092_800_000;
 
 fn defaults() -> ServerSettings {
     serde_json::from_value(json!({})).unwrap()
 }
 
-fn at(offset_ms: i64) -> UtcDateTime {
+pub(super) fn at(offset_ms: i64) -> UtcDateTime {
     utc_from_millis(NOW_MS + offset_ms)
 }
 

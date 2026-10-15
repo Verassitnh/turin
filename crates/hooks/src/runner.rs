@@ -10,6 +10,7 @@
 //! aborted, so grandchildren (background jobs, dev servers) cannot survive.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,10 @@ pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 pub const TRUNCATED_MARKER: &str = "\n...[turin: output truncated]";
 /// Coalescing window for config-file change events before a hot reload.
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(200);
+/// How long to keep draining stdout/stderr after the shell has exited. A
+/// background job that inherited the pipes holds them open past that point;
+/// once the grace expires the run returns and the leftover group is killed.
+const DRAIN_GRACE: Duration = Duration::from_millis(250);
 /// Capacity of the results broadcast channel. Results are informational; a
 /// lagging consumer drops old results rather than blocking hook execution.
 const RESULTS_CHANNEL_CAPACITY: usize = 1024;
@@ -204,6 +209,7 @@ pub async fn dispatch(
                 .collect(),
             stdin: serde_json::to_string(&hook_stdin_json(&event, context, &cwd))
                 .expect("stdin envelope is always valid JSON"),
+            drain_grace: runner.drain_grace(),
         };
         if should_block {
             let result = run_hook(&plan).await;
@@ -230,6 +236,15 @@ struct HookRunPlan {
     cwd: PathBuf,
     env: Vec<(String, String)>,
     stdin: String,
+    drain_grace: Duration,
+}
+
+/// Environment keys the app process carries under the `TURIN_` prefix.
+fn inherited_turin_keys() -> Vec<std::ffi::OsString> {
+    std::env::vars_os()
+        .map(|(key, _)| key)
+        .filter(|key| key.as_encoded_bytes().starts_with(b"TURIN_"))
+        .collect()
 }
 
 async fn run_hook(plan: &HookRunPlan) -> HookRunResult {
@@ -256,7 +271,14 @@ async fn run_hook(plan: &HookRunPlan) -> HookRunResult {
     let mut command = Command::new("/bin/sh");
     command.arg("-c").arg(&plan.spec.command);
     command.current_dir(&plan.cwd);
-    // Login-shell-equivalent environment: the full parent env plus TURIN_*.
+    // The hook inherits the app's environment. PATH hydration from the login
+    // shell happens once at app startup (upstream `fixPath`), not per hook.
+    // Inherited TURIN_* keys are scrubbed first so stale values (a thread id
+    // from a hook that launched Turin) and future app secrets never leak;
+    // fresh values for this event are set right after.
+    for key in inherited_turin_keys() {
+        command.env_remove(key);
+    }
     for (key, value) in &plan.env {
         command.env(key, value);
     }
@@ -291,7 +313,7 @@ async fn run_hook(plan: &HookRunPlan) -> HookRunResult {
 
     let mut guard = ChildGroupGuard::new(child);
     let timeout = Duration::from_secs(plan.spec.timeout_secs);
-    match tokio::time::timeout(timeout, guard.run(plan.stdin.as_bytes())).await {
+    match tokio::time::timeout(timeout, guard.run(plan.stdin.as_bytes(), plan.drain_grace)).await {
         Ok(capture) => {
             guard.finished();
             match capture {
@@ -337,26 +359,60 @@ struct RunCapture {
     error: Option<String>,
 }
 
-/// Reads up to `max_bytes`, then keeps draining and discarding so the child
-/// can never block on a full pipe. Mirrors upstream's truncate mode.
-async fn read_bounded<R: AsyncRead + Unpin>(reader: Option<R>, max_bytes: usize) -> StreamCapture {
+/// Bytes captured so far from one stream. Lives outside the reader future so
+/// a reader that is cut off (shell exited, pipe still held open) still leaves
+/// everything it read behind.
+#[derive(Default)]
+struct StreamBuf {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl StreamBuf {
+    fn into_capture(mut self) -> StreamCapture {
+        if self.truncated {
+            self.bytes.extend_from_slice(TRUNCATED_MARKER.as_bytes());
+        }
+        match String::from_utf8(self.bytes) {
+            Ok(text) => StreamCapture {
+                text,
+                truncated: self.truncated,
+                invalid_utf8: false,
+            },
+            Err(err) => StreamCapture {
+                text: String::from_utf8_lossy(err.as_bytes()).into_owned(),
+                truncated: self.truncated,
+                invalid_utf8: true,
+            },
+        }
+    }
+}
+
+/// Reads until EOF into `buf`, keeping at most `max_bytes`; the rest is
+/// drained and discarded so the child can never block on a full pipe. Mirrors
+/// upstream's truncate mode. Cancel-safe: dropping the future loses nothing
+/// already appended to `buf`.
+async fn fill_bounded<R: AsyncRead + Unpin>(
+    reader: Option<R>,
+    buf: &mut StreamBuf,
+    max_bytes: usize,
+) {
     let Some(mut reader) = reader else {
-        return StreamCapture::default();
+        return;
     };
-    let mut bytes = Vec::new();
-    let mut truncated = false;
-    let mut chunk = [0u8; 16 * 1024];
+    // Heap buffer: keeps the future (and every JoinSet task cell) small.
+    let mut chunk = vec![0u8; 16 * 1024];
     loop {
         match reader.read(&mut chunk).await {
             Ok(0) => break,
             Ok(n) => {
-                if !truncated {
-                    if bytes.len() + n > max_bytes {
-                        let keep = max_bytes.saturating_sub(bytes.len());
-                        bytes.extend_from_slice(&chunk[..keep]);
-                        truncated = true;
+                if !buf.truncated {
+                    if buf.bytes.len() + n > max_bytes {
+                        let keep = max_bytes.saturating_sub(buf.bytes.len());
+                        buf.bytes.extend_from_slice(&chunk[..keep]);
+                        buf.truncated = true;
                     } else {
-                        bytes.extend_from_slice(&chunk[..n]);
+                        buf.bytes.extend_from_slice(&chunk[..n]);
                     }
                 }
             }
@@ -364,45 +420,42 @@ async fn read_bounded<R: AsyncRead + Unpin>(reader: Option<R>, max_bytes: usize)
             Err(_) => break,
         }
     }
-    if truncated {
-        bytes.extend_from_slice(TRUNCATED_MARKER.as_bytes());
-    }
-    match String::from_utf8(bytes) {
-        Ok(text) => StreamCapture {
-            text,
-            truncated,
-            invalid_utf8: false,
-        },
-        Err(err) => StreamCapture {
-            text: String::from_utf8_lossy(err.as_bytes()).into_owned(),
-            truncated,
-            invalid_utf8: true,
-        },
-    }
 }
 
 /// Owns the hook child for its whole run. Dropping it before the run
 /// finishes (timeout path handled explicitly; task abort path via Drop)
 /// kills the child's whole process group, so grandchildren cannot survive.
+///
+/// The pgid is recorded at spawn: `Child::id()` turns `None` once the shell
+/// has been reaped, but the group lives on while any member does, and
+/// `kill(-pgid)` still reaches it.
 struct ChildGroupGuard {
     child: Option<Child>,
+    /// The shell's pid, which is its process group id (`process_group(0)`).
+    pgid: Option<u32>,
     finished: bool,
 }
 
 impl ChildGroupGuard {
     fn new(child: Child) -> Self {
         Self {
+            pgid: child.id(),
             child: Some(child),
             finished: false,
         }
     }
 
-    fn id(&self) -> Option<u32> {
-        self.child.as_ref().and_then(Child::id)
-    }
-
     /// Writes stdin, drains both output streams, and waits for exit.
-    async fn run(&mut self, stdin_bytes: &[u8]) -> Result<RunCapture, String> {
+    ///
+    /// Returns once the shell has exited plus at most `drain_grace` of extra
+    /// draining, not when the pipes hit EOF: a background job that inherited
+    /// stdout would otherwise hold the run until the timeout. If the pipes are
+    /// still held after the grace, that leftover group is killed.
+    async fn run(
+        &mut self,
+        stdin_bytes: &[u8],
+        drain_grace: Duration,
+    ) -> Result<RunCapture, String> {
         let child = self
             .child
             .as_mut()
@@ -410,18 +463,44 @@ impl ChildGroupGuard {
         let stdin_handle = child.stdin.take();
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
-        let write = async {
-            if let Some(mut handle) = stdin_handle {
-                // A hook that never reads stdin gets EPIPE here; that is not
-                // an error (upstream only fails on spawn/read/exit).
-                let _ = handle.write_all(stdin_bytes).await;
-                let _ = handle.shutdown().await;
-            }
+        let mut stdout = StreamBuf::default();
+        let mut stderr = StreamBuf::default();
+        // Scoped so the reader futures' borrows of the buffers end here.
+        let (status, leftover_group) = {
+            let io = async {
+                let write = async {
+                    if let Some(mut handle) = stdin_handle {
+                        // A hook that never reads stdin gets EPIPE here; that is
+                        // not an error (upstream only fails on spawn/read/exit).
+                        let _ = handle.write_all(stdin_bytes).await;
+                        let _ = handle.shutdown().await;
+                    }
+                };
+                tokio::join!(
+                    write,
+                    fill_bounded(stdout_handle, &mut stdout, MAX_OUTPUT_BYTES),
+                    fill_bounded(stderr_handle, &mut stderr, MAX_OUTPUT_BYTES),
+                );
+            };
+            tokio::pin!(io);
+            let mut leftover_group = false;
+            let status = tokio::select! {
+                status = child.wait() => {
+                    // Shell is gone; give already-written output a moment to
+                    // arrive. A timeout here means something else still holds
+                    // the pipes.
+                    leftover_group = tokio::time::timeout(drain_grace, &mut io).await.is_err();
+                    status
+                }
+                () = &mut io => child.wait().await,
+            };
+            (status, leftover_group)
         };
-        let stdout = read_bounded(stdout_handle, MAX_OUTPUT_BYTES);
-        let stderr = read_bounded(stderr_handle, MAX_OUTPUT_BYTES);
-        let wait = child.wait();
-        let (_, stdout, stderr, status) = tokio::join!(write, stdout, stderr, wait);
+        if leftover_group {
+            self.kill_group();
+        }
+        let stdout = stdout.into_capture();
+        let stderr = stderr.into_capture();
         match status {
             Ok(status) => Ok(RunCapture {
                 stdout,
@@ -448,8 +527,8 @@ impl ChildGroupGuard {
     }
 
     fn kill_group(&mut self) {
-        if let Some(pid) = self.id() {
-            let _ = kill_process_group(pid);
+        if let Some(pgid) = self.pgid {
+            let _ = kill_process_group(pgid);
         }
         // Belt and braces: also kill the child directly, which is the only
         // option on platforms without process groups.
@@ -472,15 +551,16 @@ impl Drop for ChildGroupGuard {
     }
 }
 
-/// SIGKILL to `-pid`: every member of the group the child leads. The child
-/// was spawned with `process_group(0)`, so it is the group leader.
+/// SIGKILL to `-pgid`: every member of the group the child leads. The child
+/// was spawned with `process_group(0)`, so its pid is the group id, and the
+/// kernel never reuses a pgid while a member is alive.
 #[cfg(unix)]
-fn kill_process_group(pid: u32) -> bool {
-    unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) == 0 }
+fn kill_process_group(pgid: u32) -> bool {
+    unsafe { libc::kill(-(pgid as libc::pid_t), libc::SIGKILL) == 0 }
 }
 
 #[cfg(not(unix))]
-fn kill_process_group(_pid: u32) -> bool {
+fn kill_process_group(_pgid: u32) -> bool {
     false
 }
 
@@ -499,6 +579,8 @@ struct HookRunnerInner {
     results: broadcast::Sender<HookRunResult>,
     /// Dropped on shutdown to stop file watching.
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    /// Post-exit output drain, in milliseconds (see [`DRAIN_GRACE`]).
+    drain_grace_ms: AtomicU64,
 }
 
 impl HookRunner {
@@ -520,6 +602,7 @@ impl HookRunner {
             tasks: Mutex::new(Some(JoinSet::new())),
             results,
             watcher: Mutex::new(None),
+            drain_grace_ms: AtomicU64::new(DRAIN_GRACE.as_millis() as u64),
         });
         let runner = Self { inner };
         runner.start_watcher();
@@ -530,6 +613,22 @@ impl HookRunner {
     /// A lagging subscriber loses old results; it never slows hooks down.
     pub fn subscribe_results(&self) -> broadcast::Receiver<HookRunResult> {
         self.inner.results.subscribe()
+    }
+
+    #[cfg(test)]
+    fn set_drain_grace(&self, grace: Duration) {
+        self.inner
+            .drain_grace_ms
+            .store(grace.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn task_count(&self) -> usize {
+        self.inner.tasks.lock().as_ref().map_or(0, JoinSet::len)
+    }
+
+    fn drain_grace(&self) -> Duration {
+        Duration::from_millis(self.inner.drain_grace_ms.load(Ordering::Relaxed))
     }
 
     /// The current config snapshot.
@@ -580,6 +679,15 @@ impl HookRunner {
         let mut tasks = self.inner.tasks.lock();
         match tasks.as_mut() {
             Some(set) => {
+                // Reap finished runs so a long session does not accumulate
+                // one task cell per hook run, and so panics are seen.
+                while let Some(joined) = set.try_join_next() {
+                    if let Err(err) = joined
+                        && err.is_panic()
+                    {
+                        tracing::error!(%err, "hooks background task panicked");
+                    }
+                }
                 set.spawn(future);
                 true
             }
@@ -1249,5 +1357,198 @@ command = "echo $$ > out/hook.pid; sleep 30; touch out/never.txt"
             )
             .await;
         assert_eq!(summary.non_blocking_spawned, 0);
+    }
+
+    fn pid_alive(pid: libc::pid_t) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    fn read_pid(path: &Path) -> libc::pid_t {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    async fn wait_for_file(path: &Path) {
+        for _ in 0..200 {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("{} never appeared", path.display());
+    }
+
+    const SH_EXITS_BEFORE_BACKGROUND_JOB: &str = r#"
+[[hook]]
+event = "thread.created"
+command = "sleep 600 & echo $! > out/gc.pid; exit 0"
+blocking = BLOCKING
+timeout_secs = 1
+"#;
+
+    #[tokio::test]
+    async fn timeout_kills_group_after_the_shell_was_reaped() {
+        // sh exits at once but its background job keeps stdout open. With a
+        // drain grace far beyond the timeout the run is still pending when
+        // the timeout fires, so the leader is already reaped: the kill must
+        // use the pgid recorded at spawn.
+        let (_dir, project, config_path) =
+            project_with_config(&SH_EXITS_BEFORE_BACKGROUND_JOB.replace("BLOCKING", "true"));
+        let runner = runner(&config_path);
+        runner.set_drain_grace(Duration::from_secs(60));
+        let started = Instant::now();
+        let summary = runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        assert!(summary.blocking[0].timed_out);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let gc = read_pid(&project.join("out/gc.pid"));
+        assert!(
+            wait_for_pid_gone(gc),
+            "background job {gc} survived timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_kills_group_after_the_shell_was_reaped() {
+        let (_dir, project, config_path) =
+            project_with_config(&SH_EXITS_BEFORE_BACKGROUND_JOB.replace("BLOCKING", "false"));
+        let runner = runner(&config_path);
+        runner.set_drain_grace(Duration::from_secs(60));
+        runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        let gc_path = project.join("out/gc.pid");
+        wait_for_file(&gc_path).await;
+        // Let the shell exit and be reaped while the run is still draining.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let gc = read_pid(&gc_path);
+        assert!(pid_alive(gc));
+        runner.shutdown().await;
+        assert!(
+            wait_for_pid_gone(gc),
+            "background job {gc} survived shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_returns_when_the_shell_exits_and_kills_pipe_holders() {
+        let (_dir, project, config_path) =
+            project_with_config(&SH_EXITS_BEFORE_BACKGROUND_JOB.replace("BLOCKING", "true"));
+        let runner = runner(&config_path);
+        let started = Instant::now();
+        let summary = runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        let result = &summary.blocking[0];
+        // The real exit code survives and the run does not wait for the
+        // timeout; the job still holding the pipes is killed after the drain.
+        assert_eq!(result.exit_code, Some(0));
+        assert!(!result.timed_out);
+        assert!(started.elapsed() < Duration::from_millis(900));
+        let gc = read_pid(&project.join("out/gc.pid"));
+        assert!(wait_for_pid_gone(gc), "pipe-holding job {gc} survived");
+    }
+
+    #[tokio::test]
+    async fn output_detached_background_job_is_left_running() {
+        let (_dir, project, config_path) = project_with_config(
+            r#"
+[[hook]]
+event = "thread.created"
+command = "sleep 600 >/dev/null 2>&1 & echo $! > out/gc.pid"
+blocking = true
+"#,
+        );
+        let runner = runner(&config_path);
+        let summary = runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        assert_eq!(summary.blocking[0].exit_code, Some(0));
+        let gc = read_pid(&project.join("out/gc.pid"));
+        let alive = pid_alive(gc);
+        unsafe { libc::kill(gc, libc::SIGKILL) };
+        assert!(
+            alive,
+            "a job that released the pipes is a daemon, not leaked output"
+        );
+    }
+
+    #[tokio::test]
+    async fn finished_background_runs_are_reaped_from_the_task_set() {
+        let (_dir, project, config_path) =
+            project_with_config("[[hook]]\nevent = \"turn.completed\"\ncommand = \"true\"\n");
+        let runner = runner(&config_path);
+        let mut results = runner.subscribe_results();
+        let ctx = context(&project, None);
+        for _ in 0..60 {
+            runner
+                .dispatch(HookEvent::turn_completed(serde_json::json!({})), &ctx)
+                .await;
+            // Wait for the run to finish so the next spawn can reap it.
+            tokio::time::timeout(Duration::from_secs(10), results.recv())
+                .await
+                .expect("result published")
+                .unwrap();
+        }
+        // Without reaping this would be 60 runs + the watcher.
+        assert!(
+            runner.task_count() <= 4,
+            "task set grew to {}",
+            runner.task_count()
+        );
+    }
+
+    #[tokio::test]
+    async fn inherited_turin_env_is_scrubbed() {
+        let (_dir, project, config_path) = project_with_config(
+            r#"
+[[hook]]
+event = "turn.failed"
+command = "env > out/env.txt"
+blocking = false
+"#,
+        );
+        // SAFETY: test-only; the names are unique to this test.
+        unsafe {
+            std::env::set_var("TURIN_QC_SECRET", "hunter2");
+            std::env::set_var("TURIN_THREAD_ID", "stale-thread");
+        }
+        let runner = runner(&config_path);
+        let mut results = runner.subscribe_results();
+        runner
+            .dispatch(
+                HookEvent::turn_failed(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        tokio::time::timeout(Duration::from_secs(10), results.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        unsafe {
+            std::env::remove_var("TURIN_QC_SECRET");
+            std::env::remove_var("TURIN_THREAD_ID");
+        }
+        let env_text = std::fs::read_to_string(project.join("out/env.txt")).unwrap();
+        assert!(!env_text.contains("hunter2"), "{env_text}");
+        assert!(!env_text.contains("TURIN_QC_SECRET"), "{env_text}");
+        assert!(!env_text.contains("stale-thread"), "{env_text}");
+        assert!(env_text.contains("TURIN_EVENT=turn.failed"), "{env_text}");
     }
 }

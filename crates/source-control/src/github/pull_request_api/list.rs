@@ -423,17 +423,13 @@ impl GitHubPullRequestApi {
         let count_rows =
             |pages: &[ListPage]| pages.iter().map(|page| page.raw_count).sum::<usize>();
         let pages = read_graphql_pages(
-            async |after: Option<String>, pages: &[ListPage]| {
-                self.list_page(
-                    input,
-                    owner,
-                    name,
-                    query,
-                    continues,
-                    after,
-                    rows.saturating_sub(count_rows(pages)),
-                )
-                .await
+            |after: Option<String>, pages: &[ListPage]| {
+                // Counted before the request starts: the future must not borrow the pages so far.
+                let remaining = rows.saturating_sub(count_rows(pages));
+                async move {
+                    self.list_page(input, owner, name, query, continues, after, remaining)
+                        .await
+                }
             },
             ReadGraphQlPagesOptions {
                 next_cursor: &|page: &ListPage| page.end_cursor.clone(),
@@ -674,13 +670,15 @@ impl GitHubPullRequestApi {
         &self,
         input: &ListPullRequestStatsInput,
     ) -> Result<Vec<GitHubPullRequestStat>, GitHubPullRequestApiError> {
-        let chunks: Vec<&[ChangeRequestSelector]> = input
+        // Owned chunks: a stream of borrowed slices makes the future's `Send` unprovable.
+        let chunks: Vec<Vec<ChangeRequestSelector>> = input
             .change_requests
             .chunks(STAT_ALIASES_PER_REQUEST)
+            .map(<[ChangeRequestSelector]>::to_vec)
             .collect();
         let results: Vec<Vec<GitHubPullRequestStat>> = stream::iter(chunks)
-            .map(|chunk| async move {
-                let Some(document) = build_pull_request_stats_graphql_query(chunk) else {
+            .map(|chunk: Vec<ChangeRequestSelector>| async move {
+                let Some(document) = build_pull_request_stats_graphql_query(&chunk) else {
                     return Err(GitHubPullRequestApiError::from(
                         GitHubRepositorySelectorError {
                             cwd: input.cwd.clone(),

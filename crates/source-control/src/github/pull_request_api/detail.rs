@@ -59,8 +59,12 @@ impl GitHubPullRequestApi {
         allow_reserve: bool,
     ) -> Result<AllCheckContexts, GitHubPullRequestApiError> {
         let RepositorySelector { owner, name } = parse_repository_selector(&target.repository);
+        let (owner, name) = (&owner, &name);
         let pages = read_graphql_pages(
-            async |after: Option<String>, previous: &[GitHubCheckContextsPage]| {
+            |after: Option<String>, previous: &[GitHubCheckContextsPage]| {
+                // Read before the request starts: the future must not borrow the pages so far.
+                let first_head = previous.first().map(|page| page.head_sha.clone());
+                async move {
                 let page = self
                     .graphql_read(
                         GraphqlRead {
@@ -78,7 +82,7 @@ impl GitHubPullRequestApi {
                     .await?;
                 // Each page names the head it read, so a push mid-walk fails rather than mixing
                 // two revisions' checks.
-                if !previous.is_empty() && page.head_sha != previous[0].head_sha {
+                if first_head.is_some_and(|first_head| page.head_sha != first_head) {
                     return Err(Self::read_error_message(
                         &target.cwd,
                         "getPullRequestDetail",
@@ -86,6 +90,7 @@ impl GitHubPullRequestApi {
                     ));
                 }
                 Ok(page)
+                }
             },
             ReadGraphQlPagesOptions {
                 next_cursor: &|page: &GitHubCheckContextsPage| page.next_cursor.clone(),
@@ -182,8 +187,9 @@ impl GitHubPullRequestApi {
         let count_heads = |pages: &[GitHubPullRequestHeadsPage]| {
             pages.iter().map(|page| page.heads.len()).sum::<usize>()
         };
+        let (owner, name) = (&owner, &name);
         let pages = read_graphql_pages(
-            async |after: Option<String>, _: &[GitHubPullRequestHeadsPage]| {
+            |after: Option<String>, _: &[GitHubPullRequestHeadsPage]| async move {
                 self.graphql_read(
                     GraphqlRead {
                         cwd: &target.cwd,

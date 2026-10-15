@@ -50,7 +50,7 @@ impl GraphQlOperation {
 pub type GraphQlAliasKey<'a, Item> = &'a dyn Fn(&Item, usize) -> i64;
 
 /// `until` of [`ReadGraphQlPagesOptions`].
-pub type GraphQlUntil<'a, Page> = &'a dyn Fn(&[Page]) -> bool;
+pub type GraphQlUntil<'a, Page> = &'a (dyn Fn(&[Page]) -> bool + Sync);
 
 /// Input of [`aliased_graphql_document`].
 pub struct AliasedGraphQlDocumentInput<'a, Item> {
@@ -126,7 +126,7 @@ pub fn aliased_graphql_document<Item>(
 
 /// Options of [`read_graphql_pages`].
 pub struct ReadGraphQlPagesOptions<'a, Page> {
-    pub next_cursor: &'a dyn Fn(&Page) -> Option<String>,
+    pub next_cursor: &'a (dyn Fn(&Page) -> Option<String> + Sync),
     pub from: Option<String>,
     pub max_pages: Option<usize>,
     pub until: Option<GraphQlUntil<'a, Page>>,
@@ -146,10 +146,13 @@ pub struct GraphQlPages<Page> {
 ///
 /// `truncated` says pages remained when reading stopped. A cursor GitHub hands back a second time
 /// would page forever, so it stops the read as truncated too.
-pub async fn read_graphql_pages<Page, E>(
-    mut read: impl AsyncFnMut(Option<String>, &[Page]) -> Result<Page, E>,
+pub async fn read_graphql_pages<Page, E, Fut>(
+    mut read: impl FnMut(Option<String>, &[Page]) -> Fut,
     options: ReadGraphQlPagesOptions<'_, Page>,
-) -> Result<GraphQlPages<Page>, E> {
+) -> Result<GraphQlPages<Page>, E>
+where
+    Fut: Future<Output = Result<Page, E>>,
+{
     let mut pages: Vec<Page> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut after = options.from;
@@ -319,7 +322,7 @@ mod tests {
     }
 
     fn options<'a>(
-        next_cursor: &'a dyn Fn(&Option<String>) -> Option<String>,
+        next_cursor: &'a (dyn Fn(&Option<String>) -> Option<String> + Sync),
     ) -> ReadGraphQlPagesOptions<'a, Option<String>> {
         ReadGraphQlPagesOptions {
             next_cursor,
@@ -333,7 +336,7 @@ mod tests {
     async fn follows_the_cursor_until_github_has_no_more() {
         let pages = Pages::new(&[Some("a"), Some("b"), None]);
         let result = read_graphql_pages(
-            async |after, _| pages.read(after).await,
+            |after, _| pages.read(after),
             options(&|page| page.clone()),
         )
         .await
@@ -350,7 +353,7 @@ mod tests {
     async fn stops_as_truncated_at_the_page_limit_at_until_or_on_a_repeated_cursor() {
         let limited = Pages::new(&[Some("a"), Some("b"), Some("c")]);
         let at_limit = read_graphql_pages(
-            async |after, _| limited.read(after).await,
+            |after, _| limited.read(after),
             ReadGraphQlPagesOptions {
                 max_pages: Some(2),
                 ..options(&|page| page.clone())
@@ -363,7 +366,7 @@ mod tests {
 
         let enough = Pages::new(&[Some("a"), Some("b"), Some("c")]);
         let satisfied = read_graphql_pages(
-            async |after, _| enough.read(after).await,
+            |after, _| enough.read(after),
             ReadGraphQlPagesOptions {
                 until: Some(&|read| read.len() == 1),
                 ..options(&|page| page.clone())
@@ -376,7 +379,7 @@ mod tests {
 
         let stuck = Pages::new(&[Some("a"), Some("a"), Some("a")]);
         let repeated = read_graphql_pages(
-            async |after, _| stuck.read(after).await,
+            |after, _| stuck.read(after),
             ReadGraphQlPagesOptions {
                 from: Some("start".into()),
                 ..options(&|page| page.clone())
@@ -395,12 +398,14 @@ mod tests {
     async fn read_is_handed_the_pages_so_far_and_errors_propagate() {
         let mut seen_lengths = Vec::new();
         let result: Result<GraphQlPages<Option<String>>, &str> = read_graphql_pages(
-            async |after, so_far: &[Option<String>]| {
+            |after, so_far: &[Option<String>]| {
                 seen_lengths.push(so_far.len());
-                match after.as_deref() {
-                    None => Ok(Some("a".to_owned())),
-                    Some("a") => Ok(Some("b".to_owned())),
-                    Some(_) => Err("boom"),
+                async move {
+                    match after.as_deref() {
+                        None => Ok(Some("a".to_owned())),
+                        Some("a") => Ok(Some("b".to_owned())),
+                        Some(_) => Err("boom"),
+                    }
                 }
             },
             options(&|page| page.clone()),

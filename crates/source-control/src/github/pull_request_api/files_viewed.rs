@@ -46,8 +46,9 @@ impl GitHubPullRequestApi {
         target: &GitHubPullRequestTarget,
     ) -> Result<GitHubPullRequestFilesViewed, GitHubPullRequestApiError> {
         let RepositorySelector { owner, name } = parse_repository_selector(&target.repository);
+        let (owner, name) = (&owner, &name);
         let pages = read_graphql_pages(
-            async |after: Option<String>, _: &[GitHubPullRequestFilesViewedPage]| {
+            |after: Option<String>, _: &[GitHubPullRequestFilesViewedPage]| async move {
                 self.graphql_read(
                     GraphqlRead {
                         cwd: &target.cwd,

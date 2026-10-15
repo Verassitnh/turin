@@ -181,8 +181,9 @@ impl GitHubPullRequestApi {
         // ordinarily accrues. Followed so a review whose event fell past that page still finds
         // its reason.
         if let Some(from) = dismissal_cursor {
+            let (owner, name) = (&owner, &name);
             let pages = read_graphql_pages(
-                async |cursor: Option<String>, _: &[GitHubReviewDismissalsPage]| {
+                |cursor: Option<String>, _: &[GitHubReviewDismissalsPage]| async move {
                     self.graphql_read(
                         GraphqlRead {
                             cwd: &target.cwd,

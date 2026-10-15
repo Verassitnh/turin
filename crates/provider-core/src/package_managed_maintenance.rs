@@ -19,7 +19,7 @@ use turin_contracts::{UtcDateTime, provider_instance::ProviderDriverKind};
 
 use crate::{
     command_path::resolve_command_path,
-    host_process::{Platform, ProcessEnv},
+    host_process::{Platform, ProcessEnv, RedactedEnvironment},
     maintenance::{ProviderMaintenanceCapabilities, ProviderMaintenanceCommandAction},
     maintenance_resolver::{
         ProviderVersionAdvisoryInput, create_provider_version_advisory,
@@ -47,13 +47,25 @@ static MISE_INVOCATION: LazyLock<Regex> =
 
 /// What the resolver knows about the executable: `resolvedCommandPath` follows
 /// `PATH` and symlinks are resolved in `realCommandPath`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProviderMaintenanceResolutionContext {
     pub binary_path: String,
     pub resolved_command_path: String,
     pub real_command_path: String,
     pub env: ProcessEnv,
     pub platform: Platform,
+}
+
+impl std::fmt::Debug for ProviderMaintenanceResolutionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderMaintenanceResolutionContext")
+            .field("binary_path", &self.binary_path)
+            .field("resolved_command_path", &self.resolved_command_path)
+            .field("real_command_path", &self.real_command_path)
+            .field("env", &RedactedEnvironment(&self.env))
+            .field("platform", &self.platform)
+            .finish()
+    }
 }
 
 /// The provider's own updater (`claude update`, `codex update`). It runs first
@@ -1083,5 +1095,19 @@ mod tests {
             .parse()
             .unwrap();
         crate::process_group::assert_process_exits(grandchild, "grandchild").await;
+    }
+
+    #[test]
+    fn resolution_context_debug_redacts_environment_values() {
+        let context = ProviderMaintenanceResolutionContext {
+            binary_path: "/usr/local/bin/codex".into(),
+            resolved_command_path: "/usr/local/bin/codex".into(),
+            real_command_path: "/usr/local/bin/codex".into(),
+            env: ProcessEnv::from([("OPENAI_API_KEY".to_owned(), "fixture-key".to_owned())]),
+            platform: Platform::Darwin,
+        };
+        let debug = format!("{context:?}");
+        assert!(debug.contains("OPENAI_API_KEY"), "{debug}");
+        assert!(!debug.contains("fixture-key"), "{debug}");
     }
 }

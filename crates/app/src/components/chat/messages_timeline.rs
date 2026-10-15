@@ -139,16 +139,41 @@ impl MessagesTimeline {
             _observe: observe,
         };
         this.recompute(cx);
+        // `TURIN_EXPAND=folds|all` (dev/screenshots) opens every turn fold
+        // (and every tool group).
+        if let Ok(mode) = std::env::var("TURIN_EXPAND") {
+            for _ in 0..3 {
+                let mut ui = (*this.ui).clone();
+                for row in this.rows.iter() {
+                    match &row.content {
+                        MessagesTimelineRowContent::TurnFold { run_id, .. } => {
+                            ui.expanded_run_ids.insert(run_id.clone());
+                        }
+                        MessagesTimelineRowContent::WorkToggle { group_id, .. }
+                            if mode == "all" =>
+                        {
+                            ui.expanded_work_group_ids.insert(group_id.clone());
+                        }
+                        _ => {}
+                    }
+                }
+                this.ui = Arc::new(ui);
+                this.recompute(cx);
+            }
+        }
         // `initialScrollAtEnd`. `TURIN_SCROLL_ROW=n` (dev/screenshots) opens
         // at row n instead.
         match std::env::var("TURIN_SCROLL_ROW")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
         {
-            Some(row) => this.list.scroll_to(gpui_kit::ListOffset {
-                item_ix: row + 1,
-                offset_in_item: px(0.),
-            }),
+            Some(row) => {
+                this.list.set_follow_mode(FollowMode::Normal);
+                this.list.scroll_to(gpui_kit::ListOffset {
+                    item_ix: row + 1,
+                    offset_in_item: px(0.),
+                })
+            }
             None => this.list.scroll_to_end(),
         }
         this

@@ -1322,10 +1322,13 @@ pub fn work_toggle_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
         WorkLogLine {
             icon: Some(icon_box(icon, theme.icon_muted)),
             label: div().truncate().child(summary.clone()).into_any_element(),
-            trailing: vec![
-                row_timestamp(("toggle-time", cx.order), created_at, &group, false, cx),
-                chevron(*expanded, true, cx),
-            ],
+            trailing: vec![row_timestamp(
+                ("toggle-time", cx.order),
+                created_at,
+                &group,
+                false,
+                cx,
+            )],
             wrap_label: false,
         },
         move |_, _, cx| {

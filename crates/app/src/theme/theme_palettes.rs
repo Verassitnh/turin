@@ -4,6 +4,9 @@
 //! tables diff cleanly against upstream; [`super::color::parse_color`] resolves
 //! them. Generated from the TS source, keep it that way when re-syncing.
 
+// Ported in full: ported upstream palette data and id sets; the theme picker (T20) consumes the rest.
+#![allow(dead_code)]
+
 pub const BUILT_IN_THEME_IDS: [&str; 5] = ["t3-chat", "grove", "ocean", "ember", "iris"];
 
 /// The standard T3 Code palette, kept separate from the optional built-in theme library.

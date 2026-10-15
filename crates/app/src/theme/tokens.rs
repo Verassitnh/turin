@@ -6,6 +6,9 @@
 //! interface font size exactly like the web app's root `font-size` does
 //! (GPUI's rem size is the theme font size). Pixel values stay pixels.
 
+// Ported in full: the full index.css token table, ahead of its callers.
+#![allow(dead_code)]
+
 use gpui_kit::{BoxShadow, Hsla, Pixels, Rems, point, px};
 
 use super::color::hex;

@@ -8,10 +8,10 @@
 use gpui_kit::{
     App, CursorStyle, ElementId, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, px, rems, svg,
+    Window, div, rems,
 };
 
-use crate::assets::T3_WORDMARK;
+use crate::branding::APP_BASE_NAME;
 use crate::components::drag_region::{DragRegion as _, no_drag};
 use crate::components::workspace_titlebar::workspace_titlebar_content_left;
 use crate::theme::ActiveAppTheme;
@@ -26,9 +26,6 @@ pub struct SidebarChromeHeader;
 impl RenderOnce for SidebarChromeHeader {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme();
-        // `h-[1cap]` of the 14px brand text.
-        let cap = 10.;
-        let wordmark_width = cap * 94.3941 / 56.96;
         div()
             .id("sidebar-chrome-header")
             .relative()
@@ -57,21 +54,14 @@ impl RenderOnce for SidebarChromeHeader {
                             .items_center()
                             .rounded(CONTROL_RADIUS)
                             .text_color(theme.foreground)
+                            // SidebarBrandMark slot styling (`text-sm font-medium
+                            // tracking-tight`) with Turin's name instead of
+                            // the T3 wordmark + "Code".
                             .child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
                                     .text_size(TEXT_SM.size)
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child(
-                                        svg()
-                                            .path(T3_WORDMARK)
-                                            .w(px(wordmark_width))
-                                            .h(px(cap))
-                                            .text_color(theme.foreground),
-                                    )
-                                    .child(div().text_color(theme.muted_foreground).child("Code")),
+                                    .child(APP_BASE_NAME),
                             ),
                     ),
             )

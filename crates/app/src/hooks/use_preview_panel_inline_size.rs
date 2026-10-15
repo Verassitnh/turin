@@ -5,6 +5,7 @@
 
 use super::use_resizable_width::clamp_resizable_width;
 
+#[allow(dead_code)] // persistence lands with settings.
 pub const PREVIEW_PANEL_WIDTH_STORAGE_KEY: &str = "t3code:preview-panel-width";
 pub const PREVIEW_PANEL_MIN_WIDTH: f32 = 360.;
 /// Upper bound as a fraction of the viewport; only binds on wide screens.

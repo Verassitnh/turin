@@ -314,6 +314,7 @@ impl AppTheme {
     /// The `[data-app-sidebar]` token scope: what `text-foreground`,
     /// `text-muted-foreground`, `bg-accent`, `border-border`, … resolve to
     /// for anything rendered inside the sidebar.
+    #[allow(dead_code)] // sidebar call sites move to it in T15.
     pub fn sidebar_scope(&self) -> &SidebarScope {
         &self.sidebar_scope
     }

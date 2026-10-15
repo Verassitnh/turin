@@ -150,11 +150,13 @@ pub fn clamp_code_font_size(value: f64) -> u32 {
     )
 }
 
+#[allow(dead_code)] // font picker (T20).
 const MONOSPACE_ADVANCE_TOLERANCE: f32 = 0.01;
 
 /// Whether measured glyph advances share one width. Unmeasurable input
 /// (empty, non-finite, non-positive) answers true so a missing measurement
 /// never blocks a legitimate font.
+#[allow(dead_code)] // font picker (T20).
 pub fn are_font_advances_monospace(advances: &[f32]) -> bool {
     let Some(&reference) = advances.first() else {
         return true;
@@ -172,6 +174,7 @@ pub fn are_font_advances_monospace(advances: &[f32]) -> bool {
 /// `is_installed`; generic keywords go to `resolve_generic` (upstream measures
 /// DOM probes; on macOS that names SF Pro / SF Mono). `None` when nothing
 /// can be named.
+#[allow(dead_code)] // font picker "Default" label (T20).
 pub fn resolve_default_family_label(
     stack: &str,
     is_installed: impl Fn(&str) -> bool,

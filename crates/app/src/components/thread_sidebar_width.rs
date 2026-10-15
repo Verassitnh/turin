@@ -1,11 +1,13 @@
 //! Port of upstream/apps/web/src/components/threadSidebarWidth.ts
 
+#[allow(dead_code)] // persistence lands with settings.
 pub const THREAD_SIDEBAR_WIDTH_STORAGE_KEY: &str = "chat_thread_sidebar_width";
 pub const THREAD_SIDEBAR_DEFAULT_WIDTH: f32 = 16. * 16.;
 pub const THREAD_SIDEBAR_MIN_WIDTH: f32 = 13. * 16.;
 pub const THREAD_MAIN_CONTENT_MIN_WIDTH: f32 = 40. * 16.;
 
 /// The brand's measured width can raise the minimum so "T3 Code" never clips.
+#[allow(dead_code)] // brand-width probe not wired yet (see PORTING Deviations).
 pub fn resolve_thread_sidebar_minimum_width(brand_width: f32) -> f32 {
     THREAD_SIDEBAR_MIN_WIDTH.max(brand_width.ceil())
 }

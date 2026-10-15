@@ -3,6 +3,9 @@
 //! Preview-orb data for the Settings → Appearance theme picker. The oklab
 //! math (`parseOklab`, `oklabToHex`) lives in [`super::color`].
 
+// Ported in full: preview-orb data for the theme picker (T20).
+#![allow(dead_code)]
+
 use super::color::{Oklab, oklab_to_rgba, parse_color, rgba_to_oklab, to_hex};
 use super::theme_palettes::ThemeAppearance;
 

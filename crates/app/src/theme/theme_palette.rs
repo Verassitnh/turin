@@ -27,6 +27,7 @@ const LEGACY_T3_CHAT_DARK_THEME_ID: &str = "t3-chat-dark";
 /// palette) or a theme id.
 pub type ThemePreference = str;
 
+#[allow(dead_code)] // Light/Dark come from the settings task's appearance picker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemePreferenceMode {
     Light,
@@ -55,6 +56,7 @@ fn normalize_theme_id(theme_id: &str) -> &str {
 /// Map a stored preference onto the id the runtime applies, so selection state
 /// matches the theme cards. The legacy dark-variant id stays as-is because it
 /// still carries the appearance hint getThemePreferenceMode reads.
+#[allow(dead_code)] // settings task (T20) selection state.
 pub fn canonical_theme_preference(theme: &str) -> &str {
     if theme == LEGACY_T3_CHAT_DARK_THEME_ID {
         theme
@@ -91,6 +93,7 @@ pub fn get_theme_definition(theme: &ThemePreference) -> Option<&'static ThemeDef
 }
 
 /// Artwork palettes are reviewed alongside built-ins; user themes always use the pill fallback.
+#[allow(dead_code)] // sidebar artwork lands with the sidebar task.
 pub fn theme_allows_sidebar_artwork(theme: &ThemePreference) -> bool {
     let theme_id = theme_id_from_preference(theme);
     BUILT_IN_THEMES
@@ -103,6 +106,7 @@ pub fn theme_allows_sidebar_artwork(theme: &ThemePreference) -> bool {
 /// Selecting a single-appearance theme as the base preference would clear the
 /// light/dark mix and leave the appearance tiles disagreeing with what is on
 /// screen, so every path that selects a theme has to make the same call.
+#[allow(dead_code)] // theme picker (T20).
 pub fn single_appearance_of(theme: &ThemeDefinition) -> Option<ThemeAppearance> {
     match get_theme_modes(theme).as_slice() {
         [only] => Some(*only),
@@ -123,6 +127,7 @@ pub fn get_theme_colors_for_mode(
     }
 }
 
+#[allow(dead_code)] // theme picker (T20); used by single_appearance_of.
 pub fn get_theme_modes(theme: &ThemeDefinition) -> Vec<ThemeAppearance> {
     [ThemeAppearance::Light, ThemeAppearance::Dark]
         .into_iter()
@@ -172,6 +177,7 @@ pub fn resolve_theme_appearance(
     }
 }
 
+#[allow(dead_code)] // settings import validation (T20).
 pub fn is_known_theme_preference(theme: &str) -> bool {
     matches!(theme, "light" | "dark" | "system") || get_theme_definition(theme).is_some()
 }

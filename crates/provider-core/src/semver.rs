@@ -44,6 +44,10 @@ pub fn normalize_semver_version(version: &str) -> String {
     }
 }
 
+pub(crate) fn is_valid_semver(value: &str) -> bool {
+    parse_semver(value).is_some()
+}
+
 fn parse_semver(value: &str) -> Option<ParsedSemver> {
     let normalized = normalize_semver_version(value);
     let normalized = normalized.strip_prefix('v').unwrap_or(&normalized);

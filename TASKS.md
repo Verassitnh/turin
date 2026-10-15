@@ -59,6 +59,8 @@ through `../.cargo/rustc-throttle` (global slot cap in
 reboot). Build output lives in `../turin-targets.noindex/` (Spotlight skips
 it); each worktree's `target` is a symlink there.
 
+**Merge rule (PM, 2026-10-15):** before a task merges to main, its branch merges `main` and passes its gate in its own worktree (old contracts copies broke main twice). After every merge run `python3 scripts/dedupe-workspace-deps.py`.
+
 ## Storage policy (user, 2026-10-15)
 
 - **Disk guard (2026-10-15 09:50, disk hit 100% again with ~25 targets / 130G):** `../.cargo/disk-guard.sh` (nohup, restart after reboot) prunes `incremental/` caches when free < 30G; log `../.cargo/disk-guard.log`. PM wipes a worktree's `turin-targets.noindex/<task>/*` as soon as the task is idle/merged.
@@ -147,7 +149,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | N10 | Prompt links (keep/cut: user decision) | `crates/app` | — | decide |
 | N11 | Project content search dialog | `crates/app` | Sonnet | todo |
 | DEDUP | Collapse 28 upstream files ported in >1 crate; delete 10 ports of cut files | all | Cursor Auto | todo (after wave merges) |
-| T01 | Port all kept contracts modules | `crates/contracts` | GLM → Sonnet | done (9f37c0a, 545 tests) → QC queued |
+| T01 | Port all kept contracts modules | `crates/contracts` | GLM → Sonnet | **merged to main** (QC PASS wf_0fd743c1-ca2, fixes T01c) |
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | done (merged; QC PASS) |
 | T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | done (merged with T02c) |
 | T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | done (merged; re-QC PASS) |
@@ -160,27 +162,27 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T04c | Apply T04b re-QC corrections to protocol docs | `docs/protocols` | Haiku | done (merged, incl. T04d stale-note fixes) |
 | T02c | Persistence: Db drop deadlock + index DDL whitespace (from T02b re-QC) | `crates/persistence` | Haiku | done (merged; test catches bug, 6.5k cycles clean) |
-| T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet → Grok → Haiku | done (316 tests; markdown files live in T16's app/chat/markdown) → QC queued |
-| T05b | Shared utils, contract-dependent files | `crates/shared` (new modules only) | Codex | active (Codex re-auth) |
+| T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet → Grok → Haiku | **merged to main** (332 tests; QC PASS wf_21d5cc36-fb9, fixes T05ac; markdown files live in T16's app/chat/markdown) |
+| T05b | Shared utils, contract-dependent files | `crates/shared` (new modules only) | Codex | **merged to main** with T05c (765 shared tests; QC PASS wf_a9f9ab79-bba) |
 | T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok → Cursor Auto | done (151 tests) → QC queued |
 | T07 | Source control: core + GitHub driver, PR service, review guides, viewed files | `crates/source-control` | GLM → Sonnet → Cursor Auto | r3 active (from docs/handoff/T07.md) |
-| T08 | Provider core: adapter trait, registry, catalog, model manifests, auth/credentials | `crates/provider-core` | Codex → Sonnet → Grok | done (stable trait + registries) → QC queued |
+| T08 | Provider core: adapter trait, registry, catalog, model manifests, auth/credentials | `crates/provider-core` | Codex → Sonnet → Grok | **merged to main** (182 tests; QC PASS wf_7e833cf1-e0c, fixes T08c) |
 | T08b | Provider core remainder: subagentProjection, mcpToolPresentation, settings watcher → reconcile, model manifest fetch, NDJSON event log, ProviderHost live wiring | `crates/provider-core` | Codex | active (Codex re-auth) |
 
 ### Wave 3: engines (after wave 2)
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T09a | Codex app-server protocol: codegen types from JSON schema + stdio JSON-RPC client | `crates/codex-app-server` | Codex → Grok | done → QC pending |
+| T09a | Codex app-server protocol: codegen types from JSON schema + stdio JSON-RPC client | `crates/codex-app-server` | Codex → Grok | **merged to main** (33 tests; QC PASS wf_d1ca0d2b-4c4, fixes T09ac) |
 | T09 | Codex provider: CodexAdapterV2 + provider/Codex* | `crates/provider-codex` | Codex | r3 active (Codex re-auth) |
-| T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok → Cursor Auto | r3 fixes done (16 items, 31 tests) → re-QC queued (Haiku) |
+| T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok → Cursor Auto | **merged to main** (36 tests; re-QC PASS wf_5cb03da3-528, fixes T10ac4) |
 | T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex | r3 active (Codex re-auth) |
 | T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | done → QC wf_118a9a5d-526 |
 | T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok → Cursor Auto | r3: process leak + unjustified cuts (92 tests) |
 | T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok → Cursor Auto | QC PASS (5 medium, 8 low) → r3 fixes active |
 | T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok → Cursor Auto | done (26 tests, real provider-core traits) → QC queued |
-| T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex → Sonnet → Cursor Auto | r3 active (from docs/handoff/T13a.md; ~124 tests) |
-| T13b | Orchestrator write side: EventSink/Store, outbox/worker, receipts, command policy, thread lifecycle services | `crates/orchestration/src/pipeline/**` | Codex → Sonnet → Cursor Auto | r3 active (from docs/handoff/T13b.md) |
+| T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex → Sonnet → Cursor Auto | **merged to main** (202 tests; QC PASS wf_3daef7bb-ee4, fixes) |
+| T13b | Orchestrator write side: EventSink/Store, outbox/worker, receipts, command policy, thread lifecycle services | `crates/orchestration/src/pipeline/**` | Codex → Sonnet → Cursor Auto | **merged to main** (QC PASS wf_1d598789-d6c, fixes T13bc) |
 | T13c | Orchestrator core + provider run services (Orchestrator.ts, ProviderSessionManager, RunExecution, ingest, recovery, checkpoints, PR reactors) | `crates/orchestration/src/core/**` | Cursor Auto (Codex when back) | active (base: T13b + T13a + stage) |
 | T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus → Sonnet → Cursor Auto | r3 active (from docs/handoff/T14.md; 451 tests) |
 
@@ -190,9 +192,9 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T15 | Sidebar (projects, threads, status, snooze, search, drag) | `crates/app/src/components/sidebar` | Opus | done (286 tests) → QC queued |
 | T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/components/chat` | Opus → Haiku (T16c fixes) | QC PASS → T16c fix round active |
-| T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus → Sonnet | active (base: T16) |
+| T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus → Sonnet | built (675 tests, screenshots) → QC running wf_ad0ea466-91d |
 | T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus → Sonnet | active (base: T16) |
-| T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Sonnet | paused (Claude budget; next Sonnet UI slot) |
+| T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Sonnet | active (Sonnet, base T16 + T14) |
 | T20 | Settings + keybindings UI | `crates/app/src/settings` | Opus | todo |
 
 ### Wave 5: glue
@@ -202,7 +204,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T21 | Hooks crate (orchestrator wiring later; UI parts → Opus) | `crates/hooks` | GLM → Sonnet | done (merged; re-QC PASS) |
 | T21c | Hooks trust covers all of `.turin/` + docs/test fixes from re-QC | `crates/hooks` | Sonnet | done (merged; security re-QC queued) |
 | T22 | App wiring: runtime bridge, end-to-end smoke with each provider | `crates/app` | Opus | todo |
-| T23 | T3 database import | `crates/persistence` | Grok → Cursor Auto | done (905 threads / 164,813 events decode, 0 errors) → QC queued |
+| T23 | T3 database import | `crates/persistence` | Grok → Cursor Auto | **merged to main** (95 tests; QC PASS wf_42a38ca2-bee, fixes T23c; accepts older DBs like upstream) |
 
 ### Brand
 

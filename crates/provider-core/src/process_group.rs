@@ -40,4 +40,25 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn signals_a_spawned_process_group() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        use std::process::{Command, Stdio};
+
+        const SIGKILL: i32 = 9;
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 600 & wait"])
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = i64::from(child.id());
+        // Signal 0 only probes.
+        signal_process_group(pid, 0).unwrap();
+        signal_process_group(pid, SIGKILL).unwrap();
+        assert_eq!(child.wait().unwrap().signal(), Some(SIGKILL));
+    }
 }

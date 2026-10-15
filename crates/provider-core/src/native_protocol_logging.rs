@@ -2,19 +2,33 @@
 
 use serde_json::{Value, json};
 
-/// Accept only bounded method names as structural diagnostic fields.
-pub fn structural_protocol_method(value: &str) -> &str {
+/// `isStructuralTag` from upstream `shared/observability`: a bounded
+/// identifier-like string that is safe to copy into diagnostics.
+fn is_structural_tag(value: &str) -> bool {
     let bytes = value.as_bytes();
-    if bytes.is_empty()
-        || bytes.len() > 128
-        || !bytes[0].is_ascii_alphabetic()
-        || !bytes
+    !bytes.is_empty()
+        && bytes.len() <= 128
+        && bytes[0].is_ascii_alphabetic()
+        && bytes
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:/-".contains(byte))
-    {
-        "unknown"
-    } else {
+}
+
+/// Accept only bounded method names as structural diagnostic fields.
+pub fn structural_protocol_method(value: &str) -> &str {
+    if is_structural_tag(value) {
         value
+    } else {
+        "unknown"
+    }
+}
+
+/// `errorTag` for a tagged record: the tag when structural, else `TaggedError`.
+fn tagged_error_tag(tag: &str) -> &str {
+    if is_structural_tag(tag) {
+        tag
+    } else {
+        "TaggedError"
     }
 }
 
@@ -27,7 +41,7 @@ pub fn summarize_native_protocol_payload(payload: &Value) -> Value {
         Value::Object(fields) => {
             let mut summary = json!({"valueType": "object", "fieldCount": fields.len()});
             if let Some(tag) = fields.get("_tag").and_then(Value::as_str) {
-                summary["messageTag"] = Value::String(tag.to_owned());
+                summary["messageTag"] = Value::String(tagged_error_tag(tag).to_owned());
             }
             if let Some(tag) = fields.get("tag").and_then(Value::as_str) {
                 summary["method"] = Value::String(structural_protocol_method(tag).to_owned());
@@ -51,6 +65,22 @@ mod tests {
         assert_eq!(
             summarize_native_protocol_payload(&json!({"tag":"thread/start","secret":"do not log"})),
             json!({"valueType":"object","fieldCount":2,"method":"thread/start"})
+        );
+        assert_eq!(
+            summarize_native_protocol_payload(&json!({"_tag":"secret token value"})),
+            json!({"valueType":"object","fieldCount":1,"messageTag":"TaggedError"})
+        );
+        assert_eq!(
+            summarize_native_protocol_payload(&json!({"_tag":"AcpRequestError"})),
+            json!({"valueType":"object","fieldCount":1,"messageTag":"AcpRequestError"})
+        );
+        assert_eq!(
+            summarize_native_protocol_payload(&json!("héllo")),
+            json!({"valueType":"string","byteLength":6})
+        );
+        assert_eq!(
+            summarize_native_protocol_payload(&json!([1, 2, 3])),
+            json!({"valueType":"array","itemCount":3})
         );
     }
 }

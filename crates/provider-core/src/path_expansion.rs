@@ -12,6 +12,10 @@ pub fn expand_home_path(value: &str, home: &str) -> String {
         .strip_prefix("~/")
         .or_else(|| value.strip_prefix("~\\"))
     {
+        // `NodePath.join(home, "")` is `home`; `Path::join("")` would add a slash.
+        if tail.is_empty() {
+            return home.to_owned();
+        }
         return Path::new(home).join(tail).to_string_lossy().into_owned();
     }
     value.to_owned()
@@ -39,5 +43,6 @@ mod tests {
             "/home/ada/.codex-work"
         );
         assert_eq!(expand_home_path("~\\.codex", home), "/home/ada/.codex");
+        assert_eq!(expand_home_path("~/", home), home);
     }
 }

@@ -1,11 +1,11 @@
 //! Port of upstream/packages/provider-core/src/server/ProviderLatestVersions.ts.
 
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     future::Future,
     time::{Duration, Instant},
 };
-use tokio::sync::Mutex;
 
 const FOUND_TTL: Duration = Duration::from_secs(60 * 60);
 const MISSING_TTL: Duration = Duration::from_secs(60);
@@ -52,9 +52,12 @@ impl ProviderLatestVersions {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Option<String>, E>>,
     {
+        // `now` is read before the lookup, as upstream does, so the TTL
+        // counts from when the lookup started.
+        let now = Instant::now();
         if !fresh {
-            if let Some(entry) = self.entries.lock().await.get(key) {
-                if entry.expires_at.is_none_or(|at| at > Instant::now()) {
+            if let Some(entry) = self.entries.lock().get(key) {
+                if entry.expires_at.is_none_or(|at| at > now) {
                     return Ok(entry.version.clone());
                 }
             }
@@ -65,18 +68,18 @@ impl ProviderLatestVersions {
         } else {
             MISSING_TTL
         };
-        self.entries.lock().await.insert(
+        self.entries.lock().insert(
             key.into(),
             Entry {
                 version: version.clone(),
-                expires_at: Some(Instant::now() + ttl),
+                expires_at: Some(now + ttl),
             },
         );
         Ok(version)
     }
 
-    pub async fn invalidate(&self, key: &str) {
-        self.entries.lock().await.remove(key);
+    pub fn invalidate(&self, key: &str) {
+        self.entries.lock().remove(key);
     }
 }
 
@@ -97,7 +100,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fresh.as_deref(), Some("2.0"));
-        versions.invalidate("codex").await;
+        versions.invalidate("codex");
         let looked_up = versions
             .cached("codex", || async { Ok::<_, ()>(None) }, false)
             .await

@@ -5,14 +5,24 @@
 
 #![allow(dead_code)]
 
+pub mod checks_popover;
 pub mod code_tab;
+pub mod comment_body;
+pub mod comment_form;
+pub mod copyable_code;
+pub mod demo;
 pub mod detail_context;
+pub mod detail_layout;
 pub mod detail_panel;
 pub mod dropdown;
+pub mod edit_button;
 pub mod fixtures;
 pub mod guide_tab;
+pub mod guide_view;
 pub mod link_pull_request_dialog_logic;
 pub mod mock_source;
+pub mod panel_host;
+pub mod pickers;
 pub mod presentation_view;
 pub mod pull_request_detail_logic;
 pub mod pull_request_diff_logic;
@@ -32,6 +42,9 @@ pub mod pull_request_stack_snapshot;
 pub mod pull_request_summary_scroll_logic;
 pub mod pull_requests_route_search;
 pub mod relative_time;
+pub mod review_annotation;
+pub mod review_form;
+pub mod stack_popover;
 pub mod summary_tab;
 pub mod timeline_tab;
 pub mod view_model;

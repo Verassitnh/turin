@@ -77,7 +77,7 @@ fn main() {
             cx.set_global(state::store::ClientStoreGlobal(store));
             app_sidebar_layout::bind_keys(cx);
             let right_panel = dev_overrides(cx);
-            gpui_kit::open_window(window_options(cx), cx, |window, cx| {
+            let handle = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
                 cx.new(|cx| {
                     let mut layout = AppSidebarLayout::new(window, cx);
                     layout.set_right_panel_open(right_panel);
@@ -85,6 +85,15 @@ fn main() {
                 })
             })
             .expect("failed to open window");
+            // Dev hook: `TURIN_PULL_REQUESTS_DEMO` shows the pull request views on the mock source.
+            if let Some(scenario) = pull_request::demo::scenario_from_env() {
+                let (window_handle, layout) = handle;
+                window_handle
+                    .update(cx, |_, window, cx| {
+                        pull_request::demo::install(&layout, scenario, window, cx)
+                    })
+                    .ok();
+            }
             cx.activate(true);
         });
 }

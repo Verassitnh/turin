@@ -1,6 +1,9 @@
 #![allow(unused_imports)]
 use super::super::*;
 use serde_json::{Value, json};
+use turin_contracts::environment::RepositoryIdentity;
+use turin_contracts::pull_request::PullRequestMergeCapabilities;
+use turin_contracts::thread_pull_request::ThreadLinkedPullRequest;
 
 /// Builds a contract value from its wire JSON. Upstream tests cast partial objects to the full
 /// type; the Rust fixtures are whole values, so every field the contract requires is present.
@@ -72,7 +75,7 @@ pub(super) fn pull_request_detail(overrides: Value) -> PullRequestDetail {
 pub(super) fn behind_detail() -> PullRequestDetail {
     let mut detail = pull_request_detail(json!({}));
     detail.base_comparison = Some(PullRequestBaseComparison::Behind);
-    detail.behind_by = NonNegativeInt::new(12);
+    detail.behind_by = Some(12);
     detail.capabilities.update_methods = Some(vec![
         PullRequestUpdateMethod::Merge,
         PullRequestUpdateMethod::Rebase,

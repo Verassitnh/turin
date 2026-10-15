@@ -1,0 +1,1 @@
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestStackPopover.tsx + PullRequestStackMenu.tsx + PullRequestStackHeader.tsx + PullRequestStackLayers.tsx + PullRequestStackLayerContent.tsx (not ported yet).

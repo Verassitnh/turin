@@ -1,6 +1,8 @@
 //! Port of upstream/packages/contracts/src/git.ts
 
-use crate::base_schemas::{NonNegativeInt, PositiveInt, ProjectId, ThreadId, TrimmedNonEmptyString};
+use crate::base_schemas::{
+    NonNegativeInt, PositiveInt, ProjectId, ThreadId, TrimmedNonEmptyString,
+};
 use crate::source_control::{SourceControlProviderError, SourceControlProviderInfo};
 use crate::vcs::VcsDriverKind;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -63,10 +65,10 @@ mod file_paths {
         d: D,
     ) -> Result<Option<Vec<GitFilePath>>, D::Error> {
         let values = Option::<Vec<GitFilePath>>::deserialize(d)?;
-        if let Some(paths) = &values {
-            if paths.is_empty() {
-                return Err(serde::de::Error::custom("filePaths must not be empty"));
-            }
+        if let Some(paths) = &values
+            && paths.is_empty()
+        {
+            return Err(serde::de::Error::custom("filePaths must not be empty"));
         }
         Ok(values)
     }
@@ -173,7 +175,11 @@ pub struct GitRunStackedActionToastRunAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum GitRunStackedActionToastCta {
     #[serde(rename = "none")]
     None,
@@ -262,7 +268,11 @@ pub struct GitRunStackedActionInput {
     pub commit_message: Option<TrimmedNonEmptyString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_branch: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "file_paths::deserialize")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "file_paths::deserialize"
+    )]
     pub file_paths: Option<Vec<GitFilePath>>,
     /// The thread the action runs beside; a pull request it creates is linked to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -464,7 +474,11 @@ pub struct VcsStatusResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum VcsStatusStreamEvent {
     #[serde(rename = "snapshot")]
     Snapshot {
@@ -474,7 +488,9 @@ pub enum VcsStatusStreamEvent {
     #[serde(rename = "localUpdated")]
     LocalUpdated { local: VcsStatusLocalResult },
     #[serde(rename = "remoteUpdated")]
-    RemoteUpdated { remote: Option<VcsStatusRemoteResult> },
+    RemoteUpdated {
+        remote: Option<VcsStatusRemoteResult>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -618,7 +634,11 @@ pub enum GitCommandFailureReason {
 /// `GitCommandError` (Schema.TaggedError). Display mirrors upstream's message
 /// getter: `Git command failed in {operation} ({cwd}): {detail} (reason)`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum GitCommandError {
     #[serde(rename = "GitCommandError")]
     GitCommandError {
@@ -627,14 +647,19 @@ pub enum GitCommandError {
         cwd: String,
         // `Schema.Number` upstream: floats, not ints.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         argument_count: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         exit_code: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         stdout_length: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         stderr_length: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         output_length: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<GitCommandFailureReason>,
@@ -647,13 +672,17 @@ pub enum GitCommandError {
 impl std::fmt::Display for GitCommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::GitCommandError { operation, cwd, detail, reason, .. } => write!(
-                f,
-                "Git command failed in {operation} ({cwd}): {detail}"
-            )
-            .and_then(|_| match reason {
-                Some(reason) => write!(f, " ({reason})"),
-                None => Ok(()),
+            Self::GitCommandError {
+                operation,
+                cwd,
+                detail,
+                reason,
+                ..
+            } => write!(f, "Git command failed in {operation} ({cwd}): {detail}").and_then(|_| {
+                match reason {
+                    Some(reason) => write!(f, " ({reason})"),
+                    None => Ok(()),
+                }
             }),
         }
     }
@@ -663,7 +692,11 @@ impl std::error::Error for GitCommandError {}
 
 /// `TextGenerationError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum TextGenerationError {
     #[serde(rename = "TextGenerationError")]
     #[error("Text generation failed in {operation}: {detail}")]
@@ -677,7 +710,11 @@ pub enum TextGenerationError {
 
 /// `GitManagerError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum GitManagerError {
     #[serde(rename = "GitManagerError")]
     #[error("Git manager failed in {operation}: {detail}")]
@@ -692,10 +729,16 @@ pub enum GitManagerError {
 
 /// `GitPullRequestMaterializationError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum GitPullRequestMaterializationError {
     #[serde(rename = "GitPullRequestMaterializationError")]
-    #[error("Failed to materialize pull request #{pull_request_number} branch {head_branch} as {local_branch}.")]
+    #[error(
+        "Failed to materialize pull request #{pull_request_number} branch {head_branch} as {local_branch}."
+    )]
     GitPullRequestMaterializationError {
         cwd: TrimmedNonEmptyString,
         pull_request_number: PositiveInt,
@@ -724,7 +767,11 @@ pub enum GitManagerServiceError {
 
 /// `GitActionProgressEvent`: union on `kind`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum GitActionProgressEvent {
     #[serde(rename = "action_started")]
     ActionStarted {
@@ -783,6 +830,21 @@ pub enum GitActionProgressEvent {
     },
 }
 
+impl std::fmt::Display for GitCommandFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::AuthenticationFailed => "authentication_failed",
+            Self::BranchAlreadyExists => "branch_already_exists",
+            Self::BranchCheckedOutInWorktree => "branch_checked_out_in_worktree",
+            Self::HostKeyUnverified => "host_key_unverified",
+            Self::NotARepository => "not_a_repository",
+            Self::PathAlreadyExists => "path_already_exists",
+            Self::RemoteUnreachable => "remote_unreachable",
+            Self::TagWouldBeClobbered => "tag_would_be_clobbered",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -806,7 +868,10 @@ mod tests {
             "path": "/tmp/worktree",
         }))
         .unwrap();
-        assert_eq!(with_base.base_ref_name.as_ref().unwrap().as_str(), "origin/main");
+        assert_eq!(
+            with_base.base_ref_name.as_ref().unwrap().as_str(),
+            "origin/main"
+        );
     }
 
     #[test]
@@ -842,13 +907,14 @@ mod tests {
         .unwrap();
         assert!(parsed.is_on_pull_request_head);
 
-        let explicit: GitPreparePullRequestThreadResult = serde_json::from_value(serde_json::json!({
-            "pullRequest": resolved_pr(),
-            "branch": "feature/pr-threads",
-            "worktreePath": "/tmp/pr-threads",
-            "isOnPullRequestHead": false,
-        }))
-        .unwrap();
+        let explicit: GitPreparePullRequestThreadResult =
+            serde_json::from_value(serde_json::json!({
+                "pullRequest": resolved_pr(),
+                "branch": "feature/pr-threads",
+                "worktreePath": "/tmp/pr-threads",
+                "isOnPullRequestHead": false,
+            }))
+            .unwrap();
         assert!(!explicit.is_on_pull_request_head);
     }
 
@@ -857,7 +923,10 @@ mod tests {
         let parsed: GitResolvePullRequestResult =
             serde_json::from_value(serde_json::json!({ "pullRequest": resolved_pr() })).unwrap();
         assert_eq!(parsed.pull_request.number.get(), 42);
-        assert_eq!(parsed.pull_request.head_branch.as_str(), "feature/pr-threads");
+        assert_eq!(
+            parsed.pull_request.head_branch.as_str(),
+            "feature/pr-threads"
+        );
     }
 
     #[test]
@@ -870,16 +939,24 @@ mod tests {
             "filePaths": [" leading.txt", "trailing.txt "],
         }))
         .unwrap();
-        assert_eq!(parsed.file_paths.as_ref().unwrap()[0].as_str(), " leading.txt");
-        assert_eq!(parsed.file_paths.as_ref().unwrap()[1].as_str(), "trailing.txt ");
+        assert_eq!(
+            parsed.file_paths.as_ref().unwrap()[0].as_str(),
+            " leading.txt"
+        );
+        assert_eq!(
+            parsed.file_paths.as_ref().unwrap()[1].as_str(),
+            "trailing.txt "
+        );
 
-        assert!(serde_json::from_value::<GitRunStackedActionInput>(serde_json::json!({
-            "actionId": "action-1",
-            "cwd": "/repo",
-            "action": "commit",
-            "filePaths": [""],
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<GitRunStackedActionInput>(serde_json::json!({
+                "actionId": "action-1",
+                "cwd": "/repo",
+                "action": "commit",
+                "filePaths": [""],
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -903,19 +980,21 @@ mod tests {
         assert_eq!(parsed.working_tree.files[0].path.as_str(), " leading.txt");
         assert_eq!(parsed.working_tree.files[1].path.as_str(), "trailing.txt ");
 
-        assert!(serde_json::from_value::<VcsStatusLocalResult>(serde_json::json!({
-            "isRepo": true,
-            "hasPrimaryRemote": true,
-            "isDefaultRef": false,
-            "refName": "main",
-            "hasWorkingTreeChanges": true,
-            "workingTree": {
-                "files": [{ "path": "", "insertions": 0, "deletions": 0 }],
-                "insertions": 0,
-                "deletions": 0,
-            },
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<VcsStatusLocalResult>(serde_json::json!({
+                "isRepo": true,
+                "hasPrimaryRemote": true,
+                "isDefaultRef": false,
+                "refName": "main",
+                "hasWorkingTreeChanges": true,
+                "workingTree": {
+                    "files": [{ "path": "", "insertions": 0, "deletions": 0 }],
+                    "insertions": 0,
+                    "deletions": 0,
+                },
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -949,20 +1028,5 @@ mod tests {
             parsed.toast.cta,
             GitRunStackedActionToastCta::RunAction { ref action, .. } if action.kind == GitStackedAction::CreatePr
         ));
-    }
-}
-
-impl std::fmt::Display for GitCommandFailureReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::AuthenticationFailed => "authentication_failed",
-            Self::BranchAlreadyExists => "branch_already_exists",
-            Self::BranchCheckedOutInWorktree => "branch_checked_out_in_worktree",
-            Self::HostKeyUnverified => "host_key_unverified",
-            Self::NotARepository => "not_a_repository",
-            Self::PathAlreadyExists => "path_already_exists",
-            Self::RemoteUnreachable => "remote_unreachable",
-            Self::TagWouldBeClobbered => "tag_would_be_clobbered",
-        })
     }
 }

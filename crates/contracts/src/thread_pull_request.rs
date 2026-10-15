@@ -1,6 +1,8 @@
 //! Port of upstream/packages/contracts/src/threadPullRequest.ts
 
-use crate::base_schemas::{IsoDateTime, NonNegativeInt, PositiveInt, ProjectId, TrimmedNonEmptyString};
+use crate::base_schemas::{
+    IsoDateTime, NonNegativeInt, PositiveInt, ProjectId, TrimmedNonEmptyString,
+};
 use crate::pull_request::{
     PullRequestActor, PullRequestChecksState, PullRequestMergeability, PullRequestReviewDecision,
     PullRequestState,
@@ -227,5 +229,170 @@ mod tests {
         // `closedAt: null` is present-null, re-encoded as null.
         assert_eq!(snapshot.closed_at, Some(None));
         assert_eq!(serde_json::to_value(&snapshot).unwrap(), json);
+    }
+
+    use serde_json::{Value, json};
+
+    fn stacked_link() -> Value {
+        json!({
+            "host": "github.com",
+            "repository": "pingdotgg/t3code",
+            "number": 43,
+            "url": "https://github.com/pingdotgg/t3code/pull/43",
+            "source": "stack",
+            "linkedAt": "2026-01-01T00:01:00.000Z",
+            "snapshot": {
+                "state": "open",
+                "title": "Layer two",
+                "headBranch": "feature/stack-2",
+                "baseBranch": "feature/stack-1",
+                "isDraft": false,
+                "updatedAt": "2026-01-01T00:02:00.000Z",
+                "syncedAt": "2026-01-01T00:03:00.000Z",
+            },
+            "stack": {
+                "kind": "native",
+                "id": "7",
+                "number": 3,
+                "url": "https://github.com/pingdotgg/t3code/stacks/3",
+                "base": "main",
+                "layers": [
+                    { "number": 42, "headBranch": "feature/stack-1", "state": "open" },
+                    { "number": 43, "headBranch": "feature/stack-2", "state": "open" },
+                ],
+            },
+        })
+    }
+
+    #[test]
+    fn links_decode_with_snapshot_and_stack_and_round_trip() {
+        let link: ThreadPullRequestLink = serde_json::from_value(stacked_link()).unwrap();
+        assert_eq!(link.stack.as_ref().unwrap().layers.len(), 2);
+        assert_eq!(
+            link.snapshot.as_ref().unwrap().state,
+            PullRequestState::Open
+        );
+        assert_eq!(link.source, ThreadPullRequestLinkSource::Stack);
+        // Optional snapshot keys stay absent, `watch` stays absent, `kind` is re-emitted.
+        assert_eq!(serde_json::to_value(&link).unwrap(), stacked_link());
+    }
+
+    #[test]
+    fn stack_kind_must_be_native() {
+        let mut link = stacked_link();
+        link["stack"]["kind"] = json!("flat");
+        assert!(serde_json::from_value::<ThreadPullRequestLink>(link.clone()).is_err());
+        link["stack"].as_object_mut().unwrap().remove("kind");
+        assert!(serde_json::from_value::<ThreadPullRequestLink>(link).is_err());
+    }
+
+    #[test]
+    fn link_sources_use_upstream_spellings() {
+        for wire in ["manual", "created", "agent", "stack", "stack-dismissed"] {
+            let source: ThreadPullRequestLinkSource = serde_json::from_value(json!(wire)).unwrap();
+            assert_eq!(serde_json::to_value(source).unwrap(), json!(wire));
+        }
+        assert!(
+            serde_json::from_value::<ThreadPullRequestLinkSource>(json!("stackDismissed")).is_err()
+        );
+    }
+
+    #[test]
+    fn watch_round_trips_with_default_filled_and_explicit_passed_checks() {
+        let saved = json!({
+            "startedAt": "2026-01-01T00:00:00.000Z",
+            "headSha": "abc123",
+            "failedChecks": [],
+            "passed": true,
+            "remarksThrough": "2026-01-01T00:00:00.000Z",
+            "remarkIds": ["r1"],
+            "conflicting": false,
+            "wakes": 2,
+        });
+        let mut link = stacked_link();
+        link["watch"] = saved.clone();
+        let decoded: ThreadPullRequestLink = serde_json::from_value(link).unwrap();
+        let watch = decoded.watch.unwrap();
+        assert!(watch.passed_checks.is_empty());
+        assert_eq!(watch.head_sha.as_ref().unwrap().as_str(), "abc123");
+        let mut expected = saved.clone();
+        expected["passedChecks"] = json!([]);
+        assert_eq!(serde_json::to_value(&watch).unwrap(), expected);
+
+        let mut explicit = saved;
+        explicit["passedChecks"] = json!(["lint", " test "]);
+        let watch: ThreadPullRequestWatch = serde_json::from_value(explicit).unwrap();
+        assert_eq!(watch.passed_checks[1].as_str(), "test");
+        // `wakes` is a non-negative integer.
+        let mut negative = serde_json::to_value(&watch).unwrap();
+        negative["wakes"] = json!(-1);
+        assert!(serde_json::from_value::<ThreadPullRequestWatch>(negative).is_err());
+        // `headSha` is a required nullable key: null decodes, a blank string does not.
+        let mut blank = serde_json::to_value(&watch).unwrap();
+        blank["headSha"] = json!("  ");
+        assert!(serde_json::from_value::<ThreadPullRequestWatch>(blank).is_err());
+    }
+
+    #[test]
+    fn snapshot_keeps_every_nullable_optional_distinct_from_absent() {
+        let mut json = json!({
+            "state": "merged",
+            "title": "t",
+            "headBranch": "feature",
+            "baseBranch": "main",
+            "isDraft": true,
+            "updatedAt": null,
+            "syncedAt": "2026-10-14T00:00:00.000Z",
+        });
+        let absent: ThreadPullRequestSnapshot = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&absent).unwrap(), json);
+
+        for key in [
+            "closedAt",
+            "mergedAt",
+            "author",
+            "reviewDecision",
+            "checksState",
+        ] {
+            json[key] = Value::Null;
+        }
+        let nulls: ThreadPullRequestSnapshot = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(nulls.merged_at, Some(None));
+        assert_eq!(nulls.author, Some(None));
+        assert_eq!(nulls.review_decision, Some(None));
+        assert_eq!(nulls.checks_state, Some(None));
+        // `mergeability` is plain optional (no null), counts are non-negative.
+        assert_eq!(nulls.mergeability, None);
+        assert_eq!(serde_json::to_value(&nulls).unwrap(), json);
+
+        json["additions"] = json!(3);
+        json["mergeability"] = json!("conflicting");
+        let counted: ThreadPullRequestSnapshot = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(counted.additions, Some(3));
+        assert_eq!(
+            counted.mergeability,
+            Some(PullRequestMergeability::Conflicting)
+        );
+        json["changedFiles"] = json!(-1);
+        assert!(serde_json::from_value::<ThreadPullRequestSnapshot>(json).is_err());
+    }
+
+    #[test]
+    fn positive_numbers_and_trimming_apply_to_keys_and_legacy_links() {
+        let key: ThreadPullRequestKey = serde_json::from_value(
+            json!({"host": " github.com ", "repository": "o/r", "number": 1}),
+        )
+        .unwrap();
+        assert_eq!(key.host.as_str(), "github.com");
+        assert!(
+            serde_json::from_value::<ThreadPullRequestKey>(
+                json!({"host": "h", "repository": "o/r", "number": 0})
+            )
+            .is_err()
+        );
+        let legacy =
+            json!({"projectId": "p1", "repository": "o/r", "number": 5, "url": "https://x"});
+        let decoded: ThreadLinkedPullRequest = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), legacy);
     }
 }

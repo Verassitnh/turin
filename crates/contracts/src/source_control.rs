@@ -24,8 +24,13 @@ impl SourceControlProviderKind {
         let trimmed = value.as_ref().trim();
         let valid = !trimmed.is_empty()
             && trimmed.len() <= SOURCE_CONTROL_KIND_MAX_CHARS
-            && trimmed.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
-            && trimmed.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+            && trimmed
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_lowercase())
+            && trimmed
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
         if !valid {
             return Err(ContractError {
                 expected: "a source control provider kind matching ^[a-z][a-z0-9-]*$ (<= 64 chars)",
@@ -305,7 +310,11 @@ pub struct SourceControlDiscoveryResult {
 
 /// `SourceControlProviderError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum SourceControlProviderError {
     #[serde(rename = "SourceControlProviderError")]
     #[error("Source control provider {provider} failed in {operation}: {detail}")]
@@ -327,7 +336,11 @@ pub enum SourceControlProviderError {
 
 /// `SourceControlRepositoryError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum SourceControlRepositoryError {
     #[serde(rename = "SourceControlRepositoryError")]
     #[error("Source control repository operation {operation} failed for {provider}: {detail}")]

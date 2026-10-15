@@ -31,8 +31,15 @@ pub enum ExecutionEnvironmentPlatformArch {
 /// wear as its icon. Servers detect one from the hardware they run on
 /// (`platform.machine`), and the `environmentIcon` server setting lets a user
 /// pick one instead.
-pub const ENVIRONMENT_MACHINE_KINDS: &[&str] =
-    &["server", "cloud", "linux", "desktop", "laptop", "mac-mini", "mac-studio"];
+pub const ENVIRONMENT_MACHINE_KINDS: &[&str] = &[
+    "server",
+    "cloud",
+    "linux",
+    "desktop",
+    "laptop",
+    "mac-mini",
+    "mac-studio",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -105,7 +112,11 @@ pub enum ServerSelfUpdateMethod {
 
 /// Proven ownership for a manual update; unknown installs omit this descriptor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ServerInstallation {
     Npx,
     PnpmDlx,
@@ -392,9 +403,7 @@ pub fn repository_grouping_key_of(identity: &RepositoryIdentity) -> &str {
 
 /// Label clients show for a checkout's repository, matching
 /// [`repository_grouping_key_of`].
-pub fn repository_grouping_display_name_of(
-    identity: &RepositoryIdentity,
-) -> Option<&str> {
+pub fn repository_grouping_display_name_of(identity: &RepositoryIdentity) -> Option<&str> {
     match &identity.origin {
         Some(origin) => Some(
             origin

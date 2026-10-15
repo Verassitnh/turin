@@ -41,10 +41,10 @@ use turin_provider_core::id_allocator::{IdAllocator, derive};
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
 use crate::adapter::records::{
-    NodeOf, NodeTiming, RequestBody, TextBlock, assistant_message, epoch_ms_or, execution_node,
-    next_ordinal, open_code_question_id, request_node, request_turn_item, settle_request_item,
-    settle_request_node, text_turn_item, todo_native_id, todo_plan, todo_steps, todos_complete,
-    user_input_questions,
+    Compaction, NodeOf, NodeTiming, RequestBody, TextBlock, assistant_message,
+    compaction_turn_item, epoch_ms_or, execution_node, next_ordinal, open_code_question_id,
+    request_node, request_turn_item, settle_request_item, settle_request_node, text_turn_item,
+    todo_native_id, todo_plan, todo_steps, todos_complete, user_input_questions,
 };
 use crate::events::V1Event;
 use crate::v1_client::{PermissionReply, QuestionReply, V1Client};
@@ -456,6 +456,11 @@ impl OpenCodeV1Session {
             }
             "todo.updated" => {
                 self.on_todo(&mut guard, &props);
+            }
+            "session.compacted" => {
+                if let Some(session_id) = str_field(&props, "sessionID") {
+                    self.on_compacted(&mut guard, &session_id);
+                }
             }
             "permission.asked" | "question.asked" => {
                 self.on_request(&mut guard, &event.event_type, &props);
@@ -872,6 +877,45 @@ impl OpenCodeV1Session {
             completed_at,
         );
         let item = open_code_tool_turn_item(base, &name, &input, output, state.get("metadata"));
+        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: self.driver.clone(),
+            turn_item: item,
+        });
+    }
+
+    /// `emitCompactionItem`: once per turn, the context was compacted.
+    fn on_compacted(&self, guard: &mut V1Inner, session_id: &str) {
+        let Some(turn) = guard
+            .threads
+            .get_mut(session_id)
+            .and_then(|thread| thread.active.as_mut())
+        else {
+            return;
+        };
+        let native = format!("{}:compaction", turn.provider_turn.id.as_str());
+        if turn.item_ordinals.contains_key(&native) {
+            return;
+        }
+        let ordinal = item_ordinal(turn, &native);
+        let now = UtcDateTime::now();
+        let item = compaction_turn_item(
+            &self.driver,
+            Compaction {
+                thread_id: &turn.thread_id,
+                root_node_id: &turn.provider_turn.node_id,
+                provider_thread_id: &turn.provider_turn.provider_thread_id,
+                provider_turn_id: &turn.provider_turn.id,
+                native_item_id: &native,
+                ordinal,
+                title: "Context compacted",
+                status: OrchestrationV2TurnItemStatus::Completed,
+                started_at: turn.provider_turn.started_at,
+                completed_at: Some(now),
+                now,
+                summary: None,
+                weak_ref: true,
+            },
+        );
         self.emit(ProviderAdapterV2Event::TurnItemUpdated {
             driver: self.driver.clone(),
             turn_item: item,

@@ -1463,3 +1463,120 @@ async fn v2_declined_permission_settles_cancelled_with_its_node_and_item() {
     );
     session.close().await;
 }
+
+#[tokio::test]
+async fn v1_compaction_emits_one_completed_item_on_the_root_node() {
+    let (script, session, mut events) = v1_session_with_turn().await;
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"session.compacted","properties":{"sessionID":"ses_1"}}).to_string(),
+        )))
+        .unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"session.compacted","properties":{"sessionID":"ses_1"}}).to_string(),
+        )))
+        .unwrap();
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated" && value["turn_item"]["type"] == "compaction"
+    })
+    .await;
+    let item = of_type(&seen, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["type"] == "compaction")
+        .expect("compaction item")
+        .clone();
+    assert_eq!(item["turn_item"]["status"], "completed");
+    assert_eq!(item["turn_item"]["title"], "Context compacted");
+    // Upstream places the compaction on the turn's root node, with no node of its own.
+    assert_eq!(item["turn_item"]["nodeId"], "node_1");
+    // A second compaction in the same turn is not a second item.
+    let more = events_until(&mut events, |value| value["type"] == "turn_item.updated").await;
+    assert!(
+        of_type(&more, "turn_item.updated")
+            .iter()
+            .all(|event| event["turn_item"]["type"] != "compaction"),
+        "{more:#?}"
+    );
+    session.close().await;
+}
+
+#[tokio::test]
+async fn v2_compaction_runs_then_completes_with_its_summary() {
+    let script = script(|request| {
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e1","type":"session.compaction.started","data":{"sessionID":"ses_1"}})
+                .to_string(),
+        )))
+        .unwrap();
+    let running = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated" && value["turn_item"]["type"] == "compaction"
+    })
+    .await;
+    let first = of_type(&running, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["type"] == "compaction")
+        .expect("running compaction")
+        .clone();
+    assert_eq!(first["turn_item"]["status"], "running");
+    assert_eq!(first["turn_item"]["title"], "Compacting context");
+
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e2","type":"session.compaction.ended","data":{"sessionID":"ses_1","text":"kept the plan"}}).to_string(),
+        )))
+        .unwrap();
+    let ended = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "compaction"
+            && value["turn_item"]["status"] == "completed"
+    })
+    .await;
+    let done = of_type(&ended, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["status"] == "completed")
+        .expect("completed compaction")
+        .clone();
+    assert_eq!(done["turn_item"]["id"], first["turn_item"]["id"]);
+    assert_eq!(done["turn_item"]["summary"], "kept the plan");
+    assert_eq!(done["turn_item"]["nodeId"], "node_1");
+    session.close().await;
+}

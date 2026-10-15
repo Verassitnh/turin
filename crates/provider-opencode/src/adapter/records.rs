@@ -511,3 +511,51 @@ pub fn open_code_question_id(index: usize, header: &str) -> String {
         format!("question-{index}-{header}")
     }
 }
+
+/// One compaction, as `emitCompaction` (v2) and `emitCompactionItem` (v1) build it. The
+/// item sits on the turn's root node: upstream emits no node of its own for it.
+pub struct Compaction<'a> {
+    pub thread_id: &'a ThreadId,
+    pub root_node_id: &'a NodeId,
+    pub provider_thread_id: &'a ProviderThreadId,
+    pub provider_turn_id: &'a ProviderTurnId,
+    pub native_item_id: &'a str,
+    pub ordinal: u64,
+    pub title: &'a str,
+    pub status: OrchestrationV2TurnItemStatus,
+    pub started_at: Option<UtcDateTime>,
+    pub completed_at: Option<UtcDateTime>,
+    pub now: UtcDateTime,
+    pub summary: Option<String>,
+    pub weak_ref: bool,
+}
+
+pub fn compaction_turn_item(
+    driver: &ProviderDriverKind,
+    of: Compaction<'_>,
+) -> OrchestrationV2TurnItem {
+    OrchestrationV2TurnItem::Compaction {
+        tool_non_execution_kind: None,
+        tool_surface: None,
+        tool_icon: None,
+        tool_source: None,
+        id: derive::turn_item_from_provider_item(driver, of.native_item_id),
+        thread_id: of.thread_id.clone(),
+        run_id: None,
+        node_id: Some(of.root_node_id.clone()),
+        provider_thread_id: Some(of.provider_thread_id.clone()),
+        provider_turn_id: Some(of.provider_turn_id.clone()),
+        native_item_ref: Some(native_ref(of.native_item_id, of.weak_ref)),
+        parent_item_id: None,
+        ordinal: of.ordinal,
+        status: of.status,
+        title: Some(of.title.to_owned()),
+        started_at: of.started_at,
+        completed_at: of.completed_at,
+        updated_at: of.now,
+        driver: Some(driver.clone()),
+        summary: of.summary,
+        before_token_count: None,
+        after_token_count: None,
+    }
+}

@@ -42,9 +42,9 @@ use turin_provider_core::id_allocator::{IdAllocator, derive};
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
 use crate::adapter::records::{
-    NodeOf, NodeTiming, RequestBody, TextBlock, assistant_message, execution_node, next_ordinal,
-    node_status_of, request_node, request_turn_item, settle_request_item, settle_request_node,
-    text_turn_item,
+    Compaction, NodeOf, NodeTiming, RequestBody, TextBlock, assistant_message,
+    compaction_turn_item, execution_node, next_ordinal, node_status_of, request_node,
+    request_turn_item, settle_request_item, settle_request_node, text_turn_item,
 };
 use crate::events::V2StreamEvent;
 use crate::permission_rules::{SessionPermissionRule, session_permission_rules};
@@ -66,6 +66,9 @@ struct V2Turn {
     text_blocks: HashMap<String, TextBlockState>,
     /// When each tool call was first seen, for its node and item start.
     tool_started: HashMap<String, UtcDateTime>,
+    /// The compaction running in this turn: its native id, and when it started.
+    compaction: Option<(String, UtcDateTime)>,
+    compactions: u64,
     before: Option<String>,
 }
 
@@ -477,6 +480,13 @@ impl OpenCodeV2Session {
             | "session.reasoning.ended" => {
                 if let Some(session_id) = session_id {
                     self.on_text(&session_id, event_type, data);
+                }
+            }
+            "session.compaction.started"
+            | "session.compaction.ended"
+            | "session.compaction.failed" => {
+                if let Some(session_id) = session_id {
+                    self.compaction(&session_id, event_type, data);
                 }
             }
             "session.tool.input.started"
@@ -965,6 +975,82 @@ impl OpenCodeV2Session {
             driver: self.driver.clone(),
             thread_id: Some(thread_id),
             runtime_request: request,
+        });
+    }
+
+    /// `emitCompaction`: the turn's compaction item. A `/compact`, or OpenCode's own when the
+    /// context fills, runs inside the turn's execution. Its summary is the text it carried.
+    fn compaction(&self, session_id: &str, event_type: &str, data: &Value) {
+        let now = UtcDateTime::now();
+        let mut guard = self.inner.lock();
+        let Some(turn) = guard
+            .threads
+            .get_mut(session_id)
+            .and_then(|thread| thread.active.as_mut())
+        else {
+            return;
+        };
+        let (native, title, status, started_at, completed_at, summary) = match event_type {
+            "session.compaction.started" => {
+                let native = format!(
+                    "{}:compaction:{}",
+                    turn.provider_turn.id.as_str(),
+                    turn.compactions
+                );
+                turn.compactions += 1;
+                turn.compaction = Some((native.clone(), now));
+                (
+                    native,
+                    "Compacting context",
+                    OrchestrationV2TurnItemStatus::Running,
+                    Some(now),
+                    None,
+                    None,
+                )
+            }
+            ended_or_failed => {
+                let Some((native, started)) = turn.compaction.take() else {
+                    return;
+                };
+                let (title, status) = if ended_or_failed == "session.compaction.ended" {
+                    (
+                        "Context compacted",
+                        OrchestrationV2TurnItemStatus::Completed,
+                    )
+                } else {
+                    ("Compaction failed", OrchestrationV2TurnItemStatus::Failed)
+                };
+                let summary = data
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_owned);
+                (native, title, status, Some(started), Some(now), summary)
+            }
+        };
+        let ordinal = item_ordinal(turn, &native);
+        let item = compaction_turn_item(
+            &self.driver,
+            Compaction {
+                thread_id: &turn.thread_id,
+                root_node_id: &turn.provider_turn.node_id,
+                provider_thread_id: &turn.provider_turn.provider_thread_id,
+                provider_turn_id: &turn.provider_turn.id,
+                native_item_id: &native,
+                ordinal,
+                title,
+                status,
+                started_at,
+                completed_at,
+                now,
+                summary,
+                weak_ref: false,
+            },
+        );
+        drop(guard);
+        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: self.driver.clone(),
+            turn_item: item,
         });
     }
 
@@ -1551,6 +1637,8 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                 item_ordinals: HashMap::new(),
                 text_blocks: HashMap::new(),
                 tool_started: HashMap::new(),
+                compaction: None,
+                compactions: 0,
                 before: None,
             });
         }

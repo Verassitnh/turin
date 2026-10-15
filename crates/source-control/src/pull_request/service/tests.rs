@@ -20,6 +20,8 @@ mod part_b;
 mod part_c;
 mod part_d;
 mod part_e;
+mod part_f;
+mod part_g;
 
 pub(super) fn counter() -> Arc<AtomicUsize> {
     Arc::new(AtomicUsize::new(0))

@@ -2934,3 +2934,7 @@ pub fn should_collapse_user_message(text: &str) -> bool {
     utf16_len(&visible) > MAX_COLLAPSED_USER_MESSAGE_LENGTH
         || visible.split('\n').count() > MAX_COLLAPSED_USER_MESSAGE_LINES
 }
+
+#[cfg(test)]
+#[path = "messages_timeline_logic_tests/mod.rs"]
+mod tests;

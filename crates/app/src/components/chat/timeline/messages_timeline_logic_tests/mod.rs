@@ -11,7 +11,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-pub(super) use pretty_assertions::assert_eq;
 pub(super) use serde_json::{Value, json};
 
 pub(super) use super::*;
@@ -33,14 +32,9 @@ pub(super) use crate::components::chat::timeline::types::{
 };
 pub(super) use MessagesTimelineRowContent as Row;
 
-mod active_tools;
-mod deferred_rows;
-mod derive_rows_folds;
-mod derive_rows_live;
-mod labels_and_helpers;
-mod linked_resources;
+mod derive_rows;
+mod helpers;
 mod stable_rows;
-mod v2_history;
 
 // ---------------------------------------------------------------------------
 // Timeline entries
@@ -219,7 +213,13 @@ pub(super) fn derive(input: &MessagesTimelineRowsInput) -> Vec<Arc<MessagesTimel
 /// A completed turn item in `thread-1` with no run, node, or timestamps
 /// other than `updated_at`.
 pub(super) fn turn_item(id: &str, updated_at: &str, payload: TurnItemPayload) -> TurnItem {
-    TurnItem::new(id, "thread-1", TurnItemStatus::Completed, updated_at, payload)
+    TurnItem::new(
+        id,
+        "thread-1",
+        TurnItemStatus::Completed,
+        updated_at,
+        payload,
+    )
 }
 
 /// `{ position, visibility: "local", sourceThreadId: item.threadId, sourceItemId: item.id, item }`.
@@ -355,11 +355,7 @@ impl StreamingTimelineFixture {
 }
 
 pub(super) fn streaming_fixture_time(second: u32) -> String {
-    format!(
-        "2026-09-04T00:{:02}:{:02}.000Z",
-        second / 60,
-        second % 60
-    )
+    format!("2026-09-04T00:{:02}:{:02}.000Z", second / 60, second % 60)
 }
 
 pub(super) fn make_streaming_timeline_fixture(text: &str) -> StreamingTimelineFixture {
@@ -492,7 +488,9 @@ pub(super) fn find_id<'a>(
     rows: &'a [Arc<MessagesTimelineRow>],
     id: &str,
 ) -> Option<&'a MessagesTimelineRowContent> {
-    rows.iter().find(|row| row.id() == id).map(|row| &row.content)
+    rows.iter()
+        .find(|row| row.id() == id)
+        .map(|row| &row.content)
 }
 
 pub(super) fn has_kind(rows: &[Arc<MessagesTimelineRow>], kind: MessagesTimelineRowKind) -> bool {
@@ -545,7 +543,10 @@ fn fixtures_build_the_streaming_timeline() {
     let fixture = make_streaming_timeline_fixture("Hello");
     let entries = derive_timeline_entries_from_visible_turn_items(&fixture.entries_input());
     assert_eq!(
-        entries.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>(),
+        entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
         vec![
             "history-user",
             "history-work",

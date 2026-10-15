@@ -6995,12 +6995,24 @@ name = "turin-provider-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "chrono",
+ "dirs 6.0.0",
+ "futures",
+ "indexmap",
+ "parking_lot",
+ "pretty_assertions",
+ "regex",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-stream",
+ "tokio-util",
  "tracing",
  "turin-contracts",
+ "uuid",
 ]
 
 [[package]]

@@ -93,6 +93,8 @@ pub struct AppSidebarLayout {
     main_content: Option<AnyView>,
     /// Replaces the right panel's body.
     right_panel_content: Option<AnyView>,
+    /// A modal layer over the whole window (dialogs).
+    overlay: Option<AnyView>,
     _appearance: Subscription,
 }
 
@@ -116,6 +118,7 @@ impl AppSidebarLayout {
             last_drag_moved: false,
             main_content: None,
             right_panel_content: None,
+            overlay: None,
             _appearance: appearance,
         }
     }
@@ -123,6 +126,12 @@ impl AppSidebarLayout {
     /// Shows `content` where the chat column normally sits.
     pub fn set_main_content(&mut self, content: Option<AnyView>, cx: &mut Context<Self>) {
         self.main_content = content;
+        cx.notify();
+    }
+
+    /// Shows `content` over the whole window (a dialog), or removes it.
+    pub fn set_overlay(&mut self, content: Option<AnyView>, cx: &mut Context<Self>) {
+        self.overlay = content;
         cx.notify();
     }
 
@@ -441,5 +450,6 @@ impl Render for AppSidebarLayout {
             })
             .child(sidebar_toggle)
             .child(layout_controls)
+            .children(self.overlay.clone())
     }
 }

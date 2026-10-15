@@ -191,6 +191,12 @@ impl ThreadPanelHost {
     }
 }
 
+impl ThreadPanelHost {
+    pub fn panel(&self) -> &Entity<super::thread_panel::ThreadPullRequestsPanel> {
+        &self.panel
+    }
+}
+
 impl Render for ThreadPanelHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.app_theme().clone();

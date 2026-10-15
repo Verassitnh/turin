@@ -11,6 +11,8 @@
 use gpui_kit::{App, AppContext as _, Entity, Window};
 
 use super::detail_context::DetailTab;
+use super::link_dialog::{LinkPullRequestDialog, LinkPullRequestDialogEvent};
+use super::thread_panel::ThreadPullRequestsPanelEvent;
 use super::list_page::{PullRequestsPage, PullRequestsPageEvent};
 use super::pull_request_list_preferences::{PullRequestListPreferences, PullRequestListSort};
 use super::mock_source::{MockPullRequestSource, demo_environment_id, demo_reference};
@@ -24,7 +26,7 @@ pub enum Scenario {
     List(Option<String>),
     Detail { tab: Option<DetailTab>, number: Option<u64> },
     /// The thread view's right panel on the linked pull requests of the demo thread.
-    Thread,
+    Thread { link_dialog: Option<String> },
 }
 
 pub fn scenario_from_env() -> Option<Scenario> {
@@ -35,7 +37,12 @@ pub fn parse(value: &str) -> Option<Scenario> {
     let mut parts = value.split(':');
     match parts.next()? {
         "list" => Some(Scenario::List(parts.next().map(str::to_owned))),
-        "thread" => Some(Scenario::Thread),
+        "thread" => Some(Scenario::Thread {
+            link_dialog: match parts.next() {
+                Some("link") => Some(parts.collect::<Vec<_>>().join(":")),
+                _ => None,
+            },
+        }),
         "detail" => Some(Scenario::Detail {
             tab: parts.next().and_then(DetailTab::parse),
             number: parts.next().and_then(|n| n.parse().ok()),
@@ -52,7 +59,7 @@ pub fn install(
     cx: &mut App,
 ) {
     let store: Entity<PullRequestStore> = MockPullRequestSource::start(cx);
-    if scenario == Scenario::Thread {
+    if let Scenario::Thread { link_dialog } = scenario {
         let thread_host = cx.new(|cx| {
             super::panel_host::ThreadPanelHost::new(
                 store.clone(),
@@ -61,9 +68,53 @@ pub fn install(
                 cx,
             )
         });
+        let panel = thread_host.read(cx).panel().clone();
         layout.update(cx, |layout, cx| {
             layout.set_right_panel_content(Some(thread_host.into()), cx);
         });
+        let open_dialog = {
+            let layout = layout.clone();
+            let store = store.clone();
+            move |prefill: Option<String>, window: &mut Window, cx: &mut App| {
+                let dialog = cx.new(|cx| {
+                    LinkPullRequestDialog::new(
+                        Some(super::mock_source::demo_link_project()),
+                        window,
+                        cx,
+                    )
+                });
+                if let Some(prefill) = prefill.filter(|text| !text.is_empty()) {
+                    dialog.update(cx, |dialog, cx| dialog.prefill(&prefill, window, cx));
+                }
+                let dialog_layout = layout.clone();
+                let dialog_store = store.clone();
+                window
+                    .subscribe(&dialog, cx, move |_, event: &LinkPullRequestDialogEvent, _, cx| {
+                        if let LinkPullRequestDialogEvent::Link(link) = event
+                            && let Some(source) = dialog_store.read(cx).source()
+                            && let Some(number) = turin_contracts::PositiveInt::new(link.number)
+                            && let Some(reference) =
+                                super::mock_source::reference_for(&link.host, &link.repository, number)
+                        {
+                            source.link_thread(&super::mock_source::demo_thread_id(), &reference, cx);
+                        }
+                        dialog_layout.update(cx, |layout, cx| layout.set_overlay(None, cx));
+                    })
+                    .detach();
+                layout.update(cx, |layout, cx| layout.set_overlay(Some(dialog.into()), cx));
+            }
+        };
+        let handler = open_dialog.clone();
+        window
+            .subscribe(&panel, cx, move |_, event: &ThreadPullRequestsPanelEvent, window, cx| {
+                if matches!(event, ThreadPullRequestsPanelEvent::OpenLinkDialog) {
+                    handler(None, window, cx);
+                }
+            })
+            .detach();
+        if let Some(prefill) = link_dialog {
+            open_dialog(Some(prefill), window, cx);
+        }
         return;
     }
     let host = cx.new(|cx| PullRequestPanelHost::new(store.clone(), cx));
@@ -90,7 +141,7 @@ pub fn install(
         .detach();
     match scenario {
         Scenario::List(preset) => apply_list_preset(&page, &store, preset.as_deref(), cx),
-        Scenario::Thread => {}
+        Scenario::Thread { .. } => {}
         Scenario::Detail { tab, number } => {
             let mut reference = demo_reference();
             if let Some(number) = number

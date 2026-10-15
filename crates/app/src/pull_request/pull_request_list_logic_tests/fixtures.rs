@@ -2,6 +2,7 @@
 use super::super::*;
 
 use indexmap::{IndexMap, IndexSet};
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use turin_contracts::{PositiveInt, ProjectId, TrimmedNonEmptyString};
 
@@ -134,4 +135,73 @@ pub(super) fn stats_scope(key: &str, policy: PullRequestStatsPolicy) -> PullRequ
         key: key.to_owned(),
         policy,
     }
+}
+
+pub(super) const ENV_2: &str = "env-2";
+pub(super) const ENV_3: &str = "env-3";
+
+/// Decodes a fixture from its wire shape, the way the server sends it.
+pub(super) fn wire<T: DeserializeOwned>(value: Value) -> T {
+    serde_json::from_value(value).expect("fixture decodes")
+}
+
+pub(super) fn env(id: &str) -> EnvironmentId {
+    EnvironmentId::new(id).expect("fixture environment ids are valid")
+}
+
+/// Upstream `summary()`: a host's provider summary, with `overrides` merged on top. Upstream's
+/// `actions` is absent unless given, and so is it here.
+pub(super) fn provider(overrides: Value) -> PullRequestProviderSummary {
+    let mut summary = json!({
+        "host": "github.com",
+        "kind": "github",
+        "searchesOnHost": true,
+        "projectCount": 1,
+        "configured": true,
+        "detail": null,
+    });
+    let fields = summary.as_object_mut().expect("fixture summary is an object");
+    for (key, value) in overrides.as_object().expect("overrides are an object") {
+        fields.insert(key.clone(), value.clone());
+    }
+    wire(summary)
+}
+
+/// Upstream `answer()`: one environment's listing with nothing in it, signed in as Bilal on
+/// github.com. Callers struct-update the fields they vary.
+pub(super) fn answer() -> PullRequestListResult {
+    wire(json!({
+        "viewers": { "github.com": "Bilal" },
+        "providers": [{
+            "host": "github.com",
+            "kind": "github",
+            "searchesOnHost": true,
+            "projectCount": 1,
+            "configured": true,
+            "detail": null,
+        }],
+        "entries": [],
+        "errors": [],
+        "truncated": false,
+        "nextCursors": {},
+    }))
+}
+
+pub(super) fn cursors(value: Value) -> PullRequestListCursors {
+    wire(value)
+}
+
+/// The row the list helpers take when they take a plain listing rather than an environment's.
+pub(super) fn listing(overrides: Value) -> PullRequestListEntry {
+    listed(overrides).entry
+}
+
+/// Upstream `(entry) => true` for the size sort: no row has its line counts measured.
+pub(super) fn unmeasured(_: &EnvironmentPullRequestEntry) -> bool {
+    false
+}
+
+/// A list filter's label groups, as the query parser and the page send them.
+pub(super) fn label_groups(value: Value) -> Option<Vec<Vec<PullRequestQualifierValue>>> {
+    list_filters(json!({ "labels": value })).labels
 }

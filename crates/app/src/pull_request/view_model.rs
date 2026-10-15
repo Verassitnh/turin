@@ -14,10 +14,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use turin_contracts::pull_request::{
-    PullRequestAction, PullRequestChecks, PullRequestDetailView, PullRequestDiffResult,
-    PullRequestFileViewed, PullRequestLabelCandidateList, PullRequestMergeMethod,
-    PullRequestReactionContent, PullRequestRef, PullRequestReviewVerdict,
-    PullRequestReviewerCandidateList, PullRequestStack, PullRequestUpdateMethod,
+    PullRequestAction, PullRequestChecks, PullRequestCommentUpdateKind, PullRequestDetailView,
+    PullRequestDiffResult, PullRequestFileViewed, PullRequestLabelCandidateList,
+    PullRequestMergeMethod, PullRequestReactionContent, PullRequestRef,
+    PullRequestReviewCommentDraft, PullRequestReviewVerdict, PullRequestReviewerCandidateList,
+    PullRequestStack, PullRequestUpdateMethod,
 };
 use turin_contracts::pull_request_review_guide::PullRequestReviewGuideResult;
 use turin_contracts::thread_pull_request::ThreadPullRequestLink;
@@ -187,6 +188,40 @@ pub trait PullRequestSource: 'static {
     fn update_title(&self, reference: &PullRequestRef, title: String, cx: &mut App);
     fn update_body(&self, reference: &PullRequestRef, body: String, cx: &mut App);
     fn submit_review(&self, reference: &PullRequestRef, review: ReviewSubmission, cx: &mut App);
+    /// A whole review with the line comments the reader drafted in the Code tab
+    /// (`pullRequestEnvironment.submitReview` carries them in one request). Sources that cannot
+    /// post line comments fall back to the verdict and the words.
+    fn submit_review_with_comments(
+        &self,
+        reference: &PullRequestRef,
+        review: ReviewSubmission,
+        comments: Vec<PullRequestReviewCommentDraft>,
+        cx: &mut App,
+    ) {
+        let _ = comments;
+        self.submit_review(reference, review, cx);
+    }
+    /// Rewrite one of the reader's own remarks (`pullRequestEnvironment.updateComment`).
+    fn update_comment(
+        &self,
+        reference: &PullRequestRef,
+        comment_id: &str,
+        kind: PullRequestCommentUpdateKind,
+        body: String,
+        cx: &mut App,
+    ) {
+        let _ = (reference, comment_id, kind, body, cx);
+    }
+    /// "Show more replies" on a review thread read in pages (`threadComments`).
+    fn load_thread_comments(
+        &self,
+        reference: &PullRequestRef,
+        thread_id: &str,
+        cursor: &str,
+        cx: &mut App,
+    ) {
+        let _ = (reference, thread_id, cursor, cx);
+    }
     fn reply_to_thread(
         &self,
         reference: &PullRequestRef,

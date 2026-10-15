@@ -253,6 +253,33 @@ impl PullRequestSource for MockPullRequestSource {
         });
     }
 
+    fn update_comment(
+        &self,
+        reference: &PullRequestRef,
+        comment_id: &str,
+        _kind: turin_contracts::pull_request::PullRequestCommentUpdateKind,
+        body: String,
+        cx: &mut App,
+    ) {
+        let comment_id = comment_id.to_owned();
+        self.with_store(cx, |store, cx| {
+            store.update_detail(reference, cx, |snapshot| {
+                if let Loadable::Ready(detail) = &mut snapshot.detail {
+                    for comment in detail.comments.iter_mut().filter(|c| c.id.as_str() == comment_id) {
+                        comment.body = body.clone();
+                        comment.edited_at = Some(Some(fixtures::ago(0)));
+                    }
+                    for thread in &mut detail.review_threads {
+                        for comment in thread.comments.iter_mut().filter(|c| c.id.as_str() == comment_id) {
+                            comment.body = body.clone();
+                            comment.edited_at = Some(Some(fixtures::ago(0)));
+                        }
+                    }
+                }
+            });
+        });
+    }
+
     fn update_title(&self, reference: &PullRequestRef, title: String, cx: &mut App) {
         self.with_store(cx, |store, cx| {
             store.update_detail(reference, cx, |snapshot| {
@@ -435,4 +462,16 @@ pub fn demo_reference() -> PullRequestRef {
         "number": fixtures::DEMO_DETAIL_NUMBER,
     }))
     .expect("demo reference matches the contract")
+}
+
+/// The thread's own project for the link dialog: bare numbers resolve against this repository.
+pub fn demo_link_project() -> super::link_dialog::LinkDialogProject {
+    super::link_dialog::LinkDialogProject {
+        host: fixtures::DEMO_HOST.to_owned(),
+        repository: fixtures::DEMO_REPOSITORY.to_owned(),
+        readable_repositories: vec![
+            (fixtures::DEMO_HOST.to_owned(), fixtures::DEMO_REPOSITORY.to_owned()),
+            (fixtures::DEMO_HOST.to_owned(), "pingdotgg/t3code".to_owned()),
+        ],
+    }
 }

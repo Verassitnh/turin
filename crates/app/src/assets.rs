@@ -17,6 +17,7 @@ icon_assets!(
         ArrowLeft,
         ArrowRight,
         ArrowUp,
+        ArrowUpRight,
         BookOpen,
         Bot,
         Brain,
@@ -86,12 +87,14 @@ icon_assets!(
         Pencil,
         PenLine,
         Pin,
+        Play,
         Plug2,
         Plus,
         Redo2,
         RefreshCw,
         Reply,
         Rocket,
+        RotateCcw,
         Route,
         Search,
         Settings,
@@ -113,6 +116,7 @@ icon_assets!(
         Unlink2,
         UserCheck,
         UserLock,
+        UserPlus,
         UserRound,
         UserRoundX,
         Users,
@@ -129,9 +133,13 @@ pub const SEND_ARROW: &str = "brand/send-arrow.svg";
 /// (PullRequestListEmptyState.tsx `BranchMark`, unjoined).
 pub const BRANCH_MARK: &str = "brand/branch-mark.svg";
 
+/// lucide `smile-plus` (the reaction picker trigger); the gpui-kit icon set ships no `smile` family.
+pub const SMILE_PLUS: &str = "brand/smile-plus.svg";
+
 const BRAND: &[(&str, &[u8])] = &[
     (SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg")),
     (BRANCH_MARK, include_bytes!("../assets/brand/branch-mark.svg")),
+    (SMILE_PLUS, include_bytes!("../assets/brand/smile-plus.svg")),
 ];
 
 pub struct AppAssets;

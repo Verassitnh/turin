@@ -5,6 +5,7 @@
 
 pub mod editor;
 pub mod editor_labels;
+pub mod editor_preferences;
 pub mod external_launcher;
 pub mod host;
 pub mod icns;

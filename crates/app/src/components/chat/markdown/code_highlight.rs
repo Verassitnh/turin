@@ -131,10 +131,7 @@ impl PierreTheme {
                 return color;
             }
             // `function.method.call` → `function.method` → `function`.
-            match name.rfind('.') {
-                Some(ix) => name = &name[..ix],
-                None => return None,
-            }
+            name = &name[..name.rfind('.')?];
         }
     }
 }
@@ -196,13 +193,6 @@ fn registry_language(language: &str) -> String {
         "jsonc" | "json5" => "json".into(),
         _ => lower,
     }
-}
-
-/// The language name shown in a code block header for a fence language.
-pub fn has_grammar(language: &str) -> bool {
-    LanguageRegistry::singleton()
-        .language(&registry_language(language))
-        .is_some()
 }
 
 /// Highlights `code` for `language`, cached.

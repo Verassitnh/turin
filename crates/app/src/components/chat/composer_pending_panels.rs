@@ -247,7 +247,7 @@ impl RenderOnce for ComposerPendingApprovalBanner {
             .justify_end()
             .gap(rems(0.375))
             .self_center();
-        let respond = Arc::new(respond);
+        let respond = std::rc::Rc::new(respond);
         for (ix, option) in options
             .iter()
             .filter(|o| {

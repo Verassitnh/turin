@@ -56,11 +56,6 @@ impl MessageCopyButton {
         self
     }
 
-    pub fn icon(mut self, icon: IconName) -> Self {
-        self.icon = icon;
-        self
-    }
-
     pub fn size(mut self, size: ButtonSize) -> Self {
         self.size = size;
         self
@@ -111,7 +106,7 @@ impl RenderOnce for MessageCopyButton {
                 let state = state.clone();
                 cx.spawn(async move |cx| {
                     cx.background_executor().timer(timeout).await;
-                    let _ = state.update(cx, |state, cx| {
+                    state.update(cx, |state, cx| {
                         if state.generation == generation {
                             state.copied = false;
                             cx.notify();

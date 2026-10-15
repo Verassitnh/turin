@@ -16,19 +16,16 @@ pub(super) use serde_json::{Value, json};
 pub(super) use super::*;
 pub(super) use crate::components::chat::timeline::session_logic::{
     TimelineEntriesInput, derive_timeline_entries_from_visible_turn_items,
-    derive_timeline_entries_from_visible_turn_items_with_state,
-    work_entry_display_indicates_tool_failure,
 };
 pub(super) use crate::components::chat::timeline::turn_item::{
-    NotificationOutcome, NotificationSource, ProjectedTurnItem, ProjectedVisibility,
-    ProviderFailure, ProviderFailureClass, ProviderRequestKind, ProviderRetry, ToolActivityIcon,
-    ToolActivitySource, ToolActivitySurface, TurnItem, TurnItemPayload, TurnItemStatus,
-    TurnItemType,
+    ProjectedTurnItem, ProjectedVisibility, ProviderFailure, ProviderFailureClass,
+    ProviderRequestKind, ProviderRetry, ToolActivityIcon, ToolActivitySurface, TurnItem,
+    TurnItemPayload, TurnItemStatus, TurnItemType,
 };
 pub(super) use crate::components::chat::timeline::types::{
-    Actor, AttemptStatus, ChatMessage, CheckpointStatus, CreationSource, InputIntent, MessageRole,
-    PlanStatus, ProposedPlan, RunStatus, TimelineAttempt, TimelineEntry, TimelineEntryKind,
-    TimelineLatestRun, ToolLifecycleStatus, TurnDiffSummary, WorkLogEntry, WorkTone,
+    Actor, AttemptStatus, ChatMessage, CreationSource, InputIntent, MessageRole, RunStatus,
+    TimelineAttempt, TimelineEntry, TimelineEntryKind, TimelineLatestRun, ToolLifecycleStatus,
+    WorkLogEntry, WorkTone,
 };
 pub(super) use MessagesTimelineRowContent as Row;
 

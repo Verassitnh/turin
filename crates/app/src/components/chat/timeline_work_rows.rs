@@ -8,8 +8,6 @@
 //! V2LifecycleRow.tsx (`SubagentTimelineLink`), TimelineSystemDivider.tsx and
 //! a reduced V2ItemInspector.tsx.
 
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -62,7 +60,9 @@ use crate::ui::{Icon, IconName, Tooltip};
 
 // ── Icons ───────────────────────────────────────────────────────────────────
 
-/// `WorkEntryIconName` → lucide.
+/// `WorkEntryIconName` → lucide. `Code` (JavaScript REPL tools) and `X`
+/// keep upstream's full set.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkEntryIconName {
     PullRequest,
@@ -1295,7 +1295,6 @@ pub fn work_toggle_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
         id,
         created_at,
         group_id,
-        expanded,
         summary,
         summary_kind,
         tool_surface,

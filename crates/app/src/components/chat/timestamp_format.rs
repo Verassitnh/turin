@@ -7,7 +7,9 @@
 
 use chrono::{DateTime, Datelike, Local, TimeZone as _};
 
-/// `TimestampFormat` (settings).
+/// `TimestampFormat` (settings). The 12/24-hour choices arrive with the
+/// settings task.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TimestampFormat {
     #[default]
@@ -43,6 +45,7 @@ fn format_time(date: &DateTime<Local>, format: TimestampFormat, seconds: bool) -
 }
 
 /// `formatTimestamp` (with seconds).
+#[allow(dead_code)]
 pub fn format_timestamp(iso: &str, format: TimestampFormat) -> String {
     parse_timestamp_date(iso).map_or_else(String::new, |date| format_time(&date, format, true))
 }
@@ -125,6 +128,7 @@ pub fn format_day_aware_timestamp(iso: &str, format: TimestampFormat) -> String 
 }
 
 /// `formatUpcomingTimestamp`.
+#[allow(dead_code)]
 pub fn format_upcoming_timestamp(iso: &str, format: TimestampFormat) -> String {
     let now = Local::now();
     let Some(date) = parse_timestamp_date(iso) else {

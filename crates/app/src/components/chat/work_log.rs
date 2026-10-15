@@ -5,7 +5,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, Div, ElementId, InteractiveElement as _, IntoElement,
     ParentElement, RenderOnce, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Window, div, px, relative, rems,
+    Styled as _, Window, div, relative, rems,
 };
 
 use crate::theme::ActiveAppTheme;
@@ -118,7 +118,8 @@ pub fn work_log_button(
         .on_click(on_click)
 }
 
-/// `WorkLogDetails` kinds.
+/// `WorkLogDetails` kinds. `Media` hosts viewed images (not ported yet).
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkLogDetailsKind {
     Text,

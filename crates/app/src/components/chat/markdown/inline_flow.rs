@@ -637,11 +637,6 @@ impl InlineFlow {
         self
     }
 
-    pub fn selectable(mut self, selectable: bool) -> Self {
-        self.selectable = selectable;
-        self
-    }
-
     pub fn document_order(mut self, order: u64) -> Self {
         self.document_order = order;
         self
@@ -649,14 +644,6 @@ impl InlineFlow {
 
     pub fn selection_color(mut self, color: Hsla) -> Self {
         self.selection_color = color;
-        self
-    }
-
-    pub fn on_link(
-        mut self,
-        handler: impl Fn(&SharedString, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.on_link = Some(Rc::new(handler));
         self
     }
 

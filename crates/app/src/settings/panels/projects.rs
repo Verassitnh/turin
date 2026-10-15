@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use turin_contracts::project::ProjectScript;
 
 use super::super::controls::{FieldSize, SelectWidth, switch, text_field};
-use super::super::dialog::{ConfirmSpec, Dialog, dialog_footer, dialog_frame, dialog_header};
+use super::super::dialog::{ConfirmSpec, Dialog, dialog_footer, dialog_frame, dialog_header, dialog_panel};
 use super::super::layout::{SettingsRow, SettingsSection};
 use super::super::project_scripts::{command_for_project_script, next_project_script_id};
 use super::super::project_settings_logic::project_group_title_needs_update;
@@ -343,8 +343,6 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap_4()
-            .px_6()
-            .pb_6()
             .child(div().flex().flex_col().gap(px(6.)).child(label("Name")).child(text_field(&name, None, FieldSize::Default, false, cx)))
             .child(div().flex().flex_col().gap(px(6.)).child(label("Command")).child(text_field(&command, None, FieldSize::Default, true, cx)))
             .child(
@@ -444,7 +442,7 @@ impl SettingsView {
                     Some("Actions run in this project's checkout or its worktree.".into()),
                     &theme,
                 ),
-                body.into_any_element(),
+                dialog_panel("script-body", body),
                 dialog_footer(&theme, footer),
             ],
             dismiss,

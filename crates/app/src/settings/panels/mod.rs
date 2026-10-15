@@ -3,6 +3,7 @@
 //! (`SettingsPageContainer`).
 
 mod appearance;
+mod background_activity;
 mod archived;
 mod general;
 mod keybindings;

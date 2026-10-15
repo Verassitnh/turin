@@ -562,6 +562,8 @@ impl SettingsView {
             false,
             |this, value, _, cx| {
                 if value == json!("advanced") {
+                    this.dialog = Some(super::super::dialog::Dialog::BackgroundActivity);
+                    cx.notify();
                     return;
                 }
                 this.update_server(
@@ -570,6 +572,18 @@ impl SettingsView {
                 );
             },
         );
+        let configure = matches!(option, BackgroundActivityProfileOption::Advanced).then(|| {
+            crate::ui::Button::new("configure-background-activity")
+                .variant(crate::ui::ButtonVariant::Outline)
+                .size(crate::ui::ButtonSize::IconSm)
+                .icon(crate::ui::IconName::Settings2)
+                .tooltip(crate::ui::Tooltip::new("Configure background activity"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.dialog = Some(super::super::dialog::Dialog::BackgroundActivity);
+                    cx.notify();
+                }))
+        });
+        let control = div().flex().items_center().gap_2().child(control).children(configure);
         let changed = super::super::panels_logic::has_changed_background_activity_settings(&vm.server);
         let reset = changed.then(|| {
             let action = self.cb(cx, |this, _, cx| {

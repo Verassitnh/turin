@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use gpui_kit::{
-    AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
+    AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, MouseButton, StatefulInteractiveElement as _,
     ParentElement as _, Rems, SharedString, Styled as _, Window, deferred, div, px, relative,
     rems,
 };
@@ -33,6 +33,8 @@ pub enum Dialog {
     AddHub,
     /// The Projects page's action editor.
     ScriptEditor,
+    /// `BackgroundActivityAdvancedDialog`.
+    BackgroundActivity,
 }
 
 /// `DialogPopup` chrome around `children` (header / panel / footer).
@@ -88,6 +90,19 @@ pub fn dialog_frame(
     .into_any_element()
 }
 
+/// `DialogPanel`: the scrolling body between header and footer.
+pub fn dialog_panel(id: &'static str, child: impl IntoElement) -> AnyElement {
+    div()
+        .id(id)
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .px_6()
+        .pb_6()
+        .child(child)
+        .into_any_element()
+}
+
 pub fn dialog_header(title: impl Into<SharedString>, description: Option<SharedString>, theme: &AppTheme) -> AnyElement {
     div()
         .flex()
@@ -133,6 +148,9 @@ impl SettingsView {
         let theme = cx.app_theme().clone();
         if matches!(self.dialog, Some(Dialog::AddHub)) {
             return Some(self.render_add_hub_dialog(window, cx));
+        }
+        if matches!(self.dialog, Some(Dialog::BackgroundActivity)) {
+            return Some(self.render_background_activity_dialog(window, cx));
         }
         if matches!(self.dialog, Some(Dialog::ScriptEditor)) {
             return Some(self.render_script_editor_dialog(window, cx));
@@ -253,8 +271,6 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap_4()
-            .px_6()
-            .pb_6()
             .child(field("Hub URL", &url))
             .child(field("Management key", &key))
             .child(field("Label (optional)", &label));
@@ -272,7 +288,7 @@ impl SettingsView {
                     ),
                     &theme,
                 ),
-                body.into_any_element(),
+                dialog_panel("hub-body", body),
                 dialog_footer(
                     &theme,
                     vec![

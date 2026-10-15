@@ -170,6 +170,7 @@ impl SettingsView {
                     self.panels.demo_scroll = Some((offset, 30));
                 }
             }
+            "bg-dialog" => self.dialog = Some(super::dialog::Dialog::BackgroundActivity),
             "add-hub" => self.dialog = Some(super::dialog::Dialog::AddHub),
             other if other.starts_with("expand:") => {
                 self.panels.source_control.expanded.insert(other["expand:".len()..].to_owned());

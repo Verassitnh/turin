@@ -8,10 +8,21 @@ license.workspace = true
 turin-contracts.workspace = true
 turin-persistence.workspace = true
 anyhow.workspace = true
-rusqlite.workspace = true
 base64.workspace = true
+chrono.workspace = true
+futures.workspace = true
+indexmap.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile.workspace = true

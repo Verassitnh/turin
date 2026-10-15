@@ -9,6 +9,7 @@ tempfile.workspace = true
 turin-acp.workspace = true
 turin-contracts.workspace = true
 turin-provider-core.workspace = true
+turin-provider-opencode.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 libc.workspace = true

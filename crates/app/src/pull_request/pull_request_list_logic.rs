@@ -510,3 +510,7 @@ pub fn sort_pull_request_groups(
     }
     out
 }
+
+#[cfg(test)]
+#[path = "pull_request_list_logic_tests/mod.rs"]
+mod tests;

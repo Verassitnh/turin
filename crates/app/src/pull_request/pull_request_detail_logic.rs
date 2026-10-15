@@ -1323,3 +1323,7 @@ pub fn build_ask_about_guide_stop_handoff(
         ],
     }
 }
+
+#[cfg(test)]
+#[path = "pull_request_detail_logic_tests/mod.rs"]
+mod ported_tests;

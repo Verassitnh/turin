@@ -7105,6 +7105,7 @@ name = "turin-orchestration"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "futures",
@@ -7115,15 +7116,20 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tracing",
  "turin-contracts",
+ "turin-hooks",
  "turin-persistence",
+ "turin-provider-core",
+ "turin-shared",
  "unicode-segmentation",
  "url",
+ "uuid",
 ]
 
 [[package]]

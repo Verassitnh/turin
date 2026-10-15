@@ -163,7 +163,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T04c | Apply T04b re-QC corrections to protocol docs | `docs/protocols` | Haiku | done (merged, incl. T04d stale-note fixes) |
 | T02c | Persistence: Db drop deadlock + index DDL whitespace (from T02b re-QC) | `crates/persistence` | Haiku | done (merged; test catches bug, 6.5k cycles clean) |
 | T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet → Grok → Haiku | **merged to main** (332 tests; QC PASS wf_21d5cc36-fb9, fixes T05ac; markdown files live in T16's app/chat/markdown) |
-| T05b | Shared utils, contract-dependent files | `crates/shared` (new modules only) | Codex | active (Codex re-auth) |
+| T05b | Shared utils, contract-dependent files | `crates/shared` (new modules only) | Codex | **merged to main** with T05c (765 shared tests; QC PASS wf_a9f9ab79-bba) |
 | T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok → Cursor Auto | done (151 tests) → QC queued |
 | T07 | Source control: core + GitHub driver, PR service, review guides, viewed files | `crates/source-control` | GLM → Sonnet → Cursor Auto | r3 active (from docs/handoff/T07.md) |
 | T08 | Provider core: adapter trait, registry, catalog, model manifests, auth/credentials | `crates/provider-core` | Codex → Sonnet → Grok | **merged to main** (182 tests; QC PASS wf_7e833cf1-e0c, fixes T08c) |
@@ -182,7 +182,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok → Cursor Auto | QC PASS (5 medium, 8 low) → r3 fixes active |
 | T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok → Cursor Auto | done (26 tests, real provider-core traits) → QC queued |
 | T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex → Sonnet → Cursor Auto | **merged to main** (202 tests; QC PASS wf_3daef7bb-ee4, fixes) |
-| T13b | Orchestrator write side: EventSink/Store, outbox/worker, receipts, command policy, thread lifecycle services | `crates/orchestration/src/pipeline/**` | Codex → Sonnet → Cursor Auto | r3 active (from docs/handoff/T13b.md) |
+| T13b | Orchestrator write side: EventSink/Store, outbox/worker, receipts, command policy, thread lifecycle services | `crates/orchestration/src/pipeline/**` | Codex → Sonnet → Cursor Auto | **merged to main** (QC PASS wf_1d598789-d6c, fixes T13bc) |
 | T13c | Orchestrator core + provider run services (Orchestrator.ts, ProviderSessionManager, RunExecution, ingest, recovery, checkpoints, PR reactors) | `crates/orchestration/src/core/**` | Cursor Auto (Codex when back) | active (base: T13b + T13a + stage) |
 | T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus → Sonnet → Cursor Auto | r3 active (from docs/handoff/T14.md; 451 tests) |
 

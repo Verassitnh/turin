@@ -61,6 +61,8 @@ it); each worktree's `target` is a symlink there.
 
 ## Storage policy (user, 2026-10-15)
 
+- **Disk guard (2026-10-15 09:50, disk hit 100% again with ~25 targets / 130G):** `../.cargo/disk-guard.sh` (nohup, restart after reboot) prunes `incremental/` caches when free < 30G; log `../.cargo/disk-guard.log`. PM wipes a worktree's `turin-targets.noindex/<task>/*` as soon as the task is idle/merged.
+
 Disk hit 100% once. Lean dev/test profiles via `../.cargo/config.toml`
 (line tables only, no dep debug info). When a task merges, PM removes its
 worktree (`git worktree remove`) — branches stay on origin. QC/scratch builds

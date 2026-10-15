@@ -11,6 +11,7 @@ pub mod menu;
 pub mod popover;
 pub mod scroll_area;
 pub mod separator;
+pub mod toggle;
 pub mod tooltip;
 
 #[allow(unused_imports)]
@@ -27,5 +28,7 @@ pub use popover::{PopoverPadding, popover, popover_title};
 pub use scroll_area::{scroll_area, scroll_area_hidden};
 #[allow(unused_imports)]
 pub use separator::Separator;
+#[allow(unused_imports)]
+pub use toggle::{Toggle, ToggleSize, ToggleVariant};
 #[allow(unused_imports)]
 pub use tooltip::{Tooltip, TooltipVariant};

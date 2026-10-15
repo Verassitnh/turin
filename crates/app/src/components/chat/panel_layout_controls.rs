@@ -10,8 +10,7 @@ use gpui_kit::{
     App, ClickEvent, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div,
 };
 
-use crate::theme::tokens::RADIUS_LG;
-use crate::ui::{Button, ButtonSize, ButtonVariant, IconName, Tooltip};
+use crate::ui::{IconName, Toggle, ToggleSize, ToggleVariant, Tooltip};
 
 type Handler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -23,14 +22,13 @@ pub struct PanelLayoutControls {
     pub on_toggle_maximize: Handler,
 }
 
-fn toggle(id: &'static str, icon: IconName, pressed: bool, tooltip: Tooltip) -> Button {
-    Button::new(id)
-        .variant(ButtonVariant::Ghost)
-        .size(ButtonSize::IconSm)
+fn toggle(id: &'static str, icon: IconName, pressed: bool, tooltip: Tooltip) -> Toggle {
+    Toggle::new(id)
+        .variant(ToggleVariant::Ghost)
+        .size(ToggleSize::Sm)
         .icon(icon)
         .pressed(pressed)
         .tooltip(tooltip)
-        .rounded(RADIUS_LG)
 }
 
 impl RenderOnce for PanelLayoutControls {

@@ -17,6 +17,13 @@ PM (Claude Opus 5.5) owns this file. Agents don't edit it; they report back.
 | GLM | glm-5.3 via OpenCode | ¢ | Bulk mechanical translation: contracts, shared utils, reducers, test ports |
 | Haiku | Claude Haiku 5.5 | ¢ | Small fixes, clippy/fmt cleanups, review passes |
 
+**Model policy (user, 2026-10-15): use Sonnet and Haiku wherever reasonable.**
+Opus only for UI rendering/look-and-feel work and look-and-feel QC. View-model
+logic, backend, docs and QC review/verify go to Sonnet (reviewers, leads) and
+Haiku (skeptics, mechanical edits). Grok carries the bulk of backend ports
+while Codex/GLM are out. Keep concurrent Claude agents ≤ 8 and QC workflows ≤ 2
+to stay under the Claude session limit (hit once on 2026-10-14 ~20:45).
+
 **Throughput rule (user, 2026-10-14): run the maximum number of agents the
 dependency graph allows, everything async.** Never wait on a merge when a
 dependent can branch from the in-flight branch it needs (rebase later; QC fix

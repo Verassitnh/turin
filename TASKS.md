@@ -20,7 +20,7 @@ PM (Claude Opus 5.5) owns this file. Agents don't edit it; they report back.
 **Throughput rule (user, 2026-10-14): run the maximum number of agents the
 dependency graph allows, everything async.** Never wait on a merge when a
 dependent can branch from the in-flight branch it needs (rebase later; QC fix
-rounds merge in). Caps: Codex 4, Opus UI 4, Grok 3, GLM 3, Sonnet 2 (4 while GLM is out of OpenRouter credits), QC
+rounds merge in). Caps: Codex 4, Opus UI 4, Grok 3, GLM 3, Sonnet 2. **Outages (2026-10-14 ~20:15): GLM out of OpenRouter credits, Codex at ChatGPT subscription usage limit → Sonnet cap 5, Grok cap 6 until they return.** QC
 workflows unlimited. Cheap models still go first on mechanical work. Cheap
 models go first on anything mechanical; escalate to Codex only on failure or
 when the logic is subtle (state machines, protocol framing, concurrency).
@@ -86,19 +86,19 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T05b | Shared utils, contract-dependent files | `crates/shared` | GLM | todo (after T01) |
 | T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok | active (base: T01 branch) |
 | T07 | Source control: core + GitHub driver, PR service, review guides, viewed files | `crates/source-control` | GLM → Sonnet | active r2 (base: T01 branch) |
-| T08 | Provider core: adapter trait, registry, catalog, model manifests, auth/credentials | `crates/provider-core` | Codex | active (base: T01 branch) |
+| T08 | Provider core: adapter trait, registry, catalog, model manifests, auth/credentials | `crates/provider-core` | Codex → Sonnet | active r2 (Codex usage limit) |
 
 ### Wave 3: engines (after wave 2)
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T09a | Codex app-server protocol: codegen types from JSON schema + stdio JSON-RPC client | `crates/codex-app-server` | Codex | active |
+| T09a | Codex app-server protocol: codegen types from JSON schema + stdio JSON-RPC client | `crates/codex-app-server` | Codex → Grok | active r2 (Codex usage limit) |
 | T09 | Codex provider: CodexAdapterV2 + provider/Codex* | `crates/provider-codex` | Codex (high) | todo |
-| T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex (high) | active |
+| T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok | active r2 (Codex usage limit) |
 | T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex (high) | todo |
 | T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | active |
 | T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok | todo |
-| T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex | active |
+| T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok | active r2 (Codex usage limit) |
 | T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok | todo |
 | T13 | Orchestrator: event sink/store, projections, run execution, turn services | `crates/orchestration` | Codex (high), split into sub-tasks | todo |
 | T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus | todo |

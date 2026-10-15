@@ -92,7 +92,11 @@ pub type OrchestrationGetFullThreadDiffResult = ThreadTurnDiff;
 
 /// `OrchestrationGetTurnDiffError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum OrchestrationGetTurnDiffError {
     #[serde(rename = "OrchestrationGetTurnDiffError")]
     #[error("{message}")]
@@ -105,7 +109,11 @@ pub enum OrchestrationGetTurnDiffError {
 
 /// `OrchestrationGetFullThreadDiffError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum OrchestrationGetFullThreadDiffError {
     #[serde(rename = "OrchestrationGetFullThreadDiffError")]
     #[error("{message}")]
@@ -143,11 +151,13 @@ mod tests {
 
     #[test]
     fn get_turn_diff_input_rejects_inverted_range() {
-        assert!(serde_json::from_value::<OrchestrationGetTurnDiffInput>(serde_json::json!({
-            "fromTurnCount": 3,
-            "toTurnCount": 1,
-            "threadId": "t1",
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<OrchestrationGetTurnDiffInput>(serde_json::json!({
+                "fromTurnCount": 3,
+                "toTurnCount": 1,
+                "threadId": "t1",
+            }))
+            .is_err()
+        );
     }
 }

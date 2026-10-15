@@ -1,7 +1,7 @@
 //! Port of upstream/packages/contracts/src/composerContextClipboard.ts
 
 use crate::base_schemas::{EnvironmentId, MessageId, ThreadId};
-use crate::composer_context::{records_field, ComposerContextRecord};
+use crate::composer_context::{ComposerContextRecord, records_field};
 use serde::{Deserialize, Serialize};
 
 /// Structured clipboard payload for context copied between drafts and

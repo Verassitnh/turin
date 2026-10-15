@@ -6837,11 +6837,11 @@ dependencies = [
  "chrono",
  "indexmap",
  "pretty_assertions",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "turin-contracts-id-consumer",
- "unicode-ccc",
  "uuid",
 ]
 

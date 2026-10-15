@@ -712,8 +712,448 @@ pub fn build_thread_title_prompt(input: ThreadTitlePromptInput<'_>) -> Prompt {
                 "title": { "type": "string" },
                 "needsRefinement": { "type": "boolean" },
             },
-            "required": ["title"],
+            "required": ["title", "needsRefinement"],
             "additionalProperties": false,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use turin_contracts::settings::{BranchNamingMode, BranchNamingOptions};
+    use turin_provider_core::text_generation::{ReviewGuideStackLayer, ReviewGuideStackState};
+
+    use super::*;
+    use crate::text_generation_policy::{TextGenerationPolicy, TextGenerationPolicyKind};
+
+    fn custom_policy(configure: impl FnOnce(&mut TextGenerationPolicy)) -> TextGenerationPolicy {
+        let mut policy = TextGenerationPolicy::new(TextGenerationPolicyKind::Custom, false);
+        configure(&mut policy);
+        policy
+    }
+
+    fn naming(mode: BranchNamingMode, prefix: &str, instructions: &str) -> BranchNamingOptions {
+        BranchNamingOptions {
+            mode,
+            prefix: prefix.to_owned(),
+            instructions: instructions.to_owned(),
+        }
+    }
+
+    fn image(id: &str, name: &str, mime: &str, size: u64) -> ChatAttachment {
+        serde_json::from_value(serde_json::json!({
+            "type": "image",
+            "id": id,
+            "name": name,
+            "mimeType": mime,
+            "sizeBytes": size,
+        }))
+        .expect("image attachment")
+    }
+
+    fn commit<'a>(
+        branch: Option<&'a str>,
+        include_branch: bool,
+        policy: Option<&'a TextGenerationPolicy>,
+    ) -> Prompt {
+        build_commit_message_prompt(CommitMessagePromptInput {
+            branch,
+            staged_summary: "M README.md",
+            staged_patch: "diff --git a/README.md b/README.md\n+hello",
+            include_branch,
+            policy,
+        })
+    }
+
+    #[test]
+    fn commit_prompt_includes_staged_patch_and_summary() {
+        let result = commit(Some("main"), false, None);
+        assert!(result.prompt.contains("Staged files:"));
+        assert!(result.prompt.contains("M README.md"));
+        assert!(result.prompt.contains("Staged patch:"));
+        assert!(result.prompt.contains("diff --git a/README.md b/README.md"));
+        assert!(result.prompt.contains("Branch: main"));
+        // Should NOT include the branch generation instruction.
+        assert!(
+            !result
+                .prompt
+                .contains("branch must be a short semantic git branch fragment")
+        );
+    }
+
+    #[test]
+    fn commit_prompt_includes_branch_generation_instruction_when_include_branch_is_true() {
+        let result = commit(Some("feature/foo"), true, None);
+        assert!(
+            result
+                .prompt
+                .contains("branch must be a short semantic git branch fragment")
+        );
+        assert!(
+            result
+                .prompt
+                .contains("Return a JSON object with keys: subject, body, branch.")
+        );
+    }
+
+    #[test]
+    fn commit_prompt_shows_detached_when_branch_is_null() {
+        let result = commit(None, false, None);
+        assert!(result.prompt.contains("Branch: (detached)"));
+    }
+
+    #[test]
+    fn commit_prompt_includes_policy_instructions() {
+        let policy = custom_policy(|policy| {
+            policy.commit_instructions =
+                Some("Use a terse repository-specific subject.".to_owned());
+        });
+        let result = commit(Some("main"), false, Some(&policy));
+        assert!(result.prompt.contains("Additional instructions:"));
+        assert!(
+            result
+                .prompt
+                .contains("Use a terse repository-specific subject.")
+        );
+    }
+
+    fn pr_content<'a>(
+        template: Option<&'a str>,
+        policy: Option<&'a TextGenerationPolicy>,
+    ) -> Prompt {
+        build_pr_content_prompt(PrContentPromptInput {
+            base_branch: "main",
+            head_branch: "feature/auth",
+            commit_summary: "feat: add login page",
+            diff_summary: "3 files changed",
+            diff_patch: "diff --git a/auth.ts b/auth.ts\n+export function login()",
+            change_request_template: template,
+            policy,
+        })
+    }
+
+    #[test]
+    fn pr_content_prompt_includes_branch_names_commits_and_diff() {
+        let result = pr_content(None, None);
+        assert!(result.prompt.contains("Base branch: main"));
+        assert!(result.prompt.contains("Head branch: feature/auth"));
+        assert!(result.prompt.contains("Commits:"));
+        assert!(result.prompt.contains("feat: add login page"));
+        assert!(result.prompt.contains("Diff stat:"));
+        assert!(result.prompt.contains("3 files changed"));
+        assert!(result.prompt.contains("Diff patch:"));
+        assert!(result.prompt.contains("export function login()"));
+        assert!(
+            result
+                .prompt
+                .contains("include headings '## Summary' and '## Testing'")
+        );
+    }
+
+    #[test]
+    fn pr_content_prompt_follows_a_repository_template_instead_of_the_default_headings() {
+        let policy = custom_policy(|policy| {
+            policy.change_request_instructions =
+                Some("Keep the title in sentence case.".to_owned());
+        });
+        let result = pr_content(
+            Some("<!-- remove me -->\n## What changed\n\n## Verification"),
+            Some(&policy),
+        );
+        assert!(result.prompt.contains("Keep the title in sentence case."));
+        assert!(
+            result
+                .prompt
+                .contains("follow the repository change request template structure")
+        );
+        assert!(
+            result
+                .prompt
+                .contains("drop HTML comments from the template")
+        );
+        assert!(
+            result
+                .prompt
+                .contains("Repository change request template:")
+        );
+        assert!(
+            result
+                .prompt
+                .contains("<!-- remove me -->\n## What changed\n\n## Verification")
+        );
+        assert!(
+            !result
+                .prompt
+                .contains("include headings '## Summary' and '## Testing'")
+        );
+    }
+
+    fn branch_prompt(
+        message: &str,
+        naming: Option<&BranchNamingOptions>,
+        attachments: &[ChatAttachment],
+    ) -> Prompt {
+        build_branch_name_prompt(BranchNamePromptInput {
+            naming,
+            message,
+            attachments,
+            policy: None,
+        })
+    }
+
+    #[test]
+    fn branch_prompt_requests_a_semantic_prefix_as_part_of_the_same_branch_response() {
+        let options = naming(BranchNamingMode::Semantic, "ignored", "ignored instruction");
+        let Prompt {
+            prompt,
+            output_schema,
+        } = branch_prompt("Add search", Some(&options), &[]);
+        assert!(prompt.contains("feat/add-search"));
+        assert!(!prompt.contains("ignored instruction"));
+        assert_eq!(output_schema["required"], serde_json::json!(["branch"]));
+    }
+
+    #[test]
+    fn branch_prompt_appends_custom_instructions_without_imposing_a_prefix_case_or_word_limit() {
+        let options = naming(
+            BranchNamingMode::Custom,
+            "ignored",
+            "Use Julius/ABC-123 and preserve capitalization.",
+        );
+        let prompt = branch_prompt("Add search", Some(&options), &[]).prompt;
+        assert!(prompt.contains("Use Julius/ABC-123 and preserve capitalization."));
+        assert!(prompt.contains("complete branch name"));
+        assert!(!prompt.contains("2-6 words"));
+        assert!(!prompt.contains("lowercase"));
+        assert!(!prompt.contains("no issue prefixes"));
+    }
+
+    #[test]
+    fn branch_prompt_asks_for_just_the_fragment_in_static_mode() {
+        let options = naming(BranchNamingMode::Static, "team", "ignored instruction");
+        let prompt = branch_prompt("Add search", Some(&options), &[]).prompt;
+        assert!(prompt.contains("without a prefix or namespace"));
+        assert!(!prompt.contains("ignored instruction"));
+    }
+
+    #[test]
+    fn branch_prompt_includes_the_user_message_in_the_prompt() {
+        let result = branch_prompt("Fix the login timeout bug", None, &[]);
+        assert!(result.prompt.contains("User message:"));
+        assert!(result.prompt.contains("Fix the login timeout bug"));
+        assert!(!result.prompt.contains("Attachment metadata:"));
+    }
+
+    #[test]
+    fn branch_prompt_includes_attachment_metadata_when_attachments_are_provided() {
+        let attachments = [image("att-123", "screenshot.png", "image/png", 12_345)];
+        let result = branch_prompt("Fix the layout from screenshot", None, &attachments);
+        assert!(result.prompt.contains("Attachment metadata:"));
+        assert!(result.prompt.contains("screenshot.png"));
+        assert!(result.prompt.contains("image/png"));
+        assert!(result.prompt.contains("12345 bytes"));
+    }
+
+    fn review_input() -> ReviewGuideGenerationInput {
+        ReviewGuideGenerationInput {
+            cwd: String::new(),
+            number: 42,
+            title: "Add search".to_owned(),
+            description: String::new(),
+            base_branch: "main".to_owned(),
+            base_commit: "abc123".to_owned(),
+            settled_review: String::new(),
+            instructions: None,
+            stack: None,
+            model_selection: serde_json::from_value(serde_json::json!({
+                "instanceId": "codex",
+                "model": "gpt-5",
+            }))
+            .expect("selection"),
+        }
+    }
+
+    #[test]
+    fn review_guide_prompt_adds_the_maintainers_preferences_after_the_change_context() {
+        let mut input = review_input();
+        input.instructions = Some("  Skip test files unless they change behavior.  ".to_owned());
+        let prompt = build_review_guide_prompt(&input).prompt;
+        let preferences = prompt
+            .find("The maintainer's preferences for guides:")
+            .expect("preferences section");
+        assert!(preferences > prompt.find("Already settled in review:").expect("settled"));
+        assert!(prompt[preferences..].contains("Skip test files unless they change behavior."));
+        assert!(prompt[preferences..].contains("do not change the JSON format"));
+    }
+
+    #[test]
+    fn review_guide_prompt_names_the_stacks_other_layers_as_context_the_guide_may_point_at() {
+        let mut input = review_input();
+        input.stack = Some(vec![
+            ReviewGuideStackLayer {
+                number: 41,
+                title: Some("Add the index".to_owned()),
+                head_sha: Some("aaa111".to_owned()),
+                state: ReviewGuideStackState::Merged,
+            },
+            ReviewGuideStackLayer {
+                number: 42,
+                title: Some("Add search".to_owned()),
+                head_sha: Some("bbb222".to_owned()),
+                state: ReviewGuideStackState::Open,
+            },
+            ReviewGuideStackLayer {
+                number: 43,
+                title: Some("Search UI".to_owned()),
+                head_sha: None,
+                state: ReviewGuideStackState::Open,
+            },
+        ]);
+        let prompt = build_review_guide_prompt(&input).prompt;
+        assert!(prompt.contains("1. #41: Add the index, merged, head aaa111"));
+        assert!(prompt.contains("2. #42 (this change): Add search\n"));
+        assert!(prompt.contains("3. #43: Search UI, head not available"));
+        assert!(prompt.contains("Never excerpt another layer's code"));
+    }
+
+    #[test]
+    fn review_guide_prompt_leaves_the_stack_out_for_a_change_that_is_not_in_one() {
+        let input = review_input();
+        assert!(
+            !build_review_guide_prompt(&input)
+                .prompt
+                .contains("layer of a stack")
+        );
+        let mut single = review_input();
+        single.stack = Some(vec![ReviewGuideStackLayer {
+            number: 42,
+            title: Some("Add search".to_owned()),
+            head_sha: Some("bbb222".to_owned()),
+            state: ReviewGuideStackState::Open,
+        }]);
+        assert!(
+            !build_review_guide_prompt(&single)
+                .prompt
+                .contains("layer of a stack")
+        );
+    }
+
+    #[test]
+    fn review_guide_prompt_leaves_the_section_out_when_there_are_no_preferences() {
+        let input = review_input();
+        assert!(
+            !build_review_guide_prompt(&input)
+                .prompt
+                .contains("preferences for guides")
+        );
+        let mut blank = review_input();
+        blank.instructions = Some("  ".to_owned());
+        assert!(
+            !build_review_guide_prompt(&blank)
+                .prompt
+                .contains("preferences for guides")
+        );
+    }
+
+    fn thread_title(
+        message: &str,
+        previous_title: Option<&str>,
+        attachments: &[ChatAttachment],
+    ) -> Prompt {
+        build_thread_title_prompt(ThreadTitlePromptInput {
+            linked_context: None,
+            message,
+            previous_title,
+            attachments,
+            policy: None,
+        })
+    }
+
+    #[test]
+    fn thread_title_prompt_requires_each_generated_field_in_the_strict_response_schema() {
+        let schema = thread_title("Fix this", None, &[]).output_schema;
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["title", "needsRefinement"])
+        );
+        assert_eq!(schema["properties"]["title"]["type"], "string");
+        assert_eq!(schema["properties"]["needsRefinement"]["type"], "boolean");
+    }
+
+    #[test]
+    fn thread_title_prompt_includes_the_user_message_without_absent_attachment_metadata() {
+        let result = thread_title(
+            "Investigate reconnect regressions after session restore",
+            None,
+            &[],
+        );
+        assert!(result.prompt.contains("User message:"));
+        assert!(
+            result
+                .prompt
+                .contains("Investigate reconnect regressions after session restore")
+        );
+        assert!(!result.prompt.contains("Attachment metadata:"));
+    }
+
+    #[test]
+    fn thread_title_prompt_includes_attachment_metadata_when_attachments_are_provided() {
+        let attachments = [image("att-456", "thread.png", "image/png", 67_890)];
+        let result = thread_title("Name this thread from the screenshot", None, &attachments);
+        assert!(result.prompt.contains("Attachment metadata:"));
+        assert!(result.prompt.contains("thread.png"));
+        assert!(result.prompt.contains("image/png"));
+        assert!(result.prompt.contains("67890 bytes"));
+    }
+
+    #[test]
+    fn thread_title_prompt_regenerates_from_recent_thread_contents_and_identifies_the_previous_title()
+     {
+        let result = thread_title(
+            "USER:\nInvestigate reconnect regressions\n\nASSISTANT:\nThe remaining issue is stale session state",
+            Some("Investigate reconnect regressions"),
+            &[],
+        );
+        assert!(result.prompt.contains(
+            "Regenerate the title for an existing T3 Code thread so the user can recognize it weeks later."
+        ));
+        assert!(
+            result
+                .prompt
+                .contains("The previous title was \"Investigate reconnect regressions\".")
+        );
+        assert!(result.prompt.contains("Thread contents:"));
+        assert!(
+            result
+                .prompt
+                .contains("The remaining issue is stale session state")
+        );
+    }
+
+    #[test]
+    fn thread_title_prompt_keeps_the_latest_thread_contents_when_regeneration_context_is_truncated()
+    {
+        let message = format!(
+            "{}\n\nASSISTANT:\nCurrent thread state",
+            "old context ".repeat(1_000)
+        );
+        let result = thread_title(&message, Some("Old title"), &[]);
+        assert!(result.prompt.contains("[Earlier content truncated]"));
+        assert!(result.prompt.contains("Current thread state"));
+        assert!(!result.prompt.contains("[truncated]"));
+    }
+
+    #[test]
+    fn thread_title_prompt_does_not_truncate_an_already_marked_regeneration_context_twice() {
+        let retained_context = "x".repeat(7_998);
+        let message = format!("[Earlier content truncated]\n\n{retained_context}");
+        let result = thread_title(&message, Some("Old title"), &[]);
+        assert!(result.prompt.contains(&format!(
+            "Thread contents:\n[Earlier content truncated]\n\n{retained_context}"
+        )));
+        assert_eq!(
+            result.prompt.matches("[Earlier content truncated]").count(),
+            1
+        );
     }
 }

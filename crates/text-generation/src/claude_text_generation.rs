@@ -251,7 +251,7 @@ impl ClaudeRunner {
                         normalize_cli_error(
                             "claude",
                             operation,
-                            &error.to_string(),
+                            error.to_string(),
                             "Failed to create title directory",
                         )
                     })?,
@@ -287,7 +287,7 @@ impl ClaudeRunner {
                 return Err(normalize_cli_error(
                     "claude",
                     operation,
-                    &message,
+                    message,
                     "Failed to spawn Claude CLI process",
                 ));
             }
@@ -302,7 +302,7 @@ impl ClaudeRunner {
                 return Err(normalize_cli_error(
                     "claude",
                     operation,
-                    &message,
+                    message,
                     "Failed to collect process output",
                 ));
             }

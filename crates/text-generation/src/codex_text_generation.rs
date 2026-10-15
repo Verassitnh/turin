@@ -350,7 +350,7 @@ impl CodexRunner {
                 return Err(normalize_cli_error(
                     "codex",
                     operation,
-                    &message,
+                    message,
                     "Failed to spawn Codex CLI process",
                 ));
             }
@@ -365,7 +365,7 @@ impl CodexRunner {
                 return Err(normalize_cli_error(
                     "codex",
                     operation,
-                    &message,
+                    message,
                     "Failed to collect process output",
                 ));
             }

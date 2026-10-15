@@ -484,10 +484,7 @@ impl VcsDriver for GitVcsDriver {
             .await?;
         if cleaned.exit_code != 0 {
             let emptied = cleaned.exit_code == 1
-                && cleaned
-                    .stderr
-                    .trim()
-                    .starts_with("warning: failed to remove ./:")
+                && FAILED_TO_REMOVE_WORKSPACE_ROOT.is_match(cleaned.stderr.trim())
                 && std::fs::read_dir(&input.cwd)
                     .map(|entries| entries.count() == 0)
                     .unwrap_or(false);
@@ -1127,6 +1124,12 @@ impl GitVcsDriver {
     }
 }
 
+/// Git's "could not remove ./" line from `git clean`, the only stderr that
+/// means "every child was removed". Anything longer or multi-line is a real failure.
+static FAILED_TO_REMOVE_WORKSPACE_ROOT: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^warning: failed to remove \./: [^\n]+$").unwrap()
+    });
 static SPARSE_ADD_HELP: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"--(?:\[no-\])?sparse\b").unwrap());
 
@@ -1386,5 +1389,19 @@ mod tests {
         let paths = vec!["a".repeat(100), "b".repeat(100)];
         let chunks = chunk_paths_for_check_ignore(&paths);
         assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn only_a_single_line_root_removal_warning_counts_as_emptied() {
+        let root = &FAILED_TO_REMOVE_WORKSPACE_ROOT;
+        assert!(root.is_match("warning: failed to remove ./: Directory not empty"));
+        assert!(!root.is_match("warning: failed to remove ./:"));
+        assert!(!root.is_match("warning: failed to remove ./: "));
+        assert!(
+            !root.is_match(
+                "warning: failed to remove ./: Directory not empty\nfatal: something else"
+            )
+        );
+        assert!(!root.is_match("fatal: warning: failed to remove ./: detail"));
     }
 }

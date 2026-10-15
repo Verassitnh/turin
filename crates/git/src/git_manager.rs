@@ -2113,6 +2113,9 @@ mod tests {
             .args(["log", "-1", "--format=%s"])
             .output()
             .unwrap();
-        assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "Ship the note.");
+        assert_eq!(
+            String::from_utf8_lossy(&log.stdout).trim(),
+            "Ship the note."
+        );
     }
 }

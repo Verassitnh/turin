@@ -134,9 +134,9 @@ impl OpenCodeServerOwner {
             }
             state.server = None;
             state.borrowers = 0;
-            drop(state);
+            // Still under the lock: a concurrent acquire must not see the gap and
+            // start a second server. Upstream closes and restarts inside one permit.
             server.shutdown().await;
-            state = self.inner.state.lock().await;
         }
         let started = start_open_code_server_process(
             self.inner.start_input(),
@@ -360,6 +360,48 @@ done
         owner.close().await;
         assert_eq!(count(), 0, "a stopped server was left in the ledger");
         let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    #[tokio::test]
+    async fn concurrent_acquires_share_one_restarted_server() {
+        let binary = write_fake_opencode();
+        let owner = OpenCodeServerOwner::new(OwnerConfig {
+            binary_path: binary.display().to_string(),
+            directory: "/work".into(),
+            server_password: None,
+            environment: Some(BTreeMap::new()),
+            idle: Some(Duration::from_secs(30)),
+            shutdown_grace: Some(Duration::from_millis(40)),
+            verify: Some(ok_verify()),
+            ledger: None,
+        });
+        let dead = owner
+            .with_server(|server| async move { Ok::<_, OpenCodeRuntimeError>(server.pid()) })
+            .await
+            .unwrap();
+        crate::process_group::signal_process_group(dead, crate::process_group::SIGKILL).unwrap();
+        for _ in 0..100 {
+            let running = owner
+                .inner
+                .state
+                .lock()
+                .await
+                .server
+                .as_ref()
+                .is_some_and(|server| server.is_running());
+            if !running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let (first, second) = tokio::join!(
+            owner.with_server(|server| async move { Ok::<_, OpenCodeRuntimeError>(server.pid()) }),
+            owner.with_server(|server| async move { Ok::<_, OpenCodeRuntimeError>(server.pid()) }),
+        );
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_ne!(first, dead, "the dead server was reused");
+        assert_eq!(first, second, "two acquires started two servers");
+        owner.close().await;
     }
 
     #[tokio::test]

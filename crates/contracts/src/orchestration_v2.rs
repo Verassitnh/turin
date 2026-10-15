@@ -1417,7 +1417,8 @@ impl<'de> Deserialize<'de> for OrchestrationV2PendingBackgroundTask {
 }
 
 /// Provider and adapter metadata that should not overwrite the app thread's title.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// No `Eq`: `ModelSelection` is not `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestrationV2ProviderThreadNativeMetadata {
     /// Provider-reported selection for display, separate from the app's saved preferences.
@@ -1753,7 +1754,8 @@ pub fn latest_provider_turn_for_attempt<'a, T: OrchestrationV2ProviderTurnLike>(
 ) -> Option<&'a T> {
     let mut latest: Option<&'a T> = None;
     for turn in provider_turns {
-        if turn.run_attempt_id() != attempt_id {
+        // No attempt id filters every turn out (upstream `attemptId == null`).
+        if attempt_id.is_none() || turn.run_attempt_id() != attempt_id {
             continue;
         }
         let is_latest = match latest {
@@ -1845,7 +1847,7 @@ pub struct OrchestrationV2RuntimeRequest {
 /// member that fits, so those come first. The plain `subagent` and `command`
 /// members after them decode values that were already decoded once. An
 /// unknown kind (or none at all) decodes to plain `background_task`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrchestrationV2NotificationSource {
     DelegatedTask {
         task_ids: Vec<NodeId>,
@@ -2876,6 +2878,9 @@ pub enum OrchestrationV2TurnItem {
         thread_id: ThreadId,
         run_id: Option<RunId>,
         node_id: Option<NodeId>,
+        // Fork overrides the base `providerThreadId` (NullOr) with
+        // Schema.optional, so the key is omitted rather than nulled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_thread_id: Option<ProviderThreadId>,
         provider_turn_id: Option<ProviderTurnId>,
         native_item_ref: Option<OrchestrationV2ProviderRef>,
@@ -2888,8 +2893,6 @@ pub enum OrchestrationV2TurnItem {
         updated_at: UtcDateTime,
         source: OrchestrationV2ForkSource,
         target_thread_id: ThreadId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        provider_thread_id: Option<ProviderThreadId>,
     },
     ThreadCreated {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4341,7 +4344,8 @@ pub struct OrchestrationV2ImportedNativeThreadRef {
 }
 
 /// An imported native thread: its ref plus any metadata the provider handed over.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// No `Eq`: the metadata carries a `ModelSelection`, which is not `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestrationV2ImportedNativeThread {
     #[serde(rename = "ref")]
@@ -6374,7 +6378,10 @@ mod tests {
         .unwrap();
 
         assert!(root_scope.advances_app_run_count);
-        assert_eq!(child_scope.parent_scope_id.as_ref().map(AsRef::as_ref), Some(&root_scope.id));
+        assert_eq!(
+            child_scope.parent_scope_id.as_ref().map(|id| id.as_str()),
+            Some(root_scope.id.as_str())
+        );
         assert!(!child_scope.advances_app_run_count);
     }
 
@@ -6398,7 +6405,10 @@ mod tests {
 
         assert!(checkpoint.app_run_ordinal.is_none());
         assert_eq!(checkpoint.scope_id.as_str(), "scope-child-1");
-        assert_eq!(checkpoint.parent_checkpoint_id.as_ref().map(AsRef::as_ref).unwrap().as_str(), "checkpoint-root-1");
+        assert_eq!(
+            checkpoint.parent_checkpoint_id.as_ref().map(|id| id.as_str()),
+            Some("checkpoint-root-1")
+        );
         assert_eq!(checkpoint.ref_.as_str(), "git-ref-1");
     }
 
@@ -6541,7 +6551,7 @@ mod tests {
             panic!("expected thread.created.record");
         };
         assert_eq!(target_thread_id.as_str(), "thread-child-1");
-        assert_eq!(target_run_id.as_ref().map(AsRef::as_ref).unwrap().as_str(), "run-child-1");
+        assert_eq!(target_run_id.as_ref().map(|id| id.as_str()).unwrap(), "run-child-1");
 
         let item: OrchestrationV2TurnItem = serde_json::from_value(turn_item_json(
             "thread_created",
@@ -6565,7 +6575,7 @@ mod tests {
         let OrchestrationV2TurnItem::ThreadCreated { target_run_id, .. } = &item else {
             panic!("expected thread_created");
         };
-        assert_eq!(target_run_id.as_ref().map(AsRef::as_ref).unwrap().as_str(), "run-child-1");
+        assert_eq!(target_run_id.as_ref().map(|id| id.as_str()).unwrap(), "run-child-1");
     }
 
     #[test]
@@ -6899,7 +6909,7 @@ mod tests {
             decoded.turn_items[0],
             OrchestrationV2TurnItem::CommandExecution { .. }
         ));
-        assert_eq!(decoded.visible_turn_items[0].item.id().as_str(), "turn-item-command-1");
+        assert_eq!(item_id(&decoded.visible_turn_items[0].item), "turn-item-command-1");
 
         let bounded: OrchestrationV2ThreadStreamItem = serde_json::from_value(json!({
             "kind": "snapshot",
@@ -7370,10 +7380,10 @@ mod tests {
             }
         }
         let turns = [
-            Turn { id: "first", run_attempt_id: Some(RunAttemptId::new("goal-attempt").unwrap()), ordinal: 3 },
-            Turn { id: "other", run_attempt_id: Some(RunAttemptId::new("other-attempt").unwrap()), ordinal: 9 },
-            Turn { id: "last", run_attempt_id: Some(RunAttemptId::new("goal-attempt").unwrap()), ordinal: 5 },
-            Turn { id: "subagent", run_attempt_id: None, ordinal: 7 },
+            Turn { id: "first", run_attempt_id: Some(RunAttemptId::new("goal-attempt").unwrap()), ordinal: PositiveInt::new(3).unwrap() },
+            Turn { id: "other", run_attempt_id: Some(RunAttemptId::new("other-attempt").unwrap()), ordinal: PositiveInt::new(9).unwrap() },
+            Turn { id: "last", run_attempt_id: Some(RunAttemptId::new("goal-attempt").unwrap()), ordinal: PositiveInt::new(5).unwrap() },
+            Turn { id: "subagent", run_attempt_id: None, ordinal: PositiveInt::new(7).unwrap() },
         ];
         let latest =
             latest_provider_turn_for_attempt(&turns, Some(&RunAttemptId::new("goal-attempt").unwrap()));
@@ -7383,7 +7393,96 @@ mod tests {
 
     #[test]
     fn turn_item_tags_are_known() {
-        crate::base_schemas::assert_known_tags::<OrchestrationV2TurnItem>();
+        // One sample per known member, decoded from wire JSON: the serialized
+        // tags must equal `known_tags` as a set, or the forward-compatible
+        // array codec would silently drop a member.
+        let samples = [
+            ("notification", json!({
+                "source": { "kind": "command" },
+                "outcome": "completed",
+                "summary": "Done",
+            })),
+            ("user_message", json!({
+                "createdBy": "user",
+                "creationSource": "web",
+                "messageId": "message-1",
+                "inputIntent": "turn_start",
+                "text": "Hello",
+                "attachments": [],
+            })),
+            ("assistant_message", json!({ "messageId": "message-1", "text": "Hi", "streaming": false })),
+            ("reasoning", json!({ "text": "Thinking", "streaming": false })),
+            ("proposed_plan", json!({ "planId": "plan-1", "markdown": "# Plan", "streaming": false })),
+            ("todo_list", json!({
+                "planId": "plan-1",
+                "steps": [{ "id": "step-1", "text": "Step", "status": "pending" }],
+            })),
+            ("user_input_request", json!({
+                "requestId": "request-1",
+                "questions": [{
+                    "id": "question-1",
+                    "header": "Header",
+                    "question": "Proceed?",
+                    "options": [{ "label": "Yes", "description": "Go ahead" }],
+                }],
+            })),
+            ("file_change", json!({ "fileName": "package.json" })),
+            ("command_execution", json!({ "input": "bun test" })),
+            ("file_search", json!({})),
+            ("web_search", json!({})),
+            ("approval_request", json!({ "requestId": "request-1", "requestKind": "command" })),
+            ("checkpoint", json!({
+                "checkpointId": "checkpoint-1",
+                "scopeId": "scope-1",
+                "files": [{ "path": "a.ts", "kind": "edited", "additions": 1, "deletions": 0 }],
+            })),
+            ("run_interrupt_request", json!({ "message": "Stop" })),
+            ("run_interrupt_result", json!({ "message": "Stopped" })),
+            ("system_notice", json!({ "message": "Noted" })),
+            ("error", json!({
+                "failure": {
+                    "class": "validation_error",
+                    "message": "Invalid",
+                    "code": "invalid_request",
+                    "retryable": false,
+                },
+            })),
+            ("compaction", json!({})),
+            ("handoff", json!({
+                "contextHandoffId": "handoff-1",
+                "fromProviderThreadIds": ["provider-thread-1"],
+                "toProviderThreadId": "provider-thread-2",
+                "fromProviderInstanceIds": ["codex"],
+                "toProviderInstanceId": "claudeAgent",
+                "strategy": "delta_since_target_last_seen",
+            })),
+            ("fork", json!({
+                "source": { "type": "node", "nodeId": "node-1" },
+                "targetThreadId": "thread-2",
+            })),
+            ("thread_created", json!({
+                "targetThreadId": "thread-2",
+                "targetProviderInstanceId": "claudeAgent",
+                "targetModel": "claude-sonnet-4-6",
+            })),
+            ("secret_request", json!({ "label": "Token", "reason": "deploy", "secretStatus": "pending" })),
+            ("subagent", json!({
+                "subagentId": "node-1",
+                "origin": "provider_native",
+                "driver": "codex",
+                "providerInstanceId": "codex",
+                "prompt": "Look",
+            })),
+            ("dynamic_tool", json!({ "input": { "query": "fixture" } })),
+        ];
+        let items: Vec<OrchestrationV2TurnItem> = samples
+            .iter()
+            .map(|(kind, extra)| {
+                serde_json::from_value(turn_item_json(kind, extra.clone()))
+                    .unwrap_or_else(|error| panic!("{kind} sample must decode: {error}"))
+            })
+            .collect();
+        crate::base_schemas::assert_known_tags(&items);
     }
 
     #[test]

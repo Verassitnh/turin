@@ -27,6 +27,7 @@ use crate::usage_limit_source_id::UsageLimitSourceId;
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 // ── Client Settings (local-only) ───────────────────────────────
@@ -487,6 +488,17 @@ pub enum EnvironmentIdentificationMode {
 pub const DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE: EnvironmentIdentificationMode =
     EnvironmentIdentificationMode::Artwork;
 
+impl EnvironmentIdentificationMode {
+    /// Wire name of the mode, matching upstream's literal set.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Artwork => "artwork",
+            Self::Pill => "pill",
+            Self::None => "none",
+        }
+    }
+}
+
 /// `SnapShotKeyChord`: a shortcut with at least one modifier held, so a plain
 /// key press never triggers a capture.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,7 +512,7 @@ impl SnapShotKeyChord {
         } else {
             Err(ContractError {
                 expected: "a shortcut with at least one modifier (Snapshot shortcut requires a modifier.)",
-                got: "a chord with no modifiers",
+                got: "a chord with no modifiers".to_owned(),
             })
         }
     }
@@ -640,6 +652,17 @@ pub enum QuitConfirmationMode {
     DoubleClick,
 }
 const DEFAULT_QUIT_CONFIRMATION_MODE: QuitConfirmationMode = QuitConfirmationMode::Hold;
+
+impl QuitConfirmationMode {
+    /// Wire name of the mode, matching upstream's literal set.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Hold => "hold",
+            Self::DoubleClick => "double-click",
+        }
+    }
+}
 
 /// Serde codec for `QuitConfirmationModeSetting` (`Schema.Union([
 /// QuitConfirmationMode, LegacyConfirmQuit])`): the canonical mode string, or
@@ -1012,6 +1035,27 @@ pub enum FollowUpBehavior {
     Steer,
 }
 
+impl SendShortcut {
+    /// Wire name of the shortcut, matching upstream's literal set.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Enter => "enter",
+            Self::ModEnterMultiline => "mod-enter-multiline",
+            Self::ModEnter => "mod-enter",
+        }
+    }
+}
+
+impl FollowUpBehavior {
+    /// Wire name of the behavior, matching upstream's literal set.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Queue => "queue",
+            Self::Steer => "steer",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientSettings {
@@ -1355,7 +1399,7 @@ pub enum CodexSetupMode {
     Existing,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1376,7 +1420,9 @@ pub struct CodexSettings {
 
 // Empty, or an integer from 100,000 to 1,000,000. Shared by the full
 // Claude settings schema and its patch so an out-of-range value fails at
-// the update that introduced it.
+// the update that introduced it. `is_valid` implements it without a regex
+// engine; kept as the upstream source of truth for the rule.
+#[allow(dead_code)]
 const CLAUDE_AUTO_COMPACT_WINDOW_PATTERN: &str = "^(?:|[1-9]\\d{5}|1000000)$";
 
 /// `ClaudeSettings.autoCompactWindow`: empty (Claude's default) or a token
@@ -1427,7 +1473,14 @@ impl<'de> Deserialize<'de> for AutoCompactWindow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl Default for AutoCompactWindow {
+    /// Upstream decoding default: empty, i.e. Claude's own threshold.
+    fn default() -> Self {
+        Self(TrimmedString::new(""))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeSettings {
     #[serde(default = "default_true")]
@@ -1449,24 +1502,27 @@ pub struct ClaudeSettings {
  * in the browser. The API key and Agent Platform methods take credentials from
  * the instance config and never open a browser.
  */
-pub const ANTIGRAVITY_AUTH_METHODS: &[ProviderSettingsFormOption] = &[
-    ProviderSettingsFormOption {
-        value: "oauth-personal".to_owned(),
-        label: "Google account".to_owned(),
-    },
-    ProviderSettingsFormOption {
-        value: "oauth-business".to_owned(),
-        label: "Gemini Enterprise".to_owned(),
-    },
-    ProviderSettingsFormOption {
-        value: "gemini-api-key".to_owned(),
-        label: "Gemini API key".to_owned(),
-    },
-    ProviderSettingsFormOption {
-        value: "agent-platform".to_owned(),
-        label: "Agent Platform (Vertex AI)".to_owned(),
-    },
-];
+pub static ANTIGRAVITY_AUTH_METHODS: LazyLock<Vec<ProviderSettingsFormOption>> =
+    LazyLock::new(|| {
+        vec![
+            ProviderSettingsFormOption {
+                value: "oauth-personal".to_owned(),
+                label: "Google account".to_owned(),
+            },
+            ProviderSettingsFormOption {
+                value: "oauth-business".to_owned(),
+                label: "Gemini Enterprise".to_owned(),
+            },
+            ProviderSettingsFormOption {
+                value: "gemini-api-key".to_owned(),
+                label: "Gemini API key".to_owned(),
+            },
+            ProviderSettingsFormOption {
+                value: "agent-platform".to_owned(),
+                label: "Agent Platform (Vertex AI)".to_owned(),
+            },
+        ]
+    });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AntigravityAuthMethod {
@@ -1484,11 +1540,12 @@ fn default_antigravity_auth_method() -> AntigravityAuthMethod {
     AntigravityAuthMethod::OauthPersonal
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AntigravitySettings {
     #[serde(default = "default_false")]
     pub enabled: bool,
+    #[serde(default = "default_antigravity_auth_method")]
     pub auth_method: AntigravityAuthMethod,
     // `secretSetting`: stored separately on the host and redacted before it
     // reaches a client.
@@ -1537,10 +1594,9 @@ pub struct GitHubHost(TrimmedNonEmptyString);
 impl GitHubHost {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
         let trimmed = TrimmedNonEmptyString::new(value)?;
-        Ok(Self(
-            TrimmedNonEmptyString::new(trimmed.as_str().to_lowercase())
-                .expect("lowercasing a non-empty host keeps it non-empty"),
-        ))
+        // Lowercasing a trimmed, non-empty host leaves it trimmed and non-empty.
+        Ok(Self(TrimmedNonEmptyString::new(trimmed.as_str().to_lowercase())
+            .expect("lowercasing a trimmed non-empty host keeps it non-empty")))
     }
     pub fn as_str(&self) -> &str {
         self.0.as_str()
@@ -1561,7 +1617,7 @@ impl Serialize for GitHubHost {
 
 impl<'de> Deserialize<'de> for GitHubHost {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Self::new(TrimmedNonEmptyString::deserialize(d)?).map_err(serde::de::Error::custom)
+        Self::new(String::deserialize(d)?).map_err(serde::de::Error::custom)
     }
 }
 
@@ -1626,6 +1682,17 @@ pub enum BranchNamingMode {
     Static,
     Semantic,
     Custom,
+}
+
+impl BranchNamingMode {
+    /// Wire name of the mode, matching upstream's literal set.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::Semantic => "semantic",
+            Self::Custom => "custom",
+        }
+    }
 }
 
 /// Upstream `BranchNamingOptions` (plain interface, not a schema).
@@ -1708,6 +1775,7 @@ fn default_background_activity_profile_selection() -> BackgroundActivityProfileS
 pub struct BackgroundActivitySettings {
     #[serde(default = "default_background_activity_schema_version")]
     pub schema_version: BackgroundActivitySchemaVersion,
+    #[serde(default = "default_background_activity_profile_selection")]
     pub profile: BackgroundActivityProfileSelection,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_profile: Option<BackgroundActivityProfile>,
@@ -1865,7 +1933,7 @@ pub struct ProjectProviderInstanceOverride {
  * disabled, or turn off one the machine enabled. See
  * `resolve_project_provider_instance_enabled` for the combined resolution.
  */
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSettingsOverrides {
     #[serde(
@@ -2148,6 +2216,7 @@ pub struct ServerSettings {
      */
     #[serde(default)]
     pub previous_worktrees_directories: Vec<TrimmedString>,
+    #[serde(default = "default_response_streaming_mode")]
     pub response_streaming_mode: ResponseStreamingMode,
     #[serde(default = "default_true")]
     pub enable_provider_update_checks: bool,
@@ -2786,7 +2855,7 @@ pub struct ServerSettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_models_hidden: Option<Vec<SetModelHidden>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub set_provider_model_order: Option<Vec<SetProviderModelOrder>>,
+    pub set_provider_model_order: Option<SetProviderModelOrder>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub favorites: Option<ModelFavorites>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3094,6 +3163,10 @@ pub struct ClientSettingsPatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{
+        CustomModelEntry, ModelCapabilities, ProviderOptionChoice, ProviderOptionDescriptor,
+        SelectOptionType, SelectProviderOptionDescriptor,
+    };
     use serde_json::json;
 
     fn decode_server(value: serde_json::Value) -> ServerSettings {
@@ -3421,9 +3494,12 @@ mod tests {
         });
         let patch =
             decode_server_patch(json!({ "usagePriceOverrides": overrides.clone() }));
-        let decoded = patch.usage_price_overrides.unwrap();
+        let decoded = patch.usage_price_overrides.as_ref().unwrap();
         assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded["removed-model"], None);
+        assert_eq!(
+            decoded.get(&TrimmedNonEmptyString::new("removed-model").unwrap()),
+            Some(&None)
+        );
         let encoded = encode(&patch);
         assert_eq!(encoded["usagePriceOverrides"], overrides);
     }
@@ -3849,7 +3925,7 @@ mod tests {
                 LoadBalancingWeight::new(60).unwrap()
             )]
             .into_iter()
-            .collect()
+            .collect::<LoadBalancingWeights>()
         );
     }
 
@@ -4036,7 +4112,19 @@ mod tests {
             snap_shot_shortcut_modifier_pair(&both_shift),
             SnapShotModifier::Shift
         );
-        assert!(!is_modifier_pair_shortcut(&DEFAULT_SNAP_SHOT_SHORTCUT.clone_chord()));
+        // An explicit chord (the third union member) is not a pair shortcut.
+        let chord = SnapShotShortcut::Chord(
+            SnapShotKeyChord::new(KeybindingShortcut {
+                key: crate::keybindings::KeybindingValue::new("w").unwrap(),
+                meta_key: false,
+                ctrl_key: false,
+                shift_key: true,
+                alt_key: false,
+                mod_key: false,
+            })
+            .unwrap(),
+        );
+        assert!(!is_modifier_pair_shortcut(&chord));
         assert_eq!(
             snap_shot_modifier_pair_label(SnapShotModifier::Meta, true),
             "Command + Command"
@@ -4619,9 +4707,8 @@ mod tests {
             patch.observability.unwrap().otlp_traces_url.unwrap().as_str(),
             "http://localhost:4318/v1/traces"
         );
-        let instance = patch
-            .provider_instances
-            .unwrap()
+        let instances = patch.provider_instances.unwrap();
+        let instance = instances
             .get(&provider_instance_id("codex_personal"))
             .unwrap();
         assert_eq!(instance.driver.as_str(), "codex");
@@ -5415,7 +5502,7 @@ mod tests {
                 TrimmedNonEmptyString::new("gpt-6").unwrap()
             )]
             .into_iter()
-            .collect()
+            .collect::<IndexMap<TrimmedNonEmptyString, TrimmedNonEmptyString>>()
         );
         assert_eq!(
             encode(&settings)["usageModelAliases"],

@@ -387,8 +387,13 @@ mod tests {
                 "ollama_local":{"driver":"ollama","config":{"endpoint":"http://localhost:11434"}}}"#,
         )
         .unwrap();
+        // `Schema.Record` preserves document order (IndexMap), unlike a
+        // sorted map; assert the order the JSON arrived in.
         let keys: Vec<&str> = decoded.keys().map(|k| k.as_str()).collect();
-        assert_eq!(keys, ["claudeAgent", "codex_personal", "codex_work", "ollama_local"]);
+        assert_eq!(
+            keys,
+            ["codex_personal", "codex_work", "claudeAgent", "ollama_local"]
+        );
         assert_eq!(
             decoded
                 .get(&ProviderInstanceId::new("codex_work").unwrap())

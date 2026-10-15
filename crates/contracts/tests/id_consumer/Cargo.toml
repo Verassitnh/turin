@@ -1,0 +1,11 @@
+# Deliberately depends on neither serde nor uuid: proves `turin_contracts::id!`
+# expands through `$crate::__private` and works in any downstream crate.
+[package]
+name = "turin-contracts-id-consumer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+turin-contracts.workspace = true

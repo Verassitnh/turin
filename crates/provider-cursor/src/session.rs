@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use futures::stream::{self, unfold};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use turin_acp::compat::InitializeResponse;
@@ -18,9 +19,35 @@ use turin_acp::cursor::{AskQuestionParams, CreatePlanParams};
 use turin_acp::protocol::RequestContext;
 use turin_acp::{AcpClient, AcpError, SpawnCommand, spawn};
 use turin_contracts::model_selection::ModelSelection;
-use turin_contracts::orchestration_v2::OrchestrationV2ProviderCapabilities;
+use turin_contracts::orchestration_v2::{
+    OrchestrationV2NativeRefStrength, OrchestrationV2ProviderCapabilities,
+    OrchestrationV2ProviderRef, OrchestrationV2ProviderSession,
+    OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
+    OrchestrationV2ProviderThreadDisposition, OrchestrationV2ProviderThreadStatus,
+    OrchestrationV2RuntimeRequest, OrchestrationV2RuntimeRequestKind,
+    OrchestrationV2RuntimeRequestStatus, OrchestrationV2ResponseCapability, OrchestrationV2TurnItem,
+    OrchestrationV2TurnItemStatus,
+};
 use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceId};
 use turin_contracts::provider_policy::ProviderApprovalDecision;
+use turin_contracts::{
+    PositiveInt, ProviderSessionId, ProviderThreadId, ProviderTurnId, RuntimeRequestId, ThreadId,
+    TrimmedNonEmptyString, UtcDateTime,
+};
+use turin_provider_core::failure::ProviderFailureCause;
+use turin_provider_core::id_allocator::derive;
+use turin_provider_core::provider_adapter::{
+    ProviderAdapterErrorKind, ProviderAdapterV2, ProviderAdapterV2EnsureThreadInput,
+    ProviderAdapterV2Error, ProviderAdapterV2Event, ProviderAdapterV2ForkThreadInput,
+    ProviderAdapterV2InterruptInput, ProviderAdapterV2OpenSessionInput,
+    ProviderAdapterV2ReadThreadSnapshotInput, ProviderAdapterV2ResumeThreadInput,
+    ProviderAdapterV2RollbackThreadInput, ProviderAdapterV2RuntimeRequestResponseInput,
+    ProviderAdapterV2SteerInput, ProviderAdapterV2TurnInput,
+    ProviderAdapterV2TurnTerminalStatus, ProviderEventStream, ProviderSessionRuntime,
+};
+use turin_provider_core::selection_transition::{
+    ProviderSelectionTransitionInput, ProviderSelectionTransitionPlan, acp_selection_transition,
+};
 
 use crate::acp_config::{default_cursor_home, with_user_config};
 use crate::auth::{self, CursorSignInStatus};
@@ -100,17 +127,42 @@ enum Pending {
     Plan(oneshot::Sender<PlanDisposition>),
 }
 
+struct ActiveTurn {
+    thread_id: ThreadId,
+    run_id: turin_contracts::RunId,
+    provider_thread_id: ProviderThreadId,
+    provider_turn_id: ProviderTurnId,
+    node_id: turin_contracts::NodeId,
+    ordinal: std::sync::atomic::AtomicU64,
+}
+
 struct SessionInner {
     client: AcpClient,
     events: mpsc::UnboundedSender<CursorEvent>,
+    provider_events: mpsc::UnboundedSender<ProviderAdapterV2Event>,
     pending: Mutex<HashMap<String, Pending>>,
+    pending_kind: Mutex<HashMap<String, PendingKind>>,
+    asks: Mutex<HashMap<String, turin_acp::cursor::AskQuestionParams>>,
     grants: Mutex<HashSet<String>>,
     thread: Mutex<Option<CursorThread>>,
+    provider_thread: Mutex<Option<OrchestrationV2ProviderThread>>,
+    active_turn: Mutex<Option<ActiveTurn>>,
     home: Option<PathBuf>,
     image_prompts: AtomicBool,
     capabilities: Mutex<OrchestrationV2ProviderCapabilities>,
     auth: Mutex<CursorSignInStatus>,
     initialize: Mutex<Option<InitializeResponse>>,
+    instance_id: ProviderInstanceId,
+    driver: ProviderDriverKind,
+    provider_session_id: ProviderSessionId,
+    provider_session: OrchestrationV2ProviderSession,
+}
+
+#[derive(Clone, Copy)]
+enum PendingKind {
+    Permission,
+    Ask,
+    Plan,
 }
 
 impl Drop for SessionInner {
@@ -135,45 +187,6 @@ fn cancel_pending(item: Pending) {
             let _ = sender.send(PlanDisposition::Cancelled);
         }
     }
-}
-
-/// Adapter surface matching `ProviderAdapterV2` for the methods Cursor ACP can serve.
-#[async_trait]
-pub trait CursorProviderAdapter: Send + Sync {
-    fn instance_id(&self) -> &ProviderInstanceId;
-    fn driver(&self) -> &ProviderDriverKind;
-    async fn get_capabilities(&self) -> Result<OrchestrationV2ProviderCapabilities, CursorError>;
-    async fn plan_selection_transition(
-        &self,
-        runtime_mode_changed: bool,
-    ) -> Result<SelectionTransition, CursorError>;
-    async fn open_session(&self, cwd: &Path) -> Result<CursorSession, CursorError>;
-}
-
-/// Session surface matching `ProviderSessionRuntime` for this transport.
-#[async_trait]
-pub trait CursorSessionRuntime: Send + Sync {
-    async fn ensure_thread(&self, cwd: &Path) -> Result<CursorThread, CursorError>;
-    async fn resume_thread(
-        &self,
-        session_id: &str,
-        cwd: &Path,
-    ) -> Result<CursorThread, CursorError>;
-    async fn start_turn(
-        &self,
-        text: &str,
-        images: &[PromptImage],
-    ) -> Result<PromptOutcome, CursorError>;
-    async fn steer_turn(&self) -> Result<(), CursorError>;
-    async fn interrupt_turn(&self) -> Result<(), CursorError>;
-    async fn respond_to_runtime_request(
-        &self,
-        request_id: &str,
-        reply: RuntimeReply,
-    ) -> Result<(), CursorError>;
-    async fn read_thread_snapshot(&self) -> Result<Value, CursorError>;
-    async fn rollback_thread(&self) -> Result<Value, CursorError>;
-    async fn fork_thread(&self) -> Result<CursorThread, CursorError>;
 }
 
 #[derive(Clone)]
@@ -210,43 +223,13 @@ impl CursorAdapter {
         self.cursor_home = home;
         self
     }
-}
 
-#[async_trait]
-impl CursorProviderAdapter for CursorAdapter {
-    fn instance_id(&self) -> &ProviderInstanceId {
+    pub fn instance_id(&self) -> &ProviderInstanceId {
         &self.instance_id
     }
 
-    fn driver(&self) -> &ProviderDriverKind {
+    pub fn driver(&self) -> &ProviderDriverKind {
         &self.driver
-    }
-
-    async fn get_capabilities(&self) -> Result<OrchestrationV2ProviderCapabilities, CursorError> {
-        Ok(capabilities::cursor_capabilities())
-    }
-
-    async fn plan_selection_transition(
-        &self,
-        runtime_mode_changed: bool,
-    ) -> Result<SelectionTransition, CursorError> {
-        Ok(capabilities::plan_selection_transition(
-            &capabilities::cursor_capabilities(),
-            runtime_mode_changed,
-        ))
-    }
-
-    async fn open_session(&self, cwd: &Path) -> Result<CursorSession, CursorError> {
-        let client = spawn(SpawnCommand {
-            program: &self.program,
-            args: auth::ACP_ARGS,
-            cwd: Some(cwd),
-        })
-        .await
-        .map_err(|error| CursorError::from_acp(CursorOperation::Spawn, &error))?;
-        let session = CursorSession::from_client(client, self.cursor_home.clone());
-        session.initialize().await?;
-        Ok(session)
     }
 }
 
@@ -254,27 +237,78 @@ impl CursorProviderAdapter for CursorAdapter {
 pub struct CursorSession {
     inner: Arc<SessionInner>,
     events: Arc<AsyncMutex<mpsc::UnboundedReceiver<CursorEvent>>>,
+    provider_events: Arc<Mutex<Option<mpsc::UnboundedReceiver<ProviderAdapterV2Event>>>>,
 }
 
 impl CursorSession {
     pub fn from_client(client: AcpClient, cursor_home: Option<PathBuf>) -> Self {
+        let instance_id = ProviderInstanceId::new("cursor").expect("cursor instance id");
+        let driver = ProviderDriverKind::new("cursor").expect("cursor driver slug");
+        let provider_session_id =
+            derive::provider_session(&instance_id);
+        Self::from_client_with(
+            client,
+            cursor_home,
+            instance_id,
+            driver,
+            provider_session_id,
+            "/".to_owned(),
+            None,
+        )
+    }
+
+    fn from_client_with(
+        client: AcpClient,
+        cursor_home: Option<PathBuf>,
+        instance_id: ProviderInstanceId,
+        driver: ProviderDriverKind,
+        provider_session_id: ProviderSessionId,
+        cwd: String,
+        model: Option<TrimmedNonEmptyString>,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (provider_tx, provider_rx) = mpsc::unbounded_channel();
+        let now = UtcDateTime::now();
+        let provider_session = OrchestrationV2ProviderSession {
+            id: provider_session_id.clone(),
+            driver: driver.clone(),
+            provider_instance_id: instance_id.clone(),
+            status: OrchestrationV2ProviderSessionStatus::Starting,
+            cwd: TrimmedNonEmptyString::new(&cwd).unwrap_or_else(|_| {
+                TrimmedNonEmptyString::new("/").expect("slash cwd")
+            }),
+            model,
+            capabilities: capabilities::cursor_capabilities(),
+            created_at: now.clone(),
+            updated_at: now,
+            last_error: None,
+        };
         let inner = Arc::new(SessionInner {
             client: client.clone(),
             events: tx,
+            provider_events: provider_tx,
             pending: Mutex::new(HashMap::new()),
+            pending_kind: Mutex::new(HashMap::new()),
+            asks: Mutex::new(HashMap::new()),
             grants: Mutex::new(HashSet::new()),
             thread: Mutex::new(None),
+            provider_thread: Mutex::new(None),
+            active_turn: Mutex::new(None),
             home: cursor_home,
             image_prompts: AtomicBool::new(false),
             capabilities: Mutex::new(capabilities::cursor_capabilities()),
             auth: Mutex::new(CursorSignInStatus::idle()),
             initialize: Mutex::new(None),
+            instance_id,
+            driver,
+            provider_session_id,
+            provider_session,
         });
         register_handlers(&client, &inner);
         Self {
             inner,
             events: Arc::new(AsyncMutex::new(rx)),
+            provider_events: Arc::new(Mutex::new(Some(provider_rx))),
         }
     }
 
@@ -464,9 +498,9 @@ impl CursorSession {
     }
 }
 
-#[async_trait]
-impl CursorSessionRuntime for CursorSession {
-    async fn ensure_thread(&self, cwd: &Path) -> Result<CursorThread, CursorError> {
+impl CursorSession {
+    /// `session/new`, once per process. Later calls return the open thread.
+    pub async fn new_session(&self, cwd: &Path) -> Result<CursorThread, CursorError> {
         if let Some(thread) = self.inner.thread.lock().expect("thread").clone() {
             return Ok(thread);
         }
@@ -479,7 +513,8 @@ impl CursorSessionRuntime for CursorSession {
         .await
     }
 
-    async fn resume_thread(
+    /// `session/load`, Cursor's resume.
+    pub async fn load_session(
         &self,
         session_id: &str,
         cwd: &Path,
@@ -498,7 +533,7 @@ impl CursorSessionRuntime for CursorSession {
         .await
     }
 
-    async fn start_turn(
+    pub async fn prompt(
         &self,
         text: &str,
         images: &[PromptImage],
@@ -537,12 +572,8 @@ impl CursorSessionRuntime for CursorSession {
         })
     }
 
-    async fn steer_turn(&self) -> Result<(), CursorError> {
-        // ACP has no steer RPC. Interrupt, then the next `start_turn` is the steered prompt.
-        self.interrupt_turn().await
-    }
-
-    async fn interrupt_turn(&self) -> Result<(), CursorError> {
+    /// Cancels waiting cards, then `session/cancel`.
+    pub async fn cancel_turn(&self) -> Result<(), CursorError> {
         self.cancel_waiters();
         let session_id = self.session_id()?;
         self.inner
@@ -552,11 +583,7 @@ impl CursorSessionRuntime for CursorSession {
             .map_err(|error| CursorError::from_acp(CursorOperation::Cancel, &error))
     }
 
-    async fn respond_to_runtime_request(
-        &self,
-        request_id: &str,
-        reply: RuntimeReply,
-    ) -> Result<(), CursorError> {
+    pub fn answer_request(&self, request_id: &str, reply: RuntimeReply) -> Result<(), CursorError> {
         let pending = self
             .inner
             .pending
@@ -594,34 +621,675 @@ impl CursorSessionRuntime for CursorSession {
         }
     }
 
-    async fn read_thread_snapshot(&self) -> Result<Value, CursorError> {
-        Err(CursorError::unsupported(
-            CursorOperation::SessionLoad,
-            "Cursor resumes with session/load. It does not return a conversation snapshot.",
-        ))
-    }
-
-    async fn rollback_thread(&self) -> Result<Value, CursorError> {
-        Err(CursorError::unsupported(
-            CursorOperation::SessionLoad,
-            "Cursor ACP cannot truncate its conversation. The app checkpoint is the rollback.",
-        ))
-    }
-
-    async fn fork_thread(&self) -> Result<CursorThread, CursorError> {
-        Err(CursorError::unsupported(
-            CursorOperation::SessionNew,
-            "Cursor ACP does not support session/fork. session/load resumes a saved session.",
-        ))
-    }
 }
 
 impl CursorSession {
+    fn publish_session(&self) {
+        let mut session = self.inner.provider_session.clone();
+        session.status = OrchestrationV2ProviderSessionStatus::Ready;
+        session.capabilities = self.capabilities();
+        session.updated_at = UtcDateTime::now();
+        let _ = self
+            .inner
+            .provider_events
+            .send(ProviderAdapterV2Event::ProviderSessionUpdated {
+                driver: self.inner.driver.clone(),
+                provider_session: session,
+            });
+    }
+
+    fn bind_provider_thread(
+        &self,
+        native_session_id: &str,
+        app_thread_id: ThreadId,
+    ) -> OrchestrationV2ProviderThread {
+        let now = UtcDateTime::now();
+        let thread = OrchestrationV2ProviderThread {
+            id: derive::provider_thread(
+                &self.inner.driver,
+                Some(&self.inner.instance_id),
+                native_session_id,
+            ),
+            driver: self.inner.driver.clone(),
+            provider_instance_id: self.inner.instance_id.clone(),
+            provider_session_id: Some(self.inner.provider_session_id.clone()),
+            app_thread_id: Some(app_thread_id),
+            owner_node_id: None,
+            native_thread_ref: Some(OrchestrationV2ProviderRef {
+                driver: self.inner.driver.clone(),
+                native_id: TrimmedNonEmptyString::new(native_session_id).ok(),
+                strength: OrchestrationV2NativeRefStrength::Strong,
+                fingerprint: None,
+                ordinal: None,
+            }),
+            native_conversation_head_ref: None,
+            status: OrchestrationV2ProviderThreadStatus::Idle,
+            first_run_ordinal: None,
+            last_run_ordinal: None,
+            handoff_ids: Vec::new(),
+            forked_from: None,
+            pending_background_tasks: Vec::new(),
+            context_usage: None,
+            native_metadata: None,
+            goal: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        *self.inner.provider_thread.lock().expect("provider thread") = Some(thread.clone());
+        let _ = self
+            .inner
+            .provider_events
+            .send(ProviderAdapterV2Event::ProviderThreadUpdated {
+                driver: self.inner.driver.clone(),
+                provider_thread: thread.clone(),
+                retained_native_turn_ids: None,
+            });
+        thread
+    }
+
+    fn emit_terminal(
+        &self,
+        provider_thread_id: &ProviderThreadId,
+        provider_turn_id: &ProviderTurnId,
+        run_ordinal: i64,
+        status: ProviderAdapterV2TurnTerminalStatus,
+        failure: Option<&str>,
+    ) {
+        let failure = match status {
+            ProviderAdapterV2TurnTerminalStatus::Failed => Some(
+                turin_provider_core::failure::make_provider_failure(
+                    turin_provider_core::failure::ProviderFailureInput {
+                        cause: None,
+                        message: failure,
+                        code: None,
+                        class: Some(
+                            turin_contracts::orchestration_v2::OrchestrationV2ProviderFailureClass::ProviderError,
+                        ),
+                        retryable: Some(Some(true)),
+                        reset_at: None,
+                    },
+                ),
+            ),
+            _ => None,
+        };
+        let disposition = if failure.is_some() {
+            OrchestrationV2ProviderThreadDisposition::Broken
+        } else {
+            OrchestrationV2ProviderThreadDisposition::Reusable
+        };
+        let _ = self.inner.provider_events.send(
+            ProviderAdapterV2Event::TurnTerminal {
+                driver: self.inner.driver.clone(),
+                provider_thread_id: provider_thread_id.clone(),
+                provider_turn_id: provider_turn_id.clone(),
+                run_ordinal: PositiveInt::new(u64::try_from(run_ordinal).unwrap_or(0).max(1))
+                    .expect("run ordinal"),
+                status,
+                failure,
+                failure_item_ordinal: None,
+                retry: None,
+                retry_started_at: None,
+                thread_disposition: disposition,
+            },
+        );
+    }
+
     fn cancel_waiters(&self) {
         let pending = std::mem::take(&mut *self.inner.pending.lock().expect("pending"));
         for (_, item) in pending {
             cancel_pending(item);
         }
+    }
+}
+
+fn native_session_id(thread: &OrchestrationV2ProviderThread) -> Option<String> {
+    thread
+        .native_thread_ref
+        .as_ref()
+        .and_then(|reference| reference.native_id.as_ref())
+        .map(|id| id.as_str().to_owned())
+}
+
+fn terminal_status(stop_reason: Option<&str>) -> ProviderAdapterV2TurnTerminalStatus {
+    match stop_reason {
+        Some("cancelled" | "canceled") => ProviderAdapterV2TurnTerminalStatus::Cancelled,
+        Some("refusal") => ProviderAdapterV2TurnTerminalStatus::Failed,
+        _ => ProviderAdapterV2TurnTerminalStatus::Completed,
+    }
+}
+
+fn plan_disposition(decision: Option<ProviderApprovalDecision>) -> PlanDisposition {
+    match decision {
+        Some(ProviderApprovalDecision::Decline) => PlanDisposition::Rejected { reason: None },
+        Some(ProviderApprovalDecision::Cancel) | None => PlanDisposition::Cancelled,
+        Some(_) => PlanDisposition::Accepted { plan_uri: None },
+    }
+}
+
+fn rollback_checkpoint(
+    input: &ProviderAdapterV2RollbackThreadInput,
+) -> turin_contracts::CheckpointId {
+    match &input.target {
+        turin_provider_core::provider_adapter::ProviderAdapterV2RollbackTarget::ThreadStart {
+            checkpoint_id,
+            ..
+        }
+        | turin_provider_core::provider_adapter::ProviderAdapterV2RollbackTarget::ProviderTurn {
+            checkpoint_id,
+            ..
+        } => checkpoint_id.clone(),
+    }
+}
+
+fn map_error(kind: ProviderAdapterErrorKind, error: CursorError) -> ProviderAdapterV2Error {
+    ProviderAdapterV2Error::new(kind).with_cause(
+        ProviderFailureCause::tagged("CursorError").with_message(error.to_string()),
+    )
+}
+
+fn emit_runtime_request(
+    inner: &SessionInner,
+    request_id: &str,
+    kind: OrchestrationV2RuntimeRequestKind,
+    status: OrchestrationV2RuntimeRequestStatus,
+    decision: Option<ProviderApprovalDecision>,
+) {
+    let Ok(id) = RuntimeRequestId::new(request_id) else {
+        return;
+    };
+    let turn = inner.active_turn.lock().expect("turn");
+    let now = UtcDateTime::now();
+    let request = OrchestrationV2RuntimeRequest {
+        id: id.clone(),
+        node_id: derive::approval_node(&id),
+        provider_turn_id: turn.as_ref().map(|turn| turn.provider_turn_id.clone()),
+        native_request_ref: Some(OrchestrationV2ProviderRef {
+            driver: inner.driver.clone(),
+            native_id: TrimmedNonEmptyString::new(request_id).ok(),
+            strength: OrchestrationV2NativeRefStrength::Weak,
+            fingerprint: None,
+            ordinal: None,
+        }),
+        kind,
+        status,
+        response_capability: OrchestrationV2ResponseCapability::Live {
+            provider_session_id: inner.provider_session_id.clone(),
+        },
+        created_at: now,
+        resolved_at: matches!(
+            status,
+            OrchestrationV2RuntimeRequestStatus::Resolved
+                | OrchestrationV2RuntimeRequestStatus::Cancelled
+        )
+        .then(UtcDateTime::now),
+        decision,
+        answers: None,
+    };
+    let thread_id = turn.as_ref().map(|turn| turn.thread_id.clone());
+    drop(turn);
+    let _ = inner
+        .provider_events
+        .send(ProviderAdapterV2Event::RuntimeRequestUpdated {
+            driver: inner.driver.clone(),
+            thread_id,
+            runtime_request: request,
+        });
+}
+
+fn emit_update(inner: &SessionInner, update: &CursorUpdate) {
+    let guard = inner.active_turn.lock().expect("turn");
+    let Some(turn) = guard.as_ref() else {
+        return;
+    };
+    let ordinal = turn.ordinal.fetch_add(1, Ordering::SeqCst);
+    let native = format!("cursor-item-{ordinal}");
+    let now = UtcDateTime::now();
+    let item = match update {
+        CursorUpdate::Text { text, .. } => OrchestrationV2TurnItem::AssistantMessage {
+            tool_non_execution_kind: None,
+            tool_surface: None,
+            tool_icon: None,
+            tool_source: None,
+            id: derive::turn_item_from_provider_item(&inner.driver, &native),
+            thread_id: turn.thread_id.clone(),
+            run_id: Some(turn.run_id.clone()),
+            node_id: Some(turn.node_id.clone()),
+            provider_thread_id: Some(turn.provider_thread_id.clone()),
+            provider_turn_id: Some(turn.provider_turn_id.clone()),
+            native_item_ref: None,
+            parent_item_id: None,
+            ordinal,
+            status: OrchestrationV2TurnItemStatus::Completed,
+            title: None,
+            started_at: Some(now.clone()),
+            completed_at: Some(now.clone()),
+            updated_at: now,
+            message_id: derive::message_from_provider_item(&inner.driver, &native),
+            text: text.clone(),
+            attachments: None,
+            streaming: true,
+        },
+        CursorUpdate::Thought { text } => OrchestrationV2TurnItem::Reasoning {
+            tool_non_execution_kind: None,
+            tool_surface: None,
+            tool_icon: None,
+            tool_source: None,
+            id: derive::turn_item_from_provider_item(&inner.driver, &native),
+            thread_id: turn.thread_id.clone(),
+            run_id: Some(turn.run_id.clone()),
+            node_id: Some(turn.node_id.clone()),
+            provider_thread_id: Some(turn.provider_thread_id.clone()),
+            provider_turn_id: Some(turn.provider_turn_id.clone()),
+            native_item_ref: None,
+            parent_item_id: None,
+            ordinal,
+            status: OrchestrationV2TurnItemStatus::Completed,
+            title: None,
+            started_at: Some(now.clone()),
+            completed_at: Some(now.clone()),
+            updated_at: now,
+            text: text.clone(),
+            streaming: true,
+        },
+        _ => return,
+    };
+    let driver = inner.driver.clone();
+    drop(guard);
+    let _ = inner
+        .provider_events
+        .send(ProviderAdapterV2Event::TurnItemUpdated {
+            driver,
+            turn_item: item,
+        });
+}
+
+#[async_trait]
+impl ProviderAdapterV2 for CursorAdapter {
+    fn instance_id(&self) -> &ProviderInstanceId {
+        &self.instance_id
+    }
+
+    fn driver(&self) -> &ProviderDriverKind {
+        &self.driver
+    }
+
+    async fn get_capabilities(
+        &self,
+    ) -> Result<OrchestrationV2ProviderCapabilities, ProviderAdapterV2Error> {
+        Ok(capabilities::cursor_capabilities())
+    }
+
+    async fn plan_selection_transition(
+        &self,
+        input: ProviderSelectionTransitionInput,
+    ) -> Result<ProviderSelectionTransitionPlan, ProviderAdapterV2Error> {
+        Ok(acp_selection_transition(&input))
+    }
+
+    async fn open_session(
+        &self,
+        input: ProviderAdapterV2OpenSessionInput,
+    ) -> Result<Arc<dyn ProviderSessionRuntime>, ProviderAdapterV2Error> {
+        let cwd = input
+            .runtime_policy
+            .cwd
+            .clone()
+            .unwrap_or_else(|| ".".to_owned());
+        let client = spawn(SpawnCommand {
+            program: &self.program,
+            args: auth::ACP_ARGS,
+            cwd: Some(Path::new(&cwd)),
+        })
+        .await
+        .map_err(|error| {
+            map_error(
+                ProviderAdapterErrorKind::OpenSession {
+                    driver: self.driver.clone(),
+                    provider_session_id: input.provider_session_id.clone(),
+                },
+                CursorError::from_acp(CursorOperation::Spawn, &error),
+            )
+        })?;
+        let session = CursorSession::from_client_with(
+            client,
+            self.cursor_home.clone(),
+            self.instance_id.clone(),
+            self.driver.clone(),
+            input.provider_session_id.clone(),
+            cwd,
+            Some(input.model_selection.model),
+        );
+        session.initialize().await.map_err(|error| {
+            map_error(
+                ProviderAdapterErrorKind::OpenSession {
+                    driver: self.driver.clone(),
+                    provider_session_id: input.provider_session_id,
+                },
+                error,
+            )
+        })?;
+        session.publish_session();
+        Ok(Arc::new(session))
+    }
+}
+
+#[async_trait]
+impl ProviderSessionRuntime for CursorSession {
+    fn instance_id(&self) -> &ProviderInstanceId {
+        &self.inner.instance_id
+    }
+
+    fn driver(&self) -> &ProviderDriverKind {
+        &self.inner.driver
+    }
+
+    fn provider_session_id(&self) -> &ProviderSessionId {
+        &self.inner.provider_session_id
+    }
+
+    fn provider_session(&self) -> &OrchestrationV2ProviderSession {
+        &self.inner.provider_session
+    }
+
+    fn events(&self) -> ProviderEventStream {
+        let receiver = self
+            .provider_events
+            .lock()
+            .expect("provider events")
+            .take();
+        match receiver {
+            Some(rx) => Box::pin(unfold(rx, |mut rx| async move {
+                let event = rx.recv().await?;
+                Some((Ok(event), rx))
+            })),
+            None => {
+                let error = ProviderAdapterV2Error::new(ProviderAdapterErrorKind::EventStream {
+                    driver: self.inner.driver.clone(),
+                    provider_session_id: self.inner.provider_session_id.clone(),
+                });
+                Box::pin(stream::once(async move { Err(error) }))
+            }
+        }
+    }
+
+    async fn ensure_thread(
+        &self,
+        input: ProviderAdapterV2EnsureThreadInput,
+    ) -> Result<OrchestrationV2ProviderThread, ProviderAdapterV2Error> {
+        if let Some(thread) = self.inner.provider_thread.lock().expect("thread").clone() {
+            return Ok(thread);
+        }
+        let cwd = input
+            .runtime_policy
+            .cwd
+            .clone()
+            .unwrap_or_else(|| ".".to_owned());
+        let native = input
+            .existing_provider_thread
+            .as_ref()
+            .and_then(native_session_id);
+        let opened = match native {
+            Some(native) => self.load_session(&native, Path::new(&cwd)).await,
+            None => self.new_session(Path::new(&cwd)).await,
+        };
+        let opened = opened.map_err(|error| {
+            map_error(
+                ProviderAdapterErrorKind::EnsureThread {
+                    driver: self.inner.driver.clone(),
+                    thread_id: input.thread_id.clone(),
+                },
+                error,
+            )
+        })?;
+        self.apply_model_selection(&input.model_selection)
+            .await
+            .map_err(|error| {
+                map_error(
+                    ProviderAdapterErrorKind::EnsureThread {
+                        driver: self.inner.driver.clone(),
+                        thread_id: input.thread_id.clone(),
+                    },
+                    error,
+                )
+            })?;
+        Ok(self.bind_provider_thread(&opened.session_id, input.thread_id))
+    }
+
+    async fn resume_thread(
+        &self,
+        input: ProviderAdapterV2ResumeThreadInput,
+    ) -> Result<OrchestrationV2ProviderThread, ProviderAdapterV2Error> {
+        let native = native_session_id(&input.provider_thread).ok_or_else(|| {
+            ProviderAdapterV2Error::new(ProviderAdapterErrorKind::ResumeThread {
+                driver: self.inner.driver.clone(),
+                provider_session_id: self.inner.provider_session_id.clone(),
+                provider_thread_id: input.provider_thread.id.clone(),
+            })
+        })?;
+        let cwd = input
+            .runtime_policy
+            .as_ref()
+            .and_then(|policy| policy.cwd.clone())
+            .unwrap_or_else(|| ".".to_owned());
+        let opened = self
+            .load_session(&native, Path::new(&cwd))
+            .await
+            .map_err(|error| {
+                map_error(
+                    ProviderAdapterErrorKind::ResumeThread {
+                        driver: self.inner.driver.clone(),
+                        provider_session_id: self.inner.provider_session_id.clone(),
+                        provider_thread_id: input.provider_thread.id.clone(),
+                    },
+                    error,
+                )
+            })?;
+        let app_thread = input
+            .thread_id
+            .clone()
+            .or_else(|| input.provider_thread.app_thread_id.clone())
+            .unwrap_or_else(|| {
+                derive::thread_from_provider_thread(
+                    &self.inner.driver,
+                    Some(&self.inner.instance_id),
+                    &native,
+                )
+            });
+        Ok(self.bind_provider_thread(&opened.session_id, app_thread))
+    }
+
+    async fn start_turn(
+        &self,
+        input: ProviderAdapterV2TurnInput,
+    ) -> Result<(), ProviderAdapterV2Error> {
+        if !input.message.attachments.is_empty() {
+            return Err(ProviderAdapterV2Error::new(
+                ProviderAdapterErrorKind::Protocol {
+                    driver: self.inner.driver.clone(),
+                    detail: "Cursor ACP prompts take inline image bytes. This turn message's attachments do not carry them.".into(),
+                    payload: None,
+                },
+            ));
+        }
+        let kind = ProviderAdapterErrorKind::TurnStart {
+            driver: self.inner.driver.clone(),
+            thread_id: input.thread_id.clone(),
+            provider_thread_id: input.provider_thread.id.clone(),
+            run_id: input.run_id.clone(),
+        };
+        self.apply_model_selection(&input.model_selection)
+            .await
+            .map_err(|error| map_error(kind.clone(), error))?;
+        let native = native_session_id(&input.provider_thread).unwrap_or_default();
+        let provider_turn_id = derive::provider_turn(
+            &self.inner.driver,
+            &format!("{native}:{}", input.run_id.as_str()),
+        );
+        *self.inner.active_turn.lock().expect("turn") = Some(ActiveTurn {
+            thread_id: input.thread_id.clone(),
+            run_id: input.run_id.clone(),
+            provider_thread_id: input.provider_thread.id.clone(),
+            provider_turn_id: provider_turn_id.clone(),
+            node_id: input.root_node_id.clone(),
+            ordinal: std::sync::atomic::AtomicU64::new(0),
+        });
+        let outcome = self.prompt(&input.message.text, &[]).await;
+        *self.inner.active_turn.lock().expect("turn") = None;
+        match outcome {
+            Ok(outcome) => {
+                self.emit_terminal(
+                    &input.provider_thread.id,
+                    &provider_turn_id,
+                    input.run_ordinal,
+                    terminal_status(outcome.stop_reason.as_deref()),
+                    None,
+                );
+                Ok(())
+            }
+            Err(error) => {
+                self.emit_terminal(
+                    &input.provider_thread.id,
+                    &provider_turn_id,
+                    input.run_ordinal,
+                    ProviderAdapterV2TurnTerminalStatus::Failed,
+                    Some(&error.to_string()),
+                );
+                Err(map_error(kind, error))
+            }
+        }
+    }
+
+    async fn steer_turn(
+        &self,
+        input: ProviderAdapterV2SteerInput,
+    ) -> Result<(), ProviderAdapterV2Error> {
+        Err(ProviderAdapterV2Error::new(
+            ProviderAdapterErrorKind::SteerRunUnsupported {
+                driver: self.inner.driver.clone(),
+                provider_thread_id: input.provider_thread.id,
+            },
+        ))
+    }
+
+    async fn interrupt_turn(
+        &self,
+        input: ProviderAdapterV2InterruptInput,
+    ) -> Result<(), ProviderAdapterV2Error> {
+        self.cancel_turn().await.map_err(|error| {
+            map_error(
+                ProviderAdapterErrorKind::Interrupt {
+                    driver: self.inner.driver.clone(),
+                    provider_thread_id: input.provider_thread.id,
+                    provider_turn_id: input.provider_turn_id,
+                },
+                error,
+            )
+        })
+    }
+
+    async fn respond_to_runtime_request(
+        &self,
+        input: ProviderAdapterV2RuntimeRequestResponseInput,
+    ) -> Result<(), ProviderAdapterV2Error> {
+        let request_id = input.request_id.as_str();
+        let kind = self
+            .inner
+            .pending_kind
+            .lock()
+            .expect("pending kind")
+            .get(request_id)
+            .copied();
+        let reply = match kind {
+            Some(PendingKind::Ask) => {
+                let params = self.inner.asks.lock().expect("asks").get(request_id).cloned();
+                let cancelled = input.decision == Some(ProviderApprovalDecision::Cancel);
+                let disposition = match params {
+                    Some(params) => extensions::ask_disposition_from_answers(
+                        &params,
+                        input.answers.as_ref().unwrap_or(&Default::default()),
+                        cancelled,
+                    ),
+                    None => AskDisposition::Cancelled,
+                };
+                RuntimeReply::UserInput(disposition)
+            }
+            Some(PendingKind::Plan) => RuntimeReply::Plan(plan_disposition(input.decision)),
+            _ => RuntimeReply::Approval(input.decision.unwrap_or(ProviderApprovalDecision::Cancel)),
+        };
+        let request_kind = match kind {
+            Some(PendingKind::Ask) | Some(PendingKind::Plan) => {
+                OrchestrationV2RuntimeRequestKind::UserInput
+            }
+            _ => OrchestrationV2RuntimeRequestKind::Permission,
+        };
+        self.answer_request(request_id, reply)
+            .map_err(|error| {
+                map_error(
+                    ProviderAdapterErrorKind::RuntimeRequestResponse {
+                        driver: self.inner.driver.clone(),
+                        request_id: input.request_id.clone(),
+                    },
+                    error,
+                )
+            })?;
+        self.inner
+            .pending_kind
+            .lock()
+            .expect("pending kind")
+            .remove(request_id);
+        self.inner.asks.lock().expect("asks").remove(request_id);
+        let status = if input.decision == Some(ProviderApprovalDecision::Cancel) {
+            OrchestrationV2RuntimeRequestStatus::Cancelled
+        } else {
+            OrchestrationV2RuntimeRequestStatus::Resolved
+        };
+        emit_runtime_request(
+            &self.inner,
+            request_id,
+            request_kind,
+            status,
+            input.decision,
+        );
+        Ok(())
+    }
+
+    async fn read_thread_snapshot(
+        &self,
+        input: ProviderAdapterV2ReadThreadSnapshotInput,
+    ) -> Result<turin_provider_core::provider_adapter::ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>
+    {
+        Err(ProviderAdapterV2Error::new(
+            ProviderAdapterErrorKind::ReadThreadSnapshot {
+                driver: self.inner.driver.clone(),
+                provider_thread_id: input.provider_thread.id,
+            },
+        ))
+    }
+
+    async fn rollback_thread(
+        &self,
+        input: ProviderAdapterV2RollbackThreadInput,
+    ) -> Result<turin_provider_core::provider_adapter::ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>
+    {
+        Err(ProviderAdapterV2Error::new(
+            ProviderAdapterErrorKind::RollbackThread {
+                driver: self.inner.driver.clone(),
+                provider_thread_id: input.provider_thread.id.clone(),
+                checkpoint_id: Some(rollback_checkpoint(&input)),
+            },
+        ))
+    }
+
+    async fn fork_thread(
+        &self,
+        input: ProviderAdapterV2ForkThreadInput,
+    ) -> Result<OrchestrationV2ProviderThread, ProviderAdapterV2Error> {
+        Err(ProviderAdapterV2Error::new(
+            ProviderAdapterErrorKind::ForkThread {
+                driver: self.inner.driver.clone(),
+                provider_thread_id: input.source_provider_thread.id,
+            },
+        ))
     }
 }
 
@@ -632,6 +1300,7 @@ fn register_handlers(client: &AcpClient, inner: &Arc<SessionInner>) {
             let inner = Arc::clone(&inner);
             async move {
                 for update in events::parse_session_update(&params) {
+                    emit_update(&inner, &update);
                     let _ = inner.events.send(CursorEvent::Update(update));
                 }
                 Ok(())
@@ -680,6 +1349,18 @@ async fn handle_permission(
         .lock()
         .expect("pending")
         .insert(ctx.request_id.clone(), Pending::Permission(tx));
+    inner
+        .pending_kind
+        .lock()
+        .expect("pending kind")
+        .insert(ctx.request_id.clone(), PendingKind::Permission);
+    emit_runtime_request(
+        &inner,
+        &ctx.request_id,
+        permissions::request_kind(&request),
+        OrchestrationV2RuntimeRequestStatus::Pending,
+        None,
+    );
     let _ = inner.events.send(CursorEvent::Approval {
         request_id: ctx.request_id,
         title: request.title.clone(),
@@ -713,6 +1394,23 @@ fn register_ask(client: &AcpClient, inner: &Arc<SessionInner>) {
                 .lock()
                 .expect("pending")
                 .insert(ctx.request_id.clone(), Pending::Ask(tx));
+            inner
+                .pending_kind
+                .lock()
+                .expect("pending kind")
+                .insert(ctx.request_id.clone(), PendingKind::Ask);
+            inner
+                .asks
+                .lock()
+                .expect("asks")
+                .insert(ctx.request_id.clone(), parsed.clone());
+            emit_runtime_request(
+                &inner,
+                &ctx.request_id,
+                OrchestrationV2RuntimeRequestKind::UserInput,
+                OrchestrationV2RuntimeRequestStatus::Pending,
+                None,
+            );
             let _ = inner.events.send(CursorEvent::UserInput {
                 request_id: ctx.request_id,
                 tool_call_id: parsed.tool_call_id.clone(),
@@ -744,6 +1442,18 @@ fn register_plan(client: &AcpClient, inner: &Arc<SessionInner>) {
                 .lock()
                 .expect("pending")
                 .insert(ctx.request_id.clone(), Pending::Plan(tx));
+            inner
+                .pending_kind
+                .lock()
+                .expect("pending kind")
+                .insert(ctx.request_id.clone(), PendingKind::Plan);
+            emit_runtime_request(
+                &inner,
+                &ctx.request_id,
+                OrchestrationV2RuntimeRequestKind::UserInput,
+                OrchestrationV2RuntimeRequestStatus::Pending,
+                None,
+            );
             let _ = inner.events.send(CursorEvent::Plan {
                 request_id: ctx.request_id,
                 tool_call_id: parsed.tool_call_id.clone(),
@@ -1071,7 +1781,7 @@ mod tests {
         let session = CursorSession::from_client(client, Some(home_path.clone()));
         session.initialize().await.unwrap();
         const { assert!(!auth::AUTHENTICATE_ON_AUTH_REQUIRED) };
-        let thread = session.ensure_thread(Path::new("/work")).await.unwrap();
+        let thread = session.new_session(Path::new("/work")).await.unwrap();
         assert_eq!(thread.session_id, "sess-1");
         let acp: Value = serde_json::from_str(
             &std::fs::read_to_string(home_path.join("acp-config.json")).unwrap(),
@@ -1098,7 +1808,7 @@ mod tests {
         assert_eq!(cli["model"], "composer-2");
 
         let running = session.clone();
-        let turn = tokio::spawn(async move { running.start_turn("hello", &[]).await });
+        let turn = tokio::spawn(async move { running.prompt("hello", &[]).await });
         loop {
             match tokio::time::timeout(Duration::from_secs(5), session.recv())
                 .await
@@ -1120,16 +1830,15 @@ mod tests {
                             .any(|option| option.label.as_str() == permissions::ALWAYS_ALLOW_LABEL)
                     );
                     session
-                        .respond_to_runtime_request(
+                        .answer_request(
                             &request_id,
                             RuntimeReply::Approval(Decision::AcceptForSession),
                         )
-                        .await
                         .unwrap();
                 }
                 CursorEvent::UserInput { request_id, .. } => {
                     session
-                        .respond_to_runtime_request(
+                        .answer_request(
                             &request_id,
                             RuntimeReply::UserInput(AskDisposition::Answered(vec![
                                 turin_acp::cursor::AskAnswer {
@@ -1138,18 +1847,16 @@ mod tests {
                                 },
                             ])),
                         )
-                        .await
                         .unwrap();
                 }
                 CursorEvent::Plan { request_id, .. } => {
                     session
-                        .respond_to_runtime_request(
+                        .answer_request(
                             &request_id,
                             RuntimeReply::Plan(PlanDisposition::Accepted {
                                 plan_uri: Some("file:///plan.md".to_owned()),
                             }),
                         )
-                        .await
                         .unwrap();
                 }
                 CursorEvent::TurnSettled { stop_reason } => {
@@ -1162,12 +1869,11 @@ mod tests {
             turn.await.unwrap().unwrap().stop_reason.as_deref(),
             Some("end_turn")
         );
-        let second = tokio::time::timeout(Duration::from_secs(5), session.start_turn("again", &[]))
+        let second = tokio::time::timeout(Duration::from_secs(5), session.prompt("again", &[]))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(second.stop_reason.as_deref(), Some("end_turn"));
-        assert!(session.fork_thread().await.unwrap_err().unsupported);
         peer.await.unwrap();
     }
 
@@ -1202,7 +1908,7 @@ mod tests {
         });
         let session = CursorSession::from_client(client, None);
         session.initialize().await.unwrap();
-        let error = session.ensure_thread(Path::new("/work")).await.unwrap_err();
+        let error = session.new_session(Path::new("/work")).await.unwrap_err();
         assert!(error.not_signed_in);
         assert_eq!(session.auth_status().phase, auth::SignInPhase::NotSignedIn);
         session.sign_in().await.unwrap();
@@ -1246,9 +1952,9 @@ mod tests {
         });
         let session = CursorSession::from_client(client, None);
         session.initialize().await.unwrap();
-        session.ensure_thread(Path::new("/work")).await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
         let running = session.clone();
-        let turn = tokio::spawn(async move { running.start_turn("stop", &[]).await });
+        let turn = tokio::spawn(async move { running.prompt("stop", &[]).await });
         match tokio::time::timeout(Duration::from_secs(5), session.recv())
             .await
             .unwrap()
@@ -1257,7 +1963,7 @@ mod tests {
             CursorEvent::Update(_) => {}
             other => panic!("unexpected {other:?}"),
         }
-        session.interrupt_turn().await.unwrap();
+        session.cancel_turn().await.unwrap();
         let outcome = tokio::time::timeout(Duration::from_secs(5), turn)
             .await
             .unwrap()

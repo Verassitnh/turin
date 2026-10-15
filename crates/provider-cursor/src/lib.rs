@@ -48,7 +48,7 @@ pub use permissions::{
 };
 pub use probe::probe_initialize;
 pub use session::{
-    CursorAdapter, CursorEvent, CursorProviderAdapter, CursorSession, CursorSessionRuntime,
-    CursorThread, PromptImage, PromptOutcome, RuntimeReply,
+    CursorAdapter, CursorEvent, CursorSession, CursorThread, PromptImage, PromptOutcome,
+    RuntimeReply,
 };
 pub use settings::CursorSettings;

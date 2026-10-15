@@ -7165,6 +7165,7 @@ dependencies = [
  "tracing",
  "turin-acp",
  "turin-contracts",
+ "turin-provider-core",
 ]
 
 [[package]]

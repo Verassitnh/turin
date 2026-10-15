@@ -1062,18 +1062,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn process_exists(pid: u32) -> bool {
-        std::process::Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    }
-
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_timed_out_probe_takes_its_grandchildren_down_with_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1094,15 +1082,6 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        // Its parent is dead, so init reaps it shortly. Until then `kill -0`
-        // still succeeds on the zombie, which is why this waits.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while process_exists(grandchild) {
-            assert!(
-                Instant::now() < deadline,
-                "grandchild {grandchild} survived the probe timeout"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        crate::process_group::assert_process_exits(grandchild, "grandchild").await;
     }
 }

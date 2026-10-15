@@ -150,15 +150,7 @@ pub struct MarkdownDocument {
 
 /// `CHAT_MARKDOWN_REMARK_PLUGINS` / `_WITH_BREAKS`.
 pub fn parse_chat_markdown(text: &str, line_breaks: bool) -> MarkdownDocument {
-    let options = ParseOptions {
-        constructs: Constructs {
-            // remark-gfm, without the math/MDX/frontmatter extensions upstream
-            // does not load.
-            ..Constructs::gfm()
-        },
-        ..ParseOptions::gfm()
-    };
-    let Ok(root) = markdown::to_mdast(text, &options) else {
+    let Ok(root) = markdown::to_mdast(text, &parse_options()) else {
         return MarkdownDocument {
             blocks: vec![Block::Paragraph(plain_inlines(text))],
         };
@@ -176,6 +168,17 @@ pub fn parse_chat_markdown(text: &str, line_breaks: bool) -> MarkdownDocument {
     MarkdownDocument { blocks }
 }
 
+fn parse_options() -> ParseOptions {
+    ParseOptions {
+        constructs: Constructs {
+            // remark-gfm, without the math/MDX/frontmatter extensions upstream
+            // does not load.
+            ..Constructs::gfm()
+        },
+        ..ParseOptions::gfm()
+    }
+}
+
 /// `shouldPreserveAssistantLineBreaks`.
 pub fn should_preserve_assistant_line_breaks(text: &str) -> bool {
     text.lines().any(|line| {
@@ -189,6 +192,9 @@ fn plain_inlines(text: &str) -> Inlines {
     builder.push_text(text, Marks::default());
     builder.finish()
 }
+
+/// `INLINE_PARSE_PREFIX` (markdownListIndentation.ts).
+const INLINE_PARSE_PREFIX: &str = "t3-markdown-inline-prefix:";
 
 struct Lowering<'a> {
     source: &'a str,
@@ -230,8 +236,7 @@ impl Lowering<'_> {
                     Some(b'`' | b'~')
                 )
             {
-                let recovered = parse_chat_markdown(code.value.trim(), self.line_breaks);
-                out.extend(recovered.blocks);
+                out.extend(self.recovered_blocks(code.value.trim()));
                 continue;
             }
             if let Some(block) = self.block(node) {
@@ -239,6 +244,43 @@ impl Lowering<'_> {
             }
         }
         out
+    }
+
+    /// `parseRecoveredMarkdown`: the text is parsed behind a prefix, which
+    /// forces block-looking input (`# Heading`, `- nested`, a fence) into a
+    /// paragraph while GFM inline syntax still parses. Root children after the
+    /// first paragraph are kept as blocks.
+    fn recovered_blocks(&mut self, value: &str) -> Vec<Block> {
+        let source = format!("{INLINE_PARSE_PREFIX}{value}");
+        let Ok(root) = markdown::to_mdast(&source, &parse_options()) else {
+            return vec![Block::Paragraph(plain_inlines(value))];
+        };
+        let mut children = root.children().cloned().unwrap_or_default();
+        let stripped = if let Some(Node::Paragraph(paragraph)) = children.first_mut()
+            && let Some(Node::Text(text)) = paragraph.children.first_mut()
+            && let Some(rest) = text.value.strip_prefix(INLINE_PARSE_PREFIX)
+        {
+            let rest = rest.to_string();
+            if rest.is_empty() {
+                paragraph.children.remove(0);
+            } else {
+                text.value = rest;
+            }
+            true
+        } else {
+            false
+        };
+        if !stripped {
+            return vec![Block::Paragraph(plain_inlines(value))];
+        }
+        let mut inner = Lowering {
+            source: &source,
+            line_breaks: self.line_breaks,
+            footnotes: std::mem::take(&mut self.footnotes),
+        };
+        let blocks = inner.blocks(&children, None);
+        self.footnotes = inner.footnotes;
+        blocks
     }
 
     fn block(&mut self, node: &Node) -> Option<Block> {
@@ -716,6 +758,41 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn over_indented_list_block_syntax_is_inline_prose() {
+        for (text, expected) in [
+            ("-      # Heading", "# Heading"),
+            ("-      - nested", "- nested"),
+            ("-      ```", "```"),
+        ] {
+            let doc = parse_chat_markdown(text, false);
+            match &doc.blocks[0] {
+                Block::List { items, .. } => match &items[0].children[0] {
+                    Block::Paragraph(inlines) => assert_eq!(inlines.text, expected, "{text}"),
+                    other => panic!("{text}: {other:?}"),
+                },
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn over_indented_list_text_keeps_gfm_inline_syntax() {
+        let doc = parse_chat_markdown("-      **bold** `code`", false);
+        let Block::List { items, .. } = &doc.blocks[0] else {
+            panic!("{doc:?}");
+        };
+        let Block::Paragraph(inlines) = &items[0].children[0] else {
+            panic!("{doc:?}");
+        };
+        assert_eq!(inlines.text, "bold code");
+        assert!(
+            inlines
+                .run_ranges()
+                .any(|(range, marks)| marks.strong && &inlines.text[range] == "bold")
+        );
     }
 
     #[test]

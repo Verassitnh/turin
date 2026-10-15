@@ -38,6 +38,16 @@ impl EnvironmentUsageStatus {
     }
 }
 
+impl crate::state::helpers::usage::CursorKeychainEnvironment for EnvironmentUsageStatus {
+    fn summary(&self) -> Option<&UsageSummary> {
+        self.summary.as_ref()
+    }
+
+    fn needs_cursor_keychain_access(&self) -> bool {
+        self.needs_cursor_keychain_access
+    }
+}
+
 /// Merges every environment that has answered. `keep_bucket` narrows the merge,
 /// for example to one model; source ownership still applies, so the result
 /// matches that slice of the full merge. Session counts are per directory and

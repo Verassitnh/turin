@@ -3,9 +3,11 @@
 //! module documents what it maps onto in gpui-component and what is not
 //! ported.
 
+pub mod alert;
 pub mod badge;
 pub mod button;
 pub mod collapsible_section_header;
+pub mod dialog;
 pub mod icon;
 pub mod kbd;
 pub mod menu;
@@ -13,6 +15,7 @@ pub mod popover;
 pub mod scroll_area;
 pub mod separator;
 pub mod sidebar;
+pub mod skeleton;
 pub mod toggle;
 pub mod tooltip;
 

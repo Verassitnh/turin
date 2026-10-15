@@ -169,3 +169,9 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 - QC running: T11, T13d, U3 (U3a+U3b combined on task/U3b-shell-state).
 - Active: T22a (live read path), DEDUP-1, T24b, T10c (QC fixes), T13c-F/D2/D4, T13e r2, T09d r2, T20d, U1/U2 (Sonnet), U3c (chat find/scripts/clipboard), U3d (thread actions/right panel), N1b (runtime async fs), T07 r4.
 
+
+## PM status 2026-10-15 23:50 UTC
+- Coverage (needed ≈ 421.6k upstream lines after cuts): on some branch 71.6% ported + 12.6% partial; on main 47.9% + 7.7%.
+- Merged since 23:30: U3a+U3b. QC: T11 FAIL (T11c fixing), T13d FAIL (fix round), U3 PASS (merged).
+- New logic bundles: R1 provider registry/auth/maintenance, R2 ACP session runtime + cursor accounts, R3 settings/theme logic, R4 composer/sidebar/client-runtime logic, R5 orchestration extras (context handoff, checkpoint rollback, workflow*) + storage cleanup.
+- Queued for Sonnet (after U1/U2): settings UI (theme editor etc.), chat UI leftovers (T16 tsx), ui primitives (T03 tsx), composer UI leftovers, N8 provider update UI, N7b routes, N9 native shell, N10/N11.

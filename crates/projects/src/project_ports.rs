@@ -9,12 +9,18 @@
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use turin_contracts::agent_sessions::AgentSessionImportSource;
 use turin_contracts::base_schemas::{IsoDateTime, TrimmedNonEmptyString, UtcDateTime};
 use turin_contracts::environment::ThreadEnvMode;
 use turin_contracts::model_selection::ModelSelection;
 use turin_contracts::orchestration_project::OrchestrationProjectShell;
+use turin_contracts::orchestration_v2::{
+    OrchestrationV2DomainEvent, OrchestrationV2ThreadHistoryOrigin,
+};
 use turin_contracts::project::{ProjectIconOverride, ProjectScript};
-use turin_contracts::{CommandId, EventId, ProjectId, ThreadId};
+use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceId};
+use turin_contracts::provider_policy::RuntimeMode;
+use turin_contracts::{CommandId, EventId, ProjectId, ProviderThreadId, ThreadId};
 
 /// Failure from a seam. Upstream carries these as `Schema.Defect` causes.
 pub type PortError = anyhow::Error;
@@ -263,6 +269,67 @@ pub trait ThreadDeletions: Send + Sync {
 #[async_trait]
 pub trait ProjectSettingsOverrides: Send + Sync {
     async fn clear_project_override(&self, project_id: &ProjectId) -> Result<(), PortError>;
+}
+
+/// The part of an orchestrator thread record the agent-session importer reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThreadRecordSummary {
+    pub project_id: ProjectId,
+    pub history_origin: Option<OrchestrationV2ThreadHistoryOrigin>,
+}
+
+/// Upstream `Orchestrator.getThreadRecords(threadId, [])`. `Ok(None)` when the
+/// thread does not exist.
+#[async_trait]
+pub trait ThreadRecordReader: Send + Sync {
+    async fn get_thread_records(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Option<ThreadRecordSummary>, PortError>;
+}
+
+/// Upstream `EventSink.write({ events })`: one transaction for the batch.
+#[async_trait]
+pub trait OrchestrationEventWriter: Send + Sync {
+    async fn write(&self, events: Vec<OrchestrationV2DomainEvent>) -> Result<(), PortError>;
+}
+
+/// A provider runtime row an imported thread starts with. Imports always write
+/// status `stopped`, so the status is not carried here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedProviderRuntime {
+    pub thread_id: ThreadId,
+    pub provider_name: String,
+    pub provider_instance_id: ProviderInstanceId,
+    pub adapter_key: String,
+    pub runtime_mode: RuntimeMode,
+    pub last_seen_at: IsoDateTime,
+    pub resume_cursor: Value,
+    pub runtime_payload: Value,
+}
+
+/// Upstream `ProviderSessionRuntimeRepository` as the importer uses it.
+#[async_trait]
+pub trait ProviderRuntimeRows: Send + Sync {
+    /// The `runtimePayload` of every readable runtime row. Rows without a
+    /// payload are `None`.
+    async fn list_runtime_payloads(&self) -> Result<Vec<Option<Value>>, PortError>;
+    /// Inserts the row, keeping any existing row for the thread (`onConflict: "ignore"`).
+    async fn upsert_imported(&self, row: &ImportedProviderRuntime) -> Result<(), PortError>;
+    async fn record_imported_transcript(
+        &self,
+        thread_id: &ThreadId,
+        source: &AgentSessionImportSource,
+    ) -> Result<(), PortError>;
+}
+
+/// Upstream `IdAllocator.derive.providerThread`: a pure, deterministic id.
+pub trait ProviderThreadIds: Send + Sync {
+    fn derive_provider_thread(
+        &self,
+        driver: &ProviderDriverKind,
+        native_thread_id: &str,
+    ) -> ProviderThreadId;
 }
 
 #[cfg(test)]

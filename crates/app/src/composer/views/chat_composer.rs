@@ -12,8 +12,9 @@ use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
+    App, AppContext as _, BoxShadow, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, Window, div, point, px,
 };
 
 use crate::composer::dispatch::{
@@ -809,6 +810,18 @@ impl Focusable for ChatComposer {
     }
 }
 
+/// The dark frame's top sheen: `dark:after:inset-shadow-2xs` in
+/// `--chat-composer-highlight` (3% white), a 1px inset line with no blur.
+fn composer_dark_highlight() -> BoxShadow {
+    BoxShadow {
+        color: with_alpha(tw::WHITE, 0.03).into(),
+        offset: point(px(0.), px(1.)),
+        blur_radius: px(0.),
+        spread_radius: px(0.),
+        inset: true,
+    }
+}
+
 impl Render for ChatComposer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let vm = self.view_model(cx);
@@ -868,7 +881,7 @@ impl Render for ChatComposer {
             .border_1()
             .border_color(outline)
             .shadow(if dark {
-                Vec::new()
+                vec![composer_dark_highlight()]
             } else {
                 tokens::shadow_composer(false)
             })

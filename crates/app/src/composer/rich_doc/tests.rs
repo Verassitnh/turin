@@ -157,7 +157,8 @@ fn preserves_crossing_mark_ranges_through_controlled_rebuilds() {
 #[test]
 fn keeps_boundary_whitespace_outside_emphasis() {
     use RichTextMark::*;
-    let cases: Vec<(Vec<(&str, Vec<RichTextMark>)>, &str)> = vec![
+    type Run<'a> = (&'a str, Vec<RichTextMark>);
+    let cases: Vec<(Vec<Run>, &str)> = vec![
         (vec![("hello ", vec![Bold])], "**hello** "),
         (vec![("  ", vec![Bold])], "  "),
         (vec![(" left ", vec![Bold, Italic])], " ***left*** "),
@@ -178,7 +179,8 @@ fn keeps_boundary_whitespace_outside_emphasis() {
         (vec![(" ", vec![Bold, Code])], "**` `**"),
     ];
     for (parts, expected) in cases {
-        let parts: Vec<(&str, &[RichTextMark])> = parts.iter().map(|(t, m)| (*t, m.as_slice())).collect();
+        let parts: Vec<(&str, &[RichTextMark])> =
+            parts.iter().map(|(t, m)| (*t, m.as_slice())).collect();
         let doc = doc_of(&parts);
         let map = serialize_doc(&doc);
         assert_eq!(map.value, expected);
@@ -193,7 +195,10 @@ fn keeps_boundary_whitespace_outside_emphasis() {
 #[test]
 fn keeps_chip_sources_canonical_through_the_document() {
     let map = round_trip("explain @README.md with **care**\nsecond line *here*");
-    assert_eq!(map.value, "explain @README.md with **care**\nsecond line *here*");
+    assert_eq!(
+        map.value,
+        "explain @README.md with **care**\nsecond line *here*"
+    );
     assert!(map.runs.iter().any(|run| run.kind == RunKind::Token));
 }
 
@@ -266,7 +271,12 @@ fn round_trips_lists() {
 
 #[test]
 fn maps_every_list_offset_through_collapsed_coordinates_and_back() {
-    for value in ["- one\n- two", "1. a\n   - b\n2. c", "- **bold** @README.md tail", "-"] {
+    for value in [
+        "- one\n- two",
+        "1. a\n   - b\n2. c",
+        "- **bold** @README.md tail",
+        "-",
+    ] {
         assert_collapsed_round_trip(value);
     }
 }
@@ -328,7 +338,11 @@ fn round_trips_quotes_rules_and_headings() {
 
 #[test]
 fn parses_rules_ahead_of_lists_and_emphasis() {
-    let blocks = build_blocks("- - -\n***\n___\ntext\n---\n- item", &label, BuildOptions::rich());
+    let blocks = build_blocks(
+        "- - -\n***\n___\ntext\n---\n- item",
+        &label,
+        BuildOptions::rich(),
+    );
     let kinds: Vec<&str> = blocks
         .iter()
         .map(|block| match block {
@@ -343,7 +357,11 @@ fn parses_rules_ahead_of_lists_and_emphasis() {
 
 #[test]
 fn parses_the_blocks_it_renders_as_the_right_node_types() {
-    let doc = build_doc("# Title\n> quote\n---\n#1234 ref\n- - -", &label, BuildOptions::rich());
+    let doc = build_doc(
+        "# Title\n> quote\n---\n#1234 ref\n- - -",
+        &label,
+        BuildOptions::rich(),
+    );
     assert!(matches!(doc.blocks[0], Block::Heading { level: 1, .. }));
     assert!(matches!(doc.blocks[1], Block::Quote { .. }));
     assert!(matches!(doc.blocks[2], Block::Rule { .. }));
@@ -432,7 +450,10 @@ fn keeps_the_end_of_the_code_inside_the_fence_rather_than_after_it() {
     let end_of_code = "func();".len();
     assert_eq!(flat_to_collapsed(&map, end_of_code), "```ts\nfunc();".len());
     assert_eq!(flat_to_markdown(&map, end_of_code), "```ts\nfunc();".len());
-    assert_eq!(collapsed_to_flat(&map, flat_to_collapsed(&map, end_of_code)), end_of_code);
+    assert_eq!(
+        collapsed_to_flat(&map, flat_to_collapsed(&map, end_of_code)),
+        end_of_code
+    );
 }
 
 #[test]
@@ -440,7 +461,10 @@ fn keeps_the_caret_inside_an_empty_fence() {
     let map = round_trip("before\n```\n```");
     let inside = "before\n".len();
     assert_eq!(flat_to_collapsed(&map, inside), "before\n```".len());
-    assert_eq!(collapsed_to_flat(&map, flat_to_collapsed(&map, inside)), inside);
+    assert_eq!(
+        collapsed_to_flat(&map, flat_to_collapsed(&map, inside)),
+        inside
+    );
 }
 
 #[test]
@@ -477,7 +501,9 @@ fn keeps_chips_in_a_fence_info_string_as_source_and_later_chips_aligned() {
     let Block::Paragraph(inline) = &doc.blocks[1] else {
         panic!("paragraph after the fence");
     };
-    assert!(matches!(&inline[0].content, InlineContent::Atom(Atom::Skill { name, .. }) if name == "my-skill"));
+    assert!(
+        matches!(&inline[0].content, InlineContent::Atom(Atom::Skill { name, .. }) if name == "my-skill")
+    );
     assert!(inline[1].is_text());
 
     let value = "``` @a.md\nsee @b.md\n```";
@@ -517,7 +543,12 @@ fn writes_code_holding_a_closing_fence_inside_a_longer_fence() {
     };
     let stored = serialize_doc(&doc).value;
     assert_eq!(stored, "````\ninitial\n```\nsecret\n````");
-    assert_eq!(build_doc(&stored, &label, BuildOptions::rich()).blocks.len(), 1);
+    assert_eq!(
+        build_doc(&stored, &label, BuildOptions::rich())
+            .blocks
+            .len(),
+        1
+    );
     assert_eq!(round_trip(&stored).value, stored);
 }
 
@@ -550,7 +581,10 @@ fn counts_a_chip_source_in_a_fence_as_one_cursor_position() {
         );
     }
     let after_chip = "see @b.md".len();
-    assert_eq!(collapsed_to_flat(&map, flat_to_collapsed(&map, after_chip)), after_chip);
+    assert_eq!(
+        collapsed_to_flat(&map, flat_to_collapsed(&map, after_chip)),
+        after_chip
+    );
     let end = map.doc_length;
     assert_eq!(collapsed_to_flat(&map, flat_to_collapsed(&map, end)), end);
 }
@@ -608,12 +642,19 @@ fn literal_text_keeps_every_line_verbatim() {
     };
     let doc = build_doc("**not bold** @README.md \n- [ ] x\n", &label, options);
     assert_eq!(doc.blocks.len(), 3);
-    assert_eq!(serialize_doc(&doc).value, "**not bold** @README.md \n- [ ] x\n");
+    assert_eq!(
+        serialize_doc(&doc).value,
+        "**not bold** @README.md \n- [ ] x\n"
+    );
 }
 
 #[test]
 fn derives_list_depths_from_indentation() {
-    let doc = build_doc("- a\n  - b\n    - c\n  - d\n- e\npara\n- f", &label, BuildOptions::rich());
+    let doc = build_doc(
+        "- a\n  - b\n    - c\n  - d\n- e\npara\n- f",
+        &label,
+        BuildOptions::rich(),
+    );
     assert_eq!(list_depths(&doc), [0, 1, 2, 1, 0, 0, 0]);
 }
 

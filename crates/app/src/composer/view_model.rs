@@ -114,7 +114,9 @@ pub struct ContextWindowCost {
 impl ContextWindowSnapshot {
     /// Used share of the window (0–100), when the window size is known.
     pub fn used_percentage(&self) -> Option<f64> {
-        self.max_tokens.filter(|max| *max > 0.).map(|max| (self.used_tokens / max * 100.).clamp(0., 100.))
+        self.max_tokens
+            .filter(|max| *max > 0.)
+            .map(|max| (self.used_tokens / max * 100.).clamp(0., 100.))
     }
 }
 
@@ -318,11 +320,16 @@ impl Default for ComposerViewModel {
 
 impl ComposerViewModel {
     pub fn selected_entry(&self) -> Option<&ProviderInstanceEntry> {
-        self.providers.iter().find(|entry| entry.instance_id == self.selected_instance_id)
+        self.providers
+            .iter()
+            .find(|entry| entry.instance_id == self.selected_instance_id)
     }
 
     pub fn no_provider_available(&self) -> bool {
-        self.provider_catalog_known && self.selected_entry().is_none_or(|entry| !entry.picker_ready() && entry.models.is_empty())
+        self.provider_catalog_known
+            && self
+                .selected_entry()
+                .is_none_or(|entry| !entry.picker_ready() && entry.models.is_empty())
     }
 }
 
@@ -354,7 +361,13 @@ pub trait ComposerSource: 'static {
     fn resume(&self, cx: &mut App);
     fn implement_plan_in_new_thread(&self, cx: &mut App);
     fn select_model(&self, instance_id: &str, model: &str, cx: &mut App);
-    fn set_model_options(&self, instance_id: &str, model: &str, options: Option<Vec<OptionSelection>>, cx: &mut App);
+    fn set_model_options(
+        &self,
+        instance_id: &str,
+        model: &str,
+        options: Option<Vec<OptionSelection>>,
+        cx: &mut App,
+    );
     fn set_runtime_mode(&self, mode: RuntimeMode, cx: &mut App);
     fn set_interaction_mode(&self, mode: InteractionMode, cx: &mut App);
     fn toggle_favorite_model(&self, instance_id: &str, model: &str, cx: &mut App);

@@ -13,7 +13,9 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::composer::editor_mentions::{ComposerPromptSegment, split_prompt_into_composer_segments};
+use crate::composer::editor_mentions::{
+    ComposerPromptSegment, split_prompt_into_composer_segments,
+};
 use crate::composer::js_string::utf16_len;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,7 +138,11 @@ fn token_start_for_cursor(units: &[u16], cursor: usize) -> usize {
 }
 
 /// `expandCollapsedComposerCursor`.
-pub fn expand_collapsed_composer_cursor(text: &str, cursor_input: usize, literal_text: bool) -> usize {
+pub fn expand_collapsed_composer_cursor(
+    text: &str,
+    cursor_input: usize,
+    literal_text: bool,
+) -> usize {
     let len = utf16_len(text);
     if literal_text {
         return clamp_cursor(len, cursor_input);
@@ -175,13 +181,20 @@ fn collapsed_segment_length(segment: &ComposerPromptSegment) -> usize {
     }
 }
 
-fn clamp_collapsed_cursor_for_segments(segments: &[ComposerPromptSegment], cursor_input: usize) -> usize {
+fn clamp_collapsed_cursor_for_segments(
+    segments: &[ComposerPromptSegment],
+    cursor_input: usize,
+) -> usize {
     let collapsed_length: usize = segments.iter().map(collapsed_segment_length).sum();
     cursor_input.min(collapsed_length)
 }
 
 /// `clampCollapsedComposerCursor`.
-pub fn clamp_collapsed_composer_cursor(text: &str, cursor_input: usize, literal_text: bool) -> usize {
+pub fn clamp_collapsed_composer_cursor(
+    text: &str,
+    cursor_input: usize,
+    literal_text: bool,
+) -> usize {
     if literal_text {
         return clamp_cursor(utf16_len(text), cursor_input);
     }
@@ -189,7 +202,11 @@ pub fn clamp_collapsed_composer_cursor(text: &str, cursor_input: usize, literal_
 }
 
 /// `collapseExpandedComposerCursor`.
-pub fn collapse_expanded_composer_cursor(text: &str, cursor_input: usize, literal_text: bool) -> usize {
+pub fn collapse_expanded_composer_cursor(
+    text: &str,
+    cursor_input: usize,
+    literal_text: bool,
+) -> usize {
     let len = utf16_len(text);
     if literal_text {
         return clamp_cursor(len, cursor_input);
@@ -352,7 +369,12 @@ pub struct ReplacedRange {
 }
 
 /// `replaceTextRange`.
-pub fn replace_text_range(text: &str, range_start: usize, range_end: usize, replacement: &str) -> ReplacedRange {
+pub fn replace_text_range(
+    text: &str,
+    range_start: usize,
+    range_end: usize,
+    replacement: &str,
+) -> ReplacedRange {
     let units: Vec<u16> = text.encode_utf16().collect();
     let safe_start = range_start.min(units.len());
     let safe_end = range_end.clamp(safe_start, units.len());
@@ -388,7 +410,12 @@ mod tests {
         }
     }
 
-    fn intent(event: &ComposerKeyEvent, command: Option<&str>, running: bool, draft: bool) -> Option<ComposerSubmissionIntent> {
+    fn intent(
+        event: &ComposerKeyEvent,
+        command: Option<&str>,
+        running: bool,
+        draft: bool,
+    ) -> Option<ComposerSubmissionIntent> {
         composer_submission_intent_for_key(&SubmissionIntentInput {
             event,
             command,
@@ -402,7 +429,10 @@ mod tests {
 
     #[test]
     fn submission_intent_for_plain_enter_and_modified_enter() {
-        assert_eq!(intent(&key("Enter"), None, false, false), Some(ComposerSubmissionIntent::Foreground));
+        assert_eq!(
+            intent(&key("Enter"), None, false, false),
+            Some(ComposerSubmissionIntent::Foreground)
+        );
         let mut shifted = key("Enter");
         shifted.shift_key = true;
         assert_eq!(intent(&shifted, None, false, false), None);
@@ -410,13 +440,21 @@ mod tests {
             intent(&key("Enter"), Some("composer.sendAlternate"), true, false),
             Some(ComposerSubmissionIntent::Alternate)
         );
-        assert_eq!(intent(&key("Enter"), Some("composer.sendAlternate"), false, false), None);
+        assert_eq!(
+            intent(&key("Enter"), Some("composer.sendAlternate"), false, false),
+            None
+        );
         assert_eq!(
             intent(&key("Enter"), Some("composer.sendBackground"), false, true),
             Some(ComposerSubmissionIntent::Background)
         );
         assert_eq!(
-            intent(&key("Enter"), Some("composer.sendAndNewThread"), false, false),
+            intent(
+                &key("Enter"),
+                Some("composer.sendAndNewThread"),
+                false,
+                false
+            ),
             Some(ComposerSubmissionIntent::Background)
         );
     }
@@ -436,11 +474,17 @@ mod tests {
         let mut with_meta = key("Enter");
         with_meta.meta_key = true;
         input.event = &with_meta;
-        assert_eq!(composer_submission_intent_for_key(&input), Some(ComposerSubmissionIntent::Foreground));
+        assert_eq!(
+            composer_submission_intent_for_key(&input),
+            Some(ComposerSubmissionIntent::Foreground)
+        );
         let plain = key("Enter");
         input.event = &plain;
         input.send_shortcut = Some(SendShortcut::ModEnterMultiline);
-        assert_eq!(composer_submission_intent_for_key(&input), Some(ComposerSubmissionIntent::Foreground));
+        assert_eq!(
+            composer_submission_intent_for_key(&input),
+            Some(ComposerSubmissionIntent::Foreground)
+        );
         input.prompt = "a\nb";
         assert_eq!(composer_submission_intent_for_key(&input), None);
     }
@@ -450,12 +494,22 @@ mod tests {
         let text = "Please inspect @";
         assert_eq!(
             detect_composer_trigger(text, utf16_len(text)),
-            Some(trig(ComposerTriggerKind::Path, "", "Please inspect ".len(), text.len()))
+            Some(trig(
+                ComposerTriggerKind::Path,
+                "",
+                "Please inspect ".len(),
+                text.len()
+            ))
         );
         let text = "Please inspect @buildi";
         assert_eq!(
             detect_composer_trigger(text, utf16_len(text)),
-            Some(trig(ComposerTriggerKind::Path, "buildi", "Please inspect ".len(), text.len()))
+            Some(trig(
+                ComposerTriggerKind::Path,
+                "buildi",
+                "Please inspect ".len(),
+                text.len()
+            ))
         );
     }
 
@@ -537,8 +591,14 @@ mod tests {
             let text = format!("run {prefix}review-follow-up then");
             let collapsed = 4 + 2;
             let expanded = utf16_len(&format!("run {prefix}review-follow-up "));
-            assert_eq!(expand_collapsed_composer_cursor(&text, collapsed, false), expanded);
-            assert_eq!(collapse_expanded_composer_cursor(&text, expanded, false), collapsed);
+            assert_eq!(
+                expand_collapsed_composer_cursor(&text, collapsed, false),
+                expanded
+            );
+            assert_eq!(
+                collapse_expanded_composer_cursor(&text, expanded, false),
+                collapsed
+            );
         }
     }
 
@@ -553,11 +613,17 @@ mod tests {
         let text = "open @AGENTS.md then @src/index.ts ";
         let collapsed = collapse_expanded_composer_cursor(text, text.len(), false);
         assert_eq!(collapsed, "open ".len() + 1 + " then @src/index.ts ".len());
-        assert_eq!(expand_collapsed_composer_cursor(text, collapsed, false), text.len());
+        assert_eq!(
+            expand_collapsed_composer_cursor(text, collapsed, false),
+            text.len()
+        );
         let text = "install @scope/pkg then @README.md ";
         let collapsed = collapse_expanded_composer_cursor(text, text.len(), false);
         assert_eq!(collapsed, "install @scope/pkg then ".len() + 1 + 1);
-        assert_eq!(expand_collapsed_composer_cursor(text, collapsed, false), text.len());
+        assert_eq!(
+            expand_collapsed_composer_cursor(text, collapsed, false),
+            text.len()
+        );
     }
 
     #[test]
@@ -580,7 +646,12 @@ mod tests {
         assert_eq!(state.cursor, prompt.len());
         assert_eq!(
             state.trigger,
-            Some(trig(ComposerTriggerKind::Path, "", "look at ".len(), prompt.len()))
+            Some(trig(
+                ComposerTriggerKind::Path,
+                "",
+                "look at ".len(),
+                prompt.len()
+            ))
         );
         let literal = composer_state_at_prompt_end("see @AGENTS.md ", true);
         assert_eq!(literal.cursor, "see @AGENTS.md ".len());
@@ -591,36 +662,62 @@ mod tests {
     fn clamp_collapsed_cursor_uses_the_collapsed_length() {
         let text = "open @AGENTS.md then ";
         let collapsed = "open ".len() + 1 + " then ".len();
-        assert_eq!(clamp_collapsed_composer_cursor(text, text.len(), false), collapsed);
-        assert_eq!(clamp_collapsed_composer_cursor(text, usize::MAX, false), collapsed);
-        assert_eq!(clamp_collapsed_composer_cursor(text, usize::MAX, true), text.len());
+        assert_eq!(
+            clamp_collapsed_composer_cursor(text, text.len(), false),
+            collapsed
+        );
+        assert_eq!(
+            clamp_collapsed_composer_cursor(text, usize::MAX, false),
+            collapsed
+        );
+        assert_eq!(
+            clamp_collapsed_composer_cursor(text, usize::MAX, true),
+            text.len()
+        );
     }
 
     #[test]
     fn cursor_adjacency_to_inline_tokens() {
         use CursorDirection::*;
-        assert!(!is_collapsed_cursor_adjacent_to_inline_token("plain", 3, Left));
-        assert!(!is_collapsed_cursor_adjacent_to_inline_token("a @b", 4, Left));
+        assert!(!is_collapsed_cursor_adjacent_to_inline_token(
+            "plain", 3, Left
+        ));
+        assert!(!is_collapsed_cursor_adjacent_to_inline_token(
+            "a @b", 4, Left
+        ));
         let text = "open @AGENTS.md then";
         assert!(is_collapsed_cursor_adjacent_to_inline_token(text, 6, Left));
         assert!(!is_collapsed_cursor_adjacent_to_inline_token(text, 5, Left));
         assert!(is_collapsed_cursor_adjacent_to_inline_token(text, 5, Right));
-        assert!(!is_collapsed_cursor_adjacent_to_inline_token(text, 6, Right));
+        assert!(!is_collapsed_cursor_adjacent_to_inline_token(
+            text, 6, Right
+        ));
         let skill = "run $review now";
         assert!(is_collapsed_cursor_adjacent_to_inline_token(skill, 5, Left));
-        assert!(is_collapsed_cursor_adjacent_to_inline_token(skill, 4, Right));
+        assert!(is_collapsed_cursor_adjacent_to_inline_token(
+            skill, 4, Right
+        ));
     }
 
     #[test]
     fn parses_standalone_slash_commands() {
-        assert_eq!(parse_standalone_composer_slash_command("/plan"), Some(ComposerSlashCommand::Plan));
-        assert_eq!(parse_standalone_composer_slash_command("  /DEFAULT "), Some(ComposerSlashCommand::Default));
+        assert_eq!(
+            parse_standalone_composer_slash_command("/plan"),
+            Some(ComposerSlashCommand::Plan)
+        );
+        assert_eq!(
+            parse_standalone_composer_slash_command("  /DEFAULT "),
+            Some(ComposerSlashCommand::Default)
+        );
         assert_eq!(parse_standalone_composer_slash_command("/plan do it"), None);
     }
 
     #[test]
     fn pasted_path_query_continues_only_an_active_path_query() {
-        assert_eq!(pasted_path_query_length("open @src/", "app.rs and more", true), 6);
+        assert_eq!(
+            pasted_path_query_length("open @src/", "app.rs and more", true),
+            6
+        );
         assert_eq!(pasted_path_query_length("open @src/", "app.rs", false), 0);
         assert_eq!(pasted_path_query_length("open ", "app.rs", true), 0);
     }

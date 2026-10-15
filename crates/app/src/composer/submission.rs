@@ -25,7 +25,7 @@ pub fn format_en_us(value: usize) -> String {
     let digits = value.to_string();
     let mut out = String::new();
     for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);
@@ -41,7 +41,11 @@ pub fn get_composer_prompt_length_validation_message(prompt: &str) -> Option<Str
     if excess == 0 {
         return None;
     }
-    let label = if excess == 1 { "character" } else { "characters" };
+    let label = if excess == 1 {
+        "character"
+    } else {
+        "characters"
+    };
     Some(format!(
         "Prompt is {} {label} over the {}-character limit. Shorten or split it before sending.",
         format_en_us(excess),
@@ -50,11 +54,13 @@ pub fn get_composer_prompt_length_validation_message(prompt: &str) -> Option<Str
 }
 
 /// `getComposerSubmissionValidationMessage`.
-pub fn get_composer_submission_validation_message(input: &ComposerSubmissionInput<'_>) -> Option<String> {
+pub fn get_composer_submission_validation_message(
+    input: &ComposerSubmissionInput<'_>,
+) -> Option<String> {
     match input.submission_target {
-        SubmissionTarget::ProviderTurn => {
-            get_composer_prompt_length_validation_message(input.provider_input.unwrap_or(input.prompt))
-        }
+        SubmissionTarget::ProviderTurn => get_composer_prompt_length_validation_message(
+            input.provider_input.unwrap_or(input.prompt),
+        ),
         SubmissionTarget::PendingUserInput => None,
     }
 }
@@ -100,7 +106,11 @@ mod tests {
 
     const LIMIT: usize = PROVIDER_SEND_TURN_MAX_INPUT_CHARS;
 
-    fn input<'a>(prompt: &'a str, provider_input: Option<&'a str>, target: SubmissionTarget) -> ComposerSubmissionInput<'a> {
+    fn input<'a>(
+        prompt: &'a str,
+        provider_input: Option<&'a str>,
+        target: SubmissionTarget,
+    ) -> ComposerSubmissionInput<'a> {
         ComposerSubmissionInput {
             prompt,
             provider_input,
@@ -124,7 +134,9 @@ mod tests {
         assert_eq!(dispatched.borrow().len(), 0);
         assert_eq!(
             result.validation_message.as_deref(),
-            Some("Prompt is 1 character over the 120,000-character limit. Shorten or split it before sending.")
+            Some(
+                "Prompt is 1 character over the 120,000-character limit. Shorten or split it before sending."
+            )
         );
         assert_eq!(prevented.get(), 1);
         let result = submit_composer_draft(
@@ -132,7 +144,13 @@ mod tests {
             || {},
             || true,
         );
-        assert_eq!(result, SubmitResult { validation_message: None, did_dispatch: true });
+        assert_eq!(
+            result,
+            SubmitResult {
+                validation_message: None,
+                did_dispatch: true
+            }
+        );
     }
 
     #[test]
@@ -161,10 +179,17 @@ mod tests {
         ));
         assert_eq!(
             message.as_deref(),
-            Some("Prompt is 4 characters over the 120,000-character limit. Shorten or split it before sending.")
+            Some(
+                "Prompt is 4 characters over the 120,000-character limit. Shorten or split it before sending."
+            )
         );
         assert!(
-            get_composer_submission_validation_message(&input(&draft, None, SubmissionTarget::ProviderTurn)).is_none()
+            get_composer_submission_validation_message(&input(
+                &draft,
+                None,
+                SubmissionTarget::ProviderTurn
+            ))
+            .is_none()
         );
     }
 
@@ -176,7 +201,13 @@ mod tests {
             || prevented.set(prevented.get() + 1),
             || false,
         );
-        assert_eq!(result, SubmitResult { validation_message: None, did_dispatch: false });
+        assert_eq!(
+            result,
+            SubmitResult {
+                validation_message: None,
+                did_dispatch: false
+            }
+        );
         assert_eq!(prevented.get(), 1);
     }
 
@@ -188,7 +219,13 @@ mod tests {
             || {},
             || true,
         );
-        assert_eq!(result, SubmitResult { validation_message: None, did_dispatch: true });
+        assert_eq!(
+            result,
+            SubmitResult {
+                validation_message: None,
+                did_dispatch: true
+            }
+        );
     }
 
     #[test]

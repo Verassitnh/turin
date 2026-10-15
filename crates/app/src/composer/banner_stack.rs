@@ -11,7 +11,9 @@ pub fn banner_priority(priority: Option<BannerPriority>, variant: BannerVariant)
     if priority == Some(BannerPriority::Activity) {
         return 0;
     }
-    if priority == Some(BannerPriority::Urgent) || matches!(variant, BannerVariant::Error | BannerVariant::Warning) {
+    if priority == Some(BannerPriority::Urgent)
+        || matches!(variant, BannerVariant::Error | BannerVariant::Warning)
+    {
         return 1;
     }
     2
@@ -45,7 +47,10 @@ mod tests {
     }
 
     fn ids(items: &[BannerItem]) -> Vec<String> {
-        order_banners(items).into_iter().map(|item| item.id.clone()).collect()
+        order_banners(items)
+            .into_iter()
+            .map(|item| item.id.clone())
+            .collect()
     }
 
     #[test]
@@ -53,7 +58,11 @@ mod tests {
         let items = [
             item("info", BannerVariant::Info, None),
             item("error", BannerVariant::Error, None),
-            item("activity", BannerVariant::Default, Some(BannerPriority::Activity)),
+            item(
+                "activity",
+                BannerVariant::Default,
+                Some(BannerPriority::Activity),
+            ),
             item("urgent", BannerVariant::Info, Some(BannerPriority::Urgent)),
         ];
         assert_eq!(ids(&items), ["activity", "error", "urgent", "info"]);
@@ -73,6 +82,9 @@ mod tests {
     fn warnings_outrank_plain_notices() {
         assert_eq!(banner_priority(None, BannerVariant::Warning), 1);
         assert_eq!(banner_priority(None, BannerVariant::Info), 2);
-        assert_eq!(banner_priority(Some(BannerPriority::Activity), BannerVariant::Error), 0);
+        assert_eq!(
+            banner_priority(Some(BannerPriority::Activity), BannerVariant::Error),
+            0
+        );
     }
 }

@@ -209,7 +209,10 @@ mod tests {
             ),
             vec![
                 text("Inspect "),
-                mention("path/to/package.json", "[package.json](path/to/package.json)"),
+                mention(
+                    "path/to/package.json",
+                    "[package.json](path/to/package.json)"
+                ),
                 text(" before continuing")
             ]
         );
@@ -218,7 +221,10 @@ mod tests {
     #[test]
     fn does_not_turn_normal_web_links_into_file_mention_segments() {
         let prompt = "Read [the docs](https://example.com/docs) first";
-        assert_eq!(split_prompt_into_composer_segments(prompt), vec![text(prompt)]);
+        assert_eq!(
+            split_prompt_into_composer_segments(prompt),
+            vec![text(prompt)]
+        );
     }
 
     #[test]
@@ -235,7 +241,10 @@ mod tests {
     #[test]
     fn keeps_ime_composed_text_containing_a_scoped_package_reference_as_text() {
         let prompt = "入力 @expo/ui　を追加";
-        assert_eq!(split_prompt_into_composer_segments(prompt), vec![text(prompt)]);
+        assert_eq!(
+            split_prompt_into_composer_segments(prompt),
+            vec![text(prompt)]
+        );
     }
 
     #[test]
@@ -291,7 +300,10 @@ mod tests {
             "Cost is $100M total",
             "Limit is $1e6 here",
         ] {
-            assert_eq!(split_prompt_into_composer_segments(prompt), vec![text(prompt)]);
+            assert_eq!(
+                split_prompt_into_composer_segments(prompt),
+                vec![text(prompt)]
+            );
         }
     }
 

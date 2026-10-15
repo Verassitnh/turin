@@ -3,9 +3,9 @@
 mod assets;
 mod branding;
 // Pure composer logic is ported ahead of the views that consume it.
+mod components;
 #[allow(dead_code)]
 mod composer;
-mod components;
 mod hooks;
 mod theme;
 // The ui primitives are a library: every upstream variant and size is ported

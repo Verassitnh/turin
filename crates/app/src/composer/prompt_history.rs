@@ -68,7 +68,11 @@ fn legacy_context_patterns() -> &'static [(&'static str, Regex); 3] {
                 Regex::new(&format!(r"\n*<{tag}>\n([\s\S]*?)\n</{tag}>\s*$")).unwrap(),
             )
         };
-        [make("terminal_context"), make("element_context"), make("preview_annotation")]
+        [
+            make("terminal_context"),
+            make("element_context"),
+            make("preview_annotation"),
+        ]
     })
 }
 
@@ -80,11 +84,18 @@ fn context_reference_pattern() -> &'static Regex {
 /// Prefer the id. A consecutive duplicate collapse can retire the recalled id
 /// while the same text lives on under a newer one, so fall back to the newest
 /// entry with matching text.
-fn find_active(entries: &[ComposerPromptHistoryEntry], position: &ComposerPromptHistoryPosition) -> Option<usize> {
+fn find_active(
+    entries: &[ComposerPromptHistoryEntry],
+    position: &ComposerPromptHistoryPosition,
+) -> Option<usize> {
     entries
         .iter()
         .position(|entry| entry.id == position.entry_id)
-        .or_else(|| entries.iter().rposition(|entry| entry.prompt == position.recalled))
+        .or_else(|| {
+            entries
+                .iter()
+                .rposition(|entry| entry.prompt == position.recalled)
+        })
 }
 
 /// Drop only the review comments appended at send time, which sit at the end.
@@ -117,8 +128,14 @@ fn find_whole_label(text: &str, label: &str) -> Option<usize> {
     while let Some(found) = text[from..].find(label) {
         let start = from + found;
         let end = start + label.len();
-        let before_ok = text[..start].chars().next_back().is_none_or(|c| !is_label_prefix_char(c));
-        let after_ok = text[end..].chars().next().is_none_or(|c| !(c.is_ascii_digit() || c == '-'));
+        let before_ok = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_label_prefix_char(c));
+        let after_ok = text[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_ascii_digit() || c == '-'));
         if before_ok && after_ok {
             return Some(start);
         }
@@ -139,7 +156,12 @@ fn strip_inline_terminal_labels(prompt: &str, headers: &[String]) -> String {
         let Some(captures) = header_re.captures(header) else {
             continue;
         };
-        let name = captures[1].trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join("-");
+        let name = captures[1]
+            .trim()
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("-");
         let label = format!("@{name}:{}", &captures[2]);
         let Some(index) = find_whole_label(&result, &label) else {
             continue;
@@ -170,7 +192,8 @@ pub fn recallable_composer_prompt(message_text: &str) -> String {
     static OPEN_TAG: OnceLock<Regex> = OnceLock::new();
     static KEYED: OnceLock<Regex> = OnceLock::new();
     let headers_re = HEADERS.get_or_init(|| Regex::new(r"(?m)^- (.+):$").unwrap());
-    let open_tag_re = OPEN_TAG.get_or_init(|| Regex::new(r"(?m)^<preview_annotation>\s*$").unwrap());
+    let open_tag_re =
+        OPEN_TAG.get_or_init(|| Regex::new(r"(?m)^<preview_annotation>\s*$").unwrap());
     let keyed_re = KEYED.get_or_init(|| Regex::new(r"(?m)^(?:Id|Page|Comment|Targets): ").unwrap());
 
     while !prompt.is_empty() {
@@ -187,10 +210,16 @@ pub fn recallable_composer_prompt(message_text: &str) -> String {
         if let Some((tag, captures)) = legacy {
             let body = captures[1].to_owned();
             let start = captures.get(0).map_or(0, |m| m.start());
-            if tag == "preview_annotation" && open_tag_re.is_match(&body) && !keyed_re.is_match(&body) {
+            if tag == "preview_annotation"
+                && open_tag_re.is_match(&body)
+                && !keyed_re.is_match(&body)
+            {
                 break;
             }
-            let headers: Vec<String> = headers_re.captures_iter(&body).map(|c| c[1].to_owned()).collect();
+            let headers: Vec<String> = headers_re
+                .captures_iter(&body)
+                .map(|c| c[1].to_owned())
+                .collect();
             if tag != "preview_annotation" && headers.is_empty() {
                 break;
             }
@@ -219,7 +248,9 @@ pub fn recallable_composer_prompt(message_text: &str) -> String {
 
     // App-composed sends are not text the user typed, so they are not history.
     let trimmed = turin_contracts::base_schemas::js_trim(&prompt);
-    if trimmed == ATTACHMENT_ONLY_BOOTSTRAP_PROMPT || trimmed.starts_with(PLAN_IMPLEMENTATION_PROMPT_PREFIX) {
+    if trimmed == ATTACHMENT_ONLY_BOOTSTRAP_PROMPT
+        || trimmed.starts_with(PLAN_IMPLEMENTATION_PROMPT_PREFIX)
+    {
         return String::new();
     }
     trimmed.to_owned()
@@ -228,7 +259,9 @@ pub fn recallable_composer_prompt(message_text: &str) -> String {
 /// `buildComposerPromptHistoryEntries`: oldest first. Consecutive identical
 /// prompts collapse into the newest one, like shell `HISTCONTROL=ignoredups`.
 /// Image-only sends have no text and are skipped.
-pub fn build_composer_prompt_history_entries(messages: &[ComposerPromptHistoryMessage]) -> Vec<ComposerPromptHistoryEntry> {
+pub fn build_composer_prompt_history_entries(
+    messages: &[ComposerPromptHistoryMessage],
+) -> Vec<ComposerPromptHistoryEntry> {
     let mut entries: Vec<ComposerPromptHistoryEntry> = Vec::new();
     for message in messages {
         if message.role != "user" {
@@ -325,18 +358,29 @@ mod tests {
         }
     }
 
-    fn backward(position: Option<&ComposerPromptHistoryPosition>, current: &str) -> Option<ComposerPromptHistoryStep> {
+    fn backward(
+        position: Option<&ComposerPromptHistoryPosition>,
+        current: &str,
+    ) -> Option<ComposerPromptHistoryStep> {
         step_composer_prompt_history(HistoryDirection::Backward, &entries(), position, current)
     }
 
-    fn forward(position: Option<&ComposerPromptHistoryPosition>, current: &str) -> Option<ComposerPromptHistoryStep> {
+    fn forward(
+        position: Option<&ComposerPromptHistoryPosition>,
+        current: &str,
+    ) -> Option<ComposerPromptHistoryStep> {
         step_composer_prompt_history(HistoryDirection::Forward, &entries(), position, current)
     }
 
     #[test]
     fn strips_an_annotation_whose_comment_contains_a_literal_opening_tag() {
-        for comment in ["Render <preview_annotation>", "Render\n<preview_annotation>\nhere", "Render &lt;preview_annotation&gt;"] {
-            let sent = format!("Prompt\n<preview_annotation>\nComment: {comment}\n</preview_annotation>");
+        for comment in [
+            "Render <preview_annotation>",
+            "Render\n<preview_annotation>\nhere",
+            "Render &lt;preview_annotation&gt;",
+        ] {
+            let sent =
+                format!("Prompt\n<preview_annotation>\nComment: {comment}\n</preview_annotation>");
             assert_eq!(recallable_composer_prompt(&sent), "Prompt");
         }
     }
@@ -350,7 +394,9 @@ mod tests {
     #[test]
     fn does_not_strip_a_terminal_label_embedded_in_ordinary_prose() {
         assert_eq!(
-            recallable_composer_prompt("email@build:7\n<terminal_context>\n- Build line 7:\n  output\n</terminal_context>"),
+            recallable_composer_prompt(
+                "email@build:7\n<terminal_context>\n- Build line 7:\n  output\n</terminal_context>"
+            ),
             "email@build:7"
         );
     }
@@ -374,18 +420,27 @@ mod tests {
                 "see @terminal-1:40 and @terminal-1:4-12 then",
             ),
         ] {
-            let sent = format!("{typed}\n\n<terminal_context>\n- Terminal 1 line 4:\n  4 | ls\n</terminal_context>");
+            let sent = format!(
+                "{typed}\n\n<terminal_context>\n- Terminal 1 line 4:\n  4 | ls\n</terminal_context>"
+            );
             assert_eq!(recallable_composer_prompt(&sent), expected);
         }
     }
 
     #[test]
     fn strips_only_review_comments_appended_at_the_end() {
-        let block = "<review_comment filePath=\"src/app.ts\">Keep this configurable.</review_comment>";
-        assert_eq!(recallable_composer_prompt(&format!("Please update this.\n\n{block}")), "Please update this.");
+        let block =
+            "<review_comment filePath=\"src/app.ts\">Keep this configurable.</review_comment>";
+        assert_eq!(
+            recallable_composer_prompt(&format!("Please update this.\n\n{block}")),
+            "Please update this."
+        );
         let mid = format!("Before\n\n{block}\n\nAfter");
         assert_eq!(recallable_composer_prompt(&mid), mid);
-        assert_eq!(recallable_composer_prompt(&format!("{mid}\n\n{block}")), mid);
+        assert_eq!(
+            recallable_composer_prompt(&format!("{mid}\n\n{block}")),
+            mid
+        );
     }
 
     #[test]
@@ -397,16 +452,27 @@ mod tests {
     #[test]
     fn removes_canonical_references_without_restoring_dangling_chips() {
         let sent = "Look at [Terminal](t3-context://v1/terminal/term-1) please\n    indented  code\n![image](t3-context://v1/image/img-1)";
-        assert_eq!(recallable_composer_prompt(sent), "Look at please\n    indented  code");
-        assert_eq!(recallable_composer_prompt("![image](t3-context://v1/image/img-1)"), "");
+        assert_eq!(
+            recallable_composer_prompt(sent),
+            "Look at please\n    indented  code"
+        );
+        assert_eq!(
+            recallable_composer_prompt("![image](t3-context://v1/image/img-1)"),
+            ""
+        );
     }
 
     #[test]
     fn returns_an_empty_string_for_app_composed_sends() {
         assert_eq!(recallable_composer_prompt("   "), "");
-        assert_eq!(recallable_composer_prompt(ATTACHMENT_ONLY_BOOTSTRAP_PROMPT), "");
         assert_eq!(
-            recallable_composer_prompt(&format!("{PLAN_IMPLEMENTATION_PROMPT_PREFIX}# Plan\n1. do it")),
+            recallable_composer_prompt(ATTACHMENT_ONLY_BOOTSTRAP_PROMPT),
+            ""
+        );
+        assert_eq!(
+            recallable_composer_prompt(&format!(
+                "{PLAN_IMPLEMENTATION_PROMPT_PREFIX}# Plan\n1. do it"
+            )),
             ""
         );
     }
@@ -425,7 +491,10 @@ mod tests {
             message("m3", "user", "other"),
             message("m4", "user", "same"),
         ]);
-        let pairs: Vec<(&str, &str)> = collapsed.iter().map(|e| (e.id.as_str(), e.prompt.as_str())).collect();
+        let pairs: Vec<(&str, &str)> = collapsed
+            .iter()
+            .map(|e| (e.id.as_str(), e.prompt.as_str()))
+            .collect();
         assert_eq!(pairs, [("m2", "same"), ("m3", "other"), ("m4", "same")]);
     }
 
@@ -439,7 +508,10 @@ mod tests {
         let first = backward(None, "").unwrap();
         assert_eq!(first.prompt, "third");
         assert_eq!(first.position, Some(pos("m3", "third")));
-        assert_eq!(backward(first.position.as_ref(), "third").unwrap().prompt, "second");
+        assert_eq!(
+            backward(first.position.as_ref(), "third").unwrap().prompt,
+            "second"
+        );
     }
 
     #[test]
@@ -453,7 +525,10 @@ mod tests {
         assert_eq!(newer.prompt, "third");
         assert_eq!(
             forward(newer.position.as_ref(), "third"),
-            Some(ComposerPromptHistoryStep { position: None, prompt: String::new() })
+            Some(ComposerPromptHistoryStep {
+                position: None,
+                prompt: String::new()
+            })
         );
     }
 
@@ -462,7 +537,10 @@ mod tests {
         let position = pos("m3", "third");
         assert_eq!(backward(Some(&position), "third edited"), None);
         assert_eq!(forward(Some(&position), "third edited"), None);
-        assert_eq!(backward(Some(&position), "").unwrap().position, Some(pos("m3", "third")));
+        assert_eq!(
+            backward(Some(&position), "").unwrap().position,
+            Some(pos("m3", "third"))
+        );
     }
 
     #[test]
@@ -478,7 +556,12 @@ mod tests {
             message("m2", "user", "B"),
             message("m3", "user", "A"),
         ]);
-        let older = step_composer_prompt_history(HistoryDirection::Backward, &grown, Some(&pos("m1", "A")), "A");
+        let older = step_composer_prompt_history(
+            HistoryDirection::Backward,
+            &grown,
+            Some(&pos("m1", "A")),
+            "A",
+        );
         assert_eq!(older.unwrap().prompt, "zeroth");
         let missing = step_composer_prompt_history(
             HistoryDirection::Forward,
@@ -491,8 +574,16 @@ mod tests {
 
     #[test]
     fn falls_back_to_matching_text_when_a_duplicate_collapse_retires_the_id() {
-        let collapsed = build_composer_prompt_history_entries(&[message("m1", "user", "first"), message("m3", "user", "A")]);
-        let step = step_composer_prompt_history(HistoryDirection::Backward, &collapsed, Some(&pos("m2", "A")), "A");
+        let collapsed = build_composer_prompt_history_entries(&[
+            message("m1", "user", "first"),
+            message("m3", "user", "A"),
+        ]);
+        let step = step_composer_prompt_history(
+            HistoryDirection::Backward,
+            &collapsed,
+            Some(&pos("m2", "A")),
+            "A",
+        );
         assert_eq!(step.unwrap().prompt, "first");
     }
 }

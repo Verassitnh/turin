@@ -72,8 +72,14 @@ mod tests {
 
     #[test]
     fn indent_lines_indents_outdents_and_leaves_blank_lines_alone() {
-        assert_eq!(indent_lines(&["a", "b"], IndentDirection::In), ["  a", "  b"]);
-        assert_eq!(indent_lines(&["a", "", "b"], IndentDirection::In), ["  a", "", "  b"]);
+        assert_eq!(
+            indent_lines(&["a", "b"], IndentDirection::In),
+            ["  a", "  b"]
+        );
+        assert_eq!(
+            indent_lines(&["a", "", "b"], IndentDirection::In),
+            ["  a", "", "  b"]
+        );
         assert_eq!(
             indent_lines(&["    a", "  b", "c"], IndentDirection::Out),
             ["  a", "b", "c"]

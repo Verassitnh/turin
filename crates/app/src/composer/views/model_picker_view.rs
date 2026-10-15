@@ -7,25 +7,31 @@ use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px, rems,
+    AnyElement, AppContext as _, Context, CursorStyle, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    rems,
 };
 
 use crate::composer::catalog::{ProviderInstanceEntry, get_provider_status_message};
 use crate::composer::model_display::{get_display_model_name, get_provider_row_label};
 use crate::composer::model_picker::{
     ModelPickerInput, ModelPickerItem, PickerRow, PickerSelection, adjacent_model_picker_provider,
-    compute_model_picker_list, initial_expanded_legacy_instances, initial_picker_selection, provider_model_key,
+    compute_model_picker_list, initial_expanded_legacy_instances, initial_picker_selection,
+    provider_model_key,
 };
-use crate::composer::model_picker_keys::{parse_model_picker_legacy_section_key, parse_model_picker_model_key};
+use crate::composer::model_picker_keys::{
+    parse_model_picker_legacy_section_key, parse_model_picker_model_key,
+};
 use crate::composer::view_model::{ComposerStore, ComposerViewModel};
 use crate::composer::views::chrome::{menu_row, muted_label};
 use crate::composer::views::footer::provider_mark;
-use crate::composer::views::prompt_editor::{CommandKey, EditorConfig, PromptEditor, PromptEditorEvent};
+use crate::composer::views::prompt_editor::{
+    CommandKey, EditorConfig, PromptEditor, PromptEditorEvent,
+};
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
-use crate::theme::tokens::{TEXT_XS, RADIUS_MD};
+use crate::theme::tokens::{RADIUS_MD, TEXT_XS};
 use crate::ui::{Icon, IconName, Tooltip};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,18 +97,23 @@ impl ModelPickerView {
         search.update(cx, |editor, _| {
             editor.set_command_handler(Some(std::rc::Rc::new(move |state, key, window, cx| {
                 let empty = state.is_empty();
-                weak.update(cx, |this, cx| this.on_search_key(key, empty, window, cx)).unwrap_or(false)
+                weak.update(cx, |this, cx| this.on_search_key(key, empty, window, cx))
+                    .unwrap_or(false)
             })));
         });
-        cx.subscribe_in(&search, window, |this, _, event: &PromptEditorEvent, _, cx| {
-            if let PromptEditorEvent::Changed(snapshot) = event {
-                if this.query != snapshot.value {
+        cx.subscribe_in(
+            &search,
+            window,
+            |this, _, event: &PromptEditorEvent, _, cx| {
+                if let PromptEditorEvent::Changed(snapshot) = event
+                    && this.query != snapshot.value
+                {
                     this.query = snapshot.value.clone();
                     this.highlighted = None;
                     cx.notify();
                 }
-            }
-        })
+            },
+        )
         .detach();
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
         Self {
@@ -124,7 +135,13 @@ impl ModelPickerView {
         search.update(cx, |editor, cx| editor.focus_at_end(window, cx));
     }
 
-    fn on_search_key(&mut self, key: &CommandKey, search_empty: bool, _window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn on_search_key(
+        &mut self,
+        key: &CommandKey,
+        search_empty: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let plain = !key.alt && !key.ctrl && !key.meta;
         match key.key.as_str() {
             "Escape" => {
@@ -132,7 +149,11 @@ impl ModelPickerView {
                 true
             }
             "Enter" if plain => {
-                if let Some(highlighted) = self.highlighted.clone().or_else(|| self.row_keys.first().cloned()) {
+                if let Some(highlighted) = self
+                    .highlighted
+                    .clone()
+                    .or_else(|| self.row_keys.first().cloned())
+                {
                     self.activate(&highlighted, cx);
                 }
                 true
@@ -153,7 +174,11 @@ impl ModelPickerView {
                 self.step_provider(if key.shift { -1 } else { 1 }, cx);
                 true
             }
-            digit if key.meta && digit.len() == 1 && digit.chars().all(|c| ('1'..='9').contains(&c)) => {
+            digit
+                if key.meta
+                    && digit.len() == 1
+                    && digit.chars().all(|c| ('1'..='9').contains(&c)) =>
+            {
                 let index = digit.parse::<usize>().unwrap_or(1) - 1;
                 if let Some(target) = self.jump_keys.get(index).cloned() {
                     self.activate(&target, cx);
@@ -187,7 +212,10 @@ impl ModelPickerView {
         if self.row_keys.is_empty() {
             return;
         }
-        let current = self.highlighted.as_ref().and_then(|key| self.row_keys.iter().position(|row| row == key));
+        let current = self
+            .highlighted
+            .as_ref()
+            .and_then(|key| self.row_keys.iter().position(|row| row == key));
         let next = match current {
             None => {
                 if delta > 0 {
@@ -231,10 +259,19 @@ impl ModelPickerView {
         })
     }
 
-    fn sidebar(&mut self, vm: &Arc<ComposerViewModel>, list: &crate::composer::model_picker::ModelPickerList, cx: &mut Context<Self>) -> AnyElement {
+    fn sidebar(
+        &mut self,
+        vm: &Arc<ComposerViewModel>,
+        list: &crate::composer::model_picker::ModelPickerList,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let selected = self.selected.clone();
-        let button = |id: SharedString, selected: bool, disabled: bool, content: AnyElement, tooltip: String| {
+        let button = |id: SharedString,
+                      selected: bool,
+                      disabled: bool,
+                      content: AnyElement,
+                      tooltip: String| {
             div()
                 .id(id)
                 .relative()
@@ -246,33 +283,60 @@ impl ModelPickerView {
                 .rounded(RADIUS_MD)
                 .when(selected, |this| this.bg(with_alpha(theme.foreground, 0.08)))
                 .when(!disabled, |this| {
-                    this.cursor(CursorStyle::PointingHand).hover(|style| style.bg(with_alpha(theme.foreground, 0.10)))
+                    this.cursor(CursorStyle::PointingHand)
+                        .hover(|style| style.bg(with_alpha(theme.foreground, 0.10)))
                 })
-                .when(disabled, |this| this.opacity(0.5).cursor(CursorStyle::OperationNotAllowed))
+                .when(disabled, |this| {
+                    this.opacity(0.5).cursor(CursorStyle::OperationNotAllowed)
+                })
                 .child(content)
                 .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         };
-        let mut column = div().relative().flex().flex_col().gap_1().p_1().min_h_full();
+        let mut column = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_1()
+            .min_h_full();
         column = column.child(
             button(
                 "picker-favorites".into(),
                 selected == PickerSelection::Favorites,
                 false,
-                Icon::new(IconName::Star).size(rems(1.25)).color(theme.foreground).into_any_element(),
+                Icon::new(IconName::Star)
+                    .size(rems(1.25))
+                    .color(theme.foreground)
+                    .into_any_element(),
                 "Favorites".to_owned(),
             )
-            .on_click(cx.listener(|this, _, _, cx| this.select_provider(PickerSelection::Favorites, cx))),
+            .on_click(
+                cx.listener(|this, _, _, cx| this.select_provider(PickerSelection::Favorites, cx)),
+            ),
         );
-        column = column.child(div().border_b_1().border_color(with_alpha(theme.border, 0.7)));
+        column = column.child(
+            div()
+                .border_b_1()
+                .border_color(with_alpha(theme.border, 0.7)),
+        );
         for entry in &list.sidebar_entries {
             let unavailable = !entry.picker_ready();
-            let reachable = list.selectable_unavailable_instance_ids.as_ref().is_some_and(|ids| ids.contains(&entry.instance_id));
-            let context_disabled = list.locked_disabled_instance_ids.as_ref().is_some_and(|ids| ids.contains(&entry.instance_id));
+            let reachable = list
+                .selectable_unavailable_instance_ids
+                .as_ref()
+                .is_some_and(|ids| ids.contains(&entry.instance_id));
+            let context_disabled = list
+                .locked_disabled_instance_ids
+                .as_ref()
+                .is_some_and(|ids| ids.contains(&entry.instance_id));
             let disabled = (unavailable && !reachable) || context_disabled;
             let tooltip = if unavailable {
                 get_provider_status_message(entry)
             } else if context_disabled {
-                format!("{} is unavailable in this thread. Start a new thread to switch providers.", entry.display_name)
+                format!(
+                    "{} is unavailable in this thread. Start a new thread to switch providers.",
+                    entry.display_name
+                )
             } else {
                 entry.display_name.clone()
             };
@@ -283,7 +347,8 @@ impl ModelPickerView {
                     format!("picker-instance-{}", entry.instance_id).into(),
                     is_selected,
                     disabled,
-                    provider_mark(&entry.driver_kind, rems(1.25), theme.foreground).into_any_element(),
+                    provider_mark(&entry.driver_kind, rems(1.25), theme.foreground)
+                        .into_any_element(),
                     tooltip,
                 )
                 .when(!disabled, |this| {
@@ -294,124 +359,181 @@ impl ModelPickerView {
             );
         }
         let _ = vm;
-        div().w(rems(2.75)).flex_shrink_0().overflow_hidden().bg(with_alpha(theme.muted, 0.3)).child(column).into_any_element()
-    }
-
-    fn model_row(&mut self, item: &ModelPickerItem, index: usize, vm: &Arc<ComposerViewModel>, jump_label: Option<String>, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.app_theme().clone();
-        let key = item.key();
-        let is_active = vm.selected_instance_id == item.instance_id && vm.selected_model == item.model.slug;
-        let highlighted = self.highlighted.as_deref() == Some(key.as_str());
-        let favorite = vm.favorite_models.contains(&provider_model_key(&item.instance_id, &item.model.slug));
-        let prefer_short = vm.locked_provider.is_none();
-        let name = get_display_model_name(&item.model, prefer_short);
-        let provider_label = get_provider_row_label(&item.instance_display_name, item.model.sub_provider.as_deref());
-        let (instance, slug) = (item.instance_id.clone(), item.model.slug.clone());
-        let (fav_instance, fav_slug) = (item.instance_id.clone(), item.model.slug.clone());
-        let activate_key = key.clone();
-        menu_row(("picker-model", index), highlighted || is_active && !highlighted && false, cx)
-            .when(is_active && !highlighted, |this| this.bg(with_alpha(theme.foreground, 0.08)))
-            .w_full()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .min_w_0()
-                    .flex_1()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().min_w_0().truncate().text_size(TEXT_XS.size).font_weight(FontWeight::MEDIUM).child(name))
-                            .when(item.model.is_new, |this| {
-                                this.child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .rounded(px(4.))
-                                        .border_1()
-                                        .border_color(with_alpha(theme.update, 0.35))
-                                        .bg(with_alpha(theme.update, 0.15))
-                                        .px(px(2.))
-                                        .text_color(theme.update_foreground)
-                                        .text_size(rems(0.625))
-                                        .font_weight(FontWeight::BOLD)
-                                        .child("NEW"),
-                                )
-                            })
-                            .when(item.model.is_unavailable, |this| {
-                                this.child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .rounded(px(6.))
-                                        .border_1()
-                                        .border_color(theme.border)
-                                        .px(px(5.))
-                                        .text_size(rems(0.6875))
-                                        .child("Unavailable"),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .mt_1()
-                            .flex()
-                            .items_center()
-                            .gap(rems(0.375))
-                            .child(provider_mark(&item.driver_kind, rems(0.75), theme.muted_foreground))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(TEXT_XS.size)
-                                    .text_color(with_alpha(theme.muted_foreground, 0.7))
-                                    .child(provider_label),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(rems(0.375))
-                    .when_some(jump_label, |this, label| {
-                        this.child(div().text_size(TEXT_XS.size).text_color(theme.muted_foreground).child(label))
-                    })
-                    .child(
-                        div()
-                            .id(("picker-favorite", index))
-                            .flex()
-                            .size(rems(1.25))
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.))
-                            .cursor(CursorStyle::PointingHand)
-                            .hover(|style| style.bg(with_alpha(theme.foreground, 0.1)))
-                            .child(
-                                Icon::new(IconName::Star)
-                                    .size(rems(0.75))
-                                    .color(if favorite { theme.warning } else { theme.muted_foreground }),
-                            )
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(if favorite { "Remove from favorites" } else { "Add to favorites" }).build(window, cx)
-                            })
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.stop_propagation();
-                                cx.emit(ModelPickerEvent::ToggleFavorite {
-                                    instance_id: fav_instance.clone(),
-                                    slug: fav_slug.clone(),
-                                });
-                            })),
-                    ),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let _ = (&instance, &slug);
-                this.activate(&activate_key, cx);
-            }))
+        div()
+            .w(rems(2.75))
+            .flex_shrink_0()
+            .overflow_hidden()
+            .bg(with_alpha(theme.muted, 0.3))
+            .child(column)
             .into_any_element()
     }
 
-    fn legacy_row(&mut self, key: &str, count: usize, expanded: bool, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn model_row(
+        &mut self,
+        item: &ModelPickerItem,
+        index: usize,
+        vm: &Arc<ComposerViewModel>,
+        jump_label: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.app_theme().clone();
+        let key = item.key();
+        let is_active =
+            vm.selected_instance_id == item.instance_id && vm.selected_model == item.model.slug;
+        let highlighted = self.highlighted.as_deref() == Some(key.as_str());
+        let favorite = vm
+            .favorite_models
+            .contains(&provider_model_key(&item.instance_id, &item.model.slug));
+        let prefer_short = vm.locked_provider.is_none();
+        let name = get_display_model_name(&item.model, prefer_short);
+        let provider_label = get_provider_row_label(
+            &item.instance_display_name,
+            item.model.sub_provider.as_deref(),
+        );
+        let (instance, slug) = (item.instance_id.clone(), item.model.slug.clone());
+        let (fav_instance, fav_slug) = (item.instance_id.clone(), item.model.slug.clone());
+        let activate_key = key.clone();
+        menu_row(
+            ("picker-model", index),
+            highlighted || is_active && !highlighted && false,
+            cx,
+        )
+        .when(is_active && !highlighted, |this| {
+            this.bg(with_alpha(theme.foreground, 0.08))
+        })
+        .w_full()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(TEXT_XS.size)
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(name),
+                        )
+                        .when(item.model.is_new, |this| {
+                            this.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(with_alpha(theme.update, 0.35))
+                                    .bg(with_alpha(theme.update, 0.15))
+                                    .px(px(2.))
+                                    .text_color(theme.update_foreground)
+                                    .text_size(rems(0.625))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child("NEW"),
+                            )
+                        })
+                        .when(item.model.is_unavailable, |this| {
+                            this.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .rounded(px(6.))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .px(px(5.))
+                                    .text_size(rems(0.6875))
+                                    .child("Unavailable"),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .mt_1()
+                        .flex()
+                        .items_center()
+                        .gap(rems(0.375))
+                        .child(provider_mark(
+                            &item.driver_kind,
+                            rems(0.75),
+                            theme.muted_foreground,
+                        ))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(TEXT_XS.size)
+                                .text_color(with_alpha(theme.muted_foreground, 0.7))
+                                .child(provider_label),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .gap(rems(0.375))
+                .when_some(jump_label, |this, label| {
+                    this.child(
+                        div()
+                            .text_size(TEXT_XS.size)
+                            .text_color(theme.muted_foreground)
+                            .child(label),
+                    )
+                })
+                .child(
+                    div()
+                        .id(("picker-favorite", index))
+                        .flex()
+                        .size(rems(1.25))
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.))
+                        .cursor(CursorStyle::PointingHand)
+                        .hover(|style| style.bg(with_alpha(theme.foreground, 0.1)))
+                        .child(
+                            Icon::new(IconName::Star)
+                                .size(rems(0.75))
+                                .color(if favorite {
+                                    theme.warning
+                                } else {
+                                    theme.muted_foreground
+                                }),
+                        )
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(if favorite {
+                                "Remove from favorites"
+                            } else {
+                                "Add to favorites"
+                            })
+                            .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(ModelPickerEvent::ToggleFavorite {
+                                instance_id: fav_instance.clone(),
+                                slug: fav_slug.clone(),
+                            });
+                        })),
+                ),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let _ = (&instance, &slug);
+            this.activate(&activate_key, cx);
+        }))
+        .into_any_element()
+    }
+
+    fn legacy_row(
+        &mut self,
+        key: &str,
+        count: usize,
+        expanded: bool,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let highlighted = self.highlighted.as_deref() == Some(key);
         let activate_key = key.to_owned();
@@ -421,7 +543,12 @@ impl ModelPickerView {
                 div()
                     .min_w_0()
                     .flex_1()
-                    .child(div().text_size(TEXT_XS.size).font_weight(FontWeight::MEDIUM).child("Legacy models"))
+                    .child(
+                        div()
+                            .text_size(TEXT_XS.size)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Legacy models"),
+                    )
                     .child(
                         div()
                             .mt_1()
@@ -430,7 +557,11 @@ impl ModelPickerView {
                             .child(format!("{count} models")),
                     ),
             )
-            .child(Icon::new(IconName::ChevronRight).color(theme.muted_foreground).when(expanded, |icon| icon.size(rems(1.))))
+            .child(
+                Icon::new(IconName::ChevronRight)
+                    .color(theme.muted_foreground)
+                    .when(expanded, |icon| icon.size(rems(1.))),
+            )
             .on_click(cx.listener(move |this, _, _, cx| this.activate(&activate_key, cx)))
             .into_any_element()
     }
@@ -462,10 +593,18 @@ impl Render for ModelPickerView {
                         .jump_keys
                         .iter()
                         .position(|key| *key == item.key())
-                        .and_then(|position| vm.shortcut_labels.get(&format!("modelPicker.jump.{}", position + 1)).cloned());
+                        .and_then(|position| {
+                            vm.shortcut_labels
+                                .get(&format!("modelPicker.jump.{}", position + 1))
+                                .cloned()
+                        });
                     rows.push(self.model_row(item, index, &vm, jump_label, cx));
                 }
-                PickerRow::LegacySection { key, count, expanded } => rows.push(self.legacy_row(key, *count, *expanded, index, cx)),
+                PickerRow::LegacySection {
+                    key,
+                    count,
+                    expanded,
+                } => rows.push(self.legacy_row(key, *count, *expanded, index, cx)),
             }
             rows.push(div().h(px(2.)).into_any_element());
         }
@@ -483,7 +622,10 @@ impl Render for ModelPickerView {
             .min_h_0()
             .overflow_hidden()
             .bg(with_alpha(theme.muted, 0.4))
-            .when(list.show_sidebar, |this| this.border_l_1().border_color(with_alpha(theme.border, 0.7)))
+            .when(list.show_sidebar, |this| {
+                this.border_l_1()
+                    .border_color(with_alpha(theme.border, 0.7))
+            })
             .child(
                 // ComboboxSearchInput: `px-3 pt-2.5`, bordered underline, search glyph.
                 div().flex_shrink_0().px_3().pt(rems(0.625)).child(
@@ -493,11 +635,10 @@ impl Render for ModelPickerView {
                         .border_color(with_alpha(theme.border, 0.7))
                         .pb(rems(0.375))
                         .child(
-                            div()
-                                .absolute()
-                                .top(rems(0.375))
-                                .left_0()
-                                .child(Icon::new(IconName::Search).color(with_alpha(theme.muted_foreground, 0.55).into())),
+                            div().absolute().top(rems(0.375)).left_0().child(
+                                Icon::new(IconName::Search)
+                                    .color(with_alpha(theme.muted_foreground, 0.55).into()),
+                            ),
                         )
                         .child(div().pl(rems(1.25)).child(self.search.clone())),
                 ),
@@ -514,7 +655,9 @@ impl Render for ModelPickerView {
                     .pl_2()
                     .pr(px(1.))
                     .children(rows)
-                    .when(empty, |this| this.child(muted_label("No models found", cx).px_3().py_2())),
+                    .when(empty, |this| {
+                        this.child(muted_label("No models found", cx).px_3().py_2())
+                    }),
             )
             .when(!setup_entries.is_empty(), |this| {
                 this.child(
@@ -527,12 +670,20 @@ impl Render for ModelPickerView {
                         .p_2()
                         .children(setup_entries.iter().map(|entry| {
                             let instance_id = entry.instance_id.clone();
-                            let label = if multiple_setup { format!("Set up {}", entry.display_name) } else { "Open provider setup".to_owned() };
+                            let label = if multiple_setup {
+                                format!("Set up {}", entry.display_name)
+                            } else {
+                                "Open provider setup".to_owned()
+                            };
                             div()
                                 .px_1()
                                 .py(rems(0.375))
                                 .text_size(TEXT_XS.size)
-                                .child(div().text_color(theme.muted_foreground).child(get_provider_status_message(entry)))
+                                .child(
+                                    div()
+                                        .text_color(theme.muted_foreground)
+                                        .child(get_provider_status_message(entry)),
+                                )
                                 .child(
                                     div()
                                         .id(("picker-setup", entry.instance_id.len()))
@@ -541,7 +692,11 @@ impl Render for ModelPickerView {
                                         .text_color(theme.foreground)
                                         .underline()
                                         .child(label)
-                                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(ModelPickerEvent::OpenSetup(instance_id.clone())))),
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.emit(ModelPickerEvent::OpenSetup(
+                                                instance_id.clone(),
+                                            ))
+                                        })),
                                 )
                         })),
                 )
@@ -559,12 +714,17 @@ impl Render for ModelPickerView {
             }));
 
         // The list holds its natural height up to the picker's cap.
-        let estimated = 3.25 + list.rows.len() as f32 * 2.85 + if setup_entries.is_empty() { 0.5 } else { 7. };
+        let estimated =
+            3.25 + list.rows.len() as f32 * 2.85 + if setup_entries.is_empty() { 0.5 } else { 7. };
         div()
             .flex()
             .flex_row()
             .w(rems(22.5))
-            .h(rems(estimated.max(2. + (list.sidebar_entries.len() as f32 + 1.) * 2.5).clamp(7., 21.625)))
+            .h(rems(
+                estimated
+                    .max(2. + (list.sidebar_entries.len() as f32 + 1.) * 2.5)
+                    .clamp(7., 21.625),
+            ))
             .overflow_hidden()
             .when_some(sidebar, |this, sidebar| this.child(sidebar))
             .child(main)

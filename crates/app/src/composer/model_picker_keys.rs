@@ -6,7 +6,10 @@ const LEGACY_SECTION_KEY_PREFIX: &str = "legacy-models:";
 /// `modelPickerModelKey`: length-prefixed so instance ids containing `:` stay
 /// unambiguous.
 pub fn model_picker_model_key(instance_id: &str, slug: &str) -> String {
-    format!("{MODEL_KEY_PREFIX}{}:{instance_id}{slug}", instance_id.chars().count())
+    format!(
+        "{MODEL_KEY_PREFIX}{}:{instance_id}{slug}",
+        instance_id.chars().count()
+    )
 }
 
 /// `parseModelPickerModelKey`.
@@ -22,7 +25,10 @@ pub fn parse_model_picker_model_key(key: &str) -> Option<(String, String)> {
     if length > value.chars().count() {
         return None;
     }
-    let split = value.char_indices().nth(length).map_or(value.len(), |(at, _)| at);
+    let split = value
+        .char_indices()
+        .nth(length)
+        .map_or(value.len(), |(at, _)| at);
     Some((value[..split].to_owned(), value[split..].to_owned()))
 }
 
@@ -31,7 +37,8 @@ pub fn model_picker_legacy_section_key(instance_id: &str) -> String {
 }
 
 pub fn parse_model_picker_legacy_section_key(key: &str) -> Option<String> {
-    key.strip_prefix(LEGACY_SECTION_KEY_PREFIX).map(str::to_owned)
+    key.strip_prefix(LEGACY_SECTION_KEY_PREFIX)
+        .map(str::to_owned)
 }
 
 #[cfg(test)]

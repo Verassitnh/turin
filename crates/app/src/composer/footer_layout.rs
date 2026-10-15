@@ -87,7 +87,10 @@ pub fn resolve_composer_timeline_inset(input: &TimelineInsetInput) -> f32 {
 }
 
 /// `overlayComposerIsResting`: only a mounted composer can be resting.
-pub fn overlay_composer_is_resting(composer_mounted: bool, composer_reported_resting: bool) -> bool {
+pub fn overlay_composer_is_resting(
+    composer_mounted: bool,
+    composer_reported_resting: bool,
+) -> bool {
     composer_mounted && composer_reported_resting
 }
 
@@ -100,8 +103,12 @@ pub fn should_animate_composer_resting_transition(
     has_completed_initial_layout && (state_changed || has_interrupted_animation)
 }
 
-pub fn should_use_compact_composer_primary_actions(width: Option<f32>, has_wide_actions: bool) -> bool {
-    has_wide_actions && width.is_some_and(|width| width < COMPOSER_FOOTER_WIDE_ACTIONS_COMPACT_BREAKPOINT_PX)
+pub fn should_use_compact_composer_primary_actions(
+    width: Option<f32>,
+    has_wide_actions: bool,
+) -> bool {
+    has_wide_actions
+        && width.is_some_and(|width| width < COMPOSER_FOOTER_WIDE_ACTIONS_COMPACT_BREAKPOINT_PX)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -147,13 +154,19 @@ fn resting_controls_width(
         .sum();
     fixed_width
         + blocks
-        + if hidden_count > 0 { input.overflow_width } else { 0.0 }
+        + if hidden_count > 0 {
+            input.overflow_width
+        } else {
+            0.0
+        }
         + input.gap * (visible_count + usize::from(hidden_count > 0)) as f32
 }
 
 /// `resolveRestingComposerControlsNaturalWidth`: the width the controls take
 /// with nothing moved into overflow.
-pub fn resolve_resting_composer_controls_natural_width(input: &RestingComposerControlsMeasurement) -> f32 {
+pub fn resolve_resting_composer_controls_natural_width(
+    input: &RestingComposerControlsMeasurement,
+) -> f32 {
     resting_controls_width(input, 0, input.natural_fixed_width, 0)
 }
 
@@ -169,7 +182,11 @@ pub fn resolve_resting_composer_controls_layout(
     previous: Option<RestingControlsLayout>,
 ) -> RestingControlsLayout {
     let block_count = input.block_widths.len();
-    let icon_steps = if input.icon_only_block_widths.is_some() { block_count } else { 0 };
+    let icon_steps = if input.icon_only_block_widths.is_some() {
+        block_count
+    } else {
+        0
+    };
     let previous_step = previous.map_or(0, |previous| {
         if previous.hidden_count > 0 {
             icon_steps + previous.hidden_count.min(block_count)
@@ -188,7 +205,12 @@ pub fn resolve_resting_composer_controls_layout(
     let mut step = 0;
     while step < icon_steps + block_count
         && width_at_step(step, input.natural_fixed_width)
-            > host_width - if step < previous_step { RESTING_CONTROLS_SLACK_PX } else { 0.0 }
+            > host_width
+                - if step < previous_step {
+                    RESTING_CONTROLS_SLACK_PX
+                } else {
+                    0.0
+                }
     {
         step += 1;
     }
@@ -202,7 +224,10 @@ pub fn resolve_resting_composer_controls_layout(
     };
     RestingControlsLayout {
         hidden_count,
-        icon_only_count: input.icon_only_block_widths.is_some().then_some(icon_only_count),
+        icon_only_count: input
+            .icon_only_block_widths
+            .is_some()
+            .then_some(icon_only_count),
         visible,
     }
 }
@@ -239,11 +264,17 @@ mod tests {
     fn shows_at_most_three_thumbnails_and_counts_the_remainder() {
         assert_eq!(
             get_resting_composer_image_preview_counts(5),
-            RestingImagePreviewCounts { visible_count: 3, overflow_count: 2 }
+            RestingImagePreviewCounts {
+                visible_count: 3,
+                overflow_count: 2
+            }
         );
         assert_eq!(
             get_resting_composer_image_preview_counts(2),
-            RestingImagePreviewCounts { visible_count: 2, overflow_count: 0 }
+            RestingImagePreviewCounts {
+                visible_count: 2,
+                overflow_count: 0
+            }
         );
     }
 
@@ -255,8 +286,14 @@ mod tests {
         assert!(!should_use_compact_composer_footer(Some(700.0), false));
         assert!(should_use_compact_composer_footer(Some(700.0), true));
         assert!(!should_use_compact_composer_footer(Some(780.0), true));
-        assert!(should_use_compact_composer_primary_actions(Some(779.0), true));
-        assert!(!should_use_compact_composer_primary_actions(Some(300.0), false));
+        assert!(should_use_compact_composer_primary_actions(
+            Some(779.0),
+            true
+        ));
+        assert!(!should_use_compact_composer_primary_actions(
+            Some(300.0),
+            false
+        ));
     }
 
     #[test]
@@ -293,7 +330,10 @@ mod tests {
         let collapsed = inset(expanded, 110.0, true, 32.0);
         assert_eq!(collapsed, expanded);
         assert_eq!(inset(collapsed, 172.0, false, 0.0), expanded);
-        assert_eq!(inset(0.0, 60.0, true, 0.0), 60.0 + COMPOSER_RESTING_EXPANSION_MIN_PX);
+        assert_eq!(
+            inset(0.0, 60.0, true, 0.0),
+            60.0 + COMPOSER_RESTING_EXPANSION_MIN_PX
+        );
     }
 
     #[test]
@@ -307,11 +347,26 @@ mod tests {
             timeline_overflows: true,
         };
         assert!(should_use_resting_composer_layout(&base()));
-        assert!(!should_use_resting_composer_layout(&RestingLayoutInput { is_scroll_collapsed: false, ..base() }));
-        assert!(!should_use_resting_composer_layout(&RestingLayoutInput { timeline_overflows: false, ..base() }));
-        assert!(!should_use_resting_composer_layout(&RestingLayoutInput { is_existing_thread: false, ..base() }));
-        assert!(!should_use_resting_composer_layout(&RestingLayoutInput { is_mobile_viewport: true, ..base() }));
-        assert!(!should_use_resting_composer_layout(&RestingLayoutInput { has_expanded_chrome: true, ..base() }));
+        assert!(!should_use_resting_composer_layout(&RestingLayoutInput {
+            is_scroll_collapsed: false,
+            ..base()
+        }));
+        assert!(!should_use_resting_composer_layout(&RestingLayoutInput {
+            timeline_overflows: false,
+            ..base()
+        }));
+        assert!(!should_use_resting_composer_layout(&RestingLayoutInput {
+            is_existing_thread: false,
+            ..base()
+        }));
+        assert!(!should_use_resting_composer_layout(&RestingLayoutInput {
+            is_mobile_viewport: true,
+            ..base()
+        }));
+        assert!(!should_use_resting_composer_layout(&RestingLayoutInput {
+            has_expanded_chrome: true,
+            ..base()
+        }));
         for collapsed in [false, true] {
             assert!(!should_use_resting_composer_layout(&RestingLayoutInput {
                 has_multiline_prompt: true,
@@ -323,9 +378,15 @@ mod tests {
 
     #[test]
     fn resting_transition_animates_only_after_initial_layout() {
-        assert!(!should_animate_composer_resting_transition(false, true, false));
-        assert!(should_animate_composer_resting_transition(true, true, false));
-        assert!(should_animate_composer_resting_transition(true, false, true));
+        assert!(!should_animate_composer_resting_transition(
+            false, true, false
+        ));
+        assert!(should_animate_composer_resting_transition(
+            true, true, false
+        ));
+        assert!(should_animate_composer_resting_transition(
+            true, false, true
+        ));
     }
 
     // Picker 140 natural / 96 minimum, plus a 9px separator. Traits 60,
@@ -347,7 +408,11 @@ mod tests {
     }
 
     fn prev(hidden: usize, visible: bool) -> Option<RestingControlsLayout> {
-        Some(RestingControlsLayout { hidden_count: hidden, icon_only_count: None, visible })
+        Some(RestingControlsLayout {
+            hidden_count: hidden,
+            icon_only_count: None,
+            visible,
+        })
     }
 
     #[test]
@@ -393,7 +458,11 @@ mod tests {
 
     #[test]
     fn settles_when_the_measured_picker_width_jitters_below_a_pixel() {
-        let mut current = RestingControlsLayout { hidden_count: 0, icon_only_count: None, visible: true };
+        let mut current = RestingControlsLayout {
+            hidden_count: 0,
+            icon_only_count: None,
+            visible: true,
+        };
         let mut settled = std::collections::HashSet::new();
         for index in 0..10 {
             let measurement = RestingComposerControlsMeasurement {
@@ -451,15 +520,25 @@ mod tests {
                 icon_only_count: Some(previous.1),
                 visible: true,
             };
-            assert_eq!(resolve_resting_composer_controls_layout(&progressive(), host, Some(previous)), previous);
-            let next = resolve_resting_composer_controls_layout(&progressive(), host + 1.0, Some(previous));
+            assert_eq!(
+                resolve_resting_composer_controls_layout(&progressive(), host, Some(previous)),
+                previous
+            );
+            let next = resolve_resting_composer_controls_layout(
+                &progressive(),
+                host + 1.0,
+                Some(previous),
+            );
             assert_eq!((next.hidden_count, next.icon_only_count.unwrap()), promoted);
         }
     }
 
     #[test]
     fn natural_width_reserves_everything_visible() {
-        assert_eq!(resolve_resting_composer_controls_natural_width(&base()), 357.0);
+        assert_eq!(
+            resolve_resting_composer_controls_natural_width(&base()),
+            357.0
+        );
     }
 
     #[test]
@@ -468,12 +547,24 @@ mod tests {
             let at = |attachments: &[ClearanceRect], button: (f32, f32)| {
                 resolve_scroll_to_end_clearance(overlay, 534.0, button, attachments)
             };
-            let side = [ClearanceRect { top: 500.0, left: 600.0, right: 700.0 }];
+            let side = [ClearanceRect {
+                top: 500.0,
+                left: 600.0,
+                right: 700.0,
+            }];
             assert_eq!(at(&side, (340.0, 460.0)), overlay - 34.0);
             assert_eq!(at(&[], (340.0, 460.0)), overlay);
             let both = [
-                ClearanceRect { top: 500.0, left: 600.0, right: 700.0 },
-                ClearanceRect { top: 500.0, left: 100.0, right: 700.0 },
+                ClearanceRect {
+                    top: 500.0,
+                    left: 600.0,
+                    right: 700.0,
+                },
+                ClearanceRect {
+                    top: 500.0,
+                    left: 100.0,
+                    right: 700.0,
+                },
             ];
             assert_eq!(at(&both, (340.0, 460.0)), overlay);
             assert_eq!(at(&side, (590.0, 710.0)), overlay);

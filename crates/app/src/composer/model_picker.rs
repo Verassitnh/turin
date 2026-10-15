@@ -10,7 +10,9 @@ use turin_contracts::model::ANTIGRAVITY_DEFAULT_MODEL;
 
 use crate::composer::catalog::ProviderInstanceEntry;
 use crate::composer::model_picker_keys::{model_picker_legacy_section_key, model_picker_model_key};
-use crate::composer::model_picker_search::{ModelPickerSearchable, build_model_picker_search_text, score_model_picker_search};
+use crate::composer::model_picker_search::{
+    ModelPickerSearchable, build_model_picker_search_text, score_model_picker_search,
+};
 use crate::composer::provider_state::{ProviderModel, resolve_selectable_model};
 
 /// `providerModelKey`: `${instanceId}:${slug}`, the favorites key.
@@ -54,7 +56,12 @@ pub fn resolve_model_picker_selected_model<'a>(
             .collect();
         return available
             .iter()
-            .find(|option| option.aliases.iter().any(|alias| alias == ANTIGRAVITY_DEFAULT_MODEL))
+            .find(|option| {
+                option
+                    .aliases
+                    .iter()
+                    .any(|alias| alias == ANTIGRAVITY_DEFAULT_MODEL)
+            })
             .or_else(|| available.iter().find(|option| option.is_default))
             .copied();
     }
@@ -82,7 +89,10 @@ pub fn should_include_model_picker_option(
 }
 
 /// `shouldOfferModelPickerSetup`.
-pub fn should_offer_model_picker_setup(entry: &ProviderInstanceEntry, options: &[ProviderModel]) -> bool {
+pub fn should_offer_model_picker_setup(
+    entry: &ProviderInstanceEntry,
+    options: &[ProviderModel],
+) -> bool {
     use crate::composer::catalog::{AuthStatus, ProviderStatus};
     entry.enabled
         && entry.status != ProviderStatus::Disabled
@@ -108,14 +118,19 @@ pub fn adjacent_model_picker_provider(
             .filter(|entry| {
                 !disabled_instance_ids.is_some_and(|ids| ids.contains(&entry.instance_id))
                     && (entry.picker_ready()
-                        || selectable_unavailable_instance_ids.is_some_and(|ids| ids.contains(&entry.instance_id)))
+                        || selectable_unavailable_instance_ids
+                            .is_some_and(|ids| ids.contains(&entry.instance_id)))
             })
             .map(|entry| PickerSelection::Instance(entry.instance_id.clone())),
     );
     let len = providers.len() as i32;
     let next = match providers.iter().position(|provider| provider == selected) {
         None => {
-            if direction == 1 { 0 } else { len - 1 }
+            if direction == 1 {
+                0
+            } else {
+                len - 1
+            }
         }
         Some(index) => (index as i32 + direction + len) % len,
     };
@@ -132,7 +147,9 @@ pub fn sort_provider_model_items(
 ) -> Vec<ModelPickerItem> {
     let mut indexed: Vec<(usize, ModelPickerItem)> = items.into_iter().enumerate().collect();
     indexed.sort_by_key(|(original, item)| {
-        let favorite = group_favorites && favorite_model_keys.contains(&provider_model_key(&item.instance_id, &item.model.slug));
+        let favorite = group_favorites
+            && favorite_model_keys
+                .contains(&provider_model_key(&item.instance_id, &item.model.slug));
         let instance_rank = instance_order
             .iter()
             .position(|id| *id == item.instance_id)
@@ -147,7 +164,11 @@ pub fn sort_provider_model_items(
 pub enum PickerRow {
     Model(Box<ModelPickerItem>),
     /// The collapsed/expanded "Legacy models" header.
-    LegacySection { key: String, count: usize, expanded: bool },
+    LegacySection {
+        key: String,
+        count: usize,
+        expanded: bool,
+    },
 }
 
 impl PickerRow {
@@ -191,20 +212,35 @@ pub struct ModelPickerList {
 
 /// The initial sidebar selection (`useState` initializer).
 pub fn initial_picker_selection(input: &ModelPickerInput<'_>) -> PickerSelection {
-    let active = input.instance_entries.iter().find(|entry| entry.instance_id == input.active_instance_id);
+    let active = input
+        .instance_entries
+        .iter()
+        .find(|entry| entry.instance_id == input.active_instance_id);
     let options = active.map(|entry| entry.models.as_slice()).unwrap_or(&[]);
-    let active_model = resolve_model_picker_selected_model(active.map(|e| e.driver_kind.as_str()), input.model, options);
-    let active_slug = active_model
-        .map(|model| model.slug.as_str())
-        .unwrap_or(if input.model == ANTIGRAVITY_DEFAULT_MODEL { "" } else { input.model });
+    let active_model = resolve_model_picker_selected_model(
+        active.map(|e| e.driver_kind.as_str()),
+        input.model,
+        options,
+    );
+    let active_slug = active_model.map(|model| model.slug.as_str()).unwrap_or(
+        if input.model == ANTIGRAVITY_DEFAULT_MODEL {
+            ""
+        } else {
+            input.model
+        },
+    );
     let has_selectable_unavailable = active.is_some_and(|entry| {
-        options
-            .iter()
-            .any(|option| should_include_model_picker_option(entry, option, input.active_instance_id, active_slug))
-            && !entry.picker_ready()
+        options.iter().any(|option| {
+            should_include_model_picker_option(entry, option, input.active_instance_id, active_slug)
+        }) && !entry.picker_ready()
     });
-    let needs_setup = input.on_open_provider_setup && active.is_some_and(|entry| should_offer_model_picker_setup(entry, options));
-    if input.locked_provider.is_some() || has_selectable_unavailable || needs_setup || input.favorites.is_empty() {
+    let needs_setup = input.on_open_provider_setup
+        && active.is_some_and(|entry| should_offer_model_picker_setup(entry, options));
+    if input.locked_provider.is_some()
+        || has_selectable_unavailable
+        || needs_setup
+        || input.favorites.is_empty()
+    {
         PickerSelection::Instance(input.active_instance_id.to_owned())
     } else {
         PickerSelection::Favorites
@@ -213,21 +249,48 @@ pub fn initial_picker_selection(input: &ModelPickerInput<'_>) -> PickerSelection
 
 /// The legacy section starts expanded when the active model is a legacy one.
 pub fn initial_expanded_legacy_instances(input: &ModelPickerInput<'_>) -> HashSet<String> {
-    let active = input.instance_entries.iter().find(|entry| entry.instance_id == input.active_instance_id);
-    let active_legacy = active.is_some_and(|entry| entry.models.iter().any(|model| model.slug == input.model && model.is_legacy));
-    if active_legacy { HashSet::from([input.active_instance_id.to_owned()]) } else { HashSet::new() }
+    let active = input
+        .instance_entries
+        .iter()
+        .find(|entry| entry.instance_id == input.active_instance_id);
+    let active_legacy = active.is_some_and(|entry| {
+        entry
+            .models
+            .iter()
+            .any(|model| model.slug == input.model && model.is_legacy)
+    });
+    if active_legacy {
+        HashSet::from([input.active_instance_id.to_owned()])
+    } else {
+        HashSet::new()
+    }
 }
 
 /// Resolve the picker's rows and chrome for the current state.
 pub fn compute_model_picker_list(input: &ModelPickerInput<'_>) -> ModelPickerList {
     let entries = input.instance_entries;
-    let active_entry = entries.iter().find(|entry| entry.instance_id == input.active_instance_id);
-    let active_options = active_entry.map(|entry| entry.models.as_slice()).unwrap_or(&[]);
-    let active_model = resolve_model_picker_selected_model(active_entry.map(|e| e.driver_kind.as_str()), input.model, active_options);
+    let active_entry = entries
+        .iter()
+        .find(|entry| entry.instance_id == input.active_instance_id);
+    let active_options = active_entry
+        .map(|entry| entry.models.as_slice())
+        .unwrap_or(&[]);
+    let active_model = resolve_model_picker_selected_model(
+        active_entry.map(|e| e.driver_kind.as_str()),
+        input.model,
+        active_options,
+    );
     let active_model_slug = active_model
         .map(|model| model.slug.clone())
-        .unwrap_or_else(|| if input.model == ANTIGRAVITY_DEFAULT_MODEL { String::new() } else { input.model.to_owned() });
-    let active_model_key = (!active_model_slug.is_empty()).then(|| model_picker_model_key(input.active_instance_id, &active_model_slug));
+        .unwrap_or_else(|| {
+            if input.model == ANTIGRAVITY_DEFAULT_MODEL {
+                String::new()
+            } else {
+                input.model.to_owned()
+            }
+        });
+    let active_model_key = (!active_model_slug.is_empty())
+        .then(|| model_picker_model_key(input.active_instance_id, &active_model_slug));
 
     let matches_locked = |entry_driver: &str, entry_group: &Option<String>| -> bool {
         let Some(locked) = input.locked_provider else {
@@ -243,10 +306,14 @@ pub fn compute_model_picker_list(input: &ModelPickerInput<'_>) -> ModelPickerLis
     };
 
     let active_has_selectable_unavailable = active_entry.is_some_and(|entry| {
-        active_options
-            .iter()
-            .any(|option| should_include_model_picker_option(entry, option, input.active_instance_id, &active_model_slug))
-            && !entry.picker_ready()
+        active_options.iter().any(|option| {
+            should_include_model_picker_option(
+                entry,
+                option,
+                input.active_instance_id,
+                &active_model_slug,
+            )
+        }) && !entry.picker_ready()
     });
     let mut selectable_unavailable: HashSet<String> = HashSet::new();
     if active_has_selectable_unavailable {
@@ -264,7 +331,12 @@ pub fn compute_model_picker_list(input: &ModelPickerInput<'_>) -> ModelPickerLis
     let mut flat: Vec<ModelPickerItem> = Vec::new();
     for entry in entries {
         for model in &entry.models {
-            if !should_include_model_picker_option(entry, model, input.active_instance_id, &active_model_slug) {
+            if !should_include_model_picker_option(
+                entry,
+                model,
+                input.active_instance_id,
+                &active_model_slug,
+            ) {
                 continue;
             }
             flat.push(ModelPickerItem {
@@ -288,7 +360,11 @@ pub fn compute_model_picker_list(input: &ModelPickerInput<'_>) -> ModelPickerLis
             .map(|entry| entry.instance_id.clone())
             .collect()
     });
-    let mut sidebar_entries: Vec<ProviderInstanceEntry> = entries.iter().filter(|e| e.picker_visible()).cloned().collect();
+    let mut sidebar_entries: Vec<ProviderInstanceEntry> = entries
+        .iter()
+        .filter(|e| e.picker_visible())
+        .cloned()
+        .collect();
     if is_locked {
         let (available, disabled): (Vec<_>, Vec<_>) = sidebar_entries
             .into_iter()
@@ -296,8 +372,15 @@ pub fn compute_model_picker_list(input: &ModelPickerInput<'_>) -> ModelPickerLis
         sidebar_entries = available.into_iter().chain(disabled).collect();
     }
     let show_sidebar = !is_searching && !sidebar_entries.is_empty();
-    let instance_order: Vec<String> = entries.iter().map(|entry| entry.instance_id.clone()).collect();
-    let is_favorite = |item: &ModelPickerItem| input.favorites.contains(&provider_model_key(&item.instance_id, &item.model.slug));
+    let instance_order: Vec<String> = entries
+        .iter()
+        .map(|entry| entry.instance_id.clone())
+        .collect();
+    let is_favorite = |item: &ModelPickerItem| {
+        input
+            .favorites
+            .contains(&provider_model_key(&item.instance_id, &item.model.slug))
+    };
 
     fn searchable(item: &ModelPickerItem, favorite: bool) -> ModelPickerSearchable<'_> {
         ModelPickerSearchable {
@@ -321,7 +404,9 @@ pub fn compute_model_picker_list(input: &ModelPickerInput<'_>) -> ModelPickerLis
             })
             .collect();
         // When searching, only the locked provider constrains the results.
-        ranked.retain(|(_, _, _, item)| matches_locked(&item.driver_kind, &item.continuation_group_key));
+        ranked.retain(|(_, _, _, item)| {
+            matches_locked(&item.driver_kind, &item.continuation_group_key)
+        });
         ranked.sort_by(|a, b| {
             a.0.cmp(&b.0)
                 .then_with(|| b.1.cmp(&a.1))
@@ -341,7 +426,11 @@ pub fn compute_model_picker_list(input: &ModelPickerInput<'_>) -> ModelPickerLis
             result,
             input.favorites,
             *input.selected != PickerSelection::Favorites,
-            if *input.selected == PickerSelection::Favorites { instance_order.as_slice() } else { &[] },
+            if *input.selected == PickerSelection::Favorites {
+                instance_order.as_slice()
+            } else {
+                &[]
+            },
         )
     };
 
@@ -354,40 +443,54 @@ pub fn compute_model_picker_list(input: &ModelPickerInput<'_>) -> ModelPickerLis
     let legacy_count = filtered.iter().filter(|item| item.model.is_legacy).count();
     if let Some(instance) = legacy_instance.filter(|_| legacy_count > 0) {
         let expanded = input.expanded_legacy_instances.contains(&instance);
-        let (legacy, current): (Vec<_>, Vec<_>) = filtered.into_iter().partition(|item| item.model.is_legacy);
-        rows.extend(current.into_iter().map(|item| PickerRow::Model(Box::new(item))));
+        let (legacy, current): (Vec<_>, Vec<_>) =
+            filtered.into_iter().partition(|item| item.model.is_legacy);
+        rows.extend(
+            current
+                .into_iter()
+                .map(|item| PickerRow::Model(Box::new(item))),
+        );
         rows.push(PickerRow::LegacySection {
             key: model_picker_legacy_section_key(&instance),
             count: legacy.len(),
             expanded,
         });
         if expanded {
-            rows.extend(legacy.into_iter().map(|item| PickerRow::Model(Box::new(item))));
+            rows.extend(
+                legacy
+                    .into_iter()
+                    .map(|item| PickerRow::Model(Box::new(item))),
+            );
         }
     } else {
-        rows.extend(filtered.into_iter().map(|item| PickerRow::Model(Box::new(item))));
+        rows.extend(
+            filtered
+                .into_iter()
+                .map(|item| PickerRow::Model(Box::new(item))),
+        );
     }
 
     let selected_entry = match input.selected {
         PickerSelection::Favorites => None,
         PickerSelection::Instance(id) => entries.iter().find(|entry| &entry.instance_id == id),
     };
-    let provider_setup_entries: Vec<ProviderInstanceEntry> = if !is_searching && input.on_open_provider_setup {
-        entries
-            .iter()
-            .filter(|entry| {
-                matches_locked(&entry.driver_kind, &entry.continuation_group_key)
-                    && should_offer_model_picker_setup(entry, &entry.models)
-                    && match selected_entry {
-                        Some(selected) => entry.instance_id == selected.instance_id,
-                        None => rows.is_empty(),
-                    }
-            })
-            .cloned()
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let provider_setup_entries: Vec<ProviderInstanceEntry> =
+        if !is_searching && input.on_open_provider_setup {
+            entries
+                .iter()
+                .filter(|entry| {
+                    matches_locked(&entry.driver_kind, &entry.continuation_group_key)
+                        && should_offer_model_picker_setup(entry, &entry.models)
+                        && match selected_entry {
+                            Some(selected) => entry.instance_id == selected.instance_id,
+                            None => rows.is_empty(),
+                        }
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
     let notice_entries: Vec<&ProviderInstanceEntry> = if is_searching {
         entries
             .iter()
@@ -398,7 +501,12 @@ pub fn compute_model_picker_list(input: &ModelPickerInput<'_>) -> ModelPickerLis
     };
     let update_required_notices = notice_entries
         .into_iter()
-        .filter_map(|entry| entry.update_required_notice.clone().map(|notice| (entry.instance_id.clone(), notice)))
+        .filter_map(|entry| {
+            entry
+                .update_required_notice
+                .clone()
+                .map(|notice| (entry.instance_id.clone(), notice))
+        })
         .collect();
 
     ModelPickerList {
@@ -415,7 +523,8 @@ pub fn compute_model_picker_list(input: &ModelPickerInput<'_>) -> ModelPickerLis
         show_sidebar,
         is_searching,
         locked_disabled_instance_ids: locked_disabled,
-        selectable_unavailable_instance_ids: (!selectable_unavailable.is_empty()).then_some(selectable_unavailable),
+        selectable_unavailable_instance_ids: (!selectable_unavailable.is_empty())
+            .then_some(selectable_unavailable),
         provider_setup_entries,
         update_required_notices,
         active_model_key,
@@ -423,8 +532,14 @@ pub fn compute_model_picker_list(input: &ModelPickerInput<'_>) -> ModelPickerLis
 }
 
 /// `handleModelSelect`'s resolution: the provider's canonical slug for a pick.
-pub fn resolve_model_pick(entries: &[ProviderInstanceEntry], instance_id: &str, model_slug: &str) -> Option<String> {
-    let entry = entries.iter().find(|entry| entry.instance_id == instance_id)?;
+pub fn resolve_model_pick(
+    entries: &[ProviderInstanceEntry],
+    instance_id: &str,
+    model_slug: &str,
+) -> Option<String> {
+    let entry = entries
+        .iter()
+        .find(|entry| entry.instance_id == instance_id)?;
     resolve_selectable_model(&entry.driver_kind, Some(model_slug), &entry.models)
 }
 

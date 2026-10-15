@@ -1,6 +1,8 @@
 //! Port of upstream/apps/web/src/components/chat/modelPickerSearch.ts
 
-use crate::composer::search_ranking::{ScoreQueryMatchInput, normalize_search_query, score_query_match};
+use crate::composer::search_ranking::{
+    ScoreQueryMatchInput, normalize_search_query, score_query_match,
+};
 
 pub struct ModelPickerSearchable<'a> {
     /// Driver kind: indexed so "codex" still matches a Codex Personal instance.
@@ -81,7 +83,11 @@ pub fn score_model_picker_search(model: &ModelPickerSearchable<'_>, query: &str)
             .min()?;
         score += best;
     }
-    Some(if model.is_favorite { score - MODEL_PICKER_FAVORITE_SCORE_BOOST } else { score })
+    Some(if model.is_favorite {
+        score - MODEL_PICKER_FAVORITE_SCORE_BOOST
+    } else {
+        score
+    })
 }
 
 #[cfg(test)]
@@ -121,7 +127,10 @@ mod tests {
 
     #[test]
     fn rejects_results_when_any_query_token_does_not_match() {
-        assert_eq!(score_model_picker_search(&model("codex", "codex", "GPT-5 Codex"), "coplt op"), None);
+        assert_eq!(
+            score_model_picker_search(&model("codex", "codex", "GPT-5 Codex"), "coplt op"),
+            None
+        );
     }
 
     #[test]
@@ -133,25 +142,43 @@ mod tests {
 
     #[test]
     fn gives_favorite_models_a_strong_enough_boost_for_partial_queries() {
-        let favorite = ModelPickerSearchable { is_favorite: true, ..model("claudeAgent", "Claude", "Claude Opus 4.7") };
+        let favorite = ModelPickerSearchable {
+            is_favorite: true,
+            ..model("claudeAgent", "Claude", "Claude Opus 4.7")
+        };
         let plain = model("cursor", "Cursor", "Opus 4.5");
-        assert!(score_model_picker_search(&favorite, "opu").unwrap() < score_model_picker_search(&plain, "opu").unwrap());
+        assert!(
+            score_model_picker_search(&favorite, "opu").unwrap()
+                < score_model_picker_search(&plain, "opu").unwrap()
+        );
     }
 
     #[test]
     fn does_not_let_the_favorite_boost_outrank_clearly_better_textual_matches() {
-        let favorite = ModelPickerSearchable { is_favorite: true, ..model("claudeAgent", "Claude", "Claude Opus 4.7") };
+        let favorite = ModelPickerSearchable {
+            is_favorite: true,
+            ..model("claudeAgent", "Claude", "Claude Opus 4.7")
+        };
         let exact = model("cursor", "Cursor", "Opus 4.7");
-        assert!(score_model_picker_search(&exact, "opus 4.7").unwrap() < score_model_picker_search(&favorite, "opus 4.7").unwrap());
+        assert!(
+            score_model_picker_search(&exact, "opus 4.7").unwrap()
+                < score_model_picker_search(&favorite, "opus 4.7").unwrap()
+        );
     }
 
     #[test]
     fn matches_a_custom_instances_display_name_against_its_models() {
-        assert!(score_model_picker_search(&model("codex", "Codex Personal", "GPT-5 Codex"), "personal").is_some());
+        assert!(
+            score_model_picker_search(&model("codex", "Codex Personal", "GPT-5 Codex"), "personal")
+                .is_some()
+        );
     }
 
     #[test]
     fn an_empty_query_scores_zero() {
-        assert_eq!(score_model_picker_search(&model("codex", "Codex", "GPT"), "  "), Some(0));
+        assert_eq!(
+            score_model_picker_search(&model("codex", "Codex", "GPT"), "  "),
+            Some(0)
+        );
     }
 }

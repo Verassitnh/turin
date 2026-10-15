@@ -14,12 +14,18 @@ pub fn middle_truncate_attachment_name(name: &str, max_characters: usize) -> Str
         return "…".to_owned();
     }
     let available = max_characters - 1;
-    let suffix_length = (available - 1).min(if available >= 18 { 14 } else { available.div_ceil(2) });
+    let suffix_length = (available - 1).min(if available >= 18 {
+        14
+    } else {
+        available.div_ceil(2)
+    });
     let prefix_length = available - suffix_length;
     let suffix: String = if suffix_length == 0 {
         String::new()
     } else {
-        characters[characters.len() - suffix_length..].iter().collect()
+        characters[characters.len() - suffix_length..]
+            .iter()
+            .collect()
     };
     let prefix: String = characters[..prefix_length].iter().collect();
     format!("{prefix}…{suffix}")
@@ -34,12 +40,18 @@ mod tests {
 
     #[test]
     fn leaves_short_names_unchanged() {
-        assert_eq!(middle_truncate_attachment_name("notes.txt", 36), "notes.txt");
+        assert_eq!(
+            middle_truncate_attachment_name("notes.txt", 36),
+            "notes.txt"
+        );
     }
 
     #[test]
     fn keeps_the_start_and_filename_extension() {
-        let result = middle_truncate_attachment_name("a-very-long-customer-reproduction-screenshot.final.png", 36);
+        let result = middle_truncate_attachment_name(
+            "a-very-long-customer-reproduction-screenshot.final.png",
+            36,
+        );
         assert_eq!(result.chars().count(), 36);
         assert!(result.starts_with("a-very-long-customer"));
         assert!(result.ends_with("final.png"));
@@ -48,7 +60,10 @@ mod tests {
 
     #[test]
     fn truncates_unicode_names_without_splitting_a_character() {
-        assert_eq!(middle_truncate_attachment_name("😀😀😀😀😀😀.png", 8), "😀😀😀….png");
+        assert_eq!(
+            middle_truncate_attachment_name("😀😀😀😀😀😀.png", 8),
+            "😀😀😀….png"
+        );
     }
 
     #[test]
@@ -60,8 +75,12 @@ mod tests {
 
     #[test]
     fn keeps_useful_ends_for_multi_dot_names_and_names_without_extensions() {
-        assert!(middle_truncate_attachment_name("customer.export.final.very-long-name.json", 24).ends_with("long-name.json"));
-        let result = middle_truncate_attachment_name("a-very-long-filename-without-an-extension", 20);
+        assert!(
+            middle_truncate_attachment_name("customer.export.final.very-long-name.json", 24)
+                .ends_with("long-name.json")
+        );
+        let result =
+            middle_truncate_attachment_name("a-very-long-filename-without-an-extension", 20);
         assert!(result.starts_with("a-ver") && result.ends_with("extension"));
     }
 }

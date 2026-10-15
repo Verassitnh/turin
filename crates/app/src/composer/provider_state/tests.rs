@@ -8,7 +8,9 @@ const MODEL: &str = "test-model";
 
 fn model_with(descriptors: Vec<OptionDescriptor>) -> Vec<ProviderModel> {
     vec![ProviderModel {
-        capabilities: Some(ModelCapabilities { option_descriptors: descriptors }),
+        capabilities: Some(ModelCapabilities {
+            option_descriptors: descriptors,
+        }),
         ..ProviderModel::simple(MODEL, MODEL)
     }]
 }
@@ -16,7 +18,10 @@ fn model_with(descriptors: Vec<OptionDescriptor>) -> Vec<ProviderModel> {
 fn selections(entries: &[(&str, OptionValue)]) -> Vec<OptionSelection> {
     entries
         .iter()
-        .map(|(id, value)| OptionSelection { id: (*id).to_owned(), value: value.clone() })
+        .map(|(id, value)| OptionSelection {
+            id: (*id).to_owned(),
+            value: value.clone(),
+        })
         .collect()
 }
 
@@ -24,7 +29,13 @@ fn s(value: &str) -> OptionValue {
     OptionValue::Str(value.to_owned())
 }
 
-fn state(provider: &str, models: &[ProviderModel], model: &str, options: &[OptionSelection], plan: bool) -> ComposerProviderState {
+fn state(
+    provider: &str,
+    models: &[ProviderModel],
+    model: &str,
+    options: &[OptionSelection],
+    plan: bool,
+) -> ComposerProviderState {
     get_composer_provider_state(&ComposerProviderStateInput {
         provider,
         model,
@@ -37,7 +48,10 @@ fn state(provider: &str, models: &[ProviderModel], model: &str, options: &[Optio
 
 #[test]
 fn derives_a_stable_prompt_injection_state() {
-    assert_eq!(get_composer_prompt_injection_state("Investigate this failure"), ComposerPromptInjectionState::None);
+    assert_eq!(
+        get_composer_prompt_injection_state("Investigate this failure"),
+        ComposerPromptInjectionState::None
+    );
     assert_eq!(
         get_composer_prompt_injection_state("Ultrathink:\nInvestigate this failure"),
         ComposerPromptInjectionState::Ultrathink
@@ -46,7 +60,11 @@ fn derives_a_stable_prompt_injection_state() {
 
 #[test]
 fn uses_descriptor_defaults_for_display_without_dispatching_them() {
-    let models = model_with(vec![select("effort", &[("low", "Low", false), ("high", "High", true)], &[])]);
+    let models = model_with(vec![select(
+        "effort",
+        &[("low", "Low", false), ("high", "High", true)],
+        &[],
+    )]);
     assert_eq!(
         state("codex", &models, MODEL, &[], true),
         ComposerProviderState {
@@ -61,7 +79,11 @@ fn uses_descriptor_defaults_for_display_without_dispatching_them() {
 #[test]
 fn lets_selections_override_defaults_and_propagates_them() {
     let models = model_with(vec![
-        select("effort", &[("low", "Low", false), ("high", "High", true)], &[]),
+        select(
+            "effort",
+            &[("low", "Low", false), ("high", "High", true)],
+            &[],
+        ),
         boolean("fastMode", None),
     ]);
     let picked = selections(&[("effort", s("low")), ("fastMode", OptionValue::Bool(true))]);
@@ -72,9 +94,18 @@ fn lets_selections_override_defaults_and_propagates_them() {
 
 #[test]
 fn preserves_selections_that_match_defaults() {
-    let models = model_with(vec![select("effort", &[("high", "High", true)], &[]), boolean("fastMode", None)]);
-    let picked = selections(&[("effort", s("high")), ("fastMode", OptionValue::Bool(false))]);
-    assert_eq!(state("codex", &models, MODEL, &picked, true).model_options_for_dispatch, Some(picked));
+    let models = model_with(vec![
+        select("effort", &[("high", "High", true)], &[]),
+        boolean("fastMode", None),
+    ]);
+    let picked = selections(&[
+        ("effort", s("high")),
+        ("fastMode", OptionValue::Bool(false)),
+    ]);
+    assert_eq!(
+        state("codex", &models, MODEL, &picked, true).model_options_for_dispatch,
+        Some(picked)
+    );
 }
 
 #[test]
@@ -83,15 +114,26 @@ fn drops_selections_for_descriptors_the_model_does_not_declare() {
     let picked = selections(&[("effort", s("max")), ("thinking", OptionValue::Bool(false))]);
     let result = state("codex", &models, MODEL, &picked, true);
     assert_eq!(result.prompt_effort, None);
-    assert_eq!(result.model_options_for_dispatch, Some(selections(&[("thinking", OptionValue::Bool(false))])));
+    assert_eq!(
+        result.model_options_for_dispatch,
+        Some(selections(&[("thinking", OptionValue::Bool(false))]))
+    );
 }
 
 #[test]
 fn derives_prompt_effort_from_the_first_select_and_preserves_the_others() {
     let models = model_with(vec![
         select("effort", &[("high", "High", true)], &[]),
-        select("contextWindow", &[("200k", "200k", true), ("1m", "1M", false)], &[]),
-        select("agent", &[("build", "Build", true), ("plan", "Plan", false)], &[]),
+        select(
+            "contextWindow",
+            &[("200k", "200k", true), ("1m", "1M", false)],
+            &[],
+        ),
+        select(
+            "agent",
+            &[("build", "Build", true), ("plan", "Plan", false)],
+            &[],
+        ),
     ]);
     let picked = selections(&[("agent", s("plan"))]);
     let result = state("codex", &models, MODEL, &picked, true);
@@ -101,24 +143,59 @@ fn derives_prompt_effort_from_the_first_select_and_preserves_the_others() {
 
 #[test]
 fn drops_the_plan_agent_when_legacy_plan_mode_is_disabled() {
-    let models = model_with(vec![select("agent", &[("build", "Build", true), ("plan", "Plan", false)], &[])]);
-    let result = state("codex", &models, MODEL, &selections(&[("agent", s("plan"))]), false);
-    assert_eq!(result.model_options_for_dispatch, Some(selections(&[("agent", s("build"))])));
+    let models = model_with(vec![select(
+        "agent",
+        &[("build", "Build", true), ("plan", "Plan", false)],
+        &[],
+    )]);
+    let result = state(
+        "codex",
+        &models,
+        MODEL,
+        &selections(&[("agent", s("plan"))]),
+        false,
+    );
+    assert_eq!(
+        result.model_options_for_dispatch,
+        Some(selections(&[("agent", s("build"))]))
+    );
 
     let only_plan = model_with(vec![select("agent", &[("plan", "Plan", true)], &[])]);
-    let result = state("codex", &only_plan, MODEL, &selections(&[("agent", s("plan"))]), false);
+    let result = state(
+        "codex",
+        &only_plan,
+        MODEL,
+        &selections(&[("agent", s("plan"))]),
+        false,
+    );
     assert_eq!(result.prompt_effort, None);
     assert_eq!(result.model_options_for_dispatch, None);
 
-    let fallback = model_with(vec![select("agent", &[("plan", "Plan", true), ("research", "Research", false)], &[])]);
-    assert_eq!(state("codex", &fallback, MODEL, &[], false).model_options_for_dispatch, None);
+    let fallback = model_with(vec![select(
+        "agent",
+        &[("plan", "Plan", true), ("research", "Research", false)],
+        &[],
+    )]);
+    assert_eq!(
+        state("codex", &fallback, MODEL, &[], false).model_options_for_dispatch,
+        None
+    );
 }
 
 #[test]
 fn returns_no_dispatch_options_when_the_model_declares_no_descriptors() {
     let models = model_with(vec![]);
-    let result = state("codex", &models, MODEL, &selections(&[("anything", s("value"))]), true);
-    assert_eq!((result.prompt_effort, result.model_options_for_dispatch), (None, None));
+    let result = state(
+        "codex",
+        &models,
+        MODEL,
+        &selections(&[("anything", s("value"))]),
+        true,
+    );
+    assert_eq!(
+        (result.prompt_effort, result.model_options_for_dispatch),
+        (None, None)
+    );
 }
 
 #[test]
@@ -132,7 +209,10 @@ fn preserves_explicit_options_when_an_opencode_model_is_absent_from_the_catalog(
         state("opencode", &catalog, "opencode/kimi-k3", &picked, false).model_options_for_dispatch,
         Some(picked.clone())
     );
-    assert_eq!(state("opencode", &[], "opencode/kimi-k3", &picked, false).model_options_for_dispatch, Some(picked));
+    assert_eq!(
+        state("opencode", &[], "opencode/kimi-k3", &picked, false).model_options_for_dispatch,
+        Some(picked)
+    );
     let with_plan = selections(&[("variant", s("max")), ("agent", s("plan"))]);
     assert_eq!(
         state("opencode", &[], "opencode/kimi-k3", &with_plan, false).model_options_for_dispatch,
@@ -144,7 +224,13 @@ fn preserves_explicit_options_when_an_opencode_model_is_absent_from_the_catalog(
 fn does_not_preserve_unknown_options_for_other_providers() {
     for provider in ["codex", "claudeAgent", "cursor", "grok"] {
         let models = model_with(vec![]);
-        let result = state(provider, &models, "missing-model", &selections(&[("unknown", s("value"))]), true);
+        let result = state(
+            provider,
+            &models,
+            "missing-model",
+            &selections(&[("unknown", s("value"))]),
+            true,
+        );
         assert_eq!(result.model_options_for_dispatch, None, "{provider}");
     }
 }
@@ -154,27 +240,40 @@ fn validates_options_for_a_known_model_selected_through_a_legacy_alias() {
     let models = vec![ProviderModel {
         aliases: vec!["legacy-test-model".into()],
         capabilities: Some(ModelCapabilities {
-            option_descriptors: vec![select("effort", &[("low", "Low", false), ("high", "High", true)], &[])],
+            option_descriptors: vec![select(
+                "effort",
+                &[("low", "Low", false), ("high", "High", true)],
+                &[],
+            )],
         }),
         ..ProviderModel::simple("test-model", "Test Model")
     }];
     let picked = selections(&[("effort", s("low")), ("unknown", s("value"))]);
     let result = state("claudeAgent", &models, "legacy-test-model", &picked, false);
-    assert_eq!(result.model_options_for_dispatch, Some(selections(&[("effort", s("low"))])));
+    assert_eq!(
+        result.model_options_for_dispatch,
+        Some(selections(&[("effort", s("low"))]))
+    );
 }
 
 #[test]
 fn adds_the_ultrathink_glow_only_for_prompt_injected_descriptors() {
     let models = model_with(vec![select(
         "effort",
-        &[("medium", "Medium", false), ("high", "High", true), ("ultrathink", "Ultrathink", false)],
+        &[
+            ("medium", "Medium", false),
+            ("high", "High", true),
+            ("ultrathink", "Ultrathink", false),
+        ],
         &["ultrathink"],
     )]);
     let result = get_composer_provider_state(&ComposerProviderStateInput {
         provider: "codex",
         model: MODEL,
         models: &models,
-        prompt_injection_state: get_composer_prompt_injection_state("Ultrathink:\nInvestigate this failure"),
+        prompt_injection_state: get_composer_prompt_injection_state(
+            "Ultrathink:\nInvestigate this failure",
+        ),
         model_options: &selections(&[("effort", s("medium"))]),
         plan_mode_enabled: true,
     });
@@ -201,20 +300,30 @@ fn defaults_fast_mode_to_false_unless_the_user_selected_it() {
     );
     for value in [true, false] {
         let picked = selections(&[("fastMode", OptionValue::Bool(value))]);
-        assert_eq!(state("cursor", &models, MODEL, &picked, true).model_options_for_dispatch, Some(picked));
+        assert_eq!(
+            state("cursor", &models, MODEL, &picked, true).model_options_for_dispatch,
+            Some(picked)
+        );
     }
 }
 
 #[test]
 fn implicit_fast_mode_default_needs_a_fast_mode_descriptor() {
-    let fast = ModelCapabilities { option_descriptors: vec![boolean("fastMode", Some(true))] };
+    let fast = ModelCapabilities {
+        option_descriptors: vec![boolean("fastMode", Some(true))],
+    };
     assert_eq!(
         with_implicit_fast_mode_default(&fast, &[]),
         Some(selections(&[("fastMode", OptionValue::Bool(false))]))
     );
     let chosen = selections(&[("fastMode", OptionValue::Bool(true))]);
-    assert_eq!(with_implicit_fast_mode_default(&fast, &chosen), Some(chosen));
-    let thinking = ModelCapabilities { option_descriptors: vec![boolean("thinking", Some(true))] };
+    assert_eq!(
+        with_implicit_fast_mode_default(&fast, &chosen),
+        Some(chosen)
+    );
+    let thinking = ModelCapabilities {
+        option_descriptors: vec![boolean("thinking", Some(true))],
+    };
     assert_eq!(with_implicit_fast_mode_default(&thinking, &[]), None);
 }
 
@@ -224,7 +333,13 @@ fn traits_fast_mode_resolves_to_normal_without_a_user_selection() {
     let caps = get_provider_model_capabilities(&models, Some(MODEL), "cursor", true);
     let resolved = with_implicit_fast_mode_default(&caps, &[]).unwrap();
     let descriptors = get_provider_option_descriptors(&caps, &resolved);
-    assert!(matches!(&descriptors[0], OptionDescriptor::Boolean { current_value: Some(false), .. }));
+    assert!(matches!(
+        &descriptors[0],
+        OptionDescriptor::Boolean {
+            current_value: Some(false),
+            ..
+        }
+    ));
 }
 
 // ── buildTraitsTriggerDisplay ──────────────────────────────────────────────
@@ -236,7 +351,12 @@ fn select_current(id: &str, options: &[(&str, &str)], current: &str) -> OptionDe
         description: None,
         options: options
             .iter()
-            .map(|(id, label)| OptionChoice { id: (*id).into(), label: (*label).into(), description: None, is_default: false })
+            .map(|(id, label)| OptionChoice {
+                id: (*id).into(),
+                label: (*label).into(),
+                description: None,
+                is_default: false,
+            })
             .collect(),
         current_value: Some(current.into()),
         prompt_injected_values: vec![],
@@ -244,7 +364,11 @@ fn select_current(id: &str, options: &[(&str, &str)], current: &str) -> OptionDe
 }
 
 fn effort() -> OptionDescriptor {
-    select_current("reasoningEffort", &[("high", "High"), ("max", "Max")], "high")
+    select_current(
+        "reasoningEffort",
+        &[("high", "High"), ("max", "Max")],
+        "high",
+    )
 }
 
 fn context_window() -> OptionDescriptor {
@@ -252,13 +376,23 @@ fn context_window() -> OptionDescriptor {
 }
 
 fn fast_mode(value: bool) -> OptionDescriptor {
-    OptionDescriptor::Boolean { id: "fastMode".into(), label: "Fast Mode".into(), description: None, current_value: Some(value) }
+    OptionDescriptor::Boolean {
+        id: "fastMode".into(),
+        label: "Fast Mode".into(),
+        description: None,
+        current_value: Some(value),
+    }
 }
 
 fn service_tier(current: &str) -> OptionDescriptor {
     let mut descriptor = select_current(
         "serviceTier",
-        &[("default", "Standard"), ("priority", "Fast"), ("ultrafast", "Ultrafast"), ("flex", "Flex")],
+        &[
+            ("default", "Standard"),
+            ("priority", "Fast"),
+            ("ultrafast", "Ultrafast"),
+            ("flex", "Flex"),
+        ],
         current,
     );
     if let OptionDescriptor::Select { options, .. } = &mut descriptor {
@@ -267,7 +401,12 @@ fn service_tier(current: &str) -> OptionDescriptor {
     descriptor
 }
 
-fn display_for(provider: &str, descriptors: &[OptionDescriptor], primary: Option<&str>, ultrathink: bool) -> String {
+fn display_for(
+    provider: &str,
+    descriptors: &[OptionDescriptor],
+    primary: Option<&str>,
+    ultrathink: bool,
+) -> String {
     build_traits_trigger_display(&TraitsTriggerInput {
         provider,
         descriptors,
@@ -284,23 +423,50 @@ fn display(descriptors: &[OptionDescriptor]) -> String {
 
 fn renamed(descriptor: OptionDescriptor, new_id: &str) -> OptionDescriptor {
     match descriptor {
-        OptionDescriptor::Select { label, description, options, current_value, prompt_injected_values, .. } => {
-            OptionDescriptor::Select { id: new_id.into(), label, description, options, current_value, prompt_injected_values }
-        }
+        OptionDescriptor::Select {
+            label,
+            description,
+            options,
+            current_value,
+            prompt_injected_values,
+            ..
+        } => OptionDescriptor::Select {
+            id: new_id.into(),
+            label,
+            description,
+            options,
+            current_value,
+            prompt_injected_values,
+        },
         other => other,
     }
 }
 
 #[test]
 fn omits_fast_mode_from_the_label_when_it_is_off_and_pairs_it_with_reasoning() {
-    assert_eq!(display(&[effort(), fast_mode(false), context_window()]), "High · 1M");
-    assert_eq!(display(&[effort(), fast_mode(true), context_window()]), "High Fast · 1M");
-    assert_eq!(display(&[effort(), context_window(), fast_mode(true)]), "High Fast · 1M");
+    assert_eq!(
+        display(&[effort(), fast_mode(false), context_window()]),
+        "High · 1M"
+    );
+    assert_eq!(
+        display(&[effort(), fast_mode(true), context_window()]),
+        "High Fast · 1M"
+    );
+    assert_eq!(
+        display(&[effort(), context_window(), fast_mode(true)]),
+        "High Fast · 1M"
+    );
 }
 
 #[test]
 fn pairs_fast_with_any_reasoning_descriptor_even_when_context_is_primary() {
-    for id in ["reasoningEffort", "reasoning", "effort", "variant", "thinking"] {
+    for id in [
+        "reasoningEffort",
+        "reasoning",
+        "effort",
+        "variant",
+        "thinking",
+    ] {
         for speed in [fast_mode(true), service_tier("priority")] {
             let descriptors = [
                 select_current("profile", &[("balanced", "Balanced")], "balanced"),
@@ -308,28 +474,59 @@ fn pairs_fast_with_any_reasoning_descriptor_even_when_context_is_primary() {
                 renamed(effort(), id),
                 speed,
             ];
-            assert_eq!(display_for("codex", &descriptors, Some("profile"), false), "Balanced · 1M · High Fast", "{id}");
+            assert_eq!(
+                display_for("codex", &descriptors, Some("profile"), false),
+                "Balanced · 1M · High Fast",
+                "{id}"
+            );
         }
-        let descriptors = [context_window(), renamed(effort(), id), service_tier("ultrafast")];
-        assert_eq!(display_for("codex", &descriptors, Some("contextWindow"), false), "1M · High Ultrafast");
+        let descriptors = [
+            context_window(),
+            renamed(effort(), id),
+            service_tier("ultrafast"),
+        ];
+        assert_eq!(
+            display_for("codex", &descriptors, Some("contextWindow"), false),
+            "1M · High Ultrafast"
+        );
     }
 }
 
 #[test]
 fn pairs_cursor_fast_with_reasoning_rather_than_the_thinking_toggle() {
-    let thinking = OptionDescriptor::Boolean { id: "thinking".into(), label: "Thinking".into(), description: None, current_value: Some(true) };
+    let thinking = OptionDescriptor::Boolean {
+        id: "thinking".into(),
+        label: "Thinking".into(),
+        description: None,
+        current_value: Some(true),
+    };
     let descriptors = [renamed(effort(), "reasoning"), fast_mode(true), thinking];
-    assert_eq!(display_for("cursor", &descriptors, Some("reasoning"), false), "High Fast · Thinking On");
+    assert_eq!(
+        display_for("cursor", &descriptors, Some("reasoning"), false),
+        "High Fast · Thinking On"
+    );
 }
 
 #[test]
 fn keeps_boolean_thinking_independent_of_fast() {
     for value in [true, false] {
-        let thinking = OptionDescriptor::Boolean { id: "thinking".into(), label: "Thinking".into(), description: None, current_value: Some(value) };
+        let thinking = OptionDescriptor::Boolean {
+            id: "thinking".into(),
+            label: "Thinking".into(),
+            description: None,
+            current_value: Some(value),
+        };
         let label = format!("Thinking {}", if value { "On" } else { "Off" });
-        assert_eq!(display(&[thinking.clone(), fast_mode(true)]), format!("{label} · Fast"));
         assert_eq!(
-            display(&[thinking.clone(), renamed(effort(), "reasoning"), fast_mode(true)]),
+            display(&[thinking.clone(), fast_mode(true)]),
+            format!("{label} · Fast")
+        );
+        assert_eq!(
+            display(&[
+                thinking.clone(),
+                renamed(effort(), "reasoning"),
+                fast_mode(true)
+            ]),
             format!("{label} · High Fast")
         );
         assert_eq!(display(&[thinking, fast_mode(false)]), label);
@@ -347,7 +544,12 @@ fn preserves_reasoning_labels_with_fast_across_harnesses() {
         for provider in ["codex", "claudeAgent", "cursor"] {
             let descriptor = select_current("reasoningEffort", &[("effort", label)], "effort");
             assert_eq!(
-                display_for(provider, &[descriptor, fast_mode(true)], Some("reasoningEffort"), false),
+                display_for(
+                    provider,
+                    &[descriptor, fast_mode(true)],
+                    Some("reasoningEffort"),
+                    false
+                ),
                 format!("{label} Fast")
             );
         }
@@ -358,7 +560,10 @@ fn preserves_reasoning_labels_with_fast_across_harnesses() {
 fn treats_codex_service_tiers_as_fast_mode_states() {
     assert_eq!(display(&[effort(), service_tier("default")]), "High");
     assert_eq!(display(&[effort(), service_tier("priority")]), "High Fast");
-    assert_eq!(display(&[effort(), service_tier("ultrafast")]), "High Ultrafast");
+    assert_eq!(
+        display(&[effort(), service_tier("ultrafast")]),
+        "High Ultrafast"
+    );
     assert_eq!(display(&[effort(), service_tier("flex")]), "High · Flex");
     let mut without_priority = service_tier("ultrafast");
     if let OptionDescriptor::Select { options, .. } = &mut without_priority {
@@ -388,7 +593,12 @@ fn keeps_the_service_tier_readable_when_it_is_the_only_trait() {
 fn falls_back_to_text_when_fast_mode_is_the_only_trait() {
     assert_eq!(display(&[fast_mode(true)]), "Fast");
     assert_eq!(display(&[fast_mode(false)]), "Normal");
-    let thinking = OptionDescriptor::Boolean { id: "thinking".into(), label: "Thinking".into(), description: None, current_value: Some(true) };
+    let thinking = OptionDescriptor::Boolean {
+        id: "thinking".into(),
+        label: "Thinking".into(),
+        description: None,
+        current_value: Some(true),
+    };
     assert_eq!(display(&[effort(), thinking]), "High · Thinking On");
     assert_eq!(display(&[effort(), context_window()]), "High · 1M");
 }
@@ -400,8 +610,18 @@ fn stays_blank_when_descriptors_resolve_to_no_label_and_there_is_no_fast_mode() 
         label: "effort".into(),
         description: None,
         options: vec![
-            OptionChoice { id: "low".into(), label: "Low".into(), description: None, is_default: false },
-            OptionChoice { id: "high".into(), label: "High".into(), description: None, is_default: false },
+            OptionChoice {
+                id: "low".into(),
+                label: "Low".into(),
+                description: None,
+                is_default: false,
+            },
+            OptionChoice {
+                id: "high".into(),
+                label: "High".into(),
+                description: None,
+                is_default: false,
+            },
         ],
         current_value: None,
         prompt_injected_values: vec![],
@@ -412,7 +632,12 @@ fn stays_blank_when_descriptors_resolve_to_no_label_and_there_is_no_fast_mode() 
 #[test]
 fn renders_prompt_controlled_ultrathink_with_fast() {
     assert_eq!(
-        display_for("codex", &[effort(), fast_mode(true)], Some("reasoningEffort"), true),
+        display_for(
+            "codex",
+            &[effort(), fast_mode(true)],
+            Some("reasoningEffort"),
+            true
+        ),
         "Ultrathink Fast"
     );
 }
@@ -427,13 +652,23 @@ fn builds_read_only_descriptors_for_unavailable_models() {
     assert_eq!(descriptors[0].label(), "Reasoning");
     assert_eq!(descriptors[1].label(), "Agent");
     assert_eq!(descriptors[2].label(), "Fast Mode");
-    assert!(matches!(&descriptors[2], OptionDescriptor::Boolean { current_value: Some(true), .. }));
+    assert!(matches!(
+        &descriptors[2],
+        OptionDescriptor::Boolean {
+            current_value: Some(true),
+            ..
+        }
+    ));
 }
 
 #[test]
 fn shows_unknown_until_a_matching_provider_report_provides_default() {
     let descriptor = select_current("variant", &[("none", "None"), ("thinking", "Thinking")], "");
-    let selection = SelectionContext { instance_id: "opencode", model: "ling", options: &[] };
+    let selection = SelectionContext {
+        instance_id: "opencode",
+        model: "ling",
+        options: &[],
+    };
     let build = |reported: Option<&SelectionContext<'_>>| {
         build_traits_trigger_display(&TraitsTriggerInput {
             provider: "opencode",
@@ -446,7 +681,11 @@ fn shows_unknown_until_a_matching_provider_report_provides_default() {
     };
     assert_eq!(build(None), "Unknown");
     let reported_options = [OptionSelection::string("variant", "default")];
-    let reported = SelectionContext { instance_id: "opencode", model: "ling", options: &reported_options };
+    let reported = SelectionContext {
+        instance_id: "opencode",
+        model: "ling",
+        options: &reported_options,
+    };
     assert_eq!(build(Some(&reported)), "Default");
 }
 
@@ -456,7 +695,11 @@ fn shows_unknown_until_a_matching_provider_report_provides_default() {
 fn picking_a_prompt_injected_value_rewrites_the_prompt() {
     let models = model_with(vec![select(
         "effort",
-        &[("medium", "Medium", false), ("high", "High", true), ("ultrathink", "Ultrathink", false)],
+        &[
+            ("medium", "Medium", false),
+            ("high", "High", true),
+            ("ultrathink", "Ultrathink", false),
+        ],
         &["ultrathink"],
     )]);
     let section = traits_section(&TraitsInput {
@@ -491,7 +734,11 @@ fn picking_a_prompt_injected_value_rewrites_the_prompt() {
 fn ultrathink_prompt_control_strips_the_prefix_when_another_effort_is_picked() {
     let models = model_with(vec![select(
         "effort",
-        &[("medium", "Medium", false), ("high", "High", true), ("ultrathink", "Ultrathink", false)],
+        &[
+            ("medium", "Medium", false),
+            ("high", "High", true),
+            ("ultrathink", "Ultrathink", false),
+        ],
         &["ultrathink"],
     )]);
     let section = traits_section(&TraitsInput {
@@ -513,18 +760,26 @@ fn ultrathink_prompt_control_strips_the_prefix_when_another_effort_is_picked() {
     };
     assert_eq!(prompt.as_deref(), Some("fix it"));
     // "ultrathink" in the body itself locks the option.
-    let locked = traits_section(&TraitsInput { prompt: "Ultrathink:\nplease ultrathink about it", ..TraitsInput {
-        provider: "claudeAgent",
-        models: &models,
-        model: Some(MODEL),
-        prompt: "",
-        model_options: &[],
-        allow_prompt_injected_effort: true,
-        plan_mode_enabled: true,
-    }});
+    let locked = traits_section(&TraitsInput {
+        prompt: "Ultrathink:\nplease ultrathink about it",
+        ..TraitsInput {
+            provider: "claudeAgent",
+            models: &models,
+            model: Some(MODEL),
+            prompt: "",
+            model_options: &[],
+            allow_prompt_injected_effort: true,
+            plan_mode_enabled: true,
+        }
+    });
     assert!(locked.ultrathink_in_body_text);
     assert_eq!(
-        handle_traits_select_change(&locked, "effort", "medium", "Ultrathink:\nplease ultrathink about it"),
+        handle_traits_select_change(
+            &locked,
+            "effort",
+            "medium",
+            "Ultrathink:\nplease ultrathink about it"
+        ),
         TraitsSelectOutcome::None
     );
 }
@@ -546,13 +801,31 @@ fn traits_hide_for_models_without_descriptors() {
 #[test]
 fn resolves_models_by_slug_name_alias_and_provider_alias() {
     let models = vec![
-        ProviderModel { aliases: vec!["Old-Name".into()], ..ProviderModel::simple("gpt-5.4", "GPT 5.4") },
+        ProviderModel {
+            aliases: vec!["Old-Name".into()],
+            ..ProviderModel::simple("gpt-5.4", "GPT 5.4")
+        },
         ProviderModel::simple("other", "Other Model"),
     ];
-    assert_eq!(resolve_selectable_model("codex", Some("gpt-5.4"), &models).as_deref(), Some("gpt-5.4"));
-    assert_eq!(resolve_selectable_model("codex", Some("other model"), &models).as_deref(), Some("other"));
-    assert_eq!(resolve_selectable_model("codex", Some("old-name"), &models).as_deref(), Some("gpt-5.4"));
-    assert_eq!(resolve_selectable_model("codex", Some("5.4"), &models).as_deref(), Some("gpt-5.4"));
-    assert_eq!(resolve_selectable_model("codex", Some("nope"), &models), None);
+    assert_eq!(
+        resolve_selectable_model("codex", Some("gpt-5.4"), &models).as_deref(),
+        Some("gpt-5.4")
+    );
+    assert_eq!(
+        resolve_selectable_model("codex", Some("other model"), &models).as_deref(),
+        Some("other")
+    );
+    assert_eq!(
+        resolve_selectable_model("codex", Some("old-name"), &models).as_deref(),
+        Some("gpt-5.4")
+    );
+    assert_eq!(
+        resolve_selectable_model("codex", Some("5.4"), &models).as_deref(),
+        Some("gpt-5.4")
+    );
+    assert_eq!(
+        resolve_selectable_model("codex", Some("nope"), &models),
+        None
+    );
     assert_eq!(resolve_selectable_model("codex", None, &models), None);
 }

@@ -100,7 +100,9 @@ impl ComposerThreadDraft {
 /// `composerDraftHasUserContent`: typed text or any attachment. Model and mode
 /// choices alone are ambient defaults, not work in progress.
 pub fn composer_draft_has_user_content(draft: Option<&ComposerThreadDraft>) -> bool {
-    draft.is_some_and(|draft| !draft.prompt.trim().is_empty() || !draft.images.is_empty() || !draft.files.is_empty())
+    draft.is_some_and(|draft| {
+        !draft.prompt.trim().is_empty() || !draft.images.is_empty() || !draft.files.is_empty()
+    })
 }
 
 fn image_dedup_key(image: &ComposerImageAttachment) -> String {
@@ -163,7 +165,13 @@ impl ComposerDraftStore {
     }
 
     /// `setModelSelection`.
-    pub fn set_model_selection(&mut self, thread_key: &str, selection: DraftModelSelection, explicit: bool, replace_options: bool) {
+    pub fn set_model_selection(
+        &mut self,
+        thread_key: &str,
+        selection: DraftModelSelection,
+        explicit: bool,
+        replace_options: bool,
+    ) {
         self.update(thread_key, |draft| {
             let current_options = draft
                 .model_selection_by_provider
@@ -178,7 +186,10 @@ impl ComposerDraftStore {
             draft.active_provider = Some(selection.instance_id.clone());
             draft.model_selection_by_provider.insert(
                 selection.instance_id.clone(),
-                DraftModelSelection { options, ..selection },
+                DraftModelSelection {
+                    options,
+                    ..selection
+                },
             );
             draft.model_selection_explicit = explicit;
         });
@@ -197,7 +208,10 @@ impl ComposerDraftStore {
             let model = draft
                 .model_selection_by_provider
                 .get(instance_id)
-                .map_or_else(|| fallback_model.to_owned(), |current| current.model.clone());
+                .map_or_else(
+                    || fallback_model.to_owned(),
+                    |current| current.model.clone(),
+                );
             match options.filter(|options| !options.is_empty()) {
                 Some(options) => {
                     draft.model_selection_by_provider.insert(
@@ -221,22 +235,35 @@ impl ComposerDraftStore {
     }
 
     pub fn set_runtime_mode(&mut self, thread_key: &str, mode: Option<&str>) {
-        let mode = mode.filter(|mode| ["approval-required", "auto-accept-edits", "full-access"].contains(mode));
-        self.update(thread_key, |draft| draft.runtime_mode = mode.map(str::to_owned));
+        let mode = mode.filter(|mode| {
+            ["approval-required", "auto-accept-edits", "full-access"].contains(mode)
+        });
+        self.update(thread_key, |draft| {
+            draft.runtime_mode = mode.map(str::to_owned)
+        });
     }
 
     pub fn set_interaction_mode(&mut self, thread_key: &str, mode: Option<&str>) {
         let mode = mode.filter(|mode| *mode == "plan" || *mode == "default");
-        self.update(thread_key, |draft| draft.interaction_mode = mode.map(str::to_owned));
+        self.update(thread_key, |draft| {
+            draft.interaction_mode = mode.map(str::to_owned)
+        });
     }
 
     /// `addImages`: deduplicated, capped at the provider's attachment limit.
     /// Returns the ids that were accepted.
-    pub fn add_images(&mut self, thread_key: &str, images: Vec<ComposerImageAttachment>, options: AddAttachmentsOptions) -> Vec<String> {
+    pub fn add_images(
+        &mut self,
+        thread_key: &str,
+        images: Vec<ComposerImageAttachment>,
+        options: AddAttachmentsOptions,
+    ) -> Vec<String> {
         let mut accepted = Vec::new();
         self.update(thread_key, |draft| {
-            let mut ids: std::collections::HashSet<String> = draft.images.iter().map(|i| i.id.clone()).collect();
-            let mut keys: std::collections::HashSet<String> = draft.images.iter().map(image_dedup_key).collect();
+            let mut ids: std::collections::HashSet<String> =
+                draft.images.iter().map(|i| i.id.clone()).collect();
+            let mut keys: std::collections::HashSet<String> =
+                draft.images.iter().map(image_dedup_key).collect();
             for image in images {
                 let key = image_dedup_key(&image);
                 if ids.contains(&image.id) || (!options.allow_duplicates && keys.contains(&key)) {
@@ -258,15 +285,24 @@ impl ComposerDraftStore {
         if !self.drafts.contains_key(thread_key) {
             return;
         }
-        self.update(thread_key, |draft| draft.images.retain(|image| image.id != image_id));
+        self.update(thread_key, |draft| {
+            draft.images.retain(|image| image.id != image_id)
+        });
     }
 
     /// `addFiles`: same rules as images; returns the accepted ids.
-    pub fn add_files(&mut self, thread_key: &str, files: Vec<ComposerFileAttachment>, options: AddAttachmentsOptions) -> Vec<String> {
+    pub fn add_files(
+        &mut self,
+        thread_key: &str,
+        files: Vec<ComposerFileAttachment>,
+        options: AddAttachmentsOptions,
+    ) -> Vec<String> {
         let mut accepted = Vec::new();
         self.update(thread_key, |draft| {
-            let mut ids: std::collections::HashSet<String> = draft.files.iter().map(|f| f.id.clone()).collect();
-            let mut keys: std::collections::HashSet<String> = draft.files.iter().map(composer_file_dedup_key).collect();
+            let mut ids: std::collections::HashSet<String> =
+                draft.files.iter().map(|f| f.id.clone()).collect();
+            let mut keys: std::collections::HashSet<String> =
+                draft.files.iter().map(composer_file_dedup_key).collect();
             for file in files {
                 let key = composer_file_dedup_key(&file);
                 if ids.contains(&file.id) || (!options.allow_duplicates && keys.contains(&key)) {
@@ -288,7 +324,9 @@ impl ComposerDraftStore {
         if !self.drafts.contains_key(thread_key) {
             return;
         }
-        self.update(thread_key, |draft| draft.files.retain(|file| file.id != file_id));
+        self.update(thread_key, |draft| {
+            draft.files.retain(|file| file.id != file_id)
+        });
     }
 
     /// `clearComposerContent`: prompt and attachments go, choices stay.
@@ -313,8 +351,13 @@ impl ComposerDraftStore {
             return;
         };
         let destination = self.drafts.get(to).cloned().unwrap_or_default();
-        let destination_file_ids: std::collections::HashSet<_> = destination.files.iter().map(|f| f.id.clone()).collect();
-        let destination_file_keys: std::collections::HashSet<_> = destination.files.iter().map(composer_file_dedup_key).collect();
+        let destination_file_ids: std::collections::HashSet<_> =
+            destination.files.iter().map(|f| f.id.clone()).collect();
+        let destination_file_keys: std::collections::HashSet<_> = destination
+            .files
+            .iter()
+            .map(composer_file_dedup_key)
+            .collect();
         let transferable: Vec<ComposerFileAttachment> = source
             .files
             .iter()
@@ -326,19 +369,29 @@ impl ComposerDraftStore {
             })
             .cloned()
             .collect();
-        let slots = PROVIDER_SEND_TURN_MAX_ATTACHMENTS.saturating_sub(destination.images.len() + destination.files.len());
+        let slots = PROVIDER_SEND_TURN_MAX_ATTACHMENTS
+            .saturating_sub(destination.images.len() + destination.files.len());
         let moved_images: Vec<_> = source.images.iter().take(slots).cloned().collect();
-        let moved_files: Vec<_> = transferable.into_iter().take(slots - moved_images.len()).collect();
-        let moved_image_ids: std::collections::HashSet<_> = moved_images.iter().map(|i| i.id.clone()).collect();
-        let moved_file_ids: std::collections::HashSet<_> = moved_files.iter().map(|f| f.id.clone()).collect();
+        let moved_files: Vec<_> = transferable
+            .into_iter()
+            .take(slots - moved_images.len())
+            .collect();
+        let moved_image_ids: std::collections::HashSet<_> =
+            moved_images.iter().map(|i| i.id.clone()).collect();
+        let moved_file_ids: std::collections::HashSet<_> =
+            moved_files.iter().map(|f| f.id.clone()).collect();
         let mut next_destination = destination;
         next_destination.prompt = source.prompt.clone();
         next_destination.images.extend(moved_images);
         next_destination.files.extend(moved_files);
         let mut next_source = source;
         next_source.prompt.clear();
-        next_source.images.retain(|image| !moved_image_ids.contains(&image.id));
-        next_source.files.retain(|file| !moved_file_ids.contains(&file.id));
+        next_source
+            .images
+            .retain(|image| !moved_image_ids.contains(&image.id));
+        next_source
+            .files
+            .retain(|file| !moved_file_ids.contains(&file.id));
         for (key, draft) in [(to, next_destination), (from, next_source)] {
             self.drafts.remove(key);
             if !draft.is_empty() {
@@ -404,11 +457,17 @@ mod tests {
     fn user_content_ignores_ambient_choices() {
         let mut store = ComposerDraftStore::new();
         store.set_runtime_mode("t", Some("full-access"));
-        assert!(!composer_draft_has_user_content(store.get_composer_draft("t")));
+        assert!(!composer_draft_has_user_content(
+            store.get_composer_draft("t")
+        ));
         store.set_prompt("t", "  ");
-        assert!(!composer_draft_has_user_content(store.get_composer_draft("t")));
+        assert!(!composer_draft_has_user_content(
+            store.get_composer_draft("t")
+        ));
         store.set_prompt("t", "hi");
-        assert!(composer_draft_has_user_content(store.get_composer_draft("t")));
+        assert!(composer_draft_has_user_content(
+            store.get_composer_draft("t")
+        ));
         assert!(!composer_draft_has_user_content(None));
     }
 
@@ -417,14 +476,31 @@ mod tests {
         let mut store = ComposerDraftStore::new();
         let accepted = store.add_images(
             "t",
-            vec![image("a", "x.png"), image("a", "y.png"), image("b", "x.png"), image("c", "z.png")],
+            vec![
+                image("a", "x.png"),
+                image("a", "y.png"),
+                image("b", "x.png"),
+                image("c", "z.png"),
+            ],
             AddAttachmentsOptions::default(),
         );
         assert_eq!(accepted, ["a", "c"]);
-        let accepted = store.add_images("t", vec![image("d", "x.png")], AddAttachmentsOptions { allow_duplicates: true });
+        let accepted = store.add_images(
+            "t",
+            vec![image("d", "x.png")],
+            AddAttachmentsOptions {
+                allow_duplicates: true,
+            },
+        );
         assert_eq!(accepted, ["d"]);
         store.remove_image("t", "a");
-        let ids: Vec<_> = store.get_composer_draft("t").unwrap().images.iter().map(|i| i.id.as_str()).collect();
+        let ids: Vec<_> = store
+            .get_composer_draft("t")
+            .unwrap()
+            .images
+            .iter()
+            .map(|i| i.id.as_str())
+            .collect();
         assert_eq!(ids, ["c", "d"]);
     }
 
@@ -436,18 +512,37 @@ mod tests {
             .collect();
         let accepted = store.add_images("t", many, AddAttachmentsOptions::default());
         assert_eq!(accepted.len(), PROVIDER_SEND_TURN_MAX_ATTACHMENTS);
-        assert!(store.add_files("t", vec![file("f", "f.txt", true)], AddAttachmentsOptions::default()).is_empty());
+        assert!(
+            store
+                .add_files(
+                    "t",
+                    vec![file("f", "f.txt", true)],
+                    AddAttachmentsOptions::default()
+                )
+                .is_empty()
+        );
     }
 
     #[test]
     fn clears_content_but_keeps_choices() {
         let mut store = ComposerDraftStore::new();
         store.set_prompt("t", "hi");
-        store.add_images("t", vec![image("a", "a.png")], AddAttachmentsOptions::default());
+        store.add_images(
+            "t",
+            vec![image("a", "a.png")],
+            AddAttachmentsOptions::default(),
+        );
         store.set_interaction_mode("t", Some("plan"));
         store.clear_composer_content("t");
         let draft = store.get_composer_draft("t").unwrap();
-        assert_eq!((draft.prompt.as_str(), draft.images.len(), draft.interaction_mode.as_deref()), ("", 0, Some("plan")));
+        assert_eq!(
+            (
+                draft.prompt.as_str(),
+                draft.images.len(),
+                draft.interaction_mode.as_deref()
+            ),
+            ("", 0, Some("plan"))
+        );
     }
 
     #[test]
@@ -458,7 +553,12 @@ mod tests {
             model: model.into(),
             options,
         };
-        store.set_provider_model_options("t", "codex", Some(vec![OptionSelection::string("effort", "high")]), "gpt-5.4");
+        store.set_provider_model_options(
+            "t",
+            "codex",
+            Some(vec![OptionSelection::string("effort", "high")]),
+            "gpt-5.4",
+        );
         let draft = store.get_composer_draft("t").unwrap();
         assert_eq!(draft.model_selection_by_provider["codex"].model, "gpt-5.4");
         assert!(draft.model_selection_explicit);
@@ -466,31 +566,61 @@ mod tests {
         store.set_model_selection("t", selection("gpt-5.3", vec![]), true, false);
         let draft = store.get_composer_draft("t").unwrap();
         assert_eq!(draft.model_selection_by_provider["codex"].model, "gpt-5.3");
-        assert_eq!(draft.model_selection_by_provider["codex"].options, vec![OptionSelection::string("effort", "high")]);
+        assert_eq!(
+            draft.model_selection_by_provider["codex"].options,
+            vec![OptionSelection::string("effort", "high")]
+        );
         // Replacing options with none clears them.
         store.set_model_selection("t", selection("gpt-5.3", vec![]), true, true);
-        assert!(store.get_composer_draft("t").unwrap().model_selection_by_provider["codex"].options.is_empty());
-        assert_eq!(store.get_composer_draft("t").unwrap().active_provider.as_deref(), Some("codex"));
+        assert!(
+            store
+                .get_composer_draft("t")
+                .unwrap()
+                .model_selection_by_provider["codex"]
+                .options
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .get_composer_draft("t")
+                .unwrap()
+                .active_provider
+                .as_deref(),
+            Some("codex")
+        );
     }
 
     #[test]
     fn moves_the_prompt_and_what_fits_to_another_thread() {
         let mut store = ComposerDraftStore::new();
         store.set_prompt("from", "moved prompt");
-        store.add_images("from", vec![image("a", "a.png")], AddAttachmentsOptions::default());
+        store.add_images(
+            "from",
+            vec![image("a", "a.png")],
+            AddAttachmentsOptions::default(),
+        );
         store.add_files(
             "from",
-            vec![file("keep", "gone.txt", false), file("move", "move.txt", true)],
+            vec![
+                file("keep", "gone.txt", false),
+                file("move", "move.txt", true),
+            ],
             AddAttachmentsOptions::default(),
         );
         store.move_composer_prompt_and_images("from", "to");
         let to = store.get_composer_draft("to").unwrap();
         assert_eq!(to.prompt, "moved prompt");
         assert_eq!(to.images.len(), 1);
-        assert_eq!(to.files.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["move"]);
+        assert_eq!(
+            to.files.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            ["move"]
+        );
         let from = store.get_composer_draft("from").unwrap();
         assert_eq!(from.prompt, "");
-        assert_eq!(from.files.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["keep"]);
+        assert_eq!(
+            from.files.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            ["keep"]
+        );
     }
 
     #[test]
@@ -509,7 +639,10 @@ mod tests {
             });
         }
         assert_eq!(store.stash_entries().len(), MAX_STASH_ENTRIES);
-        assert_eq!(store.stash_entries()[0].id, format!("s{}", MAX_STASH_ENTRIES + 2));
+        assert_eq!(
+            store.stash_entries()[0].id,
+            format!("s{}", MAX_STASH_ENTRIES + 2)
+        );
         let removed = store.remove_stash_entry("s22").unwrap();
         assert_eq!(removed.prompt, "p22");
         assert!(store.remove_stash_entry("s22").is_none());

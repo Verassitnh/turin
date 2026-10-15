@@ -42,7 +42,10 @@ impl EditorState {
     pub fn selection_flat(&mut self) -> (usize, usize) {
         let selection = self.selection;
         let map = self.map();
-        (pos_to_flat(map, selection.anchor), pos_to_flat(map, selection.head))
+        (
+            pos_to_flat(map, selection.anchor),
+            pos_to_flat(map, selection.head),
+        )
     }
 
     /// Select by flat offsets.

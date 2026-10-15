@@ -23,7 +23,9 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::composer::editor_mentions::{ComposerPromptSegment, split_prompt_into_composer_segments};
+use crate::composer::editor_mentions::{
+    ComposerPromptSegment, split_prompt_into_composer_segments,
+};
 use crate::composer::js_string::{is_js_whitespace_char, utf16_len};
 use crate::composer::rich_text::{MARK_NESTING_ORDER, RichTextMark, parse_inline_markdown};
 
@@ -86,8 +88,15 @@ pub struct SkillMeta {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Atom {
-    Mention { path: String, source: String },
-    Skill { name: String, label: String, description: Option<String> },
+    Mention {
+        path: String,
+        source: String,
+    },
+    Skill {
+        name: String,
+        label: String,
+        description: Option<String>,
+    },
 }
 
 impl Atom {
@@ -181,20 +190,32 @@ pub enum ItemPrefix {
         marker_space: String,
         content_space: String,
     },
-    Bullet { indent: String, marker: String, space: String },
-    Ordered { indent: String, marker: String, space: String },
+    Bullet {
+        indent: String,
+        marker: String,
+        space: String,
+    },
+    Ordered {
+        indent: String,
+        marker: String,
+        space: String,
+    },
 }
 
 impl ItemPrefix {
     pub fn indent(&self) -> &str {
         match self {
-            Self::Task { indent, .. } | Self::Bullet { indent, .. } | Self::Ordered { indent, .. } => indent,
+            Self::Task { indent, .. }
+            | Self::Bullet { indent, .. }
+            | Self::Ordered { indent, .. } => indent,
         }
     }
 
     pub fn set_indent(&mut self, value: String) {
         match self {
-            Self::Task { indent, .. } | Self::Bullet { indent, .. } | Self::Ordered { indent, .. } => {
+            Self::Task { indent, .. }
+            | Self::Bullet { indent, .. }
+            | Self::Ordered { indent, .. } => {
                 *indent = value;
             }
         }
@@ -205,7 +226,9 @@ impl ItemPrefix {
     pub fn list_key(&self) -> String {
         match self {
             Self::Task { .. } => "task".to_owned(),
-            Self::Ordered { marker, .. } => format!("ordered:{}", marker.chars().last().unwrap_or('.')),
+            Self::Ordered { marker, .. } => {
+                format!("ordered:{}", marker.chars().last().unwrap_or('.'))
+            }
             Self::Bullet { marker, .. } => format!("bullet:{marker}"),
         }
     }
@@ -230,11 +253,24 @@ impl ItemPrefix {
                     if *checked { "x" } else { " " }
                 )
             }
-            Self::Bullet { indent, marker, space } | Self::Ordered { indent, marker, space } => {
+            Self::Bullet {
+                indent,
+                marker,
+                space,
+            }
+            | Self::Ordered {
+                indent,
+                marker,
+                space,
+            } => {
                 let marker = if marker.is_empty() { "-" } else { marker };
                 // A bare `-` keeps its missing space only while the item is
                 // empty: once it has text, `-text` would not be a list line.
-                let space = if space.is_empty() && !empty { " " } else { space };
+                let space = if space.is_empty() && !empty {
+                    " "
+                } else {
+                    space
+                };
                 format!("{indent}{marker}{space}")
             }
         }
@@ -254,12 +290,24 @@ pub struct CodeBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
     Paragraph(Inline),
-    Heading { level: u8, space: String, content: Inline },
+    Heading {
+        level: u8,
+        space: String,
+        content: Inline,
+    },
     /// One quote line behind its exact `>` prefix.
-    Quote { prefix: String, content: Inline },
+    Quote {
+        prefix: String,
+        content: Inline,
+    },
     /// A rule keeps the exact line it was written as. It owns no characters.
-    Rule { source: String },
-    Item { prefix: ItemPrefix, content: Inline },
+    Rule {
+        source: String,
+    },
+    Item {
+        prefix: ItemPrefix,
+        content: Inline,
+    },
     Code(CodeBlock),
 }
 
@@ -338,7 +386,10 @@ impl Re {
     }
     fn rule() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| Regex::new(r"^(?:-(?:[ \t]*-){2,}|\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*\r?$").unwrap())
+        RE.get_or_init(|| {
+            Regex::new(r"^(?:-(?:[ \t]*-){2,}|\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*\r?$")
+                .unwrap()
+        })
     }
     fn heading() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
@@ -458,7 +509,10 @@ impl BuildOptions {
     }
 }
 
-fn atom_for_segment(segment: &ComposerPromptSegment, skill_label_for: &dyn Fn(&str) -> SkillMeta) -> Atom {
+fn atom_for_segment(
+    segment: &ComposerPromptSegment,
+    skill_label_for: &dyn Fn(&str) -> SkillMeta,
+) -> Atom {
     match segment {
         ComposerPromptSegment::Mention { path, source } => Atom::Mention {
             path: path.clone(),
@@ -479,9 +533,19 @@ fn atom_for_segment(segment: &ComposerPromptSegment, skill_label_for: &dyn Fn(&s
 enum Entry {
     Code(CodeBlock),
     Rule(String),
-    Heading { level: u8, space: String, inline: Inline },
-    Quote { prefix: String, inline: Inline },
-    Line { list: Option<ItemPrefix>, inline: Inline },
+    Heading {
+        level: u8,
+        space: String,
+        inline: Inline,
+    },
+    Quote {
+        prefix: String,
+        inline: Inline,
+    },
+    Line {
+        list: Option<ItemPrefix>,
+        inline: Inline,
+    },
 }
 
 /// `buildTiptapContent`, as blocks.
@@ -591,7 +655,11 @@ pub fn build_blocks(
             index += 1;
             continue;
         }
-        let opening = if block_syntax { parse_opening_fence(line) } else { None };
+        let opening = if block_syntax {
+            parse_opening_fence(line)
+        } else {
+            None
+        };
         let Some((fence, info)) = opening else {
             // A thematic break outranks a list: `- - -` and `* * *` are rules,
             // and `***` on its own line is a rule rather than an empty bold span.
@@ -617,7 +685,11 @@ pub fn build_blocks(
                 index += 1;
                 continue;
             }
-            let parsed = if block_syntax { parse_list_prefix(line) } else { None };
+            let parsed = if block_syntax {
+                parse_list_prefix(line)
+            } else {
+                None
+            };
             let content = parsed.as_ref().map_or(line, |(_, len)| &line[*len..]);
             entries.push(Entry::Line {
                 list: parsed.map(|(prefix, _)| prefix),
@@ -650,7 +722,11 @@ pub fn build_blocks(
             close,
             text: body.join("\n"),
         }));
-        index = if closed { cursor + 1 } else { source_lines.len() };
+        index = if closed {
+            cursor + 1
+        } else {
+            source_lines.len()
+        };
     }
 
     // Pass 2: upstream groups consecutive list lines into (possibly nested)
@@ -660,10 +736,17 @@ pub fn build_blocks(
     entries
         .into_iter()
         .map(|entry| match entry {
-            Entry::Quote { prefix, inline } => Block::Quote { prefix, content: inline },
+            Entry::Quote { prefix, inline } => Block::Quote {
+                prefix,
+                content: inline,
+            },
             Entry::Code(code) => Block::Code(code),
             Entry::Rule(source) => Block::Rule { source },
-            Entry::Heading { level, space, inline } => Block::Heading {
+            Entry::Heading {
+                level,
+                space,
+                inline,
+            } => Block::Heading {
                 level,
                 space,
                 content: inline,
@@ -836,7 +919,11 @@ fn has_content_on_both_sides_filter(children: &mut [InlineNode]) {
         }
         for direction in [1i32, -1] {
             let mut has_content = false;
-            let mut index: i32 = if direction == 1 { 0 } else { children.len() as i32 - 1 };
+            let mut index: i32 = if direction == 1 {
+                0
+            } else {
+                children.len() as i32 - 1
+            };
             while index >= 0 && (index as usize) < children.len() {
                 let child = &mut children[index as usize];
                 let is_ws_text = matches!(&child.content, InlineContent::Text(text)
@@ -872,7 +959,10 @@ fn split_boundary_whitespace(inline: &[InlineNode]) -> Vec<InlineNode> {
         // Separate boundary whitespace so delimiters can move past it without
         // changing the document offsets or marks on the visible text.
         let chars: Vec<char> = text.chars().collect();
-        let start = chars.iter().take_while(|c| is_js_whitespace_char(**c)).count();
+        let start = chars
+            .iter()
+            .take_while(|c| is_js_whitespace_char(**c))
+            .count();
         let end = chars
             .iter()
             .rposition(|c| !is_js_whitespace_char(*c))
@@ -881,7 +971,10 @@ fn split_boundary_whitespace(inline: &[InlineNode]) -> Vec<InlineNode> {
         let mut offset = 0;
         for boundary in [start, end, chars.len()] {
             if boundary > offset {
-                children.push(InlineNode::text(chars[offset..boundary].iter().collect::<String>(), child.marks));
+                children.push(InlineNode::text(
+                    chars[offset..boundary].iter().collect::<String>(),
+                    child.marks,
+                ));
             }
             offset = boundary;
         }
@@ -930,7 +1023,12 @@ fn ordered_marks(children: &[InlineNode]) -> Vec<Vec<RichTextMark>> {
             retained.push(*mark);
         }
         let mut next = retained.clone();
-        next.extend(marks.iter().filter(|mark| !retained.contains(mark)).copied());
+        next.extend(
+            marks
+                .iter()
+                .filter(|mark| !retained.contains(mark))
+                .copied(),
+        );
         ordered[index] = next;
     }
     ordered
@@ -1128,7 +1226,11 @@ pub fn serialize_doc(doc: &Doc) -> DocMap {
                 acc.push_prefix(prefix, index);
                 append_inline_runs(content, index, &mut acc);
             }
-            Block::Heading { level, space, content } => {
+            Block::Heading {
+                level,
+                space,
+                content,
+            } => {
                 let prefix = format!("{}{space}", "#".repeat(usize::from(*level)));
                 acc.push_prefix(&prefix, index);
                 append_inline_runs(content, index, &mut acc);
@@ -1185,7 +1287,8 @@ pub fn flat_to_collapsed(map: &DocMap, flat_offset: usize) -> usize {
         if run_owns_offset(run, bounded) {
             if matches!(run.kind, RunKind::Text | RunKind::Token) {
                 // A chip's source in a fence spans its characters but one position.
-                let within = (bounded - run.flat_start).min(run.collapsed_len - run.open_len - run.close_len);
+                let within = (bounded - run.flat_start)
+                    .min(run.collapsed_len - run.open_len - run.close_len);
                 return run.collapsed_start + run.open_len + within;
             }
             return run.collapsed_start + (bounded - run.flat_start);
@@ -1267,7 +1370,9 @@ pub fn flat_to_pos(doc: &Doc, map: &DocMap, flat: usize) -> DocPos {
     }
     // Prefer a later block that shares the start (rule then trailing line).
     let mut block = best;
-    while block + 1 < map.block_starts.len() && map.block_starts[block + 1] == map.block_starts[block] {
+    while block + 1 < map.block_starts.len()
+        && map.block_starts[block + 1] == map.block_starts[block]
+    {
         block += 1;
     }
     let len = doc.blocks[block].doc_len();

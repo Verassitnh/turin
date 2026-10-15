@@ -8,14 +8,16 @@ use std::time::Duration;
 use gpui_kit::{App, AppContext as _, Entity};
 
 use crate::composer::catalog::{ProviderInstanceEntry, ProviderSkill, ProviderSlashCommand};
-use crate::composer::provider_state::ProviderModel;
 use crate::composer::command_items::PathKind;
 use crate::composer::model_picker::provider_model_key;
 use crate::composer::prompt_history::ComposerPromptHistoryMessage;
-use crate::composer::provider_options::{ModelCapabilities, OptionChoice, OptionDescriptor, OptionSelection, OptionValue};
+use crate::composer::provider_options::{
+    ModelCapabilities, OptionChoice, OptionDescriptor, OptionSelection, OptionValue,
+};
+use crate::composer::provider_state::ProviderModel;
 use crate::composer::view_model::{
-    ComposerSource, ComposerStore, ComposerViewModel, ContextWindowSnapshot, InteractionMode, PathEntry, RuntimeMode,
-    SendRequest, SessionPhase, ThreadRef,
+    ComposerSource, ComposerStore, ComposerViewModel, ContextWindowSnapshot, InteractionMode,
+    PathEntry, RuntimeMode, SendRequest, SessionPhase, ThreadRef,
 };
 
 fn choice(id: &str, label: &str, is_default: bool) -> OptionChoice {
@@ -32,7 +34,10 @@ fn effort(options: &[(&str, &str)], default: &str) -> OptionDescriptor {
         id: "effort".into(),
         label: "Reasoning".into(),
         description: None,
-        options: options.iter().map(|(id, label)| choice(id, label, *id == default)).collect(),
+        options: options
+            .iter()
+            .map(|(id, label)| choice(id, label, *id == default))
+            .collect(),
         current_value: None,
         prompt_injected_values: Vec::new(),
     }
@@ -49,7 +54,9 @@ fn fast_mode() -> OptionDescriptor {
 
 fn model(slug: &str, name: &str, descriptors: Vec<OptionDescriptor>) -> ProviderModel {
     ProviderModel {
-        capabilities: Some(ModelCapabilities { option_descriptors: descriptors }),
+        capabilities: Some(ModelCapabilities {
+            option_descriptors: descriptors,
+        }),
         ..ProviderModel::simple(slug, name)
     }
 }
@@ -76,18 +83,34 @@ fn skills() -> Vec<ProviderSkill> {
 
 /// The fixture catalogue.
 pub fn fixture_providers() -> Vec<ProviderInstanceEntry> {
-    let codex_effort = effort(&[("low", "Low"), ("medium", "Medium"), ("high", "High"), ("xhigh", "Extra High")], "medium");
+    let codex_effort = effort(
+        &[
+            ("low", "Low"),
+            ("medium", "Medium"),
+            ("high", "High"),
+            ("xhigh", "Extra High"),
+        ],
+        "medium",
+    );
     let mut codex = ProviderInstanceEntry::new("codex", "codex", "Codex");
     codex.models = vec![
         ProviderModel {
             is_default: true,
-            ..model("gpt-5.4", "GPT-5.4", vec![codex_effort.clone(), fast_mode()])
+            ..model(
+                "gpt-5.4",
+                "GPT-5.4",
+                vec![codex_effort.clone(), fast_mode()],
+            )
         },
         ProviderModel {
             is_new: true,
             ..model("gpt-5.3-codex", "GPT-5.3 Codex", vec![codex_effort.clone()])
         },
-        model("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", vec![codex_effort.clone()]),
+        model(
+            "gpt-5.3-codex-spark",
+            "GPT-5.3 Codex Spark",
+            vec![codex_effort.clone()],
+        ),
         ProviderModel {
             is_legacy: true,
             ..model("gpt-5.2", "GPT-5.2", vec![codex_effort])
@@ -109,14 +132,30 @@ pub fn fixture_providers() -> Vec<ProviderInstanceEntry> {
     codex.reports_context_window = true;
     codex.show_interaction_mode_toggle = true;
 
-    let claude_effort = effort(&[("low", "Low"), ("medium", "Medium"), ("high", "High"), ("max", "Max")], "high");
+    let claude_effort = effort(
+        &[
+            ("low", "Low"),
+            ("medium", "Medium"),
+            ("high", "High"),
+            ("max", "Max"),
+        ],
+        "high",
+    );
     let mut claude = ProviderInstanceEntry::new("claudeAgent", "claudeAgent", "Claude");
     claude.models = vec![
         ProviderModel {
             is_default: true,
-            ..model("claude-opus-5-5", "Claude Opus 5.5", vec![claude_effort.clone()])
+            ..model(
+                "claude-opus-5-5",
+                "Claude Opus 5.5",
+                vec![claude_effort.clone()],
+            )
         },
-        model("claude-sonnet-5-5", "Claude Sonnet 5.5", vec![claude_effort.clone()]),
+        model(
+            "claude-sonnet-5-5",
+            "Claude Sonnet 5.5",
+            vec![claude_effort.clone()],
+        ),
         model("claude-haiku-5-5", "Claude Haiku 5.5", vec![]),
     ];
     claude.skills = skills();
@@ -131,12 +170,19 @@ pub fn fixture_providers() -> Vec<ProviderInstanceEntry> {
         },
         ProviderModel {
             sub_provider: Some("GitHub Copilot".into()),
-            ..model("github-copilot/claude-opus-4.7", "GitHub Copilot: Claude Opus 4.7", vec![])
+            ..model(
+                "github-copilot/claude-opus-4.7",
+                "GitHub Copilot: Claude Opus 4.7",
+                vec![],
+            )
         },
     ];
 
     let mut cursor = ProviderInstanceEntry::new("cursor", "cursor", "Cursor");
-    cursor.models = vec![model("auto", "Auto", vec![]), model("composer-2", "Composer 2", vec![fast_mode()])];
+    cursor.models = vec![
+        model("auto", "Auto", vec![]),
+        model("composer-2", "Composer 2", vec![fast_mode()]),
+    ];
     vec![codex, claude, opencode, cursor]
 }
 
@@ -152,7 +198,10 @@ fn fixture_paths() -> Vec<PathEntry> {
         ("docs/screenshots", PathKind::Directory),
     ]
     .into_iter()
-    .map(|(path, kind)| PathEntry { path: path.into(), kind })
+    .map(|(path, kind)| PathEntry {
+        path: path.into(),
+        kind,
+    })
     .collect()
 }
 
@@ -163,7 +212,9 @@ pub fn fixture_view_model() -> ComposerViewModel {
         selected_instance_id: "codex".into(),
         selected_model: "gpt-5.4".into(),
         providers,
-        favorite_models: [provider_model_key("claudeAgent", "claude-opus-5-5")].into_iter().collect(),
+        favorite_models: [provider_model_key("claudeAgent", "claude-opus-5-5")]
+            .into_iter()
+            .collect(),
         prompt_history_messages: vec![
             ComposerPromptHistoryMessage {
                 id: "m1".into(),
@@ -225,7 +276,10 @@ impl MockComposerSource {
     }
 
     pub fn sent(&self) -> Vec<SendRequest> {
-        self.sent.lock().map(|sent| sent.clone()).unwrap_or_default()
+        self.sent
+            .lock()
+            .map(|sent| sent.clone())
+            .unwrap_or_default()
     }
 
     fn update(&self, cx: &mut App, edit: impl FnOnce(&mut ComposerViewModel)) {
@@ -253,7 +307,7 @@ impl ComposerSource for MockComposerSource {
         let store = self.store.clone();
         cx.spawn(async move |cx| {
             cx.background_executor().timer(Duration::from_secs(4)).await;
-            let _ = store.update(cx, |store, cx| {
+            store.update(cx, |store, cx| {
                 let mut view_model = (**store.view_model()).clone();
                 view_model.phase = SessionPhase::Ready;
                 view_model.can_interrupt = false;
@@ -283,7 +337,13 @@ impl ComposerSource for MockComposerSource {
         });
     }
 
-    fn set_model_options(&self, instance_id: &str, model: &str, options: Option<Vec<OptionSelection>>, cx: &mut App) {
+    fn set_model_options(
+        &self,
+        instance_id: &str,
+        model: &str,
+        options: Option<Vec<OptionSelection>>,
+        cx: &mut App,
+    ) {
         self.update(cx, |vm| {
             vm.selected_instance_id = instance_id.to_owned();
             vm.selected_model = model.to_owned();
@@ -379,7 +439,9 @@ fn _option_value(_: OptionValue) {}
 /// Debug scenarios (`TURIN_COMPOSER_DEMO`): extra state layered over the
 /// fixture so each drawer can be screenshotted.
 pub fn apply_demo_scenario(scenario: &str, vm: &mut ComposerViewModel) {
-    use crate::composer::view_model::{BannerItem, BannerPriority, BannerVariant, QueueState, QueuedRun};
+    use crate::composer::view_model::{
+        BannerItem, BannerPriority, BannerVariant, QueueState, QueuedRun,
+    };
     use crate::ui::IconName;
     match scenario {
         "banners" => {

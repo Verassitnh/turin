@@ -39,7 +39,10 @@ pub enum ComposerAttachmentFileKind {
 
 /// What a picker writes when it did not recognize the file.
 fn is_generic_mime_type(mime_type: &str) -> bool {
-    matches!(mime_type, "application/octet-stream" | "binary/octet-stream" | "application/unknown")
+    matches!(
+        mime_type,
+        "application/octet-stream" | "binary/octet-stream" | "application/unknown"
+    )
 }
 
 fn extension_of(name: &str) -> Option<String> {
@@ -111,7 +114,12 @@ pub fn classify_composer_attachment_file(file: &PickedFile) -> ComposerAttachmen
 
 /// `videoMimeType`: recognizes videos even when the picker omitted the type.
 pub fn video_mime_type(name: &str, mime_type: &str) -> Option<String> {
-    let mime = mime_type.split(';').next().unwrap_or("").trim().to_lowercase();
+    let mime = mime_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
     if mime.starts_with("video/") {
         return Some(mime);
     }
@@ -140,7 +148,8 @@ pub fn is_video_attachment(name: &str, mime_type: &str) -> bool {
 pub fn is_previewable_composer_video(file: &ComposerFileAttachment, environment_id: &str) -> bool {
     is_video_attachment(&file.name, &file.mime_type)
         && (file.has_bytes()
-            || (file.uploaded_attachment_id.is_some() && file.upload_environment_id.as_deref() == Some(environment_id)))
+            || (file.uploaded_attachment_id.is_some()
+                && file.upload_environment_id.as_deref() == Some(environment_id)))
 }
 
 /// `composerOtherFilesForPresentation`: non-media files without an inline
@@ -152,7 +161,10 @@ pub fn composer_other_files_for_presentation<'a>(
 ) -> Vec<&'a ComposerFileAttachment> {
     files
         .iter()
-        .filter(|file| !is_previewable_composer_video(file, environment_id) && !inline_file_ids.contains(&file.id))
+        .filter(|file| {
+            !is_previewable_composer_video(file, environment_id)
+                && !inline_file_ids.contains(&file.id)
+        })
         .collect()
 }
 
@@ -180,12 +192,19 @@ pub fn format_attachment_size(size_bytes: u64) -> String {
 
 /// `fileAttachmentTooLargeMessage`.
 pub fn file_attachment_too_large_message(name: &str, max_upload_bytes: u64) -> String {
-    let size = if max_upload_bytes >= 1024 * 1024 && max_upload_bytes % (1024 * 1024) == 0 {
+    let size = if max_upload_bytes >= 1024 * 1024 && max_upload_bytes.is_multiple_of(1024 * 1024) {
         format!("{} MB", max_upload_bytes / (1024 * 1024))
-    } else if max_upload_bytes >= 1024 && max_upload_bytes % 1024 == 0 {
+    } else if max_upload_bytes >= 1024 && max_upload_bytes.is_multiple_of(1024) {
         format!("{} KB", max_upload_bytes / 1024)
     } else {
-        format!("{max_upload_bytes} {}", if max_upload_bytes == 1 { "byte" } else { "bytes" })
+        format!(
+            "{max_upload_bytes} {}",
+            if max_upload_bytes == 1 {
+                "byte"
+            } else {
+                "bytes"
+            }
+        )
     };
     format!("'{name}' exceeds the {size} attachment limit.")
 }
@@ -199,7 +218,9 @@ pub fn file_attachment_staging_limit(input: &FileAttachmentCapabilityState) -> O
     if !input.supports_attachment_uploads {
         return None;
     }
-    input.max_file_attachment_bytes.map(clamp_file_attachment_upload_bytes)
+    input
+        .max_file_attachment_bytes
+        .map(clamp_file_attachment_upload_bytes)
 }
 
 /// `fileAttachmentCapabilityBlockReason`: why retained generic files cannot
@@ -215,7 +236,10 @@ pub fn file_attachment_capability_block_reason(
         return Some("Waiting for the server before file attachments can send".to_owned());
     }
     let Some(max) = file_attachment_staging_limit(input) else {
-        return Some("This server does not accept file attachments right now. Remove the files to send.".to_owned());
+        return Some(
+            "This server does not accept file attachments right now. Remove the files to send."
+                .to_owned(),
+        );
     };
     files
         .iter()
@@ -231,12 +255,16 @@ pub enum DraftAttachment<'a> {
 
 /// `attachmentsToReleaseOnUploadCapabilityLoss`: only uploads not yet
 /// persisted onto a draft file are torn down.
-pub fn attachment_ids_to_release_on_upload_capability_loss(attachments: &[DraftAttachment<'_>]) -> Vec<String> {
+pub fn attachment_ids_to_release_on_upload_capability_loss(
+    attachments: &[DraftAttachment<'_>],
+) -> Vec<String> {
     attachments
         .iter()
         .filter_map(|attachment| match attachment {
             DraftAttachment::Image(image) => Some(image.id.clone()),
-            DraftAttachment::File(file) if file.uploaded_attachment_id.is_none() => Some(file.id.clone()),
+            DraftAttachment::File(file) if file.uploaded_attachment_id.is_none() => {
+                Some(file.id.clone())
+            }
             DraftAttachment::File(_) => None,
         })
         .collect()
@@ -298,21 +326,51 @@ mod tests {
     #[test]
     fn classifies_images_heic_and_unsupported_images() {
         use ComposerAttachmentFileKind::*;
-        assert_eq!(classify_composer_attachment_file(&file("photo.png", "image/png")), Image);
-        assert_eq!(classify_composer_attachment_file(&file("photo.heic", "")), Image);
-        assert_eq!(classify_composer_attachment_file(&file("diagram.svg", "image/svg+xml")), UnsupportedImage);
-        assert_eq!(classify_composer_attachment_file(&file("photo.tiff", "image/tiff")), UnsupportedImage);
-        assert_eq!(classify_composer_attachment_file(&file("report.pdf", "application/pdf")), File);
+        assert_eq!(
+            classify_composer_attachment_file(&file("photo.png", "image/png")),
+            Image
+        );
+        assert_eq!(
+            classify_composer_attachment_file(&file("photo.heic", "")),
+            Image
+        );
+        assert_eq!(
+            classify_composer_attachment_file(&file("diagram.svg", "image/svg+xml")),
+            UnsupportedImage
+        );
+        assert_eq!(
+            classify_composer_attachment_file(&file("photo.tiff", "image/tiff")),
+            UnsupportedImage
+        );
+        assert_eq!(
+            classify_composer_attachment_file(&file("report.pdf", "application/pdf")),
+            File
+        );
     }
 
     #[test]
     fn falls_back_to_the_extension_when_an_image_arrives_without_a_mime_type() {
         use ComposerAttachmentFileKind::*;
-        assert_eq!(classify_composer_attachment_file(&file("photo.jpg", "")), Image);
-        assert_eq!(classify_composer_attachment_file(&file("shot.PNG", "")), Image);
-        assert_eq!(classify_composer_attachment_file(&file("archive.zip", "")), File);
-        assert_eq!(classify_composer_attachment_file(&file("no-extension", "")), File);
-        assert_eq!(infer_image_mime_type_from_name("photo.jpg"), Some("image/jpeg"));
+        assert_eq!(
+            classify_composer_attachment_file(&file("photo.jpg", "")),
+            Image
+        );
+        assert_eq!(
+            classify_composer_attachment_file(&file("shot.PNG", "")),
+            Image
+        );
+        assert_eq!(
+            classify_composer_attachment_file(&file("archive.zip", "")),
+            File
+        );
+        assert_eq!(
+            classify_composer_attachment_file(&file("no-extension", "")),
+            File
+        );
+        assert_eq!(
+            infer_image_mime_type_from_name("photo.jpg"),
+            Some("image/jpeg")
+        );
         assert_eq!(infer_image_mime_type_from_name("archive.zip"), None);
         assert_eq!(infer_image_mime_type_from_name(".png"), None);
     }
@@ -324,8 +382,14 @@ mod tests {
         let png = file("shot.PNG", "application/octet-stream");
         assert_eq!(classify_composer_attachment_file(&jpeg), Image);
         assert_eq!(classify_composer_attachment_file(&png), Image);
-        assert_eq!(normalize_composer_image_file_mime_type(jpeg).mime_type, "image/jpeg");
-        assert_eq!(normalize_composer_image_file_mime_type(png).mime_type, "image/png");
+        assert_eq!(
+            normalize_composer_image_file_mime_type(jpeg).mime_type,
+            "image/jpeg"
+        );
+        assert_eq!(
+            normalize_composer_image_file_mime_type(png).mime_type,
+            "image/png"
+        );
     }
 
     #[test]
@@ -339,18 +403,40 @@ mod tests {
         assert_eq!(classify_composer_attachment_file(&unknown_document), File);
         assert_eq!(classify_composer_attachment_file(&document), File);
         assert_eq!(classify_composer_attachment_file(&explicit), Image);
-        assert_eq!(normalize_composer_image_file_mime_type(binary.clone()), binary);
-        assert_eq!(normalize_composer_image_file_mime_type(explicit.clone()), explicit);
+        assert_eq!(
+            normalize_composer_image_file_mime_type(binary.clone()),
+            binary
+        );
+        assert_eq!(
+            normalize_composer_image_file_mime_type(explicit.clone()),
+            explicit
+        );
     }
 
     #[test]
     fn paste_handling_claims_images_and_text_free_files() {
-        assert!(!should_handle_composer_attachment_paste(&[file("clipboard.rtf", "application/rtf")], "Copied text"));
-        for image in [file("diagram.svg", "image/svg+xml"), file("photo.tiff", "image/tiff"), file("photo.heic", "image/heic")] {
-            assert!(should_handle_composer_attachment_paste(&[image], "Image caption"));
+        assert!(!should_handle_composer_attachment_paste(
+            &[file("clipboard.rtf", "application/rtf")],
+            "Copied text"
+        ));
+        for image in [
+            file("diagram.svg", "image/svg+xml"),
+            file("photo.tiff", "image/tiff"),
+            file("photo.heic", "image/heic"),
+        ] {
+            assert!(should_handle_composer_attachment_paste(
+                &[image],
+                "Image caption"
+            ));
         }
-        assert!(should_handle_composer_attachment_paste(&[file("report.pdf", "application/pdf")], ""));
-        assert!(should_handle_composer_attachment_paste(&[file("empty.txt", "text/plain")], ""));
+        assert!(should_handle_composer_attachment_paste(
+            &[file("report.pdf", "application/pdf")],
+            ""
+        ));
+        assert!(should_handle_composer_attachment_paste(
+            &[file("empty.txt", "text/plain")],
+            ""
+        ));
         assert!(!should_handle_composer_attachment_paste(&[], ""));
     }
 
@@ -364,7 +450,10 @@ mod tests {
 
     #[test]
     fn staging_limit_follows_the_server_capability() {
-        assert_eq!(file_attachment_staging_limit(&state(false, false, None)), Some(PROVIDER_SEND_TURN_MAX_FILE_BYTES));
+        assert_eq!(
+            file_attachment_staging_limit(&state(false, false, None)),
+            Some(PROVIDER_SEND_TURN_MAX_FILE_BYTES)
+        );
         assert_eq!(
             file_attachment_capability_block_reason(
                 &state(false, false, None),
@@ -373,33 +462,70 @@ mod tests {
             .as_deref(),
             Some("Waiting for the server before file attachments can send")
         );
-        assert_eq!(file_attachment_staging_limit(&state(true, true, None)), None);
-        assert_eq!(file_attachment_staging_limit(&state(true, false, Some(50 * 1024 * 1024))), None);
-        let unsupported = "This server does not accept file attachments right now. Remove the files to send.";
-        let files = [("report.pdf".to_owned(), 1024)];
-        assert_eq!(file_attachment_capability_block_reason(&state(true, true, None), &files).as_deref(), Some(unsupported));
         assert_eq!(
-            file_attachment_capability_block_reason(&state(true, false, Some(50 * 1024 * 1024)), &files).as_deref(),
+            file_attachment_staging_limit(&state(true, true, None)),
+            None
+        );
+        assert_eq!(
+            file_attachment_staging_limit(&state(true, false, Some(50 * 1024 * 1024))),
+            None
+        );
+        let unsupported =
+            "This server does not accept file attachments right now. Remove the files to send.";
+        let files = [("report.pdf".to_owned(), 1024)];
+        assert_eq!(
+            file_attachment_capability_block_reason(&state(true, true, None), &files).as_deref(),
             Some(unsupported)
         );
         assert_eq!(
-            file_attachment_capability_block_reason(&state(true, true, Some(1024 * 1024)), &[("large.zip".into(), 2 * 1024 * 1024)])
-                .as_deref(),
+            file_attachment_capability_block_reason(
+                &state(true, false, Some(50 * 1024 * 1024)),
+                &files
+            )
+            .as_deref(),
+            Some(unsupported)
+        );
+        assert_eq!(
+            file_attachment_capability_block_reason(
+                &state(true, true, Some(1024 * 1024)),
+                &[("large.zip".into(), 2 * 1024 * 1024)]
+            )
+            .as_deref(),
             Some("'large.zip' exceeds the 1 MB attachment limit.")
         );
-        assert_eq!(file_attachment_staging_limit(&state(true, true, Some(1024 * 1024))), Some(1024 * 1024));
         assert_eq!(
-            file_attachment_staging_limit(&state(true, true, Some(PROVIDER_SEND_TURN_MAX_FILE_BYTES * 2))),
+            file_attachment_staging_limit(&state(true, true, Some(1024 * 1024))),
+            Some(1024 * 1024)
+        );
+        assert_eq!(
+            file_attachment_staging_limit(&state(
+                true,
+                true,
+                Some(PROVIDER_SEND_TURN_MAX_FILE_BYTES * 2)
+            )),
             Some(PROVIDER_SEND_TURN_MAX_FILE_BYTES)
         );
-        assert_eq!(file_attachment_capability_block_reason(&state(true, true, Some(50 * 1024 * 1024)), &files), None);
-        assert_eq!(file_attachment_capability_block_reason(&state(true, false, None), &[]), None);
-        assert_eq!(file_attachment_capability_block_reason(&state(false, false, None), &[]), None);
+        assert_eq!(
+            file_attachment_capability_block_reason(
+                &state(true, true, Some(50 * 1024 * 1024)),
+                &files
+            ),
+            None
+        );
+        assert_eq!(
+            file_attachment_capability_block_reason(&state(true, false, None), &[]),
+            None
+        );
+        assert_eq!(
+            file_attachment_capability_block_reason(&state(false, false, None), &[]),
+            None
+        );
     }
 
     #[test]
     fn keeps_draft_persisted_file_uploads_when_the_upload_capability_flips_off() {
-        let image = ComposerImageAttachment::new("image-1", "photo.png", "image/png", vec![1, 2, 3]);
+        let image =
+            ComposerImageAttachment::new("image-1", "photo.png", "image/png", vec![1, 2, 3]);
         let uploading = composer_file("file-uploading", "fresh.pdf", "application/pdf");
         let hydrated = ComposerFileAttachment {
             data: None,
@@ -444,7 +570,10 @@ mod tests {
             ("clip.avi", "video/x-msvideo"),
             ("clip.ogv", "video/ogg"),
         ] {
-            assert_eq!(video_mime_type(name, "application/octet-stream").as_deref(), Some(expected));
+            assert_eq!(
+                video_mime_type(name, "application/octet-stream").as_deref(),
+                Some(expected)
+            );
             assert!(is_video_attachment(name, "application/octet-stream"));
         }
         assert_eq!(video_mime_type("clip.mp4", "application/pdf"), None);
@@ -455,7 +584,13 @@ mod tests {
         assert_eq!(format_attachment_size(0), "1 KB");
         assert_eq!(format_attachment_size(48 * 1024), "48 KB");
         assert_eq!(format_attachment_size(3_355_443), "3.2 MB");
-        assert_eq!(file_attachment_too_large_message("a.zip", 1), "'a.zip' exceeds the 1 byte attachment limit.");
-        assert_eq!(file_attachment_too_large_message("a.zip", 2048), "'a.zip' exceeds the 2 KB attachment limit.");
+        assert_eq!(
+            file_attachment_too_large_message("a.zip", 1),
+            "'a.zip' exceeds the 1 byte attachment limit."
+        );
+        assert_eq!(
+            file_attachment_too_large_message("a.zip", 2048),
+            "'a.zip' exceeds the 2 KB attachment limit."
+        );
     }
 }

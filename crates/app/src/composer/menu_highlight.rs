@@ -37,7 +37,12 @@ mod tests {
     #[test]
     fn preserves_the_highlighted_item_within_the_same_query() {
         assert_eq!(
-            resolve_composer_menu_active_item_id(&ITEMS, Some("second"), Some("skill:u"), Some("skill:u")),
+            resolve_composer_menu_active_item_id(
+                &ITEMS,
+                Some("second"),
+                Some("skill:u"),
+                Some("skill:u")
+            ),
             Some("second")
         );
     }
@@ -45,7 +50,12 @@ mod tests {
     #[test]
     fn resets_to_the_top_result_when_the_query_changes() {
         assert_eq!(
-            resolve_composer_menu_active_item_id(&ITEMS, Some("second"), Some("skill:ui"), Some("skill:u")),
+            resolve_composer_menu_active_item_id(
+                &ITEMS,
+                Some("second"),
+                Some("skill:ui"),
+                Some("skill:u")
+            ),
             Some("top")
         );
     }
@@ -53,14 +63,24 @@ mod tests {
     #[test]
     fn falls_back_to_the_first_item_when_the_highlighted_item_disappears() {
         assert_eq!(
-            resolve_composer_menu_active_item_id(&ITEMS, Some("missing"), Some("skill:ui"), Some("skill:ui")),
+            resolve_composer_menu_active_item_id(
+                &ITEMS,
+                Some("missing"),
+                Some("skill:ui"),
+                Some("skill:ui")
+            ),
             Some("top")
         );
     }
 
     #[test]
     fn clears_while_async_results_are_empty_and_resolves_against_restored_results() {
-        let cleared = resolve_composer_menu_active_item_id(&[], Some("second"), Some("path:src"), Some("path:src"));
+        let cleared = resolve_composer_menu_active_item_id(
+            &[],
+            Some("second"),
+            Some("path:src"),
+            Some("path:src"),
+        );
         assert_eq!(cleared, None);
         assert_eq!(
             resolve_composer_menu_active_item_id(

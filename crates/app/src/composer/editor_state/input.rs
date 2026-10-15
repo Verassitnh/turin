@@ -90,9 +90,20 @@ impl EditorState {
         for block in from.block..=to.block {
             if let Some(inline) = self.doc.blocks[block].inline() {
                 let cells = to_cells(inline);
-                let start = if block == from.block { cell_index(&cells, from.offset) } else { 0 };
-                let end = if block == to.block { cell_index(&cells, to.offset) } else { cells.len() };
-                if cells[start..end.max(start)].iter().any(|cell| cell.is_atom() || !cell.marks.is_empty()) {
+                let start = if block == from.block {
+                    cell_index(&cells, from.offset)
+                } else {
+                    0
+                };
+                let end = if block == to.block {
+                    cell_index(&cells, to.offset)
+                } else {
+                    cells.len()
+                };
+                if cells[start..end.max(start)]
+                    .iter()
+                    .any(|cell| cell.is_atom() || !cell.marks.is_empty())
+                {
                     special = true;
                 }
             }
@@ -101,7 +112,11 @@ impl EditorState {
             return false;
         }
         let snapshot = self.snapshot();
-        if selection_touches_mention_boundary(&snapshot.value, snapshot.selection_start, snapshot.selection_end) {
+        if selection_touches_mention_boundary(
+            &snapshot.value,
+            snapshot.selection_start,
+            snapshot.selection_end,
+        ) {
             return false;
         }
         self.begin_change(ChangeKind::Other);
@@ -155,14 +170,23 @@ impl EditorState {
 
         // `[ ] ` at the start of an existing bullet item turns it into a task.
         if let Block::Item {
-            prefix: ItemPrefix::Bullet { indent, marker, space },
+            prefix:
+                ItemPrefix::Bullet {
+                    indent,
+                    marker,
+                    space,
+                },
             ..
         } = &block
             && let Some(captures) = rules.bullet_to_task.captures(&before)
             && ["-", "*", "+"].contains(&marker.as_str())
         {
             let checked = captures[1].eq_ignore_ascii_case("x");
-            let marker_space = if space.is_empty() { " ".to_owned() } else { space.clone() };
+            let marker_space = if space.is_empty() {
+                " ".to_owned()
+            } else {
+                space.clone()
+            };
             self.doc.blocks[pos.block] = Block::Item {
                 prefix: ItemPrefix::Task {
                     indent: indent.clone(),
@@ -268,14 +292,20 @@ impl EditorState {
             let remainder = with_rest("");
             self.doc.blocks[pos.block] = Block::Rule { source };
             if remainder.is_empty() {
-                if pos.block + 1 < self.doc.blocks.len() && self.doc.blocks[pos.block + 1].is_textblock() {
+                if pos.block + 1 < self.doc.blocks.len()
+                    && self.doc.blocks[pos.block + 1].is_textblock()
+                {
                     self.selection = Selection::caret(DocPos::new(pos.block + 1, 0));
                 } else {
-                    self.doc.blocks.insert(pos.block + 1, Block::Paragraph(Vec::new()));
+                    self.doc
+                        .blocks
+                        .insert(pos.block + 1, Block::Paragraph(Vec::new()));
                     self.selection = Selection::caret(DocPos::new(pos.block + 1, 0));
                 }
             } else {
-                self.doc.blocks.insert(pos.block + 1, Block::Paragraph(remainder));
+                self.doc
+                    .blocks
+                    .insert(pos.block + 1, Block::Paragraph(remainder));
                 self.selection = Selection::caret(DocPos::new(pos.block + 1, 0));
             }
             self.after_input_rule(typed_state);

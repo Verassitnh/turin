@@ -664,11 +664,14 @@ impl FlowProbe {
 
     /// Byte index nearest to a window point.
     pub fn index_for_point(&self, position: Point<Pixels>) -> Option<usize> {
-        self.with_layout(|layout, bounds, len| layout.index_for_position(position - bounds.origin, len))
+        self.with_layout(|layout, bounds, len| {
+            layout.index_for_position(position - bounds.origin, len)
+        })
     }
 
     pub fn line_count(&self) -> usize {
-        self.with_layout(|layout, _, _| layout.lines.len().max(1)).unwrap_or(1)
+        self.with_layout(|layout, _, _| layout.lines.len().max(1))
+            .unwrap_or(1)
     }
 
     /// The visual line holding byte `index`; a wrap point belongs to the later
@@ -678,7 +681,9 @@ impl FlowProbe {
             layout
                 .lines
                 .iter()
-                .position(|line| index < line.range.end || (index == len && index <= line.range.end))
+                .position(|line| {
+                    index < line.range.end || (index == len && index <= line.range.end)
+                })
                 .unwrap_or(layout.lines.len().saturating_sub(1))
         })
         .unwrap_or(0)
@@ -688,7 +693,10 @@ impl FlowProbe {
     pub fn line_visible_range(&self, line: usize) -> Range<usize> {
         self.with_layout(|layout, _, len| {
             layout.lines.get(line).map_or(0..len, |line| {
-                let end = line.fragments.last().map_or(line.range.start, |f| f.range.end);
+                let end = line
+                    .fragments
+                    .last()
+                    .map_or(line.range.start, |f| f.range.end);
                 line.range.start..end.max(line.range.start)
             })
         })
@@ -701,7 +709,10 @@ impl FlowProbe {
             let Some(target) = layout.lines.get(line) else {
                 return len;
             };
-            layout.index_for_position(point(x - bounds.origin.x, target.top + target.height / 2.), len)
+            layout.index_for_position(
+                point(x - bounds.origin.x, target.top + target.height / 2.),
+                len,
+            )
         })
         .unwrap_or(0)
     }
@@ -715,18 +726,6 @@ impl FlowProbe {
             Some(Bounds::new(
                 bounds.origin + point(x, target.top),
                 size(width, target.height),
-            ))
-        })
-        .flatten()
-    }
-
-    /// Bounds of one visual line (window coordinates).
-    pub fn line_bounds(&self, line: usize) -> Option<Bounds<Pixels>> {
-        self.with_layout(|layout, bounds, _| {
-            let target = layout.lines.get(line)?;
-            Some(Bounds::new(
-                bounds.origin + point(px(0.), target.top),
-                size(bounds.size.width, target.height),
             ))
         })
         .flatten()
@@ -1159,7 +1158,10 @@ impl Element for InlineFlow {
         // Highlights set by an editor.
         for highlight in &self.highlights {
             for line in &layout.lines {
-                let line_end = line.fragments.last().map_or(line.range.start, |f| f.range.end);
+                let line_end = line
+                    .fragments
+                    .last()
+                    .map_or(line.range.start, |f| f.range.end);
                 if line_end < highlight.range.start || line.range.start > highlight.range.end {
                     continue;
                 }
@@ -1172,7 +1174,10 @@ impl Element for InlineFlow {
                 }
                 if x1 > x0 {
                     window.paint_quad(PaintQuad {
-                        bounds: Bounds::new(bounds.origin + point(x0, line.top), size(x1 - x0, line.height)),
+                        bounds: Bounds::new(
+                            bounds.origin + point(x0, line.top),
+                            size(x1 - x0, line.height),
+                        ),
                         corner_radii: Corners::default(),
                         background: highlight.color.into(),
                         border_widths: Edges::default(),
@@ -1272,12 +1277,18 @@ impl Element for InlineFlow {
             let line_ix = layout
                 .lines
                 .iter()
-                .position(|line| caret.index < line.range.end || (caret.index == text.len() && caret.index <= line.range.end))
+                .position(|line| {
+                    caret.index < line.range.end
+                        || (caret.index == text.len() && caret.index <= line.range.end)
+                })
                 .unwrap_or(layout.lines.len().saturating_sub(1));
             if let Some(line) = layout.lines.get(line_ix) {
                 let x = FlowLayout::x_for_index(line, caret.index);
                 window.paint_quad(PaintQuad {
-                    bounds: Bounds::new(bounds.origin + point(x, line.top), size(caret.width, line.height)),
+                    bounds: Bounds::new(
+                        bounds.origin + point(x, line.top),
+                        size(caret.width, line.height),
+                    ),
                     corner_radii: Corners::default(),
                     background: caret.color.into(),
                     border_widths: Edges::default(),

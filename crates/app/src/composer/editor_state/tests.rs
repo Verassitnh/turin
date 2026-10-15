@@ -180,7 +180,9 @@ fn lines_after_a_closing_fence_leave_the_block() {
     let mut editor = code_editor("a\n```\nb", Some("a\n```".len()), None);
     assert!(editor.exit_code_block_on_closing_fence());
     assert_eq!(editor.value(), "```\na\n```\n\nb");
-    assert!(matches!(&editor.doc.blocks[editor.selection.head.block], Block::Paragraph(inline) if inline.is_empty()));
+    assert!(
+        matches!(&editor.doc.blocks[editor.selection.head.block], Block::Paragraph(inline) if inline.is_empty())
+    );
 }
 
 #[test]
@@ -277,7 +279,10 @@ fn enter_on_an_opening_fence_converts_it() {
         let Block::Code(code) = &editor.doc.blocks[0] else {
             panic!("code block");
         };
-        assert_eq!((code.fence.as_str(), code.language.as_str()), (fence, language));
+        assert_eq!(
+            (code.fence.as_str(), code.language.as_str()),
+            (fence, language)
+        );
         assert_eq!(code.close, format!("\n{fence}"));
         assert_eq!(code.text, "");
         assert_eq!(editor.selection.head, DocPos::new(0, 0));
@@ -352,7 +357,10 @@ fn enter_twice_lifts_the_empty_item_one_level() {
         ("- a\n  - x\n- c", "- a\n  - x\n- b\n- c"),
         ("- a\n  - x\n  - y", "- a\n  - x\n- b\n  - y"),
         ("- [ ] a\n  - [ ] x", "- [ ] a\n  - [ ] x\n- [ ] b"),
-        ("- [x] a\n  - [ ] x\n- [ ] c", "- [x] a\n  - [ ] x\n- [ ] b\n- [ ] c"),
+        (
+            "- [x] a\n  - [ ] x\n- [ ] c",
+            "- [x] a\n  - [ ] x\n- [ ] b\n- [ ] c",
+        ),
     ] {
         let mut editor = state(value);
         caret_at(&mut editor, "x", 1);
@@ -368,7 +376,10 @@ fn enter_in_the_middle_of_an_ordered_list_renumbers_the_rest() {
     for (value, expected) in [
         ("1. a\n2. x\n3. c\n4. d", "1. a\n2. x\n3. b\n4. c\n5. d"),
         ("1) a\n2) x\n3) c", "1) a\n2) x\n3) b\n4) c"),
-        ("1. a\n   1. x\n   2. c\n2. d", "1. a\n   1. x\n   2. b\n   3. c\n2. d"),
+        (
+            "1. a\n   1. x\n   2. c\n2. d",
+            "1. a\n   1. x\n   2. b\n   3. c\n2. d",
+        ),
     ] {
         let mut editor = state(value);
         caret_at(&mut editor, "x", 1);
@@ -439,7 +450,10 @@ fn lines_pasted_at_the_end_of_an_item_land_after_the_list() {
 #[test]
 fn a_rule_at_the_end_keeps_an_empty_line_to_type_on() {
     let mut editor = state("a\n---");
-    assert!(matches!(editor.doc.blocks.last(), Some(Block::Paragraph(_))));
+    assert!(matches!(
+        editor.doc.blocks.last(),
+        Some(Block::Paragraph(_))
+    ));
     editor.set_caret(editor.end_pos());
     editor.insert_text("b");
     assert_eq!(editor.value(), "a\n---\nb");
@@ -709,7 +723,10 @@ fn copy_keeps_prefixes_of_blocks_it_spans() {
     };
     assert_eq!(copy("- one\n- two\n- three", "one", "two"), "- one\n- two");
     assert_eq!(copy("3) one\n4) two", "one", "two"), "3) one\n4) two");
-    assert_eq!(copy("- [ ] one\n- [x] two", "one", "two"), "- [ ] one\n- [x] two");
+    assert_eq!(
+        copy("- [ ] one\n- [x] two", "one", "two"),
+        "- [ ] one\n- [x] two"
+    );
     assert_eq!(copy("- p\n  - a\n  - b", "p", "a"), "- p\n  - a");
     assert_eq!(copy("> one\n> two", "one", "two"), "> one\n> two");
     assert_eq!(copy("- one two", "one", "one"), "one");
@@ -718,12 +735,21 @@ fn copy_keeps_prefixes_of_blocks_it_spans() {
 
 #[test]
 fn pasting_into_a_path_query_keeps_the_path_literal() {
-    for path in ["src/__test__.tsx", "src/__tests__/a.ts", "pkg/__init__.py", "a/**b**/c"] {
+    for path in [
+        "src/__test__.tsx",
+        "src/__tests__/a.ts",
+        "pkg/__init__.py",
+        "a/**b**/c",
+    ] {
         let mut editor = at_end("Open @");
         editor.paste(path, &label, true);
         assert_eq!(editor.value(), format!("Open @{path}"));
         assert!(
-            editor.doc.blocks[0].inline().unwrap().iter().all(|n| n.marks.is_empty()),
+            editor.doc.blocks[0]
+                .inline()
+                .unwrap()
+                .iter()
+                .all(|n| n.marks.is_empty()),
             "{path}"
         );
     }

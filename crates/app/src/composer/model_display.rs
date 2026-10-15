@@ -15,7 +15,11 @@ fn strip_leading_qualifier(value: &str, qualifier: Option<&str>) -> String {
     };
     let stripped = re.replace(value, "");
     let trimmed = stripped.trim();
-    if trimmed.is_empty() { value.to_owned() } else { trimmed.to_owned() }
+    if trimmed.is_empty() {
+        value.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 /// `getDisplayModelName`.
@@ -36,7 +40,8 @@ pub fn get_provider_row_label(provider_display_name: &str, sub_provider: Option<
         return provider_display_name.to_owned();
     };
     if !provider.is_empty()
-        && Regex::new(&format!(r"(?i)^{}\s+\S", regex::escape(provider))).is_ok_and(|re| re.is_match(sub))
+        && Regex::new(&format!(r"(?i)^{}\s+\S", regex::escape(provider)))
+            .is_ok_and(|re| re.is_match(sub))
     {
         return sub.to_owned();
     }
@@ -54,10 +59,22 @@ mod tests {
 
     #[test]
     fn shows_a_sub_provider_named_after_its_provider_on_its_own() {
-        assert_eq!(get_provider_row_label("OpenCode", Some("OpenCode Zen")), "OpenCode Zen");
-        assert_eq!(get_provider_row_label("OpenCode", Some("OpenCode Go")), "OpenCode Go");
-        assert_eq!(get_provider_row_label("OpenCode", Some("opencode-go")), "OpenCode · opencode-go");
-        assert_eq!(get_provider_row_label("OpenCode", Some("GitHub Copilot")), "OpenCode · GitHub Copilot");
+        assert_eq!(
+            get_provider_row_label("OpenCode", Some("OpenCode Zen")),
+            "OpenCode Zen"
+        );
+        assert_eq!(
+            get_provider_row_label("OpenCode", Some("OpenCode Go")),
+            "OpenCode Go"
+        );
+        assert_eq!(
+            get_provider_row_label("OpenCode", Some("opencode-go")),
+            "OpenCode · opencode-go"
+        );
+        assert_eq!(
+            get_provider_row_label("OpenCode", Some("GitHub Copilot")),
+            "OpenCode · GitHub Copilot"
+        );
         assert_eq!(get_provider_row_label("Claude", None), "Claude");
     }
 
@@ -68,7 +85,10 @@ mod tests {
             ..ProviderModel::simple("a/b", "OpenCode Zen: Step 5")
         };
         assert_eq!(get_display_model_name(&model, false), "Step 5");
-        let short = ProviderModel { short_name: Some("Step".into()), ..ProviderModel::simple("a", "Long Name") };
+        let short = ProviderModel {
+            short_name: Some("Step".into()),
+            ..ProviderModel::simple("a", "Long Name")
+        };
         assert_eq!(get_display_model_name(&short, true), "Step");
         assert_eq!(get_display_model_name(&short, false), "Long Name");
     }

@@ -7,11 +7,14 @@ use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    PathBuilder, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, point, px, rems,
+    AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, PathBuilder, StatefulInteractiveElement as _, Styled as _, Window, canvas,
+    div, point, px, rems,
 };
 
-use crate::components::chat::composer_pending_panels::{BannerVariant as SurfaceVariant, attachment_overlap, banner_surface};
+use crate::components::chat::composer_pending_panels::{
+    BannerVariant as SurfaceVariant, attachment_overlap, banner_surface,
+};
 use crate::composer::banner_stack::order_banners;
 use crate::composer::context_meter::{
     format_context_window_compaction_message, format_context_window_cost, format_percentage,
@@ -38,7 +41,11 @@ fn surface_variant(variant: BannerVariant) -> SurfaceVariant {
 }
 
 /// `ComposerBanner.Row`: icon column, content, actions.
-fn banner_row(icon: Option<AnyElement>, content: AnyElement, actions: Vec<AnyElement>) -> gpui_kit::Div {
+fn banner_row(
+    icon: Option<AnyElement>,
+    content: AnyElement,
+    actions: Vec<AnyElement>,
+) -> gpui_kit::Div {
     div()
         .flex()
         .w_full()
@@ -55,14 +62,33 @@ fn banner_row(icon: Option<AnyElement>, content: AnyElement, actions: Vec<AnyEle
                 .justify_center()
                 .children(icon),
         )
-        .child(div().flex().min_w_0().flex_1().items_center().gap_1().child(content))
+        .child(
+            div()
+                .flex()
+                .min_w_0()
+                .flex_1()
+                .items_center()
+                .gap_1()
+                .child(content),
+        )
         .when(!actions.is_empty(), |this| {
-            this.child(div().flex().flex_shrink_0().items_center().justify_end().gap_1().children(actions))
+            this.child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .justify_end()
+                    .gap_1()
+                    .children(actions),
+            )
         })
 }
 
 fn small_icon(name: IconName, theme: &AppTheme) -> AnyElement {
-    Icon::new(name).size(rems(0.75)).color(theme.muted_foreground).into_any_element()
+    Icon::new(name)
+        .size(rems(0.75))
+        .color(theme.muted_foreground)
+        .into_any_element()
 }
 
 fn count_label(count: usize, theme: &AppTheme) -> AnyElement {
@@ -79,7 +105,12 @@ fn count_label(count: usize, theme: &AppTheme) -> AnyElement {
 
 impl ChatComposer {
     /// Drawers above the composer, top to bottom.
-    pub(super) fn render_drawers(&mut self, vm: &Arc<ComposerViewModel>, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_drawers(
+        &mut self,
+        vm: &Arc<ComposerViewModel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let theme = cx.app_theme().clone();
         let mut drawers: Vec<AnyElement> = Vec::new();
         let ordered: Vec<BannerItem> = order_banners(&vm.banners).into_iter().cloned().collect();
@@ -116,7 +147,11 @@ impl ChatComposer {
                     _ if theme.is_dark() => with_alpha(crate::theme::tokens::tw::WHITE, 0.05),
                     _ => with_alpha(theme.foreground, 0.08),
                 };
-                let surface = if theme.is_dark() { theme.surface_raised } else { theme.card };
+                let surface = if theme.is_dark() {
+                    theme.surface_raised
+                } else {
+                    theme.card
+                };
                 drawers.push(
                     div()
                         .id("composer-banner-peek")
@@ -146,16 +181,30 @@ impl ChatComposer {
         if let Some(front) = front {
             drawers.push(self.banner_surface_for(&front, true, window, cx));
         }
-        if vm.show_plan_follow_up_prompt && vm.pending_answer.is_none() && !vm.has_pending_approval {
+        if vm.show_plan_follow_up_prompt && vm.pending_answer.is_none() && !vm.has_pending_approval
+        {
             let title = vm.plan_follow_up_title.clone();
             let content = div()
                 .flex()
                 .min_w_0()
                 .items_center()
                 .gap_1()
-                .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child("Plan ready"))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.muted_foreground)
+                        .child("Plan ready"),
+                )
                 .when_some(title, |this, title| {
-                    this.child(div().min_w_0().flex_1().truncate().text_color(with_alpha(theme.foreground, 0.85)).child(title))
+                    this.child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_color(with_alpha(theme.foreground, 0.85))
+                            .child(title),
+                    )
                 })
                 .into_any_element();
             drawers.push(banner_surface(
@@ -170,7 +219,13 @@ impl ChatComposer {
     }
 
     /// `ComposerBannerStackAlert`.
-    fn banner_surface_for(&mut self, item: &BannerItem, attached: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn banner_surface_for(
+        &mut self,
+        item: &BannerItem,
+        attached: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let title = item.title.clone();
         let description = item.description.clone();
@@ -180,9 +235,22 @@ impl ChatComposer {
             .items_center()
             .gap_1()
             .whitespace_nowrap()
-            .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(title))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(title),
+            )
             .when_some(description, |this, description| {
-                this.child(div().min_w_0().flex_1().truncate().text_color(theme.muted_foreground).child(description))
+                this.child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_color(theme.muted_foreground)
+                        .child(description),
+                )
             })
             .into_any_element();
         let mut actions: Vec<AnyElement> = Vec::new();
@@ -209,7 +277,11 @@ impl ChatComposer {
                     .variant(ButtonVariant::Ghost)
                     .size(ButtonSize::IconXs)
                     .icon(IconName::X)
-                    .tooltip(Tooltip::new(item.dismiss_label.clone().unwrap_or_else(|| "Dismiss warning".to_owned())))
+                    .tooltip(Tooltip::new(
+                        item.dismiss_label
+                            .clone()
+                            .unwrap_or_else(|| "Dismiss warning".to_owned()),
+                    ))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(source) = this.source(cx) {
                             source.dismiss_banner(&id, cx);
@@ -218,7 +290,10 @@ impl ChatComposer {
                     .into_any_element(),
             );
         }
-        let icon = Icon::new(item.icon).size(rems(0.75)).color(theme.muted_foreground).into_any_element();
+        let icon = Icon::new(item.icon)
+            .size(rems(0.75))
+            .color(theme.muted_foreground)
+            .into_any_element();
         let row = banner_row(Some(icon), content, actions).into_any_element();
         let surface = banner_surface(surface_variant(item.variant), false, row, window, &theme);
         if attached {
@@ -239,7 +314,12 @@ impl ChatComposer {
 
     // ----- Queue -----------------------------------------------------------
 
-    fn queue_drawer(&mut self, queue: &QueueState, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn queue_drawer(
+        &mut self,
+        queue: &QueueState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let expanded = self.queue_expanded;
         let count = queue.queued.len();
@@ -253,7 +333,10 @@ impl ChatComposer {
             }))
             .child(banner_row(
                 Some(small_icon(IconName::ListOrdered, &theme)),
-                div().text_color(theme.muted_foreground).child("Queued").into_any_element(),
+                div()
+                    .text_color(theme.muted_foreground)
+                    .child("Queued")
+                    .into_any_element(),
                 vec![
                     count_label(count, &theme),
                     div()
@@ -262,9 +345,13 @@ impl ChatComposer {
                         .items_center()
                         .justify_center()
                         .child(
-                            Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronUp })
-                                .size(rems(0.875))
-                                .color(theme.muted_foreground),
+                            Icon::new(if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronUp
+                            })
+                            .size(rems(0.875))
+                            .color(theme.muted_foreground),
                         )
                         .into_any_element(),
                 ],
@@ -338,21 +425,35 @@ impl ChatComposer {
                 let icon = if pending {
                     small_icon(IconName::Clock3, &theme)
                 } else {
-                    Icon::new(IconName::GripVertical).size(rems(0.75)).color(with_alpha(theme.muted_foreground, 0.7).into()).into_any_element()
+                    Icon::new(IconName::GripVertical)
+                        .size(rems(0.75))
+                        .color(with_alpha(theme.muted_foreground, 0.7).into())
+                        .into_any_element()
                 };
                 let text = if preview.is_empty() {
                     let images = run.image_names.len();
                     let files = run.file_names.len();
-                    format!("({} attachment{})", images + files, if images + files == 1 { "" } else { "s" })
+                    format!(
+                        "({} attachment{})",
+                        images + files,
+                        if images + files == 1 { "" } else { "s" }
+                    )
                 } else {
                     preview
                 };
                 div()
                     .rounded(px(4.))
-                    .when(is_editing, |this| this.bg(theme.accent).text_color(theme.accent_foreground))
+                    .when(is_editing, |this| {
+                        this.bg(theme.accent).text_color(theme.accent_foreground)
+                    })
                     .child(banner_row(
                         Some(icon),
-                        div().min_w_0().truncate().text_color(with_alpha(theme.foreground, 0.85)).child(text).into_any_element(),
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(with_alpha(theme.foreground, 0.85))
+                            .child(text)
+                            .into_any_element(),
                         actions,
                     ))
                     .into_any_element()
@@ -363,7 +464,16 @@ impl ChatComposer {
             .flex_col()
             .child(header)
             .when(expanded, |this| {
-                this.child(div().id("composer-queue-list").flex().flex_col().max_h(rems(8.)).overflow_y_scroll().gap(px(1.)).children(rows))
+                this.child(
+                    div()
+                        .id("composer-queue-list")
+                        .flex()
+                        .flex_col()
+                        .max_h(rems(8.))
+                        .overflow_y_scroll()
+                        .gap(px(1.))
+                        .children(rows),
+                )
             })
             .into_any_element();
         banner_surface(SurfaceVariant::Default, false, body, window, &theme)
@@ -371,7 +481,12 @@ impl ChatComposer {
 
     // ----- Stash -----------------------------------------------------------
 
-    fn stash_tab(&mut self, count: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn stash_tab(
+        &mut self,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let bounds = self.trigger_bounds.stash.clone();
         let content = div()
@@ -391,14 +506,23 @@ impl ChatComposer {
         div()
             .flex()
             .justify_end()
-            .child(banner_surface(SurfaceVariant::Default, false, content, window, &theme))
+            .child(banner_surface(
+                SurfaceVariant::Default,
+                false,
+                content,
+                window,
+                &theme,
+            ))
             .into_any_element()
     }
 
     fn stash_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.app_theme().clone();
         let entries: Vec<PromptStashEntry> = self.drafts.stash_entries().to_vec();
-        let highlighted = self.stash_highlight.clone().or_else(|| entries.first().map(|entry| entry.id.clone()));
+        let highlighted = self
+            .stash_highlight
+            .clone()
+            .or_else(|| entries.first().map(|entry| entry.id.clone()));
         let header = div()
             .id("composer-stash-header")
             .cursor(CursorStyle::PointingHand)
@@ -406,7 +530,10 @@ impl ChatComposer {
             .on_click(cx.listener(|this, _, window, cx| this.close_layer(window, cx)))
             .child(banner_row(
                 Some(small_icon(IconName::Bookmark, &theme)),
-                div().text_color(theme.muted_foreground).child("Stash").into_any_element(),
+                div()
+                    .text_color(theme.muted_foreground)
+                    .child("Stash")
+                    .into_any_element(),
                 vec![
                     count_label(entries.len(), &theme),
                     div()
@@ -414,17 +541,26 @@ impl ChatComposer {
                         .size(rems(1.5))
                         .items_center()
                         .justify_center()
-                        .child(Icon::new(IconName::ChevronDown).size(rems(0.875)).color(theme.muted_foreground))
+                        .child(
+                            Icon::new(IconName::ChevronDown)
+                                .size(rems(0.875))
+                                .color(theme.muted_foreground),
+                        )
                         .into_any_element(),
                 ],
             ));
         let rows: Vec<AnyElement> = if entries.is_empty() {
-            vec![banner_row(
-                None,
-                div().text_color(theme.muted_foreground).child("Nothing stashed yet.").into_any_element(),
-                Vec::new(),
-            )
-            .into_any_element()]
+            vec![
+                banner_row(
+                    None,
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .child("Nothing stashed yet.")
+                        .into_any_element(),
+                    Vec::new(),
+                )
+                .into_any_element(),
+            ]
         } else {
             entries
                 .iter()
@@ -443,7 +579,11 @@ impl ChatComposer {
                                 .child(format!(
                                     "saving {} image{}…",
                                     entry.pending_image_count,
-                                    if entry.pending_image_count == 1 { "" } else { "s" }
+                                    if entry.pending_image_count == 1 {
+                                        ""
+                                    } else {
+                                        "s"
+                                    }
                                 ))
                                 .into_any_element(),
                         );
@@ -453,7 +593,10 @@ impl ChatComposer {
                             div()
                                 .flex_shrink_0()
                                 .text_color(theme.warning_foreground)
-                                .child(format!("{missing} image{} dropped", if missing == 1 { "" } else { "s" }))
+                                .child(format!(
+                                    "{missing} image{} dropped",
+                                    if missing == 1 { "" } else { "s" }
+                                ))
                                 .into_any_element(),
                         );
                     }
@@ -493,14 +636,18 @@ impl ChatComposer {
                         .id(("stash-entry", index))
                         .rounded(px(4.))
                         .cursor(CursorStyle::PointingHand)
-                        .when(active, |this| this.bg(theme.accent).text_color(theme.accent_foreground))
+                        .when(active, |this| {
+                            this.bg(theme.accent).text_color(theme.accent_foreground)
+                        })
                         .on_mouse_move(cx.listener(move |this, _, _, cx| {
                             if this.stash_highlight.as_deref() != Some(hover_id.as_str()) {
                                 this.stash_highlight = Some(hover_id.clone());
                                 cx.notify();
                             }
                         }))
-                        .on_click(cx.listener(move |this, _, window, cx| this.restore_stash_entry(&id, window, cx)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.restore_stash_entry(&id, window, cx)
+                        }))
                         .child(banner_row(
                             Some(small_icon(IconName::File, &theme)),
                             div()
@@ -519,18 +666,33 @@ impl ChatComposer {
             .flex()
             .flex_col()
             .child(header)
-            .child(div().id("composer-stash-list").flex().flex_col().max_h(rems(14.)).overflow_y_scroll().gap(px(1.)).children(rows))
+            .child(
+                div()
+                    .id("composer-stash-list")
+                    .flex()
+                    .flex_col()
+                    .max_h(rems(14.))
+                    .overflow_y_scroll()
+                    .gap(px(1.))
+                    .children(rows),
+            )
             .into_any_element();
         banner_surface(SurfaceVariant::Default, false, body, window, &theme)
     }
 
     // ----- Context window meter ---------------------------------------------
 
-    pub(super) fn render_context_meter(&mut self, vm: &Arc<ComposerViewModel>, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_context_meter(
+        &mut self,
+        vm: &Arc<ComposerViewModel>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let theme = cx.app_theme().clone();
         let usage = vm.context_window.clone();
         let Some(usage) = usage else {
-            return vm.reserve_context_window_meter.then(|| div().flex_shrink_0().size(rems(1.75)).into_any_element());
+            return vm
+                .reserve_context_window_meter
+                .then(|| div().flex_shrink_0().size(rems(1.75)).into_any_element());
         };
         if !vm.settings.context_window_meter_enabled {
             return None;
@@ -538,12 +700,19 @@ impl ChatComposer {
         let percentage = usage.used_percentage();
         let normalized = percentage.unwrap_or(0.).clamp(0., 100.) as f32;
         let overloaded = normalized > 90.;
-        let ring = if overloaded { theme.error } else { with_alpha(theme.muted_foreground, 0.72).into() };
+        let ring = if overloaded {
+            theme.error
+        } else {
+            with_alpha(theme.muted_foreground, 0.72).into()
+        };
         let track = with_alpha(theme.muted_foreground, 0.24);
         let bounds = self.trigger_bounds.meter.clone();
         let label = match (usage.max_tokens, format_percentage(percentage)) {
             (Some(_), Some(used)) => format!("Context window {used} used"),
-            _ => format!("Context window {} tokens used", format_context_window_tokens(Some(usage.used_tokens))),
+            _ => format!(
+                "Context window {} tokens used",
+                format_context_window_tokens(Some(usage.used_tokens))
+            ),
         };
         let open = self.layer == Some(Layer::ContextMeter);
         Some(
@@ -560,7 +729,9 @@ impl ChatComposer {
                 .when(open, |this| this.bg(with_alpha(theme.foreground, 0.06)))
                 .hover(|style| style.bg(with_alpha(theme.foreground, 0.06)))
                 .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
-                .on_click(cx.listener(|this, _, _, cx| this.set_layer(Some(Layer::ContextMeter), cx)))
+                .on_click(
+                    cx.listener(|this, _, _, cx| this.set_layer(Some(Layer::ContextMeter), cx)),
+                )
                 .child(super::chrome::track_bounds(&bounds))
                 .child(
                     canvas(
@@ -576,8 +747,12 @@ impl ChatComposer {
                                 let mut builder = PathBuilder::stroke(width);
                                 for step in 0..=steps {
                                     let t = from + (to - from) * step as f32 / steps as f32;
-                                    let angle = t * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-                                    let at = point(center.x + radius * angle.cos(), center.y + radius * angle.sin());
+                                    let angle =
+                                        t * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                                    let at = point(
+                                        center.x + radius * angle.cos(),
+                                        center.y + radius * angle.sin(),
+                                    );
                                     if step == 0 {
                                         builder.move_to(at);
                                     } else {
@@ -601,12 +776,20 @@ impl ChatComposer {
         )
     }
 
-    pub(super) fn context_meter_popover(&mut self, vm: &Arc<ComposerViewModel>, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn context_meter_popover(
+        &mut self,
+        vm: &Arc<ComposerViewModel>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let theme = cx.app_theme().clone();
         let usage = vm.context_window.clone()?;
         let percentage = usage.used_percentage();
         let normalized = percentage.unwrap_or(0.).clamp(0., 100.) as f32;
-        let ring = if normalized > 90. { theme.error } else { with_alpha(theme.muted_foreground, 0.72).into() };
+        let ring = if normalized > 90. {
+            theme.error
+        } else {
+            with_alpha(theme.muted_foreground, 0.72).into()
+        };
         let used = format_percentage(percentage);
         let total_processed = usage.total_processed_tokens.filter(|tokens| *tokens > 0.);
         let heading = match (usage.max_tokens, used.clone()) {
@@ -625,9 +808,16 @@ impl ChatComposer {
                 .gap_3()
                 .text_size(TEXT_2XS.size)
                 .child(div().text_color(theme.secondary_label).child(label))
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(theme.secondary_label).child(value))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.secondary_label)
+                        .child(value),
+                )
         };
-        let can_compact = vm.selected_entry().is_some_and(|entry| entry.slash_commands.iter().any(|c| c.name == "compact"));
+        let can_compact = vm
+            .selected_entry()
+            .is_some_and(|entry| entry.slash_commands.iter().any(|c| c.name == "compact"));
         let body = div()
             .flex()
             .flex_col()
@@ -640,18 +830,46 @@ impl ChatComposer {
                     .items_center()
                     .justify_between()
                     .gap_3()
-                    .child(div().font_weight(FontWeight::MEDIUM).text_size(TEXT_XS.size).text_color(theme.muted_foreground).child("Context Window"))
-                    .child(div().text_size(TEXT_2XS.size).text_color(theme.secondary_label).child(heading)),
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_size(TEXT_XS.size)
+                            .text_color(theme.muted_foreground)
+                            .child("Context Window"),
+                    )
+                    .child(
+                        div()
+                            .text_size(TEXT_2XS.size)
+                            .text_color(theme.secondary_label)
+                            .child(heading),
+                    ),
             )
             .when(usage.max_tokens.is_some(), |this| {
                 this.child(
-                    div().h(px(6.)).w_full().overflow_hidden().rounded_full().bg(with_alpha(theme.muted, 0.6)).child(
-                        div().h_full().rounded_full().w(gpui_kit::relative(normalized / 100.)).bg(ring),
-                    ),
+                    div()
+                        .h(px(6.))
+                        .w_full()
+                        .overflow_hidden()
+                        .rounded_full()
+                        .bg(with_alpha(theme.muted, 0.6))
+                        .child(
+                            div()
+                                .h_full()
+                                .rounded_full()
+                                .w(gpui_kit::relative(normalized / 100.))
+                                .bg(ring),
+                        ),
                 )
             })
-            .when_some(total_processed, |this, tokens| this.child(stat("Total processed", format_context_window_tokens(Some(tokens)))))
-            .when_some(usage.cost.clone(), |this, cost| this.child(stat("Cost", format_context_window_cost(&cost))))
+            .when_some(total_processed, |this, tokens| {
+                this.child(stat(
+                    "Total processed",
+                    format_context_window_tokens(Some(tokens)),
+                ))
+            })
+            .when_some(usage.cost.clone(), |this, cost| {
+                this.child(stat("Cost", format_context_window_cost(&cost)))
+            })
             .when(usage.compacts_automatically, |this| {
                 this.child(
                     div()
@@ -681,6 +899,11 @@ impl ChatComposer {
                 )
             });
         let _ = attachment_overlap;
-        Some(floating(self.trigger_bounds.meter.get(), true, true, glass_surface(cx).child(body)))
+        Some(floating(
+            self.trigger_bounds.meter.get(),
+            true,
+            true,
+            glass_surface(cx).child(body),
+        ))
     }
 }

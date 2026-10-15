@@ -132,7 +132,9 @@ pub fn format_provider_driver_kind_label(provider: &str) -> String {
         .filter(|w| !w.is_empty())
         .map(|word| {
             let mut chars = word.chars();
-            chars.next().map_or(String::new(), |first| first.to_uppercase().chain(chars).collect())
+            chars.next().map_or(String::new(), |first| {
+                first.to_uppercase().chain(chars).collect()
+            })
         })
         .collect();
     words.join(" ")
@@ -179,9 +181,15 @@ mod tests {
 
     #[test]
     fn formats_driver_kind_labels() {
-        assert_eq!(format_provider_driver_kind_label("claudeAgent"), "Claude Agent");
+        assert_eq!(
+            format_provider_driver_kind_label("claudeAgent"),
+            "Claude Agent"
+        );
         assert_eq!(format_provider_driver_kind_label("opencode"), "Opencode");
-        assert_eq!(format_provider_driver_kind_label("acp_registry"), "Acp Registry");
+        assert_eq!(
+            format_provider_driver_kind_label("acp_registry"),
+            "Acp Registry"
+        );
     }
 
     #[test]
@@ -200,19 +208,37 @@ mod tests {
         let mut entry = ProviderInstanceEntry::new("codex", "codex", "Codex");
         entry.installed = false;
         entry.can_setup = true;
-        assert_eq!(get_provider_status_message(&entry), "Open provider setup to install Codex on this environment.");
+        assert_eq!(
+            get_provider_status_message(&entry),
+            "Open provider setup to install Codex on this environment."
+        );
         entry.installed = true;
         entry.auth_status = AuthStatus::Unauthenticated;
-        assert_eq!(get_provider_status_message(&entry), "Open provider setup to sign in.");
+        assert_eq!(
+            get_provider_status_message(&entry),
+            "Open provider setup to sign in."
+        );
         entry.can_setup = false;
-        assert_eq!(get_provider_status_message(&entry), "Sign in via the CLI to authenticate again.");
+        assert_eq!(
+            get_provider_status_message(&entry),
+            "Sign in via the CLI to authenticate again."
+        );
         entry.auth_status = AuthStatus::Authenticated;
         entry.status = ProviderStatus::Error;
-        assert_eq!(get_provider_status_message(&entry), "Codex provider is unavailable.");
+        assert_eq!(
+            get_provider_status_message(&entry),
+            "Codex provider is unavailable."
+        );
         entry.status = ProviderStatus::Warning;
-        assert_eq!(get_provider_status_message(&entry), "Codex provider has limited availability.");
+        assert_eq!(
+            get_provider_status_message(&entry),
+            "Codex provider has limited availability."
+        );
         entry.status = ProviderStatus::Ready;
-        assert_eq!(get_provider_status_message(&entry), "No models are available for this provider.");
+        assert_eq!(
+            get_provider_status_message(&entry),
+            "No models are available for this provider."
+        );
         entry.status_message = Some("custom".into());
         assert_eq!(get_provider_status_message(&entry), "custom");
     }

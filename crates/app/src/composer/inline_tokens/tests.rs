@@ -110,7 +110,10 @@ fn keeps_the_delimiter_after_a_token_outside_its_source_range() {
             36
         )]
     );
-    assert_eq!(crate::composer::js_string::slice_utf16(text, 36, usize::MAX), " next");
+    assert_eq!(
+        crate::composer::js_string::slice_utf16(text, 36, usize::MAX),
+        " next"
+    );
 }
 
 #[test]

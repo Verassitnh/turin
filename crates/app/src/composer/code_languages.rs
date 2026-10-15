@@ -122,11 +122,15 @@ pub fn code_language_entry(language: &str) -> Option<CodeBlockLanguage> {
         language_alias(&language.to_lowercase()).unwrap_or(language)
     };
     let id = id.to_lowercase();
-    CODE_BLOCK_LANGUAGES.iter().copied().find(|entry| entry.id == id)
+    CODE_BLOCK_LANGUAGES
+        .iter()
+        .copied()
+        .find(|entry| entry.id == id)
 }
 
 pub fn code_language_label(language: &str) -> String {
-    code_language_entry(language).map_or_else(|| language.to_owned(), |entry| entry.label.to_owned())
+    code_language_entry(language)
+        .map_or_else(|| language.to_owned(), |entry| entry.label.to_owned())
 }
 
 #[cfg(test)]
@@ -160,7 +164,11 @@ mod tests {
             (" js", "go", " go"),
             ("  ", "go", "  go"),
         ] {
-            assert_eq!(with_info_string_language(info, language), expected, "{info:?} {language:?}");
+            assert_eq!(
+                with_info_string_language(info, language),
+                expected,
+                "{info:?} {language:?}"
+            );
         }
     }
 

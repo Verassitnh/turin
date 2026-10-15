@@ -6,9 +6,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::{
-    Anchor, AnyElement, App, Bounds, CursorStyle, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, SharedString, Stateful, Styled as _, anchored,
-    canvas, deferred, div, point, px, rems,
+    Anchor, AnyElement, App, Bounds, CursorStyle, Div, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, SharedString, Stateful, Styled as _, anchored, canvas,
+    deferred, div, point, px, rems,
 };
 
 use crate::theme::ActiveAppTheme;
@@ -23,7 +23,9 @@ pub type BoundsCell = Rc<Cell<Bounds<Pixels>>>;
 /// An invisible element that records the bounds of the box it is placed in.
 pub fn track_bounds(cell: &BoundsCell) -> impl IntoElement {
     let cell = cell.clone();
-    canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {}).absolute().size_full()
+    canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {})
+        .absolute()
+        .size_full()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -33,7 +35,12 @@ pub enum ControlSize {
 }
 
 /// `composerControlClassName`.
-pub fn composer_control(id: impl Into<gpui_kit::ElementId>, size: ControlSize, pressed: bool, cx: &App) -> Stateful<Div> {
+pub fn composer_control(
+    id: impl Into<gpui_kit::ElementId>,
+    size: ControlSize,
+    pressed: bool,
+    cx: &App,
+) -> Stateful<Div> {
     let theme = cx.app_theme();
     let base = div()
         .id(id)
@@ -61,17 +68,33 @@ pub fn composer_control(id: impl Into<gpui_kit::ElementId>, size: ControlSize, p
             .px(rems(0.4375))
             .text_size(TEXT_XS.size)
             .text_color(with_alpha(theme.muted_foreground, 0.7))
-            .hover(|style| style.bg(theme.accent).text_color(with_alpha(theme.foreground, 0.8))),
+            .hover(|style| {
+                style
+                    .bg(theme.accent)
+                    .text_color(with_alpha(theme.foreground, 0.8))
+            }),
     };
-    if pressed { base.bg(theme.accent).text_color(theme.accent_foreground) } else { base }
+    if pressed {
+        base.bg(theme.accent).text_color(theme.accent_foreground)
+    } else {
+        base
+    }
 }
 
 /// `ComposerControlChevron`.
 pub fn control_chevron(size: ControlSize, cx: &App) -> impl IntoElement {
     let theme = cx.app_theme();
     match size {
-        ControlSize::Sm => div().mx(px(-2.)).child(Icon::new(IconName::ChevronDown).size(rems(0.875)).color(theme.icon_muted)),
-        ControlSize::Xs => div().ml_0().mr(px(-4.)).opacity(0.5).child(Icon::new(IconName::ChevronDown).size(rems(0.75)).color(theme.muted_foreground)),
+        ControlSize::Sm => div().mx(px(-2.)).child(
+            Icon::new(IconName::ChevronDown)
+                .size(rems(0.875))
+                .color(theme.icon_muted),
+        ),
+        ControlSize::Xs => div().ml_0().mr(px(-4.)).opacity(0.5).child(
+            Icon::new(IconName::ChevronDown)
+                .size(rems(0.75))
+                .color(theme.muted_foreground),
+        ),
     }
 }
 
@@ -81,7 +104,11 @@ pub fn control_separator(size: ControlSize, cx: &App) -> impl IntoElement {
     div()
         .mx(px(2.))
         .w(px(1.))
-        .h(if size == ControlSize::Xs { px(14.) } else { px(16.) })
+        .h(if size == ControlSize::Xs {
+            px(14.)
+        } else {
+            px(16.)
+        })
         .flex_shrink_0()
         .bg(theme.border)
 }
@@ -103,14 +130,23 @@ pub fn glass_surface(cx: &App) -> Div {
 
 /// Places `content` against a trigger: above or below it, aligned to its
 /// start or end edge, kept inside the window.
-pub fn floating(trigger: Bounds<Pixels>, above: bool, align_end: bool, content: impl IntoElement) -> AnyElement {
+pub fn floating(
+    trigger: Bounds<Pixels>,
+    above: bool,
+    align_end: bool,
+    content: impl IntoElement,
+) -> AnyElement {
     let (anchor, x) = match (above, align_end) {
         (true, false) => (Anchor::BottomLeft, trigger.left()),
         (true, true) => (Anchor::BottomRight, trigger.right()),
         (false, false) => (Anchor::TopLeft, trigger.left()),
         (false, true) => (Anchor::TopRight, trigger.right()),
     };
-    let y = if above { trigger.top() - px(6.) } else { trigger.bottom() + px(6.) };
+    let y = if above {
+        trigger.top() - px(6.)
+    } else {
+        trigger.bottom() + px(6.)
+    };
     deferred(
         anchored()
             .position(point(x, y))
@@ -137,11 +173,18 @@ pub fn menu_row(id: impl Into<gpui_kit::ElementId>, highlighted: bool, cx: &App)
         .text_size(TEXT_SM.size)
         .cursor(CursorStyle::PointingHand)
         .hover(|style| style.bg(theme.accent).text_color(theme.accent_foreground));
-    if highlighted { row.bg(theme.accent).text_color(theme.accent_foreground) } else { row }
+    if highlighted {
+        row.bg(theme.accent).text_color(theme.accent_foreground)
+    } else {
+        row
+    }
 }
 
 pub fn muted_label(text: impl Into<SharedString>, cx: &App) -> Div {
-    div().text_size(TEXT_XS.size).text_color(cx.app_theme().muted_foreground).child(text.into())
+    div()
+        .text_size(TEXT_XS.size)
+        .text_color(cx.app_theme().muted_foreground)
+        .child(text.into())
 }
 
 pub fn dim(color: Hsla, alpha: f32) -> Hsla {

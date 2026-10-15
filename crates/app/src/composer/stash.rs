@@ -11,11 +11,21 @@ const SNIPPET_MAX_CHARS: usize = 90;
 /// One line summarising a stashed prompt: its collapsed text, or a count of
 /// what it holds when the text is empty.
 pub fn stash_entry_snippet(entry: &PromptStashEntry) -> String {
-    let collapsed = entry.prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = entry
+        .prompt
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if !collapsed.is_empty() {
         // JS `slice` counts UTF-16 units; characters are a close, safe stand-in.
         return if collapsed.chars().count() > SNIPPET_MAX_CHARS {
-            format!("{}…", collapsed.chars().take(SNIPPET_MAX_CHARS).collect::<String>())
+            format!(
+                "{}…",
+                collapsed
+                    .chars()
+                    .take(SNIPPET_MAX_CHARS)
+                    .collect::<String>()
+            )
         } else {
             collapsed
         };
@@ -33,7 +43,10 @@ pub fn stash_entry_snippet(entry: &PromptStashEntry) -> String {
     } else {
         "image"
     };
-    format!("({attachment_count} {label}{})", if attachment_count == 1 { "" } else { "s" })
+    format!(
+        "({attachment_count} {label}{})",
+        if attachment_count == 1 { "" } else { "s" }
+    )
 }
 
 /// Images that did not make it into the entry, whatever the reason.
@@ -89,7 +102,10 @@ mod tests {
 
     #[test]
     fn collapses_whitespace_and_truncates_long_prompts() {
-        assert_eq!(stash_entry_snippet(&entry("  fix   the\n bug ")), "fix the bug");
+        assert_eq!(
+            stash_entry_snippet(&entry("  fix   the\n bug ")),
+            "fix the bug"
+        );
         let long = "x".repeat(120);
         let snippet = stash_entry_snippet(&entry(&long));
         assert_eq!(snippet.chars().count(), 91);
@@ -100,7 +116,12 @@ mod tests {
     fn counts_attachments_when_the_prompt_is_empty() {
         assert_eq!(stash_entry_snippet(&entry("   ")), "(empty)");
         let mut with_image = entry("");
-        with_image.images.push(ComposerImageAttachment::new("i", "a.png", "image/png", vec![1]));
+        with_image.images.push(ComposerImageAttachment::new(
+            "i",
+            "a.png",
+            "image/png",
+            vec![1],
+        ));
         assert_eq!(stash_entry_snippet(&with_image), "(1 image)");
         let mut mixed = with_image.clone();
         mixed.files.push(ComposerFileAttachment {
@@ -130,11 +151,26 @@ mod tests {
     #[test]
     fn relative_labels_step_through_minutes_hours_and_days() {
         let now = parse_timestamp_date("2026-01-10T12:00:00.000Z").unwrap();
-        assert_eq!(relative_time_label_at("2026-01-10T11:59:30.000Z", now), "just now");
-        assert_eq!(relative_time_label_at("2026-01-10T11:55:00.000Z", now), "5m ago");
-        assert_eq!(relative_time_label_at("2026-01-10T09:00:00.000Z", now), "3h ago");
-        assert_eq!(relative_time_label_at("2026-01-07T12:00:00.000Z", now), "3d ago");
-        assert_eq!(relative_time_label_at("2026-01-11T00:00:00.000Z", now), "just now");
+        assert_eq!(
+            relative_time_label_at("2026-01-10T11:59:30.000Z", now),
+            "just now"
+        );
+        assert_eq!(
+            relative_time_label_at("2026-01-10T11:55:00.000Z", now),
+            "5m ago"
+        );
+        assert_eq!(
+            relative_time_label_at("2026-01-10T09:00:00.000Z", now),
+            "3h ago"
+        );
+        assert_eq!(
+            relative_time_label_at("2026-01-07T12:00:00.000Z", now),
+            "3d ago"
+        );
+        assert_eq!(
+            relative_time_label_at("2026-01-11T00:00:00.000Z", now),
+            "just now"
+        );
         assert_eq!(relative_time_label_at("not a date", now), "");
     }
 }

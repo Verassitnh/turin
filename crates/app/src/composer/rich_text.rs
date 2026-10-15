@@ -65,7 +65,10 @@ struct Frame {
     spans: Vec<RichTextSpan>,
 }
 
-fn current<'a>(stack: &'a mut [Frame], root: &'a mut Vec<RichTextSpan>) -> &'a mut Vec<RichTextSpan> {
+fn current<'a>(
+    stack: &'a mut [Frame],
+    root: &'a mut Vec<RichTextSpan>,
+) -> &'a mut Vec<RichTextSpan> {
     match stack.last_mut() {
         Some(frame) => &mut frame.spans,
         None => root,
@@ -83,12 +86,10 @@ fn slice(chars: &[char], start: usize, end: usize) -> String {
 }
 
 fn starts_with_at(chars: &[char], index: usize, needle: &str) -> bool {
-    let mut at = index;
-    for c in needle.chars() {
+    for (at, c) in (index..).zip(needle.chars()) {
         if chars.get(at) != Some(&c) {
             return false;
         }
-        at += 1;
     }
     true
 }
@@ -124,7 +125,11 @@ pub fn parse_inline_markdown(text: &str) -> Vec<RichTextSpan> {
                 && chars.get(close + 1) != Some(&'`')
             {
                 let piece = slice(&chars, index + 1, close);
-                push_span(current(&mut stack, &mut root), &piece, &[RichTextMark::Code]);
+                push_span(
+                    current(&mut stack, &mut root),
+                    &piece,
+                    &[RichTextMark::Code],
+                );
                 index = close + 1;
             } else {
                 push_span(current(&mut stack, &mut root), &run, &[]);
@@ -141,7 +146,11 @@ pub fn parse_inline_markdown(text: &str) -> Vec<RichTextSpan> {
         while chars.get(end) == Some(&ch) {
             end += 1;
         }
-        let before = if index == 0 { None } else { chars.get(index - 1).copied() };
+        let before = if index == 0 {
+            None
+        } else {
+            chars.get(index - 1).copied()
+        };
         let after = chars.get(end).copied();
         let can_close = before.is_some_and(|b| !is_js_whitespace_char(b))
             && (ch != '_' || !after.is_some_and(is_word_char));
@@ -297,7 +306,10 @@ mod tests {
         let alternate = "__".repeat(5_000);
         assert_eq!(
             parse_inline_markdown(&format!("**~~{alternate}text{alternate}~~**")),
-            vec![span(&format!("{alternate}text{alternate}"), &[Bold, Strike])]
+            vec![span(
+                &format!("{alternate}text{alternate}"),
+                &[Bold, Strike]
+            )]
         );
     }
 

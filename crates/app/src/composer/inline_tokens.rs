@@ -1,6 +1,8 @@
 //! Port of upstream/packages/shared/src/composerInlineTokens.ts
 
-use crate::composer::js_string::{decode_uri_component, is_js_whitespace_char, slice_utf16, utf16_len};
+use crate::composer::js_string::{
+    decode_uri_component, is_js_whitespace_char, slice_utf16, utf16_len,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposerInlineTokenKind {

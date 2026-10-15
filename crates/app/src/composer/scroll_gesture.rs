@@ -30,7 +30,8 @@ pub fn should_collapse_composer_for_scroll_key(input: &ScrollKeyInput<'_>) -> bo
     match input.key {
         "PageUp" | "Home" => input.scroll_top > 1.0,
         "PageDown" | "End" => {
-            !input.is_at_logical_end && input.scroll_top < input.scroll_height - input.client_height - 1.0
+            !input.is_at_logical_end
+                && input.scroll_top < input.scroll_height - input.client_height - 1.0
         }
         _ => false,
     }
@@ -42,7 +43,11 @@ pub fn reset_composer_scroll_gesture(state: &mut ComposerScrollGestureState) {
 }
 
 /// `suppressActiveComposerScrollGesture`.
-pub fn suppress_active_composer_scroll_gesture(state: &mut ComposerScrollGestureState, now: f64, gesture_reset_ms: f64) {
+pub fn suppress_active_composer_scroll_gesture(
+    state: &mut ComposerScrollGestureState,
+    now: f64,
+    gesture_reset_ms: f64,
+) {
     if now - state.last_event_at <= gesture_reset_ms {
         state.collapse_suppressed = true;
     }
@@ -59,7 +64,10 @@ pub struct ScrollGestureEvent {
 
 /// `recordComposerScrollGestureEvent`: true when the gesture collapses the
 /// composer.
-pub fn record_composer_scroll_gesture_event(state: &mut ComposerScrollGestureState, input: &ScrollGestureEvent) -> bool {
+pub fn record_composer_scroll_gesture_event(
+    state: &mut ComposerScrollGestureState,
+    input: &ScrollGestureEvent,
+) -> bool {
     state.last_event_at = input.now;
     if state.collapse_suppressed
         || !input.collapse_eligible
@@ -166,7 +174,14 @@ mod tests {
         let mut state = ComposerScrollGestureState::default();
         record(&mut state, 0.0, Opts::default());
         suppress_active_composer_scroll_gesture(&mut state, 20.0, RESET_MS);
-        assert!(!record(&mut state, 40.0, Opts { collapse_eligible: false, ..Opts::default() }));
+        assert!(!record(
+            &mut state,
+            40.0,
+            Opts {
+                collapse_eligible: false,
+                ..Opts::default()
+            }
+        ));
         assert!(!record(&mut state, 80.0, Opts::default()));
     }
 
@@ -175,7 +190,14 @@ mod tests {
         let mut state = ComposerScrollGestureState::default();
         record(&mut state, 0.0, Opts::default());
         suppress_active_composer_scroll_gesture(&mut state, 20.0, RESET_MS);
-        assert!(!record(&mut state, 80.0, Opts { can_scroll: false, ..Opts::default() }));
+        assert!(!record(
+            &mut state,
+            80.0,
+            Opts {
+                can_scroll: false,
+                ..Opts::default()
+            }
+        ));
         assert_eq!(state.last_event_at, 80.0);
         assert!(!record(&mut state, 160.0, Opts::default()));
     }
@@ -193,18 +215,75 @@ mod tests {
     #[test]
     fn accumulates_small_deltas_only_while_collapse_remains_eligible_and_scrollable() {
         let mut state = ComposerScrollGestureState::default();
-        assert!(!record(&mut state, 0.0, Opts { delta_px: 10.0, ..Opts::default() }));
-        assert!(!record(&mut state, 20.0, Opts { delta_px: 10.0, ..Opts::default() }));
-        assert!(record(&mut state, 40.0, Opts { delta_px: 4.0, ..Opts::default() }));
-        assert!(!record(&mut state, 60.0, Opts { delta_px: 10.0, collapse_eligible: false, ..Opts::default() }));
-        assert!(!record(&mut state, 80.0, Opts { delta_px: 14.0, ..Opts::default() }));
+        assert!(!record(
+            &mut state,
+            0.0,
+            Opts {
+                delta_px: 10.0,
+                ..Opts::default()
+            }
+        ));
+        assert!(!record(
+            &mut state,
+            20.0,
+            Opts {
+                delta_px: 10.0,
+                ..Opts::default()
+            }
+        ));
+        assert!(record(
+            &mut state,
+            40.0,
+            Opts {
+                delta_px: 4.0,
+                ..Opts::default()
+            }
+        ));
+        assert!(!record(
+            &mut state,
+            60.0,
+            Opts {
+                delta_px: 10.0,
+                collapse_eligible: false,
+                ..Opts::default()
+            }
+        ));
+        assert!(!record(
+            &mut state,
+            80.0,
+            Opts {
+                delta_px: 14.0,
+                ..Opts::default()
+            }
+        ));
     }
 
     #[test]
     fn does_not_collapse_while_scrolling_down_through_composer_footer_space() {
         let mut state = ComposerScrollGestureState::default();
-        assert!(!record(&mut state, 0.0, Opts { delta_px: 20.0, ..Opts::default() }));
-        assert!(!record(&mut state, 20.0, Opts { toward_end: true, ..Opts::default() }));
-        assert!(!record(&mut state, 40.0, Opts { delta_px: 10.0, ..Opts::default() }));
+        assert!(!record(
+            &mut state,
+            0.0,
+            Opts {
+                delta_px: 20.0,
+                ..Opts::default()
+            }
+        ));
+        assert!(!record(
+            &mut state,
+            20.0,
+            Opts {
+                toward_end: true,
+                ..Opts::default()
+            }
+        ));
+        assert!(!record(
+            &mut state,
+            40.0,
+            Opts {
+                delta_px: 10.0,
+                ..Opts::default()
+            }
+        ));
     }
 }

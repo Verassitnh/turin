@@ -11,7 +11,10 @@ fn basename(path: &str) -> &str {
 }
 
 fn escape_markdown_link_label(label: &str) -> String {
-    label.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]")
+    label
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
 }
 
 fn encode_markdown_link_destination(path: &str) -> String {
@@ -35,7 +38,10 @@ mod tests {
 
     #[test]
     fn uses_the_basename_as_the_markdown_label() {
-        assert_eq!(serialize_composer_file_link("path/to/package.json"), "[package.json](path/to/package.json)");
+        assert_eq!(
+            serialize_composer_file_link("path/to/package.json"),
+            "[package.json](path/to/package.json)"
+        );
     }
 
     #[test]
@@ -48,11 +54,17 @@ mod tests {
 
     #[test]
     fn supports_windows_paths() {
-        assert_eq!(serialize_composer_file_link("C:\\repo\\src\\index.ts"), "[index.ts](C:%5Crepo%5Csrc%5Cindex.ts)");
+        assert_eq!(
+            serialize_composer_file_link("C:\\repo\\src\\index.ts"),
+            "[index.ts](C:%5Crepo%5Csrc%5Cindex.ts)"
+        );
     }
 
     #[test]
     fn preserves_paths_that_start_with_an_at_sign() {
-        assert_eq!(serialize_composer_file_link("@scope/package.json"), "[package.json](@scope/package.json)");
+        assert_eq!(
+            serialize_composer_file_link("@scope/package.json"),
+            "[package.json](@scope/package.json)"
+        );
     }
 }

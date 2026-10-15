@@ -129,9 +129,18 @@ pub fn provider_icon_path(driver_kind: &str) -> Option<&'static str> {
 
 const BRAND: &[(&str, &[u8])] = &[
     (SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg")),
-    (PROVIDER_OPENAI, include_bytes!("../assets/brand/openai.svg")),
-    (PROVIDER_CLAUDE, include_bytes!("../assets/brand/claude.svg")),
-    (PROVIDER_CURSOR, include_bytes!("../assets/brand/cursor.svg")),
+    (
+        PROVIDER_OPENAI,
+        include_bytes!("../assets/brand/openai.svg"),
+    ),
+    (
+        PROVIDER_CLAUDE,
+        include_bytes!("../assets/brand/claude.svg"),
+    ),
+    (
+        PROVIDER_CURSOR,
+        include_bytes!("../assets/brand/cursor.svg"),
+    ),
 ];
 
 pub struct AppAssets;

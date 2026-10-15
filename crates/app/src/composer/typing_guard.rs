@@ -27,8 +27,13 @@ impl Default for ComposerTypingGuardState {
 }
 
 pub enum TypingGuardEvent<'a> {
-    Requests { request_ids: &'a [&'a str], now: f64 },
-    Type { now: f64 },
+    Requests {
+        request_ids: &'a [&'a str],
+        now: f64,
+    },
+    Type {
+        now: f64,
+    },
     Focus,
     Blur,
     Send,
@@ -45,7 +50,10 @@ pub fn update_composer_typing_guard(
         TypingGuardEvent::Requests { request_ids, now } => {
             next.held.retain(|id| request_ids.contains(&id.as_str()));
             for id in request_ids {
-                if !next.seen.contains(*id) && state.focused && now - state.last_typed_at < COMPOSER_TYPING_IDLE_MS {
+                if !next.seen.contains(*id)
+                    && state.focused
+                    && now - state.last_typed_at < COMPOSER_TYPING_IDLE_MS
+                {
                     next.held.insert((*id).to_owned());
                 }
                 next.seen.insert((*id).to_owned());
@@ -69,12 +77,25 @@ mod tests {
     use super::*;
 
     fn typing() -> ComposerTypingGuardState {
-        let state = update_composer_typing_guard(&ComposerTypingGuardState::default(), TypingGuardEvent::Focus);
+        let state = update_composer_typing_guard(
+            &ComposerTypingGuardState::default(),
+            TypingGuardEvent::Focus,
+        );
         update_composer_typing_guard(&state, TypingGuardEvent::Type { now: 1000.0 })
     }
 
-    fn requests(state: &ComposerTypingGuardState, ids: &[&str], now: f64) -> ComposerTypingGuardState {
-        update_composer_typing_guard(state, TypingGuardEvent::Requests { request_ids: ids, now })
+    fn requests(
+        state: &ComposerTypingGuardState,
+        ids: &[&str],
+        now: f64,
+    ) -> ComposerTypingGuardState {
+        update_composer_typing_guard(
+            state,
+            TypingGuardEvent::Requests {
+                request_ids: ids,
+                now,
+            },
+        )
     }
 
     fn held(state: &ComposerTypingGuardState) -> Vec<&str> {
@@ -89,7 +110,11 @@ mod tests {
 
     #[test]
     fn releases_on_idle_send_blur_and_never_re_holds_the_request() {
-        for event in [TypingGuardEvent::Idle, TypingGuardEvent::Send, TypingGuardEvent::Blur] {
+        for event in [
+            TypingGuardEvent::Idle,
+            TypingGuardEvent::Send,
+            TypingGuardEvent::Blur,
+        ] {
             let mut state = requests(&typing(), &["question"], 1200.0);
             state = update_composer_typing_guard(&state, event);
             assert!(held(&state).is_empty());

@@ -4,24 +4,28 @@
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, rems,
+    AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement,
+    MouseButton, MouseMoveEvent, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
+    Window, div, rems,
 };
 
 use crate::components::chat::composer_pending_panels::{BannerVariant, banner_surface};
 use crate::composer::command_items::{
-    ComposerCommandItem, PathKind, search_slash_command_items, slash_command_items_for_prompt_position,
+    ComposerCommandItem, PathKind, search_slash_command_items,
+    slash_command_items_for_prompt_position,
 };
 use crate::composer::editor_state::EditorSnapshot;
 use crate::composer::file_link::serialize_composer_file_link;
 use crate::composer::js_string::utf16_len;
 use crate::composer::logic::{
-    ComposerSlashCommand, ComposerTrigger, ComposerTriggerKind, collapse_expanded_composer_cursor, detect_composer_trigger,
+    ComposerSlashCommand, ComposerTrigger, ComposerTriggerKind, collapse_expanded_composer_cursor,
+    detect_composer_trigger,
 };
 use crate::composer::menu_highlight::resolve_composer_menu_active_item_id;
 use crate::composer::skills::{
-    ProviderSkillSourceKind, format_provider_skill_display_name, get_provider_skills_for_slash_menu,
-    get_provider_slash_commands_for_slash_menu, resolve_provider_skill_source_kind, search_provider_skills,
+    ProviderSkillSourceKind, format_provider_skill_display_name,
+    get_provider_skills_for_slash_menu, get_provider_slash_commands_for_slash_menu,
+    resolve_provider_skill_source_kind, search_provider_skills,
 };
 use crate::composer::view_model::{ComposerViewModel, InteractionMode};
 use crate::composer::views::chat_composer::{ChatComposer, Layer};
@@ -49,7 +53,9 @@ pub struct MenuState {
 
 impl MenuState {
     fn search_key(&self) -> Option<String> {
-        self.trigger.as_ref().map(|trigger| format!("{:?}:{}", trigger.kind, trigger.query))
+        self.trigger
+            .as_ref()
+            .map(|trigger| format!("{:?}:{}", trigger.kind, trigger.query))
     }
 
     pub fn is_open(&self) -> bool {
@@ -78,7 +84,9 @@ fn build_menu_items(vm: &ComposerViewModel, trigger: &ComposerTrigger) -> Vec<Co
     let entry = vm.selected_entry();
     let provider = vm.selected_instance_id.clone();
     let skills = entry.map(|entry| entry.skills.clone()).unwrap_or_default();
-    let commands = entry.map(|entry| entry.slash_commands.clone()).unwrap_or_default();
+    let commands = entry
+        .map(|entry| entry.slash_commands.clone())
+        .unwrap_or_default();
     match trigger.kind {
         ComposerTriggerKind::Path => {
             let query = trigger.query.to_lowercase();
@@ -103,11 +111,23 @@ fn build_menu_items(vm: &ComposerViewModel, trigger: &ComposerTrigger) -> Vec<Co
                 .filter(|entry| query.is_empty() || entry.path.to_lowercase().contains(&query))
                 .take(40)
                 .map(|entry| ComposerCommandItem::Path {
-                    id: format!("path:{}:{}", if entry.kind == PathKind::Directory { "directory" } else { "file" }, entry.path),
+                    id: format!(
+                        "path:{}:{}",
+                        if entry.kind == PathKind::Directory {
+                            "directory"
+                        } else {
+                            "file"
+                        },
+                        entry.path
+                    ),
                     path: entry.path.clone(),
                     path_kind: entry.kind,
                     label: basename(&entry.path).to_owned(),
-                    description: entry.path.rsplit_once('/').map(|(dir, _)| dir.to_owned()).unwrap_or_default(),
+                    description: entry
+                        .path
+                        .rsplit_once('/')
+                        .map(|(dir, _)| dir.to_owned())
+                        .unwrap_or_default(),
                 });
             threads.into_iter().chain(paths).collect()
         }
@@ -132,31 +152,36 @@ fn build_menu_items(vm: &ComposerViewModel, trigger: &ComposerTrigger) -> Vec<Co
                     description: "Switch this thread back to normal build mode".into(),
                 });
             }
-            let menu_skills = get_provider_skills_for_slash_menu(&skills, vm.settings.show_skills_in_slash_menu);
-            items.extend(get_provider_slash_commands_for_slash_menu(&commands, &menu_skills).into_iter().map(|command| {
-                ComposerCommandItem::ProviderSlashCommand {
-                    id: format!("provider-slash-command:{provider}:{}", command.name),
+            let menu_skills =
+                get_provider_skills_for_slash_menu(&skills, vm.settings.show_skills_in_slash_menu);
+            items.extend(
+                get_provider_slash_commands_for_slash_menu(&commands, &menu_skills)
+                    .into_iter()
+                    .map(|command| ComposerCommandItem::ProviderSlashCommand {
+                        id: format!("provider-slash-command:{provider}:{}", command.name),
+                        provider: provider.clone(),
+                        label: format!("/{}", command.name),
+                        description: command
+                            .description
+                            .clone()
+                            .or_else(|| command.input_hint.clone())
+                            .unwrap_or_else(|| "Run provider command".into()),
+                        command,
+                    }),
+            );
+            items.extend(menu_skills.into_iter().map(|skill| {
+                ComposerCommandItem::Skill {
+                    id: format!("skill:{provider}:{}", skill.name),
                     provider: provider.clone(),
-                    label: format!("/{}", command.name),
-                    description: command
-                        .description
+                    label: format!("/skill:{}", skill.name),
+                    description: skill
+                        .short_description
                         .clone()
-                        .or_else(|| command.input_hint.clone())
-                        .unwrap_or_else(|| "Run provider command".into()),
-                    command,
+                        .or_else(|| skill.description.clone())
+                        .or_else(|| skill.scope.as_ref().map(|scope| format!("{scope} skill")))
+                        .unwrap_or_default(),
+                    skill,
                 }
-            }));
-            items.extend(menu_skills.into_iter().map(|skill| ComposerCommandItem::Skill {
-                id: format!("skill:{provider}:{}", skill.name),
-                provider: provider.clone(),
-                label: format!("/skill:{}", skill.name),
-                description: skill
-                    .short_description
-                    .clone()
-                    .or_else(|| skill.description.clone())
-                    .or_else(|| skill.scope.as_ref().map(|scope| format!("{scope} skill")))
-                    .unwrap_or_default(),
-                skill,
             }));
             let items = slash_command_items_for_prompt_position(&items, trigger.range_start == 0);
             search_slash_command_items(&items, trigger.query.trim().to_lowercase().as_str())
@@ -166,7 +191,10 @@ fn build_menu_items(vm: &ComposerViewModel, trigger: &ComposerTrigger) -> Vec<Co
             .map(|skill| ComposerCommandItem::Skill {
                 id: format!("skill:{provider}:{}", skill.name),
                 provider: provider.clone(),
-                label: format_provider_skill_display_name(&skill.name, skill.display_name.as_deref()),
+                label: format_provider_skill_display_name(
+                    &skill.name,
+                    skill.display_name.as_deref(),
+                ),
                 description: skill
                     .short_description
                     .clone()
@@ -179,7 +207,14 @@ fn build_menu_items(vm: &ComposerViewModel, trigger: &ComposerTrigger) -> Vec<Co
         ComposerTriggerKind::PullRequest => vm
             .pull_requests
             .iter()
-            .filter(|pr| trigger.query.is_empty() || pr.number.to_string().starts_with(&trigger.query) || pr.title.to_lowercase().contains(&trigger.query.to_lowercase()))
+            .filter(|pr| {
+                trigger.query.is_empty()
+                    || pr.number.to_string().starts_with(&trigger.query)
+                    || pr
+                        .title
+                        .to_lowercase()
+                        .contains(&trigger.query.to_lowercase())
+            })
             .take(12)
             .map(|pr| ComposerCommandItem::PullRequest {
                 id: format!("pull-request:{}", pr.number),
@@ -193,25 +228,45 @@ fn build_menu_items(vm: &ComposerViewModel, trigger: &ComposerTrigger) -> Vec<Co
 
 impl ChatComposer {
     /// Re-detect the trigger under the caret and rebuild its items.
-    pub(super) fn after_prompt_changed(&mut self, snapshot: &EditorSnapshot, cx: &mut Context<Self>) {
+    pub(super) fn after_prompt_changed(
+        &mut self,
+        snapshot: &EditorSnapshot,
+        cx: &mut Context<Self>,
+    ) {
         let detected = detect_composer_trigger(&snapshot.value, snapshot.expanded_cursor);
         if let Some(dismissed) = &self.menu.dismissed {
-            let same = detected.as_ref().is_some_and(|t| t.kind == dismissed.kind && t.range_start == dismissed.range_start);
+            let same = detected.as_ref().is_some_and(|t| {
+                t.kind == dismissed.kind && t.range_start == dismissed.range_start
+            });
             if !same {
                 self.menu.dismissed = None;
             }
         }
         let visible = detected.filter(|trigger| {
-            !self.menu.dismissed.as_ref().is_some_and(|d| d.kind == trigger.kind && d.range_start == trigger.range_start)
+            !self
+                .menu
+                .dismissed
+                .as_ref()
+                .is_some_and(|d| d.kind == trigger.kind && d.range_start == trigger.range_start)
         });
         self.menu.trigger = visible;
         self.refresh_menu_items(cx);
-        let query = self.menu.trigger.as_ref().filter(|t| t.kind == ComposerTriggerKind::Path).map(|t| t.query.clone());
+        let query = self
+            .menu
+            .trigger
+            .as_ref()
+            .filter(|t| t.kind == ComposerTriggerKind::Path)
+            .map(|t| t.query.clone());
         if let (Some(query), Some(source)) = (query, self.source(cx)) {
             source.search_paths(&query, cx);
         }
-        let path_active = self.menu.trigger.as_ref().is_some_and(|t| t.kind == ComposerTriggerKind::Path);
-        self.editor.update(cx, |editor, _| editor.set_path_query_active(path_active));
+        let path_active = self
+            .menu
+            .trigger
+            .as_ref()
+            .is_some_and(|t| t.kind == ComposerTriggerKind::Path);
+        self.editor
+            .update(cx, |editor, _| editor.set_path_query_active(path_active));
     }
 
     pub(super) fn refresh_menu_items(&mut self, cx: &mut Context<Self>) {
@@ -246,7 +301,13 @@ impl ChatComposer {
     }
 
     /// The menu's share of `onComposerCommandKey`.
-    pub(super) fn on_menu_key(&mut self, snapshot: &EditorSnapshot, key: &CommandKey, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn on_menu_key(
+        &mut self,
+        snapshot: &EditorSnapshot,
+        key: &CommandKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(trigger) = self.menu.trigger.clone() else {
             return false;
         };
@@ -276,7 +337,10 @@ impl ChatComposer {
                 let weak = cx.weak_entity();
                 let value = snapshot.value.clone();
                 window.defer(cx, move |window, cx| {
-                    weak.update(cx, |this, cx| this.select_menu_item(&item, &trigger, &value, window, cx)).ok();
+                    weak.update(cx, |this, cx| {
+                        this.select_menu_item(&item, &trigger, &value, window, cx)
+                    })
+                    .ok();
                 });
                 true
             }
@@ -285,25 +349,51 @@ impl ChatComposer {
     }
 
     /// Replace `range` of the markdown prompt and put the caret after it.
-    fn replace_prompt_range(&mut self, value: &str, start: usize, end: usize, replacement: &str, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+    #[allow(clippy::too_many_arguments)]
+    fn replace_prompt_range(
+        &mut self,
+        value: &str,
+        start: usize,
+        end: usize,
+        replacement: &str,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let units: Vec<u16> = value.encode_utf16().collect();
         let start = start.min(units.len());
         let end = end.clamp(start, units.len());
         // A trailing space in the replacement swallows the one already there.
-        let end = if replacement.ends_with(' ') && units.get(end) == Some(&(b' ' as u16)) { end + 1 } else { end };
+        let end = if replacement.ends_with(' ') && units.get(end) == Some(&(b' ' as u16)) {
+            end + 1
+        } else {
+            end
+        };
         self.apply_prompt_replacement(value, start, end, replacement, focus, window, cx);
     }
 
     /// `applyPromptReplacement`: swap a markdown range and put the caret after it.
-    pub(super) fn apply_prompt_replacement(&mut self, value: &str, start: usize, end: usize, replacement: &str, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn apply_prompt_replacement(
+        &mut self,
+        value: &str,
+        start: usize,
+        end: usize,
+        replacement: &str,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let units: Vec<u16> = value.encode_utf16().collect();
         let start = start.min(units.len());
         let end = end.clamp(start, units.len());
         let mut next = String::from_utf16_lossy(&units[..start]);
         next.push_str(replacement);
         next.push_str(&String::from_utf16_lossy(&units[end..]));
-        let cursor = collapse_expanded_composer_cursor(&next, start + utf16_len(replacement), false);
-        self.editor.update(cx, |editor, cx| editor.set_value(&next, cursor, cx));
+        let cursor =
+            collapse_expanded_composer_cursor(&next, start + utf16_len(replacement), false);
+        self.editor
+            .update(cx, |editor, cx| editor.set_value(&next, cursor, cx));
         self.menu.highlighted = None;
         if focus {
             self.focus_editor_at(cursor, window, cx);
@@ -311,11 +401,19 @@ impl ChatComposer {
     }
 
     fn focus_editor_at(&self, cursor: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.editor.update(cx, |editor, cx| editor.focus_at(cursor, window, cx));
+        self.editor
+            .update(cx, |editor, cx| editor.focus_at(cursor, window, cx));
     }
 
     /// `onSelectComposerItem`.
-    pub(super) fn select_menu_item(&mut self, item: &ComposerCommandItem, trigger: &ComposerTrigger, value: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select_menu_item(
+        &mut self,
+        item: &ComposerCommandItem,
+        trigger: &ComposerTrigger,
+        value: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (start, end) = (trigger.range_start, trigger.range_end);
         match item {
             ComposerCommandItem::Path { path, .. } => {
@@ -331,7 +429,11 @@ impl ChatComposer {
                     if !self.view_model(cx).settings.plan_mode_enabled {
                         return;
                     }
-                    let mode = if *command == ComposerSlashCommand::Plan { InteractionMode::Plan } else { InteractionMode::Default };
+                    let mode = if *command == ComposerSlashCommand::Plan {
+                        InteractionMode::Plan
+                    } else {
+                        InteractionMode::Default
+                    };
                     if let Some(source) = self.source(cx) {
                         source.set_interaction_mode(mode, cx);
                     }
@@ -361,7 +463,11 @@ impl ChatComposer {
     }
 
     /// `ComposerCommandMenu`: the drawer above the composer.
-    pub(super) fn render_menu_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_menu_drawer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let trigger = self.menu.trigger.clone()?;
         let theme = cx.app_theme().clone();
         let vm = self.view_model(cx);
@@ -371,7 +477,9 @@ impl ChatComposer {
                 "Searching workspace files..."
             } else {
                 match trigger.kind {
-                    ComposerTriggerKind::Skill => "No skills found. Try / to browse provider commands.",
+                    ComposerTriggerKind::Skill => {
+                        "No skills found. Try / to browse provider commands."
+                    }
                     ComposerTriggerKind::Path => "No matching files or folders.",
                     ComposerTriggerKind::PullRequest => "Finding pull request...",
                     ComposerTriggerKind::SlashCommand => "No matching command.",
@@ -392,7 +500,15 @@ impl ChatComposer {
                 .clone()
                 .iter()
                 .enumerate()
-                .map(|(index, item)| self.menu_row_element(item, index, active_id.as_deref() == Some(item.id()), &trigger, cx))
+                .map(|(index, item)| {
+                    self.menu_row_element(
+                        item,
+                        index,
+                        active_id.as_deref() == Some(item.id()),
+                        &trigger,
+                        cx,
+                    )
+                })
                 .collect();
             div()
                 .id("composer-command-list")
@@ -404,30 +520,57 @@ impl ChatComposer {
                 .children(rows)
                 .into_any_element()
         };
-        Some(banner_surface(BannerVariant::Default, false, body, window, &theme))
+        Some(banner_surface(
+            BannerVariant::Default,
+            false,
+            body,
+            window,
+            &theme,
+        ))
     }
 
-    fn menu_row_element(&mut self, item: &ComposerCommandItem, index: usize, active: bool, trigger: &ComposerTrigger, cx: &mut Context<Self>) -> AnyElement {
+    fn menu_row_element(
+        &mut self,
+        item: &ComposerCommandItem,
+        index: usize,
+        active: bool,
+        trigger: &ComposerTrigger,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let id = item.id().to_owned();
         let selected = item.clone();
         let selected_trigger = trigger.clone();
         let icon = match item {
-            ComposerCommandItem::Path { path_kind, .. } => {
-                Some(Icon::new(if *path_kind == PathKind::Directory { IconName::Folder } else { IconName::File }).color(theme.muted_foreground))
+            ComposerCommandItem::Path { path_kind, .. } => Some(
+                Icon::new(if *path_kind == PathKind::Directory {
+                    IconName::Folder
+                } else {
+                    IconName::File
+                })
+                .color(theme.muted_foreground),
+            ),
+            ComposerCommandItem::Thread { .. } => {
+                Some(Icon::new(IconName::MessagesSquare).color(theme.secondary_label))
             }
-            ComposerCommandItem::Thread { .. } => Some(Icon::new(IconName::MessagesSquare).color(theme.secondary_label)),
-            ComposerCommandItem::PullRequest { .. } => Some(Icon::new(IconName::GitPullRequest).color(theme.secondary_label)),
+            ComposerCommandItem::PullRequest { .. } => {
+                Some(Icon::new(IconName::GitPullRequest).color(theme.secondary_label))
+            }
             _ => None,
         };
         let label = match (trigger.kind, item) {
             (ComposerTriggerKind::SlashCommand, ComposerCommandItem::Skill { skill, .. }) => {
-                format!("/skill:{}", format_provider_skill_display_name(&skill.name, skill.display_name.as_deref()))
+                format!(
+                    "/skill:{}",
+                    format_provider_skill_display_name(&skill.name, skill.display_name.as_deref())
+                )
             }
             _ => item.label().to_owned(),
         };
         let badge = match item {
-            ComposerCommandItem::Skill { skill, .. } => Some(resolve_provider_skill_source_kind(skill)),
+            ComposerCommandItem::Skill { skill, .. } => {
+                Some(resolve_provider_skill_source_kind(skill))
+            }
             _ => None,
         };
         let show_skill_suffix = trigger.kind == ComposerTriggerKind::Skill;
@@ -441,8 +584,12 @@ impl ChatComposer {
             .py_1()
             .rounded(RADIUS_LG)
             .cursor(CursorStyle::PointingHand)
-            .when(active, |this| this.bg(theme.accent).text_color(theme.accent_foreground))
-            .when(!active, |this| this.hover(|style| style.bg(with_alpha(theme.accent, 0.5))))
+            .when(active, |this| {
+                this.bg(theme.accent).text_color(theme.accent_foreground)
+            })
+            .when(!active, |this| {
+                this.hover(|style| style.bg(with_alpha(theme.accent, 0.5)))
+            })
             .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
                 if this.menu.highlighted.as_deref() != Some(id.as_str()) {
                     this.menu.highlighted = Some(id.clone());
@@ -497,7 +644,11 @@ impl ChatComposer {
                                 .text_size(rems(0.6875))
                                 .text_color(theme.secondary_foreground)
                                 .child(Icon::new(source_icon(kind)).size(rems(0.75)))
-                                .child(format!("{}{}", kind.label(), if show_skill_suffix { " Skill" } else { "" })),
+                                .child(format!(
+                                    "{}{}",
+                                    kind.label(),
+                                    if show_skill_suffix { " Skill" } else { "" }
+                                )),
                         )
                     }),
             )

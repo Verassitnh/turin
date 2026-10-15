@@ -72,12 +72,17 @@ mod tests {
     }
 
     fn drag(mention: &str) -> ComposerMentionDrag {
-        ComposerMentionDrag { mention: mention.into() }
+        ComposerMentionDrag {
+            mention: mention.into(),
+        }
     }
 
     #[test]
     fn serializes_a_file_path_into_a_mention() {
-        assert_eq!(composer_mention_from_tree_path("docs/index.md").as_deref(), Some("[index.md](docs/index.md)"));
+        assert_eq!(
+            composer_mention_from_tree_path("docs/index.md").as_deref(),
+            Some("[index.md](docs/index.md)")
+        );
     }
 
     #[test]
@@ -96,22 +101,38 @@ mod tests {
 
     #[test]
     fn inserts_the_mention_with_its_trailing_space_and_clears_the_highlight() {
-        let mut host = Host { log: vec![], accept: true };
+        let mut host = Host {
+            log: vec![],
+            accept: true,
+        };
         on_drag_enter(&mut host);
         on_drop(&mut host, &drag("[index.md](docs/index.md)"));
-        assert_eq!(host.log, ["active:true", "active:false", "insert:[index.md](docs/index.md) "]);
+        assert_eq!(
+            host.log,
+            [
+                "active:true",
+                "active:false",
+                "insert:[index.md](docs/index.md) "
+            ]
+        );
     }
 
     #[test]
     fn reports_a_rejected_insert_instead_of_failing_silently() {
-        let mut host = Host { log: vec![], accept: false };
+        let mut host = Host {
+            log: vec![],
+            accept: false,
+        };
         on_drop(&mut host, &drag("[a](a)"));
         assert!(host.log.contains(&"rejected".to_owned()));
     }
 
     #[test]
     fn ignores_a_drop_whose_payload_is_empty() {
-        let mut host = Host { log: vec![], accept: true };
+        let mut host = Host {
+            log: vec![],
+            accept: true,
+        };
         on_drop(&mut host, &drag(""));
         assert_eq!(host.log, ["active:false"]);
     }

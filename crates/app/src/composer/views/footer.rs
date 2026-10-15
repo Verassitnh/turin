@@ -6,22 +6,28 @@ use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, px, rems,
+    AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    rems,
 };
 
 use crate::assets::{SEND_ARROW, provider_icon_path};
-use crate::composer::footer_layout::{should_use_compact_composer_footer, should_use_compact_composer_primary_actions};
+use crate::composer::footer_layout::{
+    should_use_compact_composer_footer, should_use_compact_composer_primary_actions,
+};
 use crate::composer::logic::ComposerSubmissionIntent;
 use crate::composer::model_display::get_trigger_display_model_name;
-use crate::composer::primary_actions::{PrimaryActions, SendButton, SendIcon, resolve_primary_actions};
+use crate::composer::primary_actions::{
+    PrimaryActions, SendButton, SendIcon, resolve_primary_actions,
+};
 use crate::composer::view_model::{ComposerViewModel, InteractionMode, RuntimeMode, SessionPhase};
 use crate::composer::views::chat_composer::{ChatComposer, Layer};
 use crate::composer::views::chrome::{
-    ControlSize, composer_control, control_chevron, control_separator, floating, glass_surface, menu_row, track_bounds,
+    ControlSize, composer_control, control_chevron, control_separator, floating, glass_surface,
+    menu_row, track_bounds,
 };
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::{color_mix, MixSpace, with_alpha};
+use crate::theme::color::{MixSpace, color_mix, with_alpha};
 use crate::theme::tokens::{self, TEXT_SM, TEXT_XS, tw};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 
@@ -61,11 +67,19 @@ pub const RUNTIME_MODES: [RuntimeModeOption; 4] = [
 ];
 
 pub fn runtime_mode_option(mode: RuntimeMode) -> &'static RuntimeModeOption {
-    RUNTIME_MODES.iter().find(|option| option.mode == mode).unwrap_or(&RUNTIME_MODES[0])
+    RUNTIME_MODES
+        .iter()
+        .find(|option| option.mode == mode)
+        .unwrap_or(&RUNTIME_MODES[0])
 }
 
 impl ChatComposer {
-    pub(super) fn render_footer(&mut self, vm: &Arc<ComposerViewModel>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_footer(
+        &mut self,
+        vm: &Arc<ComposerViewModel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let width = f32::from(self.trigger_bounds.body.get().size.width);
         let measured = (width > 0.).then_some(width);
@@ -88,12 +102,19 @@ impl ChatComposer {
             .into_any_element()
     }
 
-    fn render_left_controls(&mut self, vm: &Arc<ComposerViewModel>, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_left_controls(
+        &mut self,
+        vm: &Arc<ComposerViewModel>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if vm.no_provider_available() {
             return self.render_provider_unavailable(vm, cx);
         }
         let model = self.render_model_trigger(vm, cx);
-        let traits = self.traits_section_for(vm, cx).map(|section| self.render_traits_trigger(vm, &section, cx));
+        let traits = self
+            .traits_section_for(vm, cx)
+            .map(|section| self.render_traits_trigger(vm, &section, cx));
         let mode = self.render_mode_controls(vm, cx);
         div()
             .flex()
@@ -107,9 +128,20 @@ impl ChatComposer {
             .into_any_element()
     }
 
-    fn render_provider_unavailable(&mut self, vm: &Arc<ComposerViewModel>, cx: &mut Context<Self>) -> AnyElement {
-        let setup = vm.selected_entry().filter(|entry| entry.has_setup()).map(|entry| entry.instance_id.clone());
-        let label = if setup.is_some() { "Open provider settings" } else { "No provider available" };
+    fn render_provider_unavailable(
+        &mut self,
+        vm: &Arc<ComposerViewModel>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let setup = vm
+            .selected_entry()
+            .filter(|entry| entry.has_setup())
+            .map(|entry| entry.instance_id.clone());
+        let label = if setup.is_some() {
+            "Open provider settings"
+        } else {
+            "No provider available"
+        };
         let theme = cx.app_theme().clone();
         composer_control("provider-unavailable", ControlSize::Sm, false, cx)
             .when(setup.is_none(), |this| this.opacity(0.64))
@@ -123,7 +155,11 @@ impl ChatComposer {
             .into_any_element()
     }
 
-    fn render_model_trigger(&mut self, vm: &Arc<ComposerViewModel>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_model_trigger(
+        &mut self,
+        vm: &Arc<ComposerViewModel>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let entry = vm.selected_entry();
         let model = entry.and_then(|entry| {
@@ -133,8 +169,12 @@ impl ChatComposer {
                 &entry.models,
             )
         });
-        let label = model.map(get_trigger_display_model_name).unwrap_or_else(|| vm.selected_model.clone());
-        let driver = entry.map(|entry| entry.driver_kind.clone()).unwrap_or_default();
+        let label = model
+            .map(get_trigger_display_model_name)
+            .unwrap_or_else(|| vm.selected_model.clone());
+        let driver = entry
+            .map(|entry| entry.driver_kind.clone())
+            .unwrap_or_default();
         let open = self.layer == Some(Layer::ModelPicker);
         let disabled = vm.is_send_busy || !vm.provider_catalog_known;
         let bounds = self.trigger_bounds.model.clone();
@@ -145,7 +185,14 @@ impl ChatComposer {
             .when(disabled, |this| this.opacity(0.64))
             .child(track_bounds(&bounds))
             .child(provider_mark(&driver, rems(1.), theme.muted_foreground))
-            .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(label))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(label),
+            )
             .child(control_chevron(ControlSize::Sm, cx))
             .tooltip(|window, cx| Tooltip::new("Change model").build(window, cx))
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -157,7 +204,11 @@ impl ChatComposer {
             .into_any_element()
     }
 
-    fn render_mode_controls(&mut self, vm: &Arc<ComposerViewModel>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_mode_controls(
+        &mut self,
+        vm: &Arc<ComposerViewModel>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let option = runtime_mode_option(vm.runtime_mode);
         let plan = vm.interaction_mode == InteractionMode::Plan;
@@ -181,15 +232,25 @@ impl ChatComposer {
                     .child(option.label)
                     .child(control_chevron(ControlSize::Sm, cx))
                     .tooltip(move |window, cx| Tooltip::new(option.description).build(window, cx))
-                    .on_click(cx.listener(|this, _, _, cx| this.set_layer(Some(Layer::RuntimeMode), cx))),
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.set_layer(Some(Layer::RuntimeMode), cx)),
+                    ),
             )
             .when(vm.settings.plan_mode_enabled, |this| {
                 this.child(control_separator(ControlSize::Sm, cx)).child(
                     composer_control("composer-interaction-mode", ControlSize::Sm, plan, cx)
                         .child(
-                            Icon::new(if plan { IconName::PencilRuler } else { IconName::Bot })
-                                .size(if plan { rems(1.) } else { rems(1.125) })
-                                .color(if plan { theme.accent_foreground } else { theme.muted_foreground }),
+                            Icon::new(if plan {
+                                IconName::PencilRuler
+                            } else {
+                                IconName::Bot
+                            })
+                            .size(if plan { rems(1.) } else { rems(1.125) })
+                            .color(if plan {
+                                theme.accent_foreground
+                            } else {
+                                theme.muted_foreground
+                            }),
                         )
                         .child(if plan { "Plan" } else { "Build" })
                         .tooltip(move |window, cx| Tooltip::new(plan_tooltip).build(window, cx))
@@ -199,7 +260,12 @@ impl ChatComposer {
             .into_any_element()
     }
 
-    fn render_right_controls(&mut self, vm: &Arc<ComposerViewModel>, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_right_controls(
+        &mut self,
+        vm: &Arc<ComposerViewModel>,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let attach = Button::new("composer-attach")
             .variant(ButtonVariant::Ghost)
             .size(ButtonSize::IconSm)
@@ -220,10 +286,21 @@ impl ChatComposer {
             .into_any_element()
     }
 
-    fn render_primary_actions(&mut self, vm: &Arc<ComposerViewModel>, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_primary_actions(
+        &mut self,
+        vm: &Arc<ComposerViewModel>,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let input = self.primary_actions_input(vm, compact, cx);
         match resolve_primary_actions(&input) {
-            PrimaryActions::Pending { show_stop, show_previous, previous_disabled, submit_label, submit_disabled } => {
+            PrimaryActions::Pending {
+                show_stop,
+                show_previous,
+                previous_disabled,
+                submit_label,
+                submit_disabled,
+            } => {
                 let stop = show_stop.then(|| self.stop_button(true, !vm.can_operate_thread, cx));
                 div()
                     .flex()
@@ -235,7 +312,11 @@ impl ChatComposer {
                         this.child(
                             Button::new("composer-previous-question")
                                 .variant(ButtonVariant::Outline)
-                                .size(if compact { ButtonSize::IconSm } else { ButtonSize::Sm })
+                                .size(if compact {
+                                    ButtonSize::IconSm
+                                } else {
+                                    ButtonSize::Sm
+                                })
                                 .disabled(previous_disabled)
                                 .when(compact, |b| b.icon(IconName::ChevronLeft))
                                 .when(!compact, |b| b.label("Previous"))
@@ -246,19 +327,35 @@ impl ChatComposer {
                                 })),
                         )
                     })
-                    .child(self.pill_button("composer-submit-answer", submit_label, submit_disabled, compact, 28., cx))
+                    .child(self.pill_button(
+                        "composer-submit-answer",
+                        submit_label,
+                        submit_disabled,
+                        compact,
+                        28.,
+                        cx,
+                    ))
                     .into_any_element()
             }
-            PrimaryActions::Refine { label, disabled } => self.pill_button("composer-refine", label, disabled, compact, 32., cx).into_any_element(),
-            PrimaryActions::Implement { label, disabled } => {
-                self.pill_button("composer-implement", label, disabled, compact, 32., cx).into_any_element()
-            }
-            PrimaryActions::Stop => self.stop_button(false, !vm.can_operate_thread, cx).into_any_element(),
+            PrimaryActions::Refine { label, disabled } => self
+                .pill_button("composer-refine", label, disabled, compact, 32., cx)
+                .into_any_element(),
+            PrimaryActions::Implement { label, disabled } => self
+                .pill_button("composer-implement", label, disabled, compact, 32., cx)
+                .into_any_element(),
+            PrimaryActions::Stop => self
+                .stop_button(false, !vm.can_operate_thread, cx)
+                .into_any_element(),
             PrimaryActions::Send(button) => self.send_button(&button, vm, cx),
         }
     }
 
-    fn stop_button(&mut self, inside_pending: bool, disabled: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn stop_button(
+        &mut self,
+        inside_pending: bool,
+        disabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let size = if inside_pending { px(28.) } else { px(32.) };
         div()
@@ -318,26 +415,48 @@ impl ChatComposer {
             .when(!disabled, |this| {
                 this.cursor(CursorStyle::PointingHand)
                     .hover(|style| style.bg(theme.message_action_hover))
-                    .on_click(cx.listener(|this, _, window, cx| this.submit(ComposerSubmissionIntent::Foreground, window, cx)))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.submit(ComposerSubmissionIntent::Foreground, window, cx)
+                    }))
             })
             .when(disabled, |this| this.opacity(0.64))
             .child(label)
     }
 
-    fn send_button(&mut self, button: &SendButton, vm: &Arc<ComposerViewModel>, cx: &mut Context<Self>) -> AnyElement {
+    fn send_button(
+        &mut self,
+        button: &SendButton,
+        vm: &Arc<ComposerViewModel>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let disabled = button.disabled;
         let resume = button.is_resume;
         let tooltip = button.tooltip.clone();
         let _ = vm;
         let dark = theme.is_dark();
-        let glow = color_mix(MixSpace::Srgb, theme.message_action, 0.24, with_alpha(theme.message_action, 0.));
+        let glow = color_mix(
+            MixSpace::Srgb,
+            theme.message_action,
+            0.24,
+            with_alpha(theme.message_action, 0.),
+        );
         let icon: AnyElement = match button.icon {
-            SendIcon::Spinner => Icon::new(IconName::LoaderCircle).color(theme.message_action_foreground).into_any_element(),
-            SendIcon::Resume => Icon::new(IconName::Play).color(theme.message_action_foreground).into_any_element(),
-            SendIcon::Check => Icon::new(IconName::Check).color(theme.message_action_foreground).into_any_element(),
-            SendIcon::Queue => Icon::new(IconName::ListPlus).color(theme.message_action_foreground).into_any_element(),
-            SendIcon::Steer => Icon::new(IconName::CornerUpRight).color(theme.message_action_foreground).into_any_element(),
+            SendIcon::Spinner => Icon::new(IconName::LoaderCircle)
+                .color(theme.message_action_foreground)
+                .into_any_element(),
+            SendIcon::Resume => Icon::new(IconName::Play)
+                .color(theme.message_action_foreground)
+                .into_any_element(),
+            SendIcon::Check => Icon::new(IconName::Check)
+                .color(theme.message_action_foreground)
+                .into_any_element(),
+            SendIcon::Queue => Icon::new(IconName::ListPlus)
+                .color(theme.message_action_foreground)
+                .into_any_element(),
+            SendIcon::Steer => Icon::new(IconName::CornerUpRight)
+                .color(theme.message_action_foreground)
+                .into_any_element(),
             SendIcon::ArrowUp => gpui_kit::svg()
                 .path(SEND_ARROW)
                 .size(px(14.))
@@ -364,20 +483,23 @@ impl ChatComposer {
                         inset: false,
                     }])
                     .hover(|style| style.bg(theme.message_action_hover))
-                    .on_click(cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
-                        if resume {
-                            if let Some(source) = this.source(cx) {
-                                source.resume(cx);
+                    .on_click(
+                        cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
+                            if resume {
+                                if let Some(source) = this.source(cx) {
+                                    source.resume(cx);
+                                }
+                                return;
                             }
-                            return;
-                        }
-                        let intent = if event.modifiers().secondary() || event.modifiers().control {
-                            ComposerSubmissionIntent::Alternate
-                        } else {
-                            ComposerSubmissionIntent::Foreground
-                        };
-                        this.submit(intent, window, cx);
-                    }))
+                            let intent =
+                                if event.modifiers().secondary() || event.modifiers().control {
+                                    ComposerSubmissionIntent::Alternate
+                                } else {
+                                    ComposerSubmissionIntent::Foreground
+                                };
+                            this.submit(intent, window, cx);
+                        }),
+                    )
             })
             .when(disabled, |this| this.opacity(0.64))
             .child(icon)
@@ -385,19 +507,34 @@ impl ChatComposer {
             .into_any_element()
     }
 
-    pub(super) fn render_layers(&mut self, vm: &Arc<ComposerViewModel>, _window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_layers(
+        &mut self,
+        vm: &Arc<ComposerViewModel>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let mut layers = Vec::new();
         match self.layer {
             Some(Layer::ModelPicker) => {
                 if let Some(picker) = self.model_picker.clone() {
-                    layers.push(floating(self.trigger_bounds.model.get(), true, false, glass_surface(cx).child(picker)));
+                    layers.push(floating(
+                        self.trigger_bounds.model.get(),
+                        true,
+                        false,
+                        glass_surface(cx).child(picker),
+                    ));
                 }
             }
             Some(Layer::RuntimeMode) => layers.push(self.runtime_mode_menu(vm, cx)),
             Some(Layer::CodeLanguage) => {
                 if let Some((picker, anchor)) = self.language_picker.clone() {
                     let bounds = gpui_kit::Bounds::new(anchor, gpui_kit::size(px(0.), px(0.)));
-                    layers.push(floating(bounds, false, false, glass_surface(cx).child(picker)));
+                    layers.push(floating(
+                        bounds,
+                        false,
+                        false,
+                        glass_surface(cx).child(picker),
+                    ));
                 }
             }
             Some(Layer::ContextMeter) => layers.extend(self.context_meter_popover(vm, cx)),
@@ -415,14 +552,21 @@ impl ChatComposer {
                     .left(px(-4000.))
                     .w(px(8000.))
                     .h(px(8000.))
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_layer(window, cx)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.close_layer(window, cx)),
+                    )
                     .into_any_element(),
             );
         }
         layers
     }
 
-    fn runtime_mode_menu(&mut self, vm: &Arc<ComposerViewModel>, cx: &mut Context<Self>) -> AnyElement {
+    fn runtime_mode_menu(
+        &mut self,
+        vm: &Arc<ComposerViewModel>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let current = vm.runtime_mode;
         let rows = RUNTIME_MODES.iter().enumerate().map(|(index, option)| {
@@ -443,7 +587,11 @@ impl ChatComposer {
                                 .gap(rems(0.375))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.foreground)
-                                .child(Icon::new(option.icon).size(rems(0.875)).color(theme.muted_foreground))
+                                .child(
+                                    Icon::new(option.icon)
+                                        .size(rems(0.875))
+                                        .color(theme.muted_foreground),
+                                )
                                 .child(option.label),
                         )
                         .child(
@@ -471,7 +619,11 @@ impl ChatComposer {
 }
 
 /// A provider's mark at `size`: the bundled brand glyph, else a generic bot.
-pub fn provider_mark(driver_kind: &str, size: gpui_kit::Rems, color: gpui_kit::Hsla) -> impl IntoElement {
+pub fn provider_mark(
+    driver_kind: &str,
+    size: gpui_kit::Rems,
+    color: gpui_kit::Hsla,
+) -> impl IntoElement {
     match provider_icon_path(driver_kind) {
         Some(path) => Icon::path(path).size(size).color(color),
         None => Icon::new(IconName::Bot).size(size).color(color),

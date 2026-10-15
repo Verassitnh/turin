@@ -6,8 +6,8 @@
 //! renders. The view paints the result.
 
 use crate::composer::dispatch::{
-    ActiveTurnComposerAction, ComposerDispatchMode, ResolveComposerDispatchModeInput, alternate_composer_dispatch_action,
-    resolve_composer_dispatch_mode,
+    ActiveTurnComposerAction, ComposerDispatchMode, ResolveComposerDispatchModeInput,
+    alternate_composer_dispatch_action, resolve_composer_dispatch_mode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +129,12 @@ pub enum PrimaryActions {
 }
 
 /// `formatPendingPrimaryActionLabel`.
-pub fn format_pending_primary_action_label(compact: bool, is_last_question: bool, is_responding: bool, question_index: usize) -> &'static str {
+pub fn format_pending_primary_action_label(
+    compact: bool,
+    is_last_question: bool,
+    is_responding: bool,
+    question_index: usize,
+) -> &'static str {
     if is_responding {
         return "Submitting...";
     }
@@ -139,7 +144,11 @@ pub fn format_pending_primary_action_label(compact: bool, is_last_question: bool
     if !is_last_question {
         return "Next question";
     }
-    if question_index > 0 { "Submit answers" } else { "Submit answer" }
+    if question_index > 0 {
+        "Submit answers"
+    } else {
+        "Submit answer"
+    }
 }
 
 /// `formatContextWindowTokens`.
@@ -199,11 +208,18 @@ pub fn resolve_primary_actions(input: &ComposerPrimaryActionsInput) -> PrimaryAc
             submit_disabled: !input.can_operate_thread
                 || input.is_environment_unavailable
                 || pending.is_responding
-                || if pending.is_last_question { !pending.is_complete } else { !pending.can_advance },
+                || if pending.is_last_question {
+                    !pending.is_complete
+                } else {
+                    !pending.can_advance
+                },
         };
     }
 
-    let blocked = input.is_send_busy || is_send_disabled || input.is_connecting || input.is_environment_unavailable;
+    let blocked = input.is_send_busy
+        || is_send_disabled
+        || input.is_connecting
+        || input.is_environment_unavailable;
     if input.show_plan_follow_up_prompt && (input.prompt_has_text || !input.can_resume) {
         let sending = input.is_connecting || input.is_send_busy;
         return if input.prompt_has_text {
@@ -223,8 +239,11 @@ pub fn resolve_primary_actions(input: &ComposerPrimaryActionsInput) -> PrimaryAc
         return PrimaryActions::Stop;
     }
 
-    let show_resume = input.can_resume && !input.has_sendable_content && !input.is_editing_queued_message;
-    let compact_tokens = (input.compact_before_send_tokens.is_some() && !show_resume && !input.is_editing_queued_message)
+    let show_resume =
+        input.can_resume && !input.has_sendable_content && !input.is_editing_queued_message;
+    let compact_tokens = (input.compact_before_send_tokens.is_some()
+        && !show_resume
+        && !input.is_editing_queued_message)
         .then(|| format_context_window_tokens(input.compact_before_send_tokens));
     let compacts_before_send = compact_tokens.is_some() && !input.keep_full_history;
     let queuing = is_queuing(input);
@@ -251,14 +270,24 @@ pub fn resolve_primary_actions(input: &ComposerPrimaryActionsInput) -> PrimaryAc
     } else if input.is_preparing_worktree {
         Some("Preparing worktree".to_owned())
     } else if input.is_send_busy {
-        Some(if input.is_editing_queued_message { "Updating queued message" } else { "Submitting message" }.to_owned())
+        Some(
+            if input.is_editing_queued_message {
+                "Updating queued message"
+            } else {
+                "Submitting message"
+            }
+            .to_owned(),
+        )
     } else {
         None
     };
     let alternate_action = alternate_composer_dispatch_action(Some(input.follow_up_behavior));
     let submit_tooltip = submit_status.clone().unwrap_or_else(|| {
         if compacts_before_send {
-            format!("Summarize {} tokens of history, then send", compact_tokens.as_deref().unwrap_or("0"))
+            format!(
+                "Summarize {} tokens of history, then send",
+                compact_tokens.as_deref().unwrap_or("0")
+            )
         } else if input.is_running && !input.is_editing_queued_message {
             format!(
                 "Click to {}, Ctrl/⌘-click{} to {}",
@@ -280,7 +309,11 @@ pub fn resolve_primary_actions(input: &ComposerPrimaryActionsInput) -> PrimaryAc
     } else if input.is_editing_queued_message {
         SendIcon::Check
     } else if input.is_running {
-        if queuing { SendIcon::Queue } else { SendIcon::Steer }
+        if queuing {
+            SendIcon::Queue
+        } else {
+            SendIcon::Steer
+        }
     } else {
         SendIcon::ArrowUp
     };
@@ -345,7 +378,8 @@ mod tests {
 
     #[test]
     fn disables_and_labels_the_send_button_while_feedback_is_uploading() {
-        let PrimaryActions::Send(button) = resolve_primary_actions(&send(Some("Sending feedback"))) else {
+        let PrimaryActions::Send(button) = resolve_primary_actions(&send(Some("Sending feedback")))
+        else {
             panic!("send button");
         };
         assert!(button.disabled);
@@ -356,11 +390,17 @@ mod tests {
     fn offers_stop_generation_while_a_running_turn_is_waiting_for_user_input() {
         assert!(matches!(
             resolve_primary_actions(&pending(true)),
-            PrimaryActions::Pending { show_stop: true, .. }
+            PrimaryActions::Pending {
+                show_stop: true,
+                ..
+            }
         ));
         assert!(matches!(
             resolve_primary_actions(&pending(false)),
-            PrimaryActions::Pending { show_stop: false, .. }
+            PrimaryActions::Pending {
+                show_stop: false,
+                ..
+            }
         ));
     }
 
@@ -371,30 +411,60 @@ mod tests {
             other => panic!("{other:?}"),
         };
         assert_eq!(label(send(None)), "Submit message");
-        let running = ComposerPrimaryActionsInput { is_running: true, ..send(None) };
+        let running = ComposerPrimaryActionsInput {
+            is_running: true,
+            ..send(None)
+        };
         assert_eq!(label(running.clone()), "Steer message");
         assert_eq!(
-            label(ComposerPrimaryActionsInput { alternate_modifier: true, ..running.clone() }),
+            label(ComposerPrimaryActionsInput {
+                alternate_modifier: true,
+                ..running.clone()
+            }),
             "Queue message"
         );
         assert_eq!(
-            label(ComposerPrimaryActionsInput { follow_up_behavior: ActiveTurnComposerAction::Queue, ..running }),
+            label(ComposerPrimaryActionsInput {
+                follow_up_behavior: ActiveTurnComposerAction::Queue,
+                ..running
+            }),
             "Queue message"
         );
         assert_eq!(
-            label(ComposerPrimaryActionsInput { is_editing_queued_message: true, ..send(None) }),
+            label(ComposerPrimaryActionsInput {
+                is_editing_queued_message: true,
+                ..send(None)
+            }),
             "Update queued message"
         );
         assert_eq!(
-            label(ComposerPrimaryActionsInput { is_environment_unavailable: true, ..send(None) }),
+            label(ComposerPrimaryActionsInput {
+                is_environment_unavailable: true,
+                ..send(None)
+            }),
             "Environment disconnected"
         );
-        assert_eq!(label(ComposerPrimaryActionsInput { is_connecting: true, ..send(None) }), "Connecting");
         assert_eq!(
-            label(ComposerPrimaryActionsInput { is_preparing_worktree: true, ..send(None) }),
+            label(ComposerPrimaryActionsInput {
+                is_connecting: true,
+                ..send(None)
+            }),
+            "Connecting"
+        );
+        assert_eq!(
+            label(ComposerPrimaryActionsInput {
+                is_preparing_worktree: true,
+                ..send(None)
+            }),
             "Preparing worktree"
         );
-        assert_eq!(label(ComposerPrimaryActionsInput { is_send_busy: true, ..send(None) }), "Submitting message");
+        assert_eq!(
+            label(ComposerPrimaryActionsInput {
+                is_send_busy: true,
+                ..send(None)
+            }),
+            "Submitting message"
+        );
     }
 
     #[test]
@@ -406,15 +476,25 @@ mod tests {
         }) else {
             panic!("send");
         };
-        assert_eq!(button.tooltip, "Click to steer, Ctrl/⌘-click or ⌘⇧↵ to queue");
+        assert_eq!(
+            button.tooltip,
+            "Click to steer, Ctrl/⌘-click or ⌘⇧↵ to queue"
+        );
         assert_eq!(button.icon, SendIcon::Steer);
     }
 
     #[test]
     fn stops_when_interruptible_without_sendable_content_and_resumes_when_possible() {
-        let stop = ComposerPrimaryActionsInput { can_interrupt: true, is_running: true, ..Default::default() };
+        let stop = ComposerPrimaryActionsInput {
+            can_interrupt: true,
+            is_running: true,
+            ..Default::default()
+        };
         assert_eq!(resolve_primary_actions(&stop), PrimaryActions::Stop);
-        let resume = ComposerPrimaryActionsInput { can_resume: true, ..Default::default() };
+        let resume = ComposerPrimaryActionsInput {
+            can_resume: true,
+            ..Default::default()
+        };
         let PrimaryActions::Send(button) = resolve_primary_actions(&resume) else {
             panic!("send");
         };
@@ -435,8 +515,14 @@ mod tests {
         assert_eq!(button.tooltip, "Summarize 48k tokens of history, then send");
         let chip = button.compact_chip.expect("chip");
         assert_eq!(chip.label, "Compact");
-        assert_eq!(chip.tooltip, "Next send compacts 48k tokens first. Click to keep full history");
-        let keep = ComposerPrimaryActionsInput { keep_full_history: true, ..input };
+        assert_eq!(
+            chip.tooltip,
+            "Next send compacts 48k tokens first. Click to keep full history"
+        );
+        let keep = ComposerPrimaryActionsInput {
+            keep_full_history: true,
+            ..input
+        };
         let PrimaryActions::Send(button) = resolve_primary_actions(&keep) else {
             panic!("send");
         };
@@ -446,29 +532,65 @@ mod tests {
 
     #[test]
     fn plan_follow_up_offers_refine_with_text_and_implement_without() {
-        let base = ComposerPrimaryActionsInput { show_plan_follow_up_prompt: true, ..Default::default() };
+        let base = ComposerPrimaryActionsInput {
+            show_plan_follow_up_prompt: true,
+            ..Default::default()
+        };
         assert_eq!(
-            resolve_primary_actions(&ComposerPrimaryActionsInput { prompt_has_text: true, ..base.clone() }),
-            PrimaryActions::Refine { label: "Refine", disabled: false }
+            resolve_primary_actions(&ComposerPrimaryActionsInput {
+                prompt_has_text: true,
+                ..base.clone()
+            }),
+            PrimaryActions::Refine {
+                label: "Refine",
+                disabled: false
+            }
         );
         assert_eq!(
             resolve_primary_actions(&base),
-            PrimaryActions::Implement { label: "Implement", disabled: false }
+            PrimaryActions::Implement {
+                label: "Implement",
+                disabled: false
+            }
         );
         assert_eq!(
-            resolve_primary_actions(&ComposerPrimaryActionsInput { is_send_busy: true, ..base }),
-            PrimaryActions::Implement { label: "Sending...", disabled: true }
+            resolve_primary_actions(&ComposerPrimaryActionsInput {
+                is_send_busy: true,
+                ..base
+            }),
+            PrimaryActions::Implement {
+                label: "Sending...",
+                disabled: true
+            }
         );
     }
 
     #[test]
     fn pending_labels() {
-        assert_eq!(format_pending_primary_action_label(false, true, false, 0), "Submit answer");
-        assert_eq!(format_pending_primary_action_label(false, true, false, 2), "Submit answers");
-        assert_eq!(format_pending_primary_action_label(false, false, false, 0), "Next question");
-        assert_eq!(format_pending_primary_action_label(true, false, false, 0), "Next");
-        assert_eq!(format_pending_primary_action_label(true, true, false, 0), "Submit");
-        assert_eq!(format_pending_primary_action_label(true, true, true, 0), "Submitting...");
+        assert_eq!(
+            format_pending_primary_action_label(false, true, false, 0),
+            "Submit answer"
+        );
+        assert_eq!(
+            format_pending_primary_action_label(false, true, false, 2),
+            "Submit answers"
+        );
+        assert_eq!(
+            format_pending_primary_action_label(false, false, false, 0),
+            "Next question"
+        );
+        assert_eq!(
+            format_pending_primary_action_label(true, false, false, 0),
+            "Next"
+        );
+        assert_eq!(
+            format_pending_primary_action_label(true, true, false, 0),
+            "Submit"
+        );
+        assert_eq!(
+            format_pending_primary_action_label(true, true, true, 0),
+            "Submitting..."
+        );
     }
 
     #[test]

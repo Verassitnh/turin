@@ -12,26 +12,39 @@ use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
 };
 
-use crate::composer::dispatch::{ComposerDispatchMode, ResolveComposerDispatchModeInput, resolve_composer_dispatch_mode};
-use crate::composer::draft_store::{ComposerDraftStore, ComposerFileAttachment, ComposerImageAttachment};
+use crate::composer::dispatch::{
+    ComposerDispatchMode, ResolveComposerDispatchModeInput, resolve_composer_dispatch_mode,
+};
+use crate::composer::draft_store::{
+    ComposerDraftStore, ComposerFileAttachment, ComposerImageAttachment,
+};
 use crate::composer::editor_state::EditorSnapshot;
-use crate::composer::logic::{ComposerSubmissionIntent, SubmissionIntentInput, composer_submission_intent_for_key};
+use crate::composer::logic::{
+    ComposerSubmissionIntent, SubmissionIntentInput, composer_submission_intent_for_key,
+};
 use crate::composer::primary_actions::ComposerPrimaryActionsInput;
 use crate::composer::prompt_history::ComposerPromptHistoryPosition;
-use crate::composer::submission::{ComposerSubmissionInput, SubmissionTarget, submit_composer_draft};
-use crate::composer::view_model::{ComposerSource, ComposerStore, ComposerViewModel, InteractionMode, SendRequest};
+use crate::composer::submission::{
+    ComposerSubmissionInput, SubmissionTarget, submit_composer_draft,
+};
+use crate::composer::view_model::{
+    ComposerSource, ComposerStore, ComposerViewModel, InteractionMode, SendRequest,
+};
 use crate::composer::views::chrome::BoundsCell;
-use crate::composer::views::prompt_editor::{CommandKey, EditorConfig, PromptEditor, PromptEditorEvent};
+use crate::composer::views::prompt_editor::{
+    CommandKey, EditorConfig, PromptEditor, PromptEditorEvent,
+};
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::{MixSpace, color_mix, with_alpha};
 use crate::theme::tokens::{self, RADIUS_3XL, TEXT_XS, tw};
 
 /// Composer placeholder copy (ChatComposer.tsx, default state).
-pub const COMPOSER_PLACEHOLDER: &str = "Ask anything, @tag files/folders, $use skills, or / for commands";
+pub const COMPOSER_PLACEHOLDER: &str =
+    "Ask anything, @tag files/folders, $use skills, or / for commands";
 
 /// Which floating layer is open. One at a time, as upstream's composer menus
 /// close each other.
@@ -55,7 +68,10 @@ pub struct ChatComposer {
     pub(super) history_position: Option<ComposerPromptHistoryPosition>,
     pub(super) layer: Option<Layer>,
     pub(super) model_picker: Option<Entity<super::model_picker_view::ModelPickerView>>,
-    pub(super) language_picker: Option<(Entity<super::language_picker_view::LanguagePickerView>, gpui_kit::Point<gpui_kit::Pixels>)>,
+    pub(super) language_picker: Option<(
+        Entity<super::language_picker_view::LanguagePickerView>,
+        gpui_kit::Point<gpui_kit::Pixels>,
+    )>,
     pub(super) trigger_bounds: TriggerBounds,
     pub(super) focus: FocusHandle,
     pub(super) attachment_counter: usize,
@@ -95,9 +111,13 @@ impl ChatComposer {
         });
         let subscriptions = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
-            cx.subscribe_in(&editor, window, |this, _, event: &PromptEditorEvent, window, cx| {
-                this.on_editor_event(event, window, cx);
-            }),
+            cx.subscribe_in(
+                &editor,
+                window,
+                |this, _, event: &PromptEditorEvent, window, cx| {
+                    this.on_editor_event(event, window, cx);
+                },
+            ),
         ];
         let mut this = Self {
             store,
@@ -156,30 +176,35 @@ impl ChatComposer {
             crate::composer::mock_source::apply_demo_scenario(&overlay, &mut vm);
             store.publish(vm, cx);
         });
-        if scenario == "attach" {
-            if let Some(loaded) = super::actions::read_picked_file("/tmp/t17-img.png".into()) {
-                let mut files = vec![loaded];
-                files.push((
-                    crate::composer::attachment_files::PickedFile::new("notes.txt", "text/plain", 2048),
-                    vec![0u8; 2048],
-                ));
-                self.thread_key = "local:thread-1".into();
-                self.add_picked_files(files, window, cx);
-            }
+        if scenario == "attach"
+            && let Some(loaded) = super::actions::read_picked_file("/tmp/t17-img.png".into())
+        {
+            let mut files = vec![loaded];
+            files.push((
+                crate::composer::attachment_files::PickedFile::new("notes.txt", "text/plain", 2048),
+                vec![0u8; 2048],
+            ));
+            self.thread_key = "local:thread-1".into();
+            self.add_picked_files(files, window, cx);
         }
         if scenario == "stash" {
-            for text in ["Investigate the flaky sidebar test", "Draft release notes for 0.9"] {
+            for text in [
+                "Investigate the flaky sidebar test",
+                "Draft release notes for 0.9",
+            ] {
                 let id = self.next_demo_stash_id();
-                self.drafts.push_stash_entry(crate::composer::draft_store::PromptStashEntry {
-                    id,
-                    created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                    prompt: text.into(),
-                    images: Vec::new(),
-                    files: Vec::new(),
-                    dropped_image_names: Vec::new(),
-                    unreadable_image_names: Vec::new(),
-                    pending_image_count: 0,
-                });
+                self.drafts
+                    .push_stash_entry(crate::composer::draft_store::PromptStashEntry {
+                        id,
+                        created_at: chrono::Utc::now()
+                            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        prompt: text.into(),
+                        images: Vec::new(),
+                        files: Vec::new(),
+                        dropped_image_names: Vec::new(),
+                        unreadable_image_names: Vec::new(),
+                        pending_image_count: 0,
+                    });
             }
         }
         let layer = match scenario.as_str() {
@@ -193,23 +218,31 @@ impl ChatComposer {
         if let Some(layer) = layer {
             let weak = cx.weak_entity();
             window.defer(cx, move |_, cx| {
-                weak.update(cx, |this, cx| this.set_layer(Some(layer), cx)).ok();
+                weak.update(cx, |this, cx| this.set_layer(Some(layer), cx))
+                    .ok();
             });
         }
         if scenario == "language" {
             let weak = cx.weak_entity();
             window.defer(cx, move |window, cx| {
                 weak.update(cx, |this, cx| {
-                    let block = this
-                        .editor
-                        .read(cx)
-                        .state()
-                        .doc()
-                        .blocks
-                        .iter()
-                        .position(|block| matches!(block, crate::composer::rich_doc::Block::Code(_)));
+                    let block =
+                        this.editor
+                            .read(cx)
+                            .state()
+                            .doc()
+                            .blocks
+                            .iter()
+                            .position(|block| {
+                                matches!(block, crate::composer::rich_doc::Block::Code(_))
+                            });
                     if let Some(block) = block {
-                        this.open_language_picker(block, gpui_kit::point(gpui_kit::px(700.), gpui_kit::px(520.)), window, cx);
+                        this.open_language_picker(
+                            block,
+                            gpui_kit::point(gpui_kit::px(700.), gpui_kit::px(520.)),
+                            window,
+                            cx,
+                        );
                     }
                 })
                 .ok();
@@ -218,7 +251,8 @@ impl ChatComposer {
         if scenario == "picker" {
             let weak = cx.weak_entity();
             window.defer(cx, move |window, cx| {
-                weak.update(cx, |this, cx| this.open_model_picker(window, cx)).ok();
+                weak.update(cx, |this, cx| this.open_model_picker(window, cx))
+                    .ok();
             });
         }
     }
@@ -237,19 +271,30 @@ impl ChatComposer {
 
     /// The prompt as last reported by the editor (kept in the draft).
     pub(super) fn prompt(&self, _cx: &App) -> String {
-        self.drafts.get_composer_draft(&self.thread_key).map(|draft| draft.prompt.clone()).unwrap_or_default()
+        self.drafts
+            .get_composer_draft(&self.thread_key)
+            .map(|draft| draft.prompt.clone())
+            .unwrap_or_default()
     }
 
     pub(super) fn draft_images(&self) -> Vec<ComposerImageAttachment> {
-        self.drafts.get_composer_draft(&self.thread_key).map(|draft| draft.images.clone()).unwrap_or_default()
+        self.drafts
+            .get_composer_draft(&self.thread_key)
+            .map(|draft| draft.images.clone())
+            .unwrap_or_default()
     }
 
     pub(super) fn draft_files(&self) -> Vec<ComposerFileAttachment> {
-        self.drafts.get_composer_draft(&self.thread_key).map(|draft| draft.files.clone()).unwrap_or_default()
+        self.drafts
+            .get_composer_draft(&self.thread_key)
+            .map(|draft| draft.files.clone())
+            .unwrap_or_default()
     }
 
     pub(super) fn has_sendable_content(&self, cx: &App) -> bool {
-        !self.prompt(cx).trim().is_empty() || !self.draft_images().is_empty() || !self.draft_files().is_empty()
+        !self.prompt(cx).trim().is_empty()
+            || !self.draft_images().is_empty()
+            || !self.draft_files().is_empty()
     }
 
     /// Swap the editor and attachments when the thread changes (the draft is
@@ -263,7 +308,11 @@ impl ChatComposer {
             let prompt = self.prompt(cx);
             self.drafts.set_prompt(&previous, &prompt);
         }
-        let prompt = self.drafts.get_composer_draft(&self.thread_key).map(|draft| draft.prompt.clone()).unwrap_or_default();
+        let prompt = self
+            .drafts
+            .get_composer_draft(&self.thread_key)
+            .map(|draft| draft.prompt.clone())
+            .unwrap_or_default();
         self.validation = None;
         self.history_position = None;
         self.layer = None;
@@ -275,7 +324,10 @@ impl ChatComposer {
     }
 
     fn sync_editor_config(&mut self, vm: &ComposerViewModel, cx: &mut Context<Self>) {
-        let skills = vm.selected_entry().map(|entry| entry.skills.clone()).unwrap_or_default();
+        let skills = vm
+            .selected_entry()
+            .map(|entry| entry.skills.clone())
+            .unwrap_or_default();
         let disabled = !vm.can_operate_thread;
         let rich_text = vm.settings.composer_rich_text_enabled;
         self.editor.update(cx, |editor, cx| {
@@ -293,7 +345,12 @@ impl ChatComposer {
         });
     }
 
-    fn on_editor_event(&mut self, event: &PromptEditorEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_editor_event(
+        &mut self,
+        event: &PromptEditorEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match event {
             PromptEditorEvent::Changed(snapshot) => {
                 self.drafts.set_prompt(&self.thread_key, &snapshot.value);
@@ -301,7 +358,9 @@ impl ChatComposer {
                 self.after_prompt_changed(snapshot, cx);
                 cx.notify();
             }
-            PromptEditorEvent::OpenCodeLanguagePicker { block, anchor } => self.open_language_picker(*block, *anchor, window, cx),
+            PromptEditorEvent::OpenCodeLanguagePicker { block, anchor } => {
+                self.open_language_picker(*block, *anchor, window, cx)
+            }
             PromptEditorEvent::VisibleSelectionChanged => cx.notify(),
         }
     }
@@ -336,7 +395,9 @@ impl ChatComposer {
         let paste_weak = cx.weak_entity();
         self.editor.update(cx, |editor, _| {
             editor.set_paste_handler(Some(std::rc::Rc::new(move |_state, item, window, cx| {
-                use crate::composer::attachment_files::{PickedFile, should_handle_composer_attachment_paste};
+                use crate::composer::attachment_files::{
+                    PickedFile, should_handle_composer_attachment_paste,
+                };
                 use gpui_kit::ClipboardEntry;
                 let mut loaded: Vec<(PickedFile, Vec<u8>)> = Vec::new();
                 let mut plain = String::new();
@@ -353,10 +414,23 @@ impl ChatComposer {
                                 _ => "png",
                             };
                             let name = format!("pasted-image.{extension}");
-                            loaded.push((PickedFile::new(&name, image.format.mime_type(), image.bytes.len() as u64), image.bytes.clone()));
+                            loaded.push((
+                                PickedFile::new(
+                                    &name,
+                                    image.format.mime_type(),
+                                    image.bytes.len() as u64,
+                                ),
+                                image.bytes.clone(),
+                            ));
                         }
                         ClipboardEntry::ExternalPaths(paths) => {
-                            loaded.extend(paths.paths().iter().cloned().filter_map(super::actions::read_picked_file));
+                            loaded.extend(
+                                paths
+                                    .paths()
+                                    .iter()
+                                    .cloned()
+                                    .filter_map(super::actions::read_picked_file),
+                            );
                         }
                         ClipboardEntry::String(string) => plain.push_str(string.text()),
                     }
@@ -367,7 +441,8 @@ impl ChatComposer {
                 }
                 let weak = paste_weak.clone();
                 window.defer(cx, move |window, cx| {
-                    weak.update(cx, |this, cx| this.add_picked_files(loaded, window, cx)).ok();
+                    weak.update(cx, |this, cx| this.add_picked_files(loaded, window, cx))
+                        .ok();
                 });
                 true
             })));
@@ -376,16 +451,23 @@ impl ChatComposer {
         self.editor.update(cx, |editor, _| {
             editor.set_command_handler(Some(std::rc::Rc::new(move |state, key, window, cx| {
                 let snapshot = state.snapshot();
-                let handled = weak
-                    .update(cx, |this, cx| this.on_command_key(&snapshot, key, window, cx))
-                    .unwrap_or(false);
-                handled
+
+                weak.update(cx, |this, cx| {
+                    this.on_command_key(&snapshot, key, window, cx)
+                })
+                .unwrap_or(false)
             })));
         });
     }
 
     /// `onCommandKeyDown`: the keys the composer claims before the editor.
-    fn on_command_key(&mut self, snapshot: &EditorSnapshot, key: &CommandKey, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn on_command_key(
+        &mut self,
+        snapshot: &EditorSnapshot,
+        key: &CommandKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if key.key == "Tab" && key.shift && !key.alt && !key.meta && !key.ctrl {
             // Shift+Tab flips plan/build mode.
             if !self.view_model(cx).settings.plan_mode_enabled {
@@ -400,7 +482,8 @@ impl ChatComposer {
         if key.key == "s" && key.meta && !key.shift && !key.alt && !key.ctrl && !key.is_composing {
             let weak = cx.weak_entity();
             window.defer(cx, move |window, cx| {
-                weak.update(cx, |this, cx| this.stash_or_restore(window, cx)).ok();
+                weak.update(cx, |this, cx| this.stash_or_restore(window, cx))
+                    .ok();
             });
             return true;
         }
@@ -424,7 +507,10 @@ impl ChatComposer {
         let Some(intent) = intent else {
             return self.plain_list_key(snapshot, key, window, cx);
         };
-        let intent = if (key.meta || key.ctrl) && intent == ComposerSubmissionIntent::Foreground && vm.phase == crate::composer::view_model::SessionPhase::Running {
+        let intent = if (key.meta || key.ctrl)
+            && intent == ComposerSubmissionIntent::Foreground
+            && vm.phase == crate::composer::view_model::SessionPhase::Running
+        {
             ComposerSubmissionIntent::Alternate
         } else {
             intent
@@ -432,7 +518,8 @@ impl ChatComposer {
         // The editor is mid-update: submit once it has returned.
         let weak = cx.weak_entity();
         window.defer(cx, move |window, cx| {
-            weak.update(cx, |this, cx| this.submit(intent, window, cx)).ok();
+            weak.update(cx, |this, cx| this.submit(intent, window, cx))
+                .ok();
         });
         true
     }
@@ -440,10 +527,24 @@ impl ChatComposer {
     /// Plain-text mode has no list nodes, so Enter and Tab continue or indent
     /// markdown list lines in the text itself (`listContinuationForEnter` /
     /// `listIndentForTab`). Rich mode does this in the editor.
-    fn plain_list_key(&mut self, snapshot: &EditorSnapshot, key: &CommandKey, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        use crate::composer::list_continuation::{list_continuation_for_enter, list_indent_for_tab};
+    fn plain_list_key(
+        &mut self,
+        snapshot: &EditorSnapshot,
+        key: &CommandKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::composer::list_continuation::{
+            list_continuation_for_enter, list_indent_for_tab,
+        };
         let vm = self.view_model(cx);
-        if vm.settings.composer_rich_text_enabled || key.is_composing || key.shift || key.alt || key.meta || key.ctrl {
+        if vm.settings.composer_rich_text_enabled
+            || key.is_composing
+            || key.shift
+            || key.alt
+            || key.meta
+            || key.ctrl
+        {
             return false;
         }
         if snapshot.selection_start != snapshot.selection_end {
@@ -451,7 +552,11 @@ impl ChatComposer {
         }
         let edit = match key.key.as_str() {
             "Enter" => list_continuation_for_enter(&snapshot.value, snapshot.selection_start),
-            "Tab" => list_indent_for_tab(&snapshot.value, snapshot.selection_start, snapshot.selection_end),
+            "Tab" => list_indent_for_tab(
+                &snapshot.value,
+                snapshot.selection_start,
+                snapshot.selection_end,
+            ),
             _ => None,
         };
         let Some(edit) = edit else {
@@ -461,7 +566,15 @@ impl ChatComposer {
         let weak = cx.weak_entity();
         window.defer(cx, move |window, cx| {
             weak.update(cx, |this, cx| {
-                this.apply_prompt_replacement(&value, edit.start, edit.end, &edit.replacement, true, window, cx)
+                this.apply_prompt_replacement(
+                    &value,
+                    edit.start,
+                    edit.end,
+                    &edit.replacement,
+                    true,
+                    window,
+                    cx,
+                )
             })
             .ok();
         });
@@ -469,7 +582,12 @@ impl ChatComposer {
     }
 
     /// `onSubmit`: validate, hand the draft to the source and clear it.
-    pub fn submit(&mut self, intent: ComposerSubmissionIntent, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn submit(
+        &mut self,
+        intent: ComposerSubmissionIntent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let vm = self.view_model(cx);
         let Some(source) = self.source(cx) else {
             return;
@@ -484,7 +602,10 @@ impl ChatComposer {
             return;
         }
         let running = vm.phase == crate::composer::view_model::SessionPhase::Running;
-        let editing_queued_run = vm.queue.as_ref().and_then(|queue| queue.editing_run_id.clone());
+        let editing_queued_run = vm
+            .queue
+            .as_ref()
+            .and_then(|queue| queue.editing_run_id.clone());
         let dispatch_mode = if editing_queued_run.is_some() {
             ComposerDispatchMode::Auto
         } else {
@@ -501,7 +622,8 @@ impl ChatComposer {
             files,
             instance_id: vm.selected_instance_id.clone(),
             model: vm.selected_model.clone(),
-            model_options: (!vm.selected_model_options.is_empty()).then(|| vm.selected_model_options.clone()),
+            model_options: (!vm.selected_model_options.is_empty())
+                .then(|| vm.selected_model_options.clone()),
             interaction_mode: vm.interaction_mode,
             runtime_mode: vm.runtime_mode,
             dispatch_mode,
@@ -509,7 +631,11 @@ impl ChatComposer {
             answering_pending_user_input: answering,
             editing_queued_run,
         };
-        let target = if answering { SubmissionTarget::PendingUserInput } else { SubmissionTarget::ProviderTurn };
+        let target = if answering {
+            SubmissionTarget::PendingUserInput
+        } else {
+            SubmissionTarget::ProviderTurn
+        };
         let mut prevented = false;
         let result = submit_composer_draft(
             &ComposerSubmissionInput {
@@ -530,7 +656,8 @@ impl ChatComposer {
     pub(super) fn clear_draft(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.drafts.clear_composer_content(&self.thread_key);
         self.history_position = None;
-        self.editor.update(cx, |editor, cx| editor.set_value("", 0, cx));
+        self.editor
+            .update(cx, |editor, cx| editor.set_value("", 0, cx));
     }
 
     pub(super) fn interrupt(&mut self, cx: &mut Context<Self>) {
@@ -550,17 +677,24 @@ impl ChatComposer {
         }
     }
 
-    pub(super) fn primary_actions_input(&self, vm: &ComposerViewModel, compact: bool, cx: &App) -> ComposerPrimaryActionsInput {
+    pub(super) fn primary_actions_input(
+        &self,
+        vm: &ComposerViewModel,
+        compact: bool,
+        cx: &App,
+    ) -> ComposerPrimaryActionsInput {
         let prompt_has_text = !self.prompt(cx).trim().is_empty();
         ComposerPrimaryActionsInput {
             compact,
             can_operate_thread: vm.can_operate_thread,
-            pending_action: vm.pending_answer.as_ref().map(|answer| crate::composer::primary_actions::PendingActionState {
-                question_index: answer.question_index,
-                is_last_question: answer.is_last_question,
-                can_advance: answer.can_advance,
-                is_responding: answer.is_responding,
-                is_complete: answer.is_complete,
+            pending_action: vm.pending_answer.as_ref().map(|answer| {
+                crate::composer::primary_actions::PendingActionState {
+                    question_index: answer.question_index,
+                    is_last_question: answer.is_last_question,
+                    can_advance: answer.can_advance,
+                    is_responding: answer.is_responding,
+                    is_complete: answer.is_complete,
+                }
             }),
             is_running: vm.phase == crate::composer::view_model::SessionPhase::Running,
             can_interrupt: vm.can_interrupt,
@@ -575,7 +709,10 @@ impl ChatComposer {
             is_preparing_worktree: vm.is_preparing_worktree,
             has_sendable_content: self.has_sendable_content(cx),
             can_resume: vm.can_resume,
-            is_editing_queued_message: vm.queue.as_ref().is_some_and(|queue| queue.editing_run_id.is_some()),
+            is_editing_queued_message: vm
+                .queue
+                .as_ref()
+                .is_some_and(|queue| queue.editing_run_id.is_some()),
             compact_before_send_tokens: vm.resume_compaction_tokens,
             keep_full_history: vm.keep_full_history,
             alternate_modifier: false,
@@ -617,9 +754,17 @@ impl Render for ChatComposer {
         // Flattened over the canvas: GPUI paints box shadows under the
         // element (CSS clips them to outside the border box), so a
         // translucent fill would show its own drop shadow through it.
-        let glass = if dark { theme.surface_raised } else { theme.card };
+        let glass = if dark {
+            theme.surface_raised
+        } else {
+            theme.card
+        };
         let surface = color_mix(MixSpace::Srgb, glass, 0.8, theme.background);
-        let outline = if dark { with_alpha(tw::WHITE, 0.05) } else { with_alpha(tw::BLACK, 0.08) };
+        let outline = if dark {
+            with_alpha(tw::WHITE, 0.05)
+        } else {
+            with_alpha(tw::BLACK, 0.08)
+        };
 
         if self.menu.is_open() {
             self.refresh_menu_items(cx);
@@ -629,23 +774,37 @@ impl Render for ChatComposer {
         let attachments = self.render_attachments(&vm, cx);
         let footer = self.render_footer(&vm, window, cx);
         let layers = self.render_layers(&vm, window, cx);
-        let validation = crate::composer::submission::get_composer_prompt_length_validation_message(&self.prompt(cx))
+        let validation =
+            crate::composer::submission::get_composer_prompt_length_validation_message(
+                &self.prompt(cx),
+            )
             .or_else(|| self.validation.clone());
 
         let frame = div()
             .id("chat-composer")
             .relative()
             .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, cx| style.bg(cx.app_theme().accent))
-            .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
-                let loaded: Vec<_> = paths.paths().iter().cloned().filter_map(super::actions::read_picked_file).collect();
-                this.add_picked_files(loaded, window, cx);
-            }))
+            .on_drop(
+                cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
+                    let loaded: Vec<_> = paths
+                        .paths()
+                        .iter()
+                        .cloned()
+                        .filter_map(super::actions::read_picked_file)
+                        .collect();
+                    this.add_picked_files(loaded, window, cx);
+                }),
+            )
             .w_full()
             .rounded(RADIUS_3XL)
             .bg(surface)
             .border_1()
             .border_color(outline)
-            .shadow(if dark { Vec::new() } else { tokens::shadow_composer(false) })
+            .shadow(if dark {
+                Vec::new()
+            } else {
+                tokens::shadow_composer(false)
+            })
             .child(
                 // Body: `px-4 pt-4 pb-2`.
                 div()
@@ -670,7 +829,12 @@ impl Render for ChatComposer {
             })
             .child(footer)
             .children(layers);
-        div().w_full().flex().flex_col().children(menu_drawer).children(drawers).child(frame)
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .children(menu_drawer)
+            .children(drawers)
+            .child(frame)
     }
 }
-

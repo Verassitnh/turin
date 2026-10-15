@@ -2,7 +2,10 @@
 //! happens to an edited queued message when its run leaves the queue, and how
 //! its attachments are rebuilt for saving.
 
-use crate::composer::draft_store::{ComposerDraftStore, ComposerFileAttachment, ComposerImageAttachment, composer_draft_has_user_content};
+use crate::composer::draft_store::{
+    ComposerDraftStore, ComposerFileAttachment, ComposerImageAttachment,
+    composer_draft_has_user_content,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueuedEditRecovery {
@@ -19,15 +22,19 @@ pub fn recover_queued_message_edit(
     thread_key: &str,
     original_text: &str,
 ) -> QueuedEditRecovery {
-    let dirty = store
-        .get_composer_draft(edit_key)
-        .is_some_and(|draft| draft.prompt != original_text || !draft.images.is_empty() || !draft.files.is_empty());
+    let dirty = store.get_composer_draft(edit_key).is_some_and(|draft| {
+        draft.prompt != original_text || !draft.images.is_empty() || !draft.files.is_empty()
+    });
     if dirty && !composer_draft_has_user_content(store.get_composer_draft(thread_key)) {
         store.move_composer_prompt_and_images(edit_key, thread_key);
         return QueuedEditRecovery::Kept;
     }
     store.clear_composer_content(edit_key);
-    if dirty { QueuedEditRecovery::Discarded } else { QueuedEditRecovery::Clean }
+    if dirty {
+        QueuedEditRecovery::Discarded
+    } else {
+        QueuedEditRecovery::Clean
+    }
 }
 
 /// A saved attachment of a queued message.
@@ -62,7 +69,11 @@ pub fn prepare_queued_edit_attachments(
     upload_files: impl FnOnce(&[ComposerFileAttachment]) -> Vec<QueuedAttachment>,
     read_image: impl Fn(&ComposerImageAttachment) -> String,
 ) -> Result<Vec<QueuedAttachment>, FailedUpload> {
-    let uploaded = if files.is_empty() { Vec::new() } else { upload_files(files) };
+    let uploaded = if files.is_empty() {
+        Vec::new()
+    } else {
+        upload_files(files)
+    };
     if uploaded.len() != files.len() {
         return Err(FailedUpload);
     }
@@ -113,13 +124,20 @@ mod tests {
     #[test]
     fn preserves_a_generic_file_in_file_only_and_mixed_saves() {
         for images in [Vec::new(), vec![image()]] {
-            let attachments =
-                prepare_queued_edit_attachments(&[], &images, &[file()], |_| vec![uploaded()], |_| "data:image/png;base64,aW1hZ2U=".into())
-                    .unwrap();
+            let attachments = prepare_queued_edit_attachments(
+                &[],
+                &images,
+                &[file()],
+                |_| vec![uploaded()],
+                |_| "data:image/png;base64,aW1hZ2U=".into(),
+            )
+            .unwrap();
             assert_eq!(attachments.last(), Some(&uploaded()));
             assert_eq!(attachments.len(), images.len() + 1);
             if !images.is_empty() {
-                assert!(matches!(&attachments[0], QueuedAttachment::Image { data_url, .. } if data_url == "data:image/png;base64,aW1hZ2U="));
+                assert!(
+                    matches!(&attachments[0], QueuedAttachment::Image { data_url, .. } if data_url == "data:image/png;base64,aW1hZ2U=")
+                );
             }
         }
     }
@@ -132,14 +150,26 @@ mod tests {
             mime_type: "application/pdf".into(),
             size_bytes: 6,
         };
-        let attachments = prepare_queued_edit_attachments(std::slice::from_ref(&saved), &[], &[file()], |_| vec![uploaded()], |_| "unused".into())
-            .unwrap();
+        let attachments = prepare_queued_edit_attachments(
+            std::slice::from_ref(&saved),
+            &[],
+            &[file()],
+            |_| vec![uploaded()],
+            |_| "unused".into(),
+        )
+        .unwrap();
         assert_eq!(attachments, [saved, uploaded()]);
     }
 
     #[test]
     fn fails_a_save_instead_of_dropping_a_file_whose_upload_is_missing() {
-        let result = prepare_queued_edit_attachments(&[], &[image()], &[file()], |_| Vec::new(), |_| "image".into());
+        let result = prepare_queued_edit_attachments(
+            &[],
+            &[image()],
+            &[file()],
+            |_| Vec::new(),
+            |_| "image".into(),
+        );
         assert_eq!(result, Err(FailedUpload));
         assert!(result.unwrap_err().to_string().contains("Retry or remove"));
     }
@@ -149,7 +179,10 @@ mod tests {
         let mut store = ComposerDraftStore::new();
         store.set_prompt(EDIT, "Original message");
         store.add_files(EDIT, vec![file()], Default::default());
-        assert_eq!(recover_queued_message_edit(&mut store, EDIT, THREAD, "Original message"), QueuedEditRecovery::Kept);
+        assert_eq!(
+            recover_queued_message_edit(&mut store, EDIT, THREAD, "Original message"),
+            QueuedEditRecovery::Kept
+        );
         let draft = store.get_composer_draft(THREAD).unwrap();
         assert_eq!(draft.prompt, "Original message");
         assert_eq!(draft.files, [file()]);
@@ -166,7 +199,10 @@ mod tests {
             ..file()
         };
         store.add_files(EDIT, vec![reference.clone()], Default::default());
-        assert_eq!(recover_queued_message_edit(&mut store, EDIT, THREAD, ""), QueuedEditRecovery::Kept);
+        assert_eq!(
+            recover_queued_message_edit(&mut store, EDIT, THREAD, ""),
+            QueuedEditRecovery::Kept
+        );
         assert_eq!(store.get_composer_draft(THREAD).unwrap().files, [reference]);
     }
 
@@ -175,8 +211,14 @@ mod tests {
         let mut store = ComposerDraftStore::new();
         store.set_prompt(THREAD, "Separate draft");
         store.add_files(EDIT, vec![file()], Default::default());
-        assert_eq!(recover_queued_message_edit(&mut store, EDIT, THREAD, ""), QueuedEditRecovery::Discarded);
-        assert_eq!(store.get_composer_draft(THREAD).unwrap().prompt, "Separate draft");
+        assert_eq!(
+            recover_queued_message_edit(&mut store, EDIT, THREAD, ""),
+            QueuedEditRecovery::Discarded
+        );
+        assert_eq!(
+            store.get_composer_draft(THREAD).unwrap().prompt,
+            "Separate draft"
+        );
         assert!(store.get_composer_draft(EDIT).is_none());
     }
 
@@ -184,7 +226,10 @@ mod tests {
     fn an_untouched_edit_is_clean() {
         let mut store = ComposerDraftStore::new();
         store.set_prompt(EDIT, "Same");
-        assert_eq!(recover_queued_message_edit(&mut store, EDIT, THREAD, "Same"), QueuedEditRecovery::Clean);
+        assert_eq!(
+            recover_queued_message_edit(&mut store, EDIT, THREAD, "Same"),
+            QueuedEditRecovery::Clean
+        );
         assert!(store.get_composer_draft(EDIT).is_none());
     }
 }

@@ -12,15 +12,17 @@
 
 use std::time::{Duration, Instant};
 
-use crate::composer::code_block::{CODE_BLOCK_INDENT, IndentDirection, indent_lines, leading_whitespace};
+use crate::composer::code_block::{
+    CODE_BLOCK_INDENT, IndentDirection, indent_lines, leading_whitespace,
+};
 use crate::composer::js_string::utf16_len;
 use crate::composer::list_continuation::next_ordered_marker_text;
 use crate::composer::logic::{clamp_collapsed_composer_cursor, detect_composer_trigger};
 use crate::composer::rich_doc::{
     Atom, Block, BuildOptions, CodeBlock, Doc, DocMap, DocPos, Inline, InlineContent, InlineNode,
     ItemPrefix, Marks, SkillMeta, build_blocks, build_doc, collapsed_to_flat, flat_to_collapsed,
-    flat_to_markdown, flat_to_pos, is_closing_fence, list_depths, normalize_inline, parse_opening_fence,
-    pos_to_flat, serialize_doc,
+    flat_to_markdown, flat_to_pos, is_closing_fence, list_depths, normalize_inline,
+    parse_opening_fence, pos_to_flat, serialize_doc,
 };
 use crate::composer::rich_text::RichTextMark;
 
@@ -117,7 +119,10 @@ fn cell_index(cells: &[Cell], offset: usize) -> usize {
 }
 
 fn cell_offset(cells: &[Cell], index: usize) -> usize {
-    cells[..index.min(cells.len())].iter().map(Cell::units).sum()
+    cells[..index.min(cells.len())]
+        .iter()
+        .map(Cell::units)
+        .sum()
 }
 
 fn text_cells(text: &str, marks: Marks) -> Vec<Cell> {
@@ -294,7 +299,8 @@ impl EditorState {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.doc.blocks.len() == 1 && self.doc.blocks[0].doc_len() == 0
+        self.doc.blocks.len() == 1
+            && self.doc.blocks[0].doc_len() == 0
             && matches!(self.doc.blocks[0], Block::Paragraph(_))
     }
 
@@ -309,10 +315,15 @@ impl EditorState {
         if !self.doc.blocks[block].is_textblock() {
             // A rule owns no characters: the position belongs to the next
             // textblock, or the previous one at the end.
-            if let Some(next) = (block + 1..self.doc.blocks.len()).find(|b| self.doc.blocks[*b].is_textblock()) {
+            if let Some(next) =
+                (block + 1..self.doc.blocks.len()).find(|b| self.doc.blocks[*b].is_textblock())
+            {
                 return DocPos::new(next, 0);
             }
-            if let Some(prev) = (0..block).rev().find(|b| self.doc.blocks[*b].is_textblock()) {
+            if let Some(prev) = (0..block)
+                .rev()
+                .find(|b| self.doc.blocks[*b].is_textblock())
+            {
                 return DocPos::new(prev, self.doc.blocks[prev].doc_len());
             }
             return DocPos::new(0, 0);
@@ -356,7 +367,9 @@ impl EditorState {
             .is_some_and(|at| now.duration_since(at) > self.group_delay);
         let new_group = self.undo.is_empty()
             || paused
-            || self.previous_kind.is_none_or(|previous| previous != kind || kind == ChangeKind::Other);
+            || self
+                .previous_kind
+                .is_none_or(|previous| previous != kind || kind == ChangeKind::Other);
         if new_group {
             self.undo.push(before.clone());
         }
@@ -394,7 +407,10 @@ impl EditorState {
     /// change nothing.
     fn abort_change(&mut self, before: &HistoryEntry, kind: ChangeKind) {
         let _ = kind;
-        if self.undo.last().is_some_and(|last| last.doc == before.doc && last.selection == before.selection)
+        if self
+            .undo
+            .last()
+            .is_some_and(|last| last.doc == before.doc && last.selection == before.selection)
             && self.doc == before.doc
         {
             self.undo.pop();
@@ -449,7 +465,11 @@ impl EditorState {
     ) {
         if self.map().value != value {
             self.begin_change(ChangeKind::Other);
-            self.doc = build_doc(value, skill_label_for, build_options(self.rich, self.literal));
+            self.doc = build_doc(
+                value,
+                skill_label_for,
+                build_options(self.rich, self.literal),
+            );
             self.finish_change();
         }
         let cursor = collapsed_cursor.unwrap_or_else(|| {
@@ -489,7 +509,11 @@ impl EditorState {
         let end = flat_to_markdown(&map, to_flat).min(value_len);
         EditorSnapshot {
             value: map.value.clone(),
-            cursor: if self.literal { expanded } else { clamp_collapsed_composer_cursor(&map.value, cursor, false) },
+            cursor: if self.literal {
+                expanded
+            } else {
+                clamp_collapsed_composer_cursor(&map.value, cursor, false)
+            },
             expanded_cursor: expanded,
             selection_start: start.min(end),
             selection_end: start.max(end),
@@ -527,7 +551,10 @@ impl EditorState {
 
     /// Whether the caret is in a list item (`isActive("listItem"|"taskItem")`).
     pub fn in_list_item(&self) -> bool {
-        matches!(self.doc.blocks[self.selection.head.block], Block::Item { .. })
+        matches!(
+            self.doc.blocks[self.selection.head.block],
+            Block::Item { .. }
+        )
     }
 
     pub fn in_task_item(&self) -> bool {
@@ -576,7 +603,11 @@ impl EditorState {
             return None;
         }
         let (cells, index) = self.caret_cells()?;
-        let before = if index > 0 { cells[index - 1].marks } else { Marks::NONE };
+        let before = if index > 0 {
+            cells[index - 1].marks
+        } else {
+            Marks::NONE
+        };
         let after = cells.get(index).map_or(Marks::NONE, |c| c.marks);
         if before == after {
             return None;
@@ -599,7 +630,8 @@ impl EditorState {
     /// `caretTakesMarksBefore`: true when the caret sits on a styled edge and
     /// types with the marks before it.
     pub fn caret_takes_marks_before(&self) -> bool {
-        self.styled_edge().is_some_and(|(before, _, current)| current == before)
+        self.styled_edge()
+            .is_some_and(|(before, _, current)| current == before)
     }
 
     /// `stepCaretAcrossStyledEdge`: moves the caret to the other stop of the
@@ -654,33 +686,63 @@ impl EditorState {
         }
         let before = self.begin_change(ChangeKind::Other);
         self.apply_to_inline_ranges(from, to, |cell| {
-            cell.marks = if all { cell.marks.without(mark) } else { cell.marks.with(mark) };
+            cell.marks = if all {
+                cell.marks.without(mark)
+            } else {
+                cell.marks.with(mark)
+            };
         });
         self.finish_change();
         let _ = before;
         true
     }
 
-    fn for_each_inline_range(&self, from: DocPos, to: DocPos, mut visit: impl FnMut(&[Cell], usize, usize)) {
+    fn for_each_inline_range(
+        &self,
+        from: DocPos,
+        to: DocPos,
+        mut visit: impl FnMut(&[Cell], usize, usize),
+    ) {
         for block in from.block..=to.block {
             let Some(inline) = self.doc.blocks[block].inline() else {
                 continue;
             };
             let cells = to_cells(inline);
-            let start = if block == from.block { cell_index(&cells, from.offset) } else { 0 };
-            let end = if block == to.block { cell_index(&cells, to.offset) } else { cells.len() };
+            let start = if block == from.block {
+                cell_index(&cells, from.offset)
+            } else {
+                0
+            };
+            let end = if block == to.block {
+                cell_index(&cells, to.offset)
+            } else {
+                cells.len()
+            };
             visit(&cells, start, end.max(start));
         }
     }
 
-    fn apply_to_inline_ranges(&mut self, from: DocPos, to: DocPos, mut edit: impl FnMut(&mut Cell)) {
+    fn apply_to_inline_ranges(
+        &mut self,
+        from: DocPos,
+        to: DocPos,
+        mut edit: impl FnMut(&mut Cell),
+    ) {
         for block in from.block..=to.block {
             let Some(inline) = self.doc.blocks[block].inline() else {
                 continue;
             };
             let mut cells = to_cells(inline);
-            let start = if block == from.block { cell_index(&cells, from.offset) } else { 0 };
-            let end = if block == to.block { cell_index(&cells, to.offset) } else { cells.len() };
+            let start = if block == from.block {
+                cell_index(&cells, from.offset)
+            } else {
+                0
+            };
+            let end = if block == to.block {
+                cell_index(&cells, to.offset)
+            } else {
+                cells.len()
+            };
             for cell in &mut cells[start..end.max(start)] {
                 edit(cell);
             }
@@ -721,7 +783,9 @@ impl EditorState {
         let last = self.doc.blocks[to.block].clone();
         self.truncate_block(from.block, from.offset);
         let remainder = match &last {
-            Block::Code(code) => Remainder::Text(code_slice(&code.text, to.offset, utf16_len(&code.text)).to_owned()),
+            Block::Code(code) => {
+                Remainder::Text(code_slice(&code.text, to.offset, utf16_len(&code.text)).to_owned())
+            }
             other => {
                 let cells = to_cells(other.inline().map_or(&[][..], |v| v));
                 let start = cell_index(&cells, to.offset);
@@ -809,7 +873,11 @@ impl EditorState {
         }
         let marks = self.current_marks();
         let had_selection = !self.selection.is_empty();
-        self.begin_change(if had_selection { ChangeKind::Other } else { ChangeKind::Insert });
+        self.begin_change(if had_selection {
+            ChangeKind::Other
+        } else {
+            ChangeKind::Insert
+        });
         let pos = if had_selection {
             self.delete_selection_raw()
         } else {
@@ -819,7 +887,11 @@ impl EditorState {
         let new_pos = DocPos::new(pos.block, pos.offset + utf16_len(text));
         self.selection = Selection::caret(new_pos);
         // Typing keeps the marks it started with until the caret moves.
-        self.stored_marks = if marks == self.default_marks() { None } else { Some(marks) };
+        self.stored_marks = if marks == self.default_marks() {
+            None
+        } else {
+            Some(marks)
+        };
         self.finish_change();
         true
     }
@@ -921,7 +993,10 @@ impl EditorState {
                 let at = cell_index(&cells, pos.offset);
                 let head = from_cells(&cells[..at]);
                 let tail = from_cells(&cells[at..]);
-                (with_inline(&other, head), self.second_half(&other, tail, at == cells.len()))
+                (
+                    with_inline(&other, head),
+                    self.second_half(&other, tail, at == cells.len()),
+                )
             }
         };
         self.doc.blocks[pos.block] = first;
@@ -954,8 +1029,7 @@ impl EditorState {
         if self.is_rich() && self.convert_code_fence_on_enter() {
             return true;
         }
-        let kind = if self.selection.is_empty() { ChangeKind::Other } else { ChangeKind::Other };
-        self.begin_change(kind);
+        self.begin_change(ChangeKind::Other);
         let carried = self.current_marks();
         let pos = if self.selection.is_empty() {
             self.selection.head
@@ -985,7 +1059,11 @@ impl EditorState {
         self.renumber_after(next.block);
         self.selection = Selection::caret(next);
         // splitBlockKeepMarks: typing continues with the marks at the split.
-        self.stored_marks = if carried.is_empty() { None } else { Some(carried) };
+        self.stored_marks = if carried.is_empty() {
+            None
+        } else {
+            Some(carried)
+        };
         self.finish_change();
         true
     }
@@ -1061,7 +1139,9 @@ impl EditorState {
             }
         }
         // `exitCode`: a new paragraph after the block, caret inside it.
-        self.doc.blocks.insert(pos.block + 1, Block::Paragraph(Vec::new()));
+        self.doc
+            .blocks
+            .insert(pos.block + 1, Block::Paragraph(Vec::new()));
         self.selection = Selection::caret(DocPos::new(pos.block + 1, 0));
         self.stored_marks = None;
         self.finish_change();
@@ -1074,7 +1154,8 @@ impl EditorState {
         let Some(Block::Code(code)) = self.doc.blocks.get(block) else {
             return false;
         };
-        let next = crate::composer::code_languages::with_info_string_language(&code.language, language);
+        let next =
+            crate::composer::code_languages::with_info_string_language(&code.language, language);
         if next == code.language {
             return false;
         }
@@ -1190,7 +1271,9 @@ impl EditorState {
         };
         // A selection ending at the start of a line does not touch that line.
         let search_from = start_offset.max(end_offset.saturating_sub(1));
-        let newline_after = text[search_from.min(text.len())..].find('\n').map(|at| search_from + at);
+        let newline_after = text[search_from.min(text.len())..]
+            .find('\n')
+            .map(|at| search_from + at);
         let line_end = newline_after.unwrap_or(text.len());
         let original: Vec<&str> = text[line_start..line_end].split('\n').collect();
         let next = indent_lines(&original, direction);
@@ -1201,12 +1284,14 @@ impl EditorState {
         let joined = next.join("\n");
         let first_delta = next[0].chars().map(char::len_utf16).sum::<usize>() as isize
             - original[0].chars().map(char::len_utf16).sum::<usize>() as isize;
-        let total_delta = utf16_len(&joined) as isize - utf16_len(&text[line_start..line_end]) as isize;
+        let total_delta =
+            utf16_len(&joined) as isize - utf16_len(&text[line_start..line_end]) as isize;
         if let Block::Code(code) = &mut self.doc.blocks[block] {
             code.text.replace_range(line_start..line_end, &joined);
         }
         let line_start_units = utf16_len(&text[..line_start]);
-        let next_from = (from.offset as isize + first_delta).max(line_start_units as isize) as usize;
+        let next_from =
+            (from.offset as isize + first_delta).max(line_start_units as isize) as usize;
         let next_to = ((to.offset as isize + total_delta).max(next_from as isize)) as usize;
         self.selection = Selection {
             anchor: DocPos::new(block, next_from),
@@ -1264,11 +1349,16 @@ impl EditorState {
             return true;
         }
         // The nearest earlier item one level up is the new sibling.
-        let Some(sibling_index) = (0..block).rev().find(|i| depths[*i] + 1 == depth && matches!(self.doc.blocks[*i], Block::Item { .. }))
+        let Some(sibling_index) = (0..block)
+            .rev()
+            .find(|i| depths[*i] + 1 == depth && matches!(self.doc.blocks[*i], Block::Item { .. }))
         else {
             return false;
         };
-        let Block::Item { prefix: sibling, .. } = &self.doc.blocks[sibling_index] else {
+        let Block::Item {
+            prefix: sibling, ..
+        } = &self.doc.blocks[sibling_index]
+        else {
             return false;
         };
         // A task under a bullet has no list to lift into.
@@ -1301,6 +1391,7 @@ impl EditorState {
         let mut previous = marker.clone();
         let depths = list_depths(&self.doc);
         let depth = depths[index];
+        #[allow(clippy::needless_range_loop)]
         for next in index + 1..self.doc.blocks.len() {
             let Block::Item { prefix, .. } = &mut self.doc.blocks[next] else {
                 break;
@@ -1311,7 +1402,12 @@ impl EditorState {
             if depths[next] > depth {
                 continue;
             }
-            let ItemPrefix::Ordered { marker, indent: item_indent, .. } = prefix else {
+            let ItemPrefix::Ordered {
+                marker,
+                indent: item_indent,
+                ..
+            } = prefix
+            else {
                 break;
             };
             if *item_indent != indent {
@@ -1398,7 +1494,11 @@ impl EditorState {
 
     fn backspace_at_block_start(&mut self, pos: DocPos) -> bool {
         let block = pos.block;
-        let before = if block > 0 { Some(self.doc.blocks[block - 1].clone()) } else { None };
+        let before = if block > 0 {
+            Some(self.doc.blocks[block - 1].clone())
+        } else {
+            None
+        };
         let current = self.doc.blocks[block].clone();
         match current {
             Block::Code(code) if self.is_rich() => {
@@ -1443,7 +1543,8 @@ impl EditorState {
             }
             Block::Quote { content, prefix } => {
                 // The first line of a quote lifts out of it; later lines join.
-                let joins_quote = matches!(&before, Some(Block::Quote { prefix: p, .. }) if *p == prefix);
+                let joins_quote =
+                    matches!(&before, Some(Block::Quote { prefix: p, .. }) if *p == prefix);
                 if joins_quote {
                     self.join_with_previous(block)
                 } else {
@@ -1527,7 +1628,8 @@ impl EditorState {
             }
             _ if self.in_code_block() => false,
             next_block => {
-                let remainder = Remainder::Cells(to_cells(next_block.inline().map_or(&[][..], |v| v)));
+                let remainder =
+                    Remainder::Cells(to_cells(next_block.inline().map_or(&[][..], |v| v)));
                 self.begin_change(ChangeKind::Delete);
                 self.doc.blocks.remove(next);
                 self.append_remainder(pos.block, remainder);
@@ -1560,7 +1662,10 @@ impl EditorState {
                 }
             };
         }
-        match (0..pos.block).rev().find(|b| self.doc.blocks[*b].is_textblock()) {
+        match (0..pos.block)
+            .rev()
+            .find(|b| self.doc.blocks[*b].is_textblock())
+        {
             Some(previous) => DocPos::new(previous, self.doc.blocks[previous].doc_len()),
             None => pos,
         }
@@ -1604,7 +1709,10 @@ impl EditorState {
         }
         if index > 0 {
             let word = is_word_char(chars[index - 1].0);
-            while index > 0 && !chars[index - 1].0.is_whitespace() && is_word_char(chars[index - 1].0) == word {
+            while index > 0
+                && !chars[index - 1].0.is_whitespace()
+                && is_word_char(chars[index - 1].0) == word
+            {
                 index -= 1;
             }
         }
@@ -1623,7 +1731,10 @@ impl EditorState {
         }
         if index < chars.len() {
             let word = is_word_char(chars[index].0);
-            while index < chars.len() && !chars[index].0.is_whitespace() && is_word_char(chars[index].0) == word {
+            while index < chars.len()
+                && !chars[index].0.is_whitespace()
+                && is_word_char(chars[index].0) == word
+            {
                 index += 1;
             }
         }
@@ -1669,7 +1780,11 @@ impl EditorState {
         if target == pos {
             return false;
         }
-        let (from, to) = if target < pos { (target, pos) } else { (pos, target) };
+        let (from, to) = if target < pos {
+            (target, pos)
+        } else {
+            (pos, target)
+        };
         self.begin_change(ChangeKind::Delete);
         self.delete_range_raw(from, to);
         self.selection = Selection::caret(from);
@@ -1719,7 +1834,9 @@ impl EditorState {
             let sliced = cut(block, Some(from.offset), Some(to.offset));
             return Doc {
                 blocks: vec![match sliced {
-                    Block::Code(code) => Block::Paragraph(vec![InlineNode::text(code.text, Marks::NONE)]),
+                    Block::Code(code) => {
+                        Block::Paragraph(vec![InlineNode::text(code.text, Marks::NONE)])
+                    }
                     other => Block::Paragraph(other.inline().cloned().unwrap_or_default()),
                 }],
             };
@@ -1764,7 +1881,8 @@ impl EditorState {
         if !self.literal {
             // Complete chips at paste boundaries just as autocomplete does.
             let probe = format!("{text}\n");
-            let tokens = crate::composer::editor_mentions::collect_composer_prompt_inline_tokens(&probe);
+            let tokens =
+                crate::composer::editor_mentions::collect_composer_prompt_inline_tokens(&probe);
             if let Some(last) = tokens.last()
                 && last.end == utf16_len(&text)
             {
@@ -1823,7 +1941,13 @@ impl EditorState {
             && let Block::Paragraph(inline) = &blocks[0]
         {
             if inline.is_empty() {
-                self.abort_change(&HistoryEntry { doc: self.doc.clone(), selection: self.selection }, ChangeKind::Other);
+                self.abort_change(
+                    &HistoryEntry {
+                        doc: self.doc.clone(),
+                        selection: self.selection,
+                    },
+                    ChangeKind::Other,
+                );
                 return false;
             }
             let units = inline_units(inline);
@@ -1844,7 +1968,14 @@ impl EditorState {
         let len = current.doc_len();
         let count = blocks.len();
         let last_len = blocks[count - 1].doc_len();
-        let empty_text_block = len == 0 && matches!(current, Block::Paragraph(_) | Block::Heading { .. } | Block::Quote { .. } | Block::Item { .. });
+        let empty_text_block = len == 0
+            && matches!(
+                current,
+                Block::Paragraph(_)
+                    | Block::Heading { .. }
+                    | Block::Quote { .. }
+                    | Block::Item { .. }
+            );
         if empty_text_block {
             self.doc.blocks.splice(pos.block..=pos.block, blocks);
         } else if pos.offset == 0 {
@@ -1883,13 +2014,19 @@ impl EditorState {
         // A paste ending in a rule leaves the caret on the line after it,
         // which is added when there is none.
         if matches!(self.doc.blocks[last_index], Block::Rule { .. }) {
-            if last_index + 1 >= self.doc.blocks.len() || !self.doc.blocks[last_index + 1].is_textblock() {
-                self.doc.blocks.insert(last_index + 1, Block::Paragraph(Vec::new()));
+            if last_index + 1 >= self.doc.blocks.len()
+                || !self.doc.blocks[last_index + 1].is_textblock()
+            {
+                self.doc
+                    .blocks
+                    .insert(last_index + 1, Block::Paragraph(Vec::new()));
             }
             last_index += 1;
             self.selection = Selection::caret(DocPos::new(last_index, 0));
         } else {
-            let at = self.doc.blocks[last_index].doc_len().min(last_len.max(self.doc.blocks[last_index].doc_len()));
+            let at = self.doc.blocks[last_index]
+                .doc_len()
+                .min(last_len.max(self.doc.blocks[last_index].doc_len()));
             self.selection = Selection::caret(DocPos::new(last_index, at));
         }
         self.finish_change();
@@ -1916,7 +2053,11 @@ impl EditorState {
             String::from_utf16_lossy(&units[end..])
         );
         let expanded_cursor = start + utf16_len(replacement);
-        let cursor = crate::composer::logic::collapse_expanded_composer_cursor(&next, expanded_cursor, self.literal);
+        let cursor = crate::composer::logic::collapse_expanded_composer_cursor(
+            &next,
+            expanded_cursor,
+            self.literal,
+        );
         self.set_value(&next, Some(cursor), skill_label_for);
         cursor
     }
@@ -1986,7 +2127,10 @@ fn char_index_for_offset(chars: &[(char, usize)], offset: usize) -> usize {
 }
 
 fn offset_for_char_index(chars: &[(char, usize)], index: usize) -> usize {
-    chars[..index.min(chars.len())].iter().map(|(_, len)| len).sum()
+    chars[..index.min(chars.len())]
+        .iter()
+        .map(|(_, len)| len)
+        .sum()
 }
 
 /// `/\n[ \t]*\n[ \t]*$/` at the end of `text`: returns the matched tail.
@@ -2030,8 +2174,16 @@ fn next_item_prefix(prefix: &ItemPrefix) -> ItemPrefix {
 fn align_with_sibling(item: &ItemPrefix, sibling: &ItemPrefix, after_sibling: bool) -> ItemPrefix {
     match (item, sibling) {
         (
-            ItemPrefix::Task { checked, content_space, .. },
-            ItemPrefix::Task { indent, marker_space, .. },
+            ItemPrefix::Task {
+                checked,
+                content_space,
+                ..
+            },
+            ItemPrefix::Task {
+                indent,
+                marker_space,
+                ..
+            },
         ) => ItemPrefix::Task {
             indent: indent.clone(),
             checked: *checked,
@@ -2039,17 +2191,25 @@ fn align_with_sibling(item: &ItemPrefix, sibling: &ItemPrefix, after_sibling: bo
             content_space: content_space.clone(),
         },
         (ItemPrefix::Bullet { space, .. }, ItemPrefix::Bullet { indent, marker, .. })
-        | (ItemPrefix::Ordered { space, .. }, ItemPrefix::Bullet { indent, marker, .. }) => ItemPrefix::Bullet {
-            indent: indent.clone(),
-            marker: marker.clone(),
-            space: space.clone(),
-        },
+        | (ItemPrefix::Ordered { space, .. }, ItemPrefix::Bullet { indent, marker, .. }) => {
+            ItemPrefix::Bullet {
+                indent: indent.clone(),
+                marker: marker.clone(),
+                space: space.clone(),
+            }
+        }
         (ItemPrefix::Bullet { space, .. }, ItemPrefix::Ordered { indent, marker, .. })
-        | (ItemPrefix::Ordered { space, .. }, ItemPrefix::Ordered { indent, marker, .. }) => ItemPrefix::Ordered {
-            indent: indent.clone(),
-            marker: if after_sibling { next_ordered_marker_text(marker) } else { marker.clone() },
-            space: space.clone(),
-        },
+        | (ItemPrefix::Ordered { space, .. }, ItemPrefix::Ordered { indent, marker, .. }) => {
+            ItemPrefix::Ordered {
+                indent: indent.clone(),
+                marker: if after_sibling {
+                    next_ordered_marker_text(marker)
+                } else {
+                    marker.clone()
+                },
+                space: space.clone(),
+            }
+        }
         (other, _) => other.clone(),
     }
 }

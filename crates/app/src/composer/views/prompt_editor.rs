@@ -15,11 +15,12 @@ use std::time::Duration;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement as _,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
-    Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, UTF16Selection, Window,
-    canvas, div, point, px, rems,
+    AnyElement, App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled as _, UTF16Selection, Window, canvas,
+    div, point, px, rems,
 };
 
 use crate::components::chat::markdown::code_highlight::highlight_code;
@@ -29,10 +30,13 @@ use crate::components::chat::markdown::inline_flow::{
 use crate::composer::catalog::ProviderSkill;
 use crate::composer::code_languages::{code_language_label, language_of_info_string};
 use crate::composer::editor_state::{EdgeStop, EditorSnapshot, EditorState, Selection};
-use crate::composer::rich_doc::{Block, CodeBlock, DocPos, ItemPrefix, Marks, SkillMeta, list_depths};
+use crate::composer::rich_doc::{
+    Block, CodeBlock, DocPos, ItemPrefix, Marks, SkillMeta, list_depths,
+};
 use crate::composer::rich_text::RichTextMark;
 use crate::composer::views::block_flow::{
-    BlockFlow, BlockTypography, CaretSide, FlowEnv, MarkerReveal, OffsetMap, Seg, SegKind, build_inline_flow,
+    BlockFlow, BlockTypography, CaretSide, FlowEnv, MarkerReveal, OffsetMap, Seg, SegKind,
+    build_inline_flow,
 };
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{LEADING_RELAXED, RADIUS_LG};
@@ -110,7 +114,8 @@ fn normalize_key(key: &str) -> String {
     .to_owned()
 }
 
-pub type CommandKeyHandler = Rc<dyn Fn(&mut EditorState, &CommandKey, &mut Window, &mut App) -> bool>;
+pub type CommandKeyHandler =
+    Rc<dyn Fn(&mut EditorState, &CommandKey, &mut Window, &mut App) -> bool>;
 pub type PasteHandler = Rc<dyn Fn(&mut EditorState, &ClipboardItem, &mut Window, &mut App) -> bool>;
 
 #[derive(Clone)]
@@ -168,9 +173,15 @@ pub struct PromptEditor {
 }
 
 impl PromptEditor {
-    pub fn new(value: &str, config: EditorConfig, skills: Vec<ProviderSkill>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        value: &str,
+        config: EditorConfig,
+        skills: Vec<ProviderSkill>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let label_for = skill_label_fn(&skills);
-        let state = EditorState::from_value(value, &*label_for, config.rich_text, config.literal_text);
+        let state =
+            EditorState::from_value(value, &*label_for, config.rich_text, config.literal_text);
         let mut this = Self {
             state,
             focus: cx.focus_handle(),
@@ -218,12 +229,19 @@ impl PromptEditor {
     }
 
     pub fn set_config(&mut self, config: EditorConfig, cx: &mut Context<Self>) {
-        if config.rich_text != self.config.rich_text || config.literal_text != self.config.literal_text {
+        if config.rich_text != self.config.rich_text
+            || config.literal_text != self.config.literal_text
+        {
             // Extensions are creation-time upstream: a mode flip rebuilds the
             // editor from the same controlled value.
             let snapshot = self.state.snapshot();
             let label_for = skill_label_fn(&self.skills);
-            self.state = EditorState::from_value(&snapshot.value, &*label_for, config.rich_text, config.literal_text);
+            self.state = EditorState::from_value(
+                &snapshot.value,
+                &*label_for,
+                config.rich_text,
+                config.literal_text,
+            );
             self.state.set_collapsed_cursor(snapshot.cursor);
         }
         self.config = config;
@@ -277,7 +295,12 @@ impl PromptEditor {
 
     /// Repaint and report after the host edited the state directly.
     /// The language picker's choice for the fence at `block`.
-    pub fn set_code_block_language(&mut self, block: usize, language: &str, cx: &mut Context<Self>) {
+    pub fn set_code_block_language(
+        &mut self,
+        block: usize,
+        language: &str,
+        cx: &mut Context<Self>,
+    ) {
         if self.state.set_code_block_language(block, language) {
             self.after_change(cx);
         }
@@ -286,7 +309,9 @@ impl PromptEditor {
     /// The info-string language of the fence at `block`.
     pub fn code_block_language(&self, block: usize) -> Option<String> {
         match self.state.doc().blocks.get(block) {
-            Some(Block::Code(code)) => Some(crate::composer::code_languages::language_of_info_string(&code.language).to_owned()),
+            Some(Block::Code(code)) => Some(
+                crate::composer::code_languages::language_of_info_string(&code.language).to_owned(),
+            ),
             _ => None,
         }
     }
@@ -307,7 +332,9 @@ impl PromptEditor {
         window
             .spawn(cx, async move |cx| {
                 loop {
-                    cx.background_executor().timer(Duration::from_millis(530)).await;
+                    cx.background_executor()
+                        .timer(Duration::from_millis(530))
+                        .await;
                     let alive = weak
                         .update(cx, |this, cx| {
                             if this.blink_epoch != epoch {
@@ -332,12 +359,18 @@ impl PromptEditor {
         let previous = self.last_snapshot.replace(snapshot.clone());
         self.scroll_caret_into_view = true;
         if previous.as_ref() != Some(&snapshot) {
-            use crate::composer::selection::{ComposerSelectionRange, did_composer_selection_change_visibly};
+            use crate::composer::selection::{
+                ComposerSelectionRange, did_composer_selection_change_visibly,
+            };
             let visible = did_composer_selection_change_visibly(
-                previous.as_ref().map_or(ComposerSelectionRange { start: 0, end: 0 }, |p| ComposerSelectionRange {
-                    start: p.selection_start,
-                    end: p.selection_end,
-                }),
+                previous
+                    .as_ref()
+                    .map_or(ComposerSelectionRange { start: 0, end: 0 }, |p| {
+                        ComposerSelectionRange {
+                            start: p.selection_start,
+                            end: p.selection_end,
+                        }
+                    }),
                 Some(ComposerSelectionRange {
                     start: snapshot.selection_start,
                     end: snapshot.selection_end,
@@ -374,8 +407,10 @@ impl PromptEditor {
         let command = modifiers.platform;
 
         // Keys the host may claim first (menu navigation, send, history).
-        if matches!(key.key.as_str(), "Enter" | "Tab" | "Escape" | "ArrowUp" | "ArrowDown")
-            && let Some(handler) = self.command_handler.clone()
+        if matches!(
+            key.key.as_str(),
+            "Enter" | "Tab" | "Escape" | "ArrowUp" | "ArrowDown"
+        ) && let Some(handler) = self.command_handler.clone()
             && handler(&mut self.state, &key, window, cx)
         {
             cx.stop_propagation();
@@ -434,16 +469,32 @@ impl PromptEditor {
                     let target = self.line_edge(head, forward);
                     self.state.move_caret(target, key.shift);
                 } else if modifiers.alt {
-                    let target = if forward { self.state.next_word_pos(head) } else { self.state.prev_word_pos(head) };
+                    let target = if forward {
+                        self.state.next_word_pos(head)
+                    } else {
+                        self.state.prev_word_pos(head)
+                    };
                     self.state.move_caret(target, key.shift);
                 } else if !key.shift && !self.state.selection().is_empty() {
                     let selection = self.state.selection();
-                    let edge = if forward { selection.to() } else { selection.from() };
+                    let edge = if forward {
+                        selection.to()
+                    } else {
+                        selection.from()
+                    };
                     self.state.move_caret(edge, false);
-                } else if !key.shift && self.state.step_caret_across_styled_edge(if forward { 1 } else { -1 }) {
+                } else if !key.shift
+                    && self
+                        .state
+                        .step_caret_across_styled_edge(if forward { 1 } else { -1 })
+                {
                     // Took the other stop of a styled edge.
                 } else {
-                    let target = if forward { self.state.next_cursor_pos(head) } else { self.state.prev_cursor_pos(head) };
+                    let target = if forward {
+                        self.state.next_cursor_pos(head)
+                    } else {
+                        self.state.prev_cursor_pos(head)
+                    };
                     self.state.move_caret(target, key.shift);
                 }
             }
@@ -451,7 +502,11 @@ impl PromptEditor {
                 vertical = true;
                 let forward = key.key == "ArrowDown";
                 if command {
-                    let target = if forward { self.doc_end() } else { DocPos::new(0, 0) };
+                    let target = if forward {
+                        self.doc_end()
+                    } else {
+                        DocPos::new(0, 0)
+                    };
                     self.state.move_caret(target, key.shift);
                 } else {
                     self.move_vertical(forward, key.shift);
@@ -518,7 +573,14 @@ impl PromptEditor {
     fn line_edge(&self, pos: DocPos, end: bool) -> DocPos {
         let probe = self.probes.borrow().get(pos.block).cloned().flatten();
         let (Some(probe), Some(flow)) = (probe, self.block_flow_for(pos.block)) else {
-            return DocPos::new(pos.block, if end { self.state.doc().blocks[pos.block].doc_len() } else { 0 });
+            return DocPos::new(
+                pos.block,
+                if end {
+                    self.state.doc().blocks[pos.block].doc_len()
+                } else {
+                    0
+                },
+            );
         };
         let byte = flow.map.doc_to_byte(pos.offset, CaretSide::Plain);
         let line = probe.line_for_index(byte);
@@ -530,7 +592,9 @@ impl PromptEditor {
     fn move_vertical(&mut self, forward: bool, extend: bool) {
         let head = self.state.selection().head;
         let probes = self.probes.borrow().clone();
-        let (Some(Some(probe)), Some(flow)) = (probes.get(head.block), self.block_flow_for(head.block)) else {
+        let (Some(Some(probe)), Some(flow)) =
+            (probes.get(head.block), self.block_flow_for(head.block))
+        else {
             return;
         };
         let byte = flow.map.doc_to_byte(head.offset, CaretSide::Plain);
@@ -541,25 +605,45 @@ impl PromptEditor {
             .unwrap_or_default();
         self.goal_x = Some(x);
         let lines = probe.line_count();
-        let target_line = if forward { line + 1 } else { line.wrapping_sub(1) };
+        let target_line = if forward {
+            line + 1
+        } else {
+            line.wrapping_sub(1)
+        };
         if target_line < lines {
             let target_byte = probe.index_for_x_on_line(target_line, x);
-            self.state.move_caret(DocPos::new(head.block, flow.map.byte_to_doc(target_byte)), extend);
+            self.state.move_caret(
+                DocPos::new(head.block, flow.map.byte_to_doc(target_byte)),
+                extend,
+            );
             return;
         }
         // Into the neighbouring text block.
         let blocks = self.state.doc().blocks.len();
-        let neighbours: Vec<usize> = if forward { (head.block + 1..blocks).collect() } else { (0..head.block).rev().collect() };
+        let neighbours: Vec<usize> = if forward {
+            (head.block + 1..blocks).collect()
+        } else {
+            (0..head.block).rev().collect()
+        };
         for index in neighbours {
-            if let (Some(Some(other)), Some(other_flow)) = (probes.get(index), self.block_flow_for(index)) {
+            if let (Some(Some(other)), Some(other_flow)) =
+                (probes.get(index), self.block_flow_for(index))
+            {
                 let line = if forward { 0 } else { other.line_count() - 1 };
                 let target_byte = other.index_for_x_on_line(line, x);
-                self.state.move_caret(DocPos::new(index, other_flow.map.byte_to_doc(target_byte)), extend);
+                self.state.move_caret(
+                    DocPos::new(index, other_flow.map.byte_to_doc(target_byte)),
+                    extend,
+                );
                 return;
             }
         }
         // The first or last line: the caret goes to the document edge.
-        let edge = if forward { self.doc_end() } else { DocPos::new(0, 0) };
+        let edge = if forward {
+            self.doc_end()
+        } else {
+            DocPos::new(0, 0)
+        };
         self.state.move_caret(edge, extend);
     }
 
@@ -572,18 +656,28 @@ impl PromptEditor {
         }
         let units: Vec<u16> = snapshot.value.encode_utf16().collect();
         let caret = snapshot.expanded_cursor.min(units.len());
-        let has_newline = if edge_start { units[..caret].contains(&0x0a) } else { units[caret..].contains(&0x0a) };
+        let has_newline = if edge_start {
+            units[..caret].contains(&0x0a)
+        } else {
+            units[caret..].contains(&0x0a)
+        };
         if has_newline {
             return false;
         }
         let head = self.state.selection().head;
         let probes = self.probes.borrow().clone();
-        let (Some(Some(probe)), Some(flow)) = (probes.get(head.block), self.block_flow_for(head.block)) else {
+        let (Some(Some(probe)), Some(flow)) =
+            (probes.get(head.block), self.block_flow_for(head.block))
+        else {
             return false;
         };
         let byte = flow.map.doc_to_byte(head.offset, CaretSide::Plain);
         let line = probe.line_for_index(byte);
-        if edge_start { line == 0 } else { line + 1 >= probe.line_count() }
+        if edge_start {
+            line == 0
+        } else {
+            line + 1 >= probe.line_count()
+        }
     }
 
     // ── Clipboard ──────────────────────────────────────────────────────────
@@ -628,7 +722,12 @@ impl PromptEditor {
     }
 
     /// Insert text at the end of the draft (a drop, a redirected paste).
-    pub fn insert_text_at_end(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub fn insert_text_at_end(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let end = self.doc_end();
         self.state.set_caret(end);
         let label_for = self.skill_label();
@@ -665,7 +764,12 @@ impl PromptEditor {
         Some(DocPos::new(index, flow.map.byte_to_doc(byte)))
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.config.disabled {
             return;
         }
@@ -691,7 +795,10 @@ impl PromptEditor {
                 2 => {
                     let end = self.state.next_word_pos(pos);
                     let start = self.state.prev_word_pos(end);
-                    self.state.set_selection(Selection { anchor: start.min(pos), head: end.max(pos) });
+                    self.state.set_selection(Selection {
+                        anchor: start.min(pos),
+                        head: end.max(pos),
+                    });
                 }
                 3.. => {
                     let len = self.state.doc().blocks[pos.block].doc_len();
@@ -709,7 +816,12 @@ impl PromptEditor {
         self.after_change(cx);
     }
 
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.selecting || !event.dragging() {
             return;
         }
@@ -740,22 +852,30 @@ impl PromptEditor {
         let mut highlights = Vec::new();
         if !selection.is_empty() && index >= from.block && index <= to.block {
             let start_doc = if index == from.block { from.offset } else { 0 };
-            let end_doc = if index == to.block { to.offset } else { flow.map.doc_len };
-            let range = flow.map.doc_to_byte(start_doc, CaretSide::InsideAfter)..flow.map.doc_to_byte(end_doc, CaretSide::InsideBefore);
+            let end_doc = if index == to.block {
+                to.offset
+            } else {
+                flow.map.doc_len
+            };
+            let range = flow.map.doc_to_byte(start_doc, CaretSide::InsideAfter)
+                ..flow.map.doc_to_byte(end_doc, CaretSide::InsideBefore);
             highlights.push(FlowHighlight {
                 range,
                 color: with_alpha(theme.info, 0.30).into(),
                 through_line_end: index < to.block,
             });
         }
-        let caret = (focused && selection.is_empty() && self.blink_on && selection.head.block == index).then(|| FlowCaret {
-            index: flow.map.doc_to_byte(selection.head.offset, side),
-            color: theme.foreground,
-            width: px(1.),
-        });
+        let caret =
+            (focused && selection.is_empty() && self.blink_on && selection.head.block == index)
+                .then(|| FlowCaret {
+                    index: flow.map.doc_to_byte(selection.head.offset, side),
+                    color: theme.foreground,
+                    width: px(1.),
+                });
         (highlights, caret)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_block(
         &self,
         index: usize,
@@ -763,7 +883,7 @@ impl PromptEditor {
         depth: usize,
         env: &FlowEnv<'_>,
         focused: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (AnyElement, Option<Rc<BlockFlow>>, Option<FlowProbe>) {
         let theme = env.theme;
@@ -788,7 +908,16 @@ impl PromptEditor {
                 let flow = Rc::new(code_flow(env, code));
                 let probe = FlowProbe::default();
                 let (highlights, caret) = self.decorations(index, &flow, focused, theme);
-                let element = self.code_frame(index, code, &flow, probe.clone(), highlights, caret, env, cx);
+                let element = self.code_frame(
+                    index,
+                    code,
+                    &flow,
+                    probe.clone(),
+                    highlights,
+                    caret,
+                    env,
+                    cx,
+                );
                 (element, Some(flow), Some(probe))
             }
             Block::Rule { .. } => {
@@ -809,7 +938,11 @@ impl PromptEditor {
                             size,
                             line_height: 1.3,
                             weight: FontWeight::SEMIBOLD,
-                            color: if *level == 6 { theme.muted_foreground } else { theme.foreground },
+                            color: if *level == 6 {
+                                theme.muted_foreground
+                            } else {
+                                theme.foreground
+                            },
                         }
                     }
                     _ => base,
@@ -828,7 +961,9 @@ impl PromptEditor {
                 .caret(caret)
                 .probe(probe.clone());
                 let element = match other {
-                    Block::Item { prefix, .. } => self.item_row(index, prefix, depth, text, env, cx),
+                    Block::Item { prefix, .. } => {
+                        self.item_row(index, prefix, depth, text, env, cx)
+                    }
                     Block::Quote { .. } => div()
                         .w_full()
                         .border_l_2()
@@ -866,7 +1001,10 @@ impl PromptEditor {
                     .pl(rems(1.375 * depth as f32))
                     .child(
                         div()
-                            .id(ElementId::NamedInteger("composer-task".into(), index as u64))
+                            .id(ElementId::NamedInteger(
+                                "composer-task".into(),
+                                index as u64,
+                            ))
                             .flex()
                             .flex_none()
                             .h(line)
@@ -889,10 +1027,18 @@ impl PromptEditor {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .when(checked, |this| this.bg(theme.info).border_color(theme.info))
-                                    .when(!checked, |this| this.bg(theme.background).border_color(theme.input))
                                     .when(checked, |this| {
-                                        this.child(Icon::new(IconName::Check).size(rems(0.625)).color(gpui_kit::white()))
+                                        this.bg(theme.info).border_color(theme.info)
+                                    })
+                                    .when(!checked, |this| {
+                                        this.bg(theme.background).border_color(theme.input)
+                                    })
+                                    .when(checked, |this| {
+                                        this.child(
+                                            Icon::new(IconName::Check)
+                                                .size(rems(0.625))
+                                                .color(gpui_kit::white()),
+                                        )
                                     }),
                             ),
                     )
@@ -950,7 +1096,10 @@ impl PromptEditor {
         let language = language_of_info_string(&code.language).to_owned();
         let label = code_language_label(&language);
         let (bg, border) = if dark {
-            (with_alpha(theme.input, 0.32).into(), gpui_kit::transparent_black())
+            (
+                with_alpha(theme.input, 0.32).into(),
+                gpui_kit::transparent_black(),
+            )
         } else {
             (theme.secondary, with_alpha(theme.border, 0.7).into())
         };
@@ -975,39 +1124,71 @@ impl PromptEditor {
             .border_color(border)
             .bg(bg)
             .child(
-                div().flex().items_center().pt(env.rem * 0.375).pr(env.rem * 0.375).pl(env.rem * 0.75).child(
-                    div()
-                        .id(ElementId::NamedInteger("composer-code-language".into(), index as u64))
-                        .flex()
-                        .items_center()
-                        .gap(env.rem * 0.375)
-                        .h(rems(1.5))
-                        .px(rems(0.5))
-                        .ml(rems(-0.5))
-                        .rounded(px(6.))
-                        .cursor(CursorStyle::PointingHand)
-                        .text_color(header_color)
-                        .font_family(env.mono.clone())
-                        .text_size(env.rem * 0.6875)
-                        .hover(|style| style.bg(theme.accent))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |_, event: &MouseDownEvent, _, cx| {
-                                cx.stop_propagation();
-                                cx.emit(PromptEditorEvent::OpenCodeLanguagePicker { block: index, anchor: event.position });
-                            }),
-                        )
-                        .child(Icon::new(IconName::FileText).size(rems(0.875)).color(header_color.into()))
-                        .child(div().max_w(rems(10.)).truncate().child(label))
-                        .child(Icon::new(IconName::ChevronDown).size(rems(0.875)).color(with_alpha(theme.foreground, 0.45).into())),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .pt(env.rem * 0.375)
+                    .pr(env.rem * 0.375)
+                    .pl(env.rem * 0.75)
+                    .child(
+                        div()
+                            .id(ElementId::NamedInteger(
+                                "composer-code-language".into(),
+                                index as u64,
+                            ))
+                            .flex()
+                            .items_center()
+                            .gap(env.rem * 0.375)
+                            .h(rems(1.5))
+                            .px(rems(0.5))
+                            .ml(rems(-0.5))
+                            .rounded(px(6.))
+                            .cursor(CursorStyle::PointingHand)
+                            .text_color(header_color)
+                            .font_family(env.mono.clone())
+                            .text_size(env.rem * 0.6875)
+                            .hover(|style| style.bg(theme.accent))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |_, event: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.emit(PromptEditorEvent::OpenCodeLanguagePicker {
+                                        block: index,
+                                        anchor: event.position,
+                                    });
+                                }),
+                            )
+                            .child(
+                                Icon::new(IconName::FileText)
+                                    .size(rems(0.875))
+                                    .color(header_color.into()),
+                            )
+                            .child(div().max_w(rems(10.)).truncate().child(label))
+                            .child(
+                                Icon::new(IconName::ChevronDown)
+                                    .size(rems(0.875))
+                                    .color(with_alpha(theme.foreground, 0.45).into()),
+                            ),
+                    ),
             )
-            .child(div().w_full().px(rems(0.75)).pt(rems(0.25)).pb(rems(0.5)).child(text))
+            .child(
+                div()
+                    .w_full()
+                    .px(rems(0.75))
+                    .pt(rems(0.25))
+                    .pb(rems(0.5))
+                    .child(text),
+            )
             .into_any_element()
     }
 
     /// The vertical gap CSS margin collapsing leaves between two blocks.
-    fn gap_between(prev: Option<(&Block, usize)>, next: (&Block, usize), rem: Pixels, first: bool) -> Pixels {
+    fn gap_between(
+        prev: Option<(&Block, usize)>,
+        next: (&Block, usize),
+        rem: Pixels,
+        first: bool,
+    ) -> Pixels {
         let list = rem * 0.65;
         let before = |block: &Block| match block {
             Block::Heading { .. } => {
@@ -1044,7 +1225,8 @@ impl PromptEditor {
         };
         // Items of one list run touch; leaving or entering a nested list opens
         // the nested list's margin.
-        if let (Block::Item { prefix: a, .. }, Block::Item { prefix: b, .. }) = (prev_block, next.0) {
+        if let (Block::Item { prefix: a, .. }, Block::Item { prefix: b, .. }) = (prev_block, next.0)
+        {
             let task = |p: &ItemPrefix| matches!(p, ItemPrefix::Task { .. });
             return if next.1 > prev_depth {
                 if task(b) { px(0.) } else { list }
@@ -1056,7 +1238,8 @@ impl PromptEditor {
                 list
             };
         }
-        if let (Block::Quote { prefix: a, .. }, Block::Quote { prefix: b, .. }) = (prev_block, next.0)
+        if let (Block::Quote { prefix: a, .. }, Block::Quote { prefix: b, .. }) =
+            (prev_block, next.0)
             && a == b
         {
             return px(0.);
@@ -1092,16 +1275,25 @@ fn code_flow(env: &FlowEnv<'_>, code: &CodeBlock) -> BlockFlow {
             continue;
         }
         if range.start > cursor {
-            spans.push(FlowSpan { len: range.start - cursor, style: base.clone() });
+            spans.push(FlowSpan {
+                len: range.start - cursor,
+                style: base.clone(),
+            });
         }
         spans.push(FlowSpan {
             len: range.end - range.start,
-            style: FlowSpanStyle { color: *color, ..base.clone() },
+            style: FlowSpanStyle {
+                color: *color,
+                ..base.clone()
+            },
         });
         cursor = range.end;
     }
     if cursor < text.len() {
-        spans.push(FlowSpan { len: text.len() - cursor, style: base.clone() });
+        spans.push(FlowSpan {
+            len: text.len() - cursor,
+            style: base.clone(),
+        });
     }
     let doc_len = crate::composer::js_string::utf16_len(text);
     BlockFlow {
@@ -1131,17 +1323,26 @@ fn skill_label_fn(skills: &[ProviderSkill]) -> Rc<dyn Fn(&str) -> SkillMeta> {
         let normalized = name.strip_prefix('$').unwrap_or(name);
         match skills.iter().find(|skill| skill.name == normalized) {
             None => SkillMeta {
-                label: crate::composer::skills::format_provider_skill_display_name(normalized, None),
+                label: crate::composer::skills::format_provider_skill_display_name(
+                    normalized, None,
+                ),
                 description: None,
             },
             Some(skill) => SkillMeta {
-                label: crate::composer::skills::format_provider_skill_display_name(&skill.name, skill.display_name.as_deref()),
+                label: crate::composer::skills::format_provider_skill_display_name(
+                    &skill.name,
+                    skill.display_name.as_deref(),
+                ),
                 description: skill
                     .short_description
                     .as_deref()
                     .map(str::trim)
                     .filter(|d| !d.is_empty())
-                    .or(skill.description.as_deref().map(str::trim).filter(|d| !d.is_empty()))
+                    .or(skill
+                        .description
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|d| !d.is_empty()))
                     .map(str::to_owned),
             },
         }
@@ -1172,7 +1373,8 @@ impl Render for PromptEditor {
         let mut rows: Vec<AnyElement> = Vec::with_capacity(doc.blocks.len());
         let mut previous: Option<usize> = None;
         for (index, block) in doc.blocks.iter().enumerate() {
-            let (element, flow, probe) = self.render_block(index, block, depths[index], &env, focused, window, cx);
+            let (element, flow, probe) =
+                self.render_block(index, block, depths[index], &env, focused, window, cx);
             let gap = Self::gap_between(
                 previous.map(|p| (&doc.blocks[p], depths[p])),
                 (block, depths[index]),
@@ -1186,7 +1388,9 @@ impl Render for PromptEditor {
         }
         // The last block's own bottom margin.
         let bottom = doc.blocks.last().map_or(px(0.), |last| match last {
-            Block::Item { prefix, .. } if !matches!(prefix, ItemPrefix::Task { .. }) => env.rem * 0.65,
+            Block::Item { prefix, .. } if !matches!(prefix, ItemPrefix::Task { .. }) => {
+                env.rem * 0.65
+            }
             Block::Quote { .. } | Block::Rule { .. } | Block::Code(_) => env.rem * 0.65,
             _ => px(0.),
         });
@@ -1217,11 +1421,30 @@ impl Render for PromptEditor {
             .text_size(size)
             .line_height(line_height)
             .text_color(theme.foreground)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| this.on_key_down(event, window, cx)))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| this.on_mouse_down(event, window, cx)))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| this.on_mouse_move(event, window, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, window, cx| this.on_mouse_up(event, window, cx)))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, window, cx| this.on_mouse_up(event, window, cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.on_key_down(event, window, cx)
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.on_mouse_down(event, window, cx)
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.on_mouse_move(event, window, cx)
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    this.on_mouse_up(event, window, cx)
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    this.on_mouse_up(event, window, cx)
+                }),
+            )
             .child(
                 div()
                     .id("composer-editor-scroll")
@@ -1248,7 +1471,11 @@ impl Render for PromptEditor {
                 canvas(
                     |bounds, _, _| bounds,
                     move |bounds, _, window, cx| {
-                        window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
+                        window.handle_input(
+                            &focus,
+                            ElementInputHandler::new(bounds, entity.clone()),
+                            cx,
+                        );
                     },
                 )
                 .absolute()
@@ -1317,7 +1544,12 @@ impl EntityInputHandler for PromptEditor {
         Some(String::from_utf16_lossy(&units[start..end]))
     }
 
-    fn selected_text_range(&mut self, _ignore_disabled_input: bool, _window: &mut Window, _cx: &mut Context<Self>) -> Option<UTF16Selection> {
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
         let (anchor, head) = self.state.selection_flat();
         Some(UTF16Selection {
             range: anchor.min(head)..anchor.max(head),
@@ -1325,7 +1557,11 @@ impl EntityInputHandler for PromptEditor {
         })
     }
 
-    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
         self.marked.clone()
     }
 
@@ -1333,7 +1569,13 @@ impl EntityInputHandler for PromptEditor {
         self.marked = None;
     }
 
-    fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn replace_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.config.disabled {
             return;
         }
@@ -1373,13 +1615,20 @@ impl EntityInputHandler for PromptEditor {
         let units = crate::composer::js_string::utf16_len(new_text);
         self.marked = (units > 0).then_some(from..from + units);
         if let Some(selected) = new_selected_range {
-            self.state.set_selection_flat(from + selected.start, from + selected.end);
+            self.state
+                .set_selection_flat(from + selected.start, from + selected.end);
         }
         self.restart_blink(window, cx);
         self.after_change(cx);
     }
 
-    fn bounds_for_range(&mut self, range: Range<usize>, element_bounds: Bounds<Pixels>, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+    fn bounds_for_range(
+        &mut self,
+        range: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
         let _ = range;
         let head = self.state.selection().head;
         let probe = self.probes.borrow().get(head.block).cloned().flatten()?;
@@ -1388,7 +1637,12 @@ impl EntityInputHandler for PromptEditor {
         probe.caret_bounds(byte, px(1.)).or(Some(element_bounds))
     }
 
-    fn character_index_for_point(&mut self, position: Point<Pixels>, _window: &mut Window, _cx: &mut Context<Self>) -> Option<usize> {
+    fn character_index_for_point(
+        &mut self,
+        position: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
         let pos = self.pos_for_point(position)?;
         let map = self.state.map();
         Some(crate::composer::rich_doc::pos_to_flat(map, pos))

@@ -21,9 +21,18 @@ pub struct ComposerListEdit {
 }
 
 enum ListMarker {
-    Ordered { indent: String, number_text: String, delimiter: char },
-    Task { indent: String },
-    Bullet { indent: String, bullet: String },
+    Ordered {
+        indent: String,
+        number_text: String,
+        delimiter: char,
+    },
+    Task {
+        indent: String,
+    },
+    Bullet {
+        indent: String,
+        bullet: String,
+    },
 }
 
 fn parse_list_marker(line: &str) -> Option<(ListMarker, usize)> {
@@ -49,7 +58,10 @@ fn parse_list_marker(line: &str) -> Option<(ListMarker, usize)> {
         ));
     }
     if let Some(captures) = task.captures(rest) {
-        return Some((ListMarker::Task { indent }, indent_units + utf16_len(&captures[0])));
+        return Some((
+            ListMarker::Task { indent },
+            indent_units + utf16_len(&captures[0]),
+        ));
     }
     if let Some(captures) = bullet.captures(rest) {
         return Some((
@@ -114,7 +126,10 @@ struct Line {
 }
 
 fn current_line(units: &[u16], cursor: usize) -> Line {
-    let start = units[..cursor].iter().rposition(|u| *u == 0x0a).map_or(0, |at| at + 1);
+    let start = units[..cursor]
+        .iter()
+        .rposition(|u| *u == 0x0a)
+        .map_or(0, |at| at + 1);
     let end = units[cursor..]
         .iter()
         .position(|u| *u == 0x0a)
@@ -193,7 +208,10 @@ mod tests {
     }
 
     fn enter(value: &str, cursor: usize) -> String {
-        apply(value, &list_continuation_for_enter(value, cursor).expect("edit"))
+        apply(
+            value,
+            &list_continuation_for_enter(value, cursor).expect("edit"),
+        )
     }
 
     #[test]
@@ -253,7 +271,10 @@ mod tests {
 
     #[test]
     fn indents_list_items_on_tab() {
-        assert_eq!(apply("- foo", &list_indent_for_tab("- foo", 2, 2).unwrap()), "  - foo");
+        assert_eq!(
+            apply("- foo", &list_indent_for_tab("- foo", 2, 2).unwrap()),
+            "  - foo"
+        );
         assert_eq!(list_indent_for_tab("plain", 2, 2), None);
         assert_eq!(list_indent_for_tab("- foo", 1, 3), None);
     }

@@ -10,7 +10,9 @@
 
 use gpui_kit::{FontWeight, Hsla, Pixels, SharedString, px};
 
-use crate::components::chat::markdown::inline_flow::{FlowSpan, FlowSpanStyle, FlowText, SpanChrome};
+use crate::components::chat::markdown::inline_flow::{
+    FlowSpan, FlowSpanStyle, FlowText, SpanChrome,
+};
 use crate::composer::js_string::utf16_len;
 use crate::composer::rich_doc::{Atom, DocPos, Inline, InlineContent, InlineNode, Marks};
 use crate::composer::rich_text::RichTextMark;
@@ -85,7 +87,8 @@ impl OffsetMap {
             match seg.kind {
                 SegKind::Text => {
                     if doc >= seg.doc_start && doc <= seg.doc_start + seg.doc_len {
-                        candidates.push(seg.byte_start + byte_for_units(&seg.text, doc - seg.doc_start));
+                        candidates
+                            .push(seg.byte_start + byte_for_units(&seg.text, doc - seg.doc_start));
                     }
                 }
                 SegKind::Atom => {
@@ -142,7 +145,13 @@ impl OffsetMap {
     }
 
     /// Byte range of the chip (or marker run) a document offset touches.
-    pub fn byte_range_of_doc_range(&self, from: usize, to: usize, side_from: CaretSide, side_to: CaretSide) -> std::ops::Range<usize> {
+    pub fn byte_range_of_doc_range(
+        &self,
+        from: usize,
+        to: usize,
+        side_from: CaretSide,
+        side_to: CaretSide,
+    ) -> std::ops::Range<usize> {
         self.doc_to_byte(from, side_from)..self.doc_to_byte(to, side_to)
     }
 }
@@ -158,7 +167,6 @@ fn chip_accent(atom: &Atom) -> Hsla {
         Atom::Mention { .. } => color("oklch(0.62 0.11 215)"),
         Atom::Skill { .. } => color("oklch(0.62 0.16 322)"),
     }
-    .into()
 }
 
 fn basename(path: &str) -> &str {
@@ -173,10 +181,18 @@ fn chip_label(atom: &Atom) -> String {
     match atom {
         Atom::Mention { path, .. } => {
             let name = basename(path);
-            if name.is_empty() { path.clone() } else { name.to_owned() }
+            if name.is_empty() {
+                path.clone()
+            } else {
+                name.to_owned()
+            }
         }
         Atom::Skill { label, name, .. } => {
-            if label.is_empty() { name.clone() } else { label.clone() }
+            if label.is_empty() {
+                name.clone()
+            } else {
+                label.clone()
+            }
         }
     }
 }
@@ -212,7 +228,12 @@ struct Run {
 fn mark_runs(inline: &Inline) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
     let mut doc = 0usize;
-    for mark in [RichTextMark::Strike, RichTextMark::Bold, RichTextMark::Italic, RichTextMark::Code] {
+    for mark in [
+        RichTextMark::Strike,
+        RichTextMark::Bold,
+        RichTextMark::Italic,
+        RichTextMark::Code,
+    ] {
         let mut open: Option<Run> = None;
         let mut offset = 0usize;
         doc = 0;
@@ -252,20 +273,28 @@ fn run_is_active(run: &Run, reveal: &MarkerReveal<'_>) -> bool {
     if !reveal.enabled {
         return false;
     }
-    if let Some((from, to)) = reveal.selection {
-        if from != to {
-            // Any overlap of the selection with the run.
-            let (start, end) = if from.block == to.block && from.block == reveal.block {
-                (from.offset, to.offset)
-            } else if reveal.block < from.block || reveal.block > to.block {
-                return false;
+    if let Some((from, to)) = reveal.selection
+        && from != to
+    {
+        // Any overlap of the selection with the run.
+        let (start, end) = if from.block == to.block && from.block == reveal.block {
+            (from.offset, to.offset)
+        } else if reveal.block < from.block || reveal.block > to.block {
+            return false;
+        } else {
+            let start = if reveal.block == from.block {
+                from.offset
             } else {
-                let start = if reveal.block == from.block { from.offset } else { 0 };
-                let end = if reveal.block == to.block { to.offset } else { usize::MAX };
-                (start, end)
+                0
             };
-            return start < run.doc_end && end > run.doc_start;
-        }
+            let end = if reveal.block == to.block {
+                to.offset
+            } else {
+                usize::MAX
+            };
+            (start, end)
+        };
+        return start < run.doc_end && end > run.doc_start;
     }
     let Some(caret) = reveal.caret.filter(|c| c.block == reveal.block) else {
         return false;
@@ -289,7 +318,10 @@ pub fn build_inline_flow(
 ) -> BlockFlow {
     let theme = env.theme;
     let runs = mark_runs(inline);
-    let active: Vec<&Run> = runs.iter().filter(|run| run_is_active(run, reveal)).collect();
+    let active: Vec<&Run> = runs
+        .iter()
+        .filter(|run| run_is_active(run, reveal))
+        .collect();
 
     let mut text = String::new();
     let mut spans: Vec<FlowSpan> = Vec::new();
@@ -311,7 +343,11 @@ pub fn build_inline_flow(
             atomic: false,
         };
         if marks.has(RichTextMark::Bold) {
-            style.weight = if typography.weight.0 >= 600. { FontWeight::BLACK } else { FontWeight::BOLD };
+            style.weight = if typography.weight.0 >= 600. {
+                FontWeight::BLACK
+            } else {
+                FontWeight::BOLD
+            };
         }
         if marks.has(RichTextMark::Code) {
             style.family = env.mono.clone();
@@ -330,7 +366,11 @@ pub fn build_inline_flow(
         style
     };
 
-    let push_marker = |marker: &str, text: &mut String, spans: &mut Vec<FlowSpan>, map: &mut OffsetMap, doc: usize| {
+    let push_marker = |marker: &str,
+                       text: &mut String,
+                       spans: &mut Vec<FlowSpan>,
+                       map: &mut OffsetMap,
+                       doc: usize| {
         let mut style = base_style(Marks::NONE);
         style.color = with_alpha(theme.muted_foreground, 0.75).into();
         style.weight = FontWeight::NORMAL;
@@ -345,7 +385,10 @@ pub fn build_inline_flow(
             text: marker.to_owned(),
         });
         text.push_str(marker);
-        spans.push(FlowSpan { len: marker.len(), style });
+        spans.push(FlowSpan {
+            len: marker.len(),
+            style,
+        });
     };
 
     for (index, node) in inline.iter().enumerate() {
@@ -367,14 +410,18 @@ pub fn build_inline_flow(
                         text: piece.clone(),
                     });
                     text.push_str(piece);
-                    spans.push(FlowSpan { len: piece.len(), style: base_style(node.marks) });
+                    spans.push(FlowSpan {
+                        len: piece.len(),
+                        style: base_style(node.marks),
+                    });
                 }
             }
             InlineContent::Atom(atom) => {
                 let label = chip_label(atom);
                 let accent = chip_accent(atom);
                 let chip_size = typography.size * 0.86;
-                let foreground: Hsla = color_mix(MixSpace::Oklab, accent, 0.22, theme.foreground).into();
+                let foreground: Hsla =
+                    color_mix(MixSpace::Oklab, accent, 0.22, theme.foreground).into();
                 let mut style = base_style(node.marks);
                 style.family = env.sans.clone();
                 style.weight = FontWeight::MEDIUM;
@@ -405,7 +452,10 @@ pub fn build_inline_flow(
                     text: label.clone(),
                 });
                 text.push_str(&label);
-                spans.push(FlowSpan { len: label.len(), style });
+                spans.push(FlowSpan {
+                    len: label.len(),
+                    style,
+                });
             }
         }
         doc += node.doc_len();
@@ -444,7 +494,10 @@ pub fn plain_flow(text: &str, style: FlowSpanStyle) -> BlockFlow {
     let spans = if text.is_empty() {
         Vec::new()
     } else {
-        vec![FlowSpan { len: text.len(), style }]
+        vec![FlowSpan {
+            len: text.len(),
+            style,
+        }]
     };
     BlockFlow {
         flow: FlowText {
@@ -487,7 +540,14 @@ mod tests {
         let map = OffsetMap {
             segs: vec![
                 text_seg(0, "ab😀", 0),
-                Seg { kind: SegKind::Atom, doc_start: 4, doc_len: 1, byte_start: 6, byte_len: 8, text: "README.md".into() },
+                Seg {
+                    kind: SegKind::Atom,
+                    doc_start: 4,
+                    doc_len: 1,
+                    byte_start: 6,
+                    byte_len: 8,
+                    text: "README.md".into(),
+                },
                 text_seg(5, "cd", 14),
             ],
             doc_len: 7,
@@ -506,9 +566,21 @@ mod tests {
 
     #[test]
     fn styled_edges_offer_three_caret_stops() {
-        let marker = |doc, byte| Seg { kind: SegKind::Marker, doc_start: doc, doc_len: 0, byte_start: byte, byte_len: 2, text: "**".into() };
+        let marker = |doc, byte| Seg {
+            kind: SegKind::Marker,
+            doc_start: doc,
+            doc_len: 0,
+            byte_start: byte,
+            byte_len: 2,
+            text: "**".into(),
+        };
         let map = OffsetMap {
-            segs: vec![text_seg(0, "ab", 0), marker(2, 2), marker(2, 4), text_seg(2, "cd", 6)],
+            segs: vec![
+                text_seg(0, "ab", 0),
+                marker(2, 2),
+                marker(2, 4),
+                text_seg(2, "cd", 6),
+            ],
             doc_len: 4,
             byte_len: 8,
         };

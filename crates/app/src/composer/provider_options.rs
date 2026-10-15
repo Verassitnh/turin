@@ -134,7 +134,9 @@ impl From<&contract::ProviderOptionSelection> for OptionSelection {
         Self {
             id: selection.id.as_str().to_owned(),
             value: match &selection.value {
-                contract::ProviderOptionSelectionValue::Str(value) => OptionValue::Str(value.as_str().to_owned()),
+                contract::ProviderOptionSelectionValue::Str(value) => {
+                    OptionValue::Str(value.as_str().to_owned())
+                }
                 contract::ProviderOptionSelectionValue::Bool(value) => OptionValue::Bool(*value),
             },
         }
@@ -142,7 +144,10 @@ impl From<&contract::ProviderOptionSelection> for OptionSelection {
 }
 
 fn raw_selection_value<'a>(selections: &'a [OptionSelection], id: &str) -> Option<&'a OptionValue> {
-    selections.iter().find(|selection| selection.id == id).map(|selection| &selection.value)
+    selections
+        .iter()
+        .find(|selection| selection.id == id)
+        .map(|selection| &selection.value)
 }
 
 fn trim_or_none(value: Option<&str>) -> Option<String> {
@@ -157,14 +162,21 @@ fn resolve_descriptor_choice_value(
     prompt_injected_values: &[String],
     raw: Option<&str>,
 ) -> Option<String> {
-    let default_choice = || options.iter().find(|option| option.is_default).map(|option| option.id.clone());
+    let default_choice = || {
+        options
+            .iter()
+            .find(|option| option.is_default)
+            .map(|option| option.id.clone())
+    };
     let Some(trimmed) = trim_or_none(raw) else {
         return current_value.clone().or_else(default_choice);
     };
     if options.is_empty() {
         return Some(trimmed);
     }
-    if prompt_injected_values.contains(&trimmed) && options.iter().any(|option| option.id == trimmed) {
+    if prompt_injected_values.contains(&trimmed)
+        && options.iter().any(|option| option.id == trimmed)
+    {
         return default_choice();
     }
     if options.iter().any(|option| option.id == trimmed) {
@@ -174,7 +186,10 @@ fn resolve_descriptor_choice_value(
 }
 
 /// `getProviderOptionDescriptors`: the model's descriptors with selections applied.
-pub fn get_provider_option_descriptors(caps: &ModelCapabilities, selections: &[OptionSelection]) -> Vec<OptionDescriptor> {
+pub fn get_provider_option_descriptors(
+    caps: &ModelCapabilities,
+    selections: &[OptionSelection],
+) -> Vec<OptionDescriptor> {
     caps.option_descriptors
         .iter()
         .cloned()
@@ -208,8 +223,12 @@ pub fn get_provider_option_descriptors(caps: &ModelCapabilities, selections: &[O
                         Some(OptionValue::Str(value)) => Some(value.as_str()),
                         _ => current_value.as_deref(),
                     };
-                    let resolved =
-                        resolve_descriptor_choice_value(&options, &current_value, &prompt_injected_values, raw_string);
+                    let resolved = resolve_descriptor_choice_value(
+                        &options,
+                        &current_value,
+                        &prompt_injected_values,
+                        raw_string,
+                    );
                     OptionDescriptor::Select {
                         id,
                         label,
@@ -264,7 +283,9 @@ pub fn get_provider_option_current_value(
     match descriptor {
         OptionDescriptor::Boolean { current_value, .. } => current_value.map(OptionValue::Bool),
         OptionDescriptor::Select {
-            options, current_value, ..
+            options,
+            current_value,
+            ..
         } => {
             if let Some(value) = current_value.as_ref().filter(|v| !v.is_empty()) {
                 return Some(OptionValue::Str(value.clone()));
@@ -291,7 +312,10 @@ pub fn get_provider_option_current_label(
         OptionDescriptor::Select { options, id, .. } => {
             let current = get_provider_option_current_value(Some(descriptor), selection, reported);
             let label = match &current {
-                Some(OptionValue::Str(value)) => options.iter().find(|o| &o.id == value).map(|o| o.label.clone()),
+                Some(OptionValue::Str(value)) => options
+                    .iter()
+                    .find(|o| &o.id == value)
+                    .map(|o| o.label.clone()),
                 _ => None,
             };
             label.or_else(|| {
@@ -308,13 +332,17 @@ pub fn get_provider_option_current_label(
 }
 
 /// `buildProviderOptionSelectionsFromDescriptors`.
-pub fn build_provider_option_selections_from_descriptors(descriptors: &[OptionDescriptor]) -> Option<Vec<OptionSelection>> {
+pub fn build_provider_option_selections_from_descriptors(
+    descriptors: &[OptionDescriptor],
+) -> Option<Vec<OptionSelection>> {
     let selections: Vec<OptionSelection> = descriptors
         .iter()
         .filter_map(|descriptor| {
-            get_provider_option_current_value(Some(descriptor), None, None).map(|value| OptionSelection {
-                id: descriptor.id().to_owned(),
-                value,
+            get_provider_option_current_value(Some(descriptor), None, None).map(|value| {
+                OptionSelection {
+                    id: descriptor.id().to_owned(),
+                    value,
+                }
             })
         })
         .collect();
@@ -329,10 +357,15 @@ pub fn build_explicit_provider_option_selections_from_descriptors(
     if selections.is_empty() {
         return None;
     }
-    let normalized: Vec<OptionSelection> = build_provider_option_selections_from_descriptors(descriptors)?
-        .into_iter()
-        .filter(|selection| selections.iter().any(|explicit| explicit.id == selection.id))
-        .collect();
+    let normalized: Vec<OptionSelection> =
+        build_provider_option_selections_from_descriptors(descriptors)?
+            .into_iter()
+            .filter(|selection| {
+                selections
+                    .iter()
+                    .any(|explicit| explicit.id == selection.id)
+            })
+            .collect();
     (!normalized.is_empty()).then_some(normalized)
 }
 
@@ -340,7 +373,10 @@ pub fn build_explicit_provider_option_selections_from_descriptors(
 pub fn is_claude_ultrathink_prompt(text: Option<&str>) -> bool {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
-    text.is_some_and(|text| RE.get_or_init(|| regex::Regex::new(r"(?i)\bultrathink\b").unwrap()).is_match(text))
+    text.is_some_and(|text| {
+        RE.get_or_init(|| regex::Regex::new(r"(?i)\bultrathink\b").unwrap())
+            .is_match(text)
+    })
 }
 
 /// `applyClaudePromptEffortPrefix`.
@@ -377,8 +413,15 @@ pub fn normalize_model_slug(model: Option<&str>, driver: &str) -> Option<String>
 pub(crate) mod test_support {
     use super::*;
 
-    pub fn select(id: &str, options: &[(&str, &str, bool)], prompt_injected: &[&str]) -> OptionDescriptor {
-        let default = options.iter().find(|(_, _, is_default)| *is_default).map(|(id, _, _)| (*id).to_owned());
+    pub fn select(
+        id: &str,
+        options: &[(&str, &str, bool)],
+        prompt_injected: &[&str],
+    ) -> OptionDescriptor {
+        let default = options
+            .iter()
+            .find(|(_, _, is_default)| *is_default)
+            .map(|(id, _, _)| (*id).to_owned());
         OptionDescriptor::Select {
             id: id.to_owned(),
             label: id.to_owned(),
@@ -416,13 +459,20 @@ mod tests {
     fn selections_override_descriptor_current_values() {
         let caps = ModelCapabilities {
             option_descriptors: vec![
-                select("effort", &[("low", "Low", false), ("high", "High", true)], &[]),
+                select(
+                    "effort",
+                    &[("low", "Low", false), ("high", "High", true)],
+                    &[],
+                ),
                 boolean("fastMode", None),
             ],
         };
         let descriptors = get_provider_option_descriptors(
             &caps,
-            &[OptionSelection::string("effort", "low"), OptionSelection::boolean("fastMode", true)],
+            &[
+                OptionSelection::string("effort", "low"),
+                OptionSelection::boolean("fastMode", true),
+            ],
         );
         assert_eq!(
             get_provider_option_current_value(Some(&descriptors[0]), None, None),
@@ -433,7 +483,8 @@ mod tests {
             Some(OptionValue::Bool(true))
         );
         // An unknown choice falls back to the descriptor default.
-        let descriptors = get_provider_option_descriptors(&caps, &[OptionSelection::string("effort", "bogus")]);
+        let descriptors =
+            get_provider_option_descriptors(&caps, &[OptionSelection::string("effort", "bogus")]);
         assert_eq!(
             get_provider_option_current_value(Some(&descriptors[0]), None, None),
             Some(OptionValue::Str("high".into()))
@@ -442,27 +493,49 @@ mod tests {
 
     #[test]
     fn labels_reflect_the_current_value() {
-        let descriptor = select("effort", &[("low", "Low", false), ("high", "High", true)], &[]);
-        assert_eq!(get_provider_option_current_label(Some(&descriptor), None, None).as_deref(), Some("High"));
+        let descriptor = select(
+            "effort",
+            &[("low", "Low", false), ("high", "High", true)],
+            &[],
+        );
         assert_eq!(
-            get_provider_option_current_label(Some(&boolean("thinking", Some(true))), None, None).as_deref(),
+            get_provider_option_current_label(Some(&descriptor), None, None).as_deref(),
+            Some("High")
+        );
+        assert_eq!(
+            get_provider_option_current_label(Some(&boolean("thinking", Some(true))), None, None)
+                .as_deref(),
             Some("On")
         );
-        assert_eq!(get_provider_option_current_label(Some(&boolean("thinking", None)), None, None), None);
+        assert_eq!(
+            get_provider_option_current_label(Some(&boolean("thinking", None)), None, None),
+            None
+        );
     }
 
     #[test]
     fn reported_values_fill_in_for_unselected_options() {
         let descriptor = select("variant", &[("max", "Max", false)], &[]);
-        let selection = SelectionContext { instance_id: "opencode", model: "m", options: &[] };
+        let selection = SelectionContext {
+            instance_id: "opencode",
+            model: "m",
+            options: &[],
+        };
         let reported_options = [OptionSelection::string("variant", "max")];
-        let reported = SelectionContext { instance_id: "opencode", model: "m", options: &reported_options };
+        let reported = SelectionContext {
+            instance_id: "opencode",
+            model: "m",
+            options: &reported_options,
+        };
         assert_eq!(
             get_provider_option_current_value(Some(&descriptor), Some(&selection), Some(&reported)),
             Some(OptionValue::Str("max".into()))
         );
         // Without a reported value, a variant the user did not pick is unknown.
-        assert_eq!(get_provider_option_current_value(Some(&descriptor), Some(&selection), None), None);
+        assert_eq!(
+            get_provider_option_current_value(Some(&descriptor), Some(&selection), None),
+            None
+        );
         assert_eq!(
             get_provider_option_current_label(Some(&descriptor), Some(&selection), None).as_deref(),
             Some("Unknown")
@@ -471,24 +544,41 @@ mod tests {
 
     #[test]
     fn detects_ultrathink_prompts_and_prefixes_them() {
-        assert!(is_claude_ultrathink_prompt(Some("Ultrathink:\nInvestigate")));
+        assert!(is_claude_ultrathink_prompt(Some(
+            "Ultrathink:\nInvestigate"
+        )));
         assert!(is_claude_ultrathink_prompt(Some("please ULTRATHINK this")));
         assert!(!is_claude_ultrathink_prompt(Some("ultrathinking")));
         assert!(!is_claude_ultrathink_prompt(None));
-        assert_eq!(apply_claude_prompt_effort_prefix("  hi ", Some("ultrathink")), "Ultrathink:\nhi");
+        assert_eq!(
+            apply_claude_prompt_effort_prefix("  hi ", Some("ultrathink")),
+            "Ultrathink:\nhi"
+        );
         assert_eq!(apply_claude_prompt_effort_prefix("hi", Some("high")), "hi");
-        assert_eq!(apply_claude_prompt_effort_prefix("/deploy.prod now", Some("ultrathink")), "/deploy.prod now");
+        assert_eq!(
+            apply_claude_prompt_effort_prefix("/deploy.prod now", Some("ultrathink")),
+            "/deploy.prod now"
+        );
         assert_eq!(
             apply_claude_prompt_effort_prefix("/home/me/app.ts", Some("ultrathink")),
             "Ultrathink:\n/home/me/app.ts"
         );
-        assert_eq!(apply_claude_prompt_effort_prefix("Ultrathink:\nx", Some("ultrathink")), "Ultrathink:\nx");
+        assert_eq!(
+            apply_claude_prompt_effort_prefix("Ultrathink:\nx", Some("ultrathink")),
+            "Ultrathink:\nx"
+        );
     }
 
     #[test]
     fn normalizes_model_slugs_through_driver_aliases() {
-        assert_eq!(normalize_model_slug(Some(" 5.4 "), "codex").as_deref(), Some("gpt-5.4"));
-        assert_eq!(normalize_model_slug(Some("custom/x"), "codex").as_deref(), Some("custom/x"));
+        assert_eq!(
+            normalize_model_slug(Some(" 5.4 "), "codex").as_deref(),
+            Some("gpt-5.4")
+        );
+        assert_eq!(
+            normalize_model_slug(Some("custom/x"), "codex").as_deref(),
+            Some("custom/x")
+        );
         assert_eq!(normalize_model_slug(Some("  "), "codex"), None);
         assert_eq!(normalize_model_slug(None, "codex"), None);
     }

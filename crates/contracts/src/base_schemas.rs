@@ -435,7 +435,7 @@ pub mod forward_compatible_array {
 
 /// `ForwardCompatibleOptional` / `ForwardCompatibleNullable` / `OmittedWhenNull`:
 /// a value this build does not understand decodes as absent. Use with
-/// `#[serde(default, deserialize_with = "lenient_option::deserialize")]`.
+/// `#[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_option::deserialize")]`.
 pub mod lenient_option {
     use super::*;
 
@@ -446,6 +446,27 @@ pub mod lenient_option {
     {
         let raw = Option::<serde_json::Value>::deserialize(d)?;
         Ok(raw.and_then(|value| serde_json::from_value(value).ok()))
+    }
+}
+
+/// `ForwardCompatibleOptional(Schema.NullOr(X))`: absent or unknown decodes
+/// as absent (the key is omitted on encode); an explicit `null` decodes as
+/// present-null. Use with
+/// `#[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_nullable_option::deserialize")]`.
+pub mod lenient_nullable_option {
+    use super::*;
+
+    pub fn deserialize<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: serde::de::DeserializeOwned,
+    {
+        let raw = Option::<serde_json::Value>::deserialize(d)?;
+        Ok(match raw {
+            None => None,
+            Some(serde_json::Value::Null) => Some(None),
+            Some(value) => serde_json::from_value(value).ok().map(Some),
+        })
     }
 }
 

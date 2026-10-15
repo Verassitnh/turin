@@ -17,8 +17,7 @@ use std::{
 };
 use turin_codex_app_server::{client::Client, errors::AppServerError};
 use turin_contracts::{
-    PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId,
-    TrimmedNonEmptyString, UtcDateTime,
+    PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId, TrimmedNonEmptyString, UtcDateTime,
     model::ProviderOptionSelectionValue,
     model_selection::ModelSelection,
     orchestration_v2::{
@@ -292,11 +291,7 @@ fn runtime_policy(
             .unwrap_or_else(|| fallback.to_string_lossy().into_owned()),
         runtime_mode: policy.runtime_mode,
         interaction_mode: policy.interaction_mode,
-        approval_policy: policy
-            .approval_policy
-            .as_ref()
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        approval_policy: policy.approval_policy.clone(),
         sandbox_policy: policy.sandbox_policy.clone(),
     }
 }
@@ -404,9 +399,9 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
             .cwd
             .as_deref()
             .unwrap_or_else(|| self.config.cwd.to_str().unwrap_or("."));
-        let native = self
+        let response = self
             .session
-            .ensure_thread(cwd, input.model_selection.model.as_str())
+            .start_thread(cwd, input.model_selection.model.as_str())
             .await
             .map_err(|e| {
                 error(
@@ -417,17 +412,6 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
                     e,
                 )
             })?;
-        let response = self
-            .session
-            .client()
-            .request(
-                "thread/read",
-                Some(json!({"threadId":native,"includeTurns":false})),
-            )
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| json!({"thread":{"id":native}}));
         thread_from(
             &response,
             &self.instance_id,

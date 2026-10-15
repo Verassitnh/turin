@@ -159,6 +159,11 @@ impl CodexSession {
     }
 
     pub async fn ensure_thread(&self, cwd: &str, model: &str) -> Result<String, AppServerError> {
+        let response = self.start_thread(cwd, model).await?;
+        id(&response, "/thread/id", "thread/start")
+    }
+
+    pub async fn start_thread(&self, cwd: &str, model: &str) -> Result<Value, AppServerError> {
         let response = payload(
             self.client
                 .request(
@@ -168,7 +173,7 @@ impl CodexSession {
                 .await?,
             "thread/start",
         )?;
-        id(&response, "/thread/id", "thread/start")
+        Ok(response)
     }
 
     pub async fn resume_thread(
@@ -505,7 +510,7 @@ mod tests {
                     cwd: "/workspace".into(),
                     runtime_mode: RuntimeMode::ApprovalRequired,
                     interaction_mode: ProviderInteractionMode::Default,
-                    approval_policy: Some("on-request".into()),
+                    approval_policy: Some(json!("on-request")),
                     sandbox_policy: Some(turn_params["sandboxPolicy"].clone()),
                 },
             )

@@ -10,7 +10,7 @@ pub struct RuntimePolicy {
     pub runtime_mode: RuntimeMode,
     pub interaction_mode: ProviderInteractionMode,
     /// Codex wire spelling: `untrusted`, `on-request`, `never`, ...
-    pub approval_policy: Option<String>,
+    pub approval_policy: Option<Value>,
     /// Codex wire object, e.g. `{ "type": "workspaceWrite" }`.
     pub sandbox_policy: Option<Value>,
 }
@@ -50,7 +50,10 @@ pub fn turn_start_params(
     params.insert("approvalsReviewer".into(), json!(reviewer));
     params.insert(
         "approvalPolicy".into(),
-        json!(policy.approval_policy.as_deref().unwrap_or(approval)),
+        policy
+            .approval_policy
+            .clone()
+            .unwrap_or_else(|| json!(approval)),
     );
     params.insert(
         "sandboxPolicy".into(),

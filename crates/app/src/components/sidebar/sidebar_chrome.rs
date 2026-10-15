@@ -1,24 +1,23 @@
 //! Port of upstream/apps/web/src/components/sidebar/SidebarChrome.tsx
 //!
 //! `SidebarChromeHeader` (the 52px titlebar row with the brand) and
-//! `SidebarChromeFooter` (the utility icon row). The brand width probe, the
+//! `SidebarChromeFooter` (the utility icon row, on `ui::sidebar` primitives). The brand width probe, the
 //! environment badge, stage artwork, update pill and undo notice are not
 //! ported yet.
 
 use gpui_kit::{
-    App, CursorStyle, ElementId, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, rems,
+    App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    Styled as _, WeakEntity, Window, div,
 };
 
+use super::SidebarEvent;
 use crate::branding::APP_BASE_NAME;
-use crate::components::drag_region::{DragRegion as _, no_drag};
+use crate::components::drag_region::DragRegion as _;
 use crate::components::workspace_titlebar::workspace_titlebar_content_left;
 use crate::theme::ActiveAppTheme;
-use crate::theme::tokens::{
-    CONTROL_RADIUS, SIDEBAR_CONTENT_INSET, TEXT_SM, WORKSPACE_TOPBAR_HEIGHT,
-};
-use crate::ui::{Icon, IconName, Tooltip};
+use crate::theme::tokens::{CONTROL_RADIUS, TEXT_SM, WORKSPACE_TOPBAR_HEIGHT};
+use crate::ui::sidebar::{SidebarFooter, SidebarMenuButton, SidebarMenuButtonSize};
+use crate::ui::{IconName, Tooltip};
 
 #[derive(IntoElement)]
 pub struct SidebarChromeHeader;
@@ -69,95 +68,57 @@ impl RenderOnce for SidebarChromeHeader {
     }
 }
 
-/// `SidebarMenuButton size="icon"` in the footer: 32×32, `rounded-[var(--control-radius)]`,
-/// icon `size-4` in `--sidebar-icon-color`, hover `bg-sidebar-row-hover`.
+/// `SidebarChromeFooter`: the utility row (settings, pull requests, usage)
+/// as `SidebarMenuButton size="icon"` inside `SidebarFooter`.
 #[derive(IntoElement)]
-pub struct SidebarUtilityButton {
-    id: ElementId,
-    icon: IconName,
-    label: SharedString,
+pub struct SidebarChromeFooter {
+    sidebar: WeakEntity<super::Sidebar>,
 }
 
-impl SidebarUtilityButton {
-    pub fn new(id: impl Into<ElementId>, icon: IconName, label: impl Into<SharedString>) -> Self {
-        Self {
-            id: id.into(),
-            icon,
-            label: label.into(),
-        }
+impl SidebarChromeFooter {
+    pub fn new(sidebar: WeakEntity<super::Sidebar>) -> Self {
+        Self { sidebar }
     }
 }
-
-impl RenderOnce for SidebarUtilityButton {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        sidebar_icon_button(self.id, self.icon, rems(2.), self.label, cx)
-    }
-}
-
-/// Shared look of the sidebar's icon buttons (header and footer).
-pub fn sidebar_icon_button(
-    id: ElementId,
-    icon: IconName,
-    size: gpui_kit::Rems,
-    label: SharedString,
-    cx: &App,
-) -> impl IntoElement {
-    let theme = cx.app_theme();
-    let group: SharedString = format!("sidebar-icon-{id:?}").into();
-    let tooltip = Tooltip::new(label);
-    div()
-        .id(id)
-        .on_mouse_down(MouseButton::Left, no_drag)
-        .group(group.clone())
-        .flex()
-        .flex_shrink_0()
-        .items_center()
-        .justify_center()
-        .size(size)
-        .rounded(CONTROL_RADIUS)
-        .cursor(CursorStyle::PointingHand)
-        .hover(|style| style.bg(theme.sidebar_row_hover))
-        .active(|style| style.bg(theme.sidebar_row_active))
-        .child(
-            Icon::new(icon)
-                .color(theme.sidebar_icon_color)
-                .group_hover_color(group, theme.sidebar_foreground),
-        )
-        .tooltip(move |window, cx| tooltip.clone().build(window, cx))
-}
-
-#[derive(IntoElement)]
-pub struct SidebarChromeFooter;
 
 impl RenderOnce for SidebarChromeFooter {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .px(SIDEBAR_CONTENT_INSET)
-            .py_1()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .child(SidebarUtilityButton::new(
-                        "sidebar-settings",
-                        IconName::Settings,
-                        "Settings",
-                    ))
-                    .child(SidebarUtilityButton::new(
-                        "sidebar-pull-requests",
-                        IconName::GitPullRequestArrow,
-                        "Pull Requests",
-                    ))
-                    .child(SidebarUtilityButton::new(
-                        "sidebar-usage",
-                        IconName::ChartNoAxesColumn,
-                        "Usage",
-                    )),
-            )
+        let button =
+            |id: &'static str, icon: IconName, label: &'static str, event: SidebarEvent| {
+                let sidebar = self.sidebar.clone();
+                SidebarMenuButton::new(id)
+                    .size(SidebarMenuButtonSize::Icon)
+                    .icon(icon)
+                    .tooltip(Tooltip::new(label))
+                    .on_click(move |_, _, cx| {
+                        let event = event.clone();
+                        sidebar.update(cx, |_, cx| cx.emit(event)).ok();
+                    })
+            };
+        SidebarFooter::new().child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(button(
+                    "sidebar-settings",
+                    IconName::Settings,
+                    "Settings",
+                    SidebarEvent::OpenSettings,
+                ))
+                .child(button(
+                    "sidebar-pull-requests",
+                    IconName::GitPullRequestArrow,
+                    "Pull Requests",
+                    SidebarEvent::OpenPullRequestsPage,
+                ))
+                .child(button(
+                    "sidebar-usage",
+                    IconName::ChartNoAxesColumn,
+                    "Usage",
+                    SidebarEvent::OpenUsage,
+                )),
+        )
     }
 }

@@ -7,8 +7,8 @@
 //! cut.
 
 use gpui_kit::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window,
-    div, px, rems,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    Styled as _, Window, div, px, rems,
 };
 
 use super::chat::chat_header::ChatHeader;
@@ -23,6 +23,8 @@ use crate::theme::tokens::{CHAT_CONTENT_MAX_WIDTH, TEXT_SM, WORKSPACE_TOPBAR_HEI
 pub struct ChatView {
     pub sidebar_open: bool,
     pub right_panel_open: bool,
+    /// The routed thread's `(project, title)` (sidebar selection).
+    pub thread: Option<(SharedString, SharedString)>,
 }
 
 impl RenderOnce for ChatView {
@@ -57,11 +59,11 @@ impl RenderOnce for ChatView {
                     .pl(header_left)
                     .pr(px(20.))
                     .bg(theme.background)
-                    .child(ChatHeader {
-                        project: "turin".into(),
-                        title: "Port design system and app shell".into(),
+                    .children(self.thread.clone().map(|(project, title)| ChatHeader {
+                        project,
+                        title,
                         right_panel_open: self.right_panel_open,
-                    })
+                    }))
                     .drag_region(window, cx),
             )
             .child(

@@ -20,6 +20,7 @@ pub struct ProjectFavicon {
     title: String,
     icon: Option<ProjectIcon>,
     size: Rems,
+    grayscale: bool,
 }
 
 impl ProjectFavicon {
@@ -28,7 +29,15 @@ impl ProjectFavicon {
             title: project.title.clone(),
             icon: project.project_icon.clone(),
             size: rems(1.),
+            grayscale: false,
         }
+    }
+
+    /// `grayscale` (settled history at rest): GPUI has no CSS filters, so
+    /// the tint is desaturated instead.
+    pub fn grayscale(mut self, grayscale: bool) -> Self {
+        self.grayscale = grayscale;
+        self
     }
 
     /// `className="size-*"`.
@@ -42,6 +51,14 @@ impl RenderOnce for ProjectFavicon {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme();
         let dark = theme.is_dark();
+        let gray = self.grayscale;
+        let project_icon_color = |color, dark| {
+            let mut tint = project_icon_color(color, dark);
+            if gray {
+                tint.s = 0.;
+            }
+            tint
+        };
         match self.icon {
             Some(ProjectIcon::Monogram { text, color }) => {
                 ProjectMonogram::new(text, project_icon_color(color, dark))

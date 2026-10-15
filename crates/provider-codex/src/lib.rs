@@ -4,6 +4,7 @@ pub mod approvals;
 pub mod codex_provider;
 pub mod codex_turn_token_usage;
 pub mod driver;
+pub mod goal;
 pub mod items;
 pub mod orchestration_adapter;
 pub mod params;

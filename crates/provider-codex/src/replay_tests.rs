@@ -83,6 +83,36 @@ fn fixture(name: &str) -> ReplayTranscript {
     }
 }
 
+/// The model the session runs on: the first recorded `turn/start`'s, else the thread's.
+fn recorded_model(transcript: &ReplayTranscript) -> String {
+    let started = transcript.entries.iter().find_map(|entry| match entry {
+        ReplayEntry::ExpectOutbound { frame, .. }
+            if frame.get("method").and_then(Value::as_str) == Some("turn/start") =>
+        {
+            frame
+                .pointer("/params/model")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }
+        _ => None,
+    });
+    started
+        .or_else(|| {
+            transcript.entries.iter().find_map(|entry| match entry {
+                ReplayEntry::ExpectOutbound { frame, .. }
+                    if frame.get("method").and_then(Value::as_str) == Some("thread/start") =>
+                {
+                    frame
+                        .pointer("/params/model")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                }
+                _ => None,
+            })
+        })
+        .expect("recorded model")
+}
+
 /// `params` of the nth outbound `turn/start` the upstream recorder sent.
 fn recorded_turn_params(transcript: &ReplayTranscript, nth: usize) -> Value {
     transcript
@@ -219,10 +249,7 @@ async fn open_session(
     ReplayDriver,
 ) {
     // The replay runs on the model the upstream recorder used for this scenario.
-    let model = recorded_turn_params(&transcript, 0)["model"]
-        .as_str()
-        .expect("recorded model")
-        .to_owned();
+    let model = recorded_model(&transcript);
     let (client, driver) = make_replay_client(transcript);
     let config = CodexRuntimeConfig {
         binary: "codex".into(),
@@ -2471,4 +2498,348 @@ fn late_child_turn_after_a_clean_parent_end_runs_under_the_parent_context() {
         state.interrupts.is_empty(),
         "a clean parent end interrupts nothing"
     );
+}
+
+/// A root turn's state with its provider thread known, as `turn/start` leaves it.
+fn goal_state(native_turn: &str) -> RuntimeState {
+    let mut state = RuntimeState::default();
+    let turn = detached_turn(native_turn);
+    state
+        .goal_threads
+        .insert("thread-1".into(), turn.input.provider_thread.clone());
+    state.turns.insert(native_turn.into(), turn);
+    state
+}
+
+fn goal_status(
+    events: &[ProviderAdapterV2Event],
+) -> Option<Option<turin_contracts::orchestration_v2::OrchestrationV2ProviderGoalStatus>> {
+    events.iter().rev().find_map(|event| match event {
+        ProviderAdapterV2Event::ProviderThreadUpdated {
+            provider_thread, ..
+        } => Some(provider_thread.goal.as_ref().map(|goal| goal.status)),
+        _ => None,
+    })
+}
+
+#[test]
+fn goal_notifications_write_the_root_thread_goal() {
+    let mut state = goal_state("native-turn-1");
+    let set = notify(
+        &mut state,
+        "thread/goal/updated",
+        json!({"threadId": "thread-1", "goal": {"objective": " ship it ", "status": "paused", "tokensUsed": 10, "tokenBudget": null, "timeUsedSeconds": 2}}),
+    );
+    assert_eq!(
+        goal_status(&set),
+        Some(Some(
+            turin_contracts::orchestration_v2::OrchestrationV2ProviderGoalStatus::Paused
+        ))
+    );
+    let goal = serde_json::to_value(
+        set.iter()
+            .find_map(|event| match event {
+                ProviderAdapterV2Event::ProviderThreadUpdated {
+                    provider_thread, ..
+                } => provider_thread.goal.clone(),
+                _ => None,
+            })
+            .expect("goal"),
+    )
+    .unwrap();
+    assert_eq!(goal["objective"], "ship it", "the objective is trimmed");
+    let cleared = notify(
+        &mut state,
+        "thread/goal/cleared",
+        json!({"threadId": "thread-1"}),
+    );
+    assert_eq!(goal_status(&cleared), Some(None));
+}
+
+#[test]
+fn clean_turn_with_an_active_goal_is_held_until_the_goal_turn_or_its_end() {
+    let mut state = goal_state("native-turn-1");
+    notify(
+        &mut state,
+        "thread/goal/updated",
+        json!({"threadId": "thread-1", "goal": {"objective": "ship it", "status": "active", "tokensUsed": 0, "tokenBudget": null, "timeUsedSeconds": 0}}),
+    );
+    let held = notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-1", "status": "completed", "completedAt": 2}}),
+    );
+    assert!(
+        !held
+            .iter()
+            .any(|event| matches!(event, ProviderAdapterV2Event::TurnTerminal { .. })),
+        "the run stays open for the goal's next turn"
+    );
+    assert!(state.goal_holds.contains_key("thread-1"));
+
+    // Codex starts the goal's next turn on its own: it joins the held run.
+    let continued = notify(
+        &mut state,
+        "turn/started",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-2", "startedAt": 3}}),
+    );
+    assert!(
+        continued.iter().any(|event| matches!(
+            event,
+            ProviderAdapterV2Event::ProviderTurnUpdated { provider_turn, .. }
+                if provider_turn.id.as_str().contains("native-turn-1")
+                    && provider_turn.status == turin_contracts::orchestration_v2::OrchestrationV2ProviderTurnStatus::Completed
+        )),
+        "the held turn's completion is delivered when the continuation starts"
+    );
+    assert_eq!(state.turns["native-turn-2"].input.provider_turn_ordinal, 2);
+    assert!(state.goal_holds.is_empty());
+
+    // The goal ends: the run settles with its last turn.
+    notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-2", "status": "completed", "completedAt": 4}}),
+    );
+    let settled = notify(
+        &mut state,
+        "thread/goal/updated",
+        json!({"threadId": "thread-1", "goal": {"objective": "ship it", "status": "complete", "tokensUsed": 9, "tokenBudget": null, "timeUsedSeconds": 4}}),
+    );
+    assert!(settled.iter().any(|event| matches!(
+        event,
+        ProviderAdapterV2Event::TurnTerminal {
+            status: ProviderAdapterV2TurnTerminalStatus::Completed,
+            ..
+        }
+    )));
+    assert!(state.goal_holds.is_empty());
+}
+
+#[test]
+fn a_held_run_settles_when_its_continuation_grace_ends() {
+    let mut state = goal_state("native-turn-1");
+    notify(
+        &mut state,
+        "thread/goal/updated",
+        json!({"threadId": "thread-1", "goal": {"objective": "ship it", "status": "active", "tokensUsed": 0, "tokenBudget": null, "timeUsedSeconds": 0}}),
+    );
+    notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-1", "status": "completed", "completedAt": 2}}),
+    );
+    let later = tokio::time::Instant::now()
+        + crate::goal::CONTINUATION_GRACE
+        + std::time::Duration::from_secs(1);
+    let settled = crate::projection::flush_due(&mut state, later);
+    assert!(
+        settled
+            .iter()
+            .any(|event| matches!(event, ProviderAdapterV2Event::TurnTerminal { .. }))
+    );
+    assert!(state.goal_holds.is_empty());
+}
+
+#[test]
+fn goal_command_parsing_matches_the_codex_tui() {
+    use crate::goal::{GoalCommand, parse_command};
+    assert_eq!(parse_command("/goal"), Some(GoalCommand::Show));
+    assert_eq!(parse_command("  /goal edit "), Some(GoalCommand::Show));
+    assert_eq!(parse_command("/goal clear"), Some(GoalCommand::Clear));
+    assert_eq!(parse_command("/goal Pause"), Some(GoalCommand::Pause));
+    assert_eq!(parse_command("/goal resume"), Some(GoalCommand::Resume));
+    assert_eq!(
+        parse_command("/goal ship the   release"),
+        Some(GoalCommand::Set("ship the   release".into()))
+    );
+    assert_eq!(parse_command("/goalie"), None);
+    assert_eq!(parse_command("please /goal"), None);
+}
+
+/// The `simple` fixture's head, which initializes and starts a thread and runs no
+/// turn, followed by `tail`. Goal commands are scripted against it.
+fn goal_transcript(tail: Vec<ReplayEntry>) -> ReplayTranscript {
+    let base = fixture("simple");
+    let mut entries = vec![];
+    for entry in base.entries.clone() {
+        if matches!(&entry, ReplayEntry::ExpectOutbound { frame, .. }
+            if frame.get("method").and_then(Value::as_str) == Some("turn/start"))
+        {
+            break;
+        }
+        entries.push(entry);
+    }
+    entries.extend(tail);
+    ReplayTranscript { entries, ..base }
+}
+
+/// The native thread id the head's `thread/start` response names.
+fn head_thread_id() -> String {
+    let base = fixture("simple");
+    base.entries
+        .iter()
+        .find_map(|entry| match entry {
+            ReplayEntry::EmitInbound { frame, .. } if frame.get("id") == Some(&json!(2)) => frame
+                .pointer("/result/thread/id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        })
+        .expect("head thread id")
+}
+
+fn expect_request(id: u64, method: &str, params: Value) -> ReplayEntry {
+    ReplayEntry::ExpectOutbound {
+        label: None,
+        frame: json!({"id": id, "method": method, "params": params}),
+    }
+}
+
+fn respond(id: u64, result: Value) -> ReplayEntry {
+    ReplayEntry::EmitInbound {
+        label: None,
+        frame: json!({"id": id, "result": result}),
+        after_ms: None,
+    }
+}
+
+fn notify_inbound(method: &str, params: Value) -> ReplayEntry {
+    ReplayEntry::EmitInbound {
+        label: None,
+        frame: json!({"method": method, "params": params}),
+        after_ms: None,
+    }
+}
+
+/// A `/goal` message, sent as a user turn with no attachments.
+async fn goal_command(
+    transcript: ReplayTranscript,
+    text: &str,
+) -> (Replay, Vec<ProviderAdapterV2Event>) {
+    let mut replay = open(transcript).await;
+    let input = replay.turn_input(
+        text,
+        policy(
+            RuntimeMode::FullAccess,
+            ProviderInteractionMode::Default,
+            None,
+            None,
+        ),
+    );
+    replay.runtime.start_turn(input).await.unwrap();
+    let seen = replay.next_until(is_terminal).await;
+    (replay, seen)
+}
+
+#[tokio::test]
+async fn goal_show_replies_that_no_goal_is_set_without_a_codex_turn() {
+    let thread = head_thread_id();
+    let (replay, seen) = goal_command(
+        goal_transcript(vec![
+            expect_request(3, "thread/goal/get", json!({"threadId": thread})),
+            respond(3, json!({"goal": null})),
+        ]),
+        "/goal",
+    )
+    .await;
+    assert_eq!(assistant_texts(&seen), vec!["No goal is set.".to_owned()]);
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn goal_clear_removes_the_goal_from_the_thread() {
+    let thread = head_thread_id();
+    let (replay, seen) = goal_command(
+        goal_transcript(vec![
+            expect_request(3, "thread/goal/get", json!({"threadId": thread})),
+            respond(3, json!({"goal": {"threadId": thread, "createdAt": 1, "updatedAt": 1, "objective": "ship it", "status": "paused", "tokensUsed": 0, "tokenBudget": null, "timeUsedSeconds": 0}})),
+            expect_request(4, "thread/goal/clear", json!({"threadId": thread})),
+            respond(4, json!({"cleared": true})),
+        ]),
+        "/goal clear",
+    )
+    .await;
+    assert_eq!(assistant_texts(&seen), vec!["Goal cleared.".to_owned()]);
+    let cleared = seen.iter().rev().find_map(|event| match event {
+        ProviderAdapterV2Event::ProviderThreadUpdated {
+            provider_thread, ..
+        } => Some(provider_thread.goal.is_none()),
+        _ => None,
+    });
+    assert_eq!(cleared, Some(true), "the root thread's goal is cleared");
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn goal_set_runs_its_first_turn_active_and_holds_the_run_until_the_goal_ends() {
+    let thread = head_thread_id();
+    let mut turn_start = fixture("simple")
+        .entries
+        .into_iter()
+        .find_map(|entry| match entry {
+            ReplayEntry::ExpectOutbound { frame, .. }
+                if frame.get("method").and_then(Value::as_str) == Some("turn/start") =>
+            {
+                Some(frame)
+            }
+            _ => None,
+        })
+        .expect("recorded turn/start");
+    turn_start["id"] = json!(5);
+    turn_start["params"]["input"][0]["text"] = json!("ship the release");
+    let goal = |status: &str| json!({"threadId": thread, "createdAt": 1, "updatedAt": 1, "objective": "ship the release", "status": status, "tokensUsed": 0, "tokenBudget": null, "timeUsedSeconds": 0});
+    let turn = |status: &str, completed: Value| json!({"id": "turn-goal-1", "items": [], "itemsView": "notLoaded", "status": status, "error": null, "startedAt": 1, "completedAt": completed, "durationMs": null});
+    let (replay, seen) = goal_command(
+        goal_transcript(vec![
+            expect_request(3, "thread/goal/get", json!({"threadId": thread})),
+            respond(3, json!({"goal": null})),
+            expect_request(
+                4,
+                "thread/goal/set",
+                json!({"threadId": thread, "objective": "ship the release", "status": "paused"}),
+            ),
+            respond(4, json!({"goal": goal("paused")})),
+            ReplayEntry::ExpectOutbound {
+                label: None,
+                frame: turn_start,
+            },
+            respond(5, json!({"turn": turn("inProgress", Value::Null)})),
+            notify_inbound(
+                "turn/started",
+                json!({"threadId": thread, "turn": turn("inProgress", Value::Null)}),
+            ),
+            expect_request(
+                6,
+                "thread/goal/set",
+                json!({"threadId": thread, "status": "active"}),
+            ),
+            respond(6, json!({"goal": goal("active")})),
+            notify_inbound(
+                "turn/completed",
+                json!({"threadId": thread, "turn": turn("completed", json!(2))}),
+            ),
+            notify_inbound(
+                "thread/goal/updated",
+                json!({"threadId": thread, "goal": goal("complete")}),
+            ),
+        ]),
+        "/goal ship the release",
+    )
+    .await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed,
+        "the held run settles when its goal completes"
+    );
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, ProviderAdapterV2Event::TurnTerminal { .. })),
+        "the held terminal is delivered once the goal is no longer active"
+    );
+    replay.driver.verify_complete().unwrap();
 }

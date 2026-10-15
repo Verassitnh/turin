@@ -12,7 +12,7 @@
 use crate::{
     adapter::CodexEvent,
     codex_turn_token_usage::CodexTurnTokenUsageState,
-    items,
+    goal, items,
     items::ItemArtifacts,
     orchestration_adapter::driver,
     retry::{self, LatestFailure, ProviderRetry},
@@ -29,10 +29,11 @@ use turin_contracts::{
     orchestration_v2::{
         OrchestrationV2ExecutionNodeStatus, OrchestrationV2NativeRefStrength,
         OrchestrationV2PlanArtifact, OrchestrationV2PlanArtifactStatus, OrchestrationV2PlanStep,
-        OrchestrationV2PlanStepStatus, OrchestrationV2ProviderRef,
-        OrchestrationV2ProviderThreadDisposition, OrchestrationV2ProviderTurn,
-        OrchestrationV2ProviderTurnStatus, OrchestrationV2ProviderTurnTokenUsage,
-        OrchestrationV2SubagentStatus, OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
+        OrchestrationV2PlanStepStatus, OrchestrationV2ProviderGoal, OrchestrationV2ProviderRef,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadDisposition,
+        OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus,
+        OrchestrationV2ProviderTurnTokenUsage, OrchestrationV2SubagentStatus,
+        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
     },
     provider_runtime::TurnTokenUsage,
 };
@@ -152,6 +153,14 @@ pub struct RuntimeState {
     pub interrupts: Vec<(String, String)>,
     /// Threads whose `turn/start` is in flight. Its turn registers when the call answers.
     pub starting: HashSet<String>,
+    /// The native goal of each thread, `None` when it has none.
+    pub goals: HashMap<String, Option<OrchestrationV2ProviderGoal>>,
+    /// The root provider thread each native thread's goal is written onto.
+    pub goal_threads: HashMap<String, OrchestrationV2ProviderThread>,
+    /// Root turns held for their goal, by native thread id.
+    pub goal_holds: HashMap<String, goal::GoalHold>,
+    /// Threads with a `/goal` activation in flight: a turn that ends before it is active is held.
+    pub goal_activations: HashSet<String>,
     /// The model each thread reported, by native thread id.
     pub subagent_selections: HashMap<String, subagent::ReportedSelection>,
 }
@@ -397,6 +406,10 @@ fn complete_text(
 /// this when its flush timer fires.
 pub fn flush_due(state: &mut RuntimeState, now: Instant) -> Vec<ProviderAdapterV2Event> {
     let mut events = vec![];
+    // A held goal run whose continuation grace ended settles as completed.
+    for thread in goal::expired(state, now) {
+        events.extend(goal::release_hold(state, &thread));
+    }
     for group in 0..2 {
         if state.flush_at[group].is_none_or(|at| at > now) {
             continue;
@@ -440,7 +453,13 @@ pub fn flush_due(state: &mut RuntimeState, now: Instant) -> Vec<ProviderAdapterV
 
 /// The earliest pending flush, for the stream's timer branch.
 pub fn next_flush(state: &RuntimeState) -> Option<Instant> {
-    state.flush_at.iter().flatten().min().copied()
+    state
+        .flush_at
+        .iter()
+        .flatten()
+        .copied()
+        .chain(goal::next_deadline(state))
+        .min()
 }
 
 /// Upstream `flushTurn`: completes every buffered text of a turn that is ending.
@@ -522,6 +541,12 @@ pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderA
     ) {
         return subagent::settings_updated(state, &raw.method, &raw.params);
     }
+    if matches!(
+        raw.method.as_str(),
+        "thread/goal/updated" | "thread/goal/cleared"
+    ) {
+        return goal::goal_event(state, &raw.method, &raw.params);
+    }
     let Some(native_turn) = native_turn_of(&raw.params).map(str::to_owned) else {
         return vec![];
     };
@@ -541,6 +566,12 @@ pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderA
     if !state.turns.contains_key(&native_turn) {
         if state.settled.contains_key(&native_turn) {
             return project_settled(&raw, &thread, &native_turn, state, now);
+        }
+        // Codex starts a held goal's next turn itself. That turn runs in the held run.
+        if raw.method == "turn/started" && state.goal_holds.contains_key(&thread) {
+            let mut events = goal::open_continuation(state, &thread, &native_turn);
+            events.extend(project_event(raw, state));
+            return events;
         }
         // A subagent's first `turn/started` opens its child turn. Other frames for
         // a turn that is not registered are dropped here.
@@ -1304,17 +1335,18 @@ fn turn_completed(
     let failed = failure.is_some();
     let completed_at = time_secs(params.pointer("/turn/completedAt")).unwrap_or(now);
     let provider = provider_turn(turn, status, Some(completed_at), None, token);
-    events.push(ProviderAdapterV2Event::ProviderTurnUpdated {
+    let provider_event = ProviderAdapterV2Event::ProviderTurnUpdated {
         driver: driver(),
         thread_id: Some(turn.input.thread_id.clone()),
         provider_turn: provider,
-    });
+    };
     // A clean end with background work keeps the turn, so its late item frames land.
     if status == OrchestrationV2ProviderTurnStatus::Completed && has_retained_work(turn) {
         state.settled.insert(turn.native_turn.clone(), turn.clone());
     }
     // A child turn settles its subagent. Only a top-level turn ends a run.
     if turn.subagent.is_some() {
+        events.push(provider_event);
         events.extend(subagent::finish_child_turn(
             state,
             turn,
@@ -1323,7 +1355,7 @@ fn turn_completed(
         ));
         return events;
     }
-    events.push(ProviderAdapterV2Event::TurnTerminal {
+    let terminal_event = ProviderAdapterV2Event::TurnTerminal {
         driver: driver(),
         provider_thread_id: turn.input.provider_thread.id.clone(),
         provider_turn_id: derive::provider_turn(&driver(), &turn.native_turn),
@@ -1339,6 +1371,23 @@ fn turn_completed(
             .then(|| retry.as_ref().map(|retry| retry.started_at))
             .flatten(),
         thread_disposition: OrchestrationV2ProviderThreadDisposition::Reusable,
-    });
+    };
+    // A clean end with an active goal is held: Codex starts the goal's next turn itself.
+    let thread = str_of(params, "threadId").unwrap_or_default().to_owned();
+    if status == OrchestrationV2ProviderTurnStatus::Completed && goal::holds_run(state, &thread) {
+        goal::hold(
+            state,
+            &thread,
+            goal::GoalHold {
+                input: turn.input.clone(),
+                completed: provider_event,
+                terminal: terminal_event,
+                deadline: Instant::now() + goal::CONTINUATION_GRACE,
+            },
+        );
+        return events;
+    }
+    events.push(provider_event);
+    events.push(terminal_event);
     events
 }

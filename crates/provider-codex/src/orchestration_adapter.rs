@@ -3,6 +3,7 @@
 use crate::{
     adapter::{CodexAdapter, CodexEvent, CodexSession},
     approvals::{Decision, PendingRequest},
+    goal::{self, GoalCommand},
     items,
     params::RuntimePolicy,
     projection::{self, RuntimeState, TurnState},
@@ -196,6 +197,7 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
         let session = Arc::new(session);
         let state = Arc::new(Mutex::new(RuntimeState::default()));
         let turn_registered = Arc::new(tokio::sync::Notify::new());
+        let out = out_tx.clone();
         let pump = tokio::spawn(project_pump(
             session.take_events(),
             session.take_requests(),
@@ -224,6 +226,7 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
             last_error: None,
         };
         Ok(Arc::new(CodexProviderRuntime {
+            out,
             instance_id: self.instance_id.clone(),
             driver: self.driver.clone(),
             provider_session_id: input.provider_session_id,
@@ -239,6 +242,8 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
 }
 
 pub struct CodexProviderRuntime {
+    /// Sends the events a command projects outside the pump, in stream order.
+    out: tokio::sync::mpsc::UnboundedSender<ProviderAdapterV2Event>,
     instance_id: ProviderInstanceId,
     driver: ProviderDriverKind,
     provider_session_id: ProviderSessionId,
@@ -611,6 +616,220 @@ fn snapshot(
     }
 }
 
+impl CodexProviderRuntime {
+    fn send(&self, events: Vec<ProviderAdapterV2Event>) {
+        for event in events {
+            let _ = self.out.send(event);
+        }
+    }
+
+    /// Upstream `runGoalCommand`. `/goal` runs through Codex's native goal API, as the
+    /// Codex TUI does. Set and resume start the goal's first turn, which carries the
+    /// objective, and Codex continues later goal turns itself. The other commands
+    /// settle with a reply and start no Codex turn.
+    #[allow(clippy::result_large_err)]
+    async fn run_goal_command(
+        &self,
+        input: ProviderAdapterV2TurnInput,
+        command: GoalCommand,
+    ) -> Result<(), ProviderAdapterV2Error> {
+        let thread = native_id(&input.provider_thread)?.to_owned();
+        let fail = |cause: AppServerError| {
+            error(
+                ProviderAdapterErrorKind::TurnStart {
+                    driver: self.driver.clone(),
+                    thread_id: input.thread_id.clone(),
+                    provider_thread_id: input.provider_thread.id.clone(),
+                    run_id: input.run_id.clone(),
+                },
+                cause,
+            )
+        };
+        let goal_of = |response: Option<Value>| {
+            response
+                .as_ref()
+                .and_then(|response| response.get("goal"))
+                .filter(|goal| !goal.is_null())
+                .and_then(goal::provider_goal_from_codex)
+        };
+        let client = self.session.client();
+        self.state
+            .lock()
+            .goal_threads
+            .insert(thread.clone(), input.provider_thread.clone());
+        let current = goal_of(
+            client
+                .request("thread/goal/get", Some(json!({"threadId": thread})))
+                .await
+                .map_err(fail)?,
+        );
+        let events = goal::set_goal(&mut self.state.lock(), &thread, current.clone());
+        self.send(events);
+
+        match &command {
+            GoalCommand::Show => {
+                let reply = current
+                    .as_ref()
+                    .map_or_else(|| "No goal is set.".to_owned(), goal::describe);
+                self.send(goal::reply_events(&input, &reply));
+                return Ok(());
+            }
+            GoalCommand::Clear => {
+                let response = client
+                    .request("thread/goal/clear", Some(json!({"threadId": thread})))
+                    .await
+                    .map_err(fail)?;
+                let cleared = response
+                    .as_ref()
+                    .and_then(|response| response.get("cleared"))
+                    .and_then(Value::as_bool)
+                    == Some(true);
+                let events = goal::set_goal(&mut self.state.lock(), &thread, None);
+                self.send(events);
+                let reply = if cleared {
+                    "Goal cleared."
+                } else {
+                    "No goal to clear."
+                };
+                self.send(goal::reply_events(&input, reply));
+                return Ok(());
+            }
+            GoalCommand::Pause if current.is_none() => {
+                self.send(goal::reply_events(&input, "No goal is set."));
+                return Ok(());
+            }
+            GoalCommand::Resume if current.is_none() => {
+                self.send(goal::reply_events(&input, "No goal is set."));
+                return Ok(());
+            }
+            GoalCommand::Pause => {
+                let response = client
+                    .request(
+                        "thread/goal/set",
+                        Some(json!({"threadId": thread, "status": "paused"})),
+                    )
+                    .await
+                    .map_err(fail)?;
+                let events = goal::set_goal(&mut self.state.lock(), &thread, goal_of(response));
+                self.send(events);
+                self.send(goal::reply_events(
+                    &input,
+                    "Goal paused. Send /goal resume to continue.",
+                ));
+                return Ok(());
+            }
+            GoalCommand::Set(_) | GoalCommand::Resume => {}
+        }
+
+        // Set and resume start the goal's first turn.
+        let objective = match &command {
+            GoalCommand::Set(objective) => Some(objective.clone()),
+            _ => None,
+        };
+        if let Some(objective) = &objective {
+            if current.is_some() {
+                client
+                    .request("thread/goal/clear", Some(json!({"threadId": thread})))
+                    .await
+                    .map_err(fail)?;
+            }
+            // Paused until our turn runs, so Codex does not start one first.
+            let response = client
+                .request(
+                    "thread/goal/set",
+                    Some(json!({"threadId": thread, "objective": objective, "status": "paused"})),
+                )
+                .await
+                .map_err(fail)?;
+            let events = goal::set_goal(&mut self.state.lock(), &thread, goal_of(response));
+            self.send(events);
+        }
+        // Until the goal is active, a fast first turn holds the run.
+        self.state.lock().goal_activations.insert(thread.clone());
+        let mut turn_input = input.clone();
+        if let Some(objective) = objective {
+            turn_input.message.text = objective;
+        }
+        let outcome = async {
+            self.start_native_turn(turn_input).await?;
+            let response = client
+                .request(
+                    "thread/goal/set",
+                    Some(json!({"threadId": thread, "status": "active"})),
+                )
+                .await
+                .map_err(fail)?;
+            Ok::<_, ProviderAdapterV2Error>(goal_of(response))
+        }
+        .await;
+        let mut state = self.state.lock();
+        state.goal_activations.remove(&thread);
+        let active = goal::is_active(&state, &thread);
+        let mut events = match &outcome {
+            Ok(goal) => goal::set_goal(&mut state, &thread, goal.clone()),
+            Err(_) => vec![],
+        };
+        // A run held for an activation that did not happen settles now.
+        if !goal::is_active(&state, &thread) || !active {
+            events.extend(goal::release_hold(&mut state, &thread));
+        }
+        drop(state);
+        self.send(events);
+        outcome.map(|_| ())
+    }
+    /// Starts a native Codex turn for this run's configuration. Upstream `startNativeTurn`.
+    #[allow(clippy::result_large_err)]
+    async fn start_native_turn(
+        &self,
+        input: ProviderAdapterV2TurnInput,
+    ) -> Result<(), ProviderAdapterV2Error> {
+        let thread = native_id(&input.provider_thread)?.to_owned();
+        let policy = runtime_policy(&input.runtime_policy, &self.config.cwd);
+        let model = input.model_selection.model.as_str();
+        // The thread is starting a turn until the turn is registered, so a child turn
+        // that starts first waits for its parent rather than running under a stale one.
+        self.state.lock().starting.insert(thread.clone());
+        let started = self
+            .session
+            .start_turn(
+                &thread,
+                turn_input(&input.message.text),
+                model,
+                option(&input.model_selection, "reasoningEffort"),
+                option(&input.model_selection, "serviceTier"),
+                &policy,
+            )
+            .await;
+        let native_turn = match started {
+            Ok(native_turn) => native_turn,
+            Err(e) => {
+                self.state.lock().starting.remove(&thread);
+                return Err(error(
+                    ProviderAdapterErrorKind::TurnStart {
+                        driver: self.driver.clone(),
+                        thread_id: input.thread_id.clone(),
+                        provider_thread_id: input.provider_thread.id.clone(),
+                        run_id: input.run_id.clone(),
+                    },
+                    e,
+                ));
+            }
+        };
+        {
+            let mut state = self.state.lock();
+            state.starting.remove(&thread);
+            state
+                .goal_threads
+                .insert(thread.clone(), input.provider_thread.clone());
+            state
+                .turns
+                .insert(native_turn.clone(), TurnState::new(native_turn, input));
+        }
+        self.turn_registered.notify_one();
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl ProviderSessionRuntime for CodexProviderRuntime {
     fn instance_id(&self) -> &ProviderInstanceId {
@@ -728,47 +947,14 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
         &self,
         input: ProviderAdapterV2TurnInput,
     ) -> Result<(), ProviderAdapterV2Error> {
-        let thread = native_id(&input.provider_thread)?.to_owned();
-        let policy = runtime_policy(&input.runtime_policy, &self.config.cwd);
-        let model = input.model_selection.model.as_str();
-        // The thread is starting a turn until the turn is registered, so a child turn
-        // that starts first waits for its parent rather than running under a stale one.
-        self.state.lock().starting.insert(thread.clone());
-        let started = self
-            .session
-            .start_turn(
-                &thread,
-                turn_input(&input.message.text),
-                model,
-                option(&input.model_selection, "reasoningEffort"),
-                option(&input.model_selection, "serviceTier"),
-                &policy,
-            )
-            .await;
-        let native_turn = match started {
-            Ok(native_turn) => native_turn,
-            Err(e) => {
-                self.state.lock().starting.remove(&thread);
-                return Err(error(
-                    ProviderAdapterErrorKind::TurnStart {
-                        driver: self.driver.clone(),
-                        thread_id: input.thread_id.clone(),
-                        provider_thread_id: input.provider_thread.id.clone(),
-                        run_id: input.run_id.clone(),
-                    },
-                    e,
-                ));
-            }
-        };
+        // A `/goal` message runs through Codex's goal API, not a turn of its own.
+        if input.message.attachments.is_empty()
+            && input.restart_continuation_of_run_id.is_none()
+            && let Some(command) = goal::parse_command(&input.message.text)
         {
-            let mut state = self.state.lock();
-            state.starting.remove(&thread);
-            state
-                .turns
-                .insert(native_turn.clone(), TurnState::new(native_turn, input));
+            return self.run_goal_command(input, command).await;
         }
-        self.turn_registered.notify_one();
-        Ok(())
+        self.start_native_turn(input).await
     }
     async fn steer_turn(
         &self,

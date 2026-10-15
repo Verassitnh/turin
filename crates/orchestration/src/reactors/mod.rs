@@ -3,5 +3,6 @@
 //! and upstream/apps/server/src/pullRequest.
 
 pub mod checkpoint_git;
+pub mod checkpoint_restore_safety;
 pub mod checkpoint_service;
 pub mod usage_limit_recovery_worker;

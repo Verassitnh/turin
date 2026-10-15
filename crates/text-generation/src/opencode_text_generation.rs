@@ -197,6 +197,7 @@ async fn run_open_code_json(
 }
 
 /// Upstream `connectToOpenCodeServer(...)` branch: a configured URL, never spawned.
+#[allow(clippy::result_large_err)] // The enum is only built on failure paths; boxing it would thread `Box::new` through every `?`.
 async fn run_external(
     settings: &OpenCodeTextGenerationSettings,
     request: &Request,
@@ -233,6 +234,7 @@ async fn run_external(
 }
 
 /// Upstream `runAgainstServer`: one temporary session, one prompt, and the reply text.
+#[allow(clippy::result_large_err)] // The enum is only built on failure paths; boxing it would thread `Box::new` through every `?`.
 async fn run_against_server(
     endpoint: ServerEndpoint<'_>,
     request: &Request,

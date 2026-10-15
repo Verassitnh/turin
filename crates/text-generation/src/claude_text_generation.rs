@@ -90,8 +90,7 @@ pub fn claude_error_result(stdout: &str) -> Option<String> {
         .filter(|message| message.get("is_error") == Some(&Value::Bool(true)))
         .filter_map(|message| message.get("result")?.as_str())
         .map(|result| turin_contracts::js_trim(result).to_owned())
-        .filter(|result| !result.is_empty())
-        .last()
+        .rfind(|result| !result.is_empty())
 }
 
 /// Upstream `decodeClaudeOutput`, then the envelope pick: a single object carries

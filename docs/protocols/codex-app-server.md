@@ -61,18 +61,40 @@ Use `tokio::process`, one serialized stdin writer, an unbounded line reader matc
 
 The pinned schema omits some calls the adapter uses. Hand-type `thread/backgroundTerminals/list {threadId,cursor?} -> {data:[{processId,...}],nextCursor}` and `thread/backgroundTerminals/terminate {threadId,processId} -> {terminated}`. Decode `thread/read`'s `historyMode` from the raw response. `thread/resume.excludeTurns` **is** in the schema. Add `thread/turns/list`, `thread/revert`, `thread/reverted`, `model/list`, `skills/list`, `account/read`, and `account/rateLimits/read` to the method registry (`CodexAdapterV2.ts:209-226,1030-1047,2355-2400,7324-7410`; `CodexProvider.ts:328,495-559`).
 
-Extend generated `turn/start` types with `collaborationMode:{mode:"plan"|"default",settings:{model,reasoning_effort,developer_instructions?}}`; plan turns require mode `plan`. Upstream also assigns `additionalContext`, mostly for cut T3 MCP/MCP-app features. Always send `summary:"detailed"` and `approvalsReviewer` (it otherwise sticks across resume). Put `CODEX_THREAD_CONFIG={"tools.update_plan.enabled":true,"mcp_optional_startup_grace_ms":10000}` on thread/start, resume, and fork (`CodexAdapterV2.ts:662-668,802-805,1322-1341`).
+Extend generated `turn/start` types with `collaborationMode:{mode:"plan"|"default",settings:{model,reasoning_effort,developer_instructions?}}`; plan turns require mode `plan`. Upstream also assigns `additionalContext`, mostly for cut T3 MCP/MCP-app features. Always send `summary:"detailed"` and `approvalsReviewer` (it otherwise sticks across resume). thread/start, thread/resume and thread/fork params include a `config` request parameter (`CodexAdapterV2.ts:662-668,802-805,1322-1341`):
 
-| runtimeMode | approvalPolicy | approvalsReviewer | sandboxPolicy |
+```text
+config:{"tools.update_plan.enabled":true,"mcp_optional_startup_grace_ms":10000, mcp_servers?}
+```
+
+Plus `cwd` and `model` when known. `mcp_servers` is present only when MCP servers are configured. This is **not** an environment variable: upstream's `CODEX_THREAD_CONFIG` is a TS constant spread into the request params by `codexThreadRuntimeParams`.
+
+| runtimeMode | approvalPolicy | approvalsReviewer | sandboxPolicy (turn/start) |
 |---|---|---|---|
-| approval-required | untrusted | user | readOnly |
-| auto-accept-edits | on-request | user | workspaceWrite |
-| auto | on-request | auto_review | workspaceWrite |
-| full-access | never | user | dangerFullAccess |
+| approval-required | untrusted | user | `{type:"readOnly"}` |
+| auto-accept-edits | on-request | user | `{type:"workspaceWrite"}` |
+| auto | on-request | auto_review | `{type:"workspaceWrite"}` |
+| full-access | never | user | `{type:"dangerFullAccess"}` |
 
-This table is from `codexRuntimeModeTurnDefaults` (`CodexAdapterV2.ts:679-717`); explicit runtime policy overrides still apply. `turn/steer` must include `expectedTurnId`.
+This table is from `codexRuntimeModeTurnDefaults` (`CodexAdapterV2.ts:679-717`); explicit runtime policy overrides still apply. `sandboxPolicy` is sent on `turn/start` as an object, not a bare string. `turn/steer` must include `expectedTurnId`.
 
-Rollback (`CodexThreadRevert.ts:6-44`, `CodexAdapterV2.ts:1007-1050,7324-7410`): raw `thread/read {includeTurns:false}` to inspect `historyMode`; reject anything other than `paginated`. If `notLoaded`, first `thread/resume {excludeTurns:true,...}`. Page `thread/turns/list {limit:min(remaining,100),sortDirection:"desc",itemsView:"summary"}` with a repeated-cursor guard. Then `thread/revert {threadId,beforeTurnId}` (or `thread/read` when no revert is needed) and await `thread/reverted`. Provider probing starts with `account/read`; return early on `requiresOpenaiAuth`, then run `skills/list {cwds}`, paginated `model/list`, and `account/rateLimits/read null` concurrently, with a degrading timeout on rate limits (`CodexProvider.ts:495-559`).
+Rollback (`CodexThreadRevert.ts:6-44`, `CodexAdapterV2.ts:1007-1050,7324-7410`): raw `thread/read {includeTurns:false}` to inspect `historyMode`; reject anything other than `paginated`. Compute `loaded` as `thread.status.type !== "notLoaded"`. If not loaded, first `thread/resume {excludeTurns:true,...}`. Page turns with exactly these params, with a repeated-cursor guard:
+
+```text
+thread/turns/list {threadId, cursor:null|nextCursor, limit:min(remaining,100), sortDirection:"desc", itemsView:"summary"}
+```
+
+`beforeTurnId` is the id of the Nth-newest turn, where N is the number of turns to drop. That turn and everything after it are removed. If the thread has fewer than N turns, it is the oldest turn found.
+
+Then `thread/revert {threadId,beforeTurnId}` (or `thread/read` when no revert is needed). Use the `thread` from the `thread/revert` (or `thread/read`) response as the result. `thread/reverted {threadId}` is a later informational notification that upstream ignores. Do not block on it: the no-revert branch never emits it, so awaiting it hangs.
+
+Provider probing starts with `account/read`. Return early only when there is **no** `account` AND `requiresOpenaiAuth` (`CodexProvider.ts:495-503`). Logged-in ChatGPT accounts also report `requiresOpenaiAuth:true`; a literal early return on that flag gives them no models, skills or rate limits. Otherwise run `skills/list {cwds}`, paginated `model/list`, and `account/rateLimits/read null` concurrently, with a degrading timeout on rate limits (`CodexProvider.ts:495-559`).
+
+For `account.type==="chatgpt"`, upstream calls `requestCodexChatGptModels({client, codexHome, spawnedAtMs})` (`CodexProvider.ts:369-389`, `:509-511`) instead of paginated `model/list`. It runs `model/list`, polls `<codexHome>/models_cache.json` until its fetch time is at or after spawn time (with a timeout), then lists again.
+
+> UNVERIFIED: the timeout value and the name of the fetch-time field in `models_cache.json` are not in the QC report. Read `CodexProvider.ts:369-389` before implementing.
+
+The version is parsed from `initialize.userAgent` with `/\/([^\s]+)/`.
 
 ## Server requests and ordering
 
@@ -80,8 +102,14 @@ Rollback (`CodexThreadRevert.ts:6-44`, `CodexAdapterV2.ts:1007-1050,7324-7410`):
 |---|---|
 | `item/commandExecution/requestApproval`, `item/fileChange/requestApproval` | `{decision:"accept"|"acceptForSession"|"decline"|"cancel"}`; UI acceptAlways becomes acceptForSession. |
 | `item/permissions/requestApproval` | `{permissions,scope:"turn"|"session"}`; deny uses `{permissions:{},scope:"turn"}`. |
-| Legacy `execCommandApproval`, `applyPatchApproval` | `"approved"`, `"approved_for_session"`, `{denied:{rejection}}`, or `"abort"`; route by conversationId/callId. |
+| Legacy `execCommandApproval`, `applyPatchApproval` | Wrapped as `{decision:<ReviewDecision>}`: `{decision:"approved"}`, `{decision:"approved_for_session"}`, `{decision:"abort"}`, or decline `{decision:{denied:{rejection:"User declined the request."}}}`. Route by conversationId/callId. |
 
-Approvals can precede `turn/started`: `awaitActiveTurn` yields up to 1000 times before giving up. Background-terminal item events can follow `turn/completed` and resolve against `settledTurns`. Cache per-thread session allowances by runtimeMode and request kind (`CodexAdapterV2.ts:1892-1919,2110-2136,5120-5125`). On an archived resume error matching `/\bsession \S+ is archived\b|\bcodex unarchive\b/`, call `thread/unarchive` and retry (`:6612-6629`).
+Approvals can precede `turn/started`: `awaitActiveTurn` yields up to 1000 times before giving up. Background-terminal item events can follow `turn/completed` and resolve against `settledTurns`. Cache per-thread session allowances by runtimeMode and request kind (`CodexAdapterV2.ts:1892-1919,2110-2136,5120-5125`). On an archived resume error matching the case-insensitive regex `(?i)\bsession \S+ is archived\b|\bcodex unarchive\b` (`:6618`), call `thread/unarchive` and retry (`:6612-6629`).
 
 The protocol reader terminates on **every** undecodable or unroutable line and fails all pending requests. It has no upstream line bound; any added bound must exceed multi-MB payloads and be logged as a deviation. Server request handlers run concurrently up to 32 active; excess receive `-32001` overloaded. Notifications run inline in arrival order (`effect-codex-app-server/src/protocol.ts:18,303-440`). Generate Rust types from the pinned OpenAI commit `687a119f0fcaace47e1f1abcc77cec6c813fd6da`; the crates.io `codex-app-server-protocol` package is a third-party fork.
+
+## Changelog (QC wf_9dc37bfd-861)
+
+- Item 5 (MEDIUM): rollback uses the `thread` from the `thread/revert` or `thread/read` response; `thread/reverted` is informational and not awaited; `beforeTurnId` defined as the Nth-newest turn (oldest found if fewer); exact `thread/turns/list` params; `loaded` derived from `thread.status.type`.
+- Item 6 (MEDIUM): provider early return is "no account AND requiresOpenaiAuth"; ChatGPT account path via `requestCodexChatGptModels` with `models_cache.json` polling (timeout value UNVERIFIED); version parsed from `initialize.userAgent`.
+- Item 7 (MEDIUM): `config` request parameter (not an env var) on thread/start, resume and fork; sandboxPolicy as `{type:...}` objects on turn/start; legacy approval replies wrapped in `{decision}` (decline shown as the ReviewDecision value); archived-resume regex is case-insensitive.

@@ -7336,6 +7336,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "turin-contracts",
+ "turin-review",
+ "turin-shared",
  "unicode-normalization",
  "url",
 ]

@@ -16,6 +16,7 @@ mod timestamp_format;
 // ahead of its callers.
 #[allow(dead_code)]
 mod ui;
+mod utils;
 
 use gpui_kit::*;
 

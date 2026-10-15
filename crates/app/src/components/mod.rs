@@ -1,8 +1,10 @@
 //! Ports of upstream/apps/web/src/components (app-level screens and chrome).
 
 pub mod app_sidebar_layout;
+pub mod branch_toolbar;
 pub mod chat;
 pub mod chat_view;
+pub mod command_palette;
 pub mod drag_region;
 pub mod project_favicon;
 pub mod project_monogram;

@@ -24,6 +24,7 @@ turin-provider-cursor = { path = "crates/provider-cursor" }
 turin-orchestration = { path = "crates/orchestration" }
 turin-hooks = { path = "crates/hooks" }
 turin-projects = { path = "crates/projects" }
+turin-review = { path = "crates/review" }
 
 anyhow = "1"
 async-trait = "0.1"

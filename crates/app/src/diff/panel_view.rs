@@ -1322,8 +1322,7 @@ impl DiffPanel {
     }
 
     fn gutter_width(&self, ctx: &RowCtx) -> gpui_kit::Pixels {
-        // padding-left 2ch + number (min `digits`ch) + padding-right 1ch + 2px border.
-        ctx.metrics.ch * (2. + ctx.digits as f32 + 1.) + px(3.)
+        gutter_width_for(ctx.metrics.ch, ctx.digits)
     }
 
     /// An empty split cell: hatched content and a context-gutter cell.
@@ -1948,6 +1947,12 @@ fn px_rems(pixels: f32) -> gpui_kit::Rems {
     rems(pixels / 16.)
 }
 
+/// The number column: `[data-column-number]` padding-left 2ch, `digits` ch of
+/// numbers, padding-right 1ch, then the 2px border-right of `@pierre/diffs`.
+fn gutter_width_for(ch: gpui_kit::Pixels, digits: usize) -> gpui_kit::Pixels {
+    ch * (2. + digits as f32 + 1.) + px(2.)
+}
+
 /// The highlighted line text.
 fn code_text(
     text: &str,
@@ -2032,3 +2037,14 @@ const _AUTOMATIC: &str = AUTOMATIC_BASE_REF;
 #[allow(dead_code)]
 fn _range_unused(_: SelectedLineRange, _: LineLoadingUnused, _: LineTokens) {}
 type LineLoadingUnused = ();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gutter_is_2ch_digits_1ch_and_a_2px_border() {
+        assert_eq!(gutter_width_for(px(10.), 2), px(52.));
+        assert_eq!(gutter_width_for(px(10.), 3), px(62.));
+    }
+}

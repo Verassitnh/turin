@@ -2,6 +2,7 @@
 //! response after a restart, the latest thought carried beside a running tool,
 //! and the single shared activity row.
 
+use super::derive_rows_runless::running_turn;
 use super::*;
 
 /// A work entry whose id, entry id and timeline id follow upstream's
@@ -269,5 +270,105 @@ fn keeps_an_actually_running_tool_in_the_shared_activity_row() {
             );
         }
         other => panic!("expected a live work row, got {other:?}"),
+    }
+}
+
+#[test]
+fn reuses_one_activity_row_for_initial_thinking_and_the_latest_tool() {
+    let derive_rows = |status: Option<ToolLifecycleStatus>, expanded: &[&str]| {
+        let entries = status.map_or_else(Vec::new, |status| {
+            let running = status == ToolLifecycleStatus::InProgress;
+            vec![work_entry(
+                "latest-command-entry",
+                "2026-01-01T00:00:05Z",
+                WorkLogEntry {
+                    command: Some("rg toolCall".into()),
+                    request_kind: Some("command".into()),
+                    tool_lifecycle_status: Some(status),
+                    detail: running.then(|| "exit code 1".to_string()),
+                    ..work_log(
+                        "latest-command",
+                        "2026-01-01T00:00:05Z",
+                        Some("turn-1"),
+                        if running { "Running rg" } else { "Ran rg" },
+                        WorkTone::Tool,
+                    )
+                },
+            )]
+        });
+        derive(&MessagesTimelineRowsInput {
+            expanded_work_group_ids: set(expanded),
+            ..running_turn(entries)
+        })
+    };
+    let activity_rows = |rows: &[Arc<MessagesTimelineRow>]| -> Vec<MessagesTimelineRowKind> {
+        rows.iter()
+            .filter(|row| row.id() == "live-activity-row")
+            .map(|row| row.kind())
+            .collect()
+    };
+    let activity = |rows: &[Arc<MessagesTimelineRow>]| {
+        rows.iter()
+            .find(|row| row.id() == "live-activity-row")
+            .map(|row| row.content.clone())
+            .expect("live activity row")
+    };
+
+    let initial = derive_rows(None, &[]);
+    let running = derive_rows(Some(ToolLifecycleStatus::InProgress), &[]);
+    let completed = derive_rows(Some(ToolLifecycleStatus::Completed), &[]);
+    let failed = derive_rows(Some(ToolLifecycleStatus::Failed), &[]);
+    let declined = derive_rows(Some(ToolLifecycleStatus::Declined), &[]);
+
+    assert_eq!(activity(&initial).kind(), MessagesTimelineRowKind::Thinking);
+    assert!(matches!(
+        activity(&running),
+        Row::WorkLive { active: true, .. }
+    ));
+    assert!(matches!(
+        activity(&completed),
+        Row::WorkLive { active: true, .. }
+    ));
+    assert!(!has_kind(&failed, MessagesTimelineRowKind::WorkLive));
+    assert_eq!(
+        failed.last().map(|row| (row.kind(), row.id().to_string())),
+        Some((
+            MessagesTimelineRowKind::Thinking,
+            "live-activity-row".to_string()
+        ))
+    );
+    let failed_group_id = match &failed.last().expect("failed row").content {
+        Row::Thinking { group_id, .. } => group_id.clone().expect("failed group"),
+        other => panic!("expected the failed thinking row, got {other:?}"),
+    };
+    let expanded_failed = derive_rows(Some(ToolLifecycleStatus::Failed), &[&failed_group_id]);
+    let tail = &expanded_failed[expanded_failed.len() - 2..];
+    assert!(matches!(
+        &tail[0].content,
+        Row::Thinking {
+            expanded: Some(true),
+            ..
+        }
+    ));
+    assert_eq!(tail[0].id(), "live-activity-row");
+    match &tail[1].content {
+        Row::Work {
+            is_expanded_tool_group: true,
+            grouped_entries,
+            ..
+        } => assert_eq!(grouped_entries[0].id, "latest-command"),
+        other => panic!("expected the expanded tool group, got {other:?}"),
+    }
+
+    assert!(matches!(
+        find_kind(&declined, MessagesTimelineRowKind::WorkLive),
+        Some(Row::WorkLive { active: false, .. })
+    ));
+    assert_eq!(
+        declined.last().map(|row| row.kind()),
+        Some(MessagesTimelineRowKind::Thinking)
+    );
+    for rows in [&initial, &running, &completed, &failed, &declined] {
+        assert_eq!(activity_rows(rows).len(), 1);
     }
 }

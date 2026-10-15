@@ -322,6 +322,15 @@ pub fn make_provider_maintenance_capabilities(
 /// oversized output. The child leads its own process group, so the timeout
 /// kills the whole tree, not just `brew`.
 async fn run_homebrew(brew_path: &str, args: &[&str], env: &ProcessEnv) -> Option<String> {
+    run_homebrew_within(brew_path, args, env, HOMEBREW_INFO_TIMEOUT).await
+}
+
+async fn run_homebrew_within(
+    brew_path: &str,
+    args: &[&str],
+    env: &ProcessEnv,
+    timeout: Duration,
+) -> Option<String> {
     let mut command = tokio::process::Command::new(brew_path);
     command
         .args(args)
@@ -348,12 +357,12 @@ async fn run_homebrew(brew_path: &str, args: &[&str], env: &ProcessEnv) -> Optio
         (status.success() && read <= HOMEBREW_INFO_MAX_BYTES)
             .then(|| String::from_utf8_lossy(&bytes).into_owned())
     };
-    let output = tokio::time::timeout(HOMEBREW_INFO_TIMEOUT, collect)
-        .await
-        .ok()
-        .flatten();
-    guard.disarm();
-    if output.is_none() {
+    let output = tokio::time::timeout(timeout, collect).await.ok().flatten();
+    // Only a finished probe disarms the guard. A timeout drops `collect`, and
+    // the group kill must still reach brew's children.
+    if output.is_some() {
+        guard.disarm();
+    } else {
         tracing::warn!(
             subcommand = args.first().copied().unwrap_or_default(),
             "Homebrew probe failed"
@@ -1050,5 +1059,50 @@ mod tests {
             resolve_package_managed_provider_maintenance(&codex_definition(), None).await;
         assert_eq!(capabilities.update, None);
         assert_eq!(capabilities.package_name.as_deref(), Some("@openai/codex"));
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_probe_takes_its_grandchildren_down_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("grandchild.pid");
+        let pid_file_arg = pid_file.to_str().unwrap();
+        // `sleep` is brew's child, so only the group kill can reach it.
+        let output = run_homebrew_within(
+            "/bin/sh",
+            &["-c", "sleep 600 & echo $! > \"$0\"; wait", pid_file_arg],
+            &ProcessEnv::new(),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(output, None);
+
+        let grandchild: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // Its parent is dead, so init reaps it shortly. Until then `kill -0`
+        // still succeeds on the zombie, which is why this waits.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_exists(grandchild) {
+            assert!(
+                Instant::now() < deadline,
+                "grandchild {grandchild} survived the probe timeout"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }

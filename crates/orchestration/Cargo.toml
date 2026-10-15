@@ -18,3 +18,7 @@ tracing.workspace = true
 rusqlite.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+indexmap.workspace = true
+turin-provider-core.workspace = true

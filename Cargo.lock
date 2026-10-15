@@ -7067,6 +7067,9 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "futures",
+ "indexmap",
+ "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",
@@ -7077,6 +7080,7 @@ dependencies = [
  "turin-contracts",
  "turin-hooks",
  "turin-persistence",
+ "turin-provider-core",
 ]
 
 [[package]]

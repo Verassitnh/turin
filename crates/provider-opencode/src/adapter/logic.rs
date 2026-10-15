@@ -62,20 +62,6 @@ pub fn opencode_driver() -> ProviderDriverKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderAdapterV2TurnTerminalStatus {
-    Completed,
-    Interrupted,
-    Cancelled,
-    Failed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThreadDisposition {
-    Reusable,
-    Broken,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenCodeAdmissionSignal {
     Accepted,
     AssistantCompleted,

@@ -22,7 +22,7 @@ use turin_contracts::{
         OrchestrationV2Actor, OrchestrationV2ConversationMessage,
         OrchestrationV2ConversationMessageRole, OrchestrationV2CreationSource,
         OrchestrationV2ProviderFailureClass, OrchestrationV2ProviderSession,
-        OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
+        OrchestrationV2ProviderSessionStatus,         OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadDisposition,
         OrchestrationV2ProviderThreadForkedFrom, OrchestrationV2ProviderThreadStatus,
         OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus,
         OrchestrationV2ResponseCapability, OrchestrationV2RuntimeRequest,
@@ -89,7 +89,6 @@ struct Pending {
 }
 
 struct V2Inner {
-    session: OrchestrationV2ProviderSession,
     threads: HashMap<String, V2Thread>,
     pending: HashMap<String, Pending>,
     children: HashMap<String, String>,
@@ -101,6 +100,9 @@ pub struct OpenCodeV2Session {
     instance_id: ProviderInstanceId,
     driver: ProviderDriverKind,
     provider_session_id: ProviderSessionId,
+    /// Open-time session record. Later status changes are
+    /// `provider_session.updated` events.
+    session: OrchestrationV2ProviderSession,
     client: V2Client,
     inner: Mutex<V2Inner>,
     tx: mpsc::UnboundedSender<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>,
@@ -120,24 +122,25 @@ impl OpenCodeV2Session {
             .map_err(|_| ProviderAdapterV2Error::protocol("OpenCode session cwd is blank"))?;
         let now = UtcDateTime::now();
         let (tx, rx) = mpsc::unbounded_channel();
-        let session = Arc::new(Self {
-            instance_id: instance_id.clone(),
+        let provider_session = OrchestrationV2ProviderSession {
+            id: provider_session_id.clone(),
             driver: opencode_driver(),
-            provider_session_id: provider_session_id.clone(),
+            provider_instance_id: instance_id.clone(),
+            status: OrchestrationV2ProviderSessionStatus::Ready,
+            cwd,
+            model: model.and_then(|model| turin_contracts::TrimmedNonEmptyString::new(model).ok()),
+            capabilities: v2_capabilities(),
+            created_at: now,
+            updated_at: now,
+            last_error: None,
+        };
+        let session = Arc::new(Self {
+            instance_id,
+            driver: opencode_driver(),
+            provider_session_id,
+            session: provider_session,
             client,
             inner: Mutex::new(V2Inner {
-                session: OrchestrationV2ProviderSession {
-                    id: provider_session_id,
-                    driver: opencode_driver(),
-                    provider_instance_id: instance_id,
-                    status: OrchestrationV2ProviderSessionStatus::Ready,
-                    cwd,
-                    model: model.and_then(|model| turin_contracts::TrimmedNonEmptyString::new(model).ok()),
-                    capabilities: v2_capabilities(),
-                    created_at: now,
-                    updated_at: now,
-                    last_error: None,
-                },
                 threads: HashMap::new(),
                 pending: HashMap::new(),
                 children: HashMap::new(),
@@ -153,6 +156,12 @@ impl OpenCodeV2Session {
             this.follow_events().await;
         }));
         Ok(session)
+    }
+
+    pub async fn close(&self) {
+        if let Some(handle) = self.reader.lock().take() {
+            handle.abort();
+        }
     }
 
     async fn follow_events(self: Arc<Self>) {
@@ -305,10 +314,10 @@ impl OpenCodeV2Session {
     async fn fail_stream(&self, message: &str) {
         let mut guard = self.inner.lock();
         guard.stream_dead = Some(message.to_owned());
-        guard.session.status = OrchestrationV2ProviderSessionStatus::Error;
-        guard.session.last_error = Some(message.to_owned());
-        guard.session.updated_at = UtcDateTime::now();
-        let session = guard.session.clone();
+        let mut session = self.session.clone();
+        session.status = OrchestrationV2ProviderSessionStatus::Error;
+        session.last_error = Some(message.to_owned());
+        session.updated_at = UtcDateTime::now();
         let ids: Vec<String> = guard.threads.keys().cloned().collect();
         let mut terminals = Vec::new();
         for id in ids {
@@ -720,17 +729,21 @@ impl OpenCodeV2Session {
         self.emit(ProviderAdapterV2Event::ProviderThreadUpdated {
             driver: driver.clone(),
             provider_thread,
+            retained_native_turn_ids: None,
         });
         self.emit(ProviderAdapterV2Event::TurnTerminal {
             driver,
             provider_thread_id: provider_turn.provider_thread_id.clone(),
             provider_turn_id: provider_turn.id,
-            run_ordinal,
+            run_ordinal: PositiveInt::new(run_ordinal).expect("run ordinal"),
             status,
             failure: failure.map(|message| {
                 provider_failure(OrchestrationV2ProviderFailureClass::ProviderError, &message)
             }),
-            thread_disposition: ThreadDisposition::Reusable,
+            failure_item_ordinal: None,
+            retry: None,
+            retry_started_at: None,
+            thread_disposition: OrchestrationV2ProviderThreadDisposition::Reusable,
         });
     }
 
@@ -778,8 +791,8 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
     fn provider_session_id(&self) -> &ProviderSessionId {
         &self.provider_session_id
     }
-    fn provider_session(&self) -> OrchestrationV2ProviderSession {
-        self.inner.lock().session.clone()
+    fn provider_session(&self) -> &OrchestrationV2ProviderSession {
+        &self.session
     }
     fn events(&self) -> ProviderEventStream {
         match self.rx.lock().take() {
@@ -787,16 +800,18 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
             None => Box::pin(futures::stream::empty()),
         }
     }
-    async fn close(&self) {
-        if let Some(handle) = self.reader.lock().take() {
-            handle.abort();
-        }
+    fn has_pending_background_work(
+        &self,
+    ) -> Option<BoxFuture<'_, Result<bool, ProviderAdapterV2Error>>> {
+        let pending = self.inner.lock().threads.values().any(|thread| thread.active.is_some());
+        Some(Box::pin(async move { Ok(pending) }))
     }
-    fn has_pending_background_work(&self) -> bool {
-        self.inner.lock().threads.values().any(|thread| thread.active.is_some())
-    }
-    fn get_model_context_window(&self, model: &str) -> Option<u64> {
-        self.inner.lock().windows.get(model).copied()
+    fn get_model_context_window(
+        &self,
+        model_selection: &turin_contracts::model_selection::ModelSelection,
+        _cwd: Option<&str>,
+    ) -> Option<Option<u64>> {
+        Some(self.inner.lock().windows.get(model_selection.model.as_str()).copied())
     }
 
     async fn ensure_thread(
@@ -815,7 +830,7 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                 .await;
         }
         let directory = input.runtime_policy.cwd.clone().unwrap_or_else(|| {
-            self.inner.lock().session.cwd.as_str().to_owned()
+            self.session.cwd.as_str().to_owned()
         });
         self.remember_windows(&directory).await;
         let parsed = parse_open_code_model_slug(input.model_selection.model.as_str()).ok_or_else(|| {
@@ -866,6 +881,7 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
         self.emit(ProviderAdapterV2Event::ProviderThreadUpdated {
             driver: self.driver.clone(),
             provider_thread: provider_thread.clone(),
+            retained_native_turn_ids: None,
         });
         Ok(provider_thread)
     }
@@ -892,7 +908,7 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
             .as_ref()
             .and_then(|policy| policy.cwd.clone())
             .or_else(|| native.pointer("/location/directory").and_then(Value::as_str).map(str::to_owned))
-            .unwrap_or_else(|| self.inner.lock().session.cwd.as_str().to_owned());
+            .unwrap_or_else(|| self.session.cwd.as_str().to_owned());
         let mut thread = input.provider_thread;
         thread.provider_session_id = Some(self.provider_session_id.clone());
         thread.status = OrchestrationV2ProviderThreadStatus::Idle;
@@ -1130,9 +1146,12 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
         Ok(())
     }
 
-    async fn compact_thread(&self, mut input: ProviderAdapterV2TurnInput) -> Result<(), ProviderAdapterV2Error> {
+    fn compact_thread(
+        &self,
+        mut input: ProviderAdapterV2TurnInput,
+    ) -> Option<BoxFuture<'_, Result<(), ProviderAdapterV2Error>>> {
         input.message.text = "/compact".to_owned();
-        self.start_turn(input).await
+        Some(Box::pin(async move { self.start_turn(input).await }))
     }
 
     async fn steer_turn(&self, input: ProviderAdapterV2SteerInput) -> Result<(), ProviderAdapterV2Error> {
@@ -1419,7 +1438,7 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
             .runtime_policy
             .as_ref()
             .and_then(|policy| policy.cwd.clone())
-            .unwrap_or_else(|| self.inner.lock().session.cwd.as_str().to_owned());
+            .unwrap_or_else(|| self.session.cwd.as_str().to_owned());
         self.inner.lock().threads.insert(
             fork_id.to_owned(),
             V2Thread {

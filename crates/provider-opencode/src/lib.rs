@@ -57,9 +57,11 @@ pub use v2_server::{
 };
 pub use adapter::{
     OpenCodeAdapter, OpenCodeSettings, OpenCodeV1Session, OpenCodeV2Session, ProviderAdapterV2,
-    ProviderAdapterV2Error,
-    ProviderAdapterV2Event, ProviderSessionRuntime, select_generation, v1_capabilities,
-    v2_capabilities,
+    ProviderAdapterV2Error, ProviderAdapterV2Event, ProviderSessionRuntime, approves,
+    commands_from_list, format_probe_error, models_from_provider_list,
+    open_code_child_permission_rules, pending_status, permission_rule_equals, select_generation,
+    session_grant_label, shared_provider_session_id, skills_from_list, v1_capabilities,
+    v1_rules_as_session, v2_capabilities,
 };
 pub use version_probe::{
     MINIMUM_OPENCODE_VERSION, OPENCODE_SERVER_PROBE_TIMEOUT, OPENCODE_VERSION_PROBE_TIMEOUT,

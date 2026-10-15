@@ -72,6 +72,18 @@ pub struct OpenCodeSession {
     keepalive: Mutex<Option<Keepalive>>,
 }
 
+impl Drop for OpenCodeSession {
+    fn drop(&mut self) {
+        let Some(keepalive) = self.keepalive.lock().take() else {
+            return;
+        };
+        match keepalive {
+            Keepalive::V1(process) => drop(process),
+            Keepalive::V2(server) => drop(server),
+        }
+    }
+}
+
 /// Selects the OpenCode generation and opens its session runtime.
 pub struct OpenCodeAdapter {
     instance_id: ProviderInstanceId,
@@ -169,6 +181,13 @@ impl ProviderAdapterV2 for OpenCodeAdapter {
             OpenCodeGeneration::V2 => v2_capabilities(),
             OpenCodeGeneration::V1 => v1_capabilities(),
         })
+    }
+
+    async fn plan_selection_transition(
+        &self,
+        _input: ProviderSelectionTransitionInput,
+    ) -> Result<ProviderSelectionTransitionPlan, ProviderAdapterV2Error> {
+        Ok(turn_scoped_selection_transition())
     }
 
     async fn open_session(
@@ -337,7 +356,7 @@ impl ProviderSessionRuntime for OpenCodeSession {
             SessionKind::V2(session) => session.provider_session_id(),
         }
     }
-    fn provider_session(&self) -> turin_contracts::orchestration_v2::OrchestrationV2ProviderSession {
+    fn provider_session(&self) -> &turin_contracts::orchestration_v2::OrchestrationV2ProviderSession {
         match &self.kind {
             SessionKind::V1(session) => session.provider_session(),
             SessionKind::V2(session) => session.provider_session(),
@@ -349,29 +368,22 @@ impl ProviderSessionRuntime for OpenCodeSession {
             SessionKind::V2(session) => session.events(),
         }
     }
-    async fn close(&self) {
-        match &self.kind {
-            SessionKind::V1(session) => session.close().await,
-            SessionKind::V2(session) => session.close().await,
-        }
-        let keepalive = self.keepalive.lock().take();
-        if let Some(keepalive) = keepalive {
-            match keepalive {
-                Keepalive::V1(process) => process.shutdown().await,
-                Keepalive::V2(server) => server.close().await,
-            }
-        }
-    }
-    fn has_pending_background_work(&self) -> bool {
+    fn has_pending_background_work(
+        &self,
+    ) -> Option<BoxFuture<'_, Result<bool, ProviderAdapterV2Error>>> {
         match &self.kind {
             SessionKind::V1(session) => session.has_pending_background_work(),
             SessionKind::V2(session) => session.has_pending_background_work(),
         }
     }
-    fn get_model_context_window(&self, model: &str) -> Option<u64> {
+    fn get_model_context_window(
+        &self,
+        model_selection: &turin_contracts::model_selection::ModelSelection,
+        cwd: Option<&str>,
+    ) -> Option<Option<u64>> {
         match &self.kind {
-            SessionKind::V1(session) => session.get_model_context_window(model),
-            SessionKind::V2(session) => session.get_model_context_window(model),
+            SessionKind::V1(session) => session.get_model_context_window(model_selection, cwd),
+            SessionKind::V2(session) => session.get_model_context_window(model_selection, cwd),
         }
     }
     async fn ensure_thread(
@@ -398,10 +410,13 @@ impl ProviderSessionRuntime for OpenCodeSession {
             SessionKind::V2(session) => session.start_turn(input).await,
         }
     }
-    async fn compact_thread(&self, input: ProviderAdapterV2TurnInput) -> Result<(), ProviderAdapterV2Error> {
+    fn compact_thread(
+        &self,
+        input: ProviderAdapterV2TurnInput,
+    ) -> Option<BoxFuture<'_, Result<(), ProviderAdapterV2Error>>> {
         match &self.kind {
-            SessionKind::V1(session) => session.compact_thread(input).await,
-            SessionKind::V2(session) => session.compact_thread(input).await,
+            SessionKind::V1(session) => session.compact_thread(input),
+            SessionKind::V2(session) => session.compact_thread(input),
         }
     }
     async fn steer_turn(&self, input: ProviderAdapterV2SteerInput) -> Result<(), ProviderAdapterV2Error> {

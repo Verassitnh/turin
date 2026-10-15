@@ -77,7 +77,9 @@ fn turn(thread: turin_contracts::orchestration_v2::OrchestrationV2ProviderThread
         thread_id: ThreadId::new("thread_1").unwrap(),
         run_id: RunId::new("run_1").unwrap(),
         run_ordinal: 1,
+        native_thread_has_turns: None,
         provider_turn_ordinal: 1,
+        restart_continuation_of_run_id: None,
         attempt_id: RunAttemptId::new("attempt_1").unwrap(),
         root_node_id: NodeId::new("node_1").unwrap(),
         provider_thread: thread,
@@ -92,6 +94,7 @@ fn turn(thread: turin_contracts::orchestration_v2::OrchestrationV2ProviderThread
         },
         model_selection: model(),
         runtime_policy: policy(RuntimeMode::FullAccess),
+        app_context: None,
     }
 }
 
@@ -160,6 +163,7 @@ async fn v1_prompt_sends_system_and_model() {
             title: None,
             model_selection: model(),
             runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
             existing_provider_thread: None,
         })
         .await
@@ -205,6 +209,7 @@ async fn v1_slash_command_posts_the_command_route() {
             title: None,
             model_selection: model(),
             runtime_policy: policy(RuntimeMode::Auto),
+            provider_session_id: None,
             existing_provider_thread: None,
         })
         .await
@@ -246,6 +251,7 @@ async fn v1_compact_posts_summarize() {
             title: None,
             model_selection: model(),
             runtime_policy: policy(RuntimeMode::Auto),
+            provider_session_id: None,
             existing_provider_thread: None,
         })
         .await
@@ -288,6 +294,7 @@ async fn v1_accept_for_session_replies_always() {
             title: None,
             model_selection: model(),
             runtime_policy: policy(RuntimeMode::Auto),
+            provider_session_id: None,
             existing_provider_thread: None,
         })
         .await
@@ -305,6 +312,7 @@ async fn v1_accept_for_session_replies_always() {
             request_id,
             decision: Some(ProviderApprovalDecision::AcceptForSession),
             answers: None,
+            response: None,
         })
         .await
         .unwrap();
@@ -349,6 +357,7 @@ async fn v2_prompt_writes_instructions_and_has_no_system_field() {
             title: Some("Thread".to_owned()),
             model_selection: model(),
             runtime_policy: policy(RuntimeMode::Auto),
+            provider_session_id: None,
             existing_provider_thread: None,
         })
         .await
@@ -401,6 +410,7 @@ async fn v2_decline_posts_the_note_then_rejects_with_the_message() {
             title: None,
             model_selection: model(),
             runtime_policy: policy(RuntimeMode::Auto),
+            provider_session_id: None,
             existing_provider_thread: None,
         })
         .await
@@ -418,6 +428,7 @@ async fn v2_decline_posts_the_note_then_rejects_with_the_message() {
             request_id,
             decision: Some(ProviderApprovalDecision::Decline),
             answers: None,
+            response: None,
         })
         .await
         .unwrap();
@@ -467,6 +478,7 @@ async fn v2_accept_for_session_writes_a_grant_and_replies_once() {
             title: None,
             model_selection: model(),
             runtime_policy: policy(RuntimeMode::Auto),
+            provider_session_id: None,
             existing_provider_thread: None,
         })
         .await
@@ -484,6 +496,7 @@ async fn v2_accept_for_session_writes_a_grant_and_replies_once() {
             request_id,
             decision: Some(ProviderApprovalDecision::AcceptForSession),
             answers: None,
+            response: None,
         })
         .await
         .unwrap();
@@ -539,6 +552,7 @@ async fn v2_session_created_links_a_subagent() {
             title: None,
             model_selection: model(),
             runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
             existing_provider_thread: None,
         })
         .await
@@ -637,6 +651,8 @@ async fn adapter_live_smoke_creates_a_session_without_a_prompt() {
                 ..policy(RuntimeMode::FullAccess)
             },
             resume_from_session: None,
+            initial_native_thread_id: None,
+            initial_provider_item_identity_version: None,
         })
         .await
         .unwrap();
@@ -646,10 +662,11 @@ async fn adapter_live_smoke_creates_a_session_without_a_prompt() {
             title: Some("smoke".to_owned()),
             model_selection: model(),
             runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
             existing_provider_thread: None,
         })
         .await
         .unwrap();
-    assert!(thread.native_thread_ref.and_then(|native| native.native_id).is_some());
-    runtime.close().await;
+    assert!(thread.native_thread_ref.as_ref().and_then(|native| native.native_id.as_ref()).is_some());
+    drop(runtime);
 }

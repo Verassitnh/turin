@@ -454,9 +454,10 @@ async fn exit_before_result_fails_the_turn() {
         _ => None,
     });
     let text = format!("{failure:?}");
-    // The session reports end of stream and the exit status as two events. Which one
-    // lands first decides the message, and both name the exit.
-    assert!(text.contains("Claude Code process exited"), "{text}");
+    assert!(
+        text.contains("Claude Code process exited before turn result"),
+        "{text}"
+    );
 }
 
 /// Upstream `stops the run's live workflow after root result api_error`: a

@@ -130,8 +130,10 @@ pub enum SessionEvent {
     Frame(Frame),
     Stderr(String),
     Error(String),
-    /// Stdout closed. [`SessionEvent::Exit`] carries the reaped status and may arrive before or after this.
-    Eof,
+    /// The session's last event. It is sent once, after stdout has closed, so every
+    /// frame the CLI wrote arrives before it. The status is the reaped one, or
+    /// `None` when the process was still running [`EXIT_STATUS_GRACE`] after its
+    /// stdout closed.
     Exit(ProcessExit),
 }
 enum WriteCommand {
@@ -546,14 +548,36 @@ fn push_stderr_tail(tail: &mut String, chunk: &str) {
         tail.replace_range(..start, "");
     }
 }
+/// How long a closed stdout waits for the reaper's status before the session
+/// reports its exit without one.
+const EXIT_STATUS_GRACE: Duration = Duration::from_secs(1);
 async fn reaper(mut child: tokio::process::Child, state: Arc<Shared>) {
     let status = child.wait().await.ok();
     let pgid = state.pgid.lock().unwrap().take();
     signal_group(pgid, kill_signal());
     let exit = process_exit(status);
-    *state.exit_status.lock().unwrap() = Some(exit.clone());
+    *state.exit_status.lock().unwrap() = Some(exit);
+    // The reader sends the one `Exit` event, once its stream has ended.
     state.exited.notify_one();
-    let _ = state.events.send(SessionEvent::Exit(exit));
+}
+/// The reaped status, waiting at most `grace` for the reaper to record it.
+async fn exit_status_within(state: &Shared, grace: Duration) -> ProcessExit {
+    let reaped = async {
+        loop {
+            // Register before checking, so a status recorded in between is not missed.
+            let notified = state.exited.notified();
+            if let Some(exit) = state.exit_status.lock().unwrap().clone() {
+                return exit;
+            }
+            notified.await;
+        }
+    };
+    tokio::time::timeout(grace, reaped)
+        .await
+        .unwrap_or(ProcessExit {
+            code: None,
+            signal: None,
+        })
 }
 async fn write_loop(
     mut stdin: tokio::process::ChildStdin,
@@ -593,7 +617,8 @@ async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
     let mut reader = tokio::io::BufReader::new(stdout);
     let mut handlers = JoinSet::new();
     let mut line = Vec::new();
-    loop {
+    // Whether stdout reached its end. Any other exit from the loop leaves the CLI running.
+    let stdout_closed = loop {
         while handlers.try_join_next().is_some() {}
         line.clear();
         // `take` caps a single line. A line longer than the cap is the only reader-fatal case.
@@ -602,19 +627,19 @@ async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
             .read_until(b'\n', &mut line)
             .await
         {
-            Ok(0) => break,
+            Ok(0) => break true,
             Ok(_) if line.len() == MAX_STDOUT_LINE && line.last() != Some(&b'\n') => {
                 let _ = state.events.send(SessionEvent::Error(format!(
                     "stdout: line exceeds {MAX_STDOUT_LINE} bytes"
                 )));
-                break;
+                break false;
             }
             Ok(_) => {}
             Err(e) => {
                 let _ = state
                     .events
                     .send(SessionEvent::Error(format!("stdout: {e}")));
-                break;
+                break false;
             }
         }
         let text = String::from_utf8_lossy(&line);
@@ -653,14 +678,19 @@ async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
                     let _ = state
                         .events
                         .send(SessionEvent::Error(format!("invalid known frame: {e}")));
-                    break;
+                    break false;
                 }
             },
         }
-    }
+    };
     handlers.abort_all();
     state.pending.lock().unwrap().fail_all();
-    let _ = state.events.send(SessionEvent::Eof);
+    if !stdout_closed {
+        // Nothing reads the CLI any more, so it is stopped. Its exit ends the session.
+        signal_session_group(&state, kill_signal());
+    }
+    let exit = exit_status_within(&state, EXIT_STATUS_GRACE).await;
+    let _ = state.events.send(SessionEvent::Exit(exit));
 }
 /// Delivers a control response to its waiter, or buffers it for a waiter that has not registered yet.
 /// The `pending` guard stays held while buffering: `await_control_response` checks `unmatched` and
@@ -953,7 +983,7 @@ for line in sys.stdin:
                 .unwrap()
                 .unwrap()
             {
-                SessionEvent::Eof => break,
+                SessionEvent::Exit(_) => break,
                 SessionEvent::Error(error) => panic!("{error}"),
                 _ => {}
             }
@@ -1241,7 +1271,7 @@ for line in sys.stdin:
             {
                 SessionEvent::Frame(frame) if frame.raw["status"] == "after-invalid" => break,
                 SessionEvent::Error(error) => errors.push(error),
-                SessionEvent::Eof => panic!("reader stopped after a non-UTF-8 line"),
+                SessionEvent::Exit(_) => panic!("reader stopped after a non-UTF-8 line"),
                 _ => {}
             }
         }
@@ -1419,8 +1449,7 @@ for line in sys.stdin:
             .unwrap();
         let mut saw_stderr = false;
         let mut exit = None;
-        let mut saw_eof = false;
-        while !saw_stderr || exit.is_none() || !saw_eof {
+        while !saw_stderr || exit.is_none() {
             match tokio::time::timeout(Duration::from_secs(2), session.next_event())
                 .await
                 .unwrap()
@@ -1432,7 +1461,6 @@ for line in sys.stdin:
                     }
                 }
                 SessionEvent::Exit(status) => exit = Some(status),
-                SessionEvent::Eof => saw_eof = true,
                 SessionEvent::Error(error) => panic!("{error}"),
                 _ => {}
             }

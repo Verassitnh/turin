@@ -172,6 +172,20 @@ impl ControlHandler for HostHandler {
     }
 }
 
+/// The failure of a turn whose CLI exited before its result. It names the exit
+/// status the session reported, so the text is one value per exit.
+fn exit_before_result_message(exit: &ProcessExit) -> String {
+    match (exit.code, exit.signal) {
+        (_, Some(signal)) => {
+            format!("Claude Code process exited before turn result with signal {signal}")
+        }
+        (Some(code), None) => {
+            format!("Claude Code process exited before turn result with code {code}")
+        }
+        (None, None) => "Claude Code process exited before turn result".into(),
+    }
+}
+
 pub fn process_exit_message(exit: &ProcessExit) -> String {
     match exit.signal {
         Some(signal) => format!("Claude Code process exited with signal {signal}"),
@@ -392,19 +406,11 @@ impl ClaudeAdapterV2 {
             }
             SessionEvent::Stderr(value) => ClaudeAdapterEvent::Stderr(value),
             SessionEvent::Error(value) => ClaudeAdapterEvent::Error(value),
-            SessionEvent::Eof => {
-                if self.pending_prompts > 0 {
-                    self.pending_prompts = 0;
-                    ClaudeAdapterEvent::Error(
-                        "Claude Code process exited before turn result".into(),
-                    )
-                } else {
-                    ClaudeAdapterEvent::Eof
-                }
-            }
             SessionEvent::Exit(exit) => {
-                if self.pending_prompts > 0 || exit.code.is_some_and(|code| code != 0) {
-                    self.pending_prompts = 0;
+                let turn_waiting = std::mem::take(&mut self.pending_prompts) > 0;
+                if turn_waiting {
+                    ClaudeAdapterEvent::Error(exit_before_result_message(&exit))
+                } else if exit.code.is_some_and(|code| code != 0) {
                     ClaudeAdapterEvent::Error(process_exit_message(&exit))
                 } else {
                     ClaudeAdapterEvent::Eof

@@ -25,6 +25,7 @@ regex.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 turin-provider-core.workspace = true
+unicode-segmentation.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

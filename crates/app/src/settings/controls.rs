@@ -16,7 +16,7 @@ use gpui_kit::{
 use crate::components::drag_region::no_drag;
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
-use crate::theme::tokens::{self, RADIUS_LG, RADIUS_MD, RADIUS_SM, TEXT_SM, TEXT_XS};
+use crate::theme::tokens::{self, RADIUS_LG, RADIUS_MD, RADIUS_SM, TEXT_2XS, TEXT_SM, TEXT_XS};
 use crate::ui::tooltip::dropdown_glass_border;
 use crate::ui::{Icon, IconName};
 
@@ -50,6 +50,85 @@ impl MenuState {
 
     pub fn any_open(&self) -> bool {
         self.open.is_some()
+    }
+}
+
+/// `redactedPlaceholder` (RedactedSensitiveText.tsx): a stable scramble of
+/// `value` that keeps `@`, `.`, `-` and `_`, so a hidden email keeps its shape.
+/// The hash runs over UTF-16 units (`charCodeAt`); every other character, taken
+/// by code point (`Array.from`), becomes one character of the alphabet.
+pub fn redacted_placeholder(value: &str) -> String {
+    const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+    let mut state: u32 = 0x811c_9dc5;
+    for unit in value.encode_utf16() {
+        state ^= u32::from(unit);
+        state = state.wrapping_mul(0x0100_0193);
+    }
+    let mut next_char = || {
+        state = (state ^ (state >> 13)).wrapping_mul(0x85eb_ca6b);
+        state = (state ^ (state >> 16)).wrapping_mul(0xc2b2_ae35);
+        char::from(ALPHABET[(state as i32).unsigned_abs() as usize % ALPHABET.len()])
+    };
+    value
+        .chars()
+        .map(|c| {
+            if matches!(c, '@' | '.' | '-' | '_') {
+                c
+            } else {
+                next_char()
+            }
+        })
+        .collect()
+}
+
+/// `RedactedSensitiveText`: `value` as its [`redacted_placeholder`] until
+/// `revealed`; a click toggles. GPUI has no blur filter, so the scramble stands
+/// in for upstream's `blur-xs` and the value itself never reaches the element
+/// while hidden.
+pub fn redacted_sensitive_text(
+    id: impl Into<ElementId>,
+    value: &str,
+    revealed: bool,
+    cx: &App,
+    on_toggle: impl Fn(&mut Window, &mut App) + 'static,
+) -> gpui_kit::Stateful<Div> {
+    let theme = cx.app_theme();
+    let hover = theme.foreground;
+    div()
+        .id(id)
+        .min_w_0()
+        .rounded(RADIUS_SM)
+        .font_family(theme.fonts.mono.clone())
+        .text_size(TEXT_2XS.size)
+        .text_color(theme.muted_foreground)
+        .cursor(CursorStyle::PointingHand)
+        .hover(move |this| this.text_color(hover))
+        .on_mouse_down(MouseButton::Left, no_drag)
+        .on_click(move |_, window, cx| on_toggle(window, cx))
+        .child(if revealed {
+            value.to_owned()
+        } else {
+            redacted_placeholder(value)
+        })
+}
+
+/// `--thumb-size` of `Switch` at its default size on `sm:` (`spacing(4)`).
+const SWITCH_THUMB_SIZE: f32 = 16.;
+
+/// Track `(width, height)`: `w-[calc(var(--thumb-size)*2-2px)]`, `h-[calc(var(--thumb-size)+2px)]`.
+fn switch_track_size() -> (f32, f32) {
+    (SWITCH_THUMB_SIZE * 2. - 2., SWITCH_THUMB_SIZE + 2.)
+}
+
+/// Thumb `translate-x`: `thumb-4px` when checked, centred `(thumb-4px)/2` when
+/// `mixed`, otherwise 0.
+fn switch_thumb_offset(checked: bool, mixed: bool) -> f32 {
+    if mixed {
+        (SWITCH_THUMB_SIZE - 4.) / 2.
+    } else if checked {
+        SWITCH_THUMB_SIZE - 4.
+    } else {
+        0.
     }
 }
 

@@ -25,7 +25,9 @@ use turin_provider_core::server_provider::{
     ServerProvider, ServerProviderAuthStatus, ServerProviderState,
 };
 
-use super::super::controls::{FieldSize, PopupAlign, SelectWidth, switch, text_field, with_popup};
+use super::super::controls::{
+    FieldSize, PopupAlign, SelectWidth, redacted_sensitive_text, switch, text_field, with_popup,
+};
 use super::super::layout::{SettingsRow, SettingsSection, setting_reset_button, settings_group};
 use super::super::panels_logic::{
     BackgroundActivityOverridePatch, PROVIDER_HEALTH_INTERVAL_STEP_SECONDS,
@@ -59,6 +61,8 @@ use turin_shared::model::CustomModelDefinition;
 #[derive(Default)]
 pub struct ProvidersState {
     pub selected: Option<String>,
+    /// Instance rows whose account email is revealed (`RedactedSensitiveText`).
+    pub revealed_emails: std::collections::HashSet<String>,
     pub model_filter: String,
     pub editor_scroll: gpui_kit::ScrollHandle,
     pub demo_editor_scroll: Option<(f32, u8)>,
@@ -792,7 +796,23 @@ impl SettingsView {
             }
             match (email,) {
                 (Some(email),) => {
-                    parts = parts.child("Authenticated as").child(email);
+                    let revealed = self.panels.providers.revealed_emails.contains(&row.id);
+                    let toggle_id = row.id.clone();
+                    let on_toggle = self.cb(cx, move |this, _, cx| {
+                        let revealed = &mut this.panels.providers.revealed_emails;
+                        if !revealed.remove(&toggle_id) {
+                            revealed.insert(toggle_id.clone());
+                        }
+                        cx.notify();
+                    });
+                    let email_node = redacted_sensitive_text(
+                        SharedString::from(format!("provider-email-{}", row.id)),
+                        &email,
+                        revealed,
+                        cx,
+                        on_toggle,
+                    );
+                    parts = parts.child("Authenticated as").child(email_node);
                     if let Some(label) = label {
                         parts = parts.child(format!("· {label}"));
                     }

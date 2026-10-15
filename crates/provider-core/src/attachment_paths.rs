@@ -6,11 +6,10 @@
 //! Providers receive attachment files by path, so this is the only place a
 //! chat attachment id turns into a file under the attachments directory.
 
-use std::path::Path;
+use std::{path::Path, sync::LazyLock};
 
 use regex::Regex;
-use std::sync::LazyLock;
-use turin_contracts::chat_attachment::ChatAttachment;
+use turin_contracts::{chat_attachment::ChatAttachment, js_trim};
 
 /// `SAFE_IMAGE_FILE_EXTENSIONS`.
 const SAFE_IMAGE_FILE_EXTENSIONS: [&str; 12] = [
@@ -139,6 +138,32 @@ pub fn infer_image_extension(mime_type: &str, file_name: Option<&str>) -> &'stat
     ".bin"
 }
 
+/// Upstream `PENDING_ATTACHMENT_THREAD_SEGMENT`: the thread segment of uploads not yet claimed.
+pub const PENDING_ATTACHMENT_THREAD_SEGMENT: &str = "pending";
+const THREAD_SEGMENT_MAX_CHARS: usize = 80;
+
+static NON_SEGMENT_CHARACTERS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[^a-z0-9_-]+").expect("valid regex"));
+static REPEATED_DASHES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-+").expect("valid regex"));
+
+/// `toSafeThreadAttachmentSegment`: a directory-safe slug of a thread id, or
+/// `None` when nothing usable is left.
+pub fn to_safe_thread_attachment_segment(thread_id: &str) -> Option<String> {
+    let lowered = js_trim(thread_id).to_lowercase();
+    let segment = NON_SEGMENT_CHARACTERS.replace_all(&lowered, "-");
+    let segment = REPEATED_DASHES.replace_all(&segment, "-");
+    let segment = segment.trim_matches(|c| c == '-' || c == '_');
+    let segment: String = segment.chars().take(THREAD_SEGMENT_MAX_CHARS).collect();
+    let segment = segment.trim_end_matches(['-', '_']);
+    if segment.is_empty() {
+        None
+    } else if segment == PENDING_ATTACHMENT_THREAD_SEGMENT {
+        Some("_pending".to_owned())
+    } else {
+        Some(segment.to_owned())
+    }
+}
+
 /// `attachmentRelativePath`: `<id><extension>`, or `None` for unknown kinds.
 pub fn attachment_relative_path(attachment: &ChatAttachment) -> Option<String> {
     match attachment {
@@ -205,6 +230,23 @@ mod tests {
         assert_eq!(attachment_file_extension("no-extension"), ".bin");
         assert_eq!(attachment_file_extension("weird.a-b"), ".bin");
         assert_eq!(attachment_file_extension("dir.v2/file"), ".bin");
+    }
+
+    #[test]
+    fn thread_segments_are_directory_safe() {
+        assert_eq!(
+            to_safe_thread_attachment_segment("  Thread One!! ").as_deref(),
+            Some("thread-one")
+        );
+        assert_eq!(
+            to_safe_thread_attachment_segment("../../x").as_deref(),
+            Some("x")
+        );
+        assert_eq!(to_safe_thread_attachment_segment("!!!"), None);
+        assert_eq!(
+            to_safe_thread_attachment_segment("Pending").as_deref(),
+            Some("_pending")
+        );
     }
 
     #[test]

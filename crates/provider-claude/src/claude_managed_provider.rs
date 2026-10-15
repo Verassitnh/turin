@@ -287,6 +287,9 @@ impl ClaudeManagedProvider {
     /// `consumeResetCredit`: claims the banked reset the snapshot names, then
     /// re-probes. Claims are serialized per instance. The request id survives
     /// an unanswered claim so the retry asks about the same claim.
+    // `ProviderDriverError` is the shared driver error and the `ConsumeResetCredit`
+    // closure returns it unboxed, so the lint is allowed here.
+    #[allow(clippy::result_large_err)]
     pub async fn consume_reset_credit(
         &self,
     ) -> Result<ProviderConsumeResetCreditOutcome, ProviderDriverError> {

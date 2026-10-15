@@ -261,5 +261,8 @@ pub trait OrchestratorPort: Send + Sync {
     /// Every committed thread event from now on (`streamDomainEvents`).
     async fn stream_domain_events(
         &self,
-    ) -> Result<futures::stream::BoxStream<'static, OrchestrationV2DomainEvent>, OrchestratorError>;
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<OrchestrationV2DomainEvent, OrchestratorError>>,
+        OrchestratorError,
+    >;
 }

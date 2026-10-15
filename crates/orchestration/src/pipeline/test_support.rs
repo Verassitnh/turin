@@ -218,7 +218,10 @@ impl OrchestratorPort for MockOrchestrator {
 
     async fn stream_domain_events(
         &self,
-    ) -> Result<BoxStream<'static, OrchestrationV2DomainEvent>, OrchestratorError> {
+    ) -> Result<
+        BoxStream<'static, Result<OrchestrationV2DomainEvent, OrchestratorError>>,
+        OrchestratorError,
+    > {
         Ok(stream::pending().boxed())
     }
 }

@@ -180,39 +180,17 @@ fn redact_url(matched: &str) -> String {
         // Trailing punctuation is ASCII, so the byte split is a char boundary.
         (&matched[..split], &matched[split..])
     };
-    let Some(stripped) = strip_url_secrets(candidate) else {
+    // Upstream parses with `new URL` and prints `url.toString()`, so the
+    // WHATWG normalization (trailing slash, default port, host case) and its
+    // parse failures apply here too.
+    let Ok(mut url) = url::Url::parse(candidate) else {
         return "[REDACTED_URL]".to_owned();
     };
-    format!("{stripped}{trailing}")
-}
-
-/// `new URL` with username, password, search, and hash cleared.
-fn strip_url_secrets(candidate: &str) -> Option<String> {
-    let scheme_end = candidate.find("://")?;
-    let scheme = &candidate[..scheme_end];
-    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
-        return None;
-    }
-    let rest = &candidate[scheme_end + 3..];
-    if rest.is_empty() {
-        return None;
-    }
-    let (authority, path) = match rest.find(['/', '?', '#']) {
-        Some(index) => (&rest[..index], &rest[index..]),
-        None => (rest, ""),
-    };
-    if authority.is_empty() {
-        return None;
-    }
-    let host = authority
-        .rsplit_once('@')
-        .map(|(_, host)| host)
-        .unwrap_or(authority);
-    if host.is_empty() {
-        return None;
-    }
-    let path = path.split(['?', '#']).next().unwrap_or("");
-    Some(format!("{scheme}://{host}{path}"))
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    format!("{}{trailing}", url.as_str())
 }
 
 fn replace_unsafe_control_characters(value: &str) -> String {
@@ -533,6 +511,37 @@ mod tests {
         ] {
             assert!(!message.contains(secret), "{message}");
         }
+    }
+
+    #[test]
+    fn redacted_urls_are_normalized_like_upstream_new_url() {
+        // Expected values are upstream's `new URL(...)` with username, password,
+        // search, and hash cleared, then `toString()`.
+        assert_eq!(
+            redact_provider_failure_text("https://example.test?token=x"),
+            "https://example.test/"
+        );
+        assert_eq!(
+            redact_provider_failure_text("https://Example.test:443/a"),
+            "https://example.test/a"
+        );
+        assert_eq!(
+            redact_provider_failure_text("(https://user:pass@example.test/p?q=1#f)"),
+            "(https://example.test/p)"
+        );
+    }
+
+    #[test]
+    fn unparseable_urls_are_fully_redacted() {
+        // A malformed authority would keep the credentials if it passed through.
+        assert_eq!(
+            redact_provider_failure_text("https://user:pass/x@host/path"),
+            "[REDACTED_URL]"
+        );
+        assert_eq!(
+            redact_provider_failure_text("see https://[bad now"),
+            "see [REDACTED_URL] now"
+        );
     }
 
     #[test]

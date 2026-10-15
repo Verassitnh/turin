@@ -6857,6 +6857,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "turin-contracts",
+ "url",
  "uuid",
 ]
 

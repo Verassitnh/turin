@@ -201,6 +201,8 @@ fn decode_rule_entry(entry: &Value) -> Result<KeybindingRule, String> {
 /// [`Keybindings::start`] once to sync defaults and attach the file watcher.
 pub struct Keybindings {
     config_path: PathBuf,
+    /// Upstream `startedRef`: the first startup's outcome, returned to later calls.
+    started: Mutex<Option<Result<(), KeybindingsConfigError>>>,
     write_lock: Mutex<()>,
     cache: Mutex<Option<KeybindingsConfigState>>,
     subscribers: Mutex<Vec<mpsc::UnboundedSender<KeybindingsConfigState>>>,
@@ -223,6 +225,7 @@ impl Keybindings {
     pub fn new(config_path: impl Into<PathBuf>) -> Arc<Self> {
         Arc::new(Self {
             config_path: config_path.into(),
+            started: Mutex::new(None),
             write_lock: Mutex::new(()),
             cache: Mutex::new(None),
             subscribers: Mutex::new(Vec::new()),
@@ -237,7 +240,30 @@ impl Keybindings {
     /// defaults, then load the snapshot. Must run inside a tokio runtime (the
     /// reload task is spawned here). The caller keeps the returned watcher
     /// alive for as long as it wants changes.
-    pub fn start(self: &Arc<Self>) -> Result<KeybindingsWatcher, KeybindingsConfigError> {
+    ///
+    /// Idempotent as upstream is. The first call returns the watcher. A later
+    /// call returns `Ok(None)` after a successful start, or the first startup's
+    /// error, and never reruns the sync or spawns a second watcher.
+    pub fn start(self: &Arc<Self>) -> Result<Option<KeybindingsWatcher>, KeybindingsConfigError> {
+        let mut started = self.started.lock();
+        match &*started {
+            Some(Ok(())) => return Ok(None),
+            Some(Err(error)) => return Err(error.clone()),
+            None => {}
+        }
+        match self.start_watching() {
+            Ok(watcher) => {
+                *started = Some(Ok(()));
+                Ok(Some(watcher))
+            }
+            Err(error) => {
+                *started = Some(Err(error.clone()));
+                Err(error)
+            }
+        }
+    }
+
+    fn start_watching(self: &Arc<Self>) -> Result<KeybindingsWatcher, KeybindingsConfigError> {
         let directory = self
             .config_path
             .parent()
@@ -1059,5 +1085,134 @@ mod tests {
         })
         .await
         .expect("a change event naming the external edit");
+    }
+
+    fn read_rules(path: &Path) -> Vec<KeybindingRule> {
+        serde_json::from_value(read_json(path)).unwrap()
+    }
+
+    fn late_default_rule() -> KeybindingRule {
+        rule(
+            "mod+enter",
+            "composer.sendBackground",
+            Some("composerFocus && draftThreadRoute"),
+        )
+    }
+
+    fn alongside_rule() -> KeybindingRule {
+        rule(
+            "mod+alt+enter",
+            "composer.sendBackground",
+            Some("composerFocus && draftThreadRoute"),
+        )
+    }
+
+    fn background_rules(rules: Vec<KeybindingRule>) -> Vec<KeybindingRule> {
+        rules
+            .into_iter()
+            .filter(|entry| entry.command.as_str() == "composer.sendBackground")
+            .collect()
+    }
+
+    // Ports of upstream keybindings.test.ts 297, 321 and 341 (late defaults).
+
+    #[test]
+    fn a_late_default_is_added_once_and_a_later_removal_survives_the_next_start() {
+        let (_dir, path) = fixture();
+        let service = Keybindings::new(&path);
+        let existing = alongside_rule();
+        service
+            .write_config(std::slice::from_ref(&existing))
+            .unwrap();
+
+        service.sync_default_keybindings_on_startup().unwrap();
+        assert_eq!(
+            background_rules(read_rules(&path)),
+            vec![late_default_rule(), existing.clone()]
+        );
+
+        // Removing the added rule later must survive the next startup.
+        service
+            .write_config(std::slice::from_ref(&existing))
+            .unwrap();
+        service.sync_default_keybindings_on_startup().unwrap();
+        assert_eq!(background_rules(read_rules(&path)), vec![existing]);
+    }
+
+    #[test]
+    fn a_customized_command_is_not_backfilled_with_the_late_default() {
+        let (_dir, path) = fixture();
+        let service = Keybindings::new(&path);
+        let custom = rule(
+            "alt+b",
+            "composer.sendBackground",
+            Some("composerFocus && draftThreadRoute"),
+        );
+        service.write_config(std::slice::from_ref(&custom)).unwrap();
+
+        service.sync_default_keybindings_on_startup().unwrap();
+        assert_eq!(background_rules(read_rules(&path)), vec![custom]);
+    }
+
+    #[test]
+    fn a_late_default_stays_pending_while_the_config_is_full() {
+        let (_dir, path) = fixture();
+        let service = Keybindings::new(&path);
+        let existing = alongside_rule();
+        let mut full = vec![existing.clone()];
+        full.extend(
+            (0..MAX_KEYBINDINGS_COUNT - 1)
+                .map(|index| rule("mod+alt+f1", &format!("script.filler-{index}.run"), None)),
+        );
+        let has_mod_enter = |rules: Vec<KeybindingRule>| {
+            rules.iter().any(|entry| {
+                entry.command.as_str() == "composer.sendBackground"
+                    && entry.key.as_str() == "mod+enter"
+            })
+        };
+
+        service.write_config(&full).unwrap();
+        service.sync_default_keybindings_on_startup().unwrap();
+        assert!(!has_mod_enter(read_rules(&path)));
+
+        // Room is free now: the pending default is added on the next start.
+        service
+            .write_config(std::slice::from_ref(&existing))
+            .unwrap();
+        service.sync_default_keybindings_on_startup().unwrap();
+        assert!(has_mod_enter(read_rules(&path)));
+    }
+
+    // Port of upstream keybindings.test.ts 158 ("formats invalid resolved
+    // keybinding rules with the custom message"), against the issue detail.
+
+    #[test]
+    fn an_invalid_resolved_rule_reports_the_custom_message() {
+        let entry = serde_json::json!({"key": "mod+shift+d+o", "command": "terminal.new"});
+        let detail = decode_rule_entry(&entry).unwrap_err();
+        assert!(detail.contains("Invalid keybinding rule"), "{detail}");
+        assert!(!detail.contains("Invalid data"), "{detail}");
+    }
+
+    // Regression tests for the QC report (wf_2cc40aee-4cb): start is idempotent.
+
+    #[tokio::test]
+    async fn a_second_start_returns_no_second_watcher() {
+        let (_dir, path) = fixture();
+        let service = Keybindings::new(&path);
+        assert!(service.start().unwrap().is_some());
+        assert!(service.start().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_failed_start_reports_the_same_error_on_a_second_call() {
+        let dir = tempfile::tempdir().unwrap();
+        // The config directory cannot be created under a regular file.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "x").unwrap();
+        let service = Keybindings::new(blocker.join("keybindings.json"));
+        let first = service.start().err().expect("the first start fails");
+        let second = service.start().err().expect("the second start fails");
+        assert_eq!(first, second);
     }
 }

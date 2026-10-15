@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use turin_contracts::{
-    PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId, UtcDateTime,
+    MessageId, PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId, UtcDateTime,
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2ConversationMessage,
         OrchestrationV2ConversationMessageRole, OrchestrationV2CreationSource,
@@ -38,6 +38,9 @@ use turin_contracts::{
     },
 };
 use turin_provider_core::id_allocator::{IdAllocator, derive};
+use turin_provider_core::provider_continuation_requests::{
+    ProviderContinuationDelivery, ProviderContinuationRequest, ProviderContinuationRequests,
+};
 
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
@@ -119,6 +122,20 @@ struct V2Inner {
     children: HashMap<String, String>,
     windows: HashMap<String, u64>,
     stream_dead: Option<String>,
+    /// The wake each idle session is in: an execution OpenCode started on its own.
+    wakes: HashMap<String, Wake>,
+    /// Subagent reports waiting in each session's inbox for the next wake.
+    reports: HashMap<String, Vec<String>>,
+    wake_seq: u64,
+}
+
+/// A turn OpenCode started on its own while the thread had none (upstream `Wake`). The
+/// continuation T3 is offered for it starts from `message_id`, and the events that arrived
+/// while it waited are parked here and replayed into that continuation's turn.
+struct Wake {
+    message_id: MessageId,
+    /// Parked in arrival order.
+    events: Vec<(String, Value)>,
 }
 
 pub struct OpenCodeV2Session {
@@ -130,6 +147,8 @@ pub struct OpenCodeV2Session {
     session: OrchestrationV2ProviderSession,
     client: V2Client,
     inner: Mutex<V2Inner>,
+    /// Where wake continuations are offered. Unset, offers are dropped.
+    continuation: Mutex<Arc<ProviderContinuationRequests>>,
     tx: mpsc::UnboundedSender<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>,
     rx: Mutex<
         Option<mpsc::UnboundedReceiver<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>>,
@@ -173,7 +192,11 @@ impl OpenCodeV2Session {
                 children: HashMap::new(),
                 windows: HashMap::new(),
                 stream_dead: None,
+                wakes: HashMap::new(),
+                reports: HashMap::new(),
+                wake_seq: 0,
             }),
+            continuation: Mutex::new(Arc::new(ProviderContinuationRequests::dropping())),
             tx,
             rx: Mutex::new(Some(rx)),
             reader: Mutex::new(None),
@@ -408,7 +431,17 @@ impl OpenCodeV2Session {
 
     fn on_event(&self, event_type: &str, data: &Value) {
         let session_id = str_field(data, "sessionID");
+        if let Some(session_id) = &session_id
+            && self.park_or_wake(session_id, event_type, data)
+        {
+            return;
+        }
         match event_type {
+            "session.inbox.enqueued" => {
+                if let Some(session_id) = &session_id {
+                    self.collect_report(session_id, data);
+                }
+            }
             "session.created" => {
                 let parent = str_field(data, "parentID");
                 let id = str_field(data, "id");
@@ -1024,6 +1057,111 @@ impl OpenCodeV2Session {
             thread_id: Some(thread_id),
             runtime_request: request,
         });
+    }
+
+    /// Where wake continuations are offered. Set it before the first wake; the default drops them.
+    pub fn set_continuation_requests(&self, requests: Arc<ProviderContinuationRequests>) {
+        *self.continuation.lock() = requests;
+    }
+
+    /// The wake (upstream `onWake`): OpenCode started an execution on its own while the
+    /// thread had no turn. The wake is offered once, and the execution's events park until
+    /// the continuation drains them. Returns true when the event was parked.
+    fn park_or_wake(&self, session_id: &str, event_type: &str, data: &Value) -> bool {
+        // Inbox items are what a wake delivers, so they never park.
+        if event_type.starts_with("session.inbox.") {
+            return false;
+        }
+        let mut guard = self.inner.lock();
+        let Some(thread) = guard.threads.get(session_id) else {
+            return false;
+        };
+        if thread.active.is_some() {
+            return false;
+        }
+        let route = thread.provider_thread.app_thread_id.clone();
+        let provider_thread_id = thread.provider_thread.id.clone();
+        let mut offer = None;
+        if !guard.wakes.contains_key(session_id) {
+            if event_type != "session.execution.started" {
+                return false;
+            }
+            let Some(route) = route else {
+                return false;
+            };
+            guard.wake_seq += 1;
+            let message_id = IdAllocator.message(&route, guard.wake_seq);
+            let detail = guard
+                .reports
+                .remove(session_id)
+                .filter(|texts| !texts.is_empty())
+                .map(|texts| texts.join("\n\n"));
+            guard.wakes.insert(
+                session_id.to_owned(),
+                Wake {
+                    message_id: message_id.clone(),
+                    events: Vec::new(),
+                },
+            );
+            offer = Some(ProviderContinuationRequest {
+                thread_id: route,
+                provider_thread_id,
+                driver: self.driver.clone(),
+                detail,
+                notification: None,
+                delegated_completion: None,
+                // The adapter parks the CLI's output itself, so the dispatch only ingests it.
+                delivery: Some(ProviderContinuationDelivery::AdapterBuffered),
+                message_id: Some(message_id),
+                dispatch_if_current: None,
+                clear_if_current: None,
+            });
+        }
+        let parked = match guard.wakes.get_mut(session_id) {
+            Some(wake) => {
+                wake.events.push((event_type.to_owned(), data.clone()));
+                true
+            }
+            None => false,
+        };
+        drop(guard);
+        if let Some(request) = offer {
+            let requests = Arc::clone(&self.continuation.lock());
+            requests.offer(request);
+        }
+        parked
+    }
+
+    /// A subagent's report, waiting in the inbox for the wake that delivers it (upstream
+    /// `onReport`). Only a report a subagent sent counts.
+    fn collect_report(&self, session_id: &str, data: &Value) {
+        let Some(item) = data.get("item") else {
+            return;
+        };
+        if item.get("type").and_then(Value::as_str) != Some("synthetic") {
+            return;
+        }
+        let payload = item.get("payload");
+        let source = payload
+            .and_then(|payload| payload.pointer("/metadata/source"))
+            .and_then(Value::as_str);
+        let child = payload
+            .and_then(|payload| payload.pointer("/metadata/childID"))
+            .and_then(Value::as_str);
+        let text = payload
+            .and_then(|payload| payload.get("text"))
+            .and_then(Value::as_str);
+        if source != Some("subagent") || child.is_none() {
+            return;
+        }
+        if let Some(text) = text {
+            self.inner
+                .lock()
+                .reports
+                .entry(session_id.to_owned())
+                .or_default()
+                .push(text.to_owned());
+        }
     }
 
     /// `emitCompaction`: the turn's compaction item. A `/compact`, or OpenCode's own when the
@@ -1695,6 +1833,26 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
             thread_id: Some(input.thread_id.clone()),
             provider_turn,
         });
+        // A continuation has no prompt of its own: it drains what the wake parked.
+        let wake = {
+            let mut guard = self.inner.lock();
+            let continues = input.message.created_by == OrchestrationV2Actor::Agent
+                && guard
+                    .wakes
+                    .get(&session_id)
+                    .is_some_and(|wake| wake.message_id == input.message.message_id);
+            if continues {
+                guard.wakes.remove(&session_id)
+            } else {
+                None
+            }
+        };
+        if let Some(wake) = wake {
+            for (event_type, data) in &wake.events {
+                self.on_event(event_type, data);
+            }
+            return Ok(());
+        }
         if still_stopping {
             let mut guard = self.inner.lock();
             self.finish(

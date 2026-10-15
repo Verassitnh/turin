@@ -1697,3 +1697,142 @@ async fn v2_subagent_tool_is_a_subagent_node_record_and_item() {
     assert_eq!(record["subagent"]["prompt"], "look");
     session.close().await;
 }
+
+/// A v2 session on a queue of continuation offers, with its thread ensured and idle.
+async fn v2_idle_session_with_offers() -> (
+    Script,
+    Arc<OpenCodeV2Session>,
+    ProviderEventStream,
+    Arc<turin_provider_core::provider_continuation_requests::ProviderContinuationRequests>,
+    turin_contracts::orchestration_v2::OrchestrationV2ProviderThread,
+) {
+    let script = script(|request| {
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let offers = Arc::new(
+        turin_provider_core::provider_continuation_requests::ProviderContinuationRequests::queue(),
+    );
+    session.set_continuation_requests(Arc::clone(&offers));
+    let events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    (script, session, events, offers, thread)
+}
+
+#[tokio::test]
+async fn v2_wake_offers_a_continuation_and_parks_the_execution_events() {
+    let (script, session, mut events, offers, thread) = v2_idle_session_with_offers().await;
+    let thread_id = thread.id.clone();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e1","type":"session.inbox.enqueued","data":{"sessionID":"ses_1","inboxID":"inbox_1","item":{"type":"synthetic","payload":{"text":"the report","metadata":{"source":"subagent","childID":"ses_child"}}}}}).to_string(),
+        )))
+        .unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e2","type":"session.execution.started","data":{"sessionID":"ses_1"}})
+                .to_string(),
+        )))
+        .unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e3","type":"session.text.ended","data":{"sessionID":"ses_1","assistantMessageID":"msg_w","ordinal":0,"text":"hello"}}).to_string(),
+        )))
+        .unwrap();
+    let offer = tokio::time::timeout(Duration::from_secs(3), offers.take())
+        .await
+        .expect("a continuation offer");
+    assert_eq!(offer.thread_id, ThreadId::new("thread_1").unwrap());
+    assert_eq!(offer.provider_thread_id, thread_id);
+    assert_eq!(offer.detail.as_deref(), Some("the report"));
+    assert_eq!(
+        offer.delivery,
+        Some(turin_provider_core::provider_continuation_requests::ProviderContinuationDelivery::AdapterBuffered)
+    );
+    assert!(offer.message_id.is_some());
+    // The parked text is not projected while the thread waits for its continuation.
+    let parked = events_until(&mut events, |value| value["type"] == "turn_item.updated").await;
+    assert!(
+        of_type(&parked, "turn_item.updated").is_empty(),
+        "{parked:#?}"
+    );
+    session.close().await;
+}
+
+#[tokio::test]
+async fn v2_continuation_replays_the_parked_execution_without_a_prompt() {
+    let (mut script, session, mut events, offers, thread) = v2_idle_session_with_offers().await;
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e1","type":"session.execution.started","data":{"sessionID":"ses_1"}})
+                .to_string(),
+        )))
+        .unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e2","type":"session.text.ended","data":{"sessionID":"ses_1","assistantMessageID":"msg_w","ordinal":0,"text":"hello"}}).to_string(),
+        )))
+        .unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e3","type":"session.execution.succeeded","data":{"sessionID":"ses_1"}})
+                .to_string(),
+        )))
+        .unwrap();
+    let offer = tokio::time::timeout(Duration::from_secs(3), offers.take())
+        .await
+        .expect("a continuation offer");
+
+    let mut input = turn(thread, "");
+    input.message.created_by = OrchestrationV2Actor::Agent;
+    input.message.message_id = offer.message_id.clone().expect("wake message");
+    session.start_turn(input).await.unwrap();
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "provider_turn.updated" && value["provider_turn"]["status"] == "completed"
+    })
+    .await;
+    assert!(
+        of_type(&seen, "turn_item.updated")
+            .iter()
+            .any(|event| event["turn_item"]["text"] == "hello"),
+        "{seen:#?}"
+    );
+    // The continuation has no prompt: no request went to the prompt route.
+    while let Ok(request) = script.server.requests.try_recv() {
+        assert!(!request.target.contains("/prompt"), "{}", request.target);
+    }
+    session.close().await;
+}

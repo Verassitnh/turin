@@ -7,9 +7,9 @@ license.workspace = true
 [dependencies]
 turin-contracts.workspace = true
 anyhow.workspace = true
+indexmap.workspace = true
 iana-time-zone.workspace = true
 futures.workspace = true
-indexmap.workspace = true
 libc.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true

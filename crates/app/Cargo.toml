@@ -59,6 +59,7 @@ gpui-kit = { workspace = true, features = [
     "tree-sitter-yaml",
     "tree-sitter-zig",
 ] }
+percent-encoding.workspace = true
 markdown.workspace = true
 similar = "2"
 

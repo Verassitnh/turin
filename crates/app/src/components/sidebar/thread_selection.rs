@@ -3,6 +3,9 @@
 //! Sidebar multi-selection: Cmd+Click toggles, Shift+Click selects a range
 //! from the anchor, bulk actions read the set. Owned by the sidebar view
 //! (upstream: a zustand store).
+// A faithful port keeps upstream's whole API (rule 3); callers that are
+// not ported yet (T14 reducers, the chat header menu, settings) use the rest.
+#![allow(dead_code)]
 
 use std::collections::HashSet;
 

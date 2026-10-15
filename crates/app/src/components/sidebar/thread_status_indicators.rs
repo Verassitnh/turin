@@ -20,6 +20,7 @@ use crate::components::drag_region::no_drag;
 use crate::theme::color::{hex, with_alpha};
 use crate::theme::tokens::TEXT_XS;
 use crate::theme::{ActiveAppTheme, AppTheme};
+use crate::ui::sidebar::ClickHandler;
 use crate::ui::{Icon, IconName, Tooltip};
 
 /// `formatDiffCount`: the viewer's digit grouping (en-US: `83,065`).
@@ -27,7 +28,7 @@ pub fn format_diff_count(count: u64) -> String {
     let digits = count.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(digit);
@@ -92,7 +93,7 @@ pub struct ThreadPullRequestBadge {
     id: ElementId,
     link: ThreadPullRequestLink,
     others: usize,
-    on_open_list: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+    on_open_list: Option<ClickHandler>,
 }
 
 impl ThreadPullRequestBadge {

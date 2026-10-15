@@ -6,6 +6,9 @@
 //! and samples per-row translate/opacity (and exit ghosts) while painting.
 //! Animations are timed against a caller clock (ms) with upstream's 150ms
 //! `ease-out`, so the engine stays pure and testable.
+// A faithful port keeps upstream's whole API (rule 3); callers that are
+// not ported yet (T14 reducers, the chat header menu, settings) use the rest.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -278,7 +281,7 @@ impl SidebarListMotion {
             .retain(|key, _| next_index.contains_key(key.as_str()));
         self.running
             .retain(|key, _| should_animate && next_index.contains_key(key.as_str()));
-        if should_animate && let Some(previous) = &previous {
+        if should_animate && previous.is_some() {
             for (index, (key, position)) in next.iter().enumerate() {
                 if !previous_index.contains_key(key) {
                     if position.height > 0. {

@@ -2,11 +2,14 @@
 //!
 //! The shared snooze presets with times in the user's clock preference, and
 //! the human wake description for menus and toasts.
+// A faithful port keeps upstream's whole API (rule 3); callers that are
+// not ported yet (T14 reducers, the chat header menu, settings) use the rest.
+#![allow(dead_code)]
 
 use chrono::{DateTime, Local, NaiveTime, TimeZone};
 
+pub use super::runtime::thread_settled::SnoozePreset;
 use super::runtime::thread_settled::resolve_snooze_presets as resolve_shared_snooze_presets;
-pub use super::runtime::thread_settled::{SnoozePreset, snooze_wake_label};
 use crate::timestamp_format::{TimestampFormat, format_time_of_day, parse_timestamp_ms};
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1_000;

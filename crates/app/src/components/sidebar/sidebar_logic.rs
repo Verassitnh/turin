@@ -7,6 +7,9 @@
 //! (`shouldClearThreadSelectionOnMouseDown`, `isSidebarNestedLinkClick`)
 //! have no GPUI counterpart; their behavior lives in the sidebar view.
 //! `resolveSidebarStageBadgeLabel` belongs to branding (not ported).
+// A faithful port keeps upstream's whole API (rule 3); callers that are
+// not ported yet (T14 reducers, the chat header menu, settings) use the rest.
+#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -955,12 +958,15 @@ pub fn should_create_new_thread_in_current_project(
     shift_key || project_group_count <= 1
 }
 
+/// Extra ids an item answers to (`getPreferenceIds`).
+pub type PreferenceIds<'a, T, Id> = Option<&'a dyn Fn(&T) -> Vec<Id>>;
+
 /// `orderItemsByPreferredIds`.
 pub fn order_items_by_preferred_ids<T: Clone, Id: Eq + std::hash::Hash + Clone>(
     items: &[T],
     preferred_ids: &[Id],
     get_id: impl Fn(&T) -> Id,
-    get_preference_ids: Option<&dyn Fn(&T) -> Vec<Id>>,
+    get_preference_ids: PreferenceIds<'_, T, Id>,
 ) -> Vec<T> {
     if preferred_ids.is_empty() {
         return items.to_vec();
@@ -2868,14 +2874,16 @@ mod tests {
     #[test]
     fn navigation_after_parking_a_thread() {
         let now = "2026-09-12T10:00:00.000Z";
-        let cases: [(
+        // (action, settled override, snoozed until, current route, expected, pending approvals)
+        type Case<'a> = (
             ParkAction,
             Option<SettledOverride>,
-            Option<&str>,
-            &str,
+            Option<&'a str>,
+            &'a str,
             bool,
             bool,
-        ); 8] = [
+        );
+        let cases: [Case<'_>; 8] = [
             (
                 ParkAction::Settle,
                 Some(SettledOverride::Settled),

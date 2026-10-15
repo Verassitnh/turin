@@ -7,6 +7,9 @@
 //! ups, Escape, blur/resize) and the sensor reports through a
 //! [`PointerSensorHandler`]. `SidebarDragLifecycle` (cancel on unmount)
 //! becomes the view dropping/cancelling its sensor when the list unmounts.
+// A faithful port keeps upstream's whole API (rule 3); callers that are
+// not ported yet (T14 reducers, the chat header menu, settings) use the rest.
+#![allow(dead_code)]
 
 /// A pointer position in window coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -3,6 +3,9 @@
 //! Upstream accepts both the V2 shell (`runtime`, `latestRun`) and the
 //! legacy V1 shapes (`session`, `latestTurn`). The V1 importer is cut
 //! (PORTING), so only the V2 fields exist here.
+// A faithful port keeps upstream's whole API (rule 3); callers that are
+// not ported yet (T14 reducers, the chat header menu, settings) use the rest.
+#![allow(dead_code)]
 
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Timelike};
 

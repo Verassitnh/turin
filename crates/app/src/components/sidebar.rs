@@ -127,6 +127,9 @@ pub fn jump_shortcut_label(index: usize) -> Option<String> {
     (index < 9).then(|| format!("⌘{}", index + 1))
 }
 
+/// `(top, height, left, width)` of the list in window coordinates.
+pub(crate) type ListBox = (f32, f32, f32, f32);
+
 /// What the main view shows (upstream: the router).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarRoute {
@@ -189,7 +192,7 @@ pub struct Sidebar {
     pub(crate) motion: SidebarListMotion,
     /// Last measured list box (window coords): `(top, height, left, width)`,
     /// written during prepaint.
-    pub(crate) list_box_cell: Rc<Cell<Option<(f32, f32, f32, f32)>>>,
+    pub(crate) list_box_cell: Rc<Cell<Option<ListBox>>>,
     pub(crate) epoch: Instant,
     jump_hints: ThreadJumpHintVisibilityController,
     jump_hint_task: Option<Task<()>>,
@@ -461,11 +464,6 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// Open a thread by key (the app shell's own navigation).
-    pub fn open_thread(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.navigate_to_thread(key, cx);
-    }
-
     fn traverse(&mut self, direction: ThreadTraversalDirection, cx: &mut Context<Self>) {
         let (_, layout) = self.compute_sections(cx);
         let current = self.route_thread_key().map(str::to_string);
@@ -590,8 +588,96 @@ impl Sidebar {
         self.jump_hints.is_visible()
     }
 
-    pub(crate) fn emit(&mut self, event: SidebarEvent, cx: &mut Context<Self>) {
-        cx.emit(event);
+    /// Screenshot harness (not upstream): `TURIN_SIDEBAR_ROUTE=<thread id>`,
+    /// `TURIN_SIDEBAR_HOVER=<thread id>`, `TURIN_SIDEBAR_SEARCH=<query>`,
+    /// `TURIN_SIDEBAR_SELECT=<id,id>`, `TURIN_SIDEBAR_WORKING=1`,
+    /// `TURIN_SIDEBAR_COLLAPSE=1` (collapse the settled shelf),
+    /// `TURIN_SIDEBAR_SCOPE=<project id>`, `TURIN_SIDEBAR_DRAG=<thread id>:<dy>`.
+    pub fn apply_dev_overrides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+        let key = |id: String| format!("local:{id}");
+        if var("TURIN_SIDEBAR_WORKING").is_some()
+            || var("TURIN_SIDEBAR_COLLAPSE").is_some()
+            || var("TURIN_SIDEBAR_SCOPE").is_some()
+        {
+            let working = var("TURIN_SIDEBAR_WORKING").is_some();
+            let collapse = var("TURIN_SIDEBAR_COLLAPSE").is_some();
+            let scope = var("TURIN_SIDEBAR_SCOPE").map(key);
+            self.store.update(cx, |store, cx| {
+                store.update_snapshot(cx, |snapshot| {
+                    if working {
+                        snapshot.settings.working_shelf_enabled = true;
+                    }
+                    if collapse {
+                        snapshot.settled_shelf_expanded = false;
+                    }
+                    if scope.is_some() {
+                        snapshot.project_scope_key = scope;
+                    }
+                })
+            });
+        }
+        if let Some(id) = var("TURIN_SIDEBAR_ROUTE") {
+            self.navigate_to_thread(&key(id), cx);
+        }
+        if let Some(id) = var("TURIN_SIDEBAR_HOVER") {
+            self.hovered_row = Some(key(id));
+        }
+        if let Some(ids) = var("TURIN_SIDEBAR_SELECT") {
+            for id in ids.split(',') {
+                self.selection.toggle_thread(&key(id.to_string()));
+            }
+        }
+        if let Some(query) = var("TURIN_SIDEBAR_SEARCH") {
+            self.search_input
+                .update(cx, |input, cx| input.set_value(query.clone(), window, cx));
+            self.set_search_query(query, cx);
+        }
+        if let Some(spec) = var("TURIN_SIDEBAR_DRAG")
+            && let Some((id, dy)) = spec.split_once(':')
+            && let Ok(dy) = dy.parse::<f32>()
+        {
+            let thread_key = key(id.to_string());
+            // Wait for the list to be measured, then press, travel and hold.
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(600))
+                    .await;
+                this.update_in(cx, |this, window, cx| {
+                    let top = this
+                        .row_tops(cx)
+                        .into_iter()
+                        .find(|(key, _)| *key == thread_key)
+                        .map(|(_, top)| top);
+                    let Some(top) = top else {
+                        return;
+                    };
+                    let (_, _, left, width) = this.list_box().unwrap_or_default();
+                    let origin =
+                        gpui_kit::point(gpui_kit::px(left + width / 2.), gpui_kit::px(top + 30.));
+                    let press = gpui_kit::MouseDownEvent {
+                        button: gpui_kit::MouseButton::Left,
+                        position: origin,
+                        modifiers: Modifiers::default(),
+                        click_count: 1,
+                        first_mouse: false,
+                    };
+                    this.press_row(&thread_key, &press, cx);
+                    let steps = 8;
+                    for step in 1..=steps {
+                        let y = top + 30. + dy * step as f32 / steps as f32;
+                        this.debug_pointer_move(
+                            sidebar_pointer::Point::new(left + width / 2., y),
+                            window,
+                            cx,
+                        );
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        cx.notify();
     }
 }
 

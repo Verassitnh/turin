@@ -2,6 +2,9 @@
 //!
 //! The per-thread action menu shared by the sidebar row's right-click menu
 //! and the chat header menu: labels, ordering and capability gating.
+// A faithful port keeps upstream's whole API (rule 3); callers that are
+// not ported yet (T14 reducers, the chat header menu, settings) use the rest.
+#![allow(dead_code)]
 
 use super::sidebar::runtime::thread_settled::SnoozePreset;
 use super::sidebar::sidebar_logic::ContextMenuItem;

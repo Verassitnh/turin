@@ -3,6 +3,9 @@
 //! Upstream's functions are structurally typed (`Pick<…>`); here they read
 //! through [`SortableThread`], which [`EnvironmentThreadShell`] implements
 //! and tests implement on small fixtures.
+// A faithful port keeps upstream's whole API (rule 3); callers that are
+// not ported yet (T14 reducers, the chat header menu, settings) use the rest.
+#![allow(dead_code)]
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -220,14 +223,11 @@ pub fn sort_threads<T: SortableThread + Clone>(
 }
 
 /// `getLatestThreadForProject` over `(project id, archived, thread)` triples.
-pub fn get_latest_thread_for_project<'a, T: SortableThread>(
+pub fn get_latest_thread_for_project<'a, T: SortableThread + 'a>(
     threads: impl IntoIterator<Item = (&'a str, bool, &'a T)>,
     project_id: &str,
     sort_order: ThreadSortOrder,
-) -> Option<&'a T>
-where
-    T: 'a,
-{
+) -> Option<&'a T> {
     let mut latest: Option<&T> = None;
     let mut latest_timestamp = f64::NEG_INFINITY;
     for (thread_project, archived, thread) in threads {
@@ -356,7 +356,7 @@ pub fn generate_spread_pin_order_keys(count: usize) -> Vec<String> {
         .map(|i| {
             let mut value = js_round(step * (i + 1) as f64) as u64;
             // Skip values whose low digit is the minimum (a trailing "a" key).
-            if value % BASE as u64 == 0 {
+            if value.is_multiple_of(BASE as u64) {
                 value += 1;
             }
             let mut key = Vec::with_capacity(width as usize);

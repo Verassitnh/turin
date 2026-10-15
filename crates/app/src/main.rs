@@ -24,7 +24,13 @@ fn window_options(cx: &App) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            size(px(1100.), px(780.)),
+            size(
+                px(1100.),
+                px(std::env::var("TURIN_WINDOW_HEIGHT")
+                    .ok()
+                    .and_then(|height| height.parse().ok())
+                    .unwrap_or(780.)),
+            ),
             cx,
         ))),
         window_min_size: Some(size(px(840.), px(620.))),

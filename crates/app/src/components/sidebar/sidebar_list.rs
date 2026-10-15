@@ -10,9 +10,9 @@
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Bounds, Context, CursorStyle, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, px, rems,
+    AnyElement, Bounds, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    div, px, rems,
 };
 
 use super::runtime::models::EnvironmentThreadShell;

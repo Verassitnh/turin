@@ -81,7 +81,7 @@ pub struct CollapsibleSectionHeader {
     tone: CollapsibleSectionTone,
     variant: CollapsibleSectionVariant,
     accessory: Option<AnyElement>,
-    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+    on_click: Option<super::sidebar::ClickHandler>,
 }
 
 impl CollapsibleSectionHeader {

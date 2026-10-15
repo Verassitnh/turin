@@ -401,10 +401,10 @@ impl Sidebar {
                 use gpui_kit::component::input::InputEvent;
                 match event {
                     InputEvent::PressEnter { .. } => this.commit_rename(window, cx),
-                    InputEvent::Blur => {
-                        if this.rename.as_ref().is_some_and(|rename| !rename.committed) {
-                            this.commit_rename(window, cx);
-                        }
+                    InputEvent::Blur
+                        if this.rename.as_ref().is_some_and(|rename| !rename.committed) =>
+                    {
+                        this.commit_rename(window, cx);
                     }
                     _ => {}
                 }

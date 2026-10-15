@@ -18,8 +18,8 @@
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, Context, CursorStyle, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div, px, rems,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, Styled as _,
+    Subscription, Window, actions, div, px, rems,
 };
 
 use super::chat::panel_layout_controls::PanelLayoutControls;
@@ -119,6 +119,7 @@ impl AppSidebarLayout {
         let (store, backend) = mock_sidebar(cx);
         let sidebar = cx.new(|cx| Sidebar::new(store.clone(), backend, window, cx));
         let sidebar_events = cx.subscribe_in(&sidebar, window, Self::on_sidebar_event);
+        sidebar.update(cx, |sidebar, cx| sidebar.apply_dev_overrides(window, cx));
         Self {
             focus_handle,
             sidebar_open: true,
@@ -133,11 +134,6 @@ impl AppSidebarLayout {
             _appearance: appearance,
             _sidebar_events: sidebar_events,
         }
-    }
-
-    /// The sidebar view (screenshots and tests drive it).
-    pub fn sidebar(&self) -> &Entity<Sidebar> {
-        &self.sidebar
     }
 
     fn on_sidebar_event(

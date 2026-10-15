@@ -5,6 +5,9 @@
 //! through untouched); this module is where they become numbers. `Date.parse`
 //! becomes [`parse_timestamp_ms`], `Intl.DateTimeFormat` becomes chrono's
 //! local-time formatting with the en-US shapes upstream renders by default.
+// A faithful port keeps upstream's whole API (rule 3); callers that are
+// not ported yet (T14 reducers, the chat header menu, settings) use the rest.
+#![allow(dead_code)]
 
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 

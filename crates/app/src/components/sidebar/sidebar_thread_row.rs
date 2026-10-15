@@ -361,9 +361,7 @@ impl Sidebar {
         let thread_ref = ThreadRef::of(thread);
 
         // ── Surface ────────────────────────────────────────────────────
-        let surface_bg: Option<Hsla> = if input.drag_lifted {
-            Some(scope.sidebar_row_active)
-        } else if input.is_active {
+        let surface_bg: Option<Hsla> = if input.drag_lifted || input.is_active {
             Some(scope.sidebar_row_active)
         } else if is_selected || input.sweep_action.is_some() {
             Some(scope.sidebar_row_selected)
@@ -472,16 +470,32 @@ impl Sidebar {
                             .ok();
                     })
                     .tooltip(|window, cx| Tooltip::new("Unpin thread").build(window, cx))
-                    .child(
-                        Icon::new(if is_hovered {
-                            IconName::PinOff
-                        } else {
-                            IconName::Pin
-                        })
-                        .size(rems(0.75))
-                        .color(color)
-                        .group_hover_color(format!("unpin-{key}"), scope.foreground),
-                    )
+                    // Pin marks the state at rest; hover swaps in pin-off.
+                    .child({
+                        let group = SharedString::from(format!("unpin-{key}"));
+                        div()
+                            .relative()
+                            .size(rems(0.75))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .group_hover(group.clone(), |style| style.opacity(0.))
+                                    .child(Icon::new(IconName::Pin).size(rems(0.75)).color(color)),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .opacity(0.)
+                                    .group_hover(group, |style| style.opacity(1.))
+                                    .child(
+                                        Icon::new(IconName::PinOff)
+                                            .size(rems(0.75))
+                                            .color(scope.foreground),
+                                    ),
+                            )
+                    })
                     .into_any_element()
             } else {
                 Icon::new(IconName::Pin)
@@ -854,7 +868,6 @@ impl Sidebar {
                             )
                             .child(
                                 div()
-                                    .flex()
                                     .flex_1()
                                     .min_w_0()
                                     .overflow_hidden()
@@ -879,7 +892,7 @@ impl Sidebar {
                             .min_w_0()
                             .items_center()
                             .gap(rems(0.375))
-                            .children(project.as_ref().map(|project| ProjectFavicon::new(project)))
+                            .children(project.as_ref().map(ProjectFavicon::new))
                             .child(
                                 div()
                                     .min_w_0()
@@ -1048,7 +1061,7 @@ impl Sidebar {
                     .ok();
                 }
             })
-            .content(move |state, window, cx| {
+            .content(move |_, window, cx| {
                 // Presets resolve at open time so "In 1 hour" is relative to the click.
                 let presets = resolve_snooze_presets_now(format);
                 let theme = cx.app_theme().clone();
@@ -1159,19 +1172,5 @@ impl Sidebar {
             return;
         }
         self.navigate_to_thread(key, cx);
-    }
-
-    pub(crate) fn render_jump_label(&self, index: usize) -> Option<String> {
-        jump_shortcut_label(index)
-    }
-}
-
-/// The row heights the list lays out with (rems).
-pub fn row_height_rems(section: SidebarSection) -> f32 {
-    match section {
-        SidebarSection::Pinned | SidebarSection::Active | SidebarSection::Working => {
-            CARD_ROW_HEIGHT
-        }
-        SidebarSection::Snoozed | SidebarSection::Settled => SLIM_ROW_HEIGHT,
     }
 }

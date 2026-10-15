@@ -57,7 +57,6 @@ pub(crate) struct DragSession {
 
 pub(crate) struct DragActive {
     pub active_section: SidebarSection,
-    pub occurred_at: String,
     pub items: Vec<SidebarListItem>,
     /// Item rects at pickup, window coordinates, without transforms.
     pub rects: Vec<Rect>,
@@ -241,6 +240,16 @@ impl Sidebar {
         self.apply_drag_events(events, window, cx);
     }
 
+    /// The screenshot harness's synthetic pointer travel.
+    pub(crate) fn debug_pointer_move(
+        &mut self,
+        position: Point,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pointer_moved(position, true, window, cx);
+    }
+
     fn pointer_released(&mut self, position: Point, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(mut sweep) = self.sweep.take() {
             let mut events = Events::default();
@@ -281,7 +290,7 @@ impl Sidebar {
         let action = sweep.action;
         let (partition, layout) = self.compute_sections(cx);
         let origin_section = partition.section_of(&origin);
-        let mut sweep_to = |this: &mut Self, target: String, cx: &mut Context<Self>| {
+        let sweep_to = |this: &mut Self, target: String, cx: &mut Context<Self>| {
             if this.sweep.as_ref().and_then(|s| s.target.as_ref()) == Some(&target) {
                 return;
             }
@@ -514,7 +523,6 @@ impl Sidebar {
         if let Some(drag) = &mut self.drag {
             drag.active = Some(DragActive {
                 active_section,
-                occurred_at,
                 transforms: vec![STATIONARY; layout.items.len()],
                 items: layout.items,
                 rects,

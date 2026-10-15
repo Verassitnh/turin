@@ -37,7 +37,7 @@ pub struct SidebarHeaderIconButton {
     tooltip: Tooltip,
     disabled: bool,
     selected: bool,
-    on_click: Option<Box<dyn Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static>>,
+    on_click: Option<crate::ui::sidebar::ClickHandler>,
 }
 
 impl SidebarHeaderIconButton {
@@ -94,7 +94,7 @@ impl RenderOnce for SidebarHeaderIconButton {
         let mut button = SidebarMenuButton::new(self.id)
             .size(SidebarMenuButtonSize::Icon)
             .box_size(rems(1.75))
-            .is_active(self.selected)
+            .active(self.selected)
             .disabled(self.disabled)
             .tooltip(self.tooltip);
         if let Some(icon) = self.icon {

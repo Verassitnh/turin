@@ -26,7 +26,7 @@ use crate::theme::tokens::{
 /// `SIDEBAR_WIDTH` (16rem); the thread sidebar overrides it with its own width.
 pub const SIDEBAR_WIDTH: f32 = 256.;
 
-type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+pub type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 type MouseDownHandler = Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>;
 
 /// A plain container with upstream's classes and children.
@@ -467,7 +467,7 @@ impl SidebarMenuButton {
     }
 
     /// `data-active`.
-    pub fn is_active(mut self, active: bool) -> Self {
+    pub fn active(mut self, active: bool) -> Self {
         self.is_active = active;
         self
     }

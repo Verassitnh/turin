@@ -50,7 +50,6 @@ pub struct SidebarPartition {
     /// Rows whose server supports pin + pin reorder (drag sources).
     pub draggable: HashSet<String>,
     pub active_reorderable: HashSet<String>,
-    pub snooze_now: String,
 }
 
 impl SidebarPartition {
@@ -93,10 +92,7 @@ pub fn partition_sidebar_threads(
     // Subagent child threads live in the parent's Agents surface.
     let visible = filter_sidebar_v2_visible_threads(&snapshot.threads, scoped_project_keys);
     inbox_returns.observe(working_enabled.then_some(snapshot.threads.as_slice()));
-    let mut partition = SidebarPartition {
-        snooze_now: now.to_string(),
-        ..Default::default()
-    };
+    let mut partition = SidebarPartition::default();
     let mut pinned = Vec::new();
     let mut active = Vec::new();
     let mut working = Vec::new();
@@ -185,9 +181,6 @@ pub fn partition_sidebar_threads(
 /// The rendered list: shelves after paging, collapse and route exceptions.
 #[derive(Clone, Debug, Default)]
 pub struct SidebarListLayout {
-    pub visible_working: Vec<EnvironmentThreadShell>,
-    pub visible_snoozed: Vec<EnvironmentThreadShell>,
-    pub visible_settled: Vec<EnvironmentThreadShell>,
     /// What the settled shelf renders (collapsed: only the route thread).
     pub rendered_settled: Vec<EnvironmentThreadShell>,
     pub hidden_settled_count: usize,
@@ -288,9 +281,6 @@ pub fn layout_sidebar_list(
         items.extend(rows(&rendered_settled, SidebarSection::Settled));
     }
     SidebarListLayout {
-        visible_working,
-        visible_snoozed,
-        visible_settled,
         rendered_settled,
         hidden_settled_count,
         ordered_keys,
@@ -441,9 +431,14 @@ mod tests {
         let partition = partition_sidebar_threads(&snapshot, None, None, &mut tracker, &now_iso());
         let last_settled = partition.settled.last().unwrap().key();
         let layout = layout_sidebar_list(&partition, Some(&last_settled), 2, true, false, false);
-        assert_eq!(layout.visible_settled.len(), 3);
+        assert_eq!(layout.rendered_settled.len(), 3);
         assert_eq!(layout.hidden_settled_count, 3);
-        assert!(layout.visible_snoozed.is_empty());
+        assert!(
+            !layout
+                .ordered_keys
+                .iter()
+                .any(|key| key.contains("snoozed"))
+        );
         let collapsed =
             layout_sidebar_list(&partition, Some(&last_settled), 2, false, false, false);
         assert_eq!(collapsed.rendered_settled.len(), 1);

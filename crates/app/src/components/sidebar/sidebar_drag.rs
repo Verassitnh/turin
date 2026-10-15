@@ -6,6 +6,9 @@
 //! resulting transforms as relative offsets. `closestCenter` and
 //! `verticalListSortingStrategy` from dnd-kit are ported alongside since
 //! the upstream code (and its tests) lean on them.
+// A faithful port keeps upstream's whole API (rule 3); callers that are
+// not ported yet (T14 reducers, the chat header menu, settings) use the rest.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -490,11 +493,8 @@ impl SidebarSortingStrategy {
                 .map(|key| SidebarListItem::thread(key, SidebarSection::Settled))
                 .collect(),
         );
-        let has_marker = |marker: SidebarListMarker| {
-            items
-                .iter()
-                .any(|item| *item == SidebarListItem::Marker(marker))
-        };
+        let has_marker =
+            |marker: SidebarListMarker| items.contains(&SidebarListItem::Marker(marker));
         let group = |section: SidebarSection| groups.get(&section).cloned().unwrap_or_default();
         let mut projected: Vec<SidebarListItem> = Vec::new();
         let section_or_placeholder =

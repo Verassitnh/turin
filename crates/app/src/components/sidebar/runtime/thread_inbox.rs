@@ -2,6 +2,9 @@
 //!
 //! The Working section beta: which inbox threads fold into "Working", and
 //! the two time orders (return to the user, last send).
+// A faithful port keeps upstream's whole API (rule 3); callers that are
+// not ported yet (T14 reducers, the chat header menu, settings) use the rest.
+#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 

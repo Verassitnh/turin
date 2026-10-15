@@ -2,6 +2,9 @@
 //!
 //! `PROJECT_ICON_COLORS`: each project color is `text-{c}-600
 //! dark:text-{c}-400` (Tailwind v4 palette), with a `bg-{c}-500` swatch.
+// A faithful port keeps upstream's whole API (rule 3); callers that are
+// not ported yet (T14 reducers, the chat header menu, settings) use the rest.
+#![allow(dead_code)]
 
 use gpui_kit::Hsla;
 

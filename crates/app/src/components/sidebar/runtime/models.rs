@@ -8,6 +8,9 @@
 //! the sidebar reads, because the contracts port is not on this branch yet.
 //! T14 should move this module to `crates/app/src/state` and build these
 //! values with `presentThreadShell`.
+// A faithful port keeps upstream's whole API (rule 3); callers that are
+// not ported yet (T14 reducers, the chat header menu, settings) use the rest.
+#![allow(dead_code)]
 
 use turin_contracts::{EnvironmentId, ProjectId, RunId, ThreadId};
 

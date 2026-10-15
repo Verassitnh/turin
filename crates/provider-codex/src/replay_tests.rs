@@ -15,11 +15,12 @@ use turin_contracts::{
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2AppThread, OrchestrationV2CreationSource,
-        OrchestrationV2ExecutionNodeKind, OrchestrationV2PlanArtifact,
-        OrchestrationV2PlanArtifactStatus, OrchestrationV2PlanStepStatus,
-        OrchestrationV2ProviderThread, OrchestrationV2ProviderTurn, OrchestrationV2RuntimeRequest,
-        OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
-        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
+        OrchestrationV2ExecutionNodeKind, OrchestrationV2ExecutionNodeStatus,
+        OrchestrationV2PlanArtifact, OrchestrationV2PlanArtifactStatus,
+        OrchestrationV2PlanStepStatus, OrchestrationV2ProviderThread, OrchestrationV2ProviderTurn,
+        OrchestrationV2RuntimeRequest, OrchestrationV2RuntimeRequestKind,
+        OrchestrationV2RuntimeRequestStatus, OrchestrationV2TurnItem,
+        OrchestrationV2TurnItemStatus,
     },
     provider_instance::ProviderInstanceId,
     provider_policy::{ProviderInteractionMode, ProviderUserInputAnswers, RuntimeMode},
@@ -647,6 +648,66 @@ async fn restricted_granular_replay_requests_and_accepts_file_change_approval() 
         .unwrap();
     assert_eq!(
         replay.finish_turn().await,
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+/// The recorded `fileChange` item (one `add`) maps to a completed `file_change`
+/// turn item: first change's path and diff, with its tool-call node completed.
+#[tokio::test]
+async fn file_change_replay_maps_first_change_to_file_change_item() {
+    let transcript = fixture("tool_call_restricted_granular");
+    let text = recorded_text(&transcript, 0);
+    let policy = recorded_policy(&transcript, RuntimeMode::ApprovalRequired);
+    let mut replay = open(transcript).await;
+    replay.start(&text, policy).await;
+    let before = replay
+        .next_until(|event| !runtime_requests(std::slice::from_ref(event)).is_empty())
+        .await;
+    let request = runtime_requests(&before).remove(0);
+    replay
+        .runtime
+        .respond_to_runtime_request(accept(&request))
+        .await
+        .unwrap();
+    let after = replay.next_until(is_terminal).await;
+    let (file_name, diff_str, status, node_id) = turn_items(&after)
+        .into_iter()
+        .find_map(|item| match item {
+            OrchestrationV2TurnItem::FileChange {
+                file_name,
+                diff_str,
+                status,
+                node_id,
+                ..
+            } => Some((
+                file_name.clone(),
+                diff_str.clone(),
+                *status,
+                node_id.clone(),
+            )),
+            _ => None,
+        })
+        .expect("file change item");
+    assert_eq!(
+        file_name.as_str(),
+        "/home/replay-user/t3code/packages/effect-codex-app-server/.codex-probe-write-action.txt"
+    );
+    assert_eq!(
+        diff_str.as_deref(),
+        Some("codex app-server approval fixture.\n")
+    );
+    assert_eq!(status, OrchestrationV2TurnItemStatus::Completed);
+    assert!(after.iter().any(|event| matches!(
+        event,
+        ProviderAdapterV2Event::NodeUpdated { node, .. }
+            if Some(&node.id) == node_id.as_ref()
+                && node.kind == OrchestrationV2ExecutionNodeKind::ToolCall
+                && node.status == OrchestrationV2ExecutionNodeStatus::Completed
+    )));
+    assert_eq!(
+        terminal_status(&after),
         ProviderAdapterV2TurnTerminalStatus::Completed
     );
     replay.driver.verify_complete().unwrap();

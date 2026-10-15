@@ -11,10 +11,12 @@ turin-provider-core = { path = "../provider-core" }
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+regex.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+url.workspace = true
 tokio.workspace = true
 tracing.workspace = true

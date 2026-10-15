@@ -11,6 +11,7 @@ pub mod projection;
 #[cfg(test)]
 mod replay_tests;
 pub mod runtime;
+pub mod tool_presentation;
 
 pub use driver::CodexDriver;
 pub use orchestration_adapter::CodexProviderAdapter;

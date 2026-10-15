@@ -7115,6 +7115,7 @@ dependencies = [
  "chrono",
  "futures",
  "parking_lot",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -7123,6 +7124,7 @@ dependencies = [
  "turin-codex-app-server",
  "turin-contracts",
  "turin-provider-core",
+ "url",
 ]
 
 [[package]]

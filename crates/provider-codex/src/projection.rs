@@ -6,8 +6,8 @@
 //! The caller holds the `RuntimeState` lock across each call. Projection is
 //! synchronous, so a turn is only ever borrowed mutably in one place.
 //!
-//! Not ported yet: subagent, fork, goal, background-task, MCP app capture, and
-//! dynamic-tool items (the contracts have no `dynamic_tool` turn item).
+//! Not ported yet: subagent, fork, goal, background-task, and MCP app capture.
+//! MCP and dynamic-tool calls project as `dynamic_tool` items.
 use crate::{
     adapter::CodexEvent, codex_turn_token_usage::CodexTurnTokenUsageState, items,
     items::ItemArtifacts, orchestration_adapter::driver,
@@ -55,6 +55,8 @@ pub struct TurnState {
     pub final_answer_items: Vec<String>,
     /// Final texts already completed as final answers (duplicate guard).
     pub completed_texts: HashSet<String>,
+    /// Raw `mcpToolCall` / `dynamicToolCall` items still in progress, in first-seen order.
+    pub running_tools: Vec<Value>,
 }
 
 impl TurnState {
@@ -67,6 +69,7 @@ impl TurnState {
             running_commands: vec![],
             final_answer_items: vec![],
             completed_texts: HashSet::new(),
+            running_tools: vec![],
         }
     }
 }
@@ -456,9 +459,7 @@ fn token_usage(usage: &Value) -> OrchestrationV2ProviderTurnTokenUsage {
         output_tokens: Some(count("outputTokens")),
         reasoning_output_tokens: Some(count("reasoningOutputTokens")),
         prompt_cache_ttl_ms: None,
-        updated_at: UtcDateTime::now()
-            .0
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        updated_at: UtcDateTime::now().to_string(),
     }
 }
 
@@ -613,9 +614,54 @@ fn item_started(
             }
             emit_item(items::command_execution(turn, item, started_at, now))
         }
+        "mcpToolCall" | "dynamicToolCall" => {
+            let status = items::codex_item_status(str_of(item, "status").unwrap_or("inProgress"));
+            if !status.completed {
+                track_tool(turn, item);
+            }
+            emit_item(items::dynamic_tool(turn, item, now))
+        }
         "webSearch" => emit_item(items::web_search(turn, item, false, now)),
         _ => vec![],
     }
+}
+
+fn track_tool(turn: &mut TurnState, item: &Value) {
+    let id = str_of(item, "id");
+    turn.running_tools.retain(|tool| str_of(tool, "id") != id);
+    turn.running_tools.push(item.clone());
+}
+
+/// The node and turn-item status a still-running item takes when its turn ends.
+/// Only an interrupt or a failure stops a tool, so a clean end cancels it.
+fn stopped_item_statuses(
+    status: OrchestrationV2ProviderTurnStatus,
+) -> (
+    OrchestrationV2ExecutionNodeStatus,
+    OrchestrationV2TurnItemStatus,
+) {
+    match status {
+        OrchestrationV2ProviderTurnStatus::Interrupted => (
+            OrchestrationV2ExecutionNodeStatus::Interrupted,
+            OrchestrationV2TurnItemStatus::Interrupted,
+        ),
+        OrchestrationV2ProviderTurnStatus::Failed => (
+            OrchestrationV2ExecutionNodeStatus::Failed,
+            OrchestrationV2TurnItemStatus::Failed,
+        ),
+        _ => (
+            OrchestrationV2ExecutionNodeStatus::Cancelled,
+            OrchestrationV2TurnItemStatus::Cancelled,
+        ),
+    }
+}
+
+/// Upstream `isPersistentCodexDynamicTool`: a tool that asks to outlive its turn.
+fn is_persistent_tool(item: &Value) -> bool {
+    item.get("arguments")
+        .and_then(|input| input.get("persistent"))
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 fn track_command(turn: &mut TurnState, item: &Value) {
@@ -645,6 +691,11 @@ fn item_completed(
         "commandExecution" => {
             turn.running_commands.retain(|c| c.id != native_item);
             emit_item(items::command_execution(turn, item, None, now))
+        }
+        "mcpToolCall" | "dynamicToolCall" => {
+            turn.running_tools
+                .retain(|tool| str_of(tool, "id") != Some(native_item.as_str()));
+            emit_item(items::dynamic_tool(turn, item, now))
         }
         "webSearch" => emit_item(items::web_search(turn, item, true, now)),
         "fileChange" => items::file_change(turn, item, now)
@@ -832,6 +883,30 @@ fn turn_completed(
             }
             events.extend(emit_item(artifacts));
         }
+    }
+    // Upstream `terminalizeRunningDynamicTools`: a persistent tool keeps running only
+    // when the turn ended cleanly. Turin drops the turn state here, so a persistent
+    // tool left running stays running (see the Deviations table).
+    let (tool_node_status, tool_item_status) = stopped_item_statuses(status);
+    for tool in std::mem::take(&mut turn.running_tools) {
+        if !stopped_early && is_persistent_tool(&tool) {
+            continue;
+        }
+        let mut artifacts = items::dynamic_tool(turn, &tool, now);
+        artifacts.node.status = tool_node_status;
+        artifacts.node.completed_at = Some(now);
+        if let OrchestrationV2TurnItem::DynamicTool {
+            status,
+            completed_at,
+            updated_at,
+            ..
+        } = &mut artifacts.turn_item
+        {
+            *status = tool_item_status;
+            *completed_at = Some(now);
+            *updated_at = now;
+        }
+        events.extend(emit_item(artifacts));
     }
     let token = state
         .usage

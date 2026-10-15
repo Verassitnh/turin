@@ -3,10 +3,18 @@
 //! `buildWebSearchArtifacts`, `buildFileChangeArtifacts`, `buildProposedPlanArtifacts`,
 //! `buildTodoListArtifacts`, and `resolveItemPosition`). Each builder returns the
 //! execution node and turn item upstream emits for one Codex item.
-use crate::{orchestration_adapter::driver, projection::TurnState};
-use serde_json::Value;
+use crate::{
+    orchestration_adapter::driver,
+    projection::TurnState,
+    tool_presentation::{
+        ToolPresentation, computer_use_tool_source, dynamic_tool_surface, dynamic_tool_title,
+        mcp_tool_presentation,
+    },
+};
+use serde_json::{Value, json};
 use turin_contracts::{
     PlanId, TrimmedNonEmptyString, TurnItemId, UtcDateTime,
+    base_schemas::js_trim,
     orchestration_v2::{
         OrchestrationV2ConversationMessage, OrchestrationV2ConversationMessageRole,
         OrchestrationV2CreationSource, OrchestrationV2ExecutionNode,
@@ -14,6 +22,7 @@ use turin_contracts::{
         OrchestrationV2PlanStep, OrchestrationV2ProviderRef, OrchestrationV2TurnItem,
         OrchestrationV2TurnItemStatus,
     },
+    provider_runtime::{ToolActivitySourceKind, ToolActivitySurface},
 };
 use turin_provider_core::id_allocator::derive;
 
@@ -473,6 +482,132 @@ pub fn file_change(turn: &mut TurnState, item: &Value, now: UtcDateTime) -> Opti
         turn_item,
         message: None,
     })
+}
+
+/// Upstream `codexMcpToolOutput`: the structured content (else the content blocks)
+/// of an MCP result, with the error message when the call failed.
+fn mcp_tool_output(item: &Value) -> Option<Value> {
+    let result = item.get("result").filter(|result| !result.is_null());
+    let result_output = result.and_then(|result| {
+        match result
+            .get("structuredContent")
+            .filter(|value| !value.is_null())
+        {
+            Some(structured) => Some(structured.clone()),
+            None => result.get("content").cloned(),
+        }
+    });
+    match item.get("error").filter(|error| !error.is_null()) {
+        None => result_output,
+        Some(error) => {
+            let message = error.get("message").cloned().unwrap_or(Value::Null);
+            Some(match result_output {
+                None => json!({ "error": message }),
+                Some(result) => json!({ "error": message, "result": result }),
+            })
+        }
+    }
+}
+
+/// Upstream `codexDynamicToolOutput`: the content items, or `{success: false}`.
+fn dynamic_tool_output(item: &Value) -> Option<Value> {
+    match item.get("contentItems").filter(|items| !items.is_null()) {
+        Some(items) => Some(items.clone()),
+        None => {
+            (item.get("success") == Some(&Value::Bool(false))).then(|| json!({ "success": false }))
+        }
+    }
+}
+
+/// Upstream `projectCodexDynamicToolItem` with `buildDynamicToolArtifacts`: an
+/// `mcpToolCall` or `dynamicToolCall`. The item shows the tool name, title,
+/// input, and output.
+pub fn dynamic_tool(turn: &mut TurnState, item: &Value, now: UtcDateTime) -> ItemArtifacts {
+    let native_item = str_field(item, "id").unwrap_or_default();
+    let is_mcp = str_field(item, "type") == Some("mcpToolCall");
+    let status = codex_item_status(str_field(item, "status").unwrap_or("inProgress"));
+    let (ordinal, started_at) = resolve_position(turn, native_item, None, now);
+    let completed_at = status.completed.then_some(now);
+    let node = node(
+        turn,
+        native_item,
+        OrchestrationV2ExecutionNodeKind::ToolCall,
+        status.node,
+        started_at,
+        completed_at,
+    );
+    let tool_name = if is_mcp {
+        format!(
+            "{}.{}",
+            str_field(item, "server").unwrap_or_default(),
+            str_field(item, "tool").unwrap_or_default()
+        )
+    } else {
+        let namespace = str_field(item, "namespace")
+            .map(js_trim)
+            .filter(|ns| !ns.is_empty());
+        [namespace, str_field(item, "tool")]
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    let input = item.get("arguments").cloned().unwrap_or(Value::Null);
+    let presentation = if is_mcp {
+        mcp_tool_presentation(item)
+    } else {
+        ToolPresentation::default()
+    };
+    let title = dynamic_tool_title(&tool_name, &input, presentation.title.as_deref())
+        .or(presentation.title);
+    let surface = presentation
+        .tool_surface
+        .or_else(|| dynamic_tool_surface(&tool_name, &input));
+    // A computer-use call is attributed to the computer source unless its own source already is.
+    let source_is_computer = presentation
+        .tool_source
+        .as_ref()
+        .is_some_and(|source| source.kind == ToolActivitySourceKind::Computer);
+    let tool_source = if surface == Some(ToolActivitySurface::Computer) && !source_is_computer {
+        Some(computer_use_tool_source())
+    } else {
+        presentation.tool_source
+    };
+    let turn_item = OrchestrationV2TurnItem::DynamicTool {
+        tool_non_execution_kind: None,
+        tool_surface: surface,
+        tool_icon: presentation.tool_icon,
+        tool_source,
+        id: turn_item_id(native_item),
+        thread_id: turn.input.thread_id.clone(),
+        run_id: Some(turn.input.run_id.clone()),
+        node_id: Some(node.id.clone()),
+        provider_thread_id: Some(turn.input.provider_thread.id.clone()),
+        provider_turn_id: Some(derive::provider_turn(&driver(), &turn.native_turn)),
+        native_item_ref: Some(native_item_ref(native_item)),
+        parent_item_id: None,
+        ordinal,
+        status: status.turn_item,
+        title,
+        started_at: Some(started_at),
+        completed_at,
+        updated_at: now,
+        tool_name: TrimmedNonEmptyString::new(tool_name).ok(),
+        viewed_image_path: None,
+        input,
+        output: if is_mcp {
+            mcp_tool_output(item)
+        } else {
+            dynamic_tool_output(item)
+        },
+        output_omitted: None,
+    };
+    ItemArtifacts {
+        node,
+        turn_item,
+        message: None,
+    }
 }
 
 /// Upstream `buildProposedPlanArtifacts`. `status` is the plan lifecycle; a finished

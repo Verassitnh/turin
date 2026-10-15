@@ -1357,11 +1357,11 @@ pub async fn fork_session(
     }
     forked.push(json!({"type":"custom-title","sessionId":new_id,"customTitle":title,"uuid":uuid::Uuid::new_v4().to_string(),"timestamp":timestamp}));
     let new_path = path.with_file_name(format!("{new_id}.jsonl"));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&new_path)
-        .await?;
+    let mut open = fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    open.mode(0o600);
+    let mut file = open.open(&new_path).await?;
     for entry in forked {
         file.write_all(serde_json::to_string(&entry)?.as_bytes())
             .await?;
@@ -1435,6 +1435,15 @@ mod tests {
         assert_eq!(fork_entries.len(), 3);
         assert_eq!(fork_entries[1]["parentUuid"], fork_entries[0]["uuid"]);
         assert_eq!(fork_entries[2]["customTitle"], "Branch");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(folder.join(format!("{fork}.jsonl")))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         assert!(
             fork_entries
                 .iter()

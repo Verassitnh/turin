@@ -112,7 +112,10 @@ fn migrate(
         ));
     }
 
-    conn.execute_batch("BEGIN")
+    // A deferred BEGIN only takes the write lock at the first write. If another
+    // process commits after this transaction's first read, that write fails at
+    // once with SQLITE_BUSY_SNAPSHOT, which busy_timeout cannot wait out.
+    conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|err| PersistenceError::sql("runMigrations.begin", &err))?;
     let result = migrate_in_transaction(conn, through_id);
     match &result {

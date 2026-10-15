@@ -1,23 +1,16 @@
 //! Port of upstream/packages/effect-codex-app-server/src/client.ts
 use crate::{
-    errors::{AppServerError, ProtocolError},
+    errors::{AppServerError, ProtocolError, payload_kind},
     generated::meta::{self, MethodMeta},
     protocol::{NotificationHandler, Protocol, ProtocolOptions, RequestHandler},
     schema,
 };
 use futures::{FutureExt, future::BoxFuture};
 use parking_lot::Mutex;
-use serde_json::Value;
+use serde_json::{Value, json};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, Ordering},
-    },
-};
+use std::{collections::HashMap, path::Path, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     process::Command,
@@ -44,7 +37,10 @@ struct Handlers {
 pub struct Client {
     pub raw: Protocol,
     handlers: Arc<Handlers>,
-    child_pid: Arc<AtomicU32>,
+    // Process-group id of the spawned child (0 when there is none). Recorded once at spawn and
+    // never cleared: descendants can outlive the leader, so the group must still be signalled
+    // after the leader has exited.
+    child_pgid: u32,
     child_task: Option<AbortOnDropHandle<()>>,
     stderr_task: Option<AbortOnDropHandle<()>>,
 }
@@ -80,38 +76,38 @@ impl Client {
         raw.set_request_handler(Arc::new(move |method, params| {
             let requests = requests.clone();
             async move {
+                // Mirrors upstream dispatchRequest: only protocol-known methods reach the
+                // registered handlers, and a known method without one answers -32601 rather
+                // than falling through to the unknown-request handler.
+                let Some(entry) = meta::method_meta(meta::SERVER_REQUEST_METHODS, &method) else {
+                    let unknown = requests.unknown_request.lock().clone();
+                    return match unknown {
+                        Some(handler) => handler(method, params).await,
+                        None => Err(ProtocolError::method_not_found(&method)),
+                    };
+                };
+                check_payload(&method, "decode-payload", entry.params, params.as_ref())?;
                 let handler = requests.requests.lock().get(&method).cloned();
-                let unknown = requests.unknown_request.lock().clone();
-                if let Some(handler) = handler {
-                    let entry = meta::method_meta(meta::SERVER_REQUEST_METHODS, &method);
-                    validate_known(
-                        &method,
-                        entry.and_then(|entry| entry.params),
-                        params.as_ref(),
-                    )
-                    .map_err(invalid_params)?;
-                    let result = handler(params).await.map_err(|error| match error {
-                        AppServerError::Request { error, .. } => *error,
-                        other => ProtocolError {
+                let Some(handler) = handler else {
+                    return Err(ProtocolError::method_not_found(&method));
+                };
+                let result = handler(params).await.map_err(|error| match error {
+                    AppServerError::Request { error, .. } => *error,
+                    // Upstream keeps the cause local (internalError with no data), so the
+                    // peer only sees the generic message and the detail goes to the log.
+                    other => {
+                        tracing::warn!(%method, error = %other, "Codex App Server request handler failed");
+                        ProtocolError {
                             code: -32603,
                             message: format!(
                                 "Codex App Server request handler failed for method '{method}'"
                             ),
-                            data: Some(Value::String(other.to_string())),
-                        },
-                    })?;
-                    validate_known(
-                        &method,
-                        entry.and_then(|entry| entry.response),
-                        result.as_ref(),
-                    )
-                    .map_err(invalid_params)?;
-                    Ok(result)
-                } else if let Some(handler) = unknown {
-                    handler(method, params).await
-                } else {
-                    Err(ProtocolError::method_not_found(&method))
-                }
+                            data: None,
+                        }
+                    }
+                })?;
+                check_payload(&method, "encode-payload", entry.response, result.as_ref())?;
+                Ok(result)
             }
             .boxed()
         }));
@@ -119,24 +115,32 @@ impl Client {
         raw.set_notification_handler(Arc::new(move |method, params| {
             let notifications = notifications.clone();
             async move {
-                let handlers = notifications.notifications.lock().get(&method).cloned();
-                let unknown = notifications.unknown_notification.lock().clone();
-                if let Some(handlers) = handlers {
-                    let entry = meta::method_meta(meta::SERVER_NOTIFICATION_METHODS, &method);
-                    if validate_known(
-                        &method,
-                        entry.and_then(|entry| entry.params),
-                        params.as_ref(),
-                    )
-                    .is_err()
-                    {
-                        return;
+                // Mirrors upstream dispatchNotification: a protocol-known notification only
+                // reaches its registered handlers (none is a no-op), and everything else goes to
+                // the unknown-notification handler.
+                let Some(entry) = meta::method_meta(meta::SERVER_NOTIFICATION_METHODS, &method)
+                else {
+                    let unknown = notifications.unknown_notification.lock().clone();
+                    if let Some(handler) = unknown {
+                        handler(method, params).await;
                     }
-                    for handler in handlers {
-                        let _ = handler(params.clone()).await;
+                    return;
+                };
+                let handlers = notifications
+                    .notifications
+                    .lock()
+                    .get(&method)
+                    .cloned()
+                    .unwrap_or_default();
+                if validate_known(&method, entry.params, params.as_ref()).is_err() {
+                    return;
+                }
+                // Upstream runs these with Effect.forEach, which stops at the first failure and
+                // then the outer Effect.ignore discards it.
+                for handler in handlers {
+                    if handler(params.clone()).await.is_err() {
+                        break;
                     }
-                } else if let Some(handler) = unknown {
-                    handler(method, params).await;
                 }
             }
             .boxed()
@@ -144,7 +148,7 @@ impl Client {
         Self {
             raw,
             handlers,
-            child_pid: Arc::new(AtomicU32::new(0)),
+            child_pgid: 0,
             child_task: None,
             stderr_task: None,
         }
@@ -196,8 +200,7 @@ impl Client {
             })));
         }
         let terminator = client.raw.termination_handle();
-        client.child_pid.store(pid, Ordering::Release);
-        let child_pid = client.child_pid.clone();
+        client.child_pgid = pid;
         client.child_task = Some(AbortOnDropHandle::new(tokio::spawn(async move {
             let error = match child.wait().await {
                 Ok(status) => AppServerError::ProcessExited(status.code()),
@@ -208,7 +211,6 @@ impl Client {
             };
             let _ = exit_tx.send(Some(error.clone()));
             terminator.terminate(error);
-            child_pid.store(0, Ordering::Release);
         })));
         Ok(client)
     }
@@ -278,11 +280,7 @@ impl Client {
         self.raw.terminate(AppServerError::Cancelled);
         if let Some(mut task) = self.child_task.take() {
             #[cfg(unix)]
-            if let pid @ 1..=u32::MAX = self.child_pid.load(Ordering::Acquire) {
-                unsafe {
-                    libc::kill(-(pid as i32), libc::SIGTERM);
-                }
-            }
+            signal_group(self.child_pgid, libc::SIGTERM);
             #[cfg(not(unix))]
             task.abort();
             if tokio::time::timeout(std::time::Duration::from_secs(2), &mut task)
@@ -290,11 +288,7 @@ impl Client {
                 .is_err()
             {
                 #[cfg(unix)]
-                if let pid @ 1..=u32::MAX = self.child_pid.load(Ordering::Acquire) {
-                    unsafe {
-                        libc::kill(-(pid as i32), libc::SIGKILL);
-                    }
-                }
+                signal_group(self.child_pgid, libc::SIGKILL);
                 task.await.map_err(|error| AppServerError::Transport {
                     operation: "read-process-exit-status",
                     detail: error.to_string(),
@@ -323,21 +317,47 @@ fn validate_known(
     }
     schema::validate_optional(schema_name, payload)
 }
-fn invalid_params(detail: String) -> ProtocolError {
-    ProtocolError {
-        code: -32602,
-        message: format!("Invalid params: {detail}"),
-        data: None,
+/// Mirrors upstream decodeOptionalPayload/encodeOptionalPayload for server requests: a method
+/// without a schema must not carry a payload, and a method with one must match it. The wire
+/// messages use upstream's wording; the schema detail stays out of the peer-visible error.
+pub(crate) fn check_payload(
+    method: &str,
+    operation: &'static str,
+    schema_name: Option<&str>,
+    payload: Option<&Value>,
+) -> Result<(), ProtocolError> {
+    if let (None, Some(payload)) = (schema_name, payload) {
+        return Err(ProtocolError {
+            code: -32602,
+            message: format!("Method '{method}' does not accept a payload during '{operation}'"),
+            data: Some(json!({"payloadKind": payload_kind(payload)})),
+        });
+    }
+    validate_known(method, schema_name, payload).map_err(|detail| {
+        tracing::debug!(%method, operation, %detail, "Codex App Server payload failed schema validation");
+        ProtocolError {
+            code: -32602,
+            message: format!("Invalid payload for method '{method}' during '{operation}'"),
+            data: None,
+        }
+    })
+}
+/// The group id is the leader's pid: the kernel does not reuse it while the group has members.
+/// Known limit: once the group is empty its id can be reused by an unrelated new group leader,
+/// and a shutdown or drop after that would signal that group. The window is the time between
+/// the last descendant exiting and this client being dropped.
+#[cfg(unix)]
+fn signal_group(pgid: u32, signal: libc::c_int) {
+    if let pgid @ 1..=u32::MAX = pgid {
+        unsafe {
+            libc::kill(-(pgid as i32), signal);
+        }
     }
 }
 impl Drop for Client {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if let pid @ 1..=u32::MAX = self.child_pid.load(Ordering::Acquire) {
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
-            }
-        }
+        signal_group(self.child_pgid, libc::SIGKILL);
         drop(self.child_task.take());
         drop(self.stderr_task.take());
     }

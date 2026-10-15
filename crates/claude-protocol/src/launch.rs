@@ -73,7 +73,8 @@ pub enum PromptBody {
 }
 
 /// `skills: "all"` appends `Skill` to `allowedTools`. A name list appends
-/// `Skill(<name>)` for names not already present.
+/// `Skill(<name>)` for names not already present and is also sent as
+/// `initialize.skills`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Skills {
     All,
@@ -97,7 +98,6 @@ pub struct InitializeOptions {
     pub json_schema: Option<Value>,
     pub tool_aliases: Option<Value>,
     pub title: Option<String>,
-    pub skills: Option<Vec<String>>,
     pub plan_mode_instructions: Option<String>,
     pub prompt_suggestions: Option<bool>,
     pub forward_subagent_text: Option<bool>,
@@ -301,7 +301,7 @@ impl LaunchOptions {
         if let Some(budget) = self.max_budget_usd {
             pair(&mut args, "--max-budget-usd", &js_number(budget));
         }
-        if let Some(total) = self.task_budget.filter(|total| *total != 0) {
+        if let Some(total) = self.task_budget {
             pair(&mut args, "--task-budget", &total.to_string());
         }
         if let Some(model) = &self.model {
@@ -494,7 +494,7 @@ impl LaunchOptions {
         if let Some(title) = &self.initialize.title {
             request.insert("title".into(), Value::String(title.clone()));
         }
-        if let Some(skills) = &self.initialize.skills {
+        if let Some(Skills::Names(skills)) = &self.skills {
             request.insert("skills".into(), serde_json::json!(skills));
         }
         if let Some(value) = self.initialize.prompt_suggestions {
@@ -586,10 +586,12 @@ impl LaunchOptions {
     }
 
     fn merged_settings(&self) -> anyhow::Result<Option<String>> {
-        let settings = self.settings.as_ref().map(|value| match value {
-            Value::String(path) => path.clone(),
-            other => serde_json::to_string(other).unwrap_or_else(|_| "null".into()),
-        });
+        let settings = match &self.settings {
+            Some(Value::String(path)) if !path.is_empty() => Some(path.clone()),
+            Some(Value::String(_)) | None => self.extra_args.get("settings").cloned().flatten(),
+            Some(other) => Some(serde_json::to_string(other).unwrap_or_else(|_| "null".into())),
+        }
+        .filter(|settings| !settings.is_empty());
         let Some(sandbox) = &self.sandbox else {
             return Ok(settings);
         };
@@ -623,10 +625,14 @@ impl LaunchOptions {
             .env
             .clone()
             .unwrap_or_else(|| std::env::vars().collect());
-        env.entry("CLAUDE_CODE_ENTRYPOINT".into())
-            .or_insert_with(|| "sdk-ts".into());
-        env.entry("CLAUDE_AGENT_SDK_VERSION".into())
-            .or_insert_with(|| SDK_VERSION.into());
+        for (key, default) in [
+            ("CLAUDE_CODE_ENTRYPOINT", "sdk-ts"),
+            ("CLAUDE_AGENT_SDK_VERSION", SDK_VERSION),
+        ] {
+            if env.get(key).is_none_or(String::is_empty) {
+                env.insert(key.into(), default.into());
+            }
+        }
         if self.enable_file_checkpointing {
             env.insert(
                 "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".into(),
@@ -785,6 +791,84 @@ mod tests {
             Value::String("t3".into())
         );
         assert!(options.initialize_request().get("systemPrompt").is_none());
+    }
+
+    #[test]
+    fn launch_edge_cases_match_sdk() {
+        let spec = LaunchOptions {
+            env: Some(BTreeMap::from([
+                ("CLAUDE_CODE_ENTRYPOINT".into(), String::new()),
+                ("CLAUDE_AGENT_SDK_VERSION".into(), String::new()),
+            ])),
+            task_budget: Some(0),
+            extra_args: IndexMap::from([("settings".into(), Some("{\"b\":1}".into()))]),
+            sandbox: Some(serde_json::json!({"enabled": false})),
+            ..Default::default()
+        }
+        .spec()
+        .unwrap();
+        assert_eq!(spec.env["CLAUDE_CODE_ENTRYPOINT"], "sdk-ts");
+        assert_eq!(spec.env["CLAUDE_AGENT_SDK_VERSION"], SDK_VERSION);
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|pair| pair == ["--task-budget", "0"])
+        );
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|pair| pair == ["--settings", "{\"b\":1,\"sandbox\":{\"enabled\":false}}"])
+        );
+
+        let spec = LaunchOptions {
+            settings: Some(Value::String("{\"a\":1}".into())),
+            extra_args: IndexMap::from([("settings".into(), Some("{\"b\":1}".into()))]),
+            sandbox: Some(serde_json::json!({"enabled": true})),
+            ..Default::default()
+        }
+        .spec()
+        .unwrap();
+        let settings: Vec<_> = spec
+            .args
+            .iter()
+            .filter(|arg| *arg == "--settings")
+            .collect();
+        assert_eq!(settings.len(), 1);
+        assert!(spec.args.windows(2).any(|pair| pair
+            == [
+                "--settings",
+                "{\"a\":1,\"sandbox\":{\"enabled\":true,\"failIfUnavailable\":true}}"
+            ]));
+    }
+
+    #[test]
+    fn skill_names_feed_allowed_tools_and_initialize() {
+        let options = LaunchOptions {
+            skills: Some(Skills::Names(vec!["pdf".into(), "x:y".into()])),
+            ..Default::default()
+        };
+        assert_eq!(
+            options.initialize_request()["skills"],
+            serde_json::json!(["pdf", "x:y"])
+        );
+        assert!(
+            options
+                .spec()
+                .unwrap()
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--allowedTools", "Skill(pdf),Skill(x:y)"])
+        );
+        let empty = LaunchOptions {
+            skills: Some(Skills::Names(vec![])),
+            ..Default::default()
+        };
+        assert_eq!(empty.initialize_request()["skills"], serde_json::json!([]));
+        let all = LaunchOptions {
+            skills: Some(Skills::All),
+            ..Default::default()
+        };
+        assert!(all.initialize_request().get("skills").is_none());
     }
 
     #[test]

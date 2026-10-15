@@ -24,6 +24,8 @@ Haiku (skeptics, mechanical edits). Grok carries the bulk of backend ports
 while Codex/GLM are out. Keep concurrent Claude agents ≤ 8 and QC workflows ≤ 2
 to stay under the Claude session limit (hit once on 2026-10-14 ~20:45).
 
+**Outage (2026-10-15 12:18 UTC): Grok hit Cursor's plan usage limit ("You're out of usage. Switch to Auto"). T06, T10a, T11, T12, T23 moved to Cursor Auto (`cursor`/`default`) in their own threads; trailer `Model: cursor-auto (cursor)`. Back to grok-4.7 when usage resets.**
+
 **Throughput rule (user, 2026-10-14): run the maximum number of agents the
 dependency graph allows, everything async.** Never wait on a merge when a
 dependent can branch from the in-flight branch it needs (rebase later; QC fix

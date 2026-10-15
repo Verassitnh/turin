@@ -897,15 +897,15 @@ mod tests {
 
     enum Step {
         Advance(i64),
-        Item(OrchestrationV2ShellStreamItem),
+        Item(Box<OrchestrationV2ShellStreamItem>),
     }
 
     fn updated(sequence: u64, thread: OrchestrationV2ThreadShell) -> Step {
-        Step::Item(OrchestrationV2ShellStreamItem::ThreadUpdated {
+        Step::Item(Box::new(OrchestrationV2ShellStreamItem::ThreadUpdated {
             sequence,
             location: OrchestrationV2ShellLocation::Active,
             thread,
-        })
+        }))
     }
 
     fn run_skip(steps: Vec<Step>) -> Vec<u64> {
@@ -917,7 +917,7 @@ mod tests {
                 Step::Advance(ms) => now += ms,
                 Step::Item(item) => {
                     if filter.accept(&item, now) {
-                        sent.push(match item {
+                        sent.push(match *item {
                             OrchestrationV2ShellStreamItem::ThreadUpdated { sequence, .. }
                             | OrchestrationV2ShellStreamItem::ThreadRemoved { sequence, .. } => {
                                 sequence
@@ -968,11 +968,11 @@ mod tests {
     fn skip_sends_the_next_update_after_a_removal() {
         let sent = run_skip(vec![
             updated(1, shell("a", json!({}))),
-            Step::Item(OrchestrationV2ShellStreamItem::ThreadRemoved {
+            Step::Item(Box::new(OrchestrationV2ShellStreamItem::ThreadRemoved {
                 sequence: 2,
                 location: OrchestrationV2ShellLocation::Active,
                 thread_id: tid("a"),
-            }),
+            })),
             updated(3, shell("a", json!({}))),
         ]);
         assert_eq!(sent, vec![1, 2, 3]);

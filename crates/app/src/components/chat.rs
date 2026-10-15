@@ -27,5 +27,8 @@ pub mod timeline_work_rows;
 // Scroll anchoring state for the timeline view; the view does not read it yet.
 #[allow(dead_code)]
 pub mod timeline_scroll_anchoring;
+// Selection-action placement; the DOM observer half is not ported yet.
+#[allow(dead_code)]
+pub mod selection_actions;
 pub mod timestamp_format;
 pub mod work_log;

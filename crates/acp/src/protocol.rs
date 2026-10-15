@@ -8,8 +8,10 @@
 //! dispatched to different handler tables.
 
 use std::collections::{HashMap, VecDeque};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -364,6 +366,27 @@ async fn writer_loop<W>(
     }
 }
 
+/// Ends the connection if the reader unwinds, e.g. a panicking session-update
+/// transform. Upstream terminates on any reader failure (protocol.ts 718-739).
+/// Explicit exits already call `terminate`; this covers the unwind path only.
+/// A plain drop (the client was dropped and the task aborted) does not
+/// terminate, so user hooks do not run during teardown.
+struct ReaderUnwindGuard(Arc<ConnectionInner>);
+
+impl Drop for ReaderUnwindGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.terminate(AcpError::from(AcpTransportError {
+                operation: Some(TransportOperation::ReadInputStream),
+                method: None,
+                detail: None,
+                pid: None,
+                cause: Some("ACP reader stopped after a panic".to_owned()),
+            }));
+        }
+    }
+}
+
 async fn reader_loop<R>(
     read: R,
     inner: Arc<ConnectionInner>,
@@ -373,6 +396,7 @@ async fn reader_loop<R>(
 ) where
     R: tokio::io::AsyncRead + Unpin,
 {
+    let _unwind = ReaderUnwindGuard(Arc::clone(&inner));
     let mut lines = BufReader::new(read).lines();
     loop {
         match lines.next_line().await {
@@ -521,7 +545,7 @@ async fn dispatch_notification(
             params: params.clone(),
         };
         inner.push_notification(notification.clone());
-        (inner.on_notification)(notification).await;
+        run_notification_callback(inner, notification).await;
         return Ok(());
     }
     if method == ELICITATION_COMPLETE || method == SESSION_ELICITATION_COMPLETE {
@@ -537,7 +561,7 @@ async fn dispatch_notification(
             params,
         };
         inner.push_notification(notification.clone());
-        (inner.on_notification)(notification).await;
+        run_notification_callback(inner, notification).await;
         return Ok(());
     }
     let notification = IncomingNotification::Ext {
@@ -545,8 +569,36 @@ async fn dispatch_notification(
         params,
     };
     inner.push_notification(notification.clone());
-    (inner.on_notification)(notification).await;
+    run_notification_callback(inner, notification).await;
     Ok(())
+}
+
+/// Runs the notification callback in isolation, like upstream
+/// `isolateNotificationHandler` (_internal/shared.ts): a panic is logged and the
+/// reader keeps going. Only the callback is guarded. A transform defect is not,
+/// and it terminates the connection through `ReaderUnwindGuard`.
+async fn run_notification_callback(inner: &ConnectionInner, notification: IncomingNotification) {
+    let method = notification_method(&notification).to_owned();
+    let callback = Arc::clone(&inner.on_notification);
+    let future = match std::panic::catch_unwind(AssertUnwindSafe(|| callback(notification))) {
+        Ok(future) => future,
+        Err(_) => {
+            tracing::error!(%method, "ACP notification handler panicked");
+            return;
+        }
+    };
+    if AssertUnwindSafe(future).catch_unwind().await.is_err() {
+        tracing::error!(%method, "ACP notification handler panicked");
+    }
+}
+
+fn notification_method(notification: &IncomingNotification) -> &str {
+    use crate::meta::client::SESSION_UPDATE;
+    match notification {
+        IncomingNotification::SessionUpdate { .. } => SESSION_UPDATE,
+        IncomingNotification::ElicitationComplete { method, .. }
+        | IncomingNotification::Ext { method, .. } => method,
+    }
 }
 
 async fn handler_loop(
@@ -928,6 +980,81 @@ mod tests {
         let text = error.to_string();
         assert!(!text.contains(secret));
         assert!(text.contains("decode-notification-payload"));
+    }
+
+    fn session_update_frame() -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {"sessionId": "s1", "update": {"sessionUpdate": "plan", "entries": []}}
+        })
+    }
+
+    #[tokio::test]
+    async fn panicking_notification_callback_keeps_the_reader_alive() {
+        let on_notification: NotificationCallback = Arc::new(|note| {
+            Box::pin(async move {
+                if let IncomingNotification::SessionUpdate { .. } = note {
+                    panic!("notification callback defect");
+                }
+            })
+        });
+        let (connection, mut read, mut write) = start_pair(noop_request(), on_notification);
+        let pending = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.ext_request("x/test", json!({})).await }
+        });
+        let outbound = read_value(&mut read).await;
+        write_value(&mut write, session_update_frame()).await;
+        write_value(
+            &mut write,
+            json!({"jsonrpc": "2.0", "id": outbound["id"], "result": {"ok": true}}),
+        )
+        .await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), pending)
+            .await
+            .expect("pending request hung after a callback panic")
+            .unwrap();
+        assert_eq!(result.unwrap()["ok"], true);
+        assert!(connection.termination_error().is_none());
+    }
+
+    #[tokio::test]
+    async fn transform_defect_terminates_the_connection_and_fails_pending_requests() {
+        let terminations = Arc::new(AtomicUsize::new(0));
+        let terminations_cb = Arc::clone(&terminations);
+        let (client_read, mut agent_write) = duplex(1 << 20);
+        let (mut agent_read, client_write) = duplex(1 << 20);
+        let connection = Connection::start(
+            client_read,
+            client_write,
+            ConnectionConfig {
+                on_request: noop_request(),
+                on_notification: noop_notification(),
+                on_termination: Arc::new(move |_| {
+                    terminations_cb.fetch_add(1, Ordering::SeqCst);
+                }),
+                termination_on_eof: None,
+                transform_session_update: Arc::new(|_| panic!("normalizer bug")),
+            },
+        );
+        let pending = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.ext_request("x/test", json!({})).await }
+        });
+        // Wait for the request to reach the wire, then feed a session/update to the reader.
+        let _outbound = read_value(&mut agent_read).await;
+        write_value(&mut agent_write, session_update_frame()).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), pending)
+            .await
+            .expect("pending request hung after a transform defect")
+            .unwrap();
+        let Err(AcpError::Transport(error)) = result else {
+            panic!("expected a transport termination error");
+        };
+        assert_eq!(error.operation, Some(TransportOperation::ReadInputStream));
+        assert!(connection.termination_error().is_some());
+        assert_eq!(terminations.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

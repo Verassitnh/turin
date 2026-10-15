@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::errors::PersistenceError;
@@ -42,6 +43,8 @@ pub struct Db {
 
 struct Inner {
     checkpoint: Mutex<Option<Checkpoint>>,
+    writer_gate: Arc<Semaphore>,
+    reader_gate: Arc<Semaphore>,
     writer: Mutex<Connection>,
     /// `None` for `:memory:` (a second connection would not see it) and when a
     /// read-only open is impossible. Reads then use the writer.
@@ -130,7 +133,9 @@ impl Db {
         F: FnOnce(&Transaction<'_>) -> Result<R, PersistenceError> + Send + 'static,
     {
         let inner = Arc::clone(&self.inner);
+        let permit = acquire_gate(&inner.writer_gate).await?;
         let value = AbortOnDrop::new(tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             let mut conn = inner.writer.lock();
             restore_writer_autocheckpoint(&conn, &inner.checkpoint_notify);
             let tx = conn
@@ -153,7 +158,9 @@ impl Db {
     #[cfg(test)]
     pub(crate) async fn writer_autocheckpoint(&self) -> Result<i64, PersistenceError> {
         let inner = Arc::clone(&self.inner);
+        let permit = acquire_gate(&inner.writer_gate).await?;
         AbortOnDrop::new(tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             let conn = inner.writer.lock();
             conn.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
                 .map_err(|err| PersistenceError::sql("sqlite.pragma", &err))
@@ -170,7 +177,14 @@ impl Db {
         F: FnOnce(&Connection) -> Result<R, PersistenceError> + Send + 'static,
     {
         let inner = Arc::clone(&self.inner);
+        let gate = if inner.reader.is_some() {
+            &inner.reader_gate
+        } else {
+            &inner.writer_gate
+        };
+        let permit = acquire_gate(gate).await?;
         AbortOnDrop::new(tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             if let Some(reader) = &inner.reader {
                 let conn = reader.lock();
                 return f(&conn);
@@ -194,6 +208,13 @@ impl Drop for Inner {
         let conn = self.writer.lock();
         restore_writer_autocheckpoint(&conn, &self.checkpoint_notify);
     }
+}
+
+async fn acquire_gate(gate: &Arc<Semaphore>) -> Result<OwnedSemaphorePermit, PersistenceError> {
+    gate.clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| PersistenceError::Closed)
 }
 
 fn join_error(err: tokio::task::JoinError) -> PersistenceError {
@@ -244,6 +265,8 @@ fn open_file(path: &Path) -> Result<Db, PersistenceError> {
     Ok(Db {
         inner: Arc::new(Inner {
             checkpoint: Mutex::new(checkpoint),
+            writer_gate: Arc::new(Semaphore::new(1)),
+            reader_gate: Arc::new(Semaphore::new(1)),
             writer: Mutex::new(writer),
             reader,
             checkpoint_notify: notify,
@@ -258,6 +281,8 @@ fn open_memory() -> Result<Db, PersistenceError> {
     Ok(Db {
         inner: Arc::new(Inner {
             checkpoint: Mutex::new(None),
+            writer_gate: Arc::new(Semaphore::new(1)),
+            reader_gate: Arc::new(Semaphore::new(1)),
             writer: Mutex::new(writer),
             reader: None,
             checkpoint_notify: Arc::new(CheckpointNotify {

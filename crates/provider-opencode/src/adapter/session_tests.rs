@@ -863,3 +863,211 @@ async fn v2_unload_forgets_an_idle_thread_and_keeps_a_busy_one() {
     );
     session.close().await;
 }
+
+/// Events from a session until `done` matches one, or the deadline passes. Returns them as JSON.
+async fn events_until(
+    events: &mut ProviderEventStream,
+    done: impl Fn(&Value) -> bool,
+) -> Vec<Value> {
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, events.next()).await {
+        let value = serde_json::to_value(event.expect("event")).expect("event json");
+        let finished = done(&value);
+        seen.push(value);
+        if finished {
+            break;
+        }
+    }
+    seen
+}
+
+fn of_type<'a>(events: &'a [Value], kind: &str) -> Vec<&'a Value> {
+    events
+        .iter()
+        .filter(|event| event["type"] == kind)
+        .collect()
+}
+
+#[tokio::test]
+async fn v1_text_reasoning_tool_and_todo_emit_node_message_and_plan_records() {
+    let mut script = script(|request| {
+        if request.method == "POST" && request.target.contains("prompt_async") {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "POST" && request.target.contains("/session") {
+            return FakeResponse::json(200, r#"{"id":"ses_1"}"#);
+        }
+        FakeResponse::json(200, "{}")
+    })
+    .await;
+    let session = OpenCodeV1Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        &script.server.url,
+        None,
+        Some("openai/gpt"),
+    )
+    .await
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    await_request(&mut script.server, |request| {
+        request.target.contains("prompt_async")
+    })
+    .await;
+
+    let frames = [
+        json!({"type":"message.updated","properties":{"info":{"id":"msg_u","sessionID":"ses_1","role":"user"}}}),
+        // The user's echoed text is the prompt. It must not become an assistant message.
+        json!({"type":"message.part.updated","properties":{"part":{"id":"p_user","sessionID":"ses_1","messageID":"msg_u","type":"text","text":"hi"}}}),
+        json!({"type":"message.updated","properties":{"info":{"id":"msg_a","sessionID":"ses_1","role":"assistant"}}}),
+        json!({"type":"message.part.updated","properties":{"part":{"id":"p1","sessionID":"ses_1","messageID":"msg_a","type":"text","text":"hel","time":{"start":1760500000000i64}}}}),
+        json!({"type":"message.part.delta","properties":{"sessionID":"ses_1","messageID":"msg_a","partID":"p1","field":"text","delta":"lo"}}),
+        // A delta on another field is not projected.
+        json!({"type":"message.part.delta","properties":{"sessionID":"ses_1","messageID":"msg_a","partID":"p1","field":"other","delta":"!"}}),
+        json!({"type":"message.part.updated","properties":{"part":{"id":"r1","sessionID":"ses_1","messageID":"msg_a","type":"reasoning","text":"thinking","time":{"start":1760500000000i64,"end":1760500000500i64}}}}),
+        json!({"type":"message.part.updated","properties":{"part":{"id":"t1","sessionID":"ses_1","messageID":"msg_a","type":"tool","callID":"c1","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"output":"x","title":"ls","time":{"start":1760500000000i64,"end":1760500001000i64}}}}}),
+        json!({"type":"todo.updated","properties":{"sessionID":"ses_1","todos":[{"content":"a","status":"completed"},{"content":"b","status":"in_progress"}]}}),
+        json!({"type":"message.updated","properties":{"info":{"id":"msg_a","sessionID":"ses_1","role":"assistant","time":{"created":1760500000000i64,"completed":1760500002000i64}}}}),
+    ];
+    for frame in frames {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    // The item is the last of the three emissions for p1, after its node and message.
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["nodeId"] == json!(derive_node("p1"))
+            && value["turn_item"]["status"] == "completed"
+    })
+    .await;
+
+    let p1_node = derive_node("p1");
+    let p1_nodes: Vec<&Value> = of_type(&seen, "node.updated")
+        .into_iter()
+        .filter(|event| event["node"]["id"] == json!(p1_node))
+        .collect();
+    let statuses: Vec<&str> = p1_nodes
+        .iter()
+        .map(|event| event["node"]["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(statuses, ["running", "running", "completed"], "{seen:#?}");
+    assert!(
+        p1_nodes
+            .iter()
+            .all(|event| event["node"]["kind"] == "assistant_message")
+    );
+    assert!(
+        p1_nodes
+            .iter()
+            .all(|event| event["node"]["countsForRun"] == false)
+    );
+    assert_eq!(p1_nodes[0]["node"]["parentNodeId"], json!(derive_root()));
+
+    let messages: Vec<&Value> = of_type(&seen, "message.updated")
+        .into_iter()
+        .filter(|event| event["message"]["id"] == json!(derive_message("p1")))
+        .collect();
+    let texts: Vec<&str> = messages
+        .iter()
+        .map(|event| event["message"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts, ["hel", "hello", "hello"], "{seen:#?}");
+    assert_eq!(messages.last().unwrap()["message"]["streaming"], false);
+    assert_eq!(messages[0]["message"]["role"], "assistant");
+    assert_eq!(messages[0]["message"]["createdBy"], "agent");
+    assert_eq!(messages[0]["message"]["creationSource"], "provider");
+    assert!(
+        of_type(&seen, "message.updated")
+            .iter()
+            .all(
+                |event| event["message"]["id"] != json!(derive_message("p_user"))
+                    && event["message"]["id"] != json!(derive_message("r1"))
+            ),
+        "user echo and reasoning must not become messages"
+    );
+
+    let p1_items: Vec<&Value> = of_type(&seen, "turn_item.updated")
+        .into_iter()
+        .filter(|event| event["turn_item"]["nodeId"] == json!(p1_node))
+        .collect();
+    assert_eq!(p1_items.len(), 3, "{seen:#?}");
+    let ordinals: Vec<&Value> = p1_items
+        .iter()
+        .map(|event| &event["turn_item"]["ordinal"])
+        .collect();
+    assert!(
+        ordinals.windows(2).all(|pair| pair[0] == pair[1]),
+        "ordinal renumbered: {ordinals:?}"
+    );
+
+    let reasoning = of_type(&seen, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["id"] == json!(derive_node("r1")))
+        .expect("reasoning node");
+    assert_eq!(reasoning["node"]["kind"], "reasoning");
+    assert_eq!(reasoning["node"]["status"], "completed");
+
+    let tool = of_type(&seen, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["id"] == json!(derive_node("t1")))
+        .expect("tool node");
+    assert_eq!(tool["node"]["kind"], "tool_call");
+    assert_eq!(tool["node"]["status"], "completed");
+
+    let todo_node = of_type(&seen, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["kind"] == "todo_list")
+        .expect("todo node");
+    assert_eq!(todo_node["node"]["status"], "running");
+    let plan = of_type(&seen, "plan.updated")
+        .into_iter()
+        .find(|event| event["plan"]["kind"] == "todo_list")
+        .expect("plan");
+    assert_eq!(plan["plan"]["status"], "active");
+    assert_eq!(plan["plan"]["nodeId"], todo_node["node"]["id"]);
+    let steps = plan["plan"]["steps"].as_array().unwrap();
+    assert_eq!(steps[0]["status"], "completed");
+    assert_eq!(steps[1]["status"], "running");
+    assert_eq!(steps[1]["text"], "b");
+    let todo_item = of_type(&seen, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["type"] == "todo_list")
+        .expect("todo item");
+    assert_eq!(todo_item["turn_item"]["planId"], plan["plan"]["id"]);
+    session.close().await;
+}
+
+fn derive_node(native: &str) -> String {
+    turin_provider_core::id_allocator::derive::node_from_provider_item(
+        &crate::adapter::logic::opencode_driver(),
+        native,
+    )
+    .as_str()
+    .to_owned()
+}
+
+fn derive_message(native: &str) -> String {
+    turin_provider_core::id_allocator::derive::message_from_provider_item(
+        &crate::adapter::logic::opencode_driver(),
+        native,
+    )
+    .as_str()
+    .to_owned()
+}
+
+fn derive_root() -> String {
+    "node_1".to_owned()
+}

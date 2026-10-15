@@ -7,6 +7,7 @@
 mod api;
 mod driver;
 mod logic;
+mod records;
 mod v1;
 mod v2;
 

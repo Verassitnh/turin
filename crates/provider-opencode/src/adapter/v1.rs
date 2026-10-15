@@ -18,10 +18,11 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use turin_contracts::{
-    PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId, UtcDateTime,
+    PlanId, PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId, UtcDateTime,
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2ConversationMessage,
         OrchestrationV2ConversationMessageRole, OrchestrationV2CreationSource,
+        OrchestrationV2ExecutionNodeKind, OrchestrationV2ExecutionNodeStatus,
         OrchestrationV2ProviderFailureClass, OrchestrationV2ProviderSession,
         OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
         OrchestrationV2ProviderThreadDisposition, OrchestrationV2ProviderThreadStatus,
@@ -29,7 +30,7 @@ use turin_contracts::{
         OrchestrationV2ResponseCapability, OrchestrationV2RuntimeRequest,
         OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
         OrchestrationV2Subagent, OrchestrationV2SubagentOrigin, OrchestrationV2SubagentStatus,
-        OrchestrationV2TurnItemStatus,
+        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
 };
@@ -37,6 +38,10 @@ use turin_provider_core::id_allocator::{IdAllocator, derive};
 
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
+use crate::adapter::records::{
+    NodeOf, NodeTiming, assistant_message, epoch_ms_or, execution_node, todo_native_id, todo_plan,
+    todo_steps, todos_complete,
+};
 use crate::events::V1Event;
 use crate::v1_client::{PermissionReply, QuestionReply, V1Client};
 
@@ -58,8 +63,23 @@ struct V1Turn {
     interrupted: bool,
     finalized: bool,
     usage: UsageAccum,
-    next_ordinal: u64,
-    texts: HashMap<String, String>,
+    /// Ordinals are per native item, assigned on first sight, as upstream's `itemOrdinal`.
+    item_ordinals: HashMap<String, u64>,
+    next_item_ordinal: u64,
+    plan_id: Option<PlanId>,
+    parts: HashMap<String, PartRecord>,
+}
+
+/// A text or reasoning part, kept as upstream's `ActiveOpenCodeTurn.parts` keeps it, so a
+/// delta or the completion of its message can re-project it.
+#[derive(Clone)]
+struct PartRecord {
+    message_id: String,
+    reasoning: bool,
+    text: String,
+    ignored: bool,
+    start: Option<i64>,
+    end: Option<i64>,
 }
 
 struct V1Thread {
@@ -67,6 +87,8 @@ struct V1Thread {
     active: Option<V1Turn>,
     turns: Vec<OrchestrationV2ProviderTurn>,
     requests: Vec<OrchestrationV2RuntimeRequest>,
+    /// `messageRoles`: the role each message reported, so a user's echoed text is not an answer.
+    message_roles: HashMap<String, String>,
 }
 
 struct Pending {
@@ -372,7 +394,16 @@ impl OpenCodeV1Session {
                 let session_id = str_field(&info, "sessionID");
                 let role = info.get("role").and_then(Value::as_str);
                 let message_id = str_field(&info, "id");
-                if let (Some(session_id), Some("user"), Some(_)) = (session_id, role, message_id)
+                if let (Some(session), Some(message), Some(role)) =
+                    (session_id.as_ref(), message_id.as_ref(), role)
+                    && let Some(thread) = guard.threads.get_mut(session)
+                {
+                    thread
+                        .message_roles
+                        .insert(message.clone(), role.to_owned());
+                }
+                if let (Some(session_id), Some("user"), Some(_)) =
+                    (session_id, role, message_id.as_ref())
                     && let Some(thread) = guard.threads.get_mut(&session_id)
                     && let Some(turn) = thread.active.as_mut()
                 {
@@ -395,11 +426,29 @@ impl OpenCodeV1Session {
                             &mut turn.admission,
                             OpenCodeAdmissionSignal::AssistantCompleted,
                         );
+                        // The message is done, so its text and reasoning parts settle as completed.
+                        if let Some(message) = message_id.as_deref() {
+                            let owned: Vec<String> = turn
+                                .parts
+                                .iter()
+                                .filter(|(_, record)| record.message_id == message)
+                                .map(|(id, _)| id.clone())
+                                .collect();
+                            for part_id in owned {
+                                self.emit_text_part(turn, &part_id, true);
+                            }
+                        }
                     }
                 }
             }
-            "message.part.updated" | "message.part.delta" => {
-                self.on_part(&mut guard, &event.event_type, &props);
+            "message.part.updated" => {
+                self.on_part(&mut guard, &props);
+            }
+            "message.part.delta" => {
+                self.on_part_delta(&mut guard, &props);
+            }
+            "todo.updated" => {
+                self.on_todo(&mut guard, &props);
             }
             "permission.asked" | "question.asked" => {
                 self.on_request(&mut guard, &event.event_type, &props);
@@ -525,12 +574,8 @@ impl OpenCodeV1Session {
         });
     }
 
-    fn on_part(&self, guard: &mut V1Inner, event_type: &str, props: &Value) {
-        let part = if event_type == "message.part.delta" {
-            props.clone()
-        } else {
-            props.get("part").cloned().unwrap_or(Value::Null)
-        };
+    fn on_part(&self, guard: &mut V1Inner, props: &Value) {
+        let part = props.get("part").cloned().unwrap_or(Value::Null);
         let session_id = str_field(&part, "sessionID").or_else(|| str_field(props, "sessionID"));
         let Some(session_id) = session_id else { return };
         let Some(thread) = guard.threads.get_mut(&session_id) else {
@@ -539,101 +584,404 @@ impl OpenCodeV1Session {
         let Some(turn) = thread.active.as_mut() else {
             return;
         };
+        if turn.finalized {
+            return;
+        }
         let part_type = part.get("type").and_then(Value::as_str).unwrap_or("");
         let part_id = str_field(&part, "id")
             .or_else(|| str_field(props, "partID"))
             .unwrap_or_else(|| "part".to_owned());
+        let message_id = str_field(&part, "messageID").unwrap_or_default();
         if part_type == "step-finish" || part.get("tokens").is_some() {
             if let Some(tokens) = parse_step_tokens(&part) {
                 turn.usage.add_step(&part_id, tokens);
             }
             return;
         }
-        if event_type == "message.part.delta" {
-            let delta = part.get("delta").and_then(Value::as_str).unwrap_or("");
-            let field = part.get("field").and_then(Value::as_str).unwrap_or("text");
-            if field == "text" || field == "reasoning" {
-                let text = {
-                    let slot = turn.texts.entry(part_id.clone()).or_default();
-                    slot.push_str(delta);
-                    slot.clone()
-                };
-                let item = text_item(
-                    turn,
-                    &self.driver,
-                    &part_id,
-                    &text,
-                    field == "reasoning",
-                    true,
-                );
-                self.emit(ProviderAdapterV2Event::TurnItemUpdated {
-                    driver: self.driver.clone(),
-                    turn_item: item,
-                });
-            }
+        // The user's own text is the prompt, which the turn already carries.
+        if part_type == "text"
+            && thread.message_roles.get(&message_id).map(String::as_str) == Some("user")
+        {
             return;
         }
         if part_type == "text" || part_type == "reasoning" {
-            let text = part
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned();
-            turn.texts.insert(part_id.clone(), text.clone());
-            let item = text_item(
-                turn,
-                &self.driver,
-                &part_id,
-                &text,
-                part_type == "reasoning",
-                false,
-            );
-            self.emit(ProviderAdapterV2Event::TurnItemUpdated {
-                driver: self.driver.clone(),
-                turn_item: item,
-            });
+            let record = PartRecord {
+                message_id,
+                reasoning: part_type == "reasoning",
+                text: part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                ignored: part.get("ignored").and_then(Value::as_bool) == Some(true)
+                    || part.get("synthetic").and_then(Value::as_bool) == Some(true),
+                start: part.pointer("/time/start").and_then(Value::as_i64),
+                end: part.pointer("/time/end").and_then(Value::as_i64),
+            };
+            turn.parts.insert(part_id.clone(), record);
+            self.emit_text_part(turn, &part_id, false);
             return;
         }
         if part_type == "tool" {
-            let name = part
-                .get("tool")
-                .and_then(Value::as_str)
-                .unwrap_or("tool")
-                .to_owned();
-            let state = part.get("state").cloned().unwrap_or(Value::Null);
-            let status_name = state
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("running");
-            let status = match status_name {
-                "pending" => OrchestrationV2TurnItemStatus::Pending,
-                "completed" => OrchestrationV2TurnItemStatus::Completed,
-                "error" => OrchestrationV2TurnItemStatus::Failed,
-                _ => OrchestrationV2TurnItemStatus::Running,
-            };
-            let input = state.get("input").cloned().unwrap_or(json!({}));
-            let output = state
-                .get("output")
-                .or_else(|| state.get("error"))
-                .and_then(Value::as_str);
-            let call_id = str_field(&part, "callID").unwrap_or(part_id);
-            if name == "task" {
-                turn.usage.has_subagents = true;
-                let child = state
-                    .pointer("/metadata/sessionId")
-                    .or_else(|| state.pointer("/metadata/sessionID"))
-                    .and_then(Value::as_str);
-                if let Some(child) = child {
-                    guard.children.insert(child.to_owned(), session_id);
-                }
-            }
-            let base = tool_base(turn, &self.driver, &call_id, status);
-            let item = open_code_tool_turn_item(base, &name, &input, output, state.get("metadata"));
-            self.emit(ProviderAdapterV2Event::TurnItemUpdated {
-                driver: self.driver.clone(),
-                turn_item: item,
-            });
+            self.on_tool_part(turn, &mut guard.children, &session_id, &part, &part_id);
         }
+    }
+
+    /// `message.part.delta`. Only the `text` field is projected, as upstream's
+    /// `handlePartDelta` does, and only for a part whose full text was seen first.
+    fn on_part_delta(&self, guard: &mut V1Inner, props: &Value) {
+        if str_field(props, "field").as_deref() != Some("text") {
+            return;
+        }
+        let Some(session_id) = str_field(props, "sessionID") else {
+            return;
+        };
+        let Some(part_id) = str_field(props, "partID") else {
+            return;
+        };
+        let delta = props.get("delta").and_then(Value::as_str).unwrap_or("");
+        let Some(thread) = guard.threads.get_mut(&session_id) else {
+            return;
+        };
+        let Some(turn) = thread.active.as_mut() else {
+            return;
+        };
+        match turn.parts.get_mut(&part_id) {
+            Some(record) => record.text.push_str(delta),
+            None => return,
+        }
+        self.emit_text_part(turn, &part_id, false);
+    }
+
+    /// `emitTextPart`: the node, then the assistant message for text, then the item.
+    fn emit_text_part(&self, turn: &mut V1Turn, part_id: &str, force_completed: bool) {
+        let Some(record) = turn.parts.get(part_id).cloned() else {
+            return;
+        };
+        if record.ignored || record.text.is_empty() {
+            return;
+        }
+        let now = UtcDateTime::now();
+        let completed = force_completed || record.end.is_some();
+        let started_at = epoch_ms_or(record.start, now);
+        let completed_at = completed.then(|| epoch_ms_or(record.end, now));
+        let thread_id = turn.thread_id.clone();
+        let root_node_id = turn.provider_turn.node_id.clone();
+        let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
+        let provider_turn_id = turn.provider_turn.id.clone();
+        let of = NodeOf {
+            thread_id: &thread_id,
+            root_node_id: &root_node_id,
+            provider_thread_id: &provider_thread_id,
+            provider_turn_id: &provider_turn_id,
+            native_item_id: part_id,
+            weak_ref: false,
+        };
+        let kind = if record.reasoning {
+            OrchestrationV2ExecutionNodeKind::Reasoning
+        } else {
+            OrchestrationV2ExecutionNodeKind::AssistantMessage
+        };
+        let node = execution_node(
+            &self.driver,
+            &of,
+            NodeTiming {
+                kind,
+                status: if completed {
+                    OrchestrationV2ExecutionNodeStatus::Completed
+                } else {
+                    OrchestrationV2ExecutionNodeStatus::Running
+                },
+                started_at,
+                completed_at,
+            },
+        );
+        let node_id = node.id.clone();
+        self.emit(ProviderAdapterV2Event::NodeUpdated {
+            driver: self.driver.clone(),
+            node,
+        });
+        let ordinal = item_ordinal(turn, part_id);
+        let status = if completed {
+            OrchestrationV2TurnItemStatus::Completed
+        } else {
+            OrchestrationV2TurnItemStatus::Running
+        };
+        let item = if record.reasoning {
+            OrchestrationV2TurnItem::Reasoning {
+                tool_non_execution_kind: None,
+                tool_surface: None,
+                tool_icon: None,
+                tool_source: None,
+                id: derive::turn_item_from_provider_item(&self.driver, part_id),
+                thread_id: thread_id.clone(),
+                run_id: None,
+                node_id: Some(node_id),
+                provider_thread_id: Some(provider_thread_id),
+                provider_turn_id: Some(provider_turn_id),
+                native_item_ref: Some(native_ref(part_id, false)),
+                parent_item_id: None,
+                ordinal,
+                status,
+                title: None,
+                started_at: Some(started_at),
+                completed_at,
+                updated_at: now,
+                text: record.text.clone(),
+                streaming: !completed,
+            }
+        } else {
+            let message = assistant_message(
+                &self.driver,
+                &of,
+                &node_id,
+                &record.text,
+                !completed,
+                started_at,
+                now,
+            );
+            let message_id = message.id.clone();
+            self.emit(ProviderAdapterV2Event::MessageUpdated {
+                driver: self.driver.clone(),
+                message,
+            });
+            OrchestrationV2TurnItem::AssistantMessage {
+                tool_non_execution_kind: None,
+                tool_surface: None,
+                tool_icon: None,
+                tool_source: None,
+                id: derive::turn_item_from_provider_item(&self.driver, part_id),
+                thread_id: thread_id.clone(),
+                run_id: None,
+                node_id: Some(node_id),
+                provider_thread_id: Some(provider_thread_id),
+                provider_turn_id: Some(provider_turn_id),
+                native_item_ref: Some(native_ref(part_id, false)),
+                parent_item_id: None,
+                ordinal,
+                status,
+                title: None,
+                started_at: Some(started_at),
+                completed_at,
+                updated_at: now,
+                message_id,
+                text: record.text.clone(),
+                attachments: None,
+                streaming: !completed,
+            }
+        };
+        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: self.driver.clone(),
+            turn_item: item,
+        });
+    }
+
+    /// `emitToolPart` for every tool except `question`, whose item is the respondable
+    /// runtime request. `task` keeps its existing child-session bookkeeping here.
+    fn on_tool_part(
+        &self,
+        turn: &mut V1Turn,
+        children: &mut HashMap<String, String>,
+        session_id: &str,
+        part: &Value,
+        part_id: &str,
+    ) {
+        let name = part
+            .get("tool")
+            .and_then(Value::as_str)
+            .unwrap_or("tool")
+            .to_owned();
+        if name.eq_ignore_ascii_case("question") {
+            return;
+        }
+        let state = part.get("state").cloned().unwrap_or(Value::Null);
+        let status_name = state
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("running");
+        let status = match status_name {
+            "pending" => OrchestrationV2TurnItemStatus::Pending,
+            "completed" => OrchestrationV2TurnItemStatus::Completed,
+            "error" => OrchestrationV2TurnItemStatus::Failed,
+            _ => OrchestrationV2TurnItemStatus::Running,
+        };
+        let node_status = match status_name {
+            "pending" => OrchestrationV2ExecutionNodeStatus::Pending,
+            "completed" => OrchestrationV2ExecutionNodeStatus::Completed,
+            "error" => OrchestrationV2ExecutionNodeStatus::Failed,
+            _ => OrchestrationV2ExecutionNodeStatus::Running,
+        };
+        let input = state.get("input").cloned().unwrap_or(json!({}));
+        let output = state
+            .get("output")
+            .or_else(|| state.get("error"))
+            .and_then(Value::as_str);
+        if name == "task" {
+            turn.usage.has_subagents = true;
+            let child = state
+                .pointer("/metadata/sessionId")
+                .or_else(|| state.pointer("/metadata/sessionID"))
+                .and_then(Value::as_str);
+            if let Some(child) = child {
+                children.insert(child.to_owned(), session_id.to_owned());
+            }
+        }
+        let now = UtcDateTime::now();
+        let started_at = if status_name == "pending" {
+            now
+        } else {
+            epoch_ms_or(state.pointer("/time/start").and_then(Value::as_i64), now)
+        };
+        let completed_at = matches!(status_name, "completed" | "error")
+            .then(|| epoch_ms_or(state.pointer("/time/end").and_then(Value::as_i64), now));
+        let thread_id = turn.thread_id.clone();
+        let root_node_id = turn.provider_turn.node_id.clone();
+        let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
+        let provider_turn_id = turn.provider_turn.id.clone();
+        let of = NodeOf {
+            thread_id: &thread_id,
+            root_node_id: &root_node_id,
+            provider_thread_id: &provider_thread_id,
+            provider_turn_id: &provider_turn_id,
+            native_item_id: part_id,
+            weak_ref: false,
+        };
+        let node = execution_node(
+            &self.driver,
+            &of,
+            NodeTiming {
+                kind: OrchestrationV2ExecutionNodeKind::ToolCall,
+                status: node_status,
+                started_at,
+                completed_at,
+            },
+        );
+        self.emit(ProviderAdapterV2Event::NodeUpdated {
+            driver: self.driver.clone(),
+            node,
+        });
+        let base = tool_base(
+            turn,
+            &self.driver,
+            part_id,
+            status,
+            started_at,
+            completed_at,
+        );
+        let item = open_code_tool_turn_item(base, &name, &input, output, state.get("metadata"));
+        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: self.driver.clone(),
+            turn_item: item,
+        });
+    }
+
+    /// `emitTodo`: a `todo.updated` list becomes a todo node, its plan and a todo item.
+    fn on_todo(&self, guard: &mut V1Inner, props: &Value) {
+        let Some(session_id) = str_field(props, "sessionID") else {
+            return;
+        };
+        let Some(thread) = guard.threads.get_mut(&session_id) else {
+            return;
+        };
+        let Some(turn) = thread.active.as_mut() else {
+            return;
+        };
+        let todos: Vec<(String, String)> = props
+            .get("todos")
+            .and_then(Value::as_array)
+            .map(|todos| {
+                todos
+                    .iter()
+                    .map(|todo| {
+                        (
+                            todo.get("content")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned(),
+                            todo.get("status")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let now = UtcDateTime::now();
+        let plan_id = turn
+            .plan_id
+            .get_or_insert_with(|| IdAllocator.plan(&turn.thread_id, None, &self.driver))
+            .clone();
+        let native = todo_native_id(&session_id, turn.provider_turn.id.as_str());
+        let steps = todo_steps(&native, &todos);
+        let completed = todos_complete(&steps);
+        let thread_id = turn.thread_id.clone();
+        let root_node_id = turn.provider_turn.node_id.clone();
+        let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
+        let provider_turn_id = turn.provider_turn.id.clone();
+        let started_at = turn.provider_turn.started_at.unwrap_or(now);
+        let of = NodeOf {
+            thread_id: &thread_id,
+            root_node_id: &root_node_id,
+            provider_thread_id: &provider_thread_id,
+            provider_turn_id: &provider_turn_id,
+            native_item_id: &native,
+            weak_ref: true,
+        };
+        let node = execution_node(
+            &self.driver,
+            &of,
+            NodeTiming {
+                kind: OrchestrationV2ExecutionNodeKind::TodoList,
+                status: if completed {
+                    OrchestrationV2ExecutionNodeStatus::Completed
+                } else {
+                    OrchestrationV2ExecutionNodeStatus::Running
+                },
+                started_at,
+                completed_at: completed.then_some(now),
+            },
+        );
+        let node_id = node.id.clone();
+        self.emit(ProviderAdapterV2Event::NodeUpdated {
+            driver: self.driver.clone(),
+            node,
+        });
+        self.emit(ProviderAdapterV2Event::PlanUpdated {
+            driver: self.driver.clone(),
+            plan: todo_plan(&plan_id, &thread_id, &node_id, completed, steps.clone()),
+        });
+        let ordinal = item_ordinal(turn, &native);
+        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: self.driver.clone(),
+            turn_item: OrchestrationV2TurnItem::TodoList {
+                tool_non_execution_kind: None,
+                tool_surface: None,
+                tool_icon: None,
+                tool_source: None,
+                id: derive::turn_item_from_provider_item(&self.driver, &native),
+                thread_id,
+                run_id: None,
+                node_id: Some(node_id),
+                provider_thread_id: Some(provider_thread_id),
+                provider_turn_id: Some(provider_turn_id),
+                native_item_ref: Some(native_ref(&native, true)),
+                parent_item_id: None,
+                ordinal,
+                status: if completed {
+                    OrchestrationV2TurnItemStatus::Completed
+                } else {
+                    OrchestrationV2TurnItemStatus::Running
+                },
+                title: Some("Todo list".to_owned()),
+                started_at: Some(started_at),
+                completed_at: completed.then_some(now),
+                updated_at: now,
+                plan_id,
+                steps,
+                explanation: None,
+            },
+        });
     }
 
     fn on_request(&self, guard: &mut V1Inner, event_type: &str, props: &Value) {
@@ -848,6 +1196,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
                 active: None,
                 turns: Vec::new(),
                 requests: Vec::new(),
+                message_roles: HashMap::new(),
             },
         );
         self.emit(ProviderAdapterV2Event::ProviderThreadUpdated {
@@ -889,6 +1238,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
                 active: None,
                 turns: Vec::new(),
                 requests: Vec::new(),
+                message_roles: HashMap::new(),
             },
         );
         Ok(thread)
@@ -968,8 +1318,10 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
                 interrupted: false,
                 finalized: false,
                 usage: UsageAccum::new(),
-                next_ordinal: input.provider_turn_ordinal.max(0) as u64 * 100 + 1,
-                texts: HashMap::new(),
+                next_item_ordinal: input.provider_turn_ordinal.max(0) as u64 * 100 + 1,
+                item_ordinals: HashMap::new(),
+                plan_id: None,
+                parts: HashMap::new(),
             });
         }
         self.emit(ProviderAdapterV2Event::ProviderTurnUpdated {
@@ -1275,6 +1627,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
                     active: None,
                     turns: Vec::new(),
                     requests: Vec::new(),
+                    message_roles: HashMap::new(),
                 },
             );
         }
@@ -1330,6 +1683,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
                 active: None,
                 turns: Vec::new(),
                 requests: Vec::new(),
+                message_roles: HashMap::new(),
             },
         );
         Ok(thread)
@@ -1460,14 +1814,26 @@ fn make_thread(
     thread
 }
 
+/// `itemOrdinal`: an item keeps the ordinal of its first emission, so updates do not renumber it.
+fn item_ordinal(turn: &mut V1Turn, native_id: &str) -> u64 {
+    if let Some(ordinal) = turn.item_ordinals.get(native_id) {
+        return *ordinal;
+    }
+    let ordinal = turn.next_item_ordinal;
+    turn.next_item_ordinal += 1;
+    turn.item_ordinals.insert(native_id.to_owned(), ordinal);
+    ordinal
+}
+
 fn tool_base(
     turn: &mut V1Turn,
     driver: &ProviderDriverKind,
     native_id: &str,
     status: OrchestrationV2TurnItemStatus,
+    started_at: UtcDateTime,
+    completed_at: Option<UtcDateTime>,
 ) -> ToolItemBase {
-    let ordinal = turn.next_ordinal;
-    turn.next_ordinal += 1;
+    let ordinal = item_ordinal(turn, native_id);
     ToolItemBase {
         id: derive::turn_item_from_provider_item(driver, native_id),
         thread_id: turn.thread_id.clone(),
@@ -1479,76 +1845,9 @@ fn tool_base(
         ordinal,
         status,
         title: None,
-        started_at: Some(UtcDateTime::now()),
-        completed_at: matches!(
-            status,
-            OrchestrationV2TurnItemStatus::Completed | OrchestrationV2TurnItemStatus::Failed
-        )
-        .then(UtcDateTime::now),
+        started_at: Some(started_at),
+        completed_at,
         updated_at: UtcDateTime::now(),
-    }
-}
-
-fn text_item(
-    turn: &mut V1Turn,
-    driver: &ProviderDriverKind,
-    part_id: &str,
-    text: &str,
-    reasoning: bool,
-    streaming: bool,
-) -> turin_contracts::orchestration_v2::OrchestrationV2TurnItem {
-    let ordinal = turn.next_ordinal;
-    turn.next_ordinal += 1;
-    let now = UtcDateTime::now();
-    let id = derive::turn_item_from_provider_item(driver, part_id);
-    if reasoning {
-        turin_contracts::orchestration_v2::OrchestrationV2TurnItem::Reasoning {
-            tool_non_execution_kind: None,
-            tool_surface: None,
-            tool_icon: None,
-            tool_source: None,
-            id,
-            thread_id: turn.thread_id.clone(),
-            run_id: None,
-            node_id: None,
-            provider_thread_id: Some(turn.provider_turn.provider_thread_id.clone()),
-            provider_turn_id: Some(turn.provider_turn.id.clone()),
-            native_item_ref: Some(native_ref(part_id, false)),
-            parent_item_id: None,
-            ordinal,
-            status: OrchestrationV2TurnItemStatus::Running,
-            title: None,
-            started_at: Some(now),
-            completed_at: None,
-            updated_at: now,
-            text: text.to_owned(),
-            streaming,
-        }
-    } else {
-        turin_contracts::orchestration_v2::OrchestrationV2TurnItem::AssistantMessage {
-            tool_non_execution_kind: None,
-            tool_surface: None,
-            tool_icon: None,
-            tool_source: None,
-            id,
-            thread_id: turn.thread_id.clone(),
-            run_id: None,
-            node_id: None,
-            provider_thread_id: Some(turn.provider_turn.provider_thread_id.clone()),
-            provider_turn_id: Some(turn.provider_turn.id.clone()),
-            native_item_ref: Some(native_ref(part_id, false)),
-            parent_item_id: None,
-            ordinal,
-            status: OrchestrationV2TurnItemStatus::Running,
-            title: None,
-            started_at: Some(now),
-            completed_at: None,
-            updated_at: now,
-            message_id: derive::message_from_provider_item(driver, part_id),
-            text: text.to_owned(),
-            attachments: None,
-            streaming,
-        }
     }
 }
 

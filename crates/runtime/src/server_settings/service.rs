@@ -1,4 +1,8 @@
-//! The file, secret and watch side of upstream `ServerSettingsService`
+//! The file, secret and watch side of upstream `ServerSettingsService`.
+// `ServerSettingsError` is the contracts wire type (152 bytes). Boxing it here
+// would make the service's errors differ from the ones the clients decode.
+#![allow(clippy::result_large_err)]
+
 //! (apps/server/src/serverSettings.ts). Pure pipeline steps live in the parent
 //! module and [`legacy`]. This module owns the settings cache, the write
 //! lock, secret persist and rollback, the sparse file write, and the change
@@ -316,18 +320,17 @@ impl ServerSettingsService {
         );
         // A symlinked settings file is written in its destination's directory,
         // which a watch on the link's directory never sees. Watch the target too.
-        if let Ok(target) = resolve_symlink_target(&self.settings_path) {
-            if target
+        if let Ok(target) = resolve_symlink_target(&self.settings_path)
+            && target
                 != std::fs::canonicalize(&self.settings_path)
                     .unwrap_or_else(|_| self.settings_path.clone())
-                && target != self.settings_path
-            {
-                if let Some(parent) = target.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if let Ok(watcher) = watch_file(&target, tx.clone()) {
-                    watchers.push(watcher);
-                }
+            && target != self.settings_path
+        {
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(watcher) = watch_file(&target, tx.clone()) {
+                watchers.push(watcher);
             }
         }
 
@@ -383,16 +386,16 @@ impl ServerSettingsService {
         patch: Option<&ServerSettingsPatch>,
     ) -> Result<ServerSettings, ServerSettingsError> {
         self.update_and_persist(|current| {
-            if let ProviderInstanceMutation::Create { instance_id, .. } = mutation {
-                if current.provider_instances.contains_key(instance_id) {
-                    return Err(settings_error(
-                        &self.settings_path,
-                        ServerSettingsOperation::CreateProviderInstance,
-                        Some(instance_id.as_str()),
-                        None,
-                        "provider instance already exists",
-                    ));
-                }
+            if let ProviderInstanceMutation::Create { instance_id, .. } = mutation
+                && current.provider_instances.contains_key(instance_id)
+            {
+                return Err(settings_error(
+                    &self.settings_path,
+                    ServerSettingsOperation::CreateProviderInstance,
+                    Some(instance_id.as_str()),
+                    None,
+                    "provider instance already exists",
+                ));
             }
             let patched = match patch {
                 Some(patch) => apply_server_settings_patch(&current, patch).map_err(|error| {

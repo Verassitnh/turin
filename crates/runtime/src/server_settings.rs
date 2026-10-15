@@ -50,10 +50,10 @@ pub fn decode_settings_json(raw: &str) -> Result<ServerSettings, String> {
     }
     if let Some(Value::Object(overrides)) = value.get_mut("projectSettingsOverrides") {
         for entry in overrides.values_mut() {
-            if let Some(Value::Object(entry)) = Some(entry) {
-                if let Some(mode) = entry.get_mut("responseStreamingMode") {
-                    migrate_response_streaming_mode(mode);
-                }
+            if let Some(Value::Object(entry)) = Some(entry)
+                && let Some(mode) = entry.get_mut("responseStreamingMode")
+            {
+                migrate_response_streaming_mode(mode);
             }
         }
     }
@@ -69,10 +69,10 @@ pub fn decode_legacy_file(raw: &str) -> Result<Object, String> {
         return Err("expected a JSON object".to_owned());
     };
     for key in ["providers", "bitbucket", "github"] {
-        if let Some(value) = object.get(key) {
-            if !value.is_object() {
-                return Err(format!("`{key}` must be an object"));
-            }
+        if let Some(value) = object.get(key)
+            && !value.is_object()
+        {
+            return Err(format!("`{key}` must be an object"));
         }
     }
     Ok(object)

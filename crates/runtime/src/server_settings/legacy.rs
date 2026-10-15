@@ -81,37 +81,37 @@ pub fn migrate_legacy_source_control_settings(
         .unwrap_or_default();
     let mut moves = Vec::new();
 
-    if let Some(bitbucket) = &legacy.bitbucket {
-        if !hosts.contains_key("bitbucket") {
-            hosts.insert("bitbucket".into(), Value::Object(bitbucket.clone()));
-            for (field, from) in LEGACY_BITBUCKET_SECRET_NAMES {
-                if bitbucket.get(field).and_then(Value::as_str) != Some(SECRET_REDACTED) {
-                    continue;
-                }
-                moves.push(SecretMove {
-                    from: from.to_owned(),
-                    to: source_control_host_secret_name("bitbucket", field, None),
-                });
+    if let Some(bitbucket) = &legacy.bitbucket
+        && !hosts.contains_key("bitbucket")
+    {
+        hosts.insert("bitbucket".into(), Value::Object(bitbucket.clone()));
+        for (field, from) in LEGACY_BITBUCKET_SECRET_NAMES {
+            if bitbucket.get(field).and_then(Value::as_str) != Some(SECRET_REDACTED) {
+                continue;
             }
+            moves.push(SecretMove {
+                from: from.to_owned(),
+                to: source_control_host_secret_name("bitbucket", field, None),
+            });
         }
     }
 
-    if let Some(github) = &legacy.github {
-        if !hosts.contains_key("github") {
-            hosts.insert("github".into(), Value::Object(github.clone()));
-            let tokens = github.get("tokens").cloned().unwrap_or(Value::Null);
-            for (server_host, value) in read_secret_field_values(&tokens) {
-                let Some(server_host) = server_host else {
-                    continue;
-                };
-                if value != SECRET_REDACTED {
-                    continue;
-                }
-                moves.push(SecretMove {
-                    from: legacy_github_token_secret_name(&server_host),
-                    to: source_control_host_secret_name("github", "tokens", Some(&server_host)),
-                });
+    if let Some(github) = &legacy.github
+        && !hosts.contains_key("github")
+    {
+        hosts.insert("github".into(), Value::Object(github.clone()));
+        let tokens = github.get("tokens").cloned().unwrap_or(Value::Null);
+        for (server_host, value) in read_secret_field_values(&tokens) {
+            let Some(server_host) = server_host else {
+                continue;
+            };
+            if value != SECRET_REDACTED {
+                continue;
             }
+            moves.push(SecretMove {
+                from: legacy_github_token_secret_name(&server_host),
+                to: source_control_host_secret_name("github", "tokens", Some(&server_host)),
+            });
         }
     }
 
@@ -368,15 +368,16 @@ pub fn fold_legacy_project_settings(settings: &mut Value, rows: &[LegacyProjectS
                 json!(true),
             );
         }
-        if let Some(scripts) = decode_project_scripts(&row.scripts) {
-            if !scripts.is_empty() && !reset_scripts.contains(&row.project_id) {
-                set(
-                    &mut entries,
-                    &row.project_id,
-                    "defaultProjectScripts",
-                    serde_json::to_value(scripts).unwrap_or(Value::Null),
-                );
-            }
+        if let Some(scripts) = decode_project_scripts(&row.scripts)
+            && !scripts.is_empty()
+            && !reset_scripts.contains(&row.project_id)
+        {
+            set(
+                &mut entries,
+                &row.project_id,
+                "defaultProjectScripts",
+                serde_json::to_value(scripts).unwrap_or(Value::Null),
+            );
         }
     }
 

@@ -10,7 +10,7 @@ fn a_token_streaming_mode_decodes_as_paragraph_at_both_levels() {
     )
     .unwrap();
     assert_eq!(
-        serde_json::to_value(&settings.response_streaming_mode).unwrap(),
+        serde_json::to_value(settings.response_streaming_mode).unwrap(),
         json!("paragraph")
     );
 }
@@ -233,7 +233,7 @@ mod service {
         let _watcher = service.start().await.unwrap();
         let settings = service.get_settings().await.unwrap();
         assert_eq!(
-            serde_json::to_value(&settings.response_streaming_mode).unwrap(),
+            serde_json::to_value(settings.response_streaming_mode).unwrap(),
             json!("paragraph")
         );
     }

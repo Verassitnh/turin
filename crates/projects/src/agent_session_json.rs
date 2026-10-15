@@ -581,7 +581,7 @@ mod tests {
             for text in [
                 r#"{"a":1,"a":2,"b":"before","b":"after"}"#,
                 r#"{"a":{"x":1},"a":{"y":2},"b":[],"c":{}}"#,
-                r#"{"a":[null,true,false,1,-2.3e4,"😀a\\\"",{},[],[1,2]]}"#,
+                r#"{"a":[null,true,false,1,-2.3e4,"😀\u0061\\\"",{},[],[1,2]]}"#,
                 r#"{"a":"s","a":null,"b":null,"b":"s","c":0,"c":false}"#,
                 r#"{"__proto__":{"polluted":true},"constructor":1,"__proto__":2}"#,
             ] {
@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn decodes_surrogate_pairs_and_replaces_lone_surrogates() {
         assert_eq!(
-            read(r#"{"a":"😀"}"#, 3),
+            read(r#"{"a":"\ud83d\ude00"}"#, 3),
             Some(serde_json::json!({"a": "😀"}))
         );
         assert_eq!(

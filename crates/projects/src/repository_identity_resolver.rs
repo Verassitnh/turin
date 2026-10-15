@@ -18,6 +18,7 @@ use turin_git::process::{
 use turin_git::shared_git::{
     detect_source_control_provider_from_git_remote_url, normalize_git_remote_url,
 };
+use turin_shared::js_string::locale_compare;
 
 use crate::ttl_cache::{Clock, TtlCache, system_clock};
 
@@ -123,10 +124,15 @@ impl RepositoryIdentityResolver {
         let cache_key = match self.repository_roots.get(&cwd.to_owned()) {
             Some(cache_key) => cache_key,
             None => {
+                let epoch = self.repository_roots.epoch();
                 let cache_key = self.lookup_cache_key(cwd).await;
                 let ttl = self.ttl_for(&cache_key);
-                self.repository_roots
-                    .insert(cwd.to_owned(), cache_key.clone(), ttl);
+                self.repository_roots.insert_if_unchanged(
+                    epoch,
+                    cwd.to_owned(),
+                    cache_key.clone(),
+                    ttl,
+                );
                 cache_key
             }
         }?;
@@ -136,9 +142,11 @@ impl RepositoryIdentityResolver {
         match self.identities.get(&cache_key) {
             Some(identity) => identity,
             None => {
+                let epoch = self.identities.epoch();
                 let identity = self.lookup_identity(&cache_key).await;
                 let ttl = self.ttl_for(&identity);
-                self.identities.insert(cache_key, identity.clone(), ttl);
+                self.identities
+                    .insert_if_unchanged(epoch, cache_key, identity.clone(), ttl);
                 identity
             }
         }
@@ -224,10 +232,9 @@ fn pick_primary_remote(remotes: &IndexMap<String, String>) -> Option<(String, St
             return Some((preferred.to_owned(), remote_url.clone()));
         }
     }
-    // Upstream sorts with localeCompare; byte order agrees for ASCII remote names.
     remotes
         .iter()
-        .min_by(|(left, _), (right, _)| left.cmp(right))
+        .min_by(|(left, _), (right, _)| locale_compare(left, right))
         .map(|(name, url)| (name.clone(), url.clone()))
 }
 
@@ -289,6 +296,32 @@ fn build_repository_identity(
 
 #[cfg(test)]
 mod tests {
+    use indexmap::IndexMap;
+
+    use super::pick_primary_remote;
+
+    #[test]
+    fn picks_the_first_remote_in_locale_order_when_no_preferred_name_exists() {
+        // Byte order would pick "Beta"; ICU root collation sorts "alpha" first.
+        let remotes = IndexMap::from([
+            (
+                "Beta".to_owned(),
+                "https://example.test/beta.git".to_owned(),
+            ),
+            (
+                "alpha".to_owned(),
+                "https://example.test/alpha.git".to_owned(),
+            ),
+        ]);
+
+        assert_eq!(
+            pick_primary_remote(&remotes),
+            Some((
+                "alpha".to_owned(),
+                "https://example.test/alpha.git".to_owned()
+            ))
+        );
+    }
     use std::path::Path;
     use std::process::Command;
     use std::sync::Arc;

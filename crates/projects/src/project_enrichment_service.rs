@@ -299,9 +299,10 @@ impl Inner {
         if let Some(identity) = self.identity_cache.get(&key) {
             return identity;
         }
+        let epoch = self.identity_cache.epoch();
         let identity = self.identity_source.resolve(workspace_root).await;
         self.identity_cache
-            .insert(key, identity.clone(), self.success_ttl);
+            .insert_if_unchanged(epoch, key, identity.clone(), self.success_ttl);
         identity
     }
 
@@ -311,6 +312,7 @@ impl Inner {
         if let Some(result) = self.favicon_cache.get(&key) {
             return result;
         }
+        let epoch = self.favicon_cache.epoch();
         let result = self
             .favicon_source
             .resolve_path(workspace_root)
@@ -321,7 +323,8 @@ impl Inner {
         } else {
             self.failure_ttl
         };
-        self.favicon_cache.insert(key, result.clone(), ttl);
+        self.favicon_cache
+            .insert_if_unchanged(epoch, key, result.clone(), ttl);
         result
     }
 
@@ -385,6 +388,7 @@ mod tests {
     use std::future::Future;
     use std::future::pending;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -884,5 +888,73 @@ mod tests {
         assert_eq!(options.failure_ttl, Duration::from_secs(5));
         assert_eq!(options.max_pending, 512);
         assert_eq!(options.concurrency, 4);
+    }
+
+    #[tokio::test]
+    async fn an_invalidation_during_a_lookup_is_not_refilled_by_its_result() {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let identity_source = {
+            let (started, release, calls) = (
+                Arc::clone(&started),
+                Arc::clone(&release),
+                Arc::clone(&calls),
+            );
+            FnIdentity(move |root: String| {
+                let (started, release, calls) = (
+                    Arc::clone(&started),
+                    Arc::clone(&release),
+                    Arc::clone(&calls),
+                );
+                async move {
+                    let call = calls.fetch_add(1, Ordering::SeqCst) as u32 + 1;
+                    if call == 1 {
+                        started.notify_one();
+                        release.notified().await;
+                    }
+                    Some(identity(&root, call))
+                }
+            })
+        };
+        let service = service(
+            identity_source,
+            FnFavicon(ok_favicon),
+            ProjectEnrichmentServiceOptions::default(),
+        );
+        let mut changes = service.subscribe_changes();
+
+        service.request("/moved");
+        started.notified().await;
+        // A move or delete invalidates the root while the first lookup is still running.
+        service.invalidate(["/moved"]);
+        release.notify_one();
+
+        // The identity lane reports once its lookup is stored or dropped.
+        changes.recv().await.expect("identity change");
+        assert_eq!(
+            service.peek("/moved").repository_identity,
+            None,
+            "the pre-invalidation result must not be stored"
+        );
+
+        let mut resolved = None;
+        for _ in 0..100 {
+            service.request("/moved");
+            let available = service.peek("/moved");
+            if available.repository_identity.is_some() {
+                resolved = Some(available);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let resolved = resolved.expect("the next lookup resolves");
+        assert_eq!(
+            resolved
+                .repository_identity
+                .map(|identity| identity.canonical_key.as_str().to_owned()),
+            Some("example.test/v2/moved".to_owned())
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

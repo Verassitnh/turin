@@ -125,7 +125,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T04c | Apply T04b re-QC corrections to protocol docs | `docs/protocols` | Haiku | done (merged, incl. T04d stale-note fixes) |
 | T02c | Persistence: Db drop deadlock + index DDL whitespace (from T02b re-QC) | `crates/persistence` | Haiku | done (merged; test catches bug, 6.5k cycles clean) |
-| T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet → Grok → Haiku | r4 active (Haiku) |
+| T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet → Grok → Haiku | done (316 tests; markdown files live in T16's app/chat/markdown) → QC queued |
 | T05b | Shared utils, contract-dependent files | `crates/shared` (new modules only) | Codex | active (Codex re-auth) |
 | T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok → Cursor Auto | done (151 tests) → QC queued |
 | T07 | Source control: core + GitHub driver, PR service, review guides, viewed files | `crates/source-control` | GLM → Sonnet | r3 active (resume after Claude limit) |
@@ -157,7 +157,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/components/chat` | Opus | done (294 tests) → QC queued |
 | T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus | active (base: T16) |
 | T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus | active (base: T16) |
-| T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Opus | todo |
+| T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Opus | active (base: T16 + T01) |
 | T20 | Settings + keybindings UI | `crates/app/src/settings` | Opus | todo |
 
 ### Wave 5: glue

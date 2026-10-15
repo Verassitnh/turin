@@ -19,7 +19,7 @@ use crate::base_schemas::{
     EventId, IsoDateTime, MessageId, NonNegativeInt, NodeId, PlanId, PositiveInt, ProjectId,
     ProviderSessionId, ProviderThreadId, ProviderTurnId, RawEventId, RunAttemptId, RunId,
     RuntimeRequestId, ScheduledTaskId, TaggedUnion, ThreadId, TrimmedNonEmptyString, TurnItemId,
-    UtcDateTime, unknown_union_tag,
+    UtcDateTime,
 };
 use crate::chat_attachment::ChatAttachment;
 use crate::composer_context::OrchestrationMessageContext;
@@ -3033,8 +3033,11 @@ impl TaggedUnion for OrchestrationV2TurnItem {
 /// `hasUnknownUnionTag(TurnItem.members, "type")`: whether a raw turn item
 /// payload carries a `type` this build does not know.
 pub fn is_unknown_turn_item(payload: &serde_json::Value) -> bool {
-    unknown_union_tag(payload, OrchestrationV2TurnItem::TAG, OrchestrationV2TurnItem::known_tags())
-        .is_some()
+    crate::base_schemas::has_unknown_union_tag(
+        payload,
+        OrchestrationV2TurnItem::TAG,
+        OrchestrationV2TurnItem::known_tags(),
+    )
 }
 
 /// A timeline row: a turn item at a position, from this thread or inherited
@@ -4251,6 +4254,7 @@ pub enum OrchestrationV2ShellLocation {
 /// One shell subscription frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
+#[allow(clippy::large_enum_variant)] // wire enum mirrors upstream; boxing would leak into every consumer
 pub enum OrchestrationV2ShellStreamItem {
     #[serde(rename = "synchronized")]
     Synchronized,
@@ -4927,6 +4931,7 @@ pub enum OrchestrationV2Command {
 /// send them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all_fields = "camelCase")]
+#[allow(clippy::large_enum_variant)] // wire enum mirrors upstream; boxing would leak into every consumer
 pub enum OrchestrationV2InternalCommand {
     /// Records what a pull request watch saw, and wakes the agent in the same
     /// transaction when `wake` is set. Rejected once the watch started at
@@ -5021,6 +5026,7 @@ pub struct OrchestrationV2ArchivedShellSnapshot {
 /// One archived-shell subscription frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
+#[allow(clippy::large_enum_variant)] // wire enum mirrors upstream; boxing would leak into every consumer
 pub enum OrchestrationV2ArchivedShellStreamItem {
     #[serde(rename = "snapshot")]
     Snapshot {
@@ -5043,11 +5049,11 @@ pub enum OrchestrationV2ArchivedShellStreamItem {
 #[serde(rename_all = "camelCase")]
 pub struct OrchestrationV2ThreadLaunchInitialMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    message_id: Option<MessageId>,
-    text: String,
+    pub message_id: Option<MessageId>,
+    pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    context: Option<OrchestrationMessageContext>,
-    attachments: Vec<ChatAttachment>,
+    pub context: Option<OrchestrationMessageContext>,
+    pub attachments: Vec<ChatAttachment>,
 }
 
 /// Input of a thread launch.
@@ -5056,21 +5062,21 @@ pub struct OrchestrationV2ThreadLaunchInitialMessage {
 pub struct OrchestrationV2ThreadLaunchInput {
     pub command_id: CommandId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    creation_source: Option<OrchestrationV2CreationSource>,
+    pub creation_source: Option<OrchestrationV2CreationSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    thread_id: Option<ThreadId>,
+    pub thread_id: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    reuse_existing_thread: Option<bool>,
+    pub reuse_existing_thread: Option<bool>,
     pub project_id: ProjectId,
     pub title: TrimmedNonEmptyString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    generate_title: Option<bool>,
+    pub generate_title: Option<bool>,
     pub model_selection: ModelSelection,
     pub runtime_mode: RuntimeMode,
     pub interaction_mode: ProviderInteractionMode,
     pub workspace_strategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    initial_message: Option<OrchestrationV2ThreadLaunchInitialMessage>,
+    pub initial_message: Option<OrchestrationV2ThreadLaunchInitialMessage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5209,6 +5215,7 @@ pub struct OrchestrationV2ThreadHistoryPage {
 /// subscription. A known type whose payload does not decode still fails.
 /// Decode-only: servers never send it (serializing it is an error).
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // wire enum mirrors upstream; boxing would leak into every consumer
 pub enum OrchestrationV2ThreadStreamItem {
     /// `kind: "synchronized"`.
     Synchronized,
@@ -5240,6 +5247,7 @@ pub enum OrchestrationV2ThreadStreamItem {
 /// Derived codec for the three encodable arms of the thread stream.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
+#[allow(clippy::large_enum_variant)] // wire enum mirrors upstream; boxing would leak into every consumer
 enum ThreadStreamItemWire {
     #[serde(rename = "synchronized")]
     Synchronized,
@@ -5293,7 +5301,7 @@ impl Serialize for OrchestrationV2ThreadStreamItem {
                 projection: projection.clone(),
                 history_cursor: history_cursor.clone(),
                 has_more_history: *has_more_history,
-                latest_local_turn_ordinal: latest_local_turn_ordinal.clone(),
+                latest_local_turn_ordinal: *latest_local_turn_ordinal,
                 payload_budget_exceeded: *payload_budget_exceeded,
                 turn_items_omit_local_visible: *turn_items_omit_local_visible,
             }
@@ -5513,12 +5521,6 @@ pub enum OrchestrationV2RpcError {
     ThreadLaunch(OrchestrationV2ThreadLaunchError),
     #[error(transparent)]
     StopWorkflow(OrchestrationV2StopWorkflowError),
-    #[error(transparent)]
-    SearchThread(OrchestrationV2SearchThreadError),
-    #[error(transparent)]
-    WorkflowFile(OrchestrationWorkflowFileError),
-    #[error(transparent)]
-    GetWorkflowScript(OrchestrationGetWorkflowScriptError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5677,7 +5679,8 @@ pub struct OrchestrationV2SearchQuery(TrimmedNonEmptyString);
 impl OrchestrationV2SearchQuery {
     pub fn new(value: impl AsRef<str>) -> Result<Self, crate::base_schemas::ContractError> {
         let value = TrimmedNonEmptyString::new(value)?;
-        if value.as_str().len() > 200 {
+        // `Schema.isMaxLength` counts UTF-16 code units (JS string length).
+        if value.as_str().encode_utf16().count() > 200 {
             return Err(crate::base_schemas::ContractError {
                 expected: "a search query of at most 200 chars",
                 got: value.as_str().to_owned(),
@@ -5708,15 +5711,61 @@ impl<'de> Deserialize<'de> for OrchestrationV2SearchQuery {
     }
 }
 
+/// Fails unless `count` (a UTF-16 length, like JS `.length`) is within `max`.
+fn check_max_length<E: serde::de::Error>(what: &str, count: usize, max: usize) -> Result<(), E> {
+    if count > max {
+        return Err(E::custom(format!(
+            "{what} must have at most {max} elements/characters, got {count}"
+        )));
+    }
+    Ok(())
+}
+
+/// `Schema.String.check(Schema.isMaxLength(200))`.
+fn deserialize_string_max_200<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let value = String::deserialize(d)?;
+    check_max_length("a string", value.encode_utf16().count(), 200)?;
+    Ok(value)
+}
+
+/// `Schema.optional(Schema.String.check(Schema.isMaxLength(200)))`.
+fn deserialize_optional_string_max_200<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<String>, D::Error> {
+    deserialize_string_max_200(d).map(Some)
+}
+
+/// `Schema.optionalKey(Schema.Array(skill).check(Schema.isMaxLength(1_000)))`.
+fn deserialize_skills_max_1000<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Vec<OrchestrationV2SearchThreadSkill>>, D::Error> {
+    let skills = Vec::<OrchestrationV2SearchThreadSkill>::deserialize(d)?;
+    check_max_length("skills", skills.len(), 1_000)?;
+    Ok(Some(skills))
+}
+
+/// `Schema.optionalKey(Schema.Array(navigation).check(Schema.isMaxLength(17)))`.
+fn deserialize_navigation_max_17<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Vec<OrchestrationV2ThreadFindNavigation>>, D::Error> {
+    let navigation = Vec::<OrchestrationV2ThreadFindNavigation>::deserialize(d)?;
+    check_max_length("navigation", navigation.len(), 17)?;
+    Ok(Some(navigation))
+}
+
 /// One skill a search is narrowed to, by the label this client displays
-/// (including custom display names). Upstream bounds `name` and
-/// `displayName` at 200 chars; those plain-String bounds are not enforced
-/// here (see the task Deviations report).
+/// (including custom display names). `name` and `displayName` are at most 200
+/// UTF-16 code units, checked on decode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestrationV2SearchThreadSkill {
+    #[serde(deserialize_with = "deserialize_string_max_200")]
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_string_max_200"
+    )]
     pub display_name: Option<String>,
 }
 
@@ -5733,7 +5782,11 @@ pub struct OrchestrationV2SearchThreadStart {
 pub struct OrchestrationV2SearchThreadInput {
     pub thread_id: ThreadId,
     /// Match the skill labels displayed by this client, including custom display names.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_skills_max_1000"
+    )]
     pub skills: Option<Vec<OrchestrationV2SearchThreadSkill>>,
     pub query: OrchestrationV2SearchQuery,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5754,8 +5807,7 @@ pub struct OrchestrationV2ThreadFindMatch {
 }
 
 /// Counts and identities around the selection, so clients can step without
-/// another round trip (upstream inline struct; the array's max-17 bound is
-/// not enforced here — see the task Deviations report).
+/// another round trip (upstream inline struct; the array is capped at 17).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestrationV2ThreadFindNavigation {
@@ -5775,7 +5827,11 @@ pub struct OrchestrationV2SearchThreadResult {
     pub total_matches: NonNegativeInt,
     pub active_index: NonNegativeInt,
     pub r#match: Option<OrchestrationV2ThreadFindMatch>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_navigation_max_17"
+    )]
     pub navigation: Option<Vec<OrchestrationV2ThreadFindNavigation>>,
 }
 
@@ -5801,6 +5857,14 @@ impl std::error::Error for OrchestrationV2SearchThreadError {}
 // Provider replay transcripts
 // ---------------------------------------------------------------------------
 
+/// `Schema.optional(Schema.Unknown)`: absent is `None`, but an explicit `null`
+/// is a value (`Some(Null)`), not absence.
+fn deserialize_optional_unknown<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(d).map(Some)
+}
+
 /// One recorded provider-protocol frame expectation or emission.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
@@ -5819,7 +5883,11 @@ pub enum ProviderReplayEntry {
     },
     RuntimeExit {
         status: ProviderReplayRuntimeExitStatus,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_optional_unknown"
+        )]
         error: Option<serde_json::Value>,
     },
 }

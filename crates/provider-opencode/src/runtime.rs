@@ -533,14 +533,9 @@ async fn pump_stdout(
     url_tx: mpsc::Sender<String>,
 ) {
     let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
+    let mut bytes = Vec::new();
     let mut armed = true;
-    loop {
-        line.clear();
-        let read = reader.read_line(&mut line).await.unwrap_or(0);
-        if read == 0 {
-            break;
-        }
+    while let Some(line) = next_line(&mut reader, &mut bytes).await {
         if !armed || !capture.load(Ordering::SeqCst) {
             continue;
         }
@@ -560,18 +555,43 @@ async fn pump_stderr(
     log: Arc<tokio::sync::Mutex<String>>,
 ) {
     let mut reader = BufReader::new(stderr);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let read = reader.read_line(&mut line).await.unwrap_or(0);
-        if read == 0 {
-            break;
-        }
+    let mut bytes = Vec::new();
+    while let Some(line) = next_line(&mut reader, &mut bytes).await {
         if !capture.load(Ordering::SeqCst) {
             continue;
         }
         let mut buf = log.lock().await;
         push_capped(&mut buf, &line, STARTUP_MAX_CHARS);
+    }
+}
+
+/// Next line as lossy UTF-8. `None` only at EOF or on a real read error.
+/// Invalid bytes decode to U+FFFD and reading goes on, as upstream's
+/// `Stream.decodeText` does. A `read_line` error would end the drain, and the
+/// dropped pipe then kills the server with SIGPIPE. Bytes past the startup cap
+/// are discarded, so a line with no newline cannot grow without bound.
+async fn next_line<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+) -> Option<String> {
+    line.clear();
+    loop {
+        let available = match reader.fill_buf().await {
+            Ok(available) => available,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
+        if available.is_empty() {
+            return (!line.is_empty()).then(|| String::from_utf8_lossy(line).into_owned());
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let used = newline.map_or(available.len(), |index| index + 1);
+        let room = STARTUP_MAX_CHARS.saturating_sub(line.len());
+        line.extend_from_slice(&available[..used.min(room)]);
+        reader.consume(used);
+        if newline.is_some() {
+            return Some(String::from_utf8_lossy(line).into_owned());
+        }
     }
 }
 
@@ -645,11 +665,19 @@ if [ "${TURIN_TEST_EXIT:-}" = "1" ]; then
   echo boom >&2
   exit 7
 fi
+if [ "${TURIN_TEST_NOISE:-}" = "1" ]; then
+  printf '\377\376 bad\n'
+fi
 if [ "${TURIN_TEST_SILENT:-}" != "1" ]; then
   printf '%s\n' "server listening on http://127.0.0.1:${port}"
 fi
 while true; do
-  sleep 1
+  if [ "${TURIN_TEST_NOISE:-}" = "1" ]; then
+    printf '\377 noise\n'
+    sleep 0.02
+  else
+    sleep 1
+  fi
 done
 "#,
         )
@@ -961,6 +989,36 @@ done
             !alive(child),
             "server child {child} survived the dropped start"
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_on_stdout_does_not_stop_the_drain() {
+        let binary = write_fake_opencode();
+        let mut environment = BTreeMap::new();
+        environment.insert("TURIN_TEST_NOISE".into(), "1".into());
+        let process = start_open_code_server_process(
+            StartOpenCodeServer {
+                binary_path: binary.display().to_string(),
+                directory: "/work".into(),
+                server_password: None,
+                environment: Some(environment),
+                hostname: None,
+                port: Some(9),
+                timeout: Some(Duration::from_secs(2)),
+                shutdown_grace: Some(grace()),
+                ledger: None,
+            },
+            ok_verify(),
+        )
+        .await
+        .expect("non-UTF-8 bytes before the listening line must not stop startup");
+        // Output keeps coming after startup. A stopped reader would close the pipe and kill the server.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            process.is_running(),
+            "server died after its pipe was abandoned"
+        );
+        process.shutdown().await;
     }
 
     #[tokio::test]

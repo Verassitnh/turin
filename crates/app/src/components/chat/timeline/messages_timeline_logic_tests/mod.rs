@@ -18,20 +18,41 @@ pub(super) use crate::components::chat::timeline::session_logic::{
     TimelineEntriesInput, derive_timeline_entries_from_visible_turn_items,
 };
 pub(super) use crate::components::chat::timeline::turn_item::{
-    ProjectedTurnItem, ProjectedVisibility, ProviderFailure, ProviderFailureClass,
-    ProviderRequestKind, ProviderRetry, ToolActivityIcon, ToolActivitySurface, TurnItem,
-    TurnItemPayload, TurnItemStatus, TurnItemType,
+    CheckpointFileSummary, NotificationOutcome, NotificationSource, ProjectedTurnItem,
+    ProjectedVisibility, ProviderFailure, ProviderFailureClass, ProviderRequestKind, ProviderRetry,
+    ToolActivityIcon, ToolActivitySource, ToolActivitySurface, TurnItem, TurnItemPayload,
+    TurnItemStatus, TurnItemType,
 };
 pub(super) use crate::components::chat::timeline::types::{
-    Actor, AttemptStatus, ChatMessage, CreationSource, InputIntent, MessageRole, RunStatus,
-    TimelineAttempt, TimelineEntry, TimelineEntryKind, TimelineLatestRun, ToolLifecycleStatus,
-    WorkLogEntry, WorkTone,
+    Actor, AttemptStatus, ChatMessage, CheckpointStatus, CreationSource, InputIntent, MessageRole,
+    RunStatus, TimelineAttempt, TimelineEntry, TimelineEntryKind, TimelineLatestRun,
+    ToolLifecycleStatus, TurnDiffSummary, WorkLogEntry, WorkTone,
 };
 pub(super) use MessagesTimelineRowContent as Row;
 
+mod computer_use_labels;
 mod derive_rows;
+mod derive_rows_attempts;
+mod derive_rows_compaction;
+mod derive_rows_delegation;
+mod derive_rows_folds;
+mod derive_rows_linked;
+mod derive_rows_live;
+mod derive_rows_messages;
+mod derive_rows_metadata;
+mod derive_rows_notices;
+mod derive_rows_runless;
+mod derive_rows_runless_turns;
+mod derive_rows_steers;
+mod derive_rows_streaming;
+mod derive_rows_subagents;
+mod derive_rows_timing;
+mod derive_rows_v2;
+mod derive_rows_wakes;
+mod derive_rows_work_groups;
 mod helpers;
 mod stable_rows;
+mod work_labels;
 
 // ---------------------------------------------------------------------------
 // Timeline entries

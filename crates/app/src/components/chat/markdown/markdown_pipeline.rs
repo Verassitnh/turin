@@ -17,9 +17,10 @@
 //! Windows-drive link normalisation. Raw HTML is shown as literal text, which
 //! is what upstream's sanitizer leaves of anything outside its allowlist.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
-use markdown::mdast::{self, AlignKind, Node};
+use markdown::mdast::{self, AlignKind, Node, ReferenceKind};
 use markdown::{Constructs, ParseOptions};
 
 /// `GITHUB_ALERT_PRESENTATIONS` keys.
@@ -150,30 +151,35 @@ pub struct MarkdownDocument {
 
 /// `CHAT_MARKDOWN_REMARK_PLUGINS` / `_WITH_BREAKS`.
 pub fn parse_chat_markdown(text: &str, line_breaks: bool) -> MarkdownDocument {
-    let options = ParseOptions {
+    let Ok(root) = markdown::to_mdast(text, &parse_options()) else {
+        return MarkdownDocument {
+            blocks: vec![Block::Paragraph(plain_inlines(text))],
+        };
+    };
+    let children = root.children().cloned().unwrap_or_default();
+    let definitions = link_definitions(&children, text);
+    let mut cx = Lowering {
+        source: text,
+        line_breaks,
+        footnotes: Vec::new(),
+        definitions: &definitions,
+    };
+    let mut blocks = cx.blocks(&children, None);
+    if !cx.footnotes.is_empty() {
+        blocks.push(Block::Footnotes(std::mem::take(&mut cx.footnotes)));
+    }
+    MarkdownDocument { blocks }
+}
+
+fn parse_options() -> ParseOptions {
+    ParseOptions {
         constructs: Constructs {
             // remark-gfm, without the math/MDX/frontmatter extensions upstream
             // does not load.
             ..Constructs::gfm()
         },
         ..ParseOptions::gfm()
-    };
-    let Ok(root) = markdown::to_mdast(text, &options) else {
-        return MarkdownDocument {
-            blocks: vec![Block::Paragraph(plain_inlines(text))],
-        };
-    };
-    let mut cx = Lowering {
-        source: text,
-        line_breaks,
-        footnotes: Vec::new(),
-    };
-    let children = root.children().cloned().unwrap_or_default();
-    let mut blocks = cx.blocks(&children, None);
-    if !cx.footnotes.is_empty() {
-        blocks.push(Block::Footnotes(std::mem::take(&mut cx.footnotes)));
     }
-    MarkdownDocument { blocks }
 }
 
 /// `shouldPreserveAssistantLineBreaks`.
@@ -185,15 +191,52 @@ pub fn should_preserve_assistant_line_breaks(text: &str) -> bool {
 }
 
 fn plain_inlines(text: &str) -> Inlines {
-    let mut builder = InlineBuilder::new(false);
+    let definitions = LinkDefinitions::new();
+    let mut builder = InlineBuilder::new(false, "", &definitions);
     builder.push_text(text, Marks::default());
     builder.finish()
 }
+
+/// `INLINE_PARSE_PREFIX` (markdownListIndentation.ts).
+const INLINE_PARSE_PREFIX: &str = "t3-markdown-inline-prefix:";
 
 struct Lowering<'a> {
     source: &'a str,
     line_breaks: bool,
     footnotes: Vec<(String, Vec<Block>)>,
+    definitions: &'a LinkDefinitions,
+}
+
+/// Resolved link definition URLs by identifier. A definition may sit anywhere
+/// in the document, and the first one for an identifier wins.
+type LinkDefinitions = HashMap<String, String>;
+
+fn link_definitions(nodes: &[Node], source: &str) -> LinkDefinitions {
+    let mut definitions = HashMap::new();
+    collect_link_definitions(nodes, source, &mut definitions);
+    definitions
+}
+
+fn collect_link_definitions(nodes: &[Node], source: &str, out: &mut LinkDefinitions) {
+    for node in nodes {
+        if let Node::Definition(definition) = node {
+            // The same Windows-path rule as inline destinations, applied to the
+            // definition's authored destination.
+            let url = match definition
+                .position
+                .as_ref()
+                .and_then(|position| authored_definition_destination(source, position))
+            {
+                Some(authored) => keep_windows_path_destination(authored, &definition.url),
+                None => definition.url.clone(),
+            };
+            out.entry(definition.identifier.clone())
+                .or_insert_with(|| normalize_link_url(&url));
+        }
+        if let Some(children) = node.children() {
+            collect_link_definitions(children, source, out);
+        }
+    }
 }
 
 /// `GITHUB_ALERT_MARKER`: `[!NOTE]` on its own line.
@@ -230,8 +273,7 @@ impl Lowering<'_> {
                     Some(b'`' | b'~')
                 )
             {
-                let recovered = parse_chat_markdown(code.value.trim(), self.line_breaks);
-                out.extend(recovered.blocks);
+                out.extend(self.recovered_blocks(code.value.trim()));
                 continue;
             }
             if let Some(block) = self.block(node) {
@@ -239,6 +281,47 @@ impl Lowering<'_> {
             }
         }
         out
+    }
+
+    /// `parseRecoveredMarkdown`: the text is parsed behind a prefix, which
+    /// forces block-looking input (`# Heading`, `- nested`, a fence) into a
+    /// paragraph while GFM inline syntax still parses. Root children after the
+    /// first paragraph are kept as blocks.
+    fn recovered_blocks(&mut self, value: &str) -> Vec<Block> {
+        let source = format!("{INLINE_PARSE_PREFIX}{value}");
+        let Ok(root) = markdown::to_mdast(&source, &parse_options()) else {
+            return vec![Block::Paragraph(plain_inlines(value))];
+        };
+        let mut children = root.children().cloned().unwrap_or_default();
+        let stripped = if let Some(Node::Paragraph(paragraph)) = children.first_mut()
+            && let Some(Node::Text(text)) = paragraph.children.first_mut()
+            && let Some(rest) = text.value.strip_prefix(INLINE_PARSE_PREFIX)
+        {
+            let rest = rest.to_string();
+            if rest.is_empty() {
+                paragraph.children.remove(0);
+            } else {
+                text.value = rest;
+            }
+            true
+        } else {
+            false
+        };
+        if !stripped {
+            return vec![Block::Paragraph(plain_inlines(value))];
+        }
+        // The recovered text is its own parse, so its references resolve against
+        // its own definitions.
+        let definitions = link_definitions(&children, &source);
+        let mut inner = Lowering {
+            source: &source,
+            line_breaks: self.line_breaks,
+            footnotes: std::mem::take(&mut self.footnotes),
+            definitions: &definitions,
+        };
+        let blocks = inner.blocks(&children, None);
+        self.footnotes = inner.footnotes;
+        blocks
     }
 
     fn block(&mut self, node: &Node) -> Option<Block> {
@@ -386,7 +469,7 @@ impl Lowering<'_> {
     }
 
     fn inlines_owned(&self, nodes: &[Node]) -> Inlines {
-        let mut builder = InlineBuilder::new(self.line_breaks);
+        let mut builder = InlineBuilder::new(self.line_breaks, self.source, self.definitions);
         for node in nodes {
             builder.node(node, Marks::default());
         }
@@ -421,18 +504,23 @@ fn is_closed_code_fence(source: &str, position: &markdown::unist::Position) -> b
 /// Builds collapsed inline text the way CSS `white-space: normal` renders it:
 /// runs of spaces, tabs and soft line breaks become one space, and spaces
 /// next to a forced break disappear.
-struct InlineBuilder {
+struct InlineBuilder<'a> {
     line_breaks: bool,
+    /// The document source, for authored link destinations.
+    source: &'a str,
+    definitions: &'a LinkDefinitions,
     text: String,
     runs: Vec<InlineRun>,
     links: Vec<String>,
     images: Vec<(usize, String, String)>,
 }
 
-impl InlineBuilder {
-    fn new(line_breaks: bool) -> Self {
+impl<'a> InlineBuilder<'a> {
+    fn new(line_breaks: bool, source: &'a str, definitions: &'a LinkDefinitions) -> Self {
         Self {
             line_breaks,
+            source,
+            definitions,
             text: String::new(),
             runs: Vec::new(),
             links: Vec::new(),
@@ -492,6 +580,56 @@ impl InlineBuilder {
             }
         }
         self.push_raw(&chunk, marks);
+    }
+
+    /// The link's destination, with [`keep_windows_path_destination`] applied.
+    fn link_destination(&self, link: &mdast::Link) -> String {
+        let authored = link
+            .position
+            .as_ref()
+            .and_then(|position| authored_destination(self.source, position, &link.children));
+        match authored {
+            Some(authored) => keep_windows_path_destination(authored, &link.url),
+            None => link.url.clone(),
+        }
+    }
+
+    fn push_link(&mut self, url: String, children: &[Node], marks: Marks) {
+        let ix = self.links.len();
+        self.links.push(url);
+        for child in children {
+            self.node(
+                child,
+                Marks {
+                    link: Some(ix),
+                    ..marks
+                },
+            );
+        }
+    }
+
+    fn push_image(&mut self, url: String, alt: &str, marks: Marks) {
+        self.images.push((self.text.len(), alt.to_string(), url));
+        if !alt.is_empty() {
+            self.push_text(alt, marks);
+        }
+    }
+
+    /// `revert` in mdast-util-to-hast: a reference without a definition is
+    /// its source text, brackets and label included.
+    fn revert_reference(
+        &mut self,
+        children: &[Node],
+        kind: ReferenceKind,
+        label: Option<&str>,
+        identifier: &str,
+        marks: Marks,
+    ) {
+        self.push_text("[", marks);
+        for child in children {
+            self.node(child, marks);
+        }
+        self.push_text(&reference_suffix(kind, label, identifier), marks);
     }
 
     fn hard_break(&mut self, marks: Marks) {
@@ -560,32 +698,33 @@ impl InlineBuilder {
             ),
             Node::Break(_) => self.hard_break(marks),
             Node::Link(link) => {
-                let ix = self.links.len();
-                self.links.push(normalize_link_url(&link.url));
-                for child in &link.children {
-                    self.node(
-                        child,
-                        Marks {
-                            link: Some(ix),
-                            ..marks
-                        },
-                    );
-                }
+                let url = normalize_link_url(&self.link_destination(link));
+                self.push_link(url, &link.children, marks);
             }
             Node::LinkReference(reference) => {
-                // Unresolved references render as their text.
-                for child in &reference.children {
-                    self.node(child, marks);
+                match self.definitions.get(&reference.identifier).cloned() {
+                    Some(url) => self.push_link(url, &reference.children, marks),
+                    None => self.revert_reference(
+                        &reference.children,
+                        reference.reference_kind,
+                        reference.label.as_deref(),
+                        &reference.identifier,
+                        marks,
+                    ),
                 }
             }
-            Node::Image(image) => {
-                self.images
-                    .push((self.text.len(), image.alt.clone(), image.url.clone()));
-                if !image.alt.is_empty() {
-                    self.push_text(&image.alt, marks);
+            Node::Image(image) => self.push_image(image.url.clone(), &image.alt, marks),
+            Node::ImageReference(image) => match self.definitions.get(&image.identifier).cloned() {
+                Some(url) => self.push_image(url, &image.alt, marks),
+                None => {
+                    let suffix = reference_suffix(
+                        image.reference_kind,
+                        image.label.as_deref(),
+                        &image.identifier,
+                    );
+                    self.push_text(&format!("![{}{suffix}", image.alt), marks);
                 }
-            }
-            Node::ImageReference(image) => self.push_text(&image.alt, marks),
+            },
             Node::FootnoteReference(reference) => self.push_raw(
                 &reference
                     .label
@@ -639,6 +778,94 @@ impl InlineBuilder {
             runs: self.runs,
             links: self.links,
             images: self.images,
+        }
+    }
+}
+
+/// `keepWindowsPathDestination`: a link destination that is a Windows path keeps
+/// its authored text. CommonMark reads the `\.` in `C:\me\.t3\shot.png` as an
+/// escape, so the decoded URL loses backslashes. A destination with `&` keeps the
+/// decoded URL, since it may hold character references.
+fn keep_windows_path_destination(authored: &str, decoded: &str) -> String {
+    if is_windows_absolute_path(authored) && !authored.contains('&') {
+        authored.to_string()
+    } else {
+        decoded.to_string()
+    }
+}
+
+/// `isWindowsAbsolutePath` (path.ts): a UNC path or a drive path.
+fn is_windows_absolute_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let drive = bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes.get(2).is_none_or(|&b| b == b'/' || b == b'\\');
+    drive || value.starts_with("\\\\")
+}
+
+/// The destination as written between `](` and the closing `)`, or between `<`
+/// and `>` (the source `sliceSerialize` gives for `resourceDestinationString`).
+fn authored_destination<'s>(
+    source: &'s str,
+    position: &markdown::unist::Position,
+    label: &[Node],
+) -> Option<&'s str> {
+    // The label ends at its last child, or right after the opening bracket.
+    let label_end = label
+        .last()
+        .and_then(Node::position)
+        .map_or(position.start.offset + 1, |end| end.end.offset);
+    let link_source = source.get(label_end..position.end.offset)?;
+    let open = link_source.find("](")? + 2;
+    destination_at(&link_source[open..])
+}
+
+/// The destination of a definition, as written after its `]:`.
+fn authored_definition_destination<'s>(
+    source: &'s str,
+    position: &markdown::unist::Position,
+) -> Option<&'s str> {
+    let definition_source = source.get(position.start.offset..position.end.offset)?;
+    let open = definition_source.find("]:")? + 2;
+    destination_at(&definition_source[open..])
+}
+
+/// A destination at the start of `rest` (after optional white space): either
+/// `<...>` or a bare run that ends at white space or an unmatched `)`.
+fn destination_at(rest: &str) -> Option<&str> {
+    let rest = rest.trim_start_matches([' ', '\t', '\n', '\r']);
+    if let Some(inner) = rest.strip_prefix('<') {
+        return inner.split_once('>').map(|(dest, _)| dest);
+    }
+    // Balanced parentheses may appear in a bare destination; whitespace or an
+    // unmatched `)` ends it.
+    let mut depth = 0usize;
+    let mut end = 0;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => break,
+            ')' => depth -= 1,
+            c if c.is_whitespace() => break,
+            _ => {}
+        }
+        end = i + c.len_utf8();
+    }
+    Some(&rest[..end])
+}
+
+/// The text after a reference's `[text]`: `]` for a shortcut, `][]` for a
+/// collapsed reference, `][label]` for a full one (`label || identifier`).
+fn reference_suffix(kind: ReferenceKind, label: Option<&str>, identifier: &str) -> String {
+    match kind {
+        ReferenceKind::Shortcut => "]".to_string(),
+        ReferenceKind::Collapsed => "][]".to_string(),
+        ReferenceKind::Full => {
+            let label = label
+                .filter(|label| !label.is_empty())
+                .unwrap_or(identifier);
+            format!("][{label}]")
         }
     }
 }
@@ -719,6 +946,41 @@ mod tests {
     }
 
     #[test]
+    fn over_indented_list_block_syntax_is_inline_prose() {
+        for (text, expected) in [
+            ("-      # Heading", "# Heading"),
+            ("-      - nested", "- nested"),
+            ("-      ```", "```"),
+        ] {
+            let doc = parse_chat_markdown(text, false);
+            match &doc.blocks[0] {
+                Block::List { items, .. } => match &items[0].children[0] {
+                    Block::Paragraph(inlines) => assert_eq!(inlines.text, expected, "{text}"),
+                    other => panic!("{text}: {other:?}"),
+                },
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn over_indented_list_text_keeps_gfm_inline_syntax() {
+        let doc = parse_chat_markdown("-      **bold** `code`", false);
+        let Block::List { items, .. } = &doc.blocks[0] else {
+            panic!("{doc:?}");
+        };
+        let Block::Paragraph(inlines) = &items[0].children[0] else {
+            panic!("{doc:?}");
+        };
+        assert_eq!(inlines.text, "bold code");
+        assert!(
+            inlines
+                .run_ranges()
+                .any(|(range, marks)| marks.strong && &inlines.text[range] == "bold")
+        );
+    }
+
+    #[test]
     fn unclosed_fence_is_streaming() {
         let doc = parse_chat_markdown("```rust\nfn main() {}", false);
         assert!(matches!(doc.blocks[0], Block::Code { closed: false, .. }));
@@ -736,5 +998,107 @@ mod tests {
     #[test]
     fn windows_drive_links_become_file_urls() {
         assert_eq!(normalize_link_url("C:\\a\\b.txt"), "file:///C:/a/b.txt");
+    }
+
+    #[test]
+    fn windows_path_destinations_keep_their_backslashes() {
+        // `\.` is a CommonMark escape; the authored Windows path must win.
+        let doc = parse_chat_markdown(r"[x](C:\me\.t3\shot.png)", false);
+        assert_eq!(
+            para(&doc).links,
+            vec!["file:///C:/me/.t3/shot.png".to_string()]
+        );
+        let doc = parse_chat_markdown(r"[x](<C:\me\.t3\shot.png>)", false);
+        assert_eq!(
+            para(&doc).links,
+            vec!["file:///C:/me/.t3/shot.png".to_string()]
+        );
+    }
+
+    #[test]
+    fn windows_path_destinations_with_ampersands_keep_decoding() {
+        // A destination with `&` may hold character references, so it stays decoded.
+        let doc = parse_chat_markdown(r"[x](C:\a&amp;b\c.txt)", false);
+        assert_eq!(para(&doc).links, vec!["file:///C:/a&b/c.txt".to_string()]);
+    }
+
+    #[test]
+    fn relative_destinations_still_decode_escapes() {
+        let doc = parse_chat_markdown(r"[x](docs/a\.md)", false);
+        assert_eq!(para(&doc).links, vec!["docs/a.md".to_string()]);
+    }
+
+    #[test]
+    fn full_collapsed_and_shortcut_references_resolve_to_their_definitions() {
+        let doc = parse_chat_markdown(
+            "[docs][d], [again][], and [third]\n\n[d]: https://x.dev\n[again]: https://y.dev\n[third]: https://z.dev",
+            false,
+        );
+        let inlines = para(&doc);
+        assert_eq!(inlines.text, "docs, again, and third");
+        assert_eq!(
+            inlines.links,
+            vec![
+                "https://x.dev".to_string(),
+                "https://y.dev".to_string(),
+                "https://z.dev".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn reference_labels_match_case_and_white_space() {
+        let doc = parse_chat_markdown(
+            "[Docs  Page][DOCS page]\n\n[docs page]: https://x.dev",
+            false,
+        );
+        assert_eq!(para(&doc).links, vec!["https://x.dev".to_string()]);
+    }
+
+    #[test]
+    fn unresolved_references_keep_their_source_text() {
+        let doc = parse_chat_markdown("[a][missing] [b][] [WIP] fix", false);
+        let inlines = para(&doc);
+        assert_eq!(inlines.text, "[a][missing] [b][] [WIP] fix");
+        assert!(inlines.links.is_empty());
+    }
+
+    #[test]
+    fn first_definition_of_an_identifier_wins() {
+        let doc = parse_chat_markdown(
+            "[x][a]\n\n[a]: https://one.dev\n[a]: https://two.dev",
+            false,
+        );
+        assert_eq!(para(&doc).links, vec!["https://one.dev".to_string()]);
+    }
+
+    #[test]
+    fn definitions_inside_containers_resolve_across_the_document() {
+        let doc = parse_chat_markdown("see [a]\n\n> [a]: https://x.dev", false);
+        assert_eq!(para(&doc).links, vec!["https://x.dev".to_string()]);
+    }
+
+    #[test]
+    fn reference_definitions_keep_windows_path_destinations() {
+        // The definition's `\.` is a CommonMark escape; the authored path must win.
+        let doc = parse_chat_markdown("[x][shot]\n\n[shot]: C:\\me\\.t3\\shot.png", false);
+        assert_eq!(
+            para(&doc).links,
+            vec!["file:///C:/me/.t3/shot.png".to_string()]
+        );
+    }
+
+    #[test]
+    fn reference_images_resolve_or_keep_their_source_text() {
+        let doc = parse_chat_markdown("![alt][pic]\n\n[pic]: https://img.dev/a.png", false);
+        let inlines = para(&doc);
+        assert_eq!(inlines.text, "alt");
+        assert_eq!(
+            inlines.images,
+            vec![(0, "alt".to_string(), "https://img.dev/a.png".to_string())]
+        );
+        let doc = parse_chat_markdown("![alt][missing]", false);
+        assert_eq!(para(&doc).text, "![alt][missing]");
+        assert!(para(&doc).images.is_empty());
     }
 }

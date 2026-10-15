@@ -1,425 +1,709 @@
-//! Port of upstream/apps/web/src/components/Sidebar.tsx (layout only).
+//! Port of upstream/apps/web/src/components/Sidebar.tsx (the v2 sidebar).
 //!
-//! The static shell: chrome header, search/actions row, a placeholder thread
-//! list using the card (active/pinned/working) and slim (settled) row
-//! layouts, a collapsible section header and the utility footer. Row data,
-//! search, snooze, drag, hover cards and status logic arrive with the
-//! sidebar task; the row geometry here is the upstream geometry they plug
-//! into.
+//! One flat, sectioned thread list across projects: pinned, the active
+//! inbox, the Working shelf (beta), Snoozed and the Settled tail, with a
+//! project scope instead of a project tree (LegacySidebar.tsx, the opt-in
+//! project tree, is not ported; see Deviations). The component is split by
+//! concern:
+//!
+//! - this module: state, store sync, navigation, keyboard commands, layout;
+//! - `sidebar_list`: the sortable list, shelf headers, drafts, motion;
+//! - `sidebar_thread_row`: card and slim rows, status slot, hover actions;
+//! - `sidebar_actions`: lifecycle commands, context menus, rename;
+//! - `sidebar_gestures`: row drag (reorder/move) and action sweeps;
+//! - `sidebar_search`: search results.
+//!
+//! Data comes from a [`view_model::SidebarStore`] and commands go to a
+//! [`view_model::SidebarBackend`] (the T14 seam; [`mock_source`] for now).
 
+pub mod custom_snooze_dialog;
+pub mod mock_source;
+pub mod runtime;
+pub mod sidebar_actions;
 pub mod sidebar_chrome;
+pub mod sidebar_drag;
+pub mod sidebar_gestures;
+pub mod sidebar_list;
+pub mod sidebar_logic;
+pub mod sidebar_motion;
+pub mod sidebar_pointer;
+pub mod sidebar_search;
+pub mod sidebar_sections;
+pub mod sidebar_snooze;
 pub mod sidebar_thread_header;
+pub mod sidebar_thread_row;
+pub mod thread_hover_card;
+pub mod thread_selection;
+pub mod thread_status_indicators;
+pub mod view_model;
 
-use gpui_kit::prelude::FluentBuilder as _;
+use std::cell::Cell;
+use std::collections::HashSet;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
-    App, CursorStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, SharedString, Styled as _, Window, div, px, rems,
+    App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    KeyBinding, Modifiers, ParentElement as _, Render, Styled as _, Subscription, Task, Window,
+    actions, div,
 };
 
+use self::runtime::thread_inbox::InboxReturnTracker;
 use self::sidebar_chrome::{SidebarChromeFooter, SidebarChromeHeader};
-use self::sidebar_thread_header::SidebarThreadHeader;
-use super::project_monogram::ProjectMonogram;
-use crate::theme::color::{hex, with_alpha};
-use crate::theme::tokens::{
-    RADIUS_MD, SIDEBAR_CONTENT_INSET, SIDEBAR_ROW_CONTENT_INSET, TEXT_SM, TEXT_XS,
+use self::sidebar_gestures::{DragSession, SweepSession};
+use self::sidebar_logic::{
+    JumpHintAction, SidebarProjectScopeMenuState, THREAD_JUMP_HINT_SHOW_DELAY_MS,
+    ThreadJumpHintVisibilityController, ThreadTraversalDirection, resolve_adjacent_thread_id,
+    should_create_new_thread_in_current_project,
 };
-use crate::theme::{ActiveAppTheme, AppTheme};
-use crate::ui::{Icon, IconName, Separator, scroll_area_hidden};
+use self::sidebar_motion::SidebarListMotion;
+use self::sidebar_sections::{
+    OptimisticDrop, SETTLED_TAIL_INITIAL_COUNT, SidebarListLayout, SidebarPartition,
+    layout_sidebar_list, partition_sidebar_threads, should_release_optimistic_drop,
+};
+use self::thread_selection::ThreadSelection;
+use self::view_model::{
+    SharedSidebarBackend, SidebarSnapshot, SidebarStore, SidebarStoreChanged, ThreadRef,
+    ThreadSearchMatch,
+};
+use crate::state::models::{EnvironmentThreadShell, SettledOverride};
+use crate::theme::ActiveAppTheme;
+use crate::timestamp_format::now_iso;
+use crate::ui::sidebar::{SidebarContent, SidebarGroup};
 
-/// Sidebar thread status labels (`ThreadStatusIndicators`), subset used by
-/// the placeholder rows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThreadRowStatus {
-    Working,
-    Done,
-    #[allow(dead_code)] // placeholder rows don't show a failure; T15 wires real statuses.
-    Failed,
+actions!(
+    sidebar,
+    [
+        /// `thread.previous` (mod+shift+[).
+        ThreadPrevious,
+        /// `thread.next` (mod+shift+]).
+        ThreadNext,
+        /// `thread.settle` (mod+shift+s): park the open thread and move on.
+        SettleThread,
+        /// `thread.pin` (mod+shift+p).
+        PinThread,
+        /// `chat.new` (mod+n, mod+shift+o).
+        NewThread,
+        /// `chat.newLocal` (mod+shift+n): new thread in the current project.
+        NewThreadInProject,
+        ThreadJump1,
+        ThreadJump2,
+        ThreadJump3,
+        ThreadJump4,
+        ThreadJump5,
+        ThreadJump6,
+        ThreadJump7,
+        ThreadJump8,
+        ThreadJump9,
+    ]
+);
+
+/// Upstream default bindings (packages/shared/src/keybindings.ts) for the
+/// sidebar's commands, in the app shell's key context.
+pub fn bind_keys(cx: &mut App, context: &'static str) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-shift-[", ThreadPrevious, Some(context)),
+        KeyBinding::new("cmd-shift-]", ThreadNext, Some(context)),
+        KeyBinding::new("cmd-shift-s", SettleThread, Some(context)),
+        KeyBinding::new("cmd-shift-p", PinThread, Some(context)),
+        KeyBinding::new("cmd-n", NewThread, Some(context)),
+        KeyBinding::new("cmd-shift-o", NewThread, Some(context)),
+        KeyBinding::new("cmd-shift-n", NewThreadInProject, Some(context)),
+        KeyBinding::new("cmd-1", ThreadJump1, Some(context)),
+        KeyBinding::new("cmd-2", ThreadJump2, Some(context)),
+        KeyBinding::new("cmd-3", ThreadJump3, Some(context)),
+        KeyBinding::new("cmd-4", ThreadJump4, Some(context)),
+        KeyBinding::new("cmd-5", ThreadJump5, Some(context)),
+        KeyBinding::new("cmd-6", ThreadJump6, Some(context)),
+        KeyBinding::new("cmd-7", ThreadJump7, Some(context)),
+        KeyBinding::new("cmd-8", ThreadJump8, Some(context)),
+        KeyBinding::new("cmd-9", ThreadJump9, Some(context)),
+    ]);
 }
 
-impl ThreadRowStatus {
-    fn presentation(self, theme: &AppTheme) -> (IconName, &'static str, Hsla) {
-        match self {
-            Self::Working => (IconName::CircleDashed, "Working", theme.info),
-            Self::Done => (IconName::CircleCheck, "Done", theme.success),
-            Self::Failed => (IconName::CircleAlert, "Failed", theme.error),
+/// The jump shortcut labels (`shortcutLabelForCommand(keybindings, thread.jump.N)`).
+pub fn jump_shortcut_label(index: usize) -> Option<String> {
+    (index < 9).then(|| format!("⌘{}", index + 1))
+}
+
+/// `(top, height, left, width)` of the list in window coordinates.
+pub(crate) type ListBox = (f32, f32, f32, f32);
+
+/// What the main view shows (upstream: the router).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarRoute {
+    Thread(String),
+    Draft(String),
+}
+
+/// Requests the sidebar makes of the app shell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarEvent {
+    /// The route changed (selection → main view).
+    Navigate(Option<SidebarRoute>),
+    /// Start a new thread (`useHandleNewThread`); `None` project opens the
+    /// "New thread in…" picker.
+    NewThread {
+        project_key: Option<String>,
+        branch: Option<String>,
+        worktree_path: Option<String>,
+    },
+    AddProject,
+    OpenProjectSettings(String),
+    /// Open a thread's pull requests surface.
+    OpenPullRequests(String),
+    OpenSettings,
+    OpenPullRequestsPage,
+    OpenUsage,
+}
+
+/// Inline rename state.
+pub(crate) struct RenameState {
+    pub key: String,
+    pub input: Entity<InputState>,
+    pub original: String,
+    pub committed: bool,
+}
+
+pub struct Sidebar {
+    pub(crate) store: Entity<SidebarStore>,
+    pub(crate) backend: SharedSidebarBackend,
+    pub(crate) route: Option<SidebarRoute>,
+    pub(crate) search_input: Entity<InputState>,
+    pub(crate) search_query: String,
+    pub(crate) active_search_index: usize,
+    pub(crate) search_matches: Vec<ThreadSearchMatch>,
+    pub(crate) search_pending: bool,
+    pub(crate) search_task: Option<Task<()>>,
+    pub(crate) scope_menu: SidebarProjectScopeMenuState,
+    pub(crate) scope_input: Entity<InputState>,
+    pub(crate) hovered_row: Option<String>,
+    pub(crate) selection: ThreadSelection,
+    pub(crate) rename: Option<RenameState>,
+    pub(crate) settled_visible_count: usize,
+    settled_reset_key: Option<String>,
+    pub(crate) inbox_returns: InboxReturnTracker,
+    pub(crate) optimistic_drop: Option<OptimisticDrop>,
+    pub(crate) settling: HashSet<String>,
+    pub(crate) snoozing: HashSet<String>,
+    pub(crate) drag: Option<DragSession>,
+    pub(crate) sweep: Option<SweepSession>,
+    pub(crate) motion: SidebarListMotion,
+    /// Last measured list box (window coords): `(top, height, left, width)`,
+    /// written during prepaint.
+    pub(crate) list_box_cell: Rc<Cell<Option<ListBox>>>,
+    pub(crate) epoch: Instant,
+    jump_hints: ThreadJumpHintVisibilityController,
+    jump_hint_task: Option<Task<()>>,
+    pub(crate) snooze_menu_for: Option<String>,
+    /// Section membership last frame, for motion keys and exit ghosts.
+    pub(crate) last_rows: Vec<(
+        String,
+        EnvironmentThreadShell,
+        sidebar_logic::SidebarSection,
+    )>,
+    _subscriptions: Vec<Subscription>,
+    _ticker: Task<()>,
+}
+
+impl EventEmitter<SidebarEvent> for Sidebar {}
+
+impl Sidebar {
+    pub fn new(
+        store: Entity<SidebarStore>,
+        backend: SharedSidebarBackend,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let scope_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search projects..."));
+        let subscriptions = vec![
+            cx.subscribe(&store, |this, _, _: &SidebarStoreChanged, cx| {
+                this.on_store_changed(cx)
+            }),
+            cx.subscribe_in(
+                &search_input,
+                window,
+                |this, input, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change => {
+                        let value = input.read(cx).value().to_string();
+                        this.set_search_query(value, cx);
+                    }
+                    InputEvent::PressEnter { .. } => this.select_active_search_result(window, cx),
+                    _ => {}
+                },
+            ),
+            cx.subscribe(&scope_input, |this, input, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    let query = input.read(cx).value().to_string();
+                    this.scope_menu = sidebar_logic::reduce_sidebar_project_scope_menu_state(
+                        &this.scope_menu,
+                        sidebar_logic::SidebarProjectScopeMenuAction::QueryChanged(query),
+                    );
+                    cx.notify();
+                }
+            }),
+        ];
+        // Relative labels tick by the minute, Working durations and snooze
+        // wake boundaries by the second; one coarse timer drives both, and
+        // only repaints while something time-dependent is on screen.
+        let ticker = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if this
+                    .update(cx, |this, cx| {
+                        if this.needs_tick(cx) {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let mut sidebar = Self {
+            store,
+            backend,
+            route: None,
+            search_input,
+            search_query: String::new(),
+            active_search_index: 0,
+            search_matches: Vec::new(),
+            search_pending: false,
+            search_task: None,
+            scope_menu: SidebarProjectScopeMenuState::default(),
+            scope_input,
+            hovered_row: None,
+            selection: ThreadSelection::default(),
+            rename: None,
+            settled_visible_count: SETTLED_TAIL_INITIAL_COUNT,
+            settled_reset_key: None,
+            inbox_returns: InboxReturnTracker::default(),
+            optimistic_drop: None,
+            settling: HashSet::new(),
+            snoozing: HashSet::new(),
+            drag: None,
+            sweep: None,
+            motion: SidebarListMotion::new(),
+            list_box_cell: Rc::new(Cell::new(None)),
+            epoch: Instant::now(),
+            jump_hints: ThreadJumpHintVisibilityController::default(),
+            jump_hint_task: None,
+            snooze_menu_for: None,
+            last_rows: Vec::new(),
+            _subscriptions: subscriptions,
+            _ticker: ticker,
+        };
+        sidebar.settled_reset_key = sidebar.snapshot(cx).project_scope_key.clone();
+        sidebar
+    }
+
+    pub(crate) fn list_box(&self) -> Option<(f32, f32, f32, f32)> {
+        self.list_box_cell.get()
+    }
+
+    pub(crate) fn snapshot<'a>(&self, cx: &'a App) -> &'a SidebarSnapshot {
+        self.store.read(cx).snapshot()
+    }
+
+    /// Milliseconds on the motion clock.
+    pub(crate) fn motion_now(&self) -> f64 {
+        self.epoch.elapsed().as_secs_f64() * 1000.
+    }
+
+    pub fn route(&self) -> Option<&SidebarRoute> {
+        self.route.as_ref()
+    }
+
+    pub(crate) fn route_thread_key(&self) -> Option<&str> {
+        match &self.route {
+            Some(SidebarRoute::Thread(key)) => Some(key),
+            _ => None,
         }
     }
-}
 
-#[derive(Clone, Debug)]
-pub struct ThreadRowData {
-    pub id: &'static str,
-    pub project: &'static str,
-    pub monogram: &'static str,
-    pub monogram_color: u32,
-    pub title: &'static str,
-    pub time: &'static str,
-    pub status: Option<ThreadRowStatus>,
-    pub branch: Option<&'static str>,
-    pub diff: Option<(u32, u32)>,
-}
-
-/// Placeholder rows so the shell reads like the real app.
-pub fn placeholder_threads() -> (Vec<ThreadRowData>, Vec<ThreadRowData>) {
-    let active = vec![
-        ThreadRowData {
-            id: "t-design-system",
-            project: "turin",
-            monogram: "T",
-            monogram_color: 0x155dfc,
-            title: "Port design system and app shell",
-            time: "now",
-            status: Some(ThreadRowStatus::Working),
-            branch: Some("task/T03-design-system"),
-            diff: Some((1240, 18)),
-        },
-        ThreadRowData {
-            id: "t-contracts",
-            project: "turin",
-            monogram: "T",
-            monogram_color: 0x155dfc,
-            title: "Port orchestration contracts",
-            time: "12m",
-            status: Some(ThreadRowStatus::Done),
-            branch: Some("task/T01-contracts"),
-            diff: Some((3812, 4)),
-        },
-        ThreadRowData {
-            id: "t-review",
-            project: "t3code",
-            monogram: "T3",
-            monogram_color: 0x009966,
-            title: "Review composer keyboard handling",
-            time: "2h",
-            status: None,
-            branch: Some("main"),
-            diff: None,
-        },
-    ];
-    let settled = vec![
-        ThreadRowData {
-            id: "t-settled-1",
-            project: "turin",
-            monogram: "T",
-            monogram_color: 0x155dfc,
-            title: "Scaffold workspace",
-            time: "1d",
-            status: None,
-            branch: None,
-            diff: None,
-        },
-        ThreadRowData {
-            id: "t-settled-2",
-            project: "t3code",
-            monogram: "T3",
-            monogram_color: 0x009966,
-            title: "Investigate sidebar drag jank",
-            time: "3d",
-            status: None,
-            branch: None,
-            diff: None,
-        },
-    ];
-    (active, settled)
-}
-
-/// Card variant row (`Sidebar.tsx` thread row, 78px content box).
-#[derive(IntoElement)]
-pub struct SidebarThreadRow {
-    data: ThreadRowData,
-    active: bool,
-}
-
-impl SidebarThreadRow {
-    pub fn new(data: ThreadRowData, active: bool) -> Self {
-        Self { data, active }
+    fn needs_tick(&self, cx: &App) -> bool {
+        // Working rows show elapsed seconds; snoozed rows count down; the
+        // relative labels roll over each minute.
+        let snapshot = self.snapshot(cx);
+        let second_boundary = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() % 60 == 0)
+            .unwrap_or(false);
+        second_boundary
+            || snapshot.threads.iter().any(|thread| {
+                thread.runtime.as_ref().is_some_and(|runtime| {
+                    matches!(
+                        runtime.status,
+                        crate::state::models::RunStatus::Running
+                            | crate::state::models::RunStatus::Preparing
+                            | crate::state::models::RunStatus::Starting
+                            | crate::state::models::RunStatus::Queued
+                            | crate::state::models::RunStatus::Waiting
+                    )
+                }) || thread.snoozed_until.is_some()
+            })
     }
-}
 
-impl RenderOnce for SidebarThreadRow {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.app_theme();
-        let data = self.data;
-        let status_slot = match data.status {
-            Some(status) => {
-                let (icon, label, color) = status.presentation(theme);
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(color)
-                    .child(Icon::new(icon).color(color))
-                    .child(label)
+    fn on_store_changed(&mut self, cx: &mut Context<Self>) {
+        // Scope flips drop the selection and reset the settled paging.
+        let scope = self.snapshot(cx).project_scope_key.clone();
+        if scope != self.settled_reset_key {
+            self.settled_reset_key = scope;
+            self.settled_visible_count = SETTLED_TAIL_INITIAL_COUNT;
+            self.selection.clear();
+        }
+        // Release an optimistic drop once its writes land.
+        if let Some(drop) = self.optimistic_drop.clone() {
+            let (partition, _) = self.compute_sections(cx);
+            let pinned: Vec<String> = partition
+                .pinned
+                .iter()
+                .map(EnvironmentThreadShell::key)
+                .collect();
+            let active: Vec<String> = partition
+                .active
+                .iter()
+                .map(EnvironmentThreadShell::key)
+                .collect();
+            if should_release_optimistic_drop(
+                &drop,
+                &self.snapshot(cx).threads,
+                &pinned,
+                &active,
+                &now_iso(),
+            ) {
+                self.optimistic_drop = None;
             }
-            None => div()
-                .text_color(theme.secondary_label)
-                .child(SharedString::from(data.time)),
+        }
+        // A deleted or archived renaming row cancels the rename.
+        if let Some(rename) = &self.rename
+            && !self
+                .snapshot(cx)
+                .threads
+                .iter()
+                .any(|thread| thread.key() == rename.key && thread.archived_at.is_none())
+        {
+            self.rename = None;
+        }
+        cx.notify();
+    }
+
+    /// `scopedProjectKeys` for the persisted scope.
+    pub(crate) fn scoped_project_keys(&self, cx: &App) -> Option<HashSet<String>> {
+        let snapshot = self.snapshot(cx);
+        let key = snapshot.project_scope_key.as_ref()?;
+        let group = snapshot
+            .project_groups
+            .iter()
+            .find(|group| &group.project_key == key)?;
+        Some(group.member_project_keys.iter().cloned().collect())
+    }
+
+    /// The partition and list layout for this frame.
+    pub(crate) fn compute_sections(&mut self, cx: &App) -> (SidebarPartition, SidebarListLayout) {
+        let scoped = self.scoped_project_keys(cx);
+        let snapshot = self.store.read(cx).snapshot();
+        let partition = partition_sidebar_threads(
+            snapshot,
+            scoped.as_ref(),
+            self.optimistic_drop.as_ref(),
+            &mut self.inbox_returns,
+            &now_iso(),
+        );
+        let layout = layout_sidebar_list(
+            &partition,
+            self.route_thread_key(),
+            self.settled_visible_count,
+            snapshot.settled_shelf_expanded,
+            snapshot.snoozed_shelf_expanded,
+            snapshot.working_shelf_expanded,
+        );
+        (partition, layout)
+    }
+
+    pub(crate) fn thread(&self, key: &str, cx: &App) -> Option<EnvironmentThreadShell> {
+        self.snapshot(cx)
+            .threads
+            .iter()
+            .find(|thread| thread.key() == key)
+            .cloned()
+    }
+
+    /// `navigateToThread`: plain navigation; also clears a selection, sets
+    /// the range anchor and advances the visited watermark.
+    pub(crate) fn navigate_to_thread(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.selection.has_selection() {
+            self.selection.clear();
+        }
+        self.selection.set_anchor(key);
+        self.route = Some(SidebarRoute::Thread(key.to_string()));
+        if let Some(thread) = self.thread(key, cx) {
+            self.backend
+                .mark_visited(ThreadRef::of(&thread), now_iso(), cx)
+                .detach();
+        }
+        cx.emit(SidebarEvent::Navigate(self.route.clone()));
+        cx.notify();
+    }
+
+    pub(crate) fn navigate_to_draft(&mut self, draft_id: &str, cx: &mut Context<Self>) {
+        self.selection.clear();
+        self.route = Some(SidebarRoute::Draft(draft_id.to_string()));
+        cx.emit(SidebarEvent::Navigate(self.route.clone()));
+        cx.notify();
+    }
+
+    /// The route was cleared elsewhere (home).
+    pub fn navigate_home(&mut self, cx: &mut Context<Self>) {
+        self.route = None;
+        cx.emit(SidebarEvent::Navigate(None));
+        cx.notify();
+    }
+
+    fn traverse(&mut self, direction: ThreadTraversalDirection, cx: &mut Context<Self>) {
+        let (_, layout) = self.compute_sections(cx);
+        let current = self.route_thread_key().map(str::to_string);
+        if let Some(target) =
+            resolve_adjacent_thread_id(&layout.ordered_keys, current.as_ref(), direction)
+        {
+            self.navigate_to_thread(&target, cx);
+        }
+    }
+
+    fn jump(&mut self, index: usize, cx: &mut Context<Self>) {
+        let (_, layout) = self.compute_sections(cx);
+        if let Some(key) = layout.ordered_keys.get(index).cloned() {
+            self.navigate_to_thread(&key, cx);
+        }
+    }
+
+    /// Dispatch a sidebar keyboard action (the shell forwards them).
+    pub fn handle_action(
+        &mut self,
+        action: &dyn gpui_kit::Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let any = action.as_any();
+        let jumps = [
+            any.is::<ThreadJump1>(),
+            any.is::<ThreadJump2>(),
+            any.is::<ThreadJump3>(),
+            any.is::<ThreadJump4>(),
+            any.is::<ThreadJump5>(),
+            any.is::<ThreadJump6>(),
+            any.is::<ThreadJump7>(),
+            any.is::<ThreadJump8>(),
+            any.is::<ThreadJump9>(),
+        ];
+        if let Some(index) = jumps.iter().position(|is| *is) {
+            self.jump(index, cx);
+        } else if any.is::<ThreadPrevious>() {
+            self.traverse(ThreadTraversalDirection::Previous, cx);
+        } else if any.is::<ThreadNext>() {
+            self.traverse(ThreadTraversalDirection::Next, cx);
+        } else if any.is::<SettleThread>() {
+            if let Some(key) = self.route_thread_key().map(str::to_string)
+                && let Some(thread) = self.thread(&key, cx)
+                && thread.settled_override != Some(SettledOverride::Settled)
+            {
+                self.attempt_settle(ThreadRef::of(&thread), None, window, cx);
+            }
+        } else if any.is::<PinThread>() {
+            if let Some(key) = self.route_thread_key().map(str::to_string)
+                && let Some(thread) = self.thread(&key, cx)
+            {
+                if thread.pinned_at.is_some() {
+                    self.attempt_unpin(ThreadRef::of(&thread), window, cx);
+                } else {
+                    self.attempt_pin(ThreadRef::of(&thread), window, cx);
+                }
+            }
+        } else if any.is::<NewThread>() {
+            self.handle_new_thread(false, cx);
+        } else if any.is::<NewThreadInProject>() {
+            self.handle_new_thread(true, cx);
+        }
+    }
+
+    /// `handleNewThreadClick`: one project (or Shift) creates directly in
+    /// the current project; several open the "New thread in…" picker.
+    pub(crate) fn handle_new_thread(&mut self, shift: bool, cx: &mut Context<Self>) {
+        let snapshot = self.snapshot(cx);
+        let group_count = snapshot.project_groups.len();
+        let project_key = if should_create_new_thread_in_current_project(shift, group_count) {
+            self.route_thread_key()
+                .and_then(|key| snapshot.threads.iter().find(|thread| thread.key() == key))
+                .map(EnvironmentThreadShell::project_key)
+                .or_else(|| snapshot.projects.first().map(|project| project.key()))
+        } else {
+            None
         };
-
-        let line3 = (data.branch.is_some() || data.diff.is_some()).then(|| {
-            div()
-                .mt(rems(0.125))
-                .flex()
-                .min_w_0()
-                .items_center()
-                .gap(rems(0.375))
-                .text_size(TEXT_XS.size)
-                .line_height(TEXT_XS.line_height)
-                .text_color(theme.secondary_label)
-                .when_some(data.branch, |this, branch| {
-                    this.child(
-                        div()
-                            .flex()
-                            .min_w_0()
-                            .items_center()
-                            .gap_1()
-                            .text_color(with_alpha(theme.muted_foreground, 0.4))
-                            .child(
-                                Icon::new(IconName::GitBranch)
-                                    .size(rems(0.75))
-                                    .color(with_alpha(theme.muted_foreground, 0.4).into()),
-                            )
-                            .child(div().min_w_0().truncate().child(branch)),
-                    )
-                })
-                .when_some(data.diff, |this, (additions, deletions)| {
-                    this.child(
-                        div()
-                            .flex()
-                            .flex_shrink_0()
-                            .gap_1()
-                            .font_family(theme.fonts.mono.clone())
-                            .child(
-                                div()
-                                    .text_color(theme.diff_addition_foreground)
-                                    .child(format!("+{additions}")),
-                            )
-                            .child(
-                                div()
-                                    .text_color(theme.diff_deletion_foreground)
-                                    .child(format!("\u{2212}{deletions}")),
-                            ),
-                    )
-                })
+        cx.emit(SidebarEvent::NewThread {
+            project_key,
+            branch: None,
+            worktree_path: None,
         });
+    }
 
-        div().py(px(2.)).child(
-            div()
-                .id(data.id)
-                .relative()
-                .w_full()
-                .overflow_hidden()
-                .rounded(RADIUS_MD)
-                .cursor(CursorStyle::PointingHand)
-                .map(|this| {
-                    if self.active {
-                        this.bg(theme.sidebar_row_active)
-                    } else {
-                        this.hover(|style| style.bg(theme.sidebar_row_hover))
+    /// `useShortcutModifierState` → jump hints after a 200ms hold.
+    pub fn modifiers_changed(&mut self, modifiers: &Modifiers, cx: &mut Context<Self>) {
+        // Only the exact thread-jump modifier set (⌘ alone) shows hints.
+        let should_show = modifiers.platform
+            && !modifiers.shift
+            && !modifiers.alt
+            && !modifiers.control
+            && !modifiers.function;
+        match self.jump_hints.sync(should_show) {
+            JumpHintAction::Schedule => {
+                self.jump_hint_task = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(THREAD_JUMP_HINT_SHOW_DELAY_MS))
+                        .await;
+                    this.update(cx, |this, cx| {
+                        if this.jump_hints.fire() != JumpHintAction::None {
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                }));
+            }
+            JumpHintAction::Changed(_) => {
+                self.jump_hint_task = None;
+                cx.notify();
+            }
+            JumpHintAction::None => {
+                if !should_show {
+                    self.jump_hint_task = None;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn show_jump_hints(&self) -> bool {
+        self.jump_hints.is_visible()
+    }
+
+    /// Screenshot harness (not upstream): `TURIN_SIDEBAR_ROUTE=<thread id>`,
+    /// `TURIN_SIDEBAR_HOVER=<thread id>`, `TURIN_SIDEBAR_SEARCH=<query>`,
+    /// `TURIN_SIDEBAR_SELECT=<id,id>`, `TURIN_SIDEBAR_WORKING=1`,
+    /// `TURIN_SIDEBAR_COLLAPSE=1` (collapse the settled shelf),
+    /// `TURIN_SIDEBAR_SCOPE=<project id>`, `TURIN_SIDEBAR_DRAG=<thread id>:<dy>`.
+    pub fn apply_dev_overrides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+        let key = |id: String| format!("local:{id}");
+        if var("TURIN_SIDEBAR_WORKING").is_some()
+            || var("TURIN_SIDEBAR_COLLAPSE").is_some()
+            || var("TURIN_SIDEBAR_SCOPE").is_some()
+        {
+            let working = var("TURIN_SIDEBAR_WORKING").is_some();
+            let collapse = var("TURIN_SIDEBAR_COLLAPSE").is_some();
+            let scope = var("TURIN_SIDEBAR_SCOPE").map(key);
+            self.store.update(cx, |store, cx| {
+                store.update_snapshot(cx, |snapshot| {
+                    if working {
+                        snapshot.settings.working_shelf_enabled = true;
+                    }
+                    if collapse {
+                        snapshot.settled_shelf_expanded = false;
+                    }
+                    if scope.is_some() {
+                        snapshot.project_scope_key = scope;
                     }
                 })
-                .child(
-                    div()
-                        .h(rems(4.875))
-                        .px(SIDEBAR_ROW_CONTENT_INSET)
-                        .py(SIDEBAR_CONTENT_INSET)
-                        .child(
-                            div()
-                                .flex()
-                                .h_5()
-                                .min_w_0()
-                                .items_center()
-                                .gap(rems(0.375))
-                                .child(ProjectMonogram::new(
-                                    data.monogram,
-                                    hex(data.monogram_color).into(),
-                                ))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .truncate()
-                                        .text_size(TEXT_XS.size)
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(theme.secondary_label)
-                                        .child(data.project),
-                                )
-                                .child(
-                                    div()
-                                        .ml_auto()
-                                        .flex()
-                                        .h_5()
-                                        .min_w_8()
-                                        .flex_shrink_0()
-                                        .items_center()
-                                        .justify_end()
-                                        .text_size(TEXT_XS.size)
-                                        .child(status_slot),
-                                ),
-                        )
-                        .child(
-                            div().mt_1().flex().min_w_0().child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .truncate()
-                                    .text_size(TEXT_SM.size)
-                                    .line_height(TEXT_SM.line_height)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(with_alpha(theme.foreground, 0.9))
-                                    .child(data.title),
-                            ),
-                        )
-                        .children(line3),
-                ),
-        )
-    }
-}
-
-/// Slim variant row (settled/snoozed sections): 36px, favicon dimmed at rest.
-#[derive(IntoElement)]
-pub struct SidebarSlimThreadRow {
-    data: ThreadRowData,
-}
-
-impl SidebarSlimThreadRow {
-    pub fn new(data: ThreadRowData) -> Self {
-        Self { data }
-    }
-}
-
-impl RenderOnce for SidebarSlimThreadRow {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.app_theme();
-        let data = self.data;
-        div()
-            .id(data.id)
-            .flex()
-            .h_9()
-            .items_center()
-            .gap(rems(0.625))
-            .px(rems(0.625))
-            .rounded(RADIUS_MD)
-            .cursor(CursorStyle::PointingHand)
-            .hover(|style| style.bg(theme.sidebar_row_hover))
-            .child(
-                div()
-                    .opacity(0.4)
-                    .child(ProjectMonogram::new(data.monogram, theme.muted_foreground)),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .truncate()
-                    .text_size(TEXT_SM.size)
-                    .text_color(with_alpha(theme.secondary_label, 0.7))
-                    .child(data.title),
-            )
-            .child(
-                div()
-                    .ml_auto()
-                    .flex()
-                    .h_6()
-                    .min_w_8()
-                    .items_center()
-                    .justify_end()
-                    .text_size(TEXT_XS.size)
-                    .text_color(theme.secondary_label)
-                    .child(data.time),
-            )
-    }
-}
-
-/// `CollapsibleSectionHeader` (ui/collapsible-section-header.tsx), muted tone.
-#[derive(IntoElement)]
-pub struct SidebarSectionHeader {
-    label: SharedString,
-}
-
-impl SidebarSectionHeader {
-    pub fn new(label: impl Into<SharedString>) -> Self {
-        Self {
-            label: label.into(),
+            });
         }
+        if let Some(id) = var("TURIN_SIDEBAR_ROUTE") {
+            self.navigate_to_thread(&key(id), cx);
+        }
+        if let Some(id) = var("TURIN_SIDEBAR_HOVER") {
+            self.hovered_row = Some(key(id));
+        }
+        if let Some(ids) = var("TURIN_SIDEBAR_SELECT") {
+            for id in ids.split(',') {
+                self.selection.toggle_thread(&key(id.to_string()));
+            }
+        }
+        if let Some(query) = var("TURIN_SIDEBAR_SEARCH") {
+            self.search_input
+                .update(cx, |input, cx| input.set_value(query.clone(), window, cx));
+            self.set_search_query(query, cx);
+        }
+        if let Some(spec) = var("TURIN_SIDEBAR_DRAG")
+            && let Some((id, dy)) = spec.split_once(':')
+            && let Ok(dy) = dy.parse::<f32>()
+        {
+            let thread_key = key(id.to_string());
+            // Wait for the list to be measured, then press, travel and hold.
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(600))
+                    .await;
+                this.update_in(cx, |this, window, cx| {
+                    let top = this
+                        .row_tops(cx)
+                        .into_iter()
+                        .find(|(key, _)| *key == thread_key)
+                        .map(|(_, top)| top);
+                    let Some(top) = top else {
+                        return;
+                    };
+                    let (_, _, left, width) = this.list_box().unwrap_or_default();
+                    let origin =
+                        gpui_kit::point(gpui_kit::px(left + width / 2.), gpui_kit::px(top + 30.));
+                    let press = gpui_kit::MouseDownEvent {
+                        button: gpui_kit::MouseButton::Left,
+                        position: origin,
+                        modifiers: Modifiers::default(),
+                        click_count: 1,
+                        first_mouse: false,
+                    };
+                    this.press_row(&thread_key, &press, cx);
+                    let steps = 8;
+                    for step in 1..=steps {
+                        let y = top + 30. + dy * step as f32 / steps as f32;
+                        this.debug_pointer_move(
+                            sidebar_pointer::Point::new(left + width / 2., y),
+                            window,
+                            cx,
+                        );
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        cx.notify();
     }
 }
 
-impl RenderOnce for SidebarSectionHeader {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.app_theme();
-        let muted = with_alpha(theme.sidebar_muted_foreground, 0.6).into();
-        div().mx(px(2.)).h_8().child(
-            div()
-                .id(SharedString::from(format!("section-{}", self.label)))
-                .flex()
-                .h_8()
-                .w_full()
-                .items_center()
-                .gap_2()
-                .px_2()
-                .rounded(RADIUS_MD)
-                .cursor(CursorStyle::PointingHand)
-                .text_size(TEXT_XS.size)
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(muted)
-                .child(self.label)
-                .child(div().flex_1().min_w_2().child(
-                    Separator::horizontal().color(with_alpha(theme.sidebar_border, 0.6).into()),
-                ))
-                .child(
-                    Icon::new(IconName::ChevronDown)
-                        .size(rems(0.75))
-                        .color(muted),
-                ),
-        )
-    }
-}
-
-/// The sidebar column's contents (inside the `bg-sidebar` container).
-#[derive(IntoElement)]
-pub struct Sidebar;
-
-impl RenderOnce for Sidebar {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let (active, settled) = placeholder_threads();
+impl Render for Sidebar {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.app_theme().clone();
+        let scope = *theme.sidebar_scope();
+        let header = self.render_thread_header(window, cx);
+        let body = if self.is_searching() {
+            self.render_search_results(window, cx).into_any_element()
+        } else {
+            self.render_thread_list(window, cx).into_any_element()
+        };
         div()
+            .id("sidebar")
             .flex()
             .flex_col()
             .size_full()
+            .text_color(scope.sidebar_foreground)
             .child(SidebarChromeHeader)
             .child(
-                div()
-                    .p(SIDEBAR_CONTENT_INSET)
-                    .child(SidebarThreadHeader { has_projects: true }),
+                SidebarContent::new("sidebar-content")
+                    .fixed_header(SidebarGroup::new().child(header))
+                    .child(SidebarGroup::new().with(|this| this.flex_1()).child(body)),
             )
-            .child(
-                div().flex_1().min_h_0().child(
-                    scroll_area_hidden("sidebar-content").child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_h_full()
-                            .px(SIDEBAR_CONTENT_INSET)
-                            .pb(SIDEBAR_CONTENT_INSET)
-                            .children(
-                                active
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(index, row)| SidebarThreadRow::new(row, index == 0)),
-                            )
-                            .child(
-                                div()
-                                    .mt_auto()
-                                    .flex()
-                                    .flex_col()
-                                    .child(SidebarSectionHeader::new("Settled"))
-                                    .children(settled.into_iter().map(SidebarSlimThreadRow::new)),
-                            ),
-                    ),
-                ),
-            )
-            .child(SidebarChromeFooter)
+            .child(SidebarChromeFooter::new(cx.entity().downgrade()))
+            .children(self.render_gesture_listeners(window, cx))
     }
 }

@@ -7513,6 +7513,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "turin-projects"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "indexmap",
+ "parking_lot",
+ "pretty_assertions",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "turin-contracts",
+ "turin-git",
+ "turin-shared",
+ "unicode-normalization",
+ "uuid",
+]
+
+[[package]]
 name = "turin-provider-claude"
 version = "0.1.0"
 dependencies = [
@@ -7600,6 +7626,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "turin-review"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "turin-contracts",
+ "turin-git",
+]
+
+[[package]]
 name = "turin-shared"
 version = "0.1.0"
 dependencies = [
@@ -7637,6 +7675,32 @@ dependencies = [
  "tokio",
  "tracing",
  "turin-contracts",
+]
+
+[[package]]
+name = "turin-usage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "chrono-tz",
+ "futures",
+ "gethostname",
+ "indexmap",
+ "libc",
+ "parking_lot",
+ "pretty_assertions",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "turin-contracts",
+ "turin-provider-core",
+ "turin-shared",
+ "uuid",
 ]
 
 [[package]]

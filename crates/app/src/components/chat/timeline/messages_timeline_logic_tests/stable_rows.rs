@@ -104,3 +104,74 @@ fn returns_the_previous_result_when_rows_are_unchanged() {
         compute_stable_messages_timeline_rows(derive(&rows_input(entries, false)), &initial);
     assert!(Arc::ptr_eq(&again.result, &initial.result));
 }
+
+#[test]
+fn reuses_work_rows_when_equivalent_timeline_derivations_create_new_grouped_arrays() {
+    let first_work = WorkLogEntry {
+        detail: Some("Inspecting repository state".into()),
+        ..work_log(
+            "work-1",
+            "2026-01-01T00:00:00Z",
+            None,
+            "thinking",
+            WorkTone::Thinking,
+        )
+    };
+    let second_work = WorkLogEntry {
+        detail: Some("Reading package.json".into()),
+        ..work_log(
+            "work-2",
+            "2026-01-01T00:00:01Z",
+            None,
+            "read",
+            WorkTone::Tool,
+        )
+    };
+    let create_rows = || {
+        derive(&rows_input(
+            vec![
+                work_entry("entry-work-1", "2026-01-01T00:00:00Z", first_work.clone()),
+                work_entry("entry-work-2", "2026-01-01T00:00:01Z", second_work.clone()),
+            ],
+            false,
+        ))
+    };
+
+    let first_rows = create_rows();
+    let initial = compute_stable_messages_timeline_rows(first_rows.clone(), &Default::default());
+    let second_rows = create_rows();
+    assert!(!Arc::ptr_eq(&second_rows[0], &first_rows[0]));
+
+    let repeated = compute_stable_messages_timeline_rows(second_rows, &initial);
+    assert!(Arc::ptr_eq(&repeated.result, &initial.result));
+    assert!(Arc::ptr_eq(&repeated.result[0], &initial.result[0]));
+}
+
+#[test]
+fn returns_a_new_result_when_row_order_changes_without_content_changes() {
+    let rows = derive(&rows_input(
+        vec![
+            message_entry(
+                "entry-user-1",
+                "2026-01-01T00:00:00Z",
+                user_message("user-1", "First", None, "2026-01-01T00:00:00Z"),
+            ),
+            message_entry(
+                "entry-user-2",
+                "2026-01-01T00:00:10Z",
+                user_message("user-2", "Second", None, "2026-01-01T00:00:10Z"),
+            ),
+        ],
+        false,
+    ));
+    let initial = compute_stable_messages_timeline_rows(rows.clone(), &Default::default());
+
+    let reordered =
+        compute_stable_messages_timeline_rows(vec![rows[1].clone(), rows[0].clone()], &initial);
+
+    assert!(!Arc::ptr_eq(&reordered.result, &initial.result));
+    assert_eq!(
+        *reordered.result,
+        vec![initial.result[1].clone(), initial.result[0].clone()]
+    );
+}

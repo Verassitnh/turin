@@ -11,6 +11,7 @@
 
 pub mod apply;
 pub mod canonical;
+pub mod shell;
 #[cfg(test)]
 mod window_tests;
 
@@ -28,6 +29,14 @@ use crate::projection::sql::query_payload;
 use canonical::{
     HistoryAnchor, ProjectionRecordField, ProjectionRecordFilter, ReadWindow,
     read_canonical_projection, read_projection,
+};
+use shell::{
+    ProjectionLimitRecoveryCandidate, ProjectionSettlementCandidate, ProjectionThreadPullRequests,
+    ShellSnapshotOptions, ShellSnapshotRows, ThreadWorktreePath,
+};
+use turin_contracts::UtcDateTime;
+use turin_contracts::orchestration_v2::{
+    OrchestrationV2ThreadShell, OrchestrationV2ThreadShellSnapshot,
 };
 
 /// `ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION`.
@@ -237,6 +246,98 @@ impl ProjectionStore {
         })
         .await
     }
+}
+
+impl ProjectionStore {
+    /// `readShellSnapshot`: the raw rows, read in one transaction. Decode them
+    /// with [`ShellSnapshotRows::decode`] after the connection is free.
+    pub async fn read_shell_snapshot(
+        &self,
+        options: ShellSnapshotOptions,
+    ) -> Result<ShellSnapshotRows, ProjectionStoreError> {
+        self.read_tx(move |conn| shell::read_shell_snapshot_rows(conn, &options))
+            .await
+    }
+
+    /// `getShellSnapshot`.
+    pub async fn get_shell_snapshot(
+        &self,
+        options: ShellSnapshotOptions,
+    ) -> Result<OrchestrationV2ThreadShellSnapshot, ProjectionStoreError> {
+        self.read_shell_snapshot(options).await?.decode()
+    }
+
+    /// `getThreadShell`: one thread's shell, `None` when it does not exist.
+    pub async fn get_thread_shell(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Option<OrchestrationV2ThreadShell>, ProjectionStoreError> {
+        let id = thread_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            Ok(shell::read_thread_shell(conn, &id)?)
+        })
+        .await
+    }
+
+    /// `getSettlementCandidates`.
+    pub async fn get_settlement_candidates(
+        &self,
+        thread_id: Option<ThreadId>,
+    ) -> Result<Vec<ProjectionSettlementCandidate>, ProjectionStoreError> {
+        let id = thread_id.clone().unwrap_or_else(shell_thread_id);
+        self.read_for_thread(&id, true, move |conn| {
+            Ok(shell::read_settlement_candidates(conn, thread_id.as_ref())?)
+        })
+        .await
+    }
+
+    /// `getThreadsWithPullRequests`.
+    pub async fn get_threads_with_pull_requests(
+        &self,
+        thread_id: Option<ThreadId>,
+    ) -> Result<Vec<ProjectionThreadPullRequests>, ProjectionStoreError> {
+        let id = thread_id.clone().unwrap_or_else(shell_thread_id);
+        self.read_for_thread(&id, true, move |conn| {
+            Ok(shell::read_threads_with_pull_requests(
+                conn,
+                thread_id.as_ref(),
+            )?)
+        })
+        .await
+    }
+
+    /// `getThreadWorktreePaths`.
+    pub async fn get_thread_worktree_paths(
+        &self,
+    ) -> Result<Vec<ThreadWorktreePath>, ProjectionStoreError> {
+        self.read_for_thread(&shell_thread_id(), false, |conn| {
+            Ok(shell::read_thread_worktree_paths(conn)?)
+        })
+        .await
+    }
+
+    /// `getLimitRecoveryCandidates`.
+    pub async fn get_limit_recovery_candidates(
+        &self,
+        now: UtcDateTime,
+        auto_resume: bool,
+        snooze: bool,
+    ) -> Result<Vec<ProjectionLimitRecoveryCandidate>, ProjectionStoreError> {
+        self.read_for_thread(&shell_thread_id(), true, move |conn| {
+            Ok(shell::read_limit_recovery_candidates(
+                conn,
+                &now,
+                auto_resume,
+                snooze,
+            )?)
+        })
+        .await
+    }
+}
+
+/// Stand-in thread id for reads that span threads, used only to label errors.
+fn shell_thread_id() -> ThreadId {
+    ThreadId::new("thread:shell").expect("literal id")
 }
 
 fn read_thread(

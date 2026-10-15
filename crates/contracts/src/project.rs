@@ -372,14 +372,31 @@ pub struct Project {
     pub id: ProjectId,
     pub title: TrimmedNonEmptyString,
     pub workspace_root: TrimmedNonEmptyString,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub repository_identity: Option<Option<RepositoryIdentity>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub favicon_path: Option<Option<TrimmedNonEmptyString>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub project_icon: Option<Option<ReceivedProjectIcon>>,
+    /// `Schema.NullOr(ModelSelection)`: required key, `null` when unset.
     pub default_model_selection: Option<ModelSelection>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub default_thread_env_mode: Option<Option<ThreadEnvMode>>,
     // Opt-in because background sync performs network I/O and may move the checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -416,7 +433,11 @@ pub struct ProjectCreatePayload {
     pub workspace_root: TrimmedNonEmptyString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_workspace_root_if_missing: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub default_model_selection: Option<Option<ModelSelection>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripts: Option<Vec<ProjectScript>>,
@@ -429,15 +450,31 @@ pub struct ProjectUpdatePayload {
     pub title: Option<TrimmedNonEmptyString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_root: Option<TrimmedNonEmptyString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub default_model_selection: Option<Option<ModelSelection>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_pull: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub project_icon: Option<Option<ProjectIconOverride>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub favicon_path: Option<Option<TrimmedNonEmptyString>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub default_thread_env_mode: Option<Option<ThreadEnvMode>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripts: Option<Vec<ProjectScript>>,
@@ -454,7 +491,11 @@ pub enum ProjectMutation {
         workspace_root: TrimmedNonEmptyString,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         create_workspace_root_if_missing: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::base_schemas::double_option"
+        )]
         default_model_selection: Option<Option<ModelSelection>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scripts: Option<Vec<ProjectScript>>,
@@ -467,15 +508,31 @@ pub enum ProjectMutation {
         title: Option<TrimmedNonEmptyString>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace_root: Option<TrimmedNonEmptyString>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::base_schemas::double_option"
+        )]
         default_model_selection: Option<Option<ModelSelection>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_pull: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::base_schemas::double_option"
+        )]
         project_icon: Option<Option<ProjectIconOverride>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::base_schemas::double_option"
+        )]
         favicon_path: Option<Option<TrimmedNonEmptyString>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::base_schemas::double_option"
+        )]
         default_thread_env_mode: Option<Option<ThreadEnvMode>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scripts: Option<Vec<ProjectScript>>,
@@ -979,5 +1036,15 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(change, ProjectChange::ProjectDeleted { .. }));
+    }
+}
+
+#[cfg(test)]
+mod tagged_union_tests {
+    use super::*;
+
+    #[test]
+    fn received_project_icon_known_tags() {
+        crate::base_schemas::assert_known_tags::<ReceivedProjectIcon>();
     }
 }

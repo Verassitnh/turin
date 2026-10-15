@@ -3,7 +3,6 @@
 use crate::base_schemas::TrimmedNonEmptyString;
 use crate::chat_attachment::{ChatFileAttachment, ChatImageAttachment};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProviderApprovalPolicy {
@@ -88,7 +87,8 @@ pub struct ProviderApprovalOption {
     pub warning: Option<TrimmedNonEmptyString>,
 }
 
-pub type ProviderUserInputAnswers = BTreeMap<String, serde_json::Value>;
+/// `Schema.Record(Schema.String, Schema.Unknown)`: insertion order preserved.
+pub type ProviderUserInputAnswers = indexmap::IndexMap<String, serde_json::Value>;
 
 /// One entry of `attachmentsByQuestionId`: an image or file attachment.
 /// (The unknown-attachment member is deliberately absent, as upstream.)
@@ -99,14 +99,15 @@ pub enum UserInputAttachment {
     File(ChatFileAttachment),
 }
 
-pub type UserInputAttachments = BTreeMap<String, Vec<UserInputAttachment>>;
+/// `Schema.Record(...)` keyed by question id: insertion order preserved.
+pub type UserInputAttachments = indexmap::IndexMap<String, Vec<UserInputAttachment>>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputAttachmentAnswerPayload {
     pub request_id: TrimmedNonEmptyString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub question_text_by_id: Option<BTreeMap<String, String>>,
+    pub question_text_by_id: Option<indexmap::IndexMap<String, String>>,
     pub answers: ProviderUserInputAnswers,
     pub attachments_by_question_id: UserInputAttachments,
 }

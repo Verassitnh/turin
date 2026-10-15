@@ -1,9 +1,7 @@
 //! Port of upstream/packages/contracts/src/environment.ts (local fields only;
 //! the HTTP/relay surfaces live in the cut `environmentHttp` module).
 
-use crate::base_schemas::{
-    lenient_option, EnvironmentId, ProjectId, ThreadId, TrimmedNonEmptyString,
-};
+use crate::base_schemas::{EnvironmentId, ProjectId, ThreadId, TrimmedNonEmptyString};
 use serde::{Deserialize, Serialize};
 
 /// Wire version for orchestration snapshots, streams, commands, and RPC payloads.
@@ -66,7 +64,7 @@ pub struct ExecutionEnvironmentPlatform {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "lenient_option::deserialize"
+        with = "crate::base_schemas::forward_compatible_optional"
     )]
     pub machine: Option<EnvironmentMachineKind>,
 }
@@ -277,8 +275,9 @@ pub struct ExecutionEnvironmentCapabilities {
     /// Manual commands must update this install, not the host's default
     /// global prefix — `ForwardCompatibleOptional`.
     #[serde(
+        default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "lenient_option::deserialize"
+        with = "crate::base_schemas::forward_compatible_optional"
     )]
     pub server_installation: Option<ServerInstallation>,
     /// Server can stream self-update progress before acknowledging the

@@ -1,12 +1,8 @@
 //! Port of upstream/packages/contracts/src/providerSetup.ts
 
-use crate::base_schemas::{
-    lenient_nullable_option, lenient_option, ContractError, EnvironmentId, IsoDateTime,
-    TrimmedNonEmptyString,
-};
+use crate::base_schemas::{ContractError, EnvironmentId, IsoDateTime, TrimmedNonEmptyString};
 use crate::provider_instance::{ProviderDriverKind, ProviderInstanceId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,7 +149,7 @@ pub enum ProviderAuthResponse {
         size: Option<ProviderAuthTerminalSize>,
     },
     #[serde(rename = "credentials")]
-    Credentials { values: BTreeMap<SetupOperationId, String> },
+    Credentials { values: indexmap::IndexMap<SetupOperationId, String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -266,13 +262,13 @@ pub struct ProviderAuthState {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "lenient_nullable_option::deserialize"
+        with = "crate::base_schemas::forward_compatible_optional_nullable"
     )]
     pub interaction: Option<Option<ProviderAuthInteraction>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "lenient_option::deserialize"
+        with = "crate::base_schemas::forward_compatible_optional"
     )]
     pub credential_owner: Option<ProviderCredentialOwner>,
 }

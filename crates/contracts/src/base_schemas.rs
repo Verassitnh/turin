@@ -234,62 +234,6 @@ impl<T> From<Option<T>> for EffectOption<T> {
     }
 }
 
-/// Defines a unit struct used for a constant-valued struct field, mirroring
-/// upstream `Schema.Literal("value")` fields (e.g. `kind: "snap-shot"`,
-/// `version: 1`): decodes only from exactly that string, encodes to it.
-#[macro_export]
-macro_rules! string_literal {
-    ($(#[$meta:meta])* $name:ident, $value:literal) => {
-        $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub struct $name;
-
-        impl ::serde::Serialize for $name {
-            fn serialize<S: ::serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-                s.serialize_str($value)
-            }
-        }
-
-        impl<'de> ::serde::Deserialize<'de> for $name {
-            fn deserialize<D: ::serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                let raw = <::std::borrow::Cow<'de, str>>::deserialize(d)?;
-                if raw == $value {
-                    Ok($name)
-                } else {
-                    Err(::serde::de::Error::custom(concat!("expected ", $value)))
-                }
-            }
-        }
-    };
-}
-
-/// Integer-valued counterpart of [`string_literal`], for `Schema.Literal(n)`.
-#[macro_export]
-macro_rules! int_literal {
-    ($(#[$meta:meta])* $name:ident, $value:literal) => {
-        $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub struct $name;
-
-        impl ::serde::Serialize for $name {
-            fn serialize<S: ::serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-                s.serialize_u64($value)
-            }
-        }
-
-        impl<'de> ::serde::Deserialize<'de> for $name {
-            fn deserialize<D: ::serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                let raw = <u64 as ::serde::Deserialize>::deserialize(d)?;
-                if raw == $value {
-                    Ok($name)
-                } else {
-                    Err(::serde::de::Error::custom(concat!("expected ", $value)))
-                }
-            }
-        }
-    };
-}
-
 /// Which client surface a command comes from. Turin only ever sends
 /// `Desktop`, but persisted upstream rows may carry the others.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -430,43 +374,6 @@ pub mod forward_compatible_array {
             .into_iter()
             .filter_map(|value| serde_json::from_value(value).ok())
             .collect())
-    }
-}
-
-/// `ForwardCompatibleOptional` / `ForwardCompatibleNullable` / `OmittedWhenNull`:
-/// a value this build does not understand decodes as absent. Use with
-/// `#[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_option::deserialize")]`.
-pub mod lenient_option {
-    use super::*;
-
-    pub fn deserialize<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
-    where
-        D: Deserializer<'de>,
-        T: serde::de::DeserializeOwned,
-    {
-        let raw = Option::<serde_json::Value>::deserialize(d)?;
-        Ok(raw.and_then(|value| serde_json::from_value(value).ok()))
-    }
-}
-
-/// `ForwardCompatibleOptional(Schema.NullOr(X))`: absent or unknown decodes
-/// as absent (the key is omitted on encode); an explicit `null` decodes as
-/// present-null. Use with
-/// `#[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_nullable_option::deserialize")]`.
-pub mod lenient_nullable_option {
-    use super::*;
-
-    pub fn deserialize<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
-    where
-        D: Deserializer<'de>,
-        T: serde::de::DeserializeOwned,
-    {
-        let raw = Option::<serde_json::Value>::deserialize(d)?;
-        Ok(match raw {
-            None => None,
-            Some(serde_json::Value::Null) => Some(None),
-            Some(value) => serde_json::from_value(value).ok().map(Some),
-        })
     }
 }
 

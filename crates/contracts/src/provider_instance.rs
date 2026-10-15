@@ -8,7 +8,6 @@
 
 use crate::base_schemas::{ContractError, TrimmedNonEmptyString};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::BTreeMap;
 use std::fmt;
 
 const PROVIDER_SLUG_MAX_CHARS: usize = 64;
@@ -227,7 +226,8 @@ pub enum ProviderInstanceMutation {
 
 /// Map shape for `ServerSettings.providerInstances`. Keyed by
 /// `ProviderInstanceId`, values are envelopes the registry feeds to drivers.
-pub type ProviderInstanceConfigMap = BTreeMap<ProviderInstanceId, ProviderInstanceConfig>;
+/// `Schema.Record` upstream: insertion order preserved.
+pub type ProviderInstanceConfigMap = indexmap::IndexMap<ProviderInstanceId, ProviderInstanceConfig>;
 
 /// Construct the canonical `ProviderInstanceId` used as a back-compat default
 /// for a built-in driver. The legacy single-instance-per-driver world used

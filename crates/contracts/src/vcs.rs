@@ -21,13 +21,13 @@ pub enum VcsFreshnessSource {
 }
 
 /// `VcsFreshness.observedAt` / `expiresAt` are `Schema.DateTimeUtc` /
-/// `Schema.Option(Schema.DateTimeUtc)`: ISO-8601 strings on the wire.
+/// `Schema.Option(Schema.DateTimeUtc)`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VcsFreshness {
     pub source: VcsFreshnessSource,
-    pub observed_at: String,
-    pub expires_at: EffectOption<String>,
+    pub observed_at: crate::base_schemas::UtcDateTime,
+    pub expires_at: EffectOption<crate::base_schemas::UtcDateTime>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,7 +100,7 @@ pub struct VcsProcessSpawnFailure {
 /// Upstream `VcsProcessTimeoutFailure`.
 #[derive(Debug, Clone)]
 pub struct VcsProcessTimeoutFailure {
-    pub timeout_ms: i64,
+    pub timeout_ms: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -115,7 +115,7 @@ pub enum VcsProcessExitFailureKind {
 /// Upstream `VcsProcessExitFailure`.
 #[derive(Debug, Clone)]
 pub struct VcsProcessExitFailure {
-    pub exit_code: i64,
+    pub exit_code: f64,
     pub stderr: String,
     pub stderr_truncated: bool,
 }
@@ -162,7 +162,7 @@ pub enum VcsProcessExitError {
         cwd: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         argument_count: Option<NonNegativeInt>,
-        exit_code: i64,
+        exit_code: f64,
         detail: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         failure_kind: Option<VcsProcessExitFailureKind>,
@@ -226,7 +226,7 @@ pub enum VcsProcessTimeoutError {
         cwd: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         argument_count: Option<NonNegativeInt>,
-        timeout_ms: i64,
+        timeout_ms: f64,
     },
 }
 
@@ -403,7 +403,7 @@ mod tests {
         let error = VcsProcessExitError::from_process_exit(
             context,
             VcsProcessExitFailure {
-                exit_code: 1,
+                exit_code: 1.0,
                 stderr: "err".to_owned(),
                 stderr_truncated: false,
             },
@@ -417,28 +417,28 @@ mod tests {
         let json = serde_json::to_value(&error).unwrap();
         assert_eq!(json["_tag"], "VcsProcessExitError");
         assert_eq!(json["failureKind"], "not-found");
+        assert_eq!(json["exitCode"], 1.0);
         let back: VcsError = serde_json::from_value(json).unwrap();
         assert!(matches!(back, VcsError::Exit(_)));
     }
 
     #[test]
     fn freshness_round_trips_option_shapes() {
-        let freshness = VcsFreshness {
-            source: VcsFreshnessSource::LiveLocal,
-            observed_at: "2026-10-14T00:00:00.000Z".to_owned(),
-            expires_at: EffectOption::some("2026-10-14T00:05:00.000Z".to_owned()),
-        };
-        let json = serde_json::to_value(&freshness).unwrap();
-        assert_eq!(json["expiresAt"], serde_json::json!({"_tag": "Some", "value": "2026-10-14T00:05:00.000Z"}));
-        let back: VcsFreshness = serde_json::from_value(json).unwrap();
-        assert_eq!(back, freshness);
+        let json = serde_json::json!({
+            "source": "live-local",
+            "observedAt": "2026-10-14T00:00:00.000Z",
+            "expiresAt": {"_tag": "Some", "value": "2026-10-14T00:05:00.000Z"},
+        });
+        let freshness: VcsFreshness = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&freshness).unwrap(), json);
 
-        let none = VcsFreshness {
-            expires_at: EffectOption::None,
-            ..freshness
-        };
-        let json = serde_json::to_value(&none).unwrap();
-        assert_eq!(json["expiresAt"], serde_json::json!({"_tag": "None"}));
+        let none = serde_json::json!({
+            "source": "live-local",
+            "observedAt": "2026-10-14T00:00:00.000Z",
+            "expiresAt": {"_tag": "None"},
+        });
+        let freshness: VcsFreshness = serde_json::from_value(none.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&freshness).unwrap(), none);
     }
 }
 

@@ -32,16 +32,16 @@ pub enum ReviewDiffPreviewSourceKind {
     BranchRange,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewDiffFileStat {
     pub path: String,
     pub previous_path: Option<String>,
-    pub additions: i64,
-    pub deletions: i64,
+    pub additions: f64,
+    pub deletions: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewDiffPreviewSource {
     pub id: TrimmedNonEmptyString,
@@ -86,12 +86,11 @@ pub struct ReviewDiffFileContentsResult {
     pub new_contents: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewDiffPreviewResult {
     pub cwd: TrimmedNonEmptyString,
-    /// `Schema.DateTimeUtc`: an ISO-8601 string.
-    pub generated_at: String,
+    pub generated_at: crate::base_schemas::UtcDateTime,
     pub sources: Vec<ReviewDiffPreviewSource>,
 }
 

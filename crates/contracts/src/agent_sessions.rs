@@ -63,7 +63,11 @@ pub struct AgentSessionProjectCandidate {
     /// Missing on servers that predate the git scan, where the client cannot
     /// tell repositories from plain folders and should treat every candidate
     /// as a standalone project.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub git: Option<Option<AgentSessionProjectGit>>,
 }
 

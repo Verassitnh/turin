@@ -382,7 +382,11 @@ pub struct VcsStatusChangeRequest {
     /// Last provider-side activity (ISO), including comments and metadata
     /// edits. This is not the time a change request closed or merged.
     /// Optional for old servers and providers whose lookups do not report it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub updated_at: Option<Option<String>>,
 }
 
@@ -621,16 +625,17 @@ pub enum GitCommandError {
         operation: String,
         command: String,
         cwd: String,
+        // `Schema.Number` upstream: floats, not ints.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        argument_count: Option<i64>,
+        argument_count: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        exit_code: Option<i64>,
+        exit_code: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        stdout_length: Option<i64>,
+        stdout_length: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        stderr_length: Option<i64>,
+        stderr_length: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        output_length: Option<i64>,
+        output_length: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<GitCommandFailureReason>,
         detail: String,

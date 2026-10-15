@@ -102,16 +102,32 @@ pub struct ChangeRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_draft: Option<bool>,
     /// `Schema.optional(Schema.NullOr(Schema.String))`: absent, null, or a string.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub closed_at: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub merged_at: Option<Option<String>>,
-    pub updated_at: EffectOption<String>,
+    pub updated_at: EffectOption<crate::base_schemas::UtcDateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_cross_repository: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub head_repository_name_with_owner: Option<Option<TrimmedNonEmptyString>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::base_schemas::double_option"
+    )]
     pub head_repository_owner_login: Option<Option<TrimmedNonEmptyString>>,
 }
 

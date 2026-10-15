@@ -5,4 +5,5 @@
 
 #![allow(dead_code)]
 
+pub mod fixtures;
 pub mod pull_request_list_logic;

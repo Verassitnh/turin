@@ -3,6 +3,7 @@
 mod assets;
 mod branding;
 mod components;
+mod diff;
 mod hooks;
 mod theme;
 // The ui primitives are a library: every upstream variant and size is ported

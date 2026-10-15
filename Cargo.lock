@@ -7051,6 +7051,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "similar",
  "tokio",
  "tracing",
  "tracing-subscriber",

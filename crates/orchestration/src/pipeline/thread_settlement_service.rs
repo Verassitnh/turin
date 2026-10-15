@@ -67,7 +67,7 @@ pub struct SettlementSettings {
 }
 
 pub(crate) fn to_millis(value: Option<&UtcDateTime>) -> Option<i64> {
-    value.map(|value| value.0.timestamp_millis())
+    value.map(|value| value.as_datetime().timestamp_millis())
 }
 
 /// `Option<Option<T>>` fields: the inner `None` is an explicit null.
@@ -742,7 +742,11 @@ async fn clean_up_settled_thread_inner(
     if thread.settled_override != Some(OrchestrationV2SettleOverride::Settled) {
         return Ok(());
     }
-    let Some(settled_at_ms) = thread.settled_at.as_ref().map(|at| at.0.timestamp_millis()) else {
+    let Some(settled_at_ms) = thread
+        .settled_at
+        .as_ref()
+        .map(|at| at.as_datetime().timestamp_millis())
+    else {
         return Ok(());
     };
     if inner.settle_action_run_at.lock().get(thread_id) == Some(&settled_at_ms) {

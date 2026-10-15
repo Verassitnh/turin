@@ -7072,12 +7072,24 @@ name = "turin-git"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "libc",
+ "parking_lot",
+ "pretty_assertions",
+ "regex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
  "turin-contracts",
+ "uuid",
 ]
 
 [[package]]

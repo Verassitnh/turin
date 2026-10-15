@@ -196,12 +196,8 @@ fn uri_component(value: &str) -> String {
 /// `new URLSearchParams(...).toString()` produces: space becomes `+`, and
 /// only `[A-Za-z0-9*-._]` stay literal.
 fn form_urlencoded(pairs: &[(&str, &str)]) -> String {
-    let mut out = String::new();
-    for (index, (name, value)) in pairs.iter().enumerate() {
-        if index > 0 {
-            out.push('&');
-        }
-        for byte in name.bytes().chain(value.bytes()) {
+    fn encode_into(value: &str, out: &mut String) {
+        for byte in value.bytes() {
             match byte {
                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
                     out.push(byte as char)
@@ -210,6 +206,16 @@ fn form_urlencoded(pairs: &[(&str, &str)]) -> String {
                 _ => out.push_str(&format!("%{byte:02X}")),
             }
         }
+    }
+
+    let mut out = String::new();
+    for (index, (name, value)) in pairs.iter().enumerate() {
+        if index > 0 {
+            out.push('&');
+        }
+        encode_into(name, &mut out);
+        out.push('=');
+        encode_into(value, &mut out);
     }
     out
 }

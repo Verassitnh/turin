@@ -18,7 +18,8 @@ use turin_contracts::agent_sessions::{AgentSessionProjectGit, AgentSessionScanRe
 use turin_contracts::base_schemas::{ProjectId, TrimmedNonEmptyString};
 use turin_contracts::orchestration_project::OrchestrationProjectShell;
 use turin_contracts::provider_instance::{
-    ProviderDriverKind, ProviderInstanceConfig, ProviderInstanceConfigMap, ProviderInstanceId,
+    ProviderDriverKind, ProviderInstanceConfig, ProviderInstanceConfigMap, ProviderInstanceEnvironmentVariable,
+    ProviderInstanceEnvironmentVariableName, ProviderInstanceId,
 };
 
 use super::*;
@@ -735,3 +736,170 @@ async fn keeps_case_variants_distinct_when_the_filesystem_identities_differ() {
         ]
     );
 }
+
+fn env_var(name: &str, value: &Path) -> ProviderInstanceEnvironmentVariable {
+    ProviderInstanceEnvironmentVariable {
+        name: ProviderInstanceEnvironmentVariableName::new(name).expect("name"),
+        value: value.to_string_lossy().into_owned(),
+        sensitive: false,
+        value_redacted: None,
+    }
+}
+
+fn paths(result: &AgentSessionScanResult) -> Vec<String> {
+    result
+        .candidates
+        .iter()
+        .map(|candidate| candidate.path.as_str().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn uses_explicit_default_slot_homes_instead_of_the_fixture_homes() {
+    let mut fixture = Fixture::new();
+    let legacy_workspace = fixture.workspace("t3code-workspace-legacy-");
+    let claude_workspace = fixture.workspace("t3code-workspace-claude-");
+    let codex_workspace = fixture.workspace("t3code-workspace-codex-");
+    let claude_instance_home = temp_dir("t3code-claude-instance-");
+    let codex_instance_home = temp_dir("t3code-codex-instance-");
+    // The fixture homes still hold a transcript, but the slots now point elsewhere.
+    write_transcript(
+        &fixture.claude_transcript("-legacy", "session.jsonl"),
+        &claude_session_line(legacy_workspace.path()),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    write_transcript(
+        &claude_instance_home.path().join("projects").join("-actual").join("session.jsonl"),
+        &claude_session_line(claude_workspace.path()),
+        ms("2026-02-01T00:00:00.000Z"),
+    );
+    write_transcript(
+        &codex_instance_home
+            .path()
+            .join("sessions")
+            .join("2026")
+            .join("03")
+            .join("01")
+            .join("rollout-instance.jsonl"),
+        &codex_rollout_line(codex_workspace.path()),
+        ms("2026-03-01T00:00:00.000Z"),
+    );
+    fixture.configure(
+        "claudeAgent",
+        instance("claudeAgent", json!({"homePath": claude_instance_home.path()})),
+    );
+    fixture.configure(
+        "codex",
+        instance("codex", json!({"homePath": codex_instance_home.path()})),
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(
+        paths(&result),
+        vec![
+            codex_workspace.path().to_string_lossy().into_owned(),
+            claude_workspace.path().to_string_lossy().into_owned(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn scans_each_distinct_home_across_multiple_instances_once() {
+    let mut fixture = Fixture::new();
+    let other_codex_home = temp_dir("t3code-codex-other-");
+    let workspace = fixture.workspace("t3code-workspace-");
+    let other_workspace = fixture.workspace("t3code-workspace-other-");
+    for (home, cwd) in [
+        (fixture.codex_home.clone(), workspace.path().to_path_buf()),
+        (other_codex_home.path().to_path_buf(), other_workspace.path().to_path_buf()),
+    ] {
+        write_transcript(
+            &home.join("sessions").join("2026").join("01").join("01").join("rollout-session.jsonl"),
+            &codex_rollout_line(&cwd),
+            ms("2026-01-01T00:00:00.000Z"),
+        );
+    }
+    fixture.configure(
+        "codex-personal",
+        instance("codex", json!({"homePath": fixture.codex_home})),
+    );
+    fixture.configure(
+        "codex-work",
+        instance("codex", json!({"homePath": other_codex_home.path()})),
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(result.candidates.len(), 2);
+    assert_eq!(
+        result
+            .candidates
+            .iter()
+            .map(|candidate| candidate.thread_count)
+            .collect::<Vec<_>>(),
+        vec![1, 1]
+    );
+    let mut found = paths(&result);
+    found.sort();
+    let mut expected = vec![
+        workspace.path().to_string_lossy().into_owned(),
+        other_workspace.path().to_string_lossy().into_owned(),
+    ];
+    expected.sort();
+    assert_eq!(found, expected);
+}
+
+#[tokio::test]
+async fn honors_provider_instance_home_directory_environment_variables() {
+    let mut fixture = Fixture::new();
+    let claude_environment_home = temp_dir("t3code-claude-env-");
+    let codex_environment_home = temp_dir("t3code-codex-env-");
+    let claude_workspace = fixture.workspace("t3code-workspace-claude-");
+    let codex_workspace = fixture.workspace("t3code-workspace-codex-");
+    write_transcript(
+        &claude_environment_home
+            .path()
+            .join("projects")
+            .join("-actual")
+            .join("session.jsonl"),
+        &claude_session_line(claude_workspace.path()),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    write_transcript(
+        &codex_environment_home
+            .path()
+            .join("sessions")
+            .join("2026")
+            .join("01")
+            .join("01")
+            .join("rollout-session.jsonl"),
+        &codex_rollout_line(codex_workspace.path()),
+        ms("2026-01-02T00:00:00.000Z"),
+    );
+    fixture.configure(
+        "claudeAgent",
+        ProviderInstanceConfig {
+            environment: Some(vec![env_var("CLAUDE_CONFIG_DIR", claude_environment_home.path())]),
+            ..instance("claudeAgent", json!({}))
+        },
+    );
+    fixture.configure(
+        "codex",
+        ProviderInstanceConfig {
+            environment: Some(vec![env_var("CODEX_HOME", codex_environment_home.path())]),
+            ..instance("codex", json!({}))
+        },
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(
+        paths(&result),
+        vec![
+            codex_workspace.path().to_string_lossy().into_owned(),
+            claude_workspace.path().to_string_lossy().into_owned(),
+        ]
+    );
+}
+

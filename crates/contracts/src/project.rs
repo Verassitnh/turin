@@ -72,7 +72,12 @@ impl ProjectLucideIconName {
         let value = TrimmedNonEmptyString::new(value)?;
         let s = value.as_str();
         let valid = s.len() <= 64
-            && s.split('-').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
+            && s.split('-').all(|part| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            });
         if !valid {
             return Err(ContractError {
                 expected: "a kebab-case lucide icon name (<= 64 chars)",
@@ -121,7 +126,8 @@ impl ProjectMonogramText {
             && s.chars().skip(1).all(|c| {
                 c.is_alphanumeric()
                     || matches!(c, '\u{200c}' | '\u{200d}')
-                    || unicode_ccc::get_canonical_combining_class(c) != unicode_ccc::CanonicalCombiningClass::NotReordered
+                    || unicode_ccc::get_canonical_combining_class(c)
+                        != unicode_ccc::CanonicalCombiningClass::NotReordered
             });
         if !valid {
             return Err(ContractError {
@@ -217,8 +223,9 @@ impl ProjectFaviconPath {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
         let value = TrimmedNonEmptyString::new(value)?;
         let s = value.as_str();
-        const EXTENSIONS: &[&str] =
-            &["avif", "gif", "icns", "ico", "jpg", "jpeg", "png", "svg", "webp"];
+        const EXTENSIONS: &[&str] = &[
+            "avif", "gif", "icns", "ico", "jpg", "jpeg", "png", "svg", "webp",
+        ];
         let lower = s.to_lowercase();
         let valid = s.len() <= 1024
             && lower
@@ -325,7 +332,9 @@ impl Serialize for StoredProjectIcon {
 impl<'de> Deserialize<'de> for StoredProjectIcon {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let raw = serde_json::Value::deserialize(d)?;
-        from_legacy_monogram(&raw).map(Self).map_err(serde::de::Error::custom)
+        from_legacy_monogram(&raw)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -361,7 +370,9 @@ impl<'de> Deserialize<'de> for ReceivedProjectIcon {
         let raw = serde_json::Value::deserialize(d)?;
         match crate::base_schemas::unknown_union_tag(&raw, "kind", Self::known_tags()) {
             Some(_) => Ok(Self(None)),
-            None => from_legacy_monogram(&raw).map(|icon| Self(Some(icon))).map_err(serde::de::Error::custom),
+            None => from_legacy_monogram(&raw)
+                .map(|icon| Self(Some(icon)))
+                .map_err(serde::de::Error::custom),
         }
     }
 }
@@ -415,7 +426,11 @@ pub struct ProjectSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ProjectChange {
     #[serde(rename = "project.upserted")]
     ProjectUpserted { project: Project },
@@ -481,7 +496,11 @@ pub struct ProjectUpdatePayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ProjectMutation {
     #[serde(rename = "project.create")]
     ProjectCreate {
@@ -548,7 +567,11 @@ pub enum ProjectMutation {
 
 /// `ProjectMutationError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ProjectMutationError {
     #[serde(rename = "ProjectMutationError")]
     #[error("{message}")]
@@ -735,7 +758,11 @@ project_entries_error! {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ProjectListEntriesError {
     #[serde(rename = "ProjectListEntriesError")]
     #[error("{message}")]
@@ -771,8 +798,10 @@ impl ProjectListEntriesError {
             normalized_cwd: None,
             timeout: None,
             detail: None,
-            message: TrimmedNonEmptyString::new(format!("Failed to list workspace entries in '{cwd}'."))
-                .expect("message is non-empty"),
+            message: TrimmedNonEmptyString::new(format!(
+                "Failed to list workspace entries in '{cwd}'."
+            ))
+            .expect("message is non-empty"),
             cause: None,
         }
     }
@@ -785,7 +814,8 @@ mod relative_path {
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(
         d: D,
     ) -> Result<crate::base_schemas::TrimmedNonEmptyString, D::Error> {
-        let value = <crate::base_schemas::TrimmedNonEmptyString as serde::Deserialize>::deserialize(d)?;
+        let value =
+            <crate::base_schemas::TrimmedNonEmptyString as serde::Deserialize>::deserialize(d)?;
         if value.as_str().len() > MAX {
             Err(serde::de::Error::custom(
                 "workspace-relative paths can be at most 512 chars",
@@ -995,7 +1025,10 @@ mod tests {
 
         // And it re-encodes as the plain override shape.
         let encoded = serde_json::to_value(&plain).unwrap();
-        assert_eq!(encoded, serde_json::json!({"kind":"lucide","name":"folder","color":"rose"}));
+        assert_eq!(
+            encoded,
+            serde_json::json!({"kind":"lucide","name":"folder","color":"rose"})
+        );
     }
 
     #[test]
@@ -1010,7 +1043,10 @@ mod tests {
             "kind": "monogram", "text": "X9", "color": "pink"
         }))
         .unwrap();
-        assert!(matches!(known.0, Some(ProjectIconOverride::Monogram { .. })));
+        assert!(matches!(
+            known.0,
+            Some(ProjectIconOverride::Monogram { .. })
+        ));
     }
 
     #[test]

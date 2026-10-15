@@ -6,7 +6,9 @@
 //! payload, keyed by `contextId`. Bytes never live here: image and file
 //! records bind to a `ChatAttachment` by id.
 
-use crate::base_schemas::{ContractError, EnvironmentId, NonNegativeInt, ThreadId, TrimmedNonEmptyString};
+use crate::base_schemas::{
+    ContractError, EnvironmentId, NonNegativeInt, ThreadId, TrimmedNonEmptyString,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashSet;
 use std::fmt;
@@ -126,8 +128,13 @@ impl ComposerContextKind {
         let trimmed = value.as_ref().trim();
         let valid = !trimmed.is_empty()
             && trimmed.len() <= 40
-            && trimmed.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
-            && trimmed.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+            && trimmed
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_lowercase())
+            && trimmed
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
         if !valid {
             return Err(ContractError {
                 expected: "a context kind matching ^[a-z][a-z0-9-]{0,39}$",
@@ -558,9 +565,7 @@ pub struct UnknownContextRecord {
 mod payload_field {
     use super::*;
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<serde_json::Value, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<serde_json::Value, D::Error> {
         let value = serde_json::Value::deserialize(d)?;
         match serde_json::to_string(&value) {
             Ok(encoded) if encoded.len() <= 64_000 => Ok(value),
@@ -656,7 +661,9 @@ mod message_records {
         // The bound applies to the raw input, as in upstream: forward-
         // compatible decoding drops unknown records first, so a checked
         // output length never sees the flood.
-        if serde_json::to_string(&records).map(|s| s.len()).unwrap_or(usize::MAX)
+        if serde_json::to_string(&records)
+            .map(|s| s.len())
+            .unwrap_or(usize::MAX)
             > COMPOSER_CONTEXT_MAX_SERIALIZED_CHARS
         {
             return Err(serde::de::Error::custom(format!(
@@ -779,18 +786,20 @@ mod tests {
 
     #[test]
     fn terminal_range_is_validated() {
-        assert!(serde_json::from_value::<ComposerContextRecord>(serde_json::json!({
-            "version": 1,
-            "contextId": "ctx-4",
-            "label": "term",
-            "kind": "terminal",
-            "terminalId": "t1",
-            "terminalLabel": "bash",
-            "lineStart": 10,
-            "lineEnd": 2,
-            "text": "output",
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ComposerContextRecord>(serde_json::json!({
+                "version": 1,
+                "contextId": "ctx-4",
+                "label": "term",
+                "kind": "terminal",
+                "terminalId": "t1",
+                "terminalLabel": "bash",
+                "lineStart": 10,
+                "lineEnd": 2,
+                "text": "output",
+            }))
+            .is_err()
+        );
     }
 
     #[test]

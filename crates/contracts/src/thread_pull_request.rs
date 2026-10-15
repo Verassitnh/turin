@@ -1,6 +1,8 @@
 //! Port of upstream/packages/contracts/src/threadPullRequest.ts
 
-use crate::base_schemas::{IsoDateTime, NonNegativeInt, PositiveInt, ProjectId, TrimmedNonEmptyString};
+use crate::base_schemas::{
+    IsoDateTime, NonNegativeInt, PositiveInt, ProjectId, TrimmedNonEmptyString,
+};
 use crate::pull_request::{
     PullRequestActor, PullRequestChecksState, PullRequestMergeability, PullRequestReviewDecision,
     PullRequestState,

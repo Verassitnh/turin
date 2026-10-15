@@ -63,7 +63,8 @@ impl<'de> Deserialize<'de> for ModelSelection {
         if let Some(options) = raw.options {
             wire.insert("options".to_owned(), options);
         }
-        let wire: Wire = serde_json::from_value(serde_json::Value::Object(wire)).map_err(serde::de::Error::custom)?;
+        let wire: Wire = serde_json::from_value(serde_json::Value::Object(wire))
+            .map_err(serde::de::Error::custom)?;
         let options = match wire.options {
             None => None,
             Some(value) => Some(
@@ -105,7 +106,8 @@ mod tests {
     #[test]
     fn accepts_explicit_instance_id() {
         let parsed: ModelSelection =
-            serde_json::from_str(r#"{"instanceId":"codex_personal","model":"gpt-5-codex"}"#).unwrap();
+            serde_json::from_str(r#"{"instanceId":"codex_personal","model":"gpt-5-codex"}"#)
+                .unwrap();
         assert_eq!(parsed.instance_id.as_str(), "codex_personal");
     }
 
@@ -146,9 +148,9 @@ mod tests {
 
     #[test]
     fn rejects_malformed_instance_ids() {
-        assert!(serde_json::from_str::<ModelSelection>(
-            r#"{"instanceId":"1invalid","model":"x"}"#
-        )
-        .is_err());
+        assert!(
+            serde_json::from_str::<ModelSelection>(r#"{"instanceId":"1invalid","model":"x"}"#)
+                .is_err()
+        );
     }
 }

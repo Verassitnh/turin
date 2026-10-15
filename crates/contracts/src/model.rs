@@ -138,16 +138,19 @@ pub mod provider_option_selections {
                     let trimmed = raw.trim();
                     if !trimmed.is_empty() {
                         entries.push(ProviderOptionSelection {
-                            id: TrimmedNonEmptyString::new(id).expect("trimmed non-empty checked above"),
+                            id: TrimmedNonEmptyString::new(id)
+                                .expect("trimmed non-empty checked above"),
                             value: ProviderOptionSelectionValue::Str(
-                                TrimmedNonEmptyString::new(trimmed).expect("trimmed non-empty checked above"),
+                                TrimmedNonEmptyString::new(trimmed)
+                                    .expect("trimmed non-empty checked above"),
                             ),
                         });
                     }
                 }
                 serde_json::Value::Bool(value) => {
                     entries.push(ProviderOptionSelection {
-                        id: TrimmedNonEmptyString::new(id).expect("trimmed non-empty checked above"),
+                        id: TrimmedNonEmptyString::new(id)
+                            .expect("trimmed non-empty checked above"),
                         value: ProviderOptionSelectionValue::Bool(value),
                     });
                 }
@@ -238,7 +241,9 @@ pub fn default_text_generation_model_by_provider(driver: &str) -> Option<&'stati
 }
 
 /// Upstream `MODEL_SLUG_ALIASES_BY_PROVIDER`: (alias, canonical) pairs per driver.
-pub fn model_slug_aliases_by_provider(driver: &str) -> Option<&'static [(&'static str, &'static str)]> {
+pub fn model_slug_aliases_by_provider(
+    driver: &str,
+) -> Option<&'static [(&'static str, &'static str)]> {
     match driver {
         "codex" => Some(&[
             ("gpt-5-codex", "gpt-5.4"),
@@ -314,8 +319,14 @@ mod tests {
         .unwrap();
         assert_eq!(holder.options.len(), 2);
         assert_eq!(holder.options[0].id.as_str(), "effort");
-        assert_eq!(holder.options[0].value, ProviderOptionSelectionValue::Str(TrimmedNonEmptyString::new("max").unwrap()));
-        assert_eq!(holder.options[1].value, ProviderOptionSelectionValue::Bool(true));
+        assert_eq!(
+            holder.options[0].value,
+            ProviderOptionSelectionValue::Str(TrimmedNonEmptyString::new("max").unwrap())
+        );
+        assert_eq!(
+            holder.options[1].value,
+            ProviderOptionSelectionValue::Bool(true)
+        );
 
         // Re-encode is the canonical array.
         let encoded = serde_json::to_string(&holder.options).unwrap();

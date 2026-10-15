@@ -6,7 +6,7 @@
 //! `(day, hourStart?, provider, model, sourcePath?)` buckets.
 
 use crate::base_schemas::{
-    forward_compatible_array, ContractError, NonNegativeInt, TrimmedNonEmptyString,
+    ContractError, NonNegativeInt, TrimmedNonEmptyString, forward_compatible_array,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
@@ -266,7 +266,11 @@ pub struct UsageSource {
     /// Present when this source answered from its cache while a slow refresh
     /// (an account API, for example) runs. Repeat the request with
     /// `awaitRefresh` to get the refreshed source.
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "refreshing_field")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "refreshing_field"
+    )]
     pub refreshing: Option<bool>,
 }
 
@@ -334,7 +338,11 @@ pub struct UsageSummary {
 
 /// `UsageReadError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum UsageReadError {
     #[serde(rename = "UsageReadError")]
     #[error("Usage read failed ({reason}): {detail}")]

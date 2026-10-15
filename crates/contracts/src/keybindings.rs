@@ -171,7 +171,9 @@ fn is_script_run_command(value: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_SCRIPT_ID_LENGTH
         && bytes[0].is_ascii_lowercase_or_digit()
-        && bytes.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 
 trait AsciiLowercaseOrDigit {
@@ -333,9 +335,7 @@ pub mod keybindings_config {
         rules.serialize(s)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<Vec<KeybindingRule>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<KeybindingRule>, D::Error> {
         let rules = Vec::<KeybindingRule>::deserialize(d)?;
         if rules.len() > MAX_KEYBINDINGS_COUNT {
             return Err(serde::de::Error::custom(format!(
@@ -368,8 +368,12 @@ pub struct PreviewForwardedShortcut {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum KeybindingWhenNode {
-    Identifier { name: String },
-    Not { node: Box<KeybindingWhenNode> },
+    Identifier {
+        name: String,
+    },
+    Not {
+        node: Box<KeybindingWhenNode>,
+    },
     And {
         left: Box<KeybindingWhenNode>,
         right: Box<KeybindingWhenNode>,
@@ -426,7 +430,11 @@ pub mod resolved_keybindings_config {
 /// `KeybindingsConfigError` (upstream TaggedError tag is
 /// `KeybindingsConfigParseError`, deliberately not the class name).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum KeybindingsConfigError {
     #[serde(rename = "KeybindingsConfigParseError")]
     #[error("Unable to parse keybindings config at {config_path}: {detail}")]
@@ -470,28 +478,36 @@ mod tests {
         assert_eq!(rule.command.as_str(), "script.run-tests.run");
         assert!(rule.command.is_script_run());
 
-        assert!(serde_json::from_value::<KeybindingRule>(serde_json::json!({
-            "key": "mod+r",
-            "command": "script.Bad_ID.run",
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<KeybindingRule>(serde_json::json!({
-            "key": "mod+r",
-            "command": "unknown.command",
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<KeybindingRule>(serde_json::json!({
+                "key": "mod+r",
+                "command": "script.Bad_ID.run",
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<KeybindingRule>(serde_json::json!({
+                "key": "mod+r",
+                "command": "unknown.command",
+            }))
+            .is_err()
+        );
     }
 
     #[test]
     fn rejects_blank_and_overlong_keys() {
-        assert!(serde_json::from_value::<KeybindingRule>(serde_json::json!({
-            "key": "   ", "command": "terminal.toggle",
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<KeybindingRule>(serde_json::json!({
-            "key": "a".repeat(65), "command": "terminal.toggle",
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<KeybindingRule>(serde_json::json!({
+                "key": "   ", "command": "terminal.toggle",
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<KeybindingRule>(serde_json::json!({
+                "key": "a".repeat(65), "command": "terminal.toggle",
+            }))
+            .is_err()
+        );
     }
 
     #[test]

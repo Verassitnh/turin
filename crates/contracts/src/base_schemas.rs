@@ -37,6 +37,12 @@ pub fn js_trim(value: &str) -> &str {
     value.trim_matches(is_js_whitespace)
 }
 
+/// JS `string.length` (UTF-16 code units). `Schema.isMaxLength` and friends
+/// count this, not bytes or `char`s.
+pub fn js_len(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+
 #[doc(hidden)]
 pub mod __private {
     pub use serde;
@@ -637,7 +643,6 @@ pub mod omitted_when_null {
     }
 }
 
-
 /// Wire form of upstream `Schema.Option(X)`: `Some` encodes as
 /// `{"_tag":"Some","value":…}`, `None` as `{"_tag":"None"}`.
 ///
@@ -656,7 +661,9 @@ pub enum EffectOption<T> {
 
 impl<T> EffectOption<T> {
     pub fn some(value: T) -> Self {
-        Self::Some { value: Box::new(value) }
+        Self::Some {
+            value: Box::new(value),
+        }
     }
     pub fn as_ref_option(&self) -> Option<&T> {
         match self {

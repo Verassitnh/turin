@@ -38,7 +38,11 @@ pub struct OrchestrationSearchThreadsResult {
 
 /// `OrchestrationSearchThreadsError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum OrchestrationSearchThreadsError {
     #[serde(rename = "OrchestrationSearchThreadsError")]
     #[error("{message}")]

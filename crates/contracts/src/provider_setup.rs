@@ -22,7 +22,11 @@ pub struct CodexAuthCallbackInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "phase", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "phase",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum CodexAuthCallbackState {
     #[serde(rename = "ready")]
     Ready,
@@ -99,7 +103,11 @@ pub struct ProviderAuthMethod {
 // These describe client interactions, not OAuth grant types. The provider
 // adapter remains responsible for credentials, callbacks, and refresh.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ProviderAuthInteraction {
     #[serde(rename = "browser")]
     Browser {
@@ -138,7 +146,11 @@ pub struct ProviderAuthCredentialsField {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ProviderAuthResponse {
     #[serde(rename = "browser")]
     Browser { action: ProviderAuthBrowserAction },
@@ -149,7 +161,9 @@ pub enum ProviderAuthResponse {
         size: Option<ProviderAuthTerminalSize>,
     },
     #[serde(rename = "credentials")]
-    Credentials { values: indexmap::IndexMap<SetupOperationId, String> },
+    Credentials {
+        values: indexmap::IndexMap<SetupOperationId, String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -257,7 +271,11 @@ pub struct ProviderAuthState {
     pub message: Option<String>,
     // Newer servers may add method types, interactions, or owners; older
     // clients drop what they cannot decode instead of rejecting the state.
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "auth_methods")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "auth_methods"
+    )]
     pub methods: Option<Vec<ProviderAuthMethod>>,
     #[serde(
         default,
@@ -336,7 +354,11 @@ pub struct ProviderInstallCancelInput {
 /// `ProviderSetupError` (Schema.TaggedError). Safe setup failure text: never
 /// include OAuth codes, URLs, or native token data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ProviderSetupError {
     #[serde(rename = "ProviderSetupError")]
     #[error("{detail}")]
@@ -415,7 +437,11 @@ pub struct ChatGptHandoffInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "phase", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "phase",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ChatGptHandoffState {
     #[serde(rename = "auth")]
     Auth { state: ProviderAuthState },

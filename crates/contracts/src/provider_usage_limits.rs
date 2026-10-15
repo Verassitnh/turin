@@ -1,7 +1,7 @@
 //! Port of upstream/packages/contracts/src/providerUsageLimits.ts
 
 use crate::base_schemas::{
-    forward_compatible_array, IsoDateTime, NonNegativeInt, TrimmedNonEmptyString,
+    IsoDateTime, NonNegativeInt, TrimmedNonEmptyString, forward_compatible_array,
 };
 use crate::provider_instance::{ProviderDriverKind, ProviderInstanceId};
 use crate::usage_limit_source_id::UsageLimitSourceId;
@@ -16,7 +16,9 @@ mod used_percent {
         if (0.0..=100.0).contains(&value) {
             Ok(value)
         } else {
-            Err(serde::de::Error::custom("usedPercent must be between 0 and 100"))
+            Err(serde::de::Error::custom(
+                "usedPercent must be between 0 and 100",
+            ))
         }
     }
 }
@@ -187,7 +189,11 @@ pub enum ProviderConsumeResetCreditInput {
 
 /// `UsageLimitSourceError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum UsageLimitSourceError {
     #[serde(rename = "UsageLimitSourceError")]
     #[error("{detail}")]

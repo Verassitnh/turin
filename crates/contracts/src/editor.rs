@@ -1,6 +1,6 @@
 //! Port of upstream/packages/contracts/src/editor.ts
 
-use crate::base_schemas::{TrimmedNonEmptyString};
+use crate::base_schemas::TrimmedNonEmptyString;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -50,33 +50,128 @@ macro_rules! editor {
 
 /// Upstream `EDITORS`, in the same order.
 pub const EDITORS: &[EditorDefinition] = &[
-    editor!(Cursor = "Cursor", ["cursor"], ["--classic"], Goto, Some("cursor"), None),
+    editor!(
+        Cursor = "Cursor",
+        ["cursor"],
+        ["--classic"],
+        Goto,
+        Some("cursor"),
+        None
+    ),
     // File and workspace opens must target the IDE even when the Agents
     // Window is active.
     editor!(Trae = "Trae", ["trae"], [], Goto, None, None),
     editor!(Kiro = "Kiro", ["kiro"], ["ide"], Goto, None, None),
     editor!(Vscode = "VS Code", ["code"], [], Goto, Some("vscode"), None),
     editor!(
-        VscodeInsiders = "VS Code Insiders", ["code-insiders"], [],
-        Goto, Some("vscode-insiders"), None
+        VscodeInsiders = "VS Code Insiders",
+        ["code-insiders"],
+        [],
+        Goto,
+        Some("vscode-insiders"),
+        None
     ),
-    editor!(Vscodium = "VSCodium", ["codium"], [], Goto, Some("vscodium"), None),
-    editor!(Zed = "Zed", ["zed", "zeditor"], [], DirectPath, Some("zed"), None),
+    editor!(
+        Vscodium = "VSCodium",
+        ["codium"],
+        [],
+        Goto,
+        Some("vscodium"),
+        None
+    ),
+    editor!(
+        Zed = "Zed",
+        ["zed", "zeditor"],
+        [],
+        DirectPath,
+        Some("zed"),
+        None
+    ),
     // `agy` is the standalone Antigravity CLI, not the IDE. The IDE bundle
     // ships `antigravity-ide`, so it comes first for install-folder lookups.
-    editor!(Antigravity = "Antigravity", ["antigravity-ide", "agy-ide"], [], Goto, None, None),
-    editor!(Idea = "IntelliJ IDEA", ["idea"], [], LineColumn, None, Some("IU")),
+    editor!(
+        Antigravity = "Antigravity",
+        ["antigravity-ide", "agy-ide"],
+        [],
+        Goto,
+        None,
+        None
+    ),
+    editor!(
+        Idea = "IntelliJ IDEA",
+        ["idea"],
+        [],
+        LineColumn,
+        None,
+        Some("IU")
+    ),
     editor!(Aqua = "Aqua", ["aqua"], [], LineColumn, None, Some("QA")),
     editor!(Clion = "CLion", ["clion"], [], LineColumn, None, Some("CL")),
-    editor!(Datagrip = "DataGrip", ["datagrip"], [], LineColumn, None, Some("DB")),
-    editor!(Dataspell = "DataSpell", ["dataspell"], [], LineColumn, None, Some("DS")),
-    editor!(Goland = "GoLand", ["goland"], [], LineColumn, None, Some("GO")),
-    editor!(Phpstorm = "PhpStorm", ["phpstorm"], [], LineColumn, None, Some("PS")),
-    editor!(Pycharm = "PyCharm", ["pycharm"], [], LineColumn, None, Some("PY")),
+    editor!(
+        Datagrip = "DataGrip",
+        ["datagrip"],
+        [],
+        LineColumn,
+        None,
+        Some("DB")
+    ),
+    editor!(
+        Dataspell = "DataSpell",
+        ["dataspell"],
+        [],
+        LineColumn,
+        None,
+        Some("DS")
+    ),
+    editor!(
+        Goland = "GoLand",
+        ["goland"],
+        [],
+        LineColumn,
+        None,
+        Some("GO")
+    ),
+    editor!(
+        Phpstorm = "PhpStorm",
+        ["phpstorm"],
+        [],
+        LineColumn,
+        None,
+        Some("PS")
+    ),
+    editor!(
+        Pycharm = "PyCharm",
+        ["pycharm"],
+        [],
+        LineColumn,
+        None,
+        Some("PY")
+    ),
     editor!(Rider = "Rider", ["rider"], [], LineColumn, None, Some("RD")),
-    editor!(Rubymine = "RubyMine", ["rubymine"], [], LineColumn, None, Some("RM")),
-    editor!(Rustrover = "RustRover", ["rustrover"], [], LineColumn, None, Some("RR")),
-    editor!(Webstorm = "WebStorm", ["webstorm"], [], LineColumn, None, Some("WS")),
+    editor!(
+        Rubymine = "RubyMine",
+        ["rubymine"],
+        [],
+        LineColumn,
+        None,
+        Some("RM")
+    ),
+    editor!(
+        Rustrover = "RustRover",
+        ["rustrover"],
+        [],
+        LineColumn,
+        None,
+        Some("RR")
+    ),
+    editor!(
+        Webstorm = "WebStorm",
+        ["webstorm"],
+        [],
+        LineColumn,
+        None,
+        Some("WS")
+    ),
     EditorDefinition {
         id: EditorId::FileManager,
         label: "File Manager",
@@ -156,10 +251,12 @@ pub struct LaunchEditorInput {
 }
 
 fn remote_scheme_of(editor: &EditorDefinition) -> Option<&'static str> {
-    editor.remote_scheme.or(match editor.jetbrains_product_code {
-        Some(_) => Some("jetbrains"),
-        None => None,
-    })
+    editor
+        .remote_scheme
+        .or(match editor.jetbrains_product_code {
+            Some(_) => Some("jetbrains"),
+            None => None,
+        })
 }
 
 fn editor_definition(id: EditorId) -> Option<&'static EditorDefinition> {
@@ -184,8 +281,18 @@ fn uri_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*'
-            | b'\'' | b'(' | b')' => out.push(byte as char),
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'~'
+            | b'*'
+            | b'\''
+            | b'('
+            | b')' => out.push(byte as char),
             _ => out.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -272,7 +379,9 @@ pub fn build_remote_open_url(editor: EditorId, host: &str, absolute_path: &str) 
         .map(uri_component)
         .collect::<Vec<_>>()
         .join("/");
-    Some(format!("{scheme}://vscode-remote/ssh-remote+{encoded_host}{encoded_path}"))
+    Some(format!(
+        "{scheme}://vscode-remote/ssh-remote+{encoded_host}{encoded_path}"
+    ))
 }
 
 /// `^[Cc]:[\\/]` — a Windows drive-letter prefix.
@@ -304,7 +413,11 @@ pub struct RemoteOpenTarget {
 
 /// `ExternalLauncherUnknownEditorError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ExternalLauncherUnknownEditorError {
     #[serde(rename = "ExternalLauncherUnknownEditorError")]
     #[error("Unknown editor: {editor}")]
@@ -313,7 +426,11 @@ pub enum ExternalLauncherUnknownEditorError {
 
 /// `ExternalLauncherUnsupportedEditorError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ExternalLauncherUnsupportedEditorError {
     #[serde(rename = "ExternalLauncherUnsupportedEditorError")]
     #[error("Unsupported editor: {editor}")]
@@ -322,7 +439,11 @@ pub enum ExternalLauncherUnsupportedEditorError {
 
 /// `ExternalLauncherCommandNotFoundError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ExternalLauncherCommandNotFoundError {
     #[serde(rename = "ExternalLauncherCommandNotFoundError")]
     #[error("Editor command not found: {command}")]
@@ -331,7 +452,11 @@ pub enum ExternalLauncherCommandNotFoundError {
 
 /// The target path cannot reach the editor intact, so it was not started.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ExternalLauncherUnsupportedTargetError {
     #[serde(rename = "ExternalLauncherUnsupportedTargetError")]
     #[error("{editor} cannot open a path containing line breaks or double quotes")]
@@ -341,7 +466,11 @@ pub enum ExternalLauncherUnsupportedTargetError {
 /// `ExternalLauncherBrowserSpawnError` (Schema.TaggedError). Display mirrors
 /// upstream's message getter, which joins the command and args.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ExternalLauncherBrowserSpawnError {
     #[serde(rename = "ExternalLauncherBrowserSpawnError")]
     BrowserSpawn {
@@ -355,10 +484,19 @@ pub enum ExternalLauncherBrowserSpawnError {
 impl std::fmt::Display for ExternalLauncherBrowserSpawnError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BrowserSpawn { command, args, target, .. } => write!(
+            Self::BrowserSpawn {
+                command,
+                args,
+                target,
+                ..
+            } => write!(
                 f,
                 "Failed to launch browser target '{target}' with '{}'",
-                [command.clone()].into_iter().chain(args.iter().cloned()).collect::<Vec<_>>().join(" ")
+                [command.clone()]
+                    .into_iter()
+                    .chain(args.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .join(" ")
             ),
         }
     }
@@ -369,7 +507,11 @@ impl std::error::Error for ExternalLauncherBrowserSpawnError {}
 /// `ExternalLauncherEditorSpawnError` (Schema.TaggedError). Display mirrors
 /// upstream's message getter, which joins the command and args.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ExternalLauncherEditorSpawnError {
     #[serde(rename = "ExternalLauncherEditorSpawnError")]
     EditorSpawn {
@@ -384,10 +526,20 @@ pub enum ExternalLauncherEditorSpawnError {
 impl std::fmt::Display for ExternalLauncherEditorSpawnError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::EditorSpawn { command, args, editor, target, .. } => write!(
+            Self::EditorSpawn {
+                command,
+                args,
+                editor,
+                target,
+                ..
+            } => write!(
                 f,
                 "Failed to launch '{target}' in {editor} with '{}'",
-                [command.clone()].into_iter().chain(args.iter().cloned()).collect::<Vec<_>>().join(" ")
+                [command.clone()]
+                    .into_iter()
+                    .chain(args.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .join(" ")
             ),
         }
     }
@@ -420,12 +572,8 @@ mod tests {
     #[test]
     fn remote_open_urls_match_upstream_shapes() {
         // VS Code-style deep link.
-        let url = build_remote_open_url(
-            EditorId::Vscode,
-            "box.tail1234.ts.net",
-            "/home/dev/repo",
-        )
-        .unwrap();
+        let url = build_remote_open_url(EditorId::Vscode, "box.tail1234.ts.net", "/home/dev/repo")
+            .unwrap();
         assert_eq!(
             url,
             "vscode://vscode-remote/ssh-remote+box.tail1234.ts.net/home/dev/repo"
@@ -448,7 +596,10 @@ mod tests {
         );
 
         // Editors without remote support return None.
-        assert_eq!(build_remote_open_url(EditorId::FileManager, "box", "/x"), None);
+        assert_eq!(
+            build_remote_open_url(EditorId::FileManager, "box", "/x"),
+            None
+        );
         assert_eq!(build_remote_open_url(EditorId::Trae, "box", "/x"), None);
     }
 

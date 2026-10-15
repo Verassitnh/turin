@@ -9,19 +9,21 @@
 //! Cut-module fields (device hosts, auth scopes, in-app preview browser
 //! defaults, browser profiles) are dropped; see the task's deviation report.
 
-use crate::base_schemas::{ContractError, ProjectId, ThreadId, TrimmedNonEmptyString, TrimmedString};
+use crate::base_schemas::{
+    ContractError, ProjectId, ThreadId, TrimmedNonEmptyString, TrimmedString,
+};
 use crate::environment::{EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules};
 use crate::keybindings::KeybindingShortcut;
 use crate::model::{
-    CustomModelSetting, ProviderOptionSelection, ProviderOptionSelectionValue,
-    DEFAULT_TEXT_GENERATION_MODEL, DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
+    CustomModelSetting, DEFAULT_TEXT_GENERATION_MODEL, DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
+    ProviderOptionSelection, ProviderOptionSelectionValue,
 };
 use crate::model_selection::ModelSelection;
 use crate::project::ProjectScript;
 use crate::provider_instance::{
     ProviderDriverKind, ProviderInstanceConfig, ProviderInstanceConfigMap, ProviderInstanceId,
 };
-use crate::provider_policy::{RuntimeMode, DEFAULT_RUNTIME_MODE};
+use crate::provider_policy::{DEFAULT_RUNTIME_MODE, RuntimeMode};
 use crate::pull_request::PullRequestMergeMethod;
 use crate::usage_limit_source_id::UsageLimitSourceId;
 use indexmap::IndexMap;
@@ -72,8 +74,7 @@ pub enum SidebarThreadSortOrder {
 }
 // Not exported: mobile was the last consumer of the value itself; the
 // wire field keeps its decoding default below.
-const DEFAULT_SIDEBAR_THREAD_SORT_ORDER: SidebarThreadSortOrder =
-    SidebarThreadSortOrder::UpdatedAt;
+const DEFAULT_SIDEBAR_THREAD_SORT_ORDER: SidebarThreadSortOrder = SidebarThreadSortOrder::UpdatedAt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SidebarProjectGroupingMode {
@@ -300,8 +301,7 @@ impl<'de> Deserialize<'de> for PanelAnimationDurationMs {
     }
 }
 
-const DEFAULT_PANEL_ANIMATION_DURATION_MS: PanelAnimationDurationMs =
-    PanelAnimationDurationMs(0);
+const DEFAULT_PANEL_ANIMATION_DURATION_MS: PanelAnimationDurationMs = PanelAnimationDurationMs(0);
 
 /**
  * Font size preferences, in CSS pixels. The ranges are deliberately narrow:
@@ -672,16 +672,11 @@ mod quit_confirmation_mode_setting {
     use super::QuitConfirmationMode;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub fn serialize<S: Serializer>(
-        value: &QuitConfirmationMode,
-        s: S,
-    ) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(value: &QuitConfirmationMode, s: S) -> Result<S::Ok, S::Error> {
         value.serialize(s)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<QuitConfirmationMode, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<QuitConfirmationMode, D::Error> {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Wire {
@@ -1156,7 +1151,8 @@ pub struct ClientSettings {
     #[serde(default)]
     pub provider_model_preferences: ProviderModelPreferences,
     #[serde(default)]
-    pub pull_request_merge_method_overrides: IndexMap<TrimmedNonEmptyString, PullRequestMergeMethod>,
+    pub pull_request_merge_method_overrides:
+        IndexMap<TrimmedNonEmptyString, PullRequestMergeMethod>,
     // Legacy plan mode. The composer's Build/Plan toggle was removed from the
     // default UI; this beta flag restores it (plus the /plan and /default slash
     // commands) for users who still rely on the old workflow.
@@ -1595,8 +1591,10 @@ impl GitHubHost {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
         let trimmed = TrimmedNonEmptyString::new(value)?;
         // Lowercasing a trimmed, non-empty host leaves it trimmed and non-empty.
-        Ok(Self(TrimmedNonEmptyString::new(trimmed.as_str().to_lowercase())
-            .expect("lowercasing a trimmed non-empty host keeps it non-empty")))
+        Ok(Self(
+            TrimmedNonEmptyString::new(trimmed.as_str().to_lowercase())
+                .expect("lowercasing a trimmed non-empty host keeps it non-empty"),
+        ))
     }
     pub fn as_str(&self) -> &str {
         self.0.as_str()
@@ -2581,7 +2579,11 @@ impl fmt::Display for ServerSettingsOperation {
 /// `ServerSettingsError` (upstream `Schema.TaggedError`). The Display mirrors
 /// upstream's `get message()`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ServerSettingsError {
     #[serde(rename = "ServerSettingsError")]
     ServerSettingsError {
@@ -2753,9 +2755,7 @@ pub enum WorktreeCleanupPatch {
     #[serde(rename = "off")]
     Off,
     #[serde(rename = "custom")]
-    Custom {
-        rules: WorktreeCleanupRulesPatch,
-    },
+    Custom { rules: WorktreeCleanupRulesPatch },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3026,8 +3026,7 @@ pub struct ServerSettingsPatch {
         Option<IndexMap<TrimmedNonEmptyString, Option<UsageModelPriceOverride>>>,
     /** Each entry replaces one model's mapping; `null` removes it. */
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage_model_aliases:
-        Option<IndexMap<TrimmedNonEmptyString, Option<TrimmedNonEmptyString>>>,
+    pub usage_model_aliases: Option<IndexMap<TrimmedNonEmptyString, Option<TrimmedNonEmptyString>>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -3108,7 +3107,8 @@ pub struct ClientSettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_model_preferences: Option<ProviderModelPreferences>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pull_request_merge_method_overrides: Option<IndexMap<TrimmedNonEmptyString, PullRequestMergeMethod>>,
+    pub pull_request_merge_method_overrides:
+        Option<IndexMap<TrimmedNonEmptyString, PullRequestMergeMethod>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_mode_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3201,7 +3201,11 @@ mod tests {
         ProjectId::new(id).unwrap()
     }
 
-    fn config(driver: &str, enabled: Option<bool>, config: serde_json::Value) -> ProviderInstanceConfig {
+    fn config(
+        driver: &str,
+        enabled: Option<bool>,
+        config: serde_json::Value,
+    ) -> ProviderInstanceConfig {
         ProviderInstanceConfig {
             driver: provider_driver(driver),
             display_name: None,
@@ -3236,10 +3240,13 @@ mod tests {
                 json!(mode)
             );
             let patch = decode_server_patch(input.clone());
-            assert_eq!(patch.response_streaming_mode, Some(match mode {
-                "turn" => ResponseStreamingMode::Turn,
-                _ => ResponseStreamingMode::Paragraph,
-            }));
+            assert_eq!(
+                patch.response_streaming_mode,
+                Some(match mode {
+                    "turn" => ResponseStreamingMode::Turn,
+                    _ => ResponseStreamingMode::Paragraph,
+                })
+            );
         }
     }
 
@@ -3346,17 +3353,21 @@ mod tests {
             })
         );
         assert_eq!(
-            decode_server_patch(json!({ "storageCleanup": { "worktreeKeepWhen": "tracked-changes" } }))
-                .storage_cleanup,
+            decode_server_patch(
+                json!({ "storageCleanup": { "worktreeKeepWhen": "tracked-changes" } })
+            )
+            .storage_cleanup,
             Some(StorageCleanupSettingsPatch {
                 worktree_keep_when: Some(WorktreeKeepWhen::TrackedChanges),
                 ..Default::default()
             })
         );
-        assert!(serde_json::from_value::<ServerSettingsPatch>(
-            json!({ "storageCleanup": { "worktreeKeepWhen": "unknown" } })
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<ServerSettingsPatch>(
+                json!({ "storageCleanup": { "worktreeKeepWhen": "unknown" } })
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3384,10 +3395,7 @@ mod tests {
     fn rich_text_preserves_explicit_opt_out() {
         let settings = decode_client(json!({ "composerRichTextEnabled": false }));
         assert!(!settings.composer_rich_text_enabled);
-        assert_eq!(
-            encode(&settings)["composerRichTextEnabled"],
-            json!(false)
-        );
+        assert_eq!(encode(&settings)["composerRichTextEnabled"], json!(false));
         assert_eq!(
             decode_client_patch(json!({ "composerRichTextEnabled": false }))
                 .composer_rich_text_enabled,
@@ -3433,27 +3441,30 @@ mod tests {
                 encoded["projectSettingsOverrides"]["project"]["defaultRuntimeMode"],
                 json!(mode_json)
             );
-            assert_eq!(
-                decode_server_patch(input).default_runtime_mode,
-                Some(mode)
-            );
+            assert_eq!(decode_server_patch(input).default_runtime_mode, Some(mode));
         }
     }
 
     #[test]
     fn default_permissions_reject_unsupported() {
-        assert!(serde_json::from_value::<ServerSettings>(json!({
-            "defaultRuntimeMode": "unsupported"
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<ServerSettingsPatch>(json!({
-            "defaultRuntimeMode": "unsupported"
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<ServerSettingsPatch>(json!({
-            "projectSettingsOverrides": { "project": { "defaultRuntimeMode": "unsupported" } }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ServerSettings>(json!({
+                "defaultRuntimeMode": "unsupported"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ServerSettingsPatch>(json!({
+                "defaultRuntimeMode": "unsupported"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ServerSettingsPatch>(json!({
+                "projectSettingsOverrides": { "project": { "defaultRuntimeMode": "unsupported" } }
+            }))
+            .is_err()
+        );
     }
 
     // ── ServerSettings usage price overrides ─────────────────────
@@ -3492,8 +3503,7 @@ mod tests {
             },
             "removed-model": null
         });
-        let patch =
-            decode_server_patch(json!({ "usagePriceOverrides": overrides.clone() }));
+        let patch = decode_server_patch(json!({ "usagePriceOverrides": overrides.clone() }));
         let decoded = patch.usage_price_overrides.as_ref().unwrap();
         assert_eq!(decoded.len(), 2);
         assert_eq!(
@@ -3522,14 +3532,18 @@ mod tests {
                         field: value
                     }
                 });
-                assert!(serde_json::from_value::<ServerSettings>(json!({
-                    "usagePriceOverrides": usage_price_overrides
-                }))
-                .is_err());
-                assert!(serde_json::from_value::<ServerSettingsPatch>(json!({
-                    "usagePriceOverrides": usage_price_overrides
-                }))
-                .is_err());
+                assert!(
+                    serde_json::from_value::<ServerSettings>(json!({
+                        "usagePriceOverrides": usage_price_overrides
+                    }))
+                    .is_err()
+                );
+                assert!(
+                    serde_json::from_value::<ServerSettingsPatch>(json!({
+                        "usagePriceOverrides": usage_price_overrides
+                    }))
+                    .is_err()
+                );
             }
         }
     }
@@ -3669,8 +3683,9 @@ mod tests {
     fn notifications_round_trip_in_app_preference() {
         for enabled in [true, false] {
             assert_eq!(
-                encode(&decode_client(json!({ "inAppNotificationsEnabled": enabled })))
-                    ["inAppNotificationsEnabled"],
+                encode(&decode_client(
+                    json!({ "inAppNotificationsEnabled": enabled })
+                ))["inAppNotificationsEnabled"],
                 json!(enabled)
             );
             assert_eq!(
@@ -3684,14 +3699,18 @@ mod tests {
     #[test]
     fn notifications_reject_invalid_in_app_preference() {
         for value in [json!("true"), json!(1), json!(null)] {
-            assert!(serde_json::from_value::<ClientSettings>(json!({
-                "inAppNotificationsEnabled": value
-            }))
-            .is_err());
-            assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-                "inAppNotificationsEnabled": value
-            }))
-            .is_err());
+            assert!(
+                serde_json::from_value::<ClientSettings>(json!({
+                    "inAppNotificationsEnabled": value
+                }))
+                .is_err()
+            );
+            assert!(
+                serde_json::from_value::<ClientSettingsPatch>(json!({
+                    "inAppNotificationsEnabled": value
+                }))
+                .is_err()
+            );
         }
     }
 
@@ -3720,14 +3739,18 @@ mod tests {
     #[test]
     fn notifications_reject_unsupported_modes() {
         for mode in [json!("always"), json!(true), json!(null)] {
-            assert!(serde_json::from_value::<ClientSettings>(json!({
-                "notificationMode": mode
-            }))
-            .is_err());
-            assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-                "notificationMode": mode
-            }))
-            .is_err());
+            assert!(
+                serde_json::from_value::<ClientSettings>(json!({
+                    "notificationMode": mode
+                }))
+                .is_err()
+            );
+            assert!(
+                serde_json::from_value::<ClientSettingsPatch>(json!({
+                    "notificationMode": mode
+                }))
+                .is_err()
+            );
         }
     }
 
@@ -3824,9 +3847,12 @@ mod tests {
         assert!(!settings.legacy_sidebar_enabled);
         assert!(settings.word_wrap);
         assert!(settings.composer_collapse_on_scroll);
-        assert_eq!(decode_client_patch(json!({
-            "compactSidebarEnabled": true, "sidebarCompactThreadRows": true
-        })), ClientSettingsPatch::default());
+        assert_eq!(
+            decode_client_patch(json!({
+                "compactSidebarEnabled": true, "sidebarCompactThreadRows": true
+            })),
+            ClientSettingsPatch::default()
+        );
     }
 
     #[test]
@@ -3834,8 +3860,7 @@ mod tests {
         assert!(decode_client(json!({})).diff_files_collapsed);
         for collapsed in [true, false] {
             assert_eq!(
-                encode(&decode_client(json!({ "diffFilesCollapsed": collapsed })))
-                    ["diffFilesCollapsed"],
+                encode(&decode_client(json!({ "diffFilesCollapsed": collapsed })))["diffFilesCollapsed"],
                 json!(collapsed)
             );
             assert_eq!(
@@ -3865,14 +3890,18 @@ mod tests {
                 Some(expected)
             );
         }
-        assert!(serde_json::from_value::<ClientSettings>(json!({
-            "diffColorScheme": "purple-yellow"
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "diffColorScheme": "purple-yellow"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettings>(json!({
+                "diffColorScheme": "purple-yellow"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "diffColorScheme": "purple-yellow"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -3892,10 +3921,12 @@ mod tests {
                 Some(expected)
             );
         }
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "chatWidth": "huge"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "chatWidth": "huge"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -3913,10 +3944,12 @@ mod tests {
 
     #[test]
     fn load_balancing_weights_are_range_checked() {
-        assert!(serde_json::from_value::<ClientSettings>(json!({
-            "loadBalancingWeights": { "gpt-5.6": 101 }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettings>(json!({
+                "loadBalancingWeights": { "gpt-5.6": 101 }
+            }))
+            .is_err()
+        );
         let decoded = decode_client(json!({ "loadBalancingWeights": { "gpt-5.6": 60 } }));
         assert_eq!(
             decoded.load_balancing_weights,
@@ -3948,8 +3981,7 @@ mod tests {
     fn proactive_panels_are_opt_in() {
         assert!(!decode_client(json!({})).proactive_panels_enabled);
         assert_eq!(
-            decode_client_patch(json!({ "proactivePanelsEnabled": true }))
-                .proactive_panels_enabled,
+            decode_client_patch(json!({ "proactivePanelsEnabled": true })).proactive_panels_enabled,
             Some(true)
         );
     }
@@ -3957,7 +3989,10 @@ mod tests {
     #[test]
     fn context_window_meter_defaults_off() {
         assert!(!decode_client(json!({})).context_window_meter_enabled);
-        assert!(decode_client(json!({ "contextWindowMeterEnabled": true })).context_window_meter_enabled);
+        assert!(
+            decode_client(json!({ "contextWindowMeterEnabled": true }))
+                .context_window_meter_enabled
+        );
         assert_eq!(
             decode_client_patch(json!({ "contextWindowMeterEnabled": true }))
                 .context_window_meter_enabled,
@@ -3970,18 +4005,24 @@ mod tests {
         assert_eq!(decode_client(json!({})).send_shortcut, SendShortcut::Enter);
         for shortcut in ["enter", "mod-enter-multiline", "mod-enter"] {
             assert_eq!(
-                decode_client(json!({ "sendShortcut": shortcut })).send_shortcut.as_str_name(),
+                decode_client(json!({ "sendShortcut": shortcut }))
+                    .send_shortcut
+                    .as_str_name(),
                 shortcut
             );
             assert_eq!(
-                decode_client_patch(json!({ "sendShortcut": shortcut })).send_shortcut.map(|s| s.as_str_name()),
+                decode_client_patch(json!({ "sendShortcut": shortcut }))
+                    .send_shortcut
+                    .map(|s| s.as_str_name()),
                 Some(shortcut)
             );
         }
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "sendShortcut": "invalid"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "sendShortcut": "invalid"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -3992,18 +4033,24 @@ mod tests {
         );
         for behavior in ["queue", "steer"] {
             assert_eq!(
-                decode_client(json!({ "followUpBehavior": behavior })).follow_up_behavior.as_str_name(),
+                decode_client(json!({ "followUpBehavior": behavior }))
+                    .follow_up_behavior
+                    .as_str_name(),
                 behavior
             );
             assert_eq!(
-                decode_client_patch(json!({ "followUpBehavior": behavior })).follow_up_behavior.map(|b| b.as_str_name()),
+                decode_client_patch(json!({ "followUpBehavior": behavior }))
+                    .follow_up_behavior
+                    .map(|b| b.as_str_name()),
                 Some(behavior)
             );
         }
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "followUpBehavior": "invalid"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "followUpBehavior": "invalid"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -4063,10 +4110,12 @@ mod tests {
 
     #[test]
     fn snapshot_rejects_unknown_sounds() {
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "snapShotSound": "doorbell"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "snapShotSound": "doorbell"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -4085,21 +4134,25 @@ mod tests {
             snap_shot_shortcut_modifier_pair(&patch.snap_shot_shortcut.unwrap()),
             SnapShotModifier::Meta
         );
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "snapShotShortcut": { "kind": "modifier-pair", "modifier": "hyper" }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "snapShotShortcut": { "kind": "modifier-pair", "modifier": "hyper" }
+            }))
+            .is_err()
+        );
     }
 
     #[test]
     fn snapshot_rejects_chords_without_a_modifier() {
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "snapShotShortcut": {
-                "key": "w", "metaKey": false, "ctrlKey": false,
-                "shiftKey": false, "altKey": false, "modKey": false
-            }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "snapShotShortcut": {
+                    "key": "w", "metaKey": false, "ctrlKey": false,
+                    "shiftKey": false, "altKey": false, "modKey": false
+                }
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -4147,7 +4200,10 @@ mod tests {
 
     #[test]
     fn quit_confirmation_defaults_to_hold() {
-        assert_eq!(decode_client(json!({})).confirm_quit, QuitConfirmationMode::Hold);
+        assert_eq!(
+            decode_client(json!({})).confirm_quit,
+            QuitConfirmationMode::Hold
+        );
     }
 
     #[test]
@@ -4180,10 +4236,12 @@ mod tests {
 
     #[test]
     fn quit_confirmation_rejects_booleans_at_the_patch_boundary() {
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "confirmQuit": true
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "confirmQuit": true
+            }))
+            .is_err()
+        );
     }
 
     // ── ClientSettings recording and appearance ranges ───────────
@@ -4194,7 +4252,13 @@ mod tests {
             decode_client(json!({})).browser_recording_frame_rate,
             BrowserRecordingFrameRate::Thirty
         );
-        for (rate, ok) in [(30, true), (60, true), (24, false), (59, false), (120, false)] {
+        for (rate, ok) in [
+            (30, true),
+            (60, true),
+            (24, false),
+            (59, false),
+            (120, false),
+        ] {
             assert_eq!(
                 serde_json::from_value::<ClientSettings>(json!({
                     "browserRecordingFrameRate": rate
@@ -4227,8 +4291,17 @@ mod tests {
 
     #[test]
     fn glass_opacity_ranges() {
-        assert_eq!(decode_client(json!({})).glass_opacity, GlassOpacity::new(80).unwrap());
-        for (value, ok) in [(39, false), (101, false), (40, true), (75, true), (100, true)] {
+        assert_eq!(
+            decode_client(json!({})).glass_opacity,
+            GlassOpacity::new(80).unwrap()
+        );
+        for (value, ok) in [
+            (39, false),
+            (101, false),
+            (40, true),
+            (75, true),
+            (100, true),
+        ] {
             assert_eq!(
                 serde_json::from_value::<ClientSettings>(json!({ "glassOpacity": value })).is_ok(),
                 ok
@@ -4249,7 +4322,14 @@ mod tests {
             decode_client(json!({})).appearance_contrast,
             AppearanceContrast::new(100).unwrap()
         );
-        for (value, ok) in [(49, false), (201, false), (50, true), (100, true), (150, true), (200, true)] {
+        for (value, ok) in [
+            (49, false),
+            (201, false),
+            (50, true),
+            (100, true),
+            (150, true),
+            (200, true),
+        ] {
             assert_eq!(
                 serde_json::from_value::<ClientSettings>(json!({ "appearanceContrast": value }))
                     .is_ok(),
@@ -4263,7 +4343,10 @@ mod tests {
                 ok
             );
         }
-        assert!(serde_json::from_value::<ClientSettings>(json!({ "appearanceContrast": 92.5 })).is_err());
+        assert!(
+            serde_json::from_value::<ClientSettings>(json!({ "appearanceContrast": 92.5 }))
+                .is_err()
+        );
     }
 
     #[test]
@@ -4272,7 +4355,13 @@ mod tests {
             decode_client(json!({})).panel_animation_duration_ms,
             PanelAnimationDurationMs::new(0).unwrap()
         );
-        for (value, ok) in [(0, true), (400, true), (-1, false), (401, false), (150, true)] {
+        for (value, ok) in [
+            (0, true),
+            (400, true),
+            (-1, false),
+            (401, false),
+            (150, true),
+        ] {
             assert_eq!(
                 serde_json::from_value::<ClientSettingsPatch>(json!({
                     "panelAnimationDurationMs": value
@@ -4281,19 +4370,27 @@ mod tests {
                 ok
             );
         }
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "panelAnimationDurationMs": 150.5
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "panelAnimationDurationMs": 150.5
+            }))
+            .is_err()
+        );
     }
 
     #[test]
     fn font_sizes_default_and_range_check() {
         let settings = decode_client(json!({}));
-        assert_eq!(settings.font_size_interface, InterfaceFontSize::new(16).unwrap());
+        assert_eq!(
+            settings.font_size_interface,
+            InterfaceFontSize::new(16).unwrap()
+        );
         assert_eq!(settings.font_size_prompt, PromptFontSize::new(14).unwrap());
         assert_eq!(settings.font_size_code, CodeFontSize::new(13).unwrap());
-        assert_eq!(settings.font_size_terminal, TerminalFontSize::new(12).unwrap());
+        assert_eq!(
+            settings.font_size_terminal,
+            TerminalFontSize::new(12).unwrap()
+        );
         for (value, ok) in [(11, false), (12, true), (20, true), (21, false)] {
             assert_eq!(
                 serde_json::from_value::<ClientSettings>(json!({ "fontSizeInterface": value }))
@@ -4302,7 +4399,9 @@ mod tests {
             );
         }
         assert!(serde_json::from_value::<ClientSettings>(json!({ "fontSizeCode": 9 })).is_err());
-        assert!(serde_json::from_value::<ClientSettings>(json!({ "fontSizeTerminal": 21 })).is_err());
+        assert!(
+            serde_json::from_value::<ClientSettings>(json!({ "fontSizeTerminal": 21 })).is_err()
+        );
     }
 
     #[test]
@@ -4319,10 +4418,12 @@ mod tests {
                 Some(mode)
             );
         }
-        assert!(serde_json::from_value::<ClientSettings>(json!({
-            "environmentIdentificationMode": "badge"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettings>(json!({
+                "environmentIdentificationMode": "badge"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -4344,7 +4445,10 @@ mod tests {
 
     #[test]
     fn timestamp_format_round_trips() {
-        assert_eq!(decode_client(json!({})).timestamp_format, TimestampFormat::Locale);
+        assert_eq!(
+            decode_client(json!({})).timestamp_format,
+            TimestampFormat::Locale
+        );
         for (format, expected) in [
             ("locale", TimestampFormat::Locale),
             ("12-hour", TimestampFormat::TwelveHour),
@@ -4365,7 +4469,11 @@ mod tests {
 
     #[test]
     fn client_pr_merge_method_overrides_default_empty() {
-        assert!(decode_client(json!({})).pull_request_merge_method_overrides.is_empty());
+        assert!(
+            decode_client(json!({}))
+                .pull_request_merge_method_overrides
+                .is_empty()
+        );
         let patch = decode_client_patch(json!({
             "pullRequestMergeMethodOverrides": { "project": "squash" }
         }));
@@ -4380,10 +4488,12 @@ mod tests {
                 .collect()
             )
         );
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "pullRequestMergeMethodOverrides": { "project": "fast-forward" }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "pullRequestMergeMethodOverrides": { "project": "fast-forward" }
+            }))
+            .is_err()
+        );
     }
 
     // ── ServerSettings thread settlement ─────────────────────────
@@ -4417,14 +4527,18 @@ mod tests {
     #[test]
     fn thread_settlement_rejects_out_of_range_thresholds() {
         for value in [json!(-1), json!(0), json!(91)] {
-            assert!(serde_json::from_value::<ServerSettings>(json!({
-                "sidebarAutoSettleAfterDays": value
-            }))
-            .is_err());
-            assert!(serde_json::from_value::<ServerSettingsPatch>(json!({
-                "sidebarAutoSettleAfterDays": value
-            }))
-            .is_err());
+            assert!(
+                serde_json::from_value::<ServerSettings>(json!({
+                    "sidebarAutoSettleAfterDays": value
+                }))
+                .is_err()
+            );
+            assert!(
+                serde_json::from_value::<ServerSettingsPatch>(json!({
+                    "sidebarAutoSettleAfterDays": value
+                }))
+                .is_err()
+            );
         }
     }
 
@@ -4458,27 +4572,41 @@ mod tests {
         }));
         let instances = &decoded.provider_instances;
         assert_eq!(
-            instances.get(&provider_instance_id("codex_personal")).unwrap().driver.as_str(),
+            instances
+                .get(&provider_instance_id("codex_personal"))
+                .unwrap()
+                .driver
+                .as_str(),
             "codex"
         );
         assert_eq!(
-            instances.get(&provider_instance_id("codex_work")).unwrap().config,
+            instances
+                .get(&provider_instance_id("codex_work"))
+                .unwrap()
+                .config,
             Some(json!({ "homePath": "~/.codex_work" }))
         );
         // Critical: a config naming a driver this build does not know about
         // must round-trip without loss. The runtime handles "driver not
         // installed" — the schema must not.
-        let ollama = instances.get(&provider_instance_id("ollama_local")).unwrap();
+        let ollama = instances
+            .get(&provider_instance_id("ollama_local"))
+            .unwrap();
         assert_eq!(ollama.driver.as_str(), "ollama");
-        assert_eq!(ollama.config, Some(json!({ "endpoint": "http://localhost:11434" })));
+        assert_eq!(
+            ollama.config,
+            Some(json!({ "endpoint": "http://localhost:11434" }))
+        );
     }
 
     #[test]
     fn provider_instances_reject_invalid_slug_keys() {
-        assert!(serde_json::from_value::<ServerSettings>(json!({
-            "providerInstances": { "1bad": { "driver": "codex" } }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ServerSettings>(json!({
+                "providerInstances": { "1bad": { "driver": "codex" } }
+            }))
+            .is_err()
+        );
     }
 
     // ── provider enabled defaults ────────────────────────────────
@@ -4486,8 +4614,16 @@ mod tests {
     #[test]
     fn provider_enabled_keeps_muse_disabled_until_configured() {
         let muse = provider_driver("muse");
-        assert!(!resolve_provider_instance_enabled(&config("muse", None, json!({}))));
-        assert!(resolve_provider_instance_enabled(&config("muse", Some(true), json!({}))));
+        assert!(!resolve_provider_instance_enabled(&config(
+            "muse",
+            None,
+            json!({})
+        )));
+        assert!(resolve_provider_instance_enabled(&config(
+            "muse",
+            Some(true),
+            json!({})
+        )));
         assert!(!resolve_provider_instance_enabled(&config(
             "muse",
             Some(true),
@@ -4498,9 +4634,8 @@ mod tests {
 
     #[test]
     fn provider_enabled_enables_only_stable_bindings_by_default() {
-        let enabled_by_default = |driver: &str| {
-            resolve_provider_instance_enabled(&config(driver, None, json!({})))
-        };
+        let enabled_by_default =
+            |driver: &str| resolve_provider_instance_enabled(&config(driver, None, json!({})));
         assert!(enabled_by_default("codex"));
         assert!(enabled_by_default("claudeAgent"));
         for driver in ["cursor", "grok", "muse", "pi", "opencode", "antigravity"] {
@@ -4511,15 +4646,39 @@ mod tests {
     #[test]
     fn provider_enabled_resolves_with_explicit_false_winning() {
         // No flags anywhere: driver default applies.
-        assert!(!resolve_provider_instance_enabled(&config("grok", None, json!({}))));
-        assert!(resolve_provider_instance_enabled(&config("codex", None, json!({}))));
+        assert!(!resolve_provider_instance_enabled(&config(
+            "grok",
+            None,
+            json!({})
+        )));
+        assert!(resolve_provider_instance_enabled(&config(
+            "codex",
+            None,
+            json!({})
+        )));
         // Unknown fork drivers stay enabled.
-        assert!(resolve_provider_instance_enabled(&config("ollama", None, json!({}))));
+        assert!(resolve_provider_instance_enabled(&config(
+            "ollama",
+            None,
+            json!({})
+        )));
         // Envelope flag wins over the driver default.
-        assert!(resolve_provider_instance_enabled(&config("grok", Some(true), json!({}))));
-        assert!(!resolve_provider_instance_enabled(&config("codex", Some(false), json!({}))));
+        assert!(resolve_provider_instance_enabled(&config(
+            "grok",
+            Some(true),
+            json!({})
+        )));
+        assert!(!resolve_provider_instance_enabled(&config(
+            "codex",
+            Some(false),
+            json!({})
+        )));
         // Legacy in-config flag fills in when the envelope is silent.
-        assert!(resolve_provider_instance_enabled(&config("grok", None, json!({ "enabled": true }))));
+        assert!(resolve_provider_instance_enabled(&config(
+            "grok",
+            None,
+            json!({ "enabled": true })
+        )));
         // Conflicting flags: the explicit false wins, whichever side it is on.
         assert!(!resolve_provider_instance_enabled(&config(
             "grok",
@@ -4536,8 +4695,14 @@ mod tests {
     #[test]
     fn provider_instance_config_enabled_flag_reads_legacy_blobs() {
         assert_eq!(provider_instance_config_enabled_flag(None), None);
-        assert_eq!(provider_instance_config_enabled_flag(Some(&json!(null))), None);
-        assert_eq!(provider_instance_config_enabled_flag(Some(&json!([true]))), None);
+        assert_eq!(
+            provider_instance_config_enabled_flag(Some(&json!(null))),
+            None
+        );
+        assert_eq!(
+            provider_instance_config_enabled_flag(Some(&json!([true]))),
+            None
+        );
         assert_eq!(
             provider_instance_config_enabled_flag(Some(&json!({ "enabled": true }))),
             Some(true)
@@ -4572,7 +4737,9 @@ mod tests {
     fn inherited_thread_env_mode_stays_off_the_wire() {
         let encoded = encode(&decode_server(json!({})));
         assert!(encoded.get("defaultThreadEnvMode").is_none());
-        let encoded = encode(&decode_server(json!({ "defaultThreadEnvMode": "worktree" })));
+        let encoded = encode(&decode_server(
+            json!({ "defaultThreadEnvMode": "worktree" }),
+        ));
         assert_eq!(encoded["defaultThreadEnvMode"], json!("worktree"));
     }
 
@@ -4700,11 +4867,21 @@ mod tests {
             "~/Development"
         );
         assert_eq!(
-            patch.text_generation_model_selection.unwrap().model.unwrap().as_str(),
+            patch
+                .text_generation_model_selection
+                .unwrap()
+                .model
+                .unwrap()
+                .as_str(),
             "gpt-5.4-mini"
         );
         assert_eq!(
-            patch.observability.unwrap().otlp_traces_url.unwrap().as_str(),
+            patch
+                .observability
+                .unwrap()
+                .otlp_traces_url
+                .unwrap()
+                .as_str(),
             "http://localhost:4318/v1/traces"
         );
         let instances = patch.provider_instances.unwrap();
@@ -4712,9 +4889,15 @@ mod tests {
             .get(&provider_instance_id("codex_personal"))
             .unwrap();
         assert_eq!(instance.driver.as_str(), "codex");
-        assert_eq!(instance.display_name.as_ref().unwrap().as_str(), "Codex Personal");
+        assert_eq!(
+            instance.display_name.as_ref().unwrap().as_str(),
+            "Codex Personal"
+        );
         // The driver-specific config blob stays opaque: no trimming inside it.
-        assert_eq!(instance.config, Some(json!({ "homePath": "  ~/.codex-personal  " })));
+        assert_eq!(
+            instance.config,
+            Some(json!({ "homePath": "  ~/.codex-personal  " }))
+        );
     }
 
     #[test]
@@ -4766,7 +4949,10 @@ mod tests {
             assert_eq!(encode(&settings)["environmentIcon"], json!(kind));
         }
         // Null (the default) stays on the wire: the field is required upstream.
-        assert_eq!(encode(&decode_server(json!({})))["environmentIcon"], json!(null));
+        assert_eq!(
+            encode(&decode_server(json!({})))["environmentIcon"],
+            json!(null)
+        );
     }
 
     // ── branch naming settings ───────────────────────────────────
@@ -4798,8 +4984,14 @@ mod tests {
             assert_eq!(encoded["branchNamingMode"], json!(mode));
             assert_eq!(encoded["branchNamePrefix"], json!("team/"));
             let patch = decode_server_patch(input);
-            assert_eq!(patch.branch_naming_mode.map(|m| m.as_str_name()), Some(mode));
-            assert_eq!(patch.branch_name_prefix.map(|p| p.as_str().to_owned()), Some("team/".to_owned()));
+            assert_eq!(
+                patch.branch_naming_mode.map(|m| m.as_str_name()),
+                Some(mode)
+            );
+            assert_eq!(
+                patch.branch_name_prefix.map(|p| p.as_str().to_owned()),
+                Some("team/".to_owned())
+            );
         }
     }
 
@@ -4837,7 +5029,11 @@ mod tests {
         ] {
             assert!(is_nullable_project_settings_override(key), "{key}");
         }
-        for key in ["worktreeCleanup", "defaultRuntimeMode", "responseStreamingMode"] {
+        for key in [
+            "worktreeCleanup",
+            "defaultRuntimeMode",
+            "responseStreamingMode",
+        ] {
             assert!(!is_nullable_project_settings_override(key), "{key}");
         }
         assert_eq!(PROJECT_SCOPED_SERVER_SETTING_KEYS.len(), 25);
@@ -4891,12 +5087,16 @@ mod tests {
         )]
         .into_iter()
         .collect::<ProviderInstanceConfigMap>();
-        let overrides = overrides_for(Some([(
-            provider_instance_id("codex_work"),
-            ProjectProviderInstanceOverride { enabled: Some(true) },
-        )]
-        .into_iter()
-        .collect()));
+        let overrides = overrides_for(Some(
+            [(
+                provider_instance_id("codex_work"),
+                ProjectProviderInstanceOverride {
+                    enabled: Some(true),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
         assert!(resolve_project_provider_instance_enabled(
             &instances,
             &overrides,
@@ -4913,12 +5113,16 @@ mod tests {
         )]
         .into_iter()
         .collect::<ProviderInstanceConfigMap>();
-        let overrides = overrides_for(Some([(
-            provider_instance_id("codex_work"),
-            ProjectProviderInstanceOverride { enabled: Some(false) },
-        )]
-        .into_iter()
-        .collect()));
+        let overrides = overrides_for(Some(
+            [(
+                provider_instance_id("codex_work"),
+                ProjectProviderInstanceOverride {
+                    enabled: Some(false),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
         assert!(!resolve_project_provider_instance_enabled(
             &instances,
             &overrides,
@@ -4935,12 +5139,16 @@ mod tests {
         )]
         .into_iter()
         .collect::<ProviderInstanceConfigMap>();
-        let overrides = overrides_for(Some([(
-            provider_instance_id("codex_work"),
-            ProjectProviderInstanceOverride { enabled: Some(false) },
-        )]
-        .into_iter()
-        .collect()));
+        let overrides = overrides_for(Some(
+            [(
+                provider_instance_id("codex_work"),
+                ProjectProviderInstanceOverride {
+                    enabled: Some(false),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
         assert!(resolve_project_provider_instance_enabled(
             &instances,
             &overrides,
@@ -4971,12 +5179,16 @@ mod tests {
         assert_eq!(with_project, without_project);
         assert!(!with_project);
 
-        let overridden = overrides_for(Some([(
-            provider_instance_id("codex_work"),
-            ProjectProviderInstanceOverride { enabled: Some(true) },
-        )]
-        .into_iter()
-        .collect()));
+        let overridden = overrides_for(Some(
+            [(
+                provider_instance_id("codex_work"),
+                ProjectProviderInstanceOverride {
+                    enabled: Some(true),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
         assert!(resolve_project_provider_instance_enabled(
             &instances,
             &overridden,
@@ -4987,10 +5199,18 @@ mod tests {
 
     #[test]
     fn unconfigured_default_instances_are_codex_and_claude() {
-        assert!(is_unconfigured_default_instance_enabled(&provider_instance_id("codex")));
-        assert!(is_unconfigured_default_instance_enabled(&provider_instance_id("claudeAgent")));
-        assert!(!is_unconfigured_default_instance_enabled(&provider_instance_id("cursor")));
-        assert!(!is_unconfigured_default_instance_enabled(&provider_instance_id("codex_work")));
+        assert!(is_unconfigured_default_instance_enabled(
+            &provider_instance_id("codex")
+        ));
+        assert!(is_unconfigured_default_instance_enabled(
+            &provider_instance_id("claudeAgent")
+        ));
+        assert!(!is_unconfigured_default_instance_enabled(
+            &provider_instance_id("cursor")
+        ));
+        assert!(!is_unconfigured_default_instance_enabled(
+            &provider_instance_id("codex_work")
+        ));
     }
 
     // ── server model preferences ────────────────────────────────
@@ -5011,10 +5231,12 @@ mod tests {
         );
         assert_eq!(encode(&patch), input);
         // The flag is required.
-        assert!(serde_json::from_value::<ServerSettingsPatch>(json!({
-            "setModelsHidden": [{ "provider": "codex_work", "model": "sol" }]
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ServerSettingsPatch>(json!({
+                "setModelsHidden": [{ "provider": "codex_work", "model": "sol" }]
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -5026,11 +5248,14 @@ mod tests {
         let encoded = encode(&decode_server(input.clone()));
         assert_eq!(encoded["favorites"], json!([]));
         assert_eq!(encoded["providerModelPreferences"], json!({}));
-        assert_eq!(decode_server_patch(input.clone()), ServerSettingsPatch {
-            favorites: Some(Vec::new()),
-            provider_model_preferences: Some(ProviderModelPreferences::default()),
-            ..Default::default()
-        });
+        assert_eq!(
+            decode_server_patch(input.clone()),
+            ServerSettingsPatch {
+                favorites: Some(Vec::new()),
+                provider_model_preferences: Some(ProviderModelPreferences::default()),
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
@@ -5064,7 +5289,10 @@ mod tests {
             )
         );
         let encoded = encode(&settings);
-        assert_eq!(encoded["favorites"], json!([{ "provider": "codex_work", "model": "sol" }]));
+        assert_eq!(
+            encoded["favorites"],
+            json!([{ "provider": "codex_work", "model": "sol" }])
+        );
         assert_eq!(
             encoded["providerModelPreferences"],
             json!({ "codex_work": { "hiddenModels": ["astra"], "modelOrder": ["sol"] } })
@@ -5179,11 +5407,14 @@ mod tests {
                 "options": [{ "id": "reasoningEffort", "value": DEFAULT_TEXT_GENERATION_REASONING_EFFORT }]
             })
         );
-        assert_eq!(encoded["backgroundActivity"], json!({
-            "schemaVersion": 1,
-            "profile": "balanced",
-            "overrides": {}
-        }));
+        assert_eq!(
+            encoded["backgroundActivity"],
+            json!({
+                "schemaVersion": 1,
+                "profile": "balanced",
+                "overrides": {}
+            })
+        );
         assert_eq!(encoded["automaticGitFetchInterval"], json!(30000));
         assert_eq!(encoded["branchNamingMode"], json!("static"));
         assert_eq!(encoded["branchNamePrefix"], json!("t3"));
@@ -5196,7 +5427,10 @@ mod tests {
         assert_eq!(encoded["favorites"], json!([]));
         assert_eq!(encoded["onboardingCompletedAt"], json!(null));
         assert_eq!(encoded["notificationMode"], json!("off"));
-        assert_eq!(encoded["snapShotShortcut"], json!({ "kind": "both-shift-keys" }));
+        assert_eq!(
+            encoded["snapShotShortcut"],
+            json!({ "kind": "both-shift-keys" })
+        );
         assert_eq!(encoded["sidebarProjectSortOrder"], json!("updated_at"));
     }
 
@@ -5309,21 +5543,27 @@ mod tests {
             encoded["defaultModelSelection"],
             json!({ "instanceId": "claudeAgent", "model": "claude-opus-5-5" })
         );
-        assert_eq!(encoded["providerInstances"]["codex"], json!({
-            "driver": "codex",
-            "enabled": true,
-            "config": {
-                "binaryPath": "codex",
-                "homePath": "",
-                "shadowHomePath": "",
-                "launchArgs": "",
-                "customModels": [],
-                "setupMode": "managed"
-            }
-        }));
-        assert_eq!(encoded["providerInstances"]["claudeAgent_2"], json!({
-            "driver": "claudeAgent", "displayName": "Claude", "enabled": false
-        }));
+        assert_eq!(
+            encoded["providerInstances"]["codex"],
+            json!({
+                "driver": "codex",
+                "enabled": true,
+                "config": {
+                    "binaryPath": "codex",
+                    "homePath": "",
+                    "shadowHomePath": "",
+                    "launchArgs": "",
+                    "customModels": [],
+                    "setupMode": "managed"
+                }
+            })
+        );
+        assert_eq!(
+            encoded["providerInstances"]["claudeAgent_2"],
+            json!({
+                "driver": "claudeAgent", "displayName": "Claude", "enabled": false
+            })
+        );
         // The saved file's key order within providerInstances is preserved.
         let keys: Vec<&str> = encoded["providerInstances"]
             .as_object()
@@ -5331,7 +5571,16 @@ mod tests {
             .keys()
             .map(|k| k.as_str())
             .collect();
-        assert_eq!(keys, ["codex", "claudeAgent_2", "claudeAgent", "cursor", "opencode"]);
+        assert_eq!(
+            keys,
+            [
+                "codex",
+                "claudeAgent_2",
+                "claudeAgent",
+                "cursor",
+                "opencode"
+            ]
+        );
         // ...and decoding the re-encoded file still succeeds (round trip).
         let redecoded: ServerSettings = serde_json::from_value(encoded).unwrap();
         assert_eq!(redecoded, settings);
@@ -5415,7 +5664,10 @@ mod tests {
             settings.notification_mode,
             NotificationMode::NotificationsAndSound
         );
-        assert_eq!(settings.appearance_contrast, AppearanceContrast::new(125).unwrap());
+        assert_eq!(
+            settings.appearance_contrast,
+            AppearanceContrast::new(125).unwrap()
+        );
         assert_eq!(
             settings.panel_animation_duration_ms,
             PanelAnimationDurationMs::new(25).unwrap()
@@ -5508,10 +5760,12 @@ mod tests {
             encode(&settings)["usageModelAliases"],
             json!({ "gpt-6-preview": "gpt-6" })
         );
-        assert!(serde_json::from_value::<ServerSettings>(json!({
-            "usageModelAliases": { " ": "x" }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ServerSettings>(json!({
+                "usageModelAliases": { " ": "x" }
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -5545,7 +5799,10 @@ mod tests {
             activity.base_profile,
             Some(BackgroundActivityProfile::BatterySaver)
         );
-        assert_eq!(activity.overrides.automatic_git_fetch_interval, Some(60_000));
+        assert_eq!(
+            activity.overrides.automatic_git_fetch_interval,
+            Some(60_000)
+        );
         assert_eq!(activity.overrides.pause_when_on_battery, Some(true));
         assert_eq!(
             encode(&settings)["backgroundActivity"],

@@ -7,7 +7,11 @@ use serde::{Deserialize, Serialize};
 /// whether the thread a bootstrap turn would have created was removed or
 /// never created.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum OrchestrationDispatchCommandError {
     #[serde(rename = "OrchestrationDispatchCommandError")]
     #[error("{message}")]

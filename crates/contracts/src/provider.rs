@@ -187,7 +187,11 @@ pub struct ProviderUploadFeedbackResult {
 
 /// `ProviderUploadFeedbackError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ProviderUploadFeedbackError {
     #[serde(rename = "ProviderUploadFeedbackError")]
     #[error("Failed to upload feedback for thread {thread_id}.")]

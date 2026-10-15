@@ -27,8 +27,7 @@ fn is_slug(value: &str) -> bool {
         Some(first) if PROVIDER_SLUG_FIRST.contains(first) => {}
         _ => return false,
     }
-    value.len() <= PROVIDER_SLUG_MAX_CHARS
-        && chars.all(|c| PROVIDER_SLUG_REST.contains(c))
+    value.len() <= PROVIDER_SLUG_MAX_CHARS && chars.all(|c| PROVIDER_SLUG_REST.contains(c))
 }
 
 macro_rules! provider_slug {
@@ -134,8 +133,13 @@ impl ProviderInstanceEnvironmentVariableName {
         let trimmed = value.as_ref().trim();
         let valid = !trimmed.is_empty()
             && trimmed.len() <= ENVIRONMENT_VARIABLE_NAME_MAX_CHARS
-            && trimmed.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-            && trimmed.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            && trimmed
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && trimmed
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_');
         if !valid {
             return Err(ContractError {
                 expected: "an environment variable name matching ^[a-zA-Z_][a-zA-Z0-9_]*$ (<= 128 chars)",
@@ -208,7 +212,11 @@ pub struct ProviderInstanceConfig {
 
 /// Atomic mutation for one provider-instance map entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "operation", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "operation",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ProviderInstanceMutation {
     #[serde(rename = "create")]
     Create {
@@ -249,7 +257,15 @@ mod tests {
 
     #[test]
     fn slugs_accept_valid_values() {
-        for id in ["codex", "codex_personal", "codex-work", "claudeAgent", "x", "abc123", "ollama"] {
+        for id in [
+            "codex",
+            "codex_personal",
+            "codex-work",
+            "claudeAgent",
+            "x",
+            "abc123",
+            "ollama",
+        ] {
             assert_eq!(decode_driver(id).unwrap().as_str(), id);
             assert_eq!(ProviderInstanceId::new(id).unwrap().as_str(), id);
         }
@@ -257,15 +273,29 @@ mod tests {
 
     #[test]
     fn slugs_reject_invalid_values() {
-        for value in ["", "1codex", "-codex", "_codex", "codex personal", "codex.personal", "codex/personal"] {
-            assert!(decode_driver(value).is_err(), "{value:?} should be rejected");
+        for value in [
+            "",
+            "1codex",
+            "-codex",
+            "_codex",
+            "codex personal",
+            "codex.personal",
+            "codex/personal",
+        ] {
+            assert!(
+                decode_driver(value).is_err(),
+                "{value:?} should be rejected"
+            );
         }
         assert!(ProviderInstanceId::new("1codex").is_err());
     }
 
     #[test]
     fn slugs_trim_surrounding_whitespace() {
-        assert_eq!(decode_driver("  codex_work  ").unwrap().as_str(), "codex_work");
+        assert_eq!(
+            decode_driver("  codex_work  ").unwrap().as_str(),
+            "codex_work"
+        );
     }
 
     #[test]
@@ -288,15 +318,18 @@ mod tests {
         assert_eq!(fork.driver.as_str(), "ollama");
 
         // A driver that is not a valid slug is rejected.
-        assert!(serde_json::from_str::<ProviderInstanceRef>(
-            r#"{"instanceId":"codex","driver":"1nope"}"#
-        )
-        .is_err());
+        assert!(
+            serde_json::from_str::<ProviderInstanceRef>(
+                r#"{"instanceId":"codex","driver":"1nope"}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn config_decodes_minimal_envelope() {
-        let decoded: ProviderInstanceConfig = serde_json::from_str(r#"{"driver":"codex"}"#).unwrap();
+        let decoded: ProviderInstanceConfig =
+            serde_json::from_str(r#"{"driver":"codex"}"#).unwrap();
         assert_eq!(decoded.driver.as_str(), "codex");
         assert_eq!(decoded.display_name, None);
         assert_eq!(decoded.enabled, None);
@@ -310,7 +343,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decoded.driver.as_str(), "ollama");
-        assert_eq!(decoded.config, Some(serde_json::json!({"someUnknownKnob":42,"model":"llama3"})));
+        assert_eq!(
+            decoded.config,
+            Some(serde_json::json!({"someUnknownKnob":42,"model":"llama3"}))
+        );
     }
 
     #[test]
@@ -320,10 +356,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decoded.driver.as_str(), "codex");
-        assert_eq!(decoded.display_name.as_ref().unwrap().as_str(), "Codex Personal");
+        assert_eq!(
+            decoded.display_name.as_ref().unwrap().as_str(),
+            "Codex Personal"
+        );
         assert_eq!(decoded.accent_color.as_ref().unwrap().as_str(), "#dc2626");
         // `value` is a plain Schema.String: not trimmed.
-        assert_eq!(decoded.environment.as_ref().unwrap()[0].value, "  sk-or-test  ");
+        assert_eq!(
+            decoded.environment.as_ref().unwrap()[0].value,
+            "  sk-or-test  "
+        );
     }
 
     #[test]
@@ -340,20 +382,23 @@ mod tests {
             decoded.environment,
             Some(vec![
                 ProviderInstanceEnvironmentVariable {
-                    name: ProviderInstanceEnvironmentVariableName::new("ANTHROPIC_BASE_URL").unwrap(),
+                    name: ProviderInstanceEnvironmentVariableName::new("ANTHROPIC_BASE_URL")
+                        .unwrap(),
                     value: "https://openrouter.ai/api".to_owned(),
                     sensitive: false,
                     value_redacted: None,
                 },
                 ProviderInstanceEnvironmentVariable {
-                    name: ProviderInstanceEnvironmentVariableName::new("OPENROUTER_API_KEY").unwrap(),
+                    name: ProviderInstanceEnvironmentVariableName::new("OPENROUTER_API_KEY")
+                        .unwrap(),
                     value: "sk-or-test".to_owned(),
                     sensitive: true,
                     value_redacted: None,
                 },
                 // `value` defaults to "" and `sensitive` to false on decode.
                 ProviderInstanceEnvironmentVariable {
-                    name: ProviderInstanceEnvironmentVariableName::new("ANTHROPIC_API_KEY").unwrap(),
+                    name: ProviderInstanceEnvironmentVariableName::new("ANTHROPIC_API_KEY")
+                        .unwrap(),
                     value: String::new(),
                     sensitive: false,
                     value_redacted: None,
@@ -364,18 +409,22 @@ mod tests {
 
     #[test]
     fn config_rejects_invalid_environment_variable_names() {
-        assert!(serde_json::from_str::<ProviderInstanceConfig>(
-            r#"{"driver":"codex","environment":[{"name":"HAS-DASH","value":"x"}]}"#
-        )
-        .is_err());
+        assert!(
+            serde_json::from_str::<ProviderInstanceConfig>(
+                r#"{"driver":"codex","environment":[{"name":"HAS-DASH","value":"x"}]}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn config_rejects_blank_display_name() {
-        assert!(serde_json::from_str::<ProviderInstanceConfig>(
-            r#"{"driver":"codex","displayName":"   "}"#
-        )
-        .is_err());
+        assert!(
+            serde_json::from_str::<ProviderInstanceConfig>(
+                r#"{"driver":"codex","displayName":"   "}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -392,7 +441,12 @@ mod tests {
         let keys: Vec<&str> = decoded.keys().map(|k| k.as_str()).collect();
         assert_eq!(
             keys,
-            ["codex_personal", "codex_work", "claudeAgent", "ollama_local"]
+            [
+                "codex_personal",
+                "codex_work",
+                "claudeAgent",
+                "ollama_local"
+            ]
         );
         assert_eq!(
             decoded
@@ -402,7 +456,10 @@ mod tests {
             Some(serde_json::json!({"homePath":"~/.codex_work"}))
         );
 
-        assert!(serde_json::from_str::<ProviderInstanceConfigMap>(r#"{"1codex":{"driver":"codex"}}"#).is_err());
+        assert!(
+            serde_json::from_str::<ProviderInstanceConfigMap>(r#"{"1codex":{"driver":"codex"}}"#)
+                .is_err()
+        );
     }
 
     #[test]

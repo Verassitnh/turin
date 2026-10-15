@@ -579,16 +579,14 @@ mod tool_activity_app_id {
     use super::*;
 
     /// `appId`: at most 512 chars and `^[A-Za-z0-9._-]+$`.
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<TrimmedNonEmptyString, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<TrimmedNonEmptyString, D::Error> {
         let value = TrimmedNonEmptyString::deserialize(d)?;
         let raw = value.as_str();
         if raw.len() > 512
             || raw.is_empty()
-            || !raw.bytes().all(|b| {
-                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')
-            })
+            || !raw
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
         {
             return Err(serde::de::Error::custom(
                 "an app id matching ^[A-Za-z0-9._-]+$ (<= 512 chars)",
@@ -602,9 +600,7 @@ mod tool_activity_name {
     use super::*;
 
     /// `displayName` / `name`: at most 160 chars.
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<TrimmedNonEmptyString, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<TrimmedNonEmptyString, D::Error> {
         super::trimmed_non_empty_at_most(TrimmedNonEmptyString::deserialize(d)?, 160)
             .map_err(serde::de::Error::custom)
     }
@@ -614,9 +610,7 @@ mod tool_activity_key {
     use super::*;
 
     /// `key`: at most 512 chars.
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<TrimmedNonEmptyString, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<TrimmedNonEmptyString, D::Error> {
         super::trimmed_non_empty_at_most(TrimmedNonEmptyString::deserialize(d)?, 512)
             .map_err(serde::de::Error::custom)
     }
@@ -626,9 +620,7 @@ mod tool_activity_url {
     use super::*;
 
     /// `pageUrl` / `logoUrl`: at most 4096 chars.
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<TrimmedNonEmptyString, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<TrimmedNonEmptyString, D::Error> {
         super::trimmed_non_empty_at_most(TrimmedNonEmptyString::deserialize(d)?, 4096)
             .map_err(serde::de::Error::custom)
     }
@@ -644,8 +636,7 @@ mod tool_activity_optional_url {
     ) -> Result<Option<TrimmedNonEmptyString>, D::Error> {
         match Option::<TrimmedNonEmptyString>::deserialize(d)? {
             Some(value) => Ok(Some(
-                super::trimmed_non_empty_at_most(value, 4096)
-                    .map_err(serde::de::Error::custom)?,
+                super::trimmed_non_empty_at_most(value, 4096).map_err(serde::de::Error::custom)?,
             )),
             None => Ok(None),
         }
@@ -656,9 +647,7 @@ mod token_usage_currency {
     use super::*;
 
     /// `cost.currency`: at most 32 chars.
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<TrimmedNonEmptyString, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<TrimmedNonEmptyString, D::Error> {
         super::trimmed_non_empty_at_most(TrimmedNonEmptyString::deserialize(d)?, 32)
             .map_err(serde::de::Error::custom)
     }
@@ -700,9 +689,7 @@ pub enum ToolActivityIcon {
         favicon_url_dark: Option<TrimmedNonEmptyString>,
     },
     #[serde(rename = "native-app")]
-    NativeApp {
-        app: ToolActivityNativeAppReference,
-    },
+    NativeApp { app: ToolActivityNativeAppReference },
     #[serde(rename = "themed-logo")]
     ThemedLogo {
         #[serde(deserialize_with = "tool_activity_url::deserialize")]
@@ -1583,7 +1570,10 @@ mod tests {
         let parsed = decode(with_totals).unwrap();
         assert!(matches!(parsed, ProviderRuntimeEvent::TurnCompleted { .. }));
         let parsed_value = serde_json::to_value(&parsed).unwrap();
-        assert_eq!(parsed_value["payload"]["tokenUsage"]["inputTokens"], json!(10));
+        assert_eq!(
+            parsed_value["payload"]["tokenUsage"]["inputTokens"],
+            json!(10)
+        );
 
         // A partial usage status needs no totals.
         let mut partial = complete_event;
@@ -1611,7 +1601,10 @@ mod tests {
             panic!("expected session.started");
         };
         assert_eq!(base.provider.as_str(), "ollama");
-        assert_eq!(base.provider_instance_id.as_ref().unwrap().as_str(), "ollama_local");
+        assert_eq!(
+            base.provider_instance_id.as_ref().unwrap().as_str(),
+            "ollama_local"
+        );
         assert_eq!(payload.message.as_ref().unwrap().as_str(), "started");
     }
 
@@ -1642,7 +1635,10 @@ mod tests {
         assert_eq!(payload.plan[1].status, RuntimePlanStepStatus::InProgress);
         // Explanation is an optional NullOr: a present value survives encode.
         let parsed_value = serde_json::to_value(&parsed).unwrap();
-        assert_eq!(parsed_value["payload"]["explanation"], json!("Implement schema updates"));
+        assert_eq!(
+            parsed_value["payload"]["explanation"],
+            json!("Implement schema updates")
+        );
     }
 
     #[test]
@@ -1734,29 +1730,33 @@ mod tests {
 
     #[test]
     fn rejects_legacy_message_delta_type() {
-        assert!(decode(json!({
-            "type": "message.delta",
-            "eventId": "event-4",
-            "provider": "codex",
-            "sessionId": "runtime-session-3",
-            "createdAt": "2026-02-28T00:00:03.000Z",
-            "payload": { "delta": "legacy" },
-        }))
-        .is_err());
+        assert!(
+            decode(json!({
+                "type": "message.delta",
+                "eventId": "event-4",
+                "provider": "codex",
+                "sessionId": "runtime-session-3",
+                "createdAt": "2026-02-28T00:00:03.000Z",
+                "payload": { "delta": "legacy" },
+            }))
+            .is_err()
+        );
     }
 
     #[test]
     fn rejects_empty_branded_canonical_ids() {
-        assert!(decode(json!({
-            "type": "runtime.error",
-            "eventId": "event-5",
-            "provider": "codex",
-            "sessionId": "runtime-session-3",
-            "createdAt": "2026-02-28T00:00:03.000Z",
-            "threadId": "   ",
-            "payload": { "message": "boom" },
-        }))
-        .is_err());
+        assert!(
+            decode(json!({
+                "type": "runtime.error",
+                "eventId": "event-5",
+                "provider": "codex",
+                "sessionId": "runtime-session-3",
+                "createdAt": "2026-02-28T00:00:03.000Z",
+                "threadId": "   ",
+                "payload": { "message": "boom" },
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -1786,18 +1786,27 @@ mod tests {
             serde_json::to_value(&payload.usage.max_tokens).unwrap(),
             json!(200000)
         );
-        assert_eq!(serde_json::to_value(payload.usage.used_tokens).unwrap(), json!(31251));
+        assert_eq!(
+            serde_json::to_value(payload.usage.used_tokens).unwrap(),
+            json!(31251)
+        );
     }
 
     #[test]
     fn raw_source_accepts_known_slugs_and_acp_extension_template() {
         for known in KNOWN_RUNTIME_EVENT_RAW_SOURCES {
-            assert!(RuntimeEventRawSource::new(known).is_ok(), "{known} should decode");
+            assert!(
+                RuntimeEventRawSource::new(known).is_ok(),
+                "{known} should decode"
+            );
         }
         assert!(RuntimeEventRawSource::new("acp.thing.extension").is_ok());
         // Passthrough: the raw slug encodes unchanged.
         let source = RuntimeEventRawSource::new("codex.eventmsg").unwrap();
-        assert_eq!(serde_json::to_string(&source).unwrap(), r#""codex.eventmsg""#);
+        assert_eq!(
+            serde_json::to_string(&source).unwrap(),
+            r#""codex.eventmsg""#
+        );
 
         assert!(RuntimeEventRawSource::new("claude.sdk.unknown").is_err());
         assert!(RuntimeEventRawSource::new("acp..extension").is_err());
@@ -1860,9 +1869,15 @@ mod tests {
         let ProviderRuntimeEvent::TaskStarted { payload, .. } = &parsed else {
             panic!("expected task.started");
         };
-        assert_eq!(payload.linkage.task_type.as_ref().unwrap().as_str(), "subagent");
+        assert_eq!(
+            payload.linkage.task_type.as_ref().unwrap().as_str(),
+            "subagent"
+        );
         assert_eq!(payload.linkage.agent_kind, Some(TaskAgentKind::Agent));
-        assert_eq!(payload.linkage.agent_id.as_ref().unwrap().as_str(), "agent-1");
+        assert_eq!(
+            payload.linkage.agent_id.as_ref().unwrap().as_str(),
+            "agent-1"
+        );
         // Linkage fields ride at the payload's top level, like upstream's
         // `...taskAgentLinkageFields` spread.
         let parsed_value = serde_json::to_value(&parsed).unwrap();
@@ -1878,18 +1893,24 @@ mod tests {
             serde_json::from_value(reference.clone()).unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), reference);
 
-        assert!(serde_json::from_value::<ToolActivityNativeAppReference>(json!({
-            "_tag": "app-id", "appId": "not a slug",
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<ToolActivityNativeAppReference>(json!({
-            "_tag": "app-id", "appId": "x".repeat(513),
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<ToolActivityNativeAppReference>(json!({
-            "_tag": "display-name", "displayName": "x".repeat(161),
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ToolActivityNativeAppReference>(json!({
+                "_tag": "app-id", "appId": "not a slug",
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ToolActivityNativeAppReference>(json!({
+                "_tag": "app-id", "appId": "x".repeat(513),
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ToolActivityNativeAppReference>(json!({
+                "_tag": "display-name", "displayName": "x".repeat(161),
+            }))
+            .is_err()
+        );
 
         let icon: ToolActivityIcon = serde_json::from_value(json!({
             "_tag": "website",
@@ -1897,7 +1918,12 @@ mod tests {
             "faviconUrlDark": "/dark.png",
         }))
         .unwrap();
-        let ToolActivityIcon::Website { page_url, favicon_url, favicon_url_dark } = &icon else {
+        let ToolActivityIcon::Website {
+            page_url,
+            favicon_url,
+            favicon_url_dark,
+        } = &icon
+        else {
             panic!("expected website");
         };
         assert_eq!(page_url.as_str(), "https://example.com");

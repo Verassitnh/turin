@@ -117,7 +117,11 @@ pub enum FilesystemBrowseFailure {
 /// `FilesystemBrowseError` (Schema.TaggedError). Structured diagnostics stay
 /// optional for rolling compatibility with legacy message-only payloads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum FilesystemBrowseError {
     #[serde(rename = "FilesystemBrowseError")]
     #[error("{message}")]
@@ -141,16 +145,13 @@ pub enum FilesystemBrowseError {
 impl FilesystemBrowseError {
     /// Upstream's constructor default: builds the human message when the
     /// caller did not supply one.
-    pub fn new(
-        partial_path: &str,
-        cwd: Option<&str>,
-        failure: FilesystemBrowseFailure,
-    ) -> Self {
+    pub fn new(partial_path: &str, cwd: Option<&str>, failure: FilesystemBrowseFailure) -> Self {
         let cwd_part = cwd.map(|c| format!(" from '{c}'")).unwrap_or_default();
         Self::FilesystemBrowseError {
-            partial_path: Some(TrimmedNonEmptyString::new(partial_path).expect("caller passes non-empty")),
-            cwd: cwd
-                .map(|c| TrimmedNonEmptyString::new(c).expect("caller passes non-empty")),
+            partial_path: Some(
+                TrimmedNonEmptyString::new(partial_path).expect("caller passes non-empty"),
+            ),
+            cwd: cwd.map(|c| TrimmedNonEmptyString::new(c).expect("caller passes non-empty")),
             failure: Some(failure),
             parent_path: None,
             platform: None,

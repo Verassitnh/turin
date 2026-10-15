@@ -1514,9 +1514,8 @@ mod set_files_viewed_field {
                     .get("path")
                     .cloned()
                     .map(|path| {
-                        file_path::deserialize(path).map_err(|error| {
-                            serde::de::Error::custom(error.to_string())
-                        })
+                        file_path::deserialize(path)
+                            .map_err(|error| serde::de::Error::custom(error.to_string()))
                     })
                     .transpose()?;
                 let viewed = value
@@ -1529,7 +1528,8 @@ mod set_files_viewed_field {
                     .transpose()?;
                 Ok(PullRequestSetFilesViewedFile {
                     path: path.ok_or_else(|| serde::de::Error::custom("missing field `path`"))?,
-                    viewed: viewed.ok_or_else(|| serde::de::Error::custom("missing field `viewed`"))?,
+                    viewed: viewed
+                        .ok_or_else(|| serde::de::Error::custom("missing field `viewed`"))?,
                 })
             })
             .collect()
@@ -1635,7 +1635,11 @@ pub struct PullRequestCommentUpdateInput {
 
 /// The coordinates of one line in a pull request diff.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum PullRequestReviewPosition {
     #[serde(rename = "added")]
     Added { new_line: PositiveInt },
@@ -1832,9 +1836,7 @@ pub enum PullRequestUnavailableReason {
 /// and "a refused credential", not a missing tool.
 ///
 /// Cut hosts stay in the table so upstream text still resolves.
-fn provider_requirement(
-    provider: &str,
-) -> Option<(&'static str, &'static str)> {
+fn provider_requirement(provider: &str) -> Option<(&'static str, &'static str)> {
     match provider {
         "github" => Some((
             "No GitHub credential on the server. Set GH_TOKEN, or install the GitHub CLI (https://cli.github.com/) and run `gh auth login`.",
@@ -1958,7 +1960,11 @@ pub fn pull_request_provider_requirement(
 /// `HttpServerRespondable` encoder; both are RPC-transport concerns Turin
 /// cuts — see PORTING.md.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum PullRequestUnavailableError {
     #[serde(rename = "PullRequestUnavailableError")]
     Unavailable {
@@ -1972,8 +1978,12 @@ pub enum PullRequestUnavailableError {
 
 impl std::fmt::Display for PullRequestUnavailableError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self::Unavailable { reason, provider, .. } = self;
-        let requirement = provider.as_ref().and_then(|p| provider_requirement(p.as_str()));
+        let Self::Unavailable {
+            reason, provider, ..
+        } = self;
+        let requirement = provider
+            .as_ref()
+            .and_then(|p| provider_requirement(p.as_str()));
         match reason {
             PullRequestUnavailableReason::CliMissing => f.write_str(
                 requirement
@@ -1985,9 +1995,9 @@ impl std::fmt::Display for PullRequestUnavailableError {
                     .map(|r| r.1)
                     .unwrap_or("This host has no working credentials."),
             ),
-            PullRequestUnavailableReason::ProviderUnsupported => f.write_str(
-                "Change requests cannot be browsed for this project's host yet.",
-            ),
+            PullRequestUnavailableReason::ProviderUnsupported => {
+                f.write_str("Change requests cannot be browsed for this project's host yet.")
+            }
         }
     }
 }
@@ -1997,7 +2007,11 @@ impl std::error::Error for PullRequestUnavailableError {}
 /// `PullRequestOperationError` (Schema.TaggedError; upstream's 502 HTTP
 /// annotation is cut with the RPC transport).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum PullRequestOperationError {
     #[serde(rename = "PullRequestOperationError")]
     #[error("Pull request operation {operation} failed: {detail}")]
@@ -2046,10 +2060,12 @@ mod tests {
 
     #[test]
     fn qualifier_values_are_bounded() {
-        assert!(serde_json::from_value::<PullRequestListFilters>(serde_json::json!({
-            "author": "x".repeat(201),
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<PullRequestListFilters>(serde_json::json!({
+                "author": "x".repeat(201),
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -2077,10 +2093,12 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(viewed.path, " leading.txt");
-        assert!(serde_json::from_value::<PullRequestFileViewed>(serde_json::json!({
-            "path": "", "state": "viewed",
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<PullRequestFileViewed>(serde_json::json!({
+                "path": "", "state": "viewed",
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -2102,7 +2120,10 @@ mod tests {
             remote_url: None,
         };
         assert_eq!(
-            pull_request_host_of(Some(&identity), SourceControlProviderKind::new("github").unwrap()),
+            pull_request_host_of(
+                Some(&identity),
+                SourceControlProviderKind::new("github").unwrap()
+            ),
             "github.com"
         );
 
@@ -2112,7 +2133,10 @@ mod tests {
             remote_url: Some("https://CodeBerg.org/x/y"),
         };
         assert_eq!(
-            pull_request_host_of(Some(&forgejo), SourceControlProviderKind::new("forgejo").unwrap()),
+            pull_request_host_of(
+                Some(&forgejo),
+                SourceControlProviderKind::new("forgejo").unwrap()
+            ),
             "codeberg.org"
         );
 
@@ -2125,7 +2149,10 @@ mod tests {
 
     #[test]
     fn author_filter_resolves_me() {
-        assert_eq!(resolve_pull_request_author_filter(" @Me ", Some("dev")), "dev");
+        assert_eq!(
+            resolve_pull_request_author_filter(" @Me ", Some("dev")),
+            "dev"
+        );
         assert_eq!(resolve_pull_request_author_filter("me", None), "me");
         assert_eq!(resolve_pull_request_author_filter("me", Some("  ")), "me");
         assert_eq!(resolve_pull_request_author_filter(" theo ", None), "theo");
@@ -2143,7 +2170,10 @@ mod tests {
             "No GitHub credential on the server. Set GH_TOKEN, or install the GitHub CLI (https://cli.github.com/) and run `gh auth login`."
         );
         assert_eq!(
-            pull_request_provider_requirement(github, PullRequestUnavailableReason::ProviderUnsupported),
+            pull_request_provider_requirement(
+                github,
+                PullRequestUnavailableReason::ProviderUnsupported
+            ),
             None
         );
         let error = PullRequestUnavailableError::Unavailable {

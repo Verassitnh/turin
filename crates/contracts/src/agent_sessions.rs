@@ -90,7 +90,11 @@ pub struct AgentSessionImportInput {
 
 /// `AgentSessionImportProjectNotFoundError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum AgentSessionImportProjectNotFoundError {
     #[serde(rename = "AgentSessionImportProjectNotFoundError")]
     #[error("Project '{project_id}' does not exist.")]
@@ -99,10 +103,16 @@ pub enum AgentSessionImportProjectNotFoundError {
 
 /// `AgentSessionImportProjectChangedError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum AgentSessionImportProjectChangedError {
     #[serde(rename = "AgentSessionImportProjectChangedError")]
-    #[error("Project '{project_id}' changed directories. Scan for projects again before importing history.")]
+    #[error(
+        "Project '{project_id}' changed directories. Scan for projects again before importing history."
+    )]
     Changed { project_id: ProjectId },
 }
 
@@ -115,7 +125,11 @@ pub struct AgentSessionImportResult {
 
 /// `AgentSessionScanError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum AgentSessionScanError {
     #[serde(rename = "AgentSessionScanError")]
     #[error("Failed to scan agent sessions during {operation}.")]

@@ -48,7 +48,8 @@ pub enum ProviderInteractionMode {
     Plan,
 }
 
-pub const DEFAULT_PROVIDER_INTERACTION_MODE: ProviderInteractionMode = ProviderInteractionMode::Default;
+pub const DEFAULT_PROVIDER_INTERACTION_MODE: ProviderInteractionMode =
+    ProviderInteractionMode::Default;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

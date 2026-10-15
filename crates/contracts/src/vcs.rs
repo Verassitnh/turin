@@ -122,7 +122,11 @@ pub struct VcsProcessExitFailure {
 
 /// `VcsProcessSpawnError` (Schema.TaggedError): `{"_tag": …, …fields}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum VcsProcessSpawnError {
     #[serde(rename = "VcsProcessSpawnError")]
     #[error("VCS process failed to spawn in {operation}: {command} ({cwd})")]
@@ -152,10 +156,16 @@ impl VcsProcessSpawnError {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum VcsProcessExitError {
     #[serde(rename = "VcsProcessExitError")]
-    #[error("VCS process failed in {operation}: {command} ({cwd}) exited with {exit_code} - {detail}")]
+    #[error(
+        "VCS process failed in {operation}: {command} ({cwd}) exited with {exit_code} - {detail}"
+    )]
     VcsProcessExitError {
         operation: String,
         command: String,
@@ -186,16 +196,14 @@ impl VcsProcessExitError {
         let detail = match failure_kind {
             VcsProcessExitFailureKind::Authentication => "Authentication failed.".to_owned(),
             VcsProcessExitFailureKind::RateLimited => "API rate limit exceeded.".to_owned(),
-            VcsProcessExitFailureKind::NotFound => {
-                if context.command == "glab" {
-                    "Merge request not found."
-                } else if context.command == "gh" || context.command == "az" {
-                    "Pull request not found."
-                } else {
-                    "VCS resource not found."
-                }
-                .to_owned()
+            VcsProcessExitFailureKind::NotFound => if context.command == "glab" {
+                "Merge request not found."
+            } else if context.command == "gh" || context.command == "az" {
+                "Pull request not found."
+            } else {
+                "VCS resource not found."
             }
+            .to_owned(),
             VcsProcessExitFailureKind::CommandFailed => {
                 "Process exited with a non-zero status.".to_owned()
             }
@@ -208,7 +216,11 @@ impl VcsProcessExitError {
             exit_code: error.exit_code,
             detail,
             failure_kind: Some(failure_kind),
-            retryable: if retryable == Some(true) { Some(true) } else { None },
+            retryable: if retryable == Some(true) {
+                Some(true)
+            } else {
+                None
+            },
             stderr_length: Some(error.stderr.len() as u64),
             stderr_truncated: Some(error.stderr_truncated),
         }
@@ -216,7 +228,11 @@ impl VcsProcessExitError {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum VcsProcessTimeoutError {
     #[serde(rename = "VcsProcessTimeoutError")]
     #[error("VCS process timed out in {operation}: {command} ({cwd}) after {timeout_ms}ms")]
@@ -246,10 +262,16 @@ impl VcsProcessTimeoutError {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum VcsProcessStdinWriteError {
     #[serde(rename = "VcsProcessStdinWriteError")]
-    #[error("VCS process failed to write {stdin_bytes} bytes to stdin in {operation}: {command} ({cwd})")]
+    #[error(
+        "VCS process failed to write {stdin_bytes} bytes to stdin in {operation}: {command} ({cwd})"
+    )]
     VcsProcessStdinWriteError {
         operation: String,
         command: String,
@@ -270,7 +292,11 @@ pub enum VcsProcessStream {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum VcsProcessOutputReadError {
     #[serde(rename = "VcsProcessOutputReadError")]
     #[error("VCS process failed to read {stream} in {operation}: {command} ({cwd})")]
@@ -293,10 +319,16 @@ pub enum VcsProcessOutputStream {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum VcsProcessOutputLimitError {
     #[serde(rename = "VcsProcessOutputLimitError")]
-    #[error("VCS process {stream} produced {observed_bytes} bytes in {operation}: {command} ({cwd}), exceeding the {max_bytes} byte limit")]
+    #[error(
+        "VCS process {stream} produced {observed_bytes} bytes in {operation}: {command} ({cwd}), exceeding the {max_bytes} byte limit"
+    )]
     VcsProcessOutputLimitError {
         operation: String,
         command: String,
@@ -310,7 +342,11 @@ pub enum VcsProcessOutputLimitError {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum VcsProcessMissingExitCodeError {
     #[serde(rename = "VcsProcessMissingExitCodeError")]
     #[error("VCS process completed without an exit code in {operation}: {command} ({cwd})")]
@@ -339,7 +375,11 @@ pub enum VcsOutputDecodeError {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum VcsRepositoryDetectionError {
     #[serde(rename = "VcsRepositoryDetectionError")]
     #[error("VCS repository detection failed in {operation}: {cwd} - {detail}")]
@@ -353,7 +393,11 @@ pub enum VcsRepositoryDetectionError {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum VcsUnsupportedOperationError {
     #[serde(rename = "VcsUnsupportedOperationError")]
     #[error("VCS operation is unsupported for {kind} in {operation}: {detail}")]
@@ -441,7 +485,6 @@ mod tests {
         assert_eq!(serde_json::to_value(&freshness).unwrap(), none);
     }
 }
-
 
 impl std::fmt::Display for VcsProcessStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

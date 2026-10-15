@@ -114,6 +114,68 @@ pub fn code_unit_cmp(left: &str, right: &str) -> std::cmp::Ordering {
     left.encode_utf16().cmp(right.encode_utf16())
 }
 
+/// ICU root-collation order of ASCII punctuation and symbols (after
+/// whitespace, before digits), as `localeCompare` sees it in en-US.
+const COLLATION_PUNCTUATION: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
+
+/// Approximates `String.prototype.localeCompare` in the default en-US locale
+/// (ICU root collation) without an ICU dependency.
+///
+/// Three levels, like ICU: base characters (whitespace < punctuation <
+/// digits < letters, letters case-insensitively), then accents, then case
+/// (lowercase before uppercase). Characters outside ASCII letters/digits fall
+/// back to code point order after the letters.
+pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
+    use unicode_normalization::UnicodeNormalization;
+
+    struct Key {
+        primary: Vec<u32>,
+        secondary: Vec<u32>,
+        tertiary: Vec<u8>,
+    }
+
+    fn key(value: &str) -> Key {
+        let mut primary = Vec::new();
+        let mut secondary = Vec::new();
+        let mut tertiary = Vec::new();
+        for c in value.nfd() {
+            if ('\u{0300}'..='\u{036f}').contains(&c) {
+                // Accent: attach to the previous base character.
+                if let Some(last) = secondary.last_mut() {
+                    *last = *last * 1000 + (c as u32 - 0x2ff);
+                }
+                continue;
+            }
+            let lowered = c.to_lowercase().next().unwrap_or(c);
+            let weight = if is_js_whitespace_char(c) || c.is_control() {
+                c as u32
+            } else if let Some(index) = COLLATION_PUNCTUATION.find(c) {
+                1_000 + index as u32
+            } else if c.is_ascii_digit() {
+                2_000 + (c as u32 - '0' as u32)
+            } else if lowered.is_ascii_lowercase() {
+                3_000 + (lowered as u32 - 'a' as u32)
+            } else {
+                4_000 + lowered as u32
+            };
+            primary.push(weight);
+            secondary.push(0);
+            tertiary.push(u8::from(c != lowered));
+        }
+        Key {
+            primary,
+            secondary,
+            tertiary,
+        }
+    }
+
+    let (left, right) = (key(left), key(right));
+    left.primary
+        .cmp(&right.primary)
+        .then_with(|| left.secondary.cmp(&right.secondary))
+        .then_with(|| left.tertiary.cmp(&right.tertiary))
+}
+
 /// Body of a regex character class equal to JS `\s`. Rust's `\s` differs
 /// (it has U+0085 and lacks U+FEFF), so patterns ported from JS splice this in:
 /// `format!("[{JS_WS}]")` for `\s`, `format!("[^{JS_WS}]")` for `\S`.
@@ -271,6 +333,21 @@ mod tests {
         assert_eq!(last_index_of_utf16("a\nb\nc", "\n", 0), None);
         // JS lastIndexOf clamps beyond-length start positions.
         assert_eq!(last_index_of_utf16("ab", "a", 9), Some(0));
+    }
+
+    #[test]
+    fn locale_compare_matches_icu_for_common_cases() {
+        use std::cmp::Ordering::{Greater, Less};
+        assert_eq!(locale_compare("a", "B"), Less);
+        assert_eq!(locale_compare("a", "A"), Less);
+        assert_eq!(locale_compare("A", "b"), Less);
+        assert_eq!(locale_compare("a-b", "ab"), Less);
+        assert_eq!(locale_compare("10", "9"), Less);
+        assert_eq!(locale_compare("9", "a"), Less);
+        assert_eq!(locale_compare("resume", "r\u{e9}sum\u{e9}"), Less);
+        assert_eq!(locale_compare("b", "r\u{e9}sum\u{e9}"), Less);
+        assert_eq!(locale_compare("same", "same"), std::cmp::Ordering::Equal);
+        assert_eq!(locale_compare("ab", "a"), Greater);
     }
 
     #[test]

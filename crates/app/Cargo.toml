@@ -54,6 +54,7 @@ chrono.workspace = true
 regex.workspace = true
 thiserror.workspace = true
 percent-encoding.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true

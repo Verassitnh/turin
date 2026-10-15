@@ -1322,3 +1322,206 @@ async fn thinking_before_a_tool_call_becomes_the_preamble_on_claude_5_1() {
         .collect();
     assert!(kinds.contains(&"reasoning".to_owned()), "{kinds:?}");
 }
+
+/// Points a thread at the session id a transcript reports in its `init` frame.
+fn with_transcript_session(
+    mut thread: OrchestrationV2ProviderThread,
+    session: &str,
+) -> OrchestrationV2ProviderThread {
+    thread.native_thread_ref = serde_json::from_value(json!({
+        "driver": "claudeAgent", "nativeId": session, "strength": "strong",
+    }))
+    .ok();
+    thread
+}
+
+/// The upstream MCP presentation fixture: two Firecrawl tools, each titled
+/// and sourced from the MCP server it names.
+#[tokio::test]
+async fn fixture_mcp_tools_take_their_presentation() {
+    let harness = Harness::fixture("claude_mcp_tool_presentation");
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(
+            thread,
+            "Do exactly this, one tool call at a time, with no other tool calls.",
+        ))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    assert!(
+        assistant_texts(&seen)
+            .iter()
+            .any(|t| t == "mcp presentation fixture complete")
+    );
+    let completed: Vec<Value> = turn_items(&seen)
+        .iter()
+        .filter_map(|item| serde_json::to_value(item).ok())
+        .filter(|item| item["type"] == "dynamic_tool" && item["status"] == "completed")
+        .collect();
+    let names: Vec<&str> = completed
+        .iter()
+        .map(|item| item["toolName"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "mcp__claude_ai_Firecrawl__firecrawl_scrape",
+            "mcp__claude_ai_Firecrawl__firecrawl_map",
+        ]
+    );
+    let [scrape, map] = [&completed[0], &completed[1]];
+    assert_eq!(scrape["title"], "Firecrawl scrape");
+    assert_eq!(scrape["toolSource"]["key"], "mcp:firecrawl");
+    assert_eq!(scrape["toolSource"]["name"], "Firecrawl");
+    assert_eq!(scrape["toolSource"]["kind"], "integration");
+    assert_eq!(scrape["toolSource"]["icon"]["_tag"], "themed-logo");
+    assert_eq!(scrape["toolIcon"], scrape["toolSource"]["icon"]);
+    assert_eq!(map["title"], "firecrawl map");
+    assert_eq!(map["toolSource"]["key"], "mcp:firecrawl");
+}
+
+/// The upstream no-echo compaction fixture. A CLI that never echoes cannot
+/// show the `/compact` turn is not the peer's, so the peer's reply settles it.
+#[tokio::test]
+async fn fixture_compact_after_peer_turn_without_echo_settles_each_turn() {
+    let harness = Harness::fixture("claude_compact_after_peer_turn_no_echo");
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    // The transcript's own session id must be the thread's, or each turn relaunches the CLI.
+    let thread = with_transcript_session(thread, "c0de0c0d-5e55-4c0a-9a7c-0000000000c1");
+    runtime
+        .start_turn(harness.turn_input(
+            thread.clone(),
+            "Reply with exactly: compact probe first turn",
+        ))
+        .await
+        .expect("start first turn");
+    let (first, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    assert_eq!(
+        assistant_texts(&first),
+        vec!["compact probe first turn".to_owned()]
+    );
+
+    runtime
+        .start_turn(harness.turn_input(thread, "/compact"))
+        .await
+        .expect("start compact turn");
+    let (second, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    assert_eq!(assistant_texts(&second), vec!["PEER_ACK".to_owned()]);
+    assert!(
+        turn_items(&second)
+            .iter()
+            .all(|item| !matches!(item, OrchestrationV2TurnItem::Compaction { .. })),
+        "no compaction frame is in this transcript"
+    );
+}
+
+/// The compaction frame from the upstream compaction fixture, read from that
+/// transcript, becomes a context-compacted item with its before and after sizes.
+#[tokio::test]
+async fn fixture_compact_boundary_frame_projects_its_sizes() {
+    let transcript = std::fs::read_to_string(fixture("claude_compact_after_peer_turn")).unwrap();
+    let boundary: Value = transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|entry| entry["type"] == "emit_inbound")
+        .map(|entry| entry["frame"].clone())
+        .find(|frame| frame["subtype"] == "compact_boundary")
+        .expect("fixture has a compact_boundary frame");
+    let harness = one_turn(vec![boundary]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Compact"))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    let compaction = turn_items(&seen)
+        .into_iter()
+        .find_map(|item| match item {
+            OrchestrationV2TurnItem::Compaction {
+                before_token_count,
+                after_token_count,
+                ..
+            } => Some((before_token_count, after_token_count)),
+            _ => None,
+        })
+        .expect("compaction item");
+    assert_eq!(compaction, (Some(27445), Some(1192)));
+    // The context window is T10d's catalog, so the used tokens carry no max yet.
+    let usage = seen.iter().find_map(|event| match event {
+        ProviderAdapterV2Event::ProviderTurnUpdated { provider_turn, .. } => provider_turn
+            .token_usage
+            .as_ref()
+            .and_then(|usage| serde_json::to_value(usage).ok()),
+        _ => None,
+    });
+    let usage = usage.expect("turn usage after compaction");
+    assert_eq!(usage["usedTokens"], 1192);
+    assert!(usage["maxTokens"].is_null());
+}
+
+/// The upstream nested-subagent fixture. The outer subagent hangs off the
+/// turn's root node. Its own Agent call starts a nested subagent, which hangs
+/// off the outer one. Both finish with their result text.
+/// Not asserted: the model names. Turin does not resolve aliases to catalog
+/// slugs yet, so the model is left as the launch wrote it.
+#[tokio::test]
+async fn fixture_nested_subagent_is_parented_to_its_owner() {
+    const OUTER_TASK: &str = "a457ca677bc1ecd82";
+    const NESTED_TASK: &str = "aac1d7a2af5371c7d";
+    let harness = Harness::fixture("claude_nested_subagent_model");
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    let input = harness.turn_input(
+        thread,
+        "Live-test nested subagents. Do exactly this, with no extra steps.",
+    );
+    let root = serde_json::to_value(&input.root_node_id).unwrap();
+    runtime.start_turn(input).await.expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    assert!(
+        assistant_texts(&seen)
+            .iter()
+            .any(|t| t.contains("NESTED_LEAF_OK"))
+    );
+    // Each subagent's last record is its final one.
+    let mut latest: BTreeMap<String, Value> = BTreeMap::new();
+    for event in &seen {
+        if let ProviderAdapterV2Event::SubagentUpdated { subagent, .. } = event {
+            let value = serde_json::to_value(subagent).unwrap();
+            let task = value["nativeTaskRef"]["nativeId"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            latest.insert(task, value);
+        }
+    }
+    let outer = &latest[OUTER_TASK];
+    let nested = &latest[NESTED_TASK];
+    assert_eq!(outer["status"], "completed");
+    assert_eq!(nested["status"], "completed");
+    assert_eq!(outer["parentNodeId"], root);
+    assert_eq!(nested["parentNodeId"], outer["id"]);
+    assert!(
+        nested["result"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("NESTED_LEAF_OK")
+    );
+    assert!(nested["childThreadId"].is_null());
+}

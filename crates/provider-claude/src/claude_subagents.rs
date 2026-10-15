@@ -204,13 +204,13 @@ impl SubagentRegistry {
             task.progress = Some(progress);
             changed = true;
         }
-        if task.workflow.is_some() && has_claude_workflow_snapshot(raw) {
-            if let Some(workflow) =
+        if task.workflow.is_some()
+            && has_claude_workflow_snapshot(raw)
+            && let Some(workflow) =
                 merge_claude_workflow_progress(task.workflow.as_ref(), None, None, raw)
-            {
-                task.workflow = Some(workflow);
-                changed = true;
-            }
+        {
+            task.workflow = Some(workflow);
+            changed = true;
         }
         if !changed {
             return None;
@@ -268,12 +268,12 @@ impl SubagentRegistry {
         let next = terminal_status(status);
         let task = self.tasks.get_mut(task_id)?;
         let mut changed = false;
-        if let Some(next) = next {
-            if task.status == OrchestrationV2SubagentStatus::Running {
-                task.status = next;
-                task.completed_at = Some(now);
-                changed = true;
-            }
+        if let Some(next) = next
+            && task.status == OrchestrationV2SubagentStatus::Running
+        {
+            task.status = next;
+            task.completed_at = Some(now);
+            changed = true;
         }
         if task.result.is_none() && result.is_some() {
             task.result = result;

@@ -1625,10 +1625,10 @@ fn stream_events(
             }
         }
         Some("content_block_stop") => {
-            if let Some(block) = active.stream.thinking.remove(&index) {
-                if !block.text.is_empty() {
-                    events.push(reasoning_update(&active.scope, &block, now, true));
-                }
+            if let Some(block) = active.stream.thinking.remove(&index)
+                && !block.text.is_empty()
+            {
+                events.push(reasoning_update(&active.scope, &block, now, true));
             }
         }
         _ => {}

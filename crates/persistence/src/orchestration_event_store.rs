@@ -1155,8 +1155,13 @@ struct LiveSub {
     notify: Arc<tokio::sync::Notify>,
 }
 
+struct SizedEvent {
+    event: Arc<ApplicationStoredEvent>,
+    bytes: usize,
+}
+
 struct LiveBuf {
-    items: VecDeque<ApplicationStoredEvent>,
+    items: VecDeque<SizedEvent>,
     bytes: usize,
     failed: Option<PersistenceError>,
 }
@@ -1193,18 +1198,25 @@ impl LiveHub {
     }
 
     fn publish(&self, events: Vec<ApplicationStoredEvent>) {
+        let sized: Vec<SizedEvent> = events
+            .into_iter()
+            .map(|event| {
+                let bytes = wire_event_bytes(&event);
+                SizedEvent {
+                    event: Arc::new(event),
+                    bytes,
+                }
+            })
+            .collect();
         let mut subs = self.subs.lock().unwrap_or_else(|err| err.into_inner());
         subs.retain(|sub| {
             let mut state = sub.state.lock().unwrap_or_else(|err| err.into_inner());
             if state.failed.is_some() {
                 return false;
             }
-            for event in &events {
-                let size = serde_json::to_string(event)
-                    .map(|json| json.len())
-                    .unwrap_or(0);
+            for event in &sized {
                 if state.items.len() + 1 > LIVE_STREAM_MAX_ITEMS
-                    || state.bytes + size > LIVE_STREAM_MAX_BYTES
+                    || state.bytes + event.bytes > LIVE_STREAM_MAX_BYTES
                 {
                     state.failed = Some(PersistenceError::Sql(crate::errors::sql_error(
                         "OrchestrationEventStore.streamApplicationEvents:buffer",
@@ -1218,8 +1230,11 @@ impl LiveHub {
                     )));
                     break;
                 }
-                state.bytes += size;
-                state.items.push_back(event.clone());
+                state.bytes += event.bytes;
+                state.items.push_back(SizedEvent {
+                    event: Arc::clone(&event.event),
+                    bytes: event.bytes,
+                });
             }
             sub.notify.notify_one();
             true
@@ -1254,10 +1269,10 @@ impl LiveSub {
     fn drain_after(&self, high: i64) -> Vec<ApplicationStoredEvent> {
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         let mut out = Vec::new();
-        while let Some(event) = state.items.pop_front() {
-            state.bytes = state.bytes.saturating_sub(event_bytes(&event));
-            if event.sequence() > high {
-                out.push(event);
+        while let Some(item) = state.items.pop_front() {
+            state.bytes = state.bytes.saturating_sub(item.bytes);
+            if item.event.sequence() > high {
+                out.push(Arc::try_unwrap(item.event).unwrap_or_else(|event| (*event).clone()));
             }
         }
         out
@@ -1268,40 +1283,68 @@ impl LiveSub {
     }
 }
 
-fn event_bytes(event: &ApplicationStoredEvent) -> usize {
-    serde_json::to_string(event)
+/// Byte length of the upstream wire object (`JSON.stringify` of the whole event).
+fn wire_event_bytes(event: &ApplicationStoredEvent) -> usize {
+    serde_json::to_string(&wire_event(event))
         .map(|json| json.len())
         .unwrap_or(0)
 }
 
-impl serde::Serialize for ApplicationStoredEvent {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Project(event) => event.serialize(serializer),
-            Self::Agent(event) => event.serialize(serializer),
+fn wire_event(event: &ApplicationStoredEvent) -> serde_json::Value {
+    match event {
+        ApplicationStoredEvent::Project(event) => serde_json::json!({
+            "sequence": event.sequence,
+            "eventId": event.event_id,
+            "aggregateKind": event.aggregate_kind,
+            "aggregateId": event.aggregate_id,
+            "occurredAt": event.occurred_at,
+            "commandId": event.command_id,
+            "causationEventId": event.causation_event_id,
+            "correlationId": event.correlation_id,
+            "metadata": event.metadata,
+            "type": event.event_type,
+            "payload": event.payload,
+        }),
+        ApplicationStoredEvent::Agent(stored) => {
+            let event = &stored.event;
+            let mut body = serde_json::Map::new();
+            body.insert("id".into(), serde_json::Value::String(event.id.clone()));
+            body.insert(
+                "threadId".into(),
+                serde_json::Value::String(event.thread_id.clone()),
+            );
+            if let Some(run_id) = &event.run_id {
+                body.insert("runId".into(), serde_json::Value::String(run_id.clone()));
+            }
+            if let Some(node_id) = &event.node_id {
+                body.insert("nodeId".into(), serde_json::Value::String(node_id.clone()));
+            }
+            if let Some(driver) = &event.driver {
+                body.insert("driver".into(), serde_json::Value::String(driver.clone()));
+            }
+            if let Some(instance) = &event.provider_instance_id {
+                body.insert(
+                    "providerInstanceId".into(),
+                    serde_json::Value::String(instance.clone()),
+                );
+            }
+            if let Some(raw) = &event.raw_event_id {
+                body.insert("rawEventId".into(), serde_json::Value::String(raw.clone()));
+            }
+            body.insert(
+                "occurredAt".into(),
+                serde_json::Value::String(event.occurred_at.clone()),
+            );
+            body.insert(
+                "type".into(),
+                serde_json::Value::String(event.event_type.clone()),
+            );
+            body.insert("payload".into(), event.payload.clone());
+            serde_json::json!({
+                "sequence": stored.sequence,
+                "commandId": stored.command_id,
+                "event": body,
+            })
         }
-    }
-}
-
-impl serde::Serialize for ProjectEvent {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut out = serializer.serialize_struct("ProjectEvent", 4)?;
-        out.serialize_field("sequence", &self.sequence)?;
-        out.serialize_field("eventId", &self.event_id)?;
-        out.serialize_field("type", &self.event_type)?;
-        out.serialize_field("payload", &self.payload)?;
-        out.end()
-    }
-}
-
-impl serde::Serialize for StoredAgentEvent {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut out = serializer.serialize_struct("StoredAgentEvent", 3)?;
-        out.serialize_field("sequence", &self.sequence)?;
-        out.serialize_field("commandId", &self.command_id)?;
-        out.serialize_field("type", &self.event.event_type)?;
-        out.end()
     }
 }

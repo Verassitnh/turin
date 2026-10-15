@@ -14,7 +14,7 @@ use crate::orchestration_command_receipts::{
 };
 use crate::orchestration_event_store::{
     AgentEvent, AppendAgentEvents, ApplicationStoredEvent, OrchestrationEventStore,
-    ProjectEventInput, ReadAgentEvents, ReadApplicationEvents,
+    ProjectEventInput, ReadAgentEvents, ReadApplicationEvents, StoredAgentEvent,
 };
 use crate::provider_session_runtime::{
     ProviderSessionRuntime, ProviderSessionStatus, UpsertConflict, get_by_thread_id, list,
@@ -721,6 +721,53 @@ async fn high_water_and_command_reads_use_their_indexes() {
         command_plan.contains("idx_orch_events_command_id"),
         "{command_plan}"
     );
+}
+
+#[tokio::test]
+async fn live_buffer_counts_the_full_agent_event() {
+    let store = memory_store().await;
+    let mut subscription = store.stream_application_events(0);
+    let body = "x".repeat(1024 * 1024);
+    let events = (0..9)
+        .map(|index| {
+            ApplicationStoredEvent::Agent(StoredAgentEvent {
+                sequence: index + 1,
+                command_id: None,
+                event: AgentEvent {
+                    id: format!("e{index}"),
+                    thread_id: "t".into(),
+                    event_type: "message.updated".into(),
+                    occurred_at: NOW.into(),
+                    payload: serde_json::json!({ "body": body }),
+                    run_id: None,
+                    node_id: None,
+                    driver: None,
+                    provider_instance_id: None,
+                    raw_event_id: None,
+                },
+            })
+        })
+        .collect();
+    store.publish_committed(events);
+    let mut saw_error = false;
+    for _ in 0..10 {
+        let next = tokio::time::timeout(Duration::from_secs(5), subscription.rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match next {
+            Ok(_) => continue,
+            Err(err) => {
+                assert!(
+                    err.to_string().contains("streamApplicationEvents:buffer"),
+                    "{err}"
+                );
+                saw_error = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_error);
 }
 
 #[tokio::test]

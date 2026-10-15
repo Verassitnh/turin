@@ -322,8 +322,10 @@ pub fn build_new_thread_link(input: NewThreadLinkInput<'_>) -> Result<String, ur
     Ok(url.to_string())
 }
 
+/// Upstream `URL.search`: a bare `?` is the empty string, not `?`.
 fn js_search(url: &Url) -> String {
     url.query()
+        .filter(|query| !query.is_empty())
         .map(|query| format!("?{query}"))
         .unwrap_or_default()
 }
@@ -584,6 +586,28 @@ mod tests {
             origin: Some("not a url"),
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_bare_question_mark_is_an_empty_search() {
+        // `URL.search` is "" when the query is empty, so no stray `?` survives.
+        assert_eq!(
+            prompt_link_app_path("https://app.t3.codes/new?", None).as_deref(),
+            Some("/new")
+        );
+        assert_eq!(
+            prompt_link_app_path("t3code://new?", None).as_deref(),
+            Some("/new")
+        );
+        assert_eq!(
+            prompt_link_app_path("t3code://threads/env-1/thread-1?", None).as_deref(),
+            Some("/env-1/thread-1")
+        );
+        assert_eq!(prompt_link_deep_link("/new?", None), "t3code://new");
+        assert_eq!(
+            prompt_link_deep_link("/env-1/thread-1?", None),
+            "t3code://threads/env-1/thread-1"
+        );
     }
 
     #[test]

@@ -506,6 +506,42 @@ pub fn resolve_thread_pull_request_badge_presentation(
     })
 }
 
+/// `threadPullRequestSearchTerms` over the sidebar's narrowed links. The full
+/// resolution (stacks, branch PR) is `state::support::thread_pull_requests`,
+/// which takes contract links; the shell carries the narrowed ones until T19.
+pub fn link_search_terms(pull_requests: &[ThreadPullRequestLink]) -> Vec<String> {
+    pull_requests
+        .iter()
+        .filter(|link| !link.dismissed)
+        .flat_map(|link| {
+            [
+                format!("#{}", link.number),
+                format!("{}#{}", link.repository, link.number),
+                link.url.clone(),
+                link.title.clone().unwrap_or_default(),
+            ]
+        })
+        .collect()
+}
+
+/// `resolveThreadCurrentPullRequestLink` over narrowed links, without stack
+/// chains: the only open link, else the newest visible one. Unsynced links
+/// (no state yet) count as open.
+pub fn current_link(pull_requests: &[ThreadPullRequestLink]) -> Option<&ThreadPullRequestLink> {
+    let visible: Vec<&ThreadPullRequestLink> = pull_requests
+        .iter()
+        .filter(|link| !link.dismissed)
+        .collect();
+    let open: Vec<&&ThreadPullRequestLink> = visible
+        .iter()
+        .filter(|link| matches!(link.state, None | Some(PullRequestState::Open)))
+        .collect();
+    if open.len() == 1 {
+        return Some(open[0]);
+    }
+    open.last().map(|link| **link).or(visible.last().copied())
+}
+
 /// The linked-PR badge in a row's meta line: state glyph + number, in the
 /// state's tone. A single PR opens itself; several open the list.
 #[derive(IntoElement)]

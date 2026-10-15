@@ -32,13 +32,15 @@ pub use super::runtime::thread_sort::{
     pin_order_key_between, sort_active_threads_by_order_key as sort_threads_for_sidebar,
     sort_pinned_threads_by_order_key as sort_pinned_threads_for_sidebar,
 };
+use super::thread_status_indicators::link_search_terms;
 use crate::state::models::{
-    EnvironmentProject, EnvironmentThreadShell, GoalStatus, InteractionMode,
-    PendingSubagentRequest, ProviderFailureClass, RunStatus, SettledOverride, ThreadRelationship,
-    ThreadRunSummary, ThreadRuntimeSummary, background_work_holds_completion,
-    is_latest_run_settled, resolve_thread_working_started_at, thread_pull_request_search_terms,
+    EnvironmentProject, EnvironmentThreadShell, InteractionMode, PendingSubagentRequest,
+    ProviderFailureClass, RunStatus, SettledOverride, ThreadRelationship, ThreadRunSummary,
+    ThreadRuntimeSummary, background_work_holds_completion, is_latest_run_settled,
+    resolve_thread_working_started_at,
 };
 use crate::timestamp_format::parse_timestamp_ms;
+use turin_contracts::orchestration_v2::OrchestrationV2ProviderGoalStatus;
 use turin_contracts::{EnvironmentId, ProjectId, ThreadId};
 
 /// Delay before holding the jump modifier reveals the ⌘1…9 hints.
@@ -1187,7 +1189,7 @@ pub fn search_sidebar_threads<'a>(
     let mut content_matches = Vec::new();
     for thread in threads {
         let matches_title = std::iter::once(thread.title.clone())
-            .chain(thread_pull_request_search_terms(&thread.pull_requests))
+            .chain(link_search_terms(&thread.pull_requests))
             .any(|term| term.to_lowercase().contains(&normalized));
         if matches_title {
             title_matches.push(*thread);
@@ -1632,7 +1634,11 @@ pub fn sort_sidebar_v2_project_groups(
 
 /// Goal-aware Working label (`thread.goal?.status === "active"`).
 pub fn working_label(thread: &EnvironmentThreadShell) -> &'static str {
-    if thread.goal == Some(GoalStatus::Active) {
+    if thread
+        .goal
+        .as_ref()
+        .is_some_and(|goal| goal.status == OrchestrationV2ProviderGoalStatus::Active)
+    {
         "Goal"
     } else {
         "Working"

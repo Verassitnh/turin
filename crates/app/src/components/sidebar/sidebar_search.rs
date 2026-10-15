@@ -19,9 +19,10 @@ use super::sidebar_logic::{
 };
 use super::sidebar_thread_row::thread_time_label;
 use super::thread_hover_card::SidebarThreadTooltip;
+use super::thread_status_indicators::link_search_terms;
 use crate::components::project_favicon::ProjectFavicon;
 use crate::components::thread_search_match::ThreadSearchMatchExcerpt;
-use crate::state::models::{EnvironmentThreadShell, thread_pull_request_search_terms};
+use crate::state::models::EnvironmentThreadShell;
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_MD, TEXT_SM, TEXT_XS};
@@ -197,7 +198,7 @@ impl Sidebar {
                     .filter(|link| !link.dismissed)
                     .find(|link| {
                         pull_request_matches_search_query(
-                            &thread_pull_request_search_terms(std::slice::from_ref(*link)),
+                            &link_search_terms(std::slice::from_ref(*link)),
                             &query,
                         )
                     })

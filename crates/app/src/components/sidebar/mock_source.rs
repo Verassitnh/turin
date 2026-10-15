@@ -22,11 +22,15 @@ use super::view_model::{
     ThreadRef, ThreadSearchMatch,
 };
 use crate::components::thread_search_match::SearchMatchSource;
+use turin_contracts::orchestration_v2::{
+    OrchestrationV2ProviderGoal, OrchestrationV2ProviderGoalStatus,
+};
+
 use crate::state::models::{
-    BackgroundTaskKind, DiffStat, EnvironmentProject, EnvironmentThreadShell, GoalStatus,
-    InteractionMode, ModelSelection, PendingBackgroundTask, ProjectIcon, ProjectIconColor,
-    ProviderFailureClass, PullRequestState, RunStatus, SettledOverride, ThreadPullRequestLink,
-    ThreadRunSummary, ThreadRuntimeSummary, TitleRegeneration,
+    BackgroundTaskKind, DiffStat, EnvironmentProject, EnvironmentThreadShell, InteractionMode,
+    ModelSelection, PendingBackgroundTask, ProjectIcon, ProjectIconColor, ProviderFailureClass,
+    PullRequestState, RunStatus, SettledOverride, ThreadPullRequestLink, ThreadRunSummary,
+    ThreadRuntimeSummary, TitleRegeneration,
 };
 use crate::timestamp_format::{now_ms, to_iso_string};
 
@@ -307,7 +311,16 @@ pub fn mock_snapshot() -> SidebarSnapshot {
     threads.push(t);
 
     let mut t = f.thread("goal", "turin", "Keep the gate green", 13 * HOUR);
-    t.goal = Some(GoalStatus::Active);
+    t.goal = Some(OrchestrationV2ProviderGoal {
+        objective: turin_contracts::TrimmedNonEmptyString::new("Keep the gate green")
+            .expect("non-blank"),
+        status: OrchestrationV2ProviderGoalStatus::Active,
+        tokens_used: None,
+        token_budget: None,
+        time_used_seconds: None,
+        checks: None,
+        last_check: None,
+    });
     t.latest_run = Some(f.run("run-goal", RunStatus::Running, 50 * MINUTE, None));
     t.runtime = Some(f.runtime(RunStatus::Running, "cursor", Some("run-goal"), 50 * MINUTE));
     t.model_selection.instance_id = "cursor".into();

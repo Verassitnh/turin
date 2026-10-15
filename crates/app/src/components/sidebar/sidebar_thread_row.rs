@@ -30,7 +30,7 @@ use super::sidebar_logic::{
 use super::sidebar_snooze::resolve_snooze_presets_now;
 use super::thread_hover_card::SidebarThreadTooltip;
 use super::thread_status_indicators::{
-    ThreadPullRequestBadge, ThreadWorktreeIndicator, format_diff_count,
+    ThreadPullRequestBadge, ThreadWorktreeIndicator, current_link, format_diff_count,
 };
 use super::view_model::ThreadRef;
 use super::{Sidebar, SidebarEvent, jump_shortcut_label};
@@ -512,30 +512,23 @@ impl Sidebar {
             .filter(|link| !link.dismissed)
             .cloned()
             .collect();
-        let pr_badge =
-            crate::state::models::resolve_thread_current_pull_request_link(&thread.pull_requests)
-                .cloned()
-                .map(|link| {
-                    let others = visible_prs.len().saturating_sub(1);
-                    let weak = weak.clone();
+        let pr_badge = current_link(&thread.pull_requests).cloned().map(|link| {
+            let others = visible_prs.len().saturating_sub(1);
+            let weak = weak.clone();
+            let key = key.clone();
+            ThreadPullRequestBadge::new(SharedString::from(format!("pr-{key}")), link, others)
+                .on_open_list(move |_, _, cx| {
                     let key = key.clone();
-                    ThreadPullRequestBadge::new(
-                        SharedString::from(format!("pr-{key}")),
-                        link,
-                        others,
-                    )
-                    .on_open_list(move |_, _, cx| {
-                        let key = key.clone();
-                        weak.update(cx, |this, cx| {
-                            if this.route_thread_key() != Some(key.as_str()) {
-                                this.navigate_to_thread(&key, cx);
-                            }
-                            cx.emit(SidebarEvent::OpenPullRequests(key));
-                        })
-                        .ok();
+                    weak.update(cx, |this, cx| {
+                        if this.route_thread_key() != Some(key.as_str()) {
+                            this.navigate_to_thread(&key, cx);
+                        }
+                        cx.emit(SidebarEvent::OpenPullRequests(key));
                     })
-                    .into_any_element()
-                });
+                    .ok();
+                })
+                .into_any_element()
+        });
 
         // ── Woke pill (an action: dismisses the notification) ──────────
         // Card pills use `text-warning`; the slim row uses `text-warning-foreground`

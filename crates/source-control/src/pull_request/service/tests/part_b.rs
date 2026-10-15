@@ -18,7 +18,7 @@ use turin_contracts::pull_request::{
 };
 use turin_contracts::source_control::SourceControlProviderInfo;
 
-use super::{counter, drain_sorted, log, rows};
+use super::{counter, drain_sorted, log, rows, summary_of};
 use crate::pull_request::read_cache::PullRequestReadError as PullRequestError;
 use crate::pull_request::service::PullRequestService;
 use crate::pull_request::service::test_support::*;
@@ -597,33 +597,6 @@ async fn refuses_an_action_the_host_never_claimed_it_could_run() {
 
     assert!(is_operation_error(&error));
     assert_eq!(ran.load(SeqCst), 0);
-}
-
-/// What `getChangeRequestSummary` hands back for `changeRequest(number, updatedAt)` in `state`.
-fn summary_of(
-    change_request: &ProviderChangeRequest,
-    state: PullRequestState,
-) -> ProviderChangeRequestSummary {
-    ProviderChangeRequestSummary {
-        number: change_request.number,
-        title: change_request.title.clone(),
-        url: change_request.url.clone(),
-        head_branch: change_request.head_branch.clone(),
-        base_branch: change_request.base_branch.clone(),
-        state,
-        is_draft: Some(change_request.is_draft),
-        closed_at: None,
-        merged_at: None,
-        updated_at: change_request.updated_at.clone(),
-        author: None,
-        additions: None,
-        deletions: None,
-        changed_files: None,
-        review_decision: None,
-        checks_state: None,
-        mergeability: None,
-        stack: None,
-    }
 }
 
 /// `PullRequestViewerPermissions` from the object literal a test writes upstream.

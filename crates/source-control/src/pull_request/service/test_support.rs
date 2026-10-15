@@ -778,6 +778,8 @@ pub struct ServiceOptions {
     pub resolve_repository_identity: Option<ResolveIdentity>,
     /// Projects whose `removeAgentCreditsOnMerge` setting is on.
     pub remove_agent_credits_on_merge: HashMap<String, bool>,
+    /// The clock the service and the fakes share, for a fake that stamps a `retryAt` from it.
+    pub clock: Option<Arc<TestClock>>,
 }
 
 pub struct Harness {
@@ -789,7 +791,7 @@ pub struct Harness {
 impl Harness {
     /// `makeService`
     pub async fn new(options: ServiceOptions) -> Self {
-        let clock = TestClock::new();
+        let clock = options.clock.unwrap_or_else(TestClock::new);
         let rate_limits = SourceControlRateLimit::new(clock.clone());
         let registry = PullRequestProviderRegistry::from_providers(
             options

@@ -7,9 +7,15 @@ use std::sync::atomic::AtomicUsize;
 
 use parking_lot::Mutex;
 use serde_json::Value;
+use turin_contracts::pull_request::PullRequestState;
+
+use crate::source_control_core::pull_request_provider::{
+    ProviderChangeRequest, ProviderChangeRequestSummary,
+};
 
 mod part_a;
 mod part_b;
+mod part_c;
 
 pub(super) fn counter() -> Arc<AtomicUsize> {
     Arc::new(AtomicUsize::new(0))
@@ -37,4 +43,31 @@ pub(super) fn rows(value: &Value, key: &str, fields: &[&str]) -> Value {
             .map(|row| Value::Array(fields.iter().map(|field| row[*field].clone()).collect()))
             .collect(),
     )
+}
+
+/// What `getChangeRequestSummary` hands back for `changeRequest(number, updatedAt)` in `state`.
+pub(super) fn summary_of(
+    change_request: &ProviderChangeRequest,
+    state: PullRequestState,
+) -> ProviderChangeRequestSummary {
+    ProviderChangeRequestSummary {
+        number: change_request.number,
+        title: change_request.title.clone(),
+        url: change_request.url.clone(),
+        head_branch: change_request.head_branch.clone(),
+        base_branch: change_request.base_branch.clone(),
+        state,
+        is_draft: Some(change_request.is_draft),
+        closed_at: None,
+        merged_at: None,
+        updated_at: change_request.updated_at.clone(),
+        author: None,
+        additions: None,
+        deletions: None,
+        changed_files: None,
+        review_decision: None,
+        checks_state: None,
+        mergeability: None,
+        stack: None,
+    }
 }

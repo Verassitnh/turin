@@ -22,7 +22,9 @@ use super::super::dialog::{
 };
 use super::super::layout::{SettingsRow, SettingsSection};
 use super::super::project_scripts::{command_for_project_script, next_project_script_id};
-use super::super::project_settings_logic::project_group_title_needs_update;
+use super::super::project_settings_logic::{
+    PROJECT_TITLE_EMPTY, project_group_title_needs_update, project_title_warning,
+};
 use super::super::search::searchable_setting;
 use super::super::view::SettingsView;
 use crate::components::project_monogram::ProjectMonogram;
@@ -35,6 +37,8 @@ use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 pub struct ProjectsState {
     pub selected: Option<String>,
     pub script: ScriptDraft,
+    /// The project whose last rename was refused for a blank title.
+    pub title_refused: Option<String>,
 }
 
 #[derive(Default, Clone)]
@@ -128,9 +132,12 @@ impl SettingsView {
             cx,
             move |this, text, _, cx| {
                 let title = text.trim().to_owned();
-                if title.is_empty() {
+                if project_title_warning(&title).is_some() {
+                    this.panels.projects.title_refused = Some(name_id.clone());
+                    cx.notify();
                     return;
                 }
+                this.panels.projects.title_refused = None;
                 let current = this
                     .vm(cx)
                     .projects
@@ -153,13 +160,24 @@ impl SettingsView {
                     .description(
                         "The shared name for this project group in the sidebar and thread lists.",
                     )
-                    .control(div().w(rems(16.)).child(text_field(
-                        &name_input,
-                        None,
-                        FieldSize::Sm,
-                        false,
-                        cx,
-                    ))),
+                    .control(
+                        div()
+                            .w(rems(16.))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(text_field(&name_input, None, FieldSize::Sm, false, cx))
+                            .children(
+                                (self.panels.projects.title_refused.as_deref()
+                                    == Some(project.id.as_str()))
+                                .then(|| {
+                                    div()
+                                        .text_size(TEXT_XS.size)
+                                        .text_color(theme.destructive)
+                                        .child(PROJECT_TITLE_EMPTY)
+                                }),
+                            ),
+                    ),
             )
             .child(
                 SettingsRow::new("Project icon")

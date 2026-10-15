@@ -1,5 +1,10 @@
 //! Port of the HTTP surface `OpenCodeRuntime.ts` and `server/adapter.ts` call
-//! on `@opencode-ai/sdk` 1.15.13 (`/session`, `/event`, `/global/health`, …).
+//! on `@opencode-ai/sdk@1.15.13` subpath `/v2` (`dist/v2/gen/sdk.gen.js`).
+//!
+//! The package root (`dist/gen/sdk.gen.js`) is an older client. Permission
+//! replies use `POST /permission/{requestID}/reply` (`Permission.reply`).
+//! The deprecated `POST /session/{sessionID}/permissions/{permissionID}`
+//! (`Permission.respond`) is not called.
 //!
 //! The SDK's `{ data }` field is its client return wrapper. The wire body is
 //! the resource itself (a session object, an array, a boolean). Nested session
@@ -235,7 +240,7 @@ impl V1Client {
         self.send_json(
             "permission.reply",
             Method::POST,
-            &format!("/permission/{}/reply", encode(request_id)),
+            &permission_reply_path(request_id),
             body,
             200,
         )
@@ -360,6 +365,11 @@ fn session_path(session_id: &str) -> String {
     format!("/session/{}", encode(session_id))
 }
 
+/// `Permission.reply` in `@opencode-ai/sdk@1.15.13` `dist/v2/gen/sdk.gen.js`.
+pub fn permission_reply_path(request_id: &str) -> String {
+    format!("/permission/{}/reply", encode(request_id))
+}
+
 fn encode(value: &str) -> String {
     crate::auth::encode_uri_component(value)
 }
@@ -390,6 +400,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_replies_use_the_sdk_v2_route() {
+        let path = permission_reply_path("req/1");
+        assert_eq!(path, "/permission/req%2F1/reply");
+        assert!(!path.contains("/permissions/"));
+    }
     use crate::auth::basic_authorization;
     use crate::test_support::{FakeResponse, FakeServer};
     use futures::StreamExt;

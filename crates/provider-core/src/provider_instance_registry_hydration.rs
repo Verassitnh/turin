@@ -1,9 +1,17 @@
 //! Port of `deriveProviderInstanceConfigMap` in
 //! upstream/apps/server/src/provider/ProviderInstanceRegistryHydration.ts.
 //!
-//! The settings watcher that calls `reconcile` lives with the app: this crate
-//! does not own `ServerSettingsService`. The pure derivation is what that
-//! watcher must pass in.
+//! A scoped watcher subscribes through `ProviderHost` and reconciles the
+//! registry when provider settings change.
+
+use std::sync::Arc;
+
+use tracing::error;
+
+use crate::{
+    driver::ProviderDriver, provider_host::ProviderHost,
+    provider_instance_registry::ProviderInstanceRegistry,
+};
 
 use turin_contracts::{
     provider_instance::{
@@ -11,7 +19,8 @@ use turin_contracts::{
         default_instance_id_for_driver,
     },
     settings::{
-        ServerSettings, provider_instance_config_enabled_flag, resolve_provider_instance_enabled,
+        ServerSettings, ServerSettingsError, provider_instance_config_enabled_flag,
+        resolve_provider_instance_enabled,
     },
 };
 
@@ -20,6 +29,61 @@ use turin_contracts::{
 pub struct DefaultInstanceDriver {
     pub driver_kind: ProviderDriverKind,
     pub has_default_instance: bool,
+}
+
+/// Owns both the registry and its settings watcher. Dropping this handle
+/// interrupts the watcher rather than leaving a detached task behind.
+pub struct ProviderInstanceRegistryHydration {
+    pub registry: Arc<ProviderInstanceRegistry>,
+    watcher: tokio::task::JoinHandle<()>,
+}
+
+impl ProviderInstanceRegistryHydration {
+    /// Subscribes before the initial read, so a write between the two is
+    /// picked up by the first reconcile instead of being lost. A failed
+    /// initial read fails construction, like upstream's layer build.
+    #[allow(clippy::result_large_err)]
+    pub async fn new(
+        drivers: Vec<Arc<dyn ProviderDriver>>,
+        host: &ProviderHost,
+    ) -> Result<Self, ServerSettingsError> {
+        let defaults: Vec<_> = drivers
+            .iter()
+            .map(|driver| DefaultInstanceDriver {
+                driver_kind: driver.driver_kind().clone(),
+                has_default_instance: driver.metadata().has_default_instance,
+            })
+            .collect();
+        let mut changes = host.subscribe_settings();
+        let initial = host.get_settings().await?;
+        let registry = ProviderInstanceRegistry::new(
+            drivers,
+            derive_provider_instance_config_map(&initial, &defaults),
+        )
+        .await;
+        let watched = Arc::clone(&registry);
+        let watcher = tokio::spawn(async move {
+            while let Some(mut settings) = changes.recv().await {
+                // Only the newest settings matter: reconcile is idempotent on
+                // the final map, so intermediate emissions are dropped rather
+                // than each costing a reconcile.
+                while let Ok(next) = changes.try_recv() {
+                    settings = next;
+                }
+                watched
+                    .reconcile(derive_provider_instance_config_map(&settings, &defaults))
+                    .await;
+            }
+            error!("ProviderInstanceRegistry settings watcher ended");
+        });
+        Ok(Self { registry, watcher })
+    }
+}
+
+impl Drop for ProviderInstanceRegistryHydration {
+    fn drop(&mut self) {
+        self.watcher.abort();
+    }
 }
 
 /// Explicit `providerInstances` entries plus an implicit default instance for
@@ -214,6 +278,38 @@ mod tests {
     }
 
     #[test]
+    fn folds_overrides_from_multiple_projects() {
+        let instance_id = id("codex_work");
+        let other_id = id("claudeAgent_personal");
+        let settings = settings_with(
+            indexmap::IndexMap::from([
+                (instance_id.clone(), codex(Some(false), None)),
+                (
+                    other_id.clone(),
+                    ProviderInstanceConfig {
+                        driver: ProviderDriverKind::new("claudeAgent").unwrap(),
+                        ..codex(Some(false), None)
+                    },
+                ),
+            ]),
+            vec![
+                (
+                    project("project-a"),
+                    vec![(instance_id.clone(), Some(true))],
+                ),
+                (project("project-b"), vec![(other_id.clone(), Some(true))]),
+            ],
+        );
+        let merged = derive_provider_instance_config_map(&settings, &[]);
+        assert_eq!(merged[&instance_id].enabled, Some(true));
+        assert_eq!(merged[&other_id].enabled, Some(true));
+        assert_eq!(
+            merged[&other_id].driver,
+            ProviderDriverKind::new("claudeAgent").unwrap()
+        );
+    }
+
+    #[test]
     fn adds_a_default_instance_when_the_slot_is_empty() {
         let settings = default_server_settings();
         let driver = ProviderDriverKind::new("codex").unwrap();
@@ -234,5 +330,89 @@ mod tests {
         assert_eq!(merged[&instance_id].driver, driver);
         assert!(merged[&instance_id].enabled.is_none());
         assert!(!merged.contains_key(&ProviderInstanceId::new("cursor").unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod watcher_tests {
+    use std::{any::Any, sync::Mutex};
+
+    use tokio::sync::mpsc;
+    use turin_contracts::{
+        chat_attachment::ChatAttachment, provider_instance::ProviderInstanceId,
+        settings::default_server_settings,
+    };
+
+    use super::*;
+    use crate::{
+        background_scope::BackgroundScope,
+        credential_store::{MemorySecretStore, ProviderCredentials},
+        provider_host::{ProviderHost, ProviderHostPaths, SettingsSnapshotJob},
+        rt::BoxFuture,
+    };
+
+    fn host(
+        settings: mpsc::UnboundedReceiver<ServerSettings>,
+        initial: ServerSettings,
+    ) -> ProviderHost {
+        // `subscribe_settings` hands out its receiver once; the test keeps the sender.
+        let receiver = Mutex::new(Some(settings));
+        ProviderHost::new(
+            ProviderHostPaths {
+                cwd: "/tmp".to_owned(),
+                base_dir: "/tmp".to_owned(),
+                state_dir: "/tmp".to_owned(),
+                provider_status_cache_dir: "/tmp".to_owned(),
+                attachments_dir: "/tmp".to_owned(),
+            },
+            Arc::new(move || -> BoxFuture<'static, _> {
+                let settings = initial.clone();
+                Box::pin(async move { Ok(settings) })
+            }),
+            Arc::new(|_job: SettingsSnapshotJob| -> BoxFuture<'static, _> {
+                Box::pin(async { Ok(Box::new(()) as Box<dyn Any + Send>) })
+            }),
+            Arc::new(move || receiver.lock().unwrap().take().expect("subscribed once")),
+            Arc::new(|_scope: BackgroundScope| -> BoxFuture<'static, bool> {
+                Box::pin(async { true })
+            }),
+            Arc::new(|_attachment: &ChatAttachment| -> Option<String> { None }),
+            Arc::new(|namespace: String, binding: String| {
+                ProviderCredentials::open(Arc::new(MemorySecretStore::new()), &namespace, &binding)
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_settings_change_reconciles_the_registry_once_it_is_published() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let host = host(receiver, default_server_settings());
+        let hydration = ProviderInstanceRegistryHydration::new(Vec::new(), &host)
+            .await
+            .unwrap();
+        assert!(hydration.registry.list_unavailable().is_empty());
+
+        let mut changes = hydration.registry.subscribe_changes();
+        let mut next = default_server_settings();
+        next.provider_instances.insert(
+            ProviderInstanceId::new("codex").unwrap(),
+            ProviderInstanceConfig {
+                driver: ProviderDriverKind::new("codex").unwrap(),
+                display_name: None,
+                accent_color: None,
+                environment: None,
+                enabled: None,
+                config: None,
+            },
+        );
+        sender.send(next).unwrap();
+
+        changes
+            .recv()
+            .await
+            .expect("reconcile publishes its change");
+        let unavailable = hydration.registry.list_unavailable();
+        assert_eq!(unavailable.len(), 1);
+        assert_eq!(unavailable[0].instance_id.as_str(), "codex");
     }
 }

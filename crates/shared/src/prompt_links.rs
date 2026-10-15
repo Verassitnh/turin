@@ -3,7 +3,7 @@
 //! `DEFAULT_HOSTED_APP_URL` is inlined from `connectAuth.ts`, which is cut
 //! (T3 Connect). The constant is the only piece this module needs.
 
-use crate::js_string::utf16_len;
+use crate::js_string::{JS_DOT, JS_WS, utf16_len};
 use turin_contracts::base_schemas::js_trim;
 use url::Url;
 
@@ -136,7 +136,7 @@ pub fn parse_prompt_link_repository(value: &str) -> Option<PromptLinkRepository>
             .expect("repo url")
     });
     static SHORT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^([^/\s]+)/([^/\s]+)$").expect("repo short")
+        regex::Regex::new(&format!(r"^([^/{JS_WS}]+)/([^/{JS_WS}]+)$")).expect("repo short")
     });
     let captures = URL_RE
         .captures(trimmed)
@@ -147,13 +147,16 @@ pub fn parse_prompt_link_repository(value: &str) -> Option<PromptLinkRepository>
 fn parse_prompt_link_pull_request(value: &str) -> Option<PromptLinkPullRequest> {
     let trimmed = js_trim(value);
     static URL_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(
-            r"(?i)^https?://(?:www\.)?github\.com/([^/?#]+)/([^/?#]+)/pull/(\d+)(?:[/?#].*)?$",
-        )
+        regex::Regex::new(&format!(
+            r"(?i)^https?://(?:www\.)?github\.com/([^/?#]+)/([^/?#]+)/pull/([0-9]+)(?:[/?#]{JS_DOT}*)?$"
+        ))
         .expect("pr url")
     });
     static SHORT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^([^/\s#]+)/([^/\s#]+)(?:/|#)(\d+)$").expect("pr short")
+        regex::Regex::new(&format!(
+            r"^([^/{JS_WS}#]+)/([^/{JS_WS}#]+)(?:/|#)([0-9]+)$"
+        ))
+        .expect("pr short")
     });
     let captures = URL_RE
         .captures(trimmed)
@@ -299,10 +302,12 @@ pub struct NewThreadLinkInput<'a> {
     pub origin: Option<&'a str>,
 }
 
-pub fn build_new_thread_link(input: NewThreadLinkInput<'_>) -> String {
+/// Upstream `new URL("/new", origin)`: the path is replaced, so a trailing
+/// slash or a path on the origin is dropped. An unparseable origin is an error,
+/// as it is upstream (which throws), not a fallback to the hosted app.
+pub fn build_new_thread_link(input: NewThreadLinkInput<'_>) -> Result<String, url::ParseError> {
     let origin = input.origin.unwrap_or(DEFAULT_HOSTED_APP_URL);
-    let mut url = Url::parse(&format!("{origin}/new"))
-        .unwrap_or_else(|_| Url::parse("https://app.t3.codes/new").expect("hosted new url"));
+    let mut url = Url::parse(origin)?.join("/new")?;
     {
         let mut query = url.query_pairs_mut();
         query.clear();
@@ -317,11 +322,13 @@ pub fn build_new_thread_link(input: NewThreadLinkInput<'_>) -> String {
             }
         }
     }
-    url.to_string()
+    Ok(url.to_string())
 }
 
+/// Upstream `URL.search`: a bare `?` is the empty string, not `?`.
 fn js_search(url: &Url) -> String {
     url.query()
+        .filter(|query| !query.is_empty())
         .map(|query| format!("?{query}"))
         .unwrap_or_default()
 }
@@ -548,6 +555,65 @@ mod tests {
     }
 
     #[test]
+    fn new_thread_link_resolves_the_new_path_against_the_origin() {
+        let link = |origin| {
+            build_new_thread_link(NewThreadLinkInput {
+                prompt: "hi",
+                repository: None,
+                provider: None,
+                model: None,
+                origin,
+            })
+            .unwrap()
+        };
+        // `new URL("/new", origin)` replaces the path, so the origin's own path
+        // and any trailing slash drop out.
+        assert_eq!(
+            link(Some("https://app.t3.codes/")),
+            "https://app.t3.codes/new?prompt=hi"
+        );
+        assert_eq!(
+            link(Some("http://localhost:5173/app/x")),
+            "http://localhost:5173/new?prompt=hi"
+        );
+        assert_eq!(link(None), "https://app.t3.codes/new?prompt=hi");
+    }
+
+    #[test]
+    fn new_thread_link_rejects_an_unparseable_origin() {
+        let result = build_new_thread_link(NewThreadLinkInput {
+            prompt: "hi",
+            repository: None,
+            provider: None,
+            model: None,
+            origin: Some("not a url"),
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_bare_question_mark_is_an_empty_search() {
+        // `URL.search` is "" when the query is empty, so no stray `?` survives.
+        assert_eq!(
+            prompt_link_app_path("https://app.t3.codes/new?", None).as_deref(),
+            Some("/new")
+        );
+        assert_eq!(
+            prompt_link_app_path("t3code://new?", None).as_deref(),
+            Some("/new")
+        );
+        assert_eq!(
+            prompt_link_app_path("t3code://threads/env-1/thread-1?", None).as_deref(),
+            Some("/env-1/thread-1")
+        );
+        assert_eq!(prompt_link_deep_link("/new?", None), "t3code://new");
+        assert_eq!(
+            prompt_link_deep_link("/env-1/thread-1?", None),
+            "t3code://threads/env-1/thread-1"
+        );
+    }
+
+    #[test]
     fn builds_a_link_that_parses_back_to_the_same_prompt() {
         let repository = PromptLinkRepository {
             owner: "pingdotgg".to_owned(),
@@ -559,7 +625,8 @@ mod tests {
             provider: Some("claudeAgent"),
             model: Some("opus"),
             origin: None,
-        });
+        })
+        .unwrap();
         let parsed_url = Url::parse(&link).unwrap();
         let search = format!("?{}", parsed_url.query().unwrap_or_default());
         let path = prompt_link_app_path(&link, None).unwrap();
@@ -570,5 +637,16 @@ mod tests {
             }
             other => panic!("expected a new-thread link, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod qc_regressions {
+    use super::*;
+
+    #[test]
+    fn repository_short_form_rejects_u_feff_like_js_whitespace() {
+        // Node 22: /^([^/\s]+)\/([^/\s]+)$/.test("a﻿/b") is false.
+        assert_eq!(parse_prompt_link_repository("a\u{FEFF}/b"), None);
     }
 }

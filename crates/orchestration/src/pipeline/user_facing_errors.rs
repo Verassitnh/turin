@@ -1,6 +1,7 @@
 //! Port of upstream/apps/server/src/orchestration-v2/UserFacingErrors.ts
 
 use serde_json::Value;
+use std::collections::HashSet;
 
 const GENERIC: [&str; 3] = [
     "Failed to dispatch orchestration V2 command",
@@ -8,20 +9,38 @@ const GENERIC: [&str; 3] = [
     "Provider adapter failed while dispatching orchestration command ",
 ];
 
+/// Upstream `PROVIDER_DISPLAY_NAMES` (packages/contracts/src/model.ts).
 fn provider_name(id: &str) -> String {
     match id {
+        "antigravity" => "Antigravity".into(),
         "codex" => "Codex".into(),
         "claudeAgent" => "Claude".into(),
-        "opencode" => "OpenCode".into(),
         "cursor" => "Cursor".into(),
+        "grok" => "Grok".into(),
+        "muse" => "Muse Code".into(),
+        "acpRegistry" => "ACP Registry".into(),
+        "pi" => "Pi".into(),
+        "opencode" => "OpenCode".into(),
         _ => {
-            let trimmed = id.strip_suffix("Agent").unwrap_or(id).trim();
+            // Upstream `instanceId.replace(/Agent$/i, "")`: trailing only, any case.
+            let trimmed = strip_agent_suffix(id).trim();
             let mut chars = trimmed.chars();
             chars
                 .next()
                 .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
                 .unwrap_or_else(|| id.into())
         }
+    }
+}
+
+fn strip_agent_suffix(id: &str) -> &str {
+    const AGENT: &str = "agent";
+    let Some(cut) = id.len().checked_sub(AGENT.len()) else {
+        return id;
+    };
+    match (id.get(..cut), id.get(cut..)) {
+        (Some(head), Some(tail)) if tail.eq_ignore_ascii_case(AGENT) => head,
+        _ => id,
     }
 }
 
@@ -79,11 +98,18 @@ pub fn user_facing_dispatch_error_message(cause: &Value) -> Option<String> {
             .as_str()
             .map(str::to_owned)
             .or_else(|| friendly(value))
+            // Upstream `textValue(detail) ?? textValue(message)`: a missing,
+            // non-string, or blank detail falls through to message.
             .or_else(|| {
-                value
-                    .get("detail")
-                    .or_else(|| value.get("message"))
-                    .and_then(|v| v.as_str())
+                ["detail", "message"]
+                    .iter()
+                    .find_map(|key| {
+                        value
+                            .get(*key)?
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                    })
                     .map(str::to_owned)
             });
         if let Some(message) = message
@@ -100,10 +126,12 @@ pub fn user_facing_dispatch_error_message(cause: &Value) -> Option<String> {
     }
     let mut messages = Vec::new();
     collect(cause, &mut messages, 0);
+    // Upstream keeps each message's first occurrence, then takes `.at(-1)`, so
+    // a repeat of an earlier message does not move it to the end.
+    let mut seen = HashSet::new();
     messages
-        .into_iter()
-        .rev()
-        .find(|m| !GENERIC.iter().any(|prefix| m.starts_with(prefix)))
+        .retain(|m| !GENERIC.iter().any(|prefix| m.starts_with(prefix)) && seen.insert(m.clone()));
+    messages.pop()
 }
 
 #[cfg(test)]
@@ -174,6 +202,66 @@ mod tests {
                 "Grok cannot rewind its conversation, so this checkpoint cannot be restored on this thread."
             )
         );
+    }
+
+    #[test]
+    fn repeated_message_keeps_its_first_position_before_taking_the_last() {
+        // Upstream probe: [X, Y, X] dedupes to [X, Y] and returns Y.
+        let value = serde_json::json!({
+            "message": "Claude provider thread provider-thread-1 has no live query.",
+            "cause": {
+                "message": "Codex cannot stop a run once it has started.",
+                "cause": {
+                    "message": "Claude provider thread provider-thread-1 has no live query."
+                }
+            }
+        });
+        assert_eq!(
+            user_facing_dispatch_error_message(&value).as_deref(),
+            Some("Codex cannot stop a run once it has started.")
+        );
+    }
+
+    #[test]
+    fn names_providers_from_upstream_display_names_and_any_case_agent_suffix() {
+        let name_for = |id: &str| {
+            let value = serde_json::json!({
+                "message": "Failed to dispatch orchestration command message.dispatch (command-1).",
+                "cause": {
+                    "_tag": "CommandPolicyUnsupportedError",
+                    "providerInstanceId": id,
+                }
+            });
+            user_facing_dispatch_error_message(&value).unwrap()
+        };
+        // Upstream probe: `/Agent$/i` strips "agent" from "myagent" -> "My".
+        assert_eq!(
+            name_for("myagent"),
+            "My cannot deliver a message that way right now."
+        );
+        assert_eq!(
+            name_for("acpRegistry"),
+            "ACP Registry cannot deliver a message that way right now."
+        );
+        assert_eq!(
+            name_for("muse"),
+            "Muse Code cannot deliver a message that way right now."
+        );
+    }
+
+    #[test]
+    fn blank_or_non_string_detail_falls_back_to_message() {
+        // Upstream probes: {detail:"", message:"Real"} and {detail:5, message:"Real"}.
+        for detail in [serde_json::json!(""), serde_json::json!(5)] {
+            let value = serde_json::json!({
+                "message": "Failed to dispatch orchestration command message.dispatch (command-1).",
+                "cause": { "detail": detail, "message": "Real" }
+            });
+            assert_eq!(
+                user_facing_dispatch_error_message(&value).as_deref(),
+                Some("Real")
+            );
+        }
     }
 
     #[test]

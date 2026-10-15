@@ -555,6 +555,34 @@ impl EventSink {
         self.live.publish(&live);
     }
 
+    /// Runs one writer's transaction and the publish that follows it, holding
+    /// the publish lane throughout so publishes stay in commit order.
+    ///
+    /// Both run in one spawned task. Once the transaction starts it commits
+    /// whether or not the caller survives (`Db::write` cannot stop a blocking
+    /// commit), so a caller dropped mid-write must not be the only thing that
+    /// publishes: live subscribers and the outbox would miss those events
+    /// until restart or the 30 s claimer poll. Upstream's Effect transaction
+    /// instead rolls back on interrupt; see PORTING.md Deviations.
+    async fn spawn_writer<T, F, Fut>(&self, writer: F) -> Result<T, SinkError>
+    where
+        T: Send + 'static,
+        F: FnOnce(EventSink) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, SinkError>> + Send + 'static,
+    {
+        let lane = Arc::clone(&self.publish_lane).lock_owned().await;
+        let sink = self.clone();
+        let task = tokio::spawn(async move {
+            let _lane = lane;
+            writer(sink).await
+        });
+        match task.await {
+            Ok(result) => result,
+            Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+            Err(join) => unreachable!("writer task is never aborted: {join}"),
+        }
+    }
+
     /// Appends, projects and (with `effects`) enqueues events in one
     /// transaction, then publishes them. Upstream `write` / `writeWithEffects`.
     pub async fn write(
@@ -564,15 +592,17 @@ impl EventSink {
         let count = input.events.len();
         let command_id = input.command_id.clone();
         let effect_count = input.effects.len();
-        let _lane = self.publish_lane.lock().await;
-        let sink = self.clone();
-        let appended = self
-            .db
-            .write(move |tx| sink.write_in(tx, input))
-            .await
-            .map_err(|cause| Self::write_error(count, command_id.as_ref(), cause))?;
-        self.publish(&appended, effect_count);
-        Ok(appended.typed)
+        self.spawn_writer(move |sink| async move {
+            let writer = sink.clone();
+            let appended = sink
+                .db
+                .write(move |tx| writer.write_in(tx, input))
+                .await
+                .map_err(|cause| Self::write_error(count, command_id.as_ref(), cause))?;
+            sink.publish(&appended, effect_count);
+            Ok(appended.typed)
+        })
+        .await
     }
 
     async fn write_conditional<F>(
@@ -586,31 +616,33 @@ impl EventSink {
         let count = input.events.len();
         let command_id = input.command_id.clone();
         let effect_count = input.effects.len();
-        let _lane = self.publish_lane.lock().await;
-        let sink = self.clone();
-        let appended = self
-            .db
-            .write(move |tx| {
-                if !check(tx)? {
-                    return Ok(None);
-                }
-                sink.write_in(tx, input).map(Some)
-            })
-            .await
-            .map_err(|cause| Self::write_error(count, command_id.as_ref(), cause))?;
-        match appended {
-            None => Ok(ConditionalWriteResult {
-                committed: false,
-                stored_events: vec![],
-            }),
-            Some(appended) => {
-                self.publish(&appended, effect_count);
-                Ok(ConditionalWriteResult {
-                    committed: true,
-                    stored_events: appended.typed,
+        self.spawn_writer(move |sink| async move {
+            let writer = sink.clone();
+            let appended = sink
+                .db
+                .write(move |tx| {
+                    if !check(tx)? {
+                        return Ok(None);
+                    }
+                    writer.write_in(tx, input).map(Some)
                 })
+                .await
+                .map_err(|cause| Self::write_error(count, command_id.as_ref(), cause))?;
+            match appended {
+                None => Ok(ConditionalWriteResult {
+                    committed: false,
+                    stored_events: vec![],
+                }),
+                Some(appended) => {
+                    sink.publish(&appended, effect_count);
+                    Ok(ConditionalWriteResult {
+                        committed: true,
+                        stored_events: appended.typed,
+                    })
+                }
             }
-        }
+        })
+        .await
     }
 
     pub async fn write_if_run_current(
@@ -730,93 +762,94 @@ impl EventSink {
         let command_id = input.command_id.clone();
         let effect_count = input.effects.len();
         let thread_id = input.thread_id.clone();
-        let _lane = self.publish_lane.lock().await;
-        let sink = self.clone();
-        let outcome = self
-            .db
-            .write(move |tx| {
-                let reserved = CommandReceipt {
-                    command_id: input.command_id.clone(),
-                    thread_id: input.thread_id.clone(),
-                    command_type: input.command_type.clone(),
-                    accepted_at: input.accepted_at,
-                    result_sequence: 0,
-                    status: ReceiptStatus::Accepted,
-                    error: None,
-                };
-                if !insert_if_absent_in(tx, &AnyReceipt::Thread(reserved.clone()))? {
-                    let receipt = sink.existing_command_result(tx, &input.command_id)?;
-                    return Ok(CommitOutcome::Replayed(receipt));
-                }
-                let events = sink.normalize_events(tx, input.events)?;
-                let appended = sink.append_and_apply(tx, Some(&input.command_id), events)?;
-                let Some(last) = appended.typed.last() else {
-                    return Err(decode_err(
-                        "EventSink.commit-command",
-                        format!(
-                            "Command {} produced no orchestration events.",
-                            input.command_id
-                        ),
-                    ));
-                };
-                let result_sequence = last.sequence;
-                EffectOutbox::enqueue_in(tx, &input.effects)?;
-                let receipt = CommandReceipt {
-                    result_sequence,
-                    ..reserved
-                };
-                upsert_in(tx, &AnyReceipt::Thread(receipt.clone()))?;
-                let cancelled = match &input.cancel_unsettled_effects {
-                    Some(cancel) => EffectOutbox::cancel_unsettled_in(
-                        tx,
-                        &input.thread_id,
-                        &cancel.effect_types,
-                        &cancel.reason,
-                    )?,
-                    None => vec![],
-                };
-                Ok(CommitOutcome::Committed {
-                    receipt,
-                    appended,
-                    cancelled,
+        self.spawn_writer(move |sink| async move {
+            let writer = sink.clone();
+            let outcome = sink
+                .db
+                .write(move |tx| {
+                    let reserved = CommandReceipt {
+                        command_id: input.command_id.clone(),
+                        thread_id: input.thread_id.clone(),
+                        command_type: input.command_type.clone(),
+                        accepted_at: input.accepted_at,
+                        result_sequence: 0,
+                        status: ReceiptStatus::Accepted,
+                        error: None,
+                    };
+                    if !insert_if_absent_in(tx, &AnyReceipt::Thread(reserved.clone()))? {
+                        let receipt = writer.existing_command_result(tx, &input.command_id)?;
+                        return Ok(CommitOutcome::Replayed(receipt));
+                    }
+                    let events = writer.normalize_events(tx, input.events)?;
+                    let appended = writer.append_and_apply(tx, Some(&input.command_id), events)?;
+                    let Some(last) = appended.typed.last() else {
+                        return Err(decode_err(
+                            "EventSink.commit-command",
+                            format!(
+                                "Command {} produced no orchestration events.",
+                                input.command_id
+                            ),
+                        ));
+                    };
+                    let result_sequence = last.sequence;
+                    EffectOutbox::enqueue_in(tx, &input.effects)?;
+                    let receipt = CommandReceipt {
+                        result_sequence,
+                        ..reserved
+                    };
+                    upsert_in(tx, &AnyReceipt::Thread(receipt.clone()))?;
+                    let cancelled = match &input.cancel_unsettled_effects {
+                        Some(cancel) => EffectOutbox::cancel_unsettled_in(
+                            tx,
+                            &input.thread_id,
+                            &cancel.effect_types,
+                            &cancel.reason,
+                        )?,
+                        None => vec![],
+                    };
+                    Ok(CommitOutcome::Committed {
+                        receipt,
+                        appended,
+                        cancelled,
+                    })
                 })
-            })
-            .await
-            .map_err(|cause| Self::write_error(count, Some(&command_id), cause))?;
-        match outcome {
-            CommitOutcome::Replayed(receipt) => {
-                let stored_events =
-                    self.read_by_command_id(&command_id)
-                        .await
-                        .map_err(|error| match error {
+                .await
+                .map_err(|cause| Self::write_error(count, Some(&command_id), cause))?;
+            match outcome {
+                CommitOutcome::Replayed(receipt) => {
+                    let stored_events = sink.read_by_command_id(&command_id).await.map_err(
+                        |error| match error {
                             SinkError::Stream { cause, .. } => {
                                 Self::write_error(count, Some(&command_id), cause)
                             }
                             other => other,
-                        })?;
-                debug_assert_eq!(receipt.thread_id, thread_id);
-                Ok(CommitResult {
+                        },
+                    )?;
+                    debug_assert_eq!(receipt.thread_id, thread_id);
+                    Ok(CommitResult {
+                        receipt,
+                        stored_events,
+                        committed: false,
+                        cancelled_effect_count: 0,
+                    })
+                }
+                CommitOutcome::Committed {
                     receipt,
-                    stored_events,
-                    committed: false,
-                    cancelled_effect_count: 0,
-                })
+                    appended,
+                    cancelled,
+                } => {
+                    sink.outbox.signal_cancellations(&cancelled);
+                    sink.publish(&appended, effect_count);
+                    Ok(CommitResult {
+                        receipt,
+                        stored_events: appended.typed,
+                        committed: true,
+                        cancelled_effect_count: cancelled.len(),
+                    })
+                }
             }
-            CommitOutcome::Committed {
-                receipt,
-                appended,
-                cancelled,
-            } => {
-                self.outbox.signal_cancellations(&cancelled);
-                self.publish(&appended, effect_count);
-                Ok(CommitResult {
-                    receipt,
-                    stored_events: appended.typed,
-                    committed: true,
-                    cancelled_effect_count: cancelled.len(),
-                })
-            }
-        }
+        })
+        .await
     }
 
     /// Records a rejected command (its result sequence is the thread's latest
@@ -877,42 +910,44 @@ impl EventSink {
         input: ProjectCommit,
     ) -> Result<ProjectCommitResult, SinkError> {
         let command_id = input.command_id.clone();
-        let _lane = self.publish_lane.lock().await;
-        let projections = Arc::clone(&self.projections);
-        let (receipt, committed_event) = self
-            .db
-            .write(move |tx| {
-                let reserved = ProjectCommandReceipt {
-                    command_id: input.command_id.clone(),
-                    project_id: input.project_id.clone(),
-                    command_type: input.command_type,
-                    accepted_at: input.accepted_at,
-                    result_sequence: 0,
-                    status: ReceiptStatus::Accepted,
-                    error: None,
-                };
-                if !insert_if_absent_in(tx, &AnyReceipt::Project(reserved.clone()))? {
-                    return Ok((Self::existing_project_receipt(tx, &input.command_id)?, None));
-                }
-                let event = append_project_event_in(tx, &input.event)?;
-                projections.apply_project_event(tx, &event)?;
-                let receipt = ProjectCommandReceipt {
-                    result_sequence: u64::try_from(event.sequence).unwrap_or(0),
-                    ..reserved
-                };
-                upsert_in(tx, &AnyReceipt::Project(receipt.clone()))?;
-                Ok((receipt, Some(event)))
+        self.spawn_writer(move |sink| async move {
+            let projections = Arc::clone(&sink.projections);
+            let (receipt, committed_event) = sink
+                .db
+                .write(move |tx| {
+                    let reserved = ProjectCommandReceipt {
+                        command_id: input.command_id.clone(),
+                        project_id: input.project_id.clone(),
+                        command_type: input.command_type,
+                        accepted_at: input.accepted_at,
+                        result_sequence: 0,
+                        status: ReceiptStatus::Accepted,
+                        error: None,
+                    };
+                    if !insert_if_absent_in(tx, &AnyReceipt::Project(reserved.clone()))? {
+                        return Ok((Self::existing_project_receipt(tx, &input.command_id)?, None));
+                    }
+                    let event = append_project_event_in(tx, &input.event)?;
+                    projections.apply_project_event(tx, &event)?;
+                    let receipt = ProjectCommandReceipt {
+                        result_sequence: u64::try_from(event.sequence).unwrap_or(0),
+                        ..reserved
+                    };
+                    upsert_in(tx, &AnyReceipt::Project(receipt.clone()))?;
+                    Ok((receipt, Some(event)))
+                })
+                .await
+                .map_err(|cause| Self::write_error(1, Some(&command_id), cause))?;
+            if let Some(event) = &committed_event {
+                sink.events
+                    .publish_committed(vec![ApplicationStoredEvent::Project(event.clone())]);
+            }
+            Ok(ProjectCommitResult {
+                receipt,
+                committed: committed_event.is_some(),
             })
-            .await
-            .map_err(|cause| Self::write_error(1, Some(&command_id), cause))?;
-        if let Some(event) = &committed_event {
-            self.events
-                .publish_committed(vec![ApplicationStoredEvent::Project(event.clone())]);
-        }
-        Ok(ProjectCommitResult {
-            receipt,
-            committed: committed_event.is_some(),
         })
+        .await
     }
 
     /// Records a rejected project command, or returns the receipt its command

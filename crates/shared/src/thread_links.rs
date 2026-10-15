@@ -1,6 +1,7 @@
 //! Port of upstream/packages/shared/src/threadLinks.ts
 
-use crate::js_string::{decode_uri_component, is_js_whitespace_char};
+use crate::js_string::decode_uri_component;
+use turin_contracts::base_schemas::is_js_whitespace;
 use turin_contracts::base_schemas::{ThreadId, js_trim};
 
 /// Agents mention another thread in Markdown as `[title](t3-thread://v1/<threadId>)`. The id is
@@ -38,7 +39,7 @@ pub fn format_thread_link(thread_id: &str, label: &str) -> String {
     let mut collapsed = String::with_capacity(spaced.len());
     let mut in_whitespace = false;
     for ch in spaced.chars() {
-        if is_js_whitespace_char(ch) {
+        if is_js_whitespace(ch) {
             if !in_whitespace {
                 collapsed.push(' ');
             }
@@ -113,12 +114,13 @@ struct Hit {
 /// matched by hand.
 fn scan_outside_code(chars: &[char]) -> Vec<Hit> {
     let mut hits = Vec::new();
+    let mut closes = CloseFinder::new(chars);
     let mut index = 0;
     while index < chars.len() {
         let matched = fence_end(chars, index)
             .map(|end| (end, None))
             .or_else(|| span_end(chars, index).map(|end| (end, None)))
-            .or_else(|| href_link(chars, index).map(|(end, href)| (end, Some(href))));
+            .or_else(|| href_link(chars, index, &mut closes).map(|(end, href)| (end, Some(href))));
         match matched {
             Some((end, href)) => {
                 hits.push(Hit {
@@ -178,12 +180,46 @@ fn span_end(chars: &[char], start: usize) -> Option<usize> {
     })
 }
 
+/// The next `]` or newline at or after a position, found once for a run of `[` starts. The scan
+/// position only moves forward, so the last answer stays valid until it falls behind the query.
+struct CloseFinder<'a> {
+    chars: &'a [char],
+    /// (where the search began, the first delimiter from there or `None` for none).
+    cached: Option<(usize, Option<usize>)>,
+}
+
+impl<'a> CloseFinder<'a> {
+    fn new(chars: &'a [char]) -> Self {
+        Self {
+            chars,
+            cached: None,
+        }
+    }
+
+    fn next_from(&mut self, from: usize) -> Option<usize> {
+        if let Some((searched_from, found)) = self.cached
+            && searched_from <= from
+            && found.is_none_or(|at| at >= from)
+        {
+            return found;
+        }
+        let found =
+            (from..self.chars.len()).find(|&at| self.chars[at] == ']' || self.chars[at] == '\n');
+        self.cached = Some((from, found));
+        found
+    }
+}
+
 /// `\[[^\]\n]*\]\((t3-thread://v1/[^\s)]+)\)`
-fn href_link(chars: &[char], start: usize) -> Option<(usize, String)> {
+fn href_link(
+    chars: &[char],
+    start: usize,
+    closes: &mut CloseFinder<'_>,
+) -> Option<(usize, String)> {
     if chars[start] != '[' {
         return None;
     }
-    let close = (start + 1..chars.len()).find(|&at| chars[at] == ']' || chars[at] == '\n')?;
+    let close = closes.next_from(start + 1)?;
     if chars[close] != ']' || chars.get(close + 1) != Some(&'(') {
         return None;
     }
@@ -194,7 +230,7 @@ fn href_link(chars: &[char], start: usize) -> Option<(usize, String)> {
     }
     let id_start = href_start + prefix.len();
     let id_end = (id_start..chars.len())
-        .find(|&at| is_js_whitespace_char(chars[at]) || chars[at] == ')')
+        .find(|&at| is_js_whitespace(chars[at]) || chars[at] == ')')
         .unwrap_or(chars.len());
     if id_end == id_start || chars.get(id_end) != Some(&')') {
         return None;
@@ -306,5 +342,19 @@ mod tests {
             ),
             "See [Fix the build now](t3-thread://v1/renamed) and [Gone](t3-thread://v1/deleted)."
         );
+    }
+}
+
+#[cfg(test)]
+mod qc_regressions {
+    use super::*;
+
+    #[test]
+    fn a_run_of_open_brackets_scans_in_one_pass_and_still_finds_the_link() {
+        // Each `[` used to rescan to the next `]`, so a long run of them was quadratic.
+        let markdown = format!("{}[x](t3-thread://v1/a%3A1)", "[".repeat(60_000));
+        let relabeled = relabel_thread_links(&markdown, |_| Some("Title".to_owned()));
+        // The id as written names a thread here, so it is kept as written rather than decoded.
+        assert_eq!(relabeled, "[Title](t3-thread://v1/a%3A1)");
     }
 }

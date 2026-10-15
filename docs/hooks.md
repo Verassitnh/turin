@@ -44,23 +44,52 @@ instead of silently doing nothing.
 
 ## Trust: project hooks must be approved
 
-A repository you clone can ship a `.turin/hooks.toml`, and an agent or a
-`git pull` can rewrite it, so project hooks **never run until you approve
+A repository you clone can ship a `<project>/.turin/` directory, and an agent
+or a `git pull` can rewrite it, so project hooks **never run until you approve
 them**. Your own `~/.turin/hooks.toml` is trusted.
 
+**What approval covers: everything under `<project>/.turin/`.** That is
+`hooks.toml` and every other file in that directory tree — scripts such as
+`.turin/hooks/new-worktree.sh`, helpers, dotfiles; nothing is skipped. The
+approval is one SHA-256 over the sorted relative paths and the exact bytes of
+all of them. Adding, removing, renaming or editing any one file (a one-byte
+change, a `git pull`, a branch switch, an agent edit) changes the hash and puts
+the project hooks back to pending.
+
 - Approvals are stored outside the repo, in `~/.turin/trusted-hooks.json`
-  (`$TURIN_HOME/trusted-hooks.json` when set): canonical project root →
-  SHA-256 of the exact bytes of `.turin/hooks.toml`.
+  (`$TURIN_HOME/trusted-hooks.json` when set): canonical project root → that
+  hash.
 - Until the hash matches, the project's hooks are inert. Turin shows them with
   an **Approve** action instead (a `projectHooksPending` update on the results
-  channel, reason `untrusted` for a new file or `changed` for one edited after
-  approval).
-- Any change to the file — one byte, a `git pull`, a branch switch, an agent
-  edit — revokes the approval. The hash is re-checked on every reload; your
-  global hooks keep working meanwhile.
+  channel; reason `untrusted` for a new config, `changed` when something under
+  `.turin/` changed after approval, `untrustable` when it cannot be approved).
+- The hash is re-checked on every reload **and again at every dispatch**, so an
+  edit is caught even before the file watcher notices. Your global hooks keep
+  working meanwhile.
+- Symlinks under `.turin/` must resolve inside `.turin/`. A link pointing
+  outside it (or dangling) makes the project hooks **untrustable**: they stay
+  inert, the notice says which link, and Approve is refused until it is fixed.
+  A `.turin/` that itself resolves outside the project is refused the same
+  way. Trees with more than 4096 files or 32 MiB are also refused.
 - Review what you approve: the pending notice lists each hook's event and
-  command. Approving records the hash you were shown, and is refused if the
-  file changed since.
+  command. Approving records the hash you were shown, and is refused if
+  anything changed since.
+
+**What approval does not cover: repo files outside `.turin/`.** A command like
+`./scripts/setup.sh` or `sh build.sh` runs a file that is not hashed, so a
+`git pull` or an agent edit that changes only that file runs new code without
+re-approval. Turin still allows such commands, but the pending notice lists
+them as `unhashedReferences` so the UI can warn you (best-effort: it scans the
+command text for paths, it cannot see paths built at runtime).
+
+- **Keep the scripts your hooks run in `.turin/hooks/`**, where they are
+  covered, and call them by that path (`sh .turin/hooks/setup.sh`).
+- With `cwd = "thread"`, a relative path resolves inside the thread's
+  worktree, which the agent can write and approval does not cover. Reference
+  your approved script through the project root instead:
+  `sh "$TURIN_PROJECT_ROOT/.turin/hooks/setup.sh"`.
+- Or put the logic inline in `command`, or in your global
+  `~/.turin/hooks.toml` with scripts outside the repo.
 
 ## Events
 
@@ -142,9 +171,14 @@ stdout**:
 - Each hook runs in its own process group. On timeout or shutdown the whole
   group is killed (even after the shell itself has already exited).
 - A hook finishes when its shell exits, plus a short (250 ms) drain of the
-  output it already wrote. Anything still holding the hook's stdout/stderr
-  after that — `sleep 600 &` — is killed. A job that redirects its output
-  away (`nohup server >/dev/null 2>&1 &`) is detached and keeps running.
+  output it already wrote. If anything still holds the hook's stdout/stderr
+  after that — `sleep 600 &` — the **entire process group is killed**,
+  including jobs that redirected their own output away. A job that redirects
+  its output (`nohup server >/dev/null 2>&1 &`) survives only when nothing
+  else in the group holds the pipes, so do not rely on that. To leave a daemon
+  running reliably, start it in its own session so it leaves the group:
+  `setsid server >/dev/null 2>&1 &`. macOS ships no `setsid` binary; use
+  `perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' server >/dev/null 2>&1 &`.
 - stdout and stderr are captured (1 MiB per stream; the rest is discarded and
   the result is flagged truncated). Results are shown in the app.
 - A hook that exits non-zero is reported but never blocks the orchestrator.
@@ -152,13 +186,14 @@ stdout**:
 ## Examples
 
 Create a worktree when a thread is created and move the thread into it
-(project config; approve it once in the app):
+(project config; approve it once in the app). The script lives in
+`.turin/hooks/`, so the approval covers it:
 
 ```toml
 # <project>/.turin/hooks.toml
 [[hook]]
 event = "thread.created"
-command = "./scripts/new-worktree.sh"
+command = "sh .turin/hooks/new-worktree.sh"
 cwd = "project"
 blocking = true
 timeout_secs = 600
@@ -166,7 +201,7 @@ timeout_secs = 600
 
 ```sh
 #!/bin/sh
-# scripts/new-worktree.sh
+# <project>/.turin/hooks/new-worktree.sh
 set -eu
 branch="turin/$TURIN_THREAD_ID"
 path="$TURIN_PROJECT_ROOT/../wt/$TURIN_THREAD_ID"

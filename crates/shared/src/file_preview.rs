@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::js_string::decode_uri_component;
+use crate::js_string::{JS_DOT, decode_uri_component};
 use crate::video::video_mime_type;
 use turin_contracts::base_schemas::js_trim;
 use url::Url;
@@ -135,9 +135,9 @@ static TEXT_BASENAME: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::n
 });
 
 static TEXT_MIME: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(
-        r"^(application/(json|.*\+json|xml|.*\+xml|javascript|x-javascript|yaml|x-yaml|toml|sql))$",
-    )
+    regex::Regex::new(&format!(
+        r"^(application/(json|{JS_DOT}*\+json|xml|{JS_DOT}*\+xml|javascript|x-javascript|yaml|x-yaml|toml|sql))$"
+    ))
     .expect("text mime regex")
 });
 

@@ -5,7 +5,7 @@
 use super::*;
 use crate::pipeline::domain_event::test_support::{metadata_updated, thread_created, thread_json};
 use crate::pipeline::effect_outbox::{EffectRequest, EffectStatus};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use serde_json::json;
 use std::sync::atomic::AtomicBool;
 use turin_contracts::orchestration_v2::OrchestrationV2DomainEvent as Event;
@@ -595,6 +595,33 @@ async fn publishes_live_events_in_commit_order_across_concurrent_writers() {
     sorted.sort_unstable();
     assert_eq!(published, sorted);
     assert_eq!(published.len(), writers);
+}
+
+#[tokio::test]
+async fn a_writer_dropped_mid_commit_still_publishes_what_committed() {
+    let (_, sink, _) = setup().await;
+    let start = sink.latest_sequence(None).await.unwrap();
+    let mut stream = sink
+        .stream(StreamOptions {
+            after_sequence: Some(start),
+            ..StreamOptions::default()
+        })
+        .await
+        .unwrap();
+    // Poll the write once so its transaction starts, then drop the caller.
+    let mut write = Box::pin(sink.write(WriteInput::events(vec![thread_created(
+        "event:dropped-writer",
+        "thread:dropped-writer",
+    )])));
+    assert!(write.as_mut().now_or_never().is_none());
+    drop(write);
+    // The commit happened, so live subscribers must still see it.
+    let item = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("committed event was never published")
+        .expect("stream open")
+        .expect("stream item");
+    assert!(item.sequence > u64::try_from(start).unwrap());
 }
 
 #[tokio::test]

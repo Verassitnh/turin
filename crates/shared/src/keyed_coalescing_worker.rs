@@ -8,11 +8,15 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::hash::Hash;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
+
+use crate::drainable_worker::panic_message;
 
 struct State<K, V> {
     latest_by_key: HashMap<K, V>,
@@ -118,7 +122,19 @@ where
                         }
                     }
                     Next::Item(key, value) => {
-                        process(key.clone(), value).await;
+                        // A panic ends this item only. Upstream's `ignoreCause`
+                        // + `ensuring(completeKey)` keep the loop alive, and
+                        // completion runs on both paths so the key is never
+                        // left active.
+                        let outcome = AssertUnwindSafe(async { process(key.clone(), value).await })
+                            .catch_unwind()
+                            .await;
+                        if let Err(panic) = outcome {
+                            tracing::error!(
+                                "KeyedCoalescingWorker item failed {}",
+                                panic_message(panic.as_ref())
+                            );
+                        }
                         complete_key(&worker, key);
                     }
                 }
@@ -249,6 +265,44 @@ mod tests {
                 "busy:4".to_string(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_item_releases_its_key_and_the_worker_keeps_running() {
+        let processed = Arc::new(AsyncMutex::new(Vec::new()));
+        let seen = Arc::clone(&processed);
+        let worker = KeyedCoalescingWorker::spawn(
+            |_current: i32, next| next,
+            move |key: String, value: i32| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    if value == 1 {
+                        panic!("boom {key}");
+                    }
+                    seen.lock().await.push(format!("{key}:{value}"));
+                }
+            },
+        );
+        worker.enqueue("a".into(), 1);
+        worker.enqueue("b".into(), 2);
+        // Backstop: before the fix, these waits never resolved.
+        let timeout = std::time::Duration::from_secs(5);
+        tokio::time::timeout(timeout, worker.drain_key(&"a".into()))
+            .await
+            .expect("the panicking key drains");
+        tokio::time::timeout(timeout, worker.drain_key(&"b".into()))
+            .await
+            .expect("the queued key behind it drains");
+        // The key is no longer active, so new work for it runs.
+        worker.enqueue("a".into(), 3);
+        tokio::time::timeout(timeout, worker.drain_key(&"a".into()))
+            .await
+            .expect("the released key accepts new work");
+        assert_eq!(
+            processed.lock().await.as_slice(),
+            ["b:2".to_string(), "a:3".to_string()]
+        );
+        worker.close().await;
     }
 
     #[tokio::test]

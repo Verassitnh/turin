@@ -27,44 +27,26 @@ pub struct ModelSelection {
 
 impl<'de> Deserialize<'de> for ModelSelection {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Source {
-            #[serde(default)]
-            provider: Option<serde_json::Value>,
-            #[serde(default)]
-            instance_id: Option<serde_json::Value>,
-            model: serde_json::Value,
-            #[serde(default)]
-            options: Option<serde_json::Value>,
-        }
-
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Wire {
-            instance_id: ProviderInstanceId,
-            model: TrimmedNonEmptyString,
-            #[serde(default)]
-            options: Option<serde_json::Value>,
-        }
-
-        let raw = Source::deserialize(d)?;
-        // Prefer an explicit instanceId over the legacy provider field.
-        let instance_id = raw.instance_id.or(match raw.provider {
-            Some(serde_json::Value::String(provider)) => Some(serde_json::Value::String(provider)),
-            _ => None,
-        });
-        let mut wire = serde_json::Map::new();
-        wire.insert(
-            "instanceId".to_owned(),
-            instance_id.unwrap_or(serde_json::Value::Null),
-        );
-        wire.insert("model".to_owned(), raw.model);
-        if let Some(options) = raw.options {
-            wire.insert("options".to_owned(), options);
-        }
-        let wire: Wire = serde_json::from_value(serde_json::Value::Object(wire)).map_err(serde::de::Error::custom)?;
-        let options = match wire.options {
+        // `ModelSelectionSource`: every key is `Schema.Unknown`, so presence
+        // (not nullness) is what the migration inspects. A present `null` for
+        // `instanceId` or `options` therefore reaches the wire schema and
+        // fails there, exactly like upstream.
+        let mut source = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
+        let instance_id = match source.remove("instanceId") {
+            Some(explicit) => Some(explicit),
+            None => match source.remove("provider") {
+                Some(serde_json::Value::String(provider)) => {
+                    Some(serde_json::Value::String(provider))
+                }
+                _ => None,
+            },
+        };
+        let instance_id =
+            instance_id.ok_or_else(|| serde::de::Error::missing_field("instanceId"))?;
+        let model = source
+            .remove("model")
+            .ok_or_else(|| serde::de::Error::missing_field("model"))?;
+        let options = match source.remove("options") {
             None => None,
             Some(value) => Some(
                 crate::model::provider_option_selections::deserialize(value)
@@ -72,8 +54,8 @@ impl<'de> Deserialize<'de> for ModelSelection {
             ),
         };
         Ok(Self {
-            instance_id: wire.instance_id,
-            model: wire.model,
+            instance_id: serde_json::from_value(instance_id).map_err(serde::de::Error::custom)?,
+            model: serde_json::from_value(model).map_err(serde::de::Error::custom)?,
             options,
         })
     }
@@ -105,7 +87,8 @@ mod tests {
     #[test]
     fn accepts_explicit_instance_id() {
         let parsed: ModelSelection =
-            serde_json::from_str(r#"{"instanceId":"codex_personal","model":"gpt-5-codex"}"#).unwrap();
+            serde_json::from_str(r#"{"instanceId":"codex_personal","model":"gpt-5-codex"}"#)
+                .unwrap();
         assert_eq!(parsed.instance_id.as_str(), "codex_personal");
     }
 
@@ -146,9 +129,68 @@ mod tests {
 
     #[test]
     fn rejects_malformed_instance_ids() {
-        assert!(serde_json::from_str::<ModelSelection>(
-            r#"{"instanceId":"1invalid","model":"x"}"#
+        assert!(
+            serde_json::from_str::<ModelSelection>(r#"{"instanceId":"1invalid","model":"x"}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_options_object_is_normalized_and_reencoded_canonically() {
+        let decoded: ModelSelection = serde_json::from_str(
+            r#"{"provider":"claudeAgent","model":"claude-opus-4-6","options":{"effort":"max","fastMode":true,"emptyStr":"   ","nullish":null,"nested":{"foo":1}}}"#,
         )
-        .is_err());
+        .unwrap();
+        let encoded = serde_json::to_value(&decoded).unwrap();
+        assert_eq!(
+            encoded["options"],
+            serde_json::json!([
+                {"id":"effort","value":"max"},
+                {"id":"fastMode","value":true}
+            ])
+        );
+        // Round trip of the canonical form is stable.
+        let again: ModelSelection = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&again).unwrap(), encoded);
+    }
+
+    #[test]
+    fn options_absent_stays_absent_and_null_is_rejected() {
+        let bare: ModelSelection =
+            serde_json::from_str(r#"{"instanceId":"codex","model":"m"}"#).unwrap();
+        assert_eq!(bare.options, None);
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"instanceId":"codex","model":"m"}"#
+        );
+        // `options` is optionalKey: an explicit null reaches the wire schema
+        // and fails, it is not folded into "absent".
+        assert!(
+            serde_json::from_str::<ModelSelection>(
+                r#"{"instanceId":"codex","model":"m","options":null}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ModelSelection>(
+                r#"{"instanceId":null,"provider":"codex","model":"m"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn missing_or_blank_routing_fields_fail() {
+        for raw in [
+            r#"{"model":"m"}"#,
+            r#"{"provider":5,"model":"m"}"#,
+            r#"{"instanceId":"codex"}"#,
+            r#"{"instanceId":"codex","model":"   "}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ModelSelection>(raw).is_err(),
+                "{raw}"
+            );
+        }
     }
 }

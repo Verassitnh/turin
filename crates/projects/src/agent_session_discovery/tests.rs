@@ -74,6 +74,9 @@ fn codex_rollout_line(cwd: &Path) -> String {
     )
 }
 
+const HOUR_MS: f64 = 60.0 * 60.0 * 1000.0;
+const DAY_MS: f64 = 24.0 * HOUR_MS;
+
 fn source_name(source: AgentSessionSource) -> &'static str {
     driver_slug(source)
 }
@@ -474,6 +477,8 @@ struct FsDouble {
     opens: Mutex<Vec<String>>,
     /// Size requested by each `read_alloc`, in call order.
     read_requests: Arc<Mutex<Vec<usize>>>,
+    /// Bytes returned by reads of a path's second and later opens.
+    reopened_bytes: Arc<Mutex<usize>>,
     /// Caps every `read_alloc` request, forcing short reads.
     max_read: Option<usize>,
 }
@@ -520,12 +525,17 @@ impl ScannerFileSystem for FsDouble {
         self.inner.read_file_string(path).await
     }
     async fn open(&self, path: &str) -> Option<Box<dyn ScannerFile>> {
-        self.opens.lock().push(path.to_owned());
+        let open_index = {
+            let mut opens = self.opens.lock();
+            opens.push(path.to_owned());
+            opens.iter().filter(|open| open.as_str() == path).count()
+        };
         let file = self.inner.open(&self.resolve(path)).await?;
         Some(Box::new(CountingFile {
             inner: file,
             requests: Arc::clone(&self.read_requests),
             max_read: self.max_read,
+            reopened_bytes: (open_index > 1).then(|| Arc::clone(&self.reopened_bytes)),
         }))
     }
 }
@@ -534,6 +544,7 @@ struct CountingFile {
     inner: Box<dyn ScannerFile>,
     requests: Arc<Mutex<Vec<usize>>>,
     max_read: Option<usize>,
+    reopened_bytes: Option<Arc<Mutex<usize>>>,
 }
 
 #[async_trait]
@@ -544,7 +555,11 @@ impl ScannerFile for CountingFile {
     async fn read_alloc(&mut self, size: usize) -> std::io::Result<Option<Vec<u8>>> {
         self.requests.lock().push(size);
         let size = self.max_read.map_or(size, |cap| size.min(cap));
-        self.inner.read_alloc(size).await
+        let chunk = self.inner.read_alloc(size).await?;
+        if let (Some(total), Some(chunk)) = (&self.reopened_bytes, &chunk) {
+            *total.lock() += chunk.len();
+        }
+        Ok(chunk)
     }
 }
 
@@ -1651,3 +1666,298 @@ fn make_record_limit_transcript(cwd: &Path, overflow: bool) -> String {
     }
     transcript
 }
+
+/// A Claude transcript with one user prompt and one assistant reply.
+fn claude_thread_transcript(cwd: &Path, session_id: &str) -> String {
+    format!(
+        "{}\n{}\n",
+        json!({
+            "type": "user",
+            "cwd": cwd,
+            "sessionId": session_id,
+            "timestamp": "2026-08-23T12:00:00.000Z",
+            "message": {"role": "user", "content": "Fix the project"},
+        }),
+        json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "timestamp": "2026-08-23T12:01:00.000Z",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "Done"}]},
+        }),
+    )
+}
+
+fn thread_session_ids(threads: &[AgentSessionThread]) -> Vec<String> {
+    threads
+        .iter()
+        .map(|thread| thread.provider_session_id.clone())
+        .collect()
+}
+
+fn thread_messages(threads: &[AgentSessionThread]) -> Vec<Vec<String>> {
+    threads
+        .iter()
+        .map(|thread| {
+            thread
+                .messages
+                .iter()
+                .map(|message| message.text.clone())
+                .collect()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn imports_recent_claude_and_codex_sessions_for_the_selected_project_only() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture.workspace("t3code-workspace-");
+    let other_workspace = fixture.workspace("t3code-workspace-other-");
+    write_transcript(
+        &fixture.claude_transcript("-selected", "claude-recent.jsonl"),
+        &claude_thread_transcript(workspace.path(), "claude-recent"),
+        now - DAY_MS,
+    );
+    write_transcript(
+        &fixture.claude_transcript("-selected", "claude-old.jsonl"),
+        &claude_thread_transcript(workspace.path(), "claude-old"),
+        now - 31.0 * DAY_MS,
+    );
+    write_transcript(
+        &fixture.claude_transcript("-other", "claude-other.jsonl"),
+        &claude_thread_transcript(other_workspace.path(), "claude-other"),
+        now - DAY_MS,
+    );
+    let codex_lines = [
+        json!({"type": "session_meta", "payload": {"id": "codex-recent", "cwd": workspace.path()}}),
+        json!({
+            "type": "event_msg",
+            "timestamp": "2026-08-24T10:00:00.000Z",
+            "payload": {"type": "user_message", "message": "Review this code"},
+        }),
+        json!({
+            "type": "response_item",
+            "timestamp": "2026-08-24T10:01:00.000Z",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Looks good"}],
+            },
+        }),
+    ];
+    write_transcript(
+        &fixture.codex_rollout("2026", "08", "24", "rollout-codex-recent.jsonl"),
+        &codex_lines.map(|line| line.to_string()).join("\n"),
+        now - HOUR_MS,
+    );
+
+    let threads = fixture.threads(workspace.path()).await;
+
+    assert_eq!(
+        thread_session_ids(&threads),
+        vec!["codex-recent".to_owned(), "claude-recent".to_owned()]
+    );
+    assert_eq!(
+        thread_messages(&threads),
+        vec![
+            vec!["Review this code".to_owned(), "Looks good".to_owned()],
+            vec!["Fix the project".to_owned(), "Done".to_owned()],
+        ]
+    );
+}
+
+/// Collect `recent_threads` outcomes from `scanner`, failing on any stream error.
+async fn collect_outcomes(
+    scanner: &AgentSessionDiscovery,
+    workspace_root: &Path,
+    completed: &[AgentSessionImportSource],
+) -> Vec<AgentSessionRecentThread> {
+    let root = workspace_root.to_string_lossy().into_owned();
+    scanner
+        .recent_threads(&root, completed)
+        .map(|outcome| outcome.expect("recent thread"))
+        .collect()
+        .await
+}
+
+fn importable_session_ids(outcomes: &[AgentSessionRecentThread]) -> Vec<String> {
+    outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            AgentSessionRecentThread::Importable { thread, .. } => {
+                Some(thread.provider_session_id.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn imports_history_recorded_with_a_case_alias() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture.workspace("t3code-workspace-");
+    let workspace_alias = workspace
+        .path()
+        .parent()
+        .expect("parent")
+        .join(base_name(workspace.path()).to_uppercase());
+    write_transcript(
+        &fixture.claude_transcript("-alias", "case-session.jsonl"),
+        &[
+            json!({
+                "type": "user",
+                "cwd": workspace_alias,
+                "sessionId": "case-session",
+                "timestamp": "2026-08-24T10:00:00.000Z",
+                "message": {"role": "user", "content": "Import case alias history"},
+            })
+            .to_string(),
+            json!({
+                "type": "assistant",
+                "sessionId": "case-session",
+                "timestamp": "2026-08-24T10:01:00.000Z",
+                "message": {"role": "assistant", "content": "Imported"},
+            })
+            .to_string(),
+        ]
+        .join("\n"),
+        now,
+    );
+    let double = fs_double(|double| {
+        double.stat_redirects.insert(
+            workspace_alias.to_string_lossy().into_owned(),
+            workspace.path().to_string_lossy().into_owned(),
+        );
+    });
+
+    let outcomes = collect_outcomes(&fixture.scanner_with(double), workspace.path(), &[]).await;
+
+    assert_eq!(importable_session_ids(&outcomes), vec!["case-session".to_owned()]);
+}
+
+#[tokio::test]
+async fn keeps_the_provider_instance_that_owns_a_custom_session_home() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let custom_home = temp_dir("t3code-codex-custom-");
+    let workspace = fixture.workspace("t3code-workspace-");
+    write_transcript(
+        &custom_home
+            .path()
+            .join("sessions")
+            .join("2026")
+            .join("08")
+            .join("24")
+            .join("rollout-custom.jsonl"),
+        &[
+            json!({"type": "session_meta", "payload": {"id": "custom-session", "cwd": workspace.path()}}).to_string(),
+            json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Use my work account"}}).to_string(),
+        ]
+        .join("\n"),
+        now,
+    );
+    fixture.configure(
+        "codex-work",
+        instance("codex", json!({"homePath": custom_home.path()})),
+    );
+
+    let threads = fixture.threads(workspace.path()).await;
+
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].provider_instance_id.as_str(), "codex-work");
+}
+
+#[tokio::test]
+async fn suppresses_duplicate_session_copies_without_reporting_a_skipped_import() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture.workspace("t3code-workspace-");
+    let contents = [
+        json!({"type": "session_meta", "payload": {"id": "copied-session", "cwd": workspace.path()}}).to_string(),
+        json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Import this session once"}}).to_string(),
+    ]
+    .join("\n");
+    write_transcript(
+        &fixture.codex_rollout("2026", "08", "24", "rollout-copy-a.jsonl"),
+        &contents,
+        now,
+    );
+    write_transcript(
+        &fixture.codex_rollout("2026", "08", "24", "rollout-copy-b.jsonl"),
+        &contents,
+        now - 1.0,
+    );
+
+    let outcomes = collect_outcomes(&fixture.scanner(), workspace.path(), &[]).await;
+
+    let tags: Vec<&str> = outcomes.iter().map(outcome_tag).collect();
+    assert_eq!(tags, vec!["Importable", "Duplicate"]);
+    match &outcomes[0] {
+        AgentSessionRecentThread::Importable { thread, .. } => {
+            assert_eq!(thread.provider_session_id, "copied-session");
+        }
+        other => panic!("expected Importable, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn streams_large_transcripts_across_providers_without_hiding_projects() {
+    let mut fixture = Fixture::new();
+    let now = ms("2026-08-24T12:00:00.000Z");
+    fixture.now_ms = Some(now);
+    let workspace = fixture.workspace("t3code-budget-workspace-");
+    let sixteen_mib = 16 * 1024 * 1024;
+    for (index, source) in [
+        AgentSessionSource::Codex,
+        AgentSessionSource::ClaudeAgent,
+        AgentSessionSource::Codex,
+        AgentSessionSource::ClaudeAgent,
+        AgentSessionSource::Codex,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let session_id = format!("budget-session-{index}");
+        let (file_path, contents) = match source {
+            AgentSessionSource::Codex => (
+                fixture.codex_rollout("2026", "08", "24", &format!("rollout-{session_id}.jsonl")),
+                [
+                    json!({"type": "session_meta", "payload": {"id": session_id, "cwd": workspace.path()}}).to_string(),
+                    json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Imported prompt"}}).to_string(),
+                ]
+                .join("
+"),
+            ),
+            AgentSessionSource::ClaudeAgent => (
+                fixture.claude_home.join("projects").join("selected").join(format!("{session_id}.jsonl")),
+                json!({
+                    "type": "user",
+                    "cwd": workspace.path(),
+                    "sessionId": session_id,
+                    "message": {"content": "Imported prompt"},
+                })
+                .to_string(),
+            ),
+        };
+        // Pad with trailing spaces to 16 MiB, as upstream does.
+        let mut body = format!("{contents}\n");
+        body.extend(std::iter::repeat_n(' ', sixteen_mib - body.len()));
+        write_transcript(&file_path, &body, now - index as f64 * 1_000.0);
+    }
+    let double = fs_double(|_| {});
+
+    let scanner = fixture.scanner_with(double.clone());
+    let scan = scanner.scan().await.expect("scan");
+    assert_eq!(scan.candidates[0].thread_count, 5);
+    let outcomes = collect_outcomes(&scanner, workspace.path(), &[]).await;
+
+    let tags: Vec<&str> = outcomes.iter().map(outcome_tag).collect();
+    assert_eq!(tags, vec!["Importable"; 5]);
+    assert_eq!(*double.reopened_bytes.lock(), 5 * sixteen_mib);
+}
+

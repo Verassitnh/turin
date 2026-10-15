@@ -65,6 +65,7 @@ when the logic is subtle (state machines, protocol framing, concurrency).
 | wf_342ba162-dd7 | T24 icon fix rounds | PASS: 1 low (fixed, merged) |
 | wf_4a9d9be1-c7c | T03 fix round re-QC | aborted: Claude session limit → rerun pending |
 | wf_e19abae9-25e | T02b persistence fix round | running (Sonnet/Haiku) |
+| wf_54f7c42f-d77 | T10a Claude protocol (SDK fidelity, correctness) | running |
 | wf_44e1924e-b5c | T21b hooks fix round | PASS: 1 medium (script files unhashed), 1 low → T21c. docs/qc/wf_44e1924e-b5c-T21b-hooks.md |
 | wf_e8a1a7c1-d53 | T21 hooks (spec, lifecycle, security/trust, process) | FAIL: 2 high, 5 medium, 6 low. docs/qc/wf_e8a1a7c1-d53-T21-hooks.md |
 | wf_d6d58e6c-789 | T24 app icon (visual fidelity, reproducibility) | PASS: 1 medium, 6 low; T scale needs user decision. docs/qc/wf_d6d58e6c-789-T24-icon.md |
@@ -106,7 +107,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T09a | Codex app-server protocol: codegen types from JSON schema + stdio JSON-RPC client | `crates/codex-app-server` | Codex → Grok | done → QC pending |
 | T09 | Codex provider: CodexAdapterV2 + provider/Codex* | `crates/provider-codex` | Codex (high) | todo |
-| T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok | done → QC pending |
+| T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok | done → QC wf_54f7c42f-d77 |
 | T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex (high) | todo |
 | T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | done (r2 routing/perms/ledger, live smoke ok) → QC pending |
 | T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok | todo |

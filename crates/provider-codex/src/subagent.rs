@@ -600,13 +600,15 @@ fn active_parent(state: &RuntimeState, parent_native_thread: &str) -> Option<Par
         .map(|turn| link_of(state, turn))
 }
 
-/// Whether a `turn/started` opens a child turn of a registered subagent. Such a
-/// turn is not yet in the state, so the frame is admitted instead of parked.
+/// Whether a `turn/started` opens a child turn of a registered subagent. It does
+/// once the parent thread has an active turn to run under. Until then the frame
+/// waits, as upstream's `pendingSubagentTurns` does, because `turn/start` can
+/// answer after the child's first frames.
 pub fn opens_child_turn(state: &RuntimeState, thread: &str, native_turn: &str) -> bool {
-    state
-        .subagents
-        .get(thread)
-        .is_some_and(|sub| !sub.native_turns.contains(native_turn))
+    state.subagents.get(thread).is_some_and(|sub| {
+        !sub.native_turns.contains(native_turn)
+            && active_parent(state, &sub.parent_native_thread).is_some()
+    })
 }
 
 /// Upstream `emitSubagentProviderTurnStarted`: registers a child turn under the

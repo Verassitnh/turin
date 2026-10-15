@@ -1465,3 +1465,146 @@ async fn subagent_replay_runs_spawned_children_and_settles_their_results() {
     }
     replay.driver.verify_complete().unwrap();
 }
+
+/// The app threads the replay created, as JSON, so a test can read lineage by name.
+fn app_threads(events: &[ProviderAdapterV2Event]) -> Vec<Value> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::AppThreadCreated { app_thread, .. } => {
+                serde_json::to_value(app_thread).ok()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn subagent_v2_replay_maps_activity_to_one_child_with_its_answer() {
+    let transcript = fixture("subagent_v2");
+    let policy = recorded_policy(&transcript, RuntimeMode::FullAccess);
+    let mut replay = open(transcript.clone()).await;
+    replay.start(&recorded_text(&transcript, 0), policy).await;
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+
+    let subagents = subagents(&seen);
+    assert_eq!(subagents.len(), 1);
+    let subagent = &subagents[0];
+    assert_eq!(
+        subagent.origin,
+        OrchestrationV2SubagentOrigin::ProviderNative
+    );
+    assert_eq!(subagent.created_by, OrchestrationV2Actor::Agent);
+    assert_eq!(subagent.driver.as_str(), "codex");
+    assert_eq!(subagent.title.as_deref(), Some("/root/say_hello"));
+    assert_eq!(subagent.status, OrchestrationV2SubagentStatus::Completed);
+    assert_eq!(subagent.result.as_deref(), Some("Hello."));
+    assert!(subagent.provider_thread_id.is_some());
+    assert!(subagent.native_task_ref.is_some());
+    assert!(subagent.completed_at.is_some());
+
+    let items = latest_items(&seen);
+    let root = "thread-1";
+    let parent_items = items_of(&items, root, "subagent");
+    assert_eq!(parent_items.len(), 1);
+    assert_eq!(parent_items[0]["subagentId"], json!(subagent.id.as_str()));
+    assert_eq!(parent_items[0]["result"], json!("Hello."));
+
+    let child = subagent
+        .child_thread_id
+        .as_ref()
+        .expect("child thread")
+        .as_str();
+    assert!(
+        items_of(&items, child, "assistant_message")
+            .iter()
+            .any(|item| item["text"] == "Hello."),
+        "child thread holds the subagent's answer"
+    );
+    let child_app = app_threads(&seen)
+        .into_iter()
+        .find(|app| app["id"] == child)
+        .expect("child app thread");
+    assert_eq!(child_app["lineage"]["parentThreadId"], root);
+    assert_eq!(child_app["lineage"]["relationshipToParent"], "subagent");
+    assert!(
+        seen.iter().any(|event| matches!(
+            event,
+            ProviderAdapterV2Event::ProviderTurnUpdated { thread_id: Some(thread), provider_turn, .. }
+                if thread.as_str() == child
+                    && provider_turn.status == turin_contracts::orchestration_v2::OrchestrationV2ProviderTurnStatus::Completed
+        )),
+        "child provider turn completes"
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn subagent_continue_replay_reopens_the_child_on_a_later_run() {
+    let transcript = fixture("subagent_continue");
+    let policy = recorded_policy(&transcript, RuntimeMode::FullAccess);
+    let mut replay = open(transcript.clone()).await;
+    replay
+        .start(&recorded_text(&transcript, 0), policy.clone())
+        .await;
+    let mut seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    replay.start(&recorded_text(&transcript, 1), policy).await;
+    let second = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&second),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    seen.extend(second);
+
+    let subagents = subagents(&seen);
+    assert_eq!(subagents.len(), 1);
+    let subagent = &subagents[0];
+    assert_eq!(subagent.status, OrchestrationV2SubagentStatus::Completed);
+    assert_eq!(
+        subagent.result.as_deref(),
+        Some("continued subagent response")
+    );
+    assert_eq!(
+        serde_json::to_value(subagent).unwrap()["runId"],
+        json!("run-2"),
+        "the continued subagent belongs to the run that resumed it"
+    );
+
+    let child = subagent
+        .child_thread_id
+        .as_ref()
+        .expect("child thread")
+        .as_str();
+    let items = latest_items(&seen);
+    let child_answers: Vec<&str> = items_of(&items, child, "assistant_message")
+        .iter()
+        .filter_map(|item| item["text"].as_str())
+        .collect();
+    assert!(child_answers.contains(&"initial subagent response"));
+    assert!(child_answers.contains(&"continued subagent response"));
+    assert!(
+        items_of(&items, child, "user_message").len() >= 2,
+        "the child keeps its spawn prompt and the message that resumed it"
+    );
+    let child_turns: std::collections::BTreeSet<String> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::ProviderTurnUpdated {
+                thread_id: Some(thread),
+                provider_turn,
+                ..
+            } if thread.as_str() == child => Some(provider_turn.id.as_str().to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(child_turns.len(), 2, "the child has two provider turns");
+    replay.driver.verify_complete().unwrap();
+}

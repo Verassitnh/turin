@@ -1217,7 +1217,10 @@ pub fn agent_replay_stats(
     through_sequence: i64,
     max_events: u64,
 ) -> Result<AgentReplayStats, PersistenceError> {
-    let limit = i64::try_from(max_events).unwrap_or(i64::MAX).max(0) + 1;
+    let limit = i64::try_from(max_events)
+        .unwrap_or(MAX_SAFE_INTEGER)
+        .clamp(0, MAX_SAFE_INTEGER)
+        .saturating_add(1);
     let sql = format!(
         "
         SELECT

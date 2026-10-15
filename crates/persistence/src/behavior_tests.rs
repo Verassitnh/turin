@@ -1137,3 +1137,13 @@ async fn unknown_event_types_are_rejected_before_insert() {
     let message = err.to_string();
     assert!(message.contains("appendAgentEvents:decode"), "{message}");
 }
+
+#[tokio::test]
+async fn agent_replay_stats_accepts_a_huge_event_cap() {
+    let store = memory_store().await;
+    let stats = store
+        .get_agent_replay_stats("thread".into(), 0, 1, u64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(stats.event_count, 0);
+}

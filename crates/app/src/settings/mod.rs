@@ -16,3 +16,4 @@ pub mod github_account_logic;
 pub mod project_settings_logic;
 pub mod provider_settings_logic;
 pub mod provider_status;
+pub mod search;

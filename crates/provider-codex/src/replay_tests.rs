@@ -15,9 +15,11 @@ use turin_contracts::{
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2AppThread, OrchestrationV2CreationSource,
+        OrchestrationV2ExecutionNodeKind, OrchestrationV2PlanArtifact,
+        OrchestrationV2PlanArtifactStatus, OrchestrationV2PlanStepStatus,
         OrchestrationV2ProviderThread, OrchestrationV2ProviderTurn, OrchestrationV2RuntimeRequest,
         OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
-        OrchestrationV2TurnItem,
+        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
     },
     provider_instance::ProviderInstanceId,
     provider_policy::{ProviderInteractionMode, ProviderUserInputAnswers, RuntimeMode},
@@ -288,14 +290,50 @@ fn terminal_status(events: &[ProviderAdapterV2Event]) -> ProviderAdapterV2TurnTe
         .expect("terminal event")
 }
 
+/// Completed assistant texts only: streaming updates are partial by design.
 fn assistant_texts(events: &[ProviderAdapterV2Event]) -> Vec<String> {
     events
         .iter()
         .filter_map(|event| match event {
             ProviderAdapterV2Event::TurnItemUpdated {
-                turn_item: OrchestrationV2TurnItem::AssistantMessage { text, .. },
+                turn_item:
+                    OrchestrationV2TurnItem::AssistantMessage {
+                        text,
+                        status: OrchestrationV2TurnItemStatus::Completed,
+                        ..
+                    },
                 ..
             } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn node_kinds(events: &[ProviderAdapterV2Event]) -> Vec<OrchestrationV2ExecutionNodeKind> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::NodeUpdated { node, .. } => Some(node.kind),
+            _ => None,
+        })
+        .collect()
+}
+
+fn turn_items(events: &[ProviderAdapterV2Event]) -> Vec<&OrchestrationV2TurnItem> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::TurnItemUpdated { turn_item, .. } => Some(turn_item),
+            _ => None,
+        })
+        .collect()
+}
+
+fn plan_artifacts(events: &[ProviderAdapterV2Event]) -> Vec<&OrchestrationV2PlanArtifact> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::PlanUpdated { plan, .. } => Some(plan),
             _ => None,
         })
         .collect()
@@ -681,4 +719,174 @@ fn provider_turn_of(events: &[ProviderAdapterV2Event]) -> turin_contracts::Provi
             _ => None,
         })
         .expect("provider turn")
+}
+
+#[tokio::test]
+async fn todo_list_replay_tracks_plan_steps_and_command() {
+    let transcript = fixture("todo_list");
+    let text = recorded_text(&transcript, 0);
+    let policy = recorded_policy(&transcript, RuntimeMode::FullAccess);
+    let mut replay = open(transcript).await;
+    replay.start(&text, policy).await;
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    assert_eq!(
+        assistant_texts(&seen),
+        vec!["todo list fixture complete".to_owned()]
+    );
+    let kinds = node_kinds(&seen);
+    assert!(kinds.contains(&OrchestrationV2ExecutionNodeKind::TodoList));
+    assert!(kinds.contains(&OrchestrationV2ExecutionNodeKind::ToolCall));
+    let items = turn_items(&seen);
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, OrchestrationV2TurnItem::CommandExecution { .. }))
+    );
+    let todo = plan_artifacts(&seen)
+        .into_iter()
+        .rev()
+        .find_map(|plan| match plan {
+            OrchestrationV2PlanArtifact::TodoList { steps, .. } => Some(steps.clone()),
+            _ => None,
+        })
+        .expect("todo list plan");
+    assert_eq!(todo.len(), 3);
+    assert!(
+        todo.iter()
+            .all(|step| step.status == OrchestrationV2PlanStepStatus::Completed)
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn web_search_replay_reports_completed_search_item() {
+    let transcript = fixture("web_search");
+    let text = recorded_text(&transcript, 0);
+    let policy = recorded_policy(&transcript, RuntimeMode::FullAccess);
+    let mut replay = open(transcript).await;
+    replay.start(&text, policy).await;
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    assert_eq!(
+        assistant_texts(&seen).last().map(String::as_str),
+        Some("web search fixture complete")
+    );
+    assert!(runtime_requests(&seen).is_empty());
+    let searches: Vec<_> = turn_items(&seen)
+        .into_iter()
+        .filter_map(|item| match item {
+            OrchestrationV2TurnItem::WebSearch {
+                status, patterns, ..
+            } => Some((*status, patterns.clone().unwrap_or_default())),
+            _ => None,
+        })
+        .collect();
+    let (status, patterns) = searches.last().expect("web search item");
+    assert_eq!(*status, OrchestrationV2TurnItemStatus::Completed);
+    assert!(
+        patterns
+            .iter()
+            .any(|p| p == "FIFA World Cup 2026 ticket prices official")
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn proposed_plan_replay_emits_active_plan_artifact() {
+    let transcript = fixture("proposed_plan");
+    let text = recorded_text(&transcript, 0);
+    let params = recorded_turn_params(&transcript, 0);
+    let mut replay = open(transcript).await;
+    let policy = policy(
+        RuntimeMode::FullAccess,
+        ProviderInteractionMode::Plan,
+        None,
+        Some(params["sandboxPolicy"].clone()),
+    );
+    replay.start(&text, policy).await;
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    let proposed = plan_artifacts(&seen)
+        .into_iter()
+        .rev()
+        .find_map(|plan| match plan {
+            OrchestrationV2PlanArtifact::ProposedPlan {
+                status, markdown, ..
+            } => Some((*status, markdown.clone())),
+            _ => None,
+        })
+        .expect("proposed plan");
+    assert_eq!(proposed.0, OrchestrationV2PlanArtifactStatus::Active);
+    assert!(proposed.1.contains("replay") && proposed.1.contains("fixture"));
+    let finished = turn_items(&seen)
+        .into_iter()
+        .rev()
+        .find_map(|item| match item {
+            OrchestrationV2TurnItem::ProposedPlan {
+                streaming, status, ..
+            } => Some((*streaming, *status)),
+            _ => None,
+        });
+    assert_eq!(
+        finished,
+        Some((false, OrchestrationV2TurnItemStatus::Completed))
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn mid_tool_interrupt_terminates_background_terminal() {
+    let transcript = fixture("turn_interrupt_mid_tool");
+    let text = recorded_text(&transcript, 0);
+    let policy = recorded_policy(&transcript, RuntimeMode::FullAccess);
+    let mut replay = open(transcript).await;
+    replay.start(&text, policy).await;
+    let started = replay.next_until(is_turn_running).await;
+    let native_turn = provider_turn_of(&started);
+    replay
+        .next_until(|event| {
+            matches!(
+                event,
+                ProviderAdapterV2Event::TurnItemUpdated {
+                    turn_item: OrchestrationV2TurnItem::CommandExecution {
+                        status: OrchestrationV2TurnItemStatus::Running,
+                        ..
+                    },
+                    ..
+                }
+            )
+        })
+        .await;
+    replay
+        .runtime
+        .interrupt_turn(ProviderAdapterV2InterruptInput {
+            provider_thread: replay.thread.clone(),
+            provider_turn_id: native_turn,
+            request_runtime_restart: None,
+        })
+        .await
+        .unwrap();
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Interrupted
+    );
+    assert!(turn_items(&seen).iter().any(|item| matches!(
+        item,
+        OrchestrationV2TurnItem::CommandExecution {
+            status: OrchestrationV2TurnItemStatus::Interrupted,
+            ..
+        }
+    )));
+    replay.driver.verify_complete().unwrap();
 }

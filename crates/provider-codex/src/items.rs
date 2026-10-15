@@ -13,18 +13,20 @@ use crate::{
 };
 use serde_json::{Value, json};
 use turin_contracts::{
-    PlanId, TrimmedNonEmptyString, TurnItemId, UtcDateTime,
+    PlanId, ProviderSessionId, TrimmedNonEmptyString, TurnItemId, UtcDateTime,
     base_schemas::js_trim,
     orchestration_v2::{
-        OrchestrationV2ConversationMessage, OrchestrationV2ConversationMessageRole,
-        OrchestrationV2CreationSource, OrchestrationV2ExecutionNode,
-        OrchestrationV2ExecutionNodeKind, OrchestrationV2ExecutionNodeStatus,
-        OrchestrationV2PlanStep, OrchestrationV2ProviderRef, OrchestrationV2TurnItem,
-        OrchestrationV2TurnItemStatus,
+        MessageResponseMode, OrchestrationV2ConversationMessage,
+        OrchestrationV2ConversationMessageRole, OrchestrationV2CreationSource,
+        OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeKind,
+        OrchestrationV2ExecutionNodeStatus, OrchestrationV2PlanStep, OrchestrationV2ProviderRef,
+        OrchestrationV2ResponseCapability, OrchestrationV2RuntimeRequest,
+        OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
+        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus, OrchestrationV2UserInputQuestion,
     },
     provider_runtime::{ToolActivitySourceKind, ToolActivitySurface},
 };
-use turin_provider_core::id_allocator::derive;
+use turin_provider_core::id_allocator::{IdAllocator, derive};
 
 /// One item's node and turn item, plus the conversation message for a completed assistant text.
 pub struct ItemArtifacts {
@@ -706,4 +708,159 @@ pub fn todo_list(
         explanation: explanation.map(str::to_owned),
     };
     (node, turn_item)
+}
+
+/// What a user-input request projects to: its node, the runtime request, and its
+/// turn item. Upstream's `buildUserInputRequestArtifacts`.
+pub struct UserInputArtifacts {
+    pub node: OrchestrationV2ExecutionNode,
+    pub request: OrchestrationV2RuntimeRequest,
+    pub turn_item: OrchestrationV2TurnItem,
+}
+
+/// Builds a user-input request under `turn`. A request with a live session is
+/// answered on the session. Without one it is answered by dispatching a message.
+pub fn user_input_request(
+    turn: &mut TurnState,
+    native_item: &str,
+    native_request: &str,
+    questions: Vec<OrchestrationV2UserInputQuestion>,
+    session: Option<ProviderSessionId>,
+    now: UtcDateTime,
+) -> UserInputArtifacts {
+    let provider_turn = derive::provider_turn(&driver(), &turn.native_turn);
+    let request_id =
+        IdAllocator.runtime_request(&driver(), Some(&provider_turn), Some(native_request));
+    let (ordinal, _) = resolve_position(turn, native_item, None, now);
+    let node_id = derive::node_from_provider_item(&driver(), native_item);
+    let native_ref = native_item_ref(native_item);
+    let node = OrchestrationV2ExecutionNode {
+        id: node_id.clone(),
+        thread_id: turn.input.thread_id.clone(),
+        run_id: turn.run_id(),
+        parent_node_id: Some(turn.input.root_node_id.clone()),
+        root_node_id: turn.input.root_node_id.clone(),
+        kind: OrchestrationV2ExecutionNodeKind::UserInputRequest,
+        status: OrchestrationV2ExecutionNodeStatus::Waiting,
+        counts_for_run: false,
+        provider_thread_id: Some(turn.input.provider_thread.id.clone()),
+        provider_turn_id: Some(provider_turn.clone()),
+        native_item_ref: Some(native_ref.clone()),
+        runtime_request_id: Some(request_id.clone()),
+        checkpoint_scope_id: None,
+        started_at: Some(now),
+        completed_at: None,
+    };
+    let response_mode = session.is_none().then_some(MessageResponseMode);
+    let capability = match &session {
+        Some(provider_session_id) => OrchestrationV2ResponseCapability::Live {
+            provider_session_id: provider_session_id.clone(),
+        },
+        None => OrchestrationV2ResponseCapability::Message,
+    };
+    let turn_item = OrchestrationV2TurnItem::UserInputRequest {
+        tool_non_execution_kind: None,
+        tool_surface: None,
+        tool_icon: None,
+        tool_source: None,
+        id: derive::turn_item_from_provider_item(&driver(), native_item),
+        thread_id: turn.input.thread_id.clone(),
+        run_id: turn.run_id(),
+        node_id: Some(node_id.clone()),
+        provider_thread_id: Some(turn.input.provider_thread.id.clone()),
+        provider_turn_id: Some(provider_turn.clone()),
+        native_item_ref: Some(native_ref.clone()),
+        parent_item_id: None,
+        ordinal,
+        status: OrchestrationV2TurnItemStatus::Waiting,
+        title: None,
+        started_at: Some(now),
+        completed_at: None,
+        updated_at: now,
+        request_id: request_id.clone(),
+        questions,
+        response_mode,
+        question_answer: None,
+    };
+    let request = OrchestrationV2RuntimeRequest {
+        id: request_id,
+        node_id,
+        provider_turn_id: Some(provider_turn),
+        native_request_ref: Some(native_item_ref(native_request)),
+        kind: OrchestrationV2RuntimeRequestKind::UserInput,
+        status: OrchestrationV2RuntimeRequestStatus::Pending,
+        response_capability: capability,
+        created_at: now,
+        resolved_at: None,
+        decision: None,
+        answers: None,
+    };
+    UserInputArtifacts {
+        node,
+        request,
+        turn_item,
+    }
+}
+
+/// Upstream's question mapping for `item/tool/requestUserInput`: each field falls
+/// back to a default when blank, and an option's description falls back to its label.
+pub fn codex_questions(questions: &Value) -> Vec<OrchestrationV2UserInputQuestion> {
+    let text = |value: Option<&str>, fallback: &str| {
+        value
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map_or_else(|| fallback.to_owned(), str::to_owned)
+    };
+    questions
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(index, question)| {
+            let options: Vec<Value> = question
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .map(|(option_index, option)| {
+                    let label = text(
+                        option.get("label").and_then(Value::as_str),
+                        &format!("Option {}", option_index + 1),
+                    );
+                    let description =
+                        text(option.get("description").and_then(Value::as_str), &label);
+                    json!({"label": label, "description": description})
+                })
+                .collect();
+            user_input_question(
+                &text(
+                    question.get("id").and_then(Value::as_str),
+                    &format!("question-{}", index + 1),
+                ),
+                &text(question.get("header").and_then(Value::as_str), "Question"),
+                &text(
+                    question.get("question").and_then(Value::as_str),
+                    "Choose an answer.",
+                ),
+                options,
+            )
+        })
+        .collect()
+}
+
+/// One user-input question in the contract's shape.
+pub fn user_input_question(
+    id: &str,
+    header: &str,
+    question: &str,
+    options: Vec<Value>,
+) -> OrchestrationV2UserInputQuestion {
+    serde_json::from_value(json!({
+        "id": id,
+        "header": header,
+        "question": question,
+        "options": options,
+    }))
+    .expect("user input question")
 }

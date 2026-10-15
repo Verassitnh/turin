@@ -1129,6 +1129,27 @@ async fn plan_questions_replay_answers_user_input_request() {
         .await;
     let request = runtime_requests(&seen).remove(0);
     assert_eq!(request.kind, OrchestrationV2RuntimeRequestKind::UserInput);
+    // The question is a waiting node and item under the turn's root, owned by its request.
+    let node = seen
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::NodeUpdated { node, .. } if node.id == request.node_id => {
+                Some(node.clone())
+            }
+            _ => None,
+        })
+        .expect("question node");
+    assert_eq!(
+        node.kind,
+        OrchestrationV2ExecutionNodeKind::UserInputRequest
+    );
+    assert_eq!(node.status, OrchestrationV2ExecutionNodeStatus::Waiting);
+    assert_eq!(node.runtime_request_id, Some(request.id.clone()));
+    let items = latest_items(&seen);
+    let question = items_of(&items, "thread-1", "user_input_request");
+    assert_eq!(question.len(), 1);
+    assert_eq!(question[0]["status"], "waiting");
+    assert!(question[0]["questions"][0]["header"].is_string());
     let answers: ProviderUserInputAnswers =
         serde_json::from_value(json!({"schema_preference": "Strict schemas (Recommended)"}))
             .unwrap();
@@ -2055,4 +2076,67 @@ fn context_compaction_is_one_turn_item_that_runs_then_completes() {
     assert_eq!(done[0]["status"], "completed");
     assert_eq!(done[0]["title"], "Context compacted");
     assert!(done[0]["completedAt"].is_string());
+}
+
+#[test]
+fn async_agent_message_questions_become_a_message_answered_request() {
+    let mut state = RuntimeState::default();
+    state
+        .turns
+        .insert("native-turn-1".into(), detached_turn("native-turn-1"));
+    let item = json!({
+        "type": "agentMessage",
+        "id": "msg-1",
+        "text": "ignored",
+        "phase": "final_answer",
+        "delivery": "async",
+        "questions": [{"title": "Which database?", "options": ["Postgres", "SQLite"]}],
+    });
+    notify(
+        &mut state,
+        "item/started",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "startedAtMs": 1, "item": item}),
+    );
+    let events = notify(
+        &mut state,
+        "item/completed",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "item": item}),
+    );
+    let requests = runtime_requests(&events);
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.kind, OrchestrationV2RuntimeRequestKind::UserInput);
+    assert_eq!(
+        request.response_capability,
+        turin_contracts::orchestration_v2::OrchestrationV2ResponseCapability::Message,
+        "the answer comes back as a message, not on the session"
+    );
+    assert!(
+        !state.requests.contains_key(&request.id),
+        "no session reply is registered for an async question"
+    );
+    let node = events
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::NodeUpdated { node, .. } if node.id == request.node_id => {
+                Some(node.clone())
+            }
+            _ => None,
+        })
+        .expect("question node");
+    assert_eq!(
+        node.kind,
+        OrchestrationV2ExecutionNodeKind::UserInputRequest
+    );
+    let items = latest_items(&events);
+    let question = items_of(&items, "thread-1", "user_input_request");
+    assert_eq!(question.len(), 1);
+    assert_eq!(question[0]["questions"][0]["header"], "Question");
+    assert_eq!(question[0]["questions"][0]["question"], "Which database?");
+    assert_eq!(question[0]["questions"][0]["options"][1]["label"], "SQLite");
+    assert_eq!(question[0]["responseMode"], "message");
+    assert!(
+        items_of(&items, "thread-1", "assistant_message").is_empty(),
+        "the question replaces the message text"
+    );
 }

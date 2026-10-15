@@ -1029,6 +1029,54 @@ fn approval_kind(method: &str) -> Option<ProviderRequestKind> {
     }
 }
 
+/// Upstream `item/tool/requestUserInput`: a plan question is answered on the turn
+/// that asked it, with its node and item under that turn's root.
+fn project_user_input(
+    request: PendingRequest,
+    state: &mut RuntimeState,
+    session_id: &ProviderSessionId,
+) -> Vec<ProviderAdapterV2Event> {
+    let Some(native_turn) = request.params.get("turnId").and_then(Value::as_str) else {
+        return vec![];
+    };
+    let Some(turn) = state.turns.get_mut(native_turn) else {
+        return vec![];
+    };
+    let native_item = request
+        .params
+        .get("itemId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let questions = items::codex_questions(request.params.get("questions").unwrap_or(&Value::Null));
+    let artifacts = items::user_input_request(
+        turn,
+        native_item,
+        native_item,
+        questions,
+        Some(session_id.clone()),
+        UtcDateTime::now(),
+    );
+    let thread_id = turn.input.thread_id.clone();
+    state
+        .requests
+        .insert(artifacts.request.id.clone(), request.id);
+    vec![
+        ProviderAdapterV2Event::NodeUpdated {
+            driver: driver(),
+            node: artifacts.node,
+        },
+        ProviderAdapterV2Event::TurnItemUpdated {
+            driver: driver(),
+            turn_item: artifacts.turn_item,
+        },
+        ProviderAdapterV2Event::RuntimeRequestUpdated {
+            driver: driver(),
+            thread_id: Some(thread_id),
+            runtime_request: artifacts.request,
+        },
+    ]
+}
+
 /// Upstream `buildApprovalRequestArtifacts`. A request from a subagent is asked on
 /// the top-level turn that owns it, under the subagent that asked, so the user can
 /// answer where they can see it. Native subagent threads are hidden.
@@ -1040,6 +1088,9 @@ fn project_request(
     let Some(native_turn) = request.params.get("turnId").and_then(Value::as_str) else {
         return vec![];
     };
+    if runtime_kind(&request.method) == OrchestrationV2RuntimeRequestKind::UserInput {
+        return project_user_input(request, state, session_id);
+    }
     let Some(context) = state.turns.get(native_turn) else {
         return vec![];
     };
@@ -1060,30 +1111,9 @@ fn project_request(
     let provider_turn_id = derive::provider_turn(&driver(), &owner_native);
     let id = IdAllocator.runtime_request(&driver(), Some(&provider_turn_id), native_req);
     state.requests.insert(id.clone(), request.id);
-    let thread_id = owner.input.thread_id.clone();
     let kind = runtime_kind(&request.method);
     let Some(item_kind) = approval_kind(&request.method) else {
-        // Plan questions take the user-input path, whose node and item are not ported.
-        let runtime_request = OrchestrationV2RuntimeRequest {
-            id,
-            node_id: owner.input.root_node_id.clone(),
-            provider_turn_id: Some(provider_turn_id),
-            native_request_ref: native_req.map(native_ref),
-            kind: OrchestrationV2RuntimeRequestKind::UserInput,
-            status: OrchestrationV2RuntimeRequestStatus::Pending,
-            response_capability: OrchestrationV2ResponseCapability::Live {
-                provider_session_id: session_id.clone(),
-            },
-            created_at: now,
-            resolved_at: None,
-            decision: None,
-            answers: None,
-        };
-        return vec![ProviderAdapterV2Event::RuntimeRequestUpdated {
-            driver: driver(),
-            thread_id: Some(thread_id),
-            runtime_request,
-        }];
+        return vec![];
     };
     let ordinal_key = format!(
         "{}:approval:{}",

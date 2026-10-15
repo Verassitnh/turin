@@ -743,6 +743,70 @@ fn sub_agent_activity(
     }
 }
 
+/// The questions an async agent message asks, when it asks any.
+fn async_questions(item: &Value) -> Option<&Vec<Value>> {
+    if str_of(item, "delivery") != Some("async") {
+        return None;
+    }
+    item.get("questions")
+        .and_then(Value::as_array)
+        .filter(|questions| !questions.is_empty())
+}
+
+/// Upstream's async-question branch of `item/completed`. The questions take the
+/// builder's shape, each titled `Question`, and are answered by a message. No
+/// runtime request is registered for a reply on the session.
+fn async_question(
+    turn: &mut TurnState,
+    native_item: &str,
+    questions: &[Value],
+    now: UtcDateTime,
+) -> Vec<ProviderAdapterV2Event> {
+    let codex_shape: Vec<Value> = questions
+        .iter()
+        .enumerate()
+        .map(|(index, question)| {
+            let options: Vec<Value> = question
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|label| json!({"label": label, "description": ""}))
+                .collect();
+            json!({
+                "id": index.to_string(),
+                "header": "Question",
+                "question": str_of(question, "title").unwrap_or_default(),
+                "options": options,
+            })
+        })
+        .collect();
+    let artifacts = items::user_input_request(
+        turn,
+        native_item,
+        &format!("async:{native_item}"),
+        items::codex_questions(&Value::Array(codex_shape)),
+        None,
+        now,
+    );
+    vec![
+        ProviderAdapterV2Event::NodeUpdated {
+            driver: driver(),
+            node: artifacts.node,
+        },
+        ProviderAdapterV2Event::TurnItemUpdated {
+            driver: driver(),
+            turn_item: artifacts.turn_item,
+        },
+        ProviderAdapterV2Event::RuntimeRequestUpdated {
+            driver: driver(),
+            thread_id: Some(turn.input.thread_id.clone()),
+            runtime_request: artifacts.request,
+        },
+    ]
+}
+
 /// Upstream `emitCompactionItem`: a context compaction is one turn item with no
 /// node. It is titled while it runs and again once it completes.
 fn compaction(
@@ -878,6 +942,11 @@ fn item_completed(
             complete_text(state, turn, &native_item, final_text, true, false)
         }
         "agentMessage" => {
+            // An async message with questions asks them, and its text is not projected.
+            if let Some(questions) = async_questions(item) {
+                turn.final_answer_items.retain(|id| id != &native_item);
+                return async_question(turn, &native_item, questions, now);
+            }
             let final_text = str_of(item, "text").unwrap_or_default().to_owned();
             let final_answer = str_of(item, "phase") != Some("commentary");
             let mut events = complete_text(

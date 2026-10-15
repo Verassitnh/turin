@@ -1,5 +1,6 @@
 //! turin-shared (see PORTING.md for upstream mapping)
 
+pub mod agent_awareness;
 pub mod agent_scope;
 pub mod array;
 pub mod atomic_write;
@@ -37,6 +38,7 @@ pub mod markdown_links;
 //TODO pub mod markdown_list_indentation;
 pub mod orchestration_timing;
 pub mod orchestration_v2_bounded_snapshot;
+pub mod orchestration_v2_pending_background_work;
 pub mod orchestration_v2_thread_error;
 pub mod orchestration_v2_timeline;
 pub mod path;

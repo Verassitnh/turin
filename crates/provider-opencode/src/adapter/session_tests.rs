@@ -2087,3 +2087,92 @@ async fn v2_child_execution_is_a_turn_under_a_root_turn_with_the_task_prompt() {
     );
     session.close().await;
 }
+
+#[tokio::test]
+async fn v2_a_failed_reply_keeps_the_request_answerable() {
+    let replies = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&replies);
+    let script = script(move |request| {
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "POST" && request.target.contains("/permission/") {
+            // The first reply fails; the retry lands.
+            if counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return FakeResponse::json(500, r#"{"error":"boom"}"#);
+            }
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e1","type":"permission.asked","data":{"sessionID":"ses_1","id":"perm_5","permission":"bash","patterns":["rm"]}}).to_string(),
+        )))
+        .unwrap();
+    let asked = events_until(&mut events, |value| {
+        value["type"] == "runtime_request.updated"
+    })
+    .await;
+    let request_id = of_type(&asked, "runtime_request.updated")
+        .into_iter()
+        .next()
+        .expect("request")["runtime_request"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let answer = || ProviderAdapterV2RuntimeRequestResponseInput {
+        request_id: turin_contracts::RuntimeRequestId::new(request_id.clone()).unwrap(),
+        decision: Some(ProviderApprovalDecision::Decline),
+        answers: None,
+        response: None,
+    };
+
+    // The failed reply leaves the request waiting and answerable: nothing settles.
+    assert!(session.respond_to_runtime_request(answer()).await.is_err());
+    // The retry lands and settles it, cancelled because it was declined.
+    session.respond_to_runtime_request(answer()).await.unwrap();
+    let settled = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "approval_request"
+            && value["turn_item"]["status"] == "cancelled"
+    })
+    .await;
+    assert!(
+        of_type(&settled, "runtime_request.updated")
+            .iter()
+            .any(|event| event["runtime_request"]["status"] == "cancelled"),
+        "{settled:#?}"
+    );
+    assert_eq!(replies.load(std::sync::atomic::Ordering::SeqCst), 2);
+    session.close().await;
+}

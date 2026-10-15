@@ -105,6 +105,7 @@ struct V2Thread {
     unsettled: bool,
 }
 
+#[derive(Clone)]
 enum Ask {
     Permission {
         action: String,
@@ -114,6 +115,7 @@ enum Ask {
     Form(NativeForm),
 }
 
+#[derive(Clone)]
 struct Pending {
     request_id: RuntimeRequestId,
     native_id: String,
@@ -122,6 +124,8 @@ struct Pending {
     /// The node and item shown while the request waits, settled when it ends.
     node: OrchestrationV2ExecutionNode,
     item: OrchestrationV2TurnItem,
+    /// A reply is in flight. The entry stays until it lands, so a failed reply can be retried.
+    answering: bool,
 }
 
 /// A child session a `task` call revealed (upstream's child `ThreadState`): its app thread, its
@@ -1059,6 +1063,7 @@ impl OpenCodeV2Session {
                 ask,
                 node: node.clone(),
                 item: item.clone(),
+                answering: false,
             },
         );
         drop(guard);
@@ -1502,6 +1507,120 @@ impl OpenCodeV2Session {
             driver: self.driver.clone(),
             turn_item: item,
         });
+    }
+
+    /// Sends the answer to OpenCode. Returns whether the request ends cancelled rather than
+    /// resolved; the caller settles the request once the reply has landed.
+    async fn answer(
+        &self,
+        pending: &Pending,
+        input: &ProviderAdapterV2RuntimeRequestResponseInput,
+    ) -> Result<bool, ProviderAdapterV2Error> {
+        match pending.ask.clone() {
+            Ask::Permission {
+                action,
+                resources,
+                save,
+            } => {
+                let decision = input.decision.ok_or_else(|| {
+                    ProviderAdapterV2Error::protocol(format!(
+                        "OpenCode approval request {} requires a decision",
+                        input.request_id
+                    ))
+                })?;
+                if matches!(
+                    decision,
+                    ProviderApprovalDecision::AcceptForSession
+                        | ProviderApprovalDecision::AcceptAlways
+                ) {
+                    let patterns = if save.is_empty() {
+                        vec!["*".to_owned()]
+                    } else {
+                        save.clone()
+                    };
+                    let rules = {
+                        let mut guard = self.inner.lock();
+                        guard.threads.get_mut(&pending.session_id).map(|thread| {
+                            for resource in &patterns {
+                                let grant = SessionPermissionRule {
+                                    action: action.clone(),
+                                    resource: resource.clone(),
+                                    effect: "allow".to_owned(),
+                                };
+                                if !thread.grants.iter().any(|existing| {
+                                    existing.action == grant.action
+                                        && existing.resource == grant.resource
+                                }) {
+                                    thread.grants.push(grant);
+                                }
+                            }
+                            let rules = session_permission_rules(
+                                mode_name(thread.runtime_mode),
+                                &thread.interaction,
+                                &thread.grants,
+                                &[],
+                            );
+                            thread.rules = rules.clone();
+                            rules
+                        })
+                    };
+                    if let Some(rules) = rules {
+                        let _ = self
+                            .client
+                            .update_session(&pending.session_id, &json!({ "permissions": rules }))
+                            .await;
+                    }
+                }
+                if decision == ProviderApprovalDecision::Decline {
+                    let note = declined_note(&action, &resources);
+                    let _ = self
+                        .client
+                        .synthetic(
+                            &pending.session_id,
+                            &json!({ "text": note, "delivery": "steer", "resume": false }),
+                        )
+                        .await;
+                }
+                let mut body = json!({ "decision": v2_permission_decision(decision) });
+                if decision == ProviderApprovalDecision::Decline {
+                    body["message"] = json!(DECLINED);
+                }
+                self.client
+                    .reply_permission(&pending.session_id, &pending.native_id, &body)
+                    .await
+                    .map_err(http_err)?;
+                let cancelled = matches!(
+                    decision,
+                    ProviderApprovalDecision::Decline | ProviderApprovalDecision::Cancel
+                );
+                Ok(cancelled)
+            }
+            Ask::Form(form) => {
+                let decline = matches!(
+                    input.decision,
+                    Some(ProviderApprovalDecision::Decline | ProviderApprovalDecision::Cancel)
+                );
+                let cancelled = input.answers.is_none() || decline;
+                if cancelled {
+                    self.client
+                        .cancel_form(&pending.session_id, &form.id, None)
+                        .await
+                        .map_err(http_err)?;
+                } else {
+                    let answers = input.answers.clone().unwrap_or_default();
+                    let map = answers
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect();
+                    let answer = form_answer(&form, &map);
+                    self.client
+                        .reply_form(&pending.session_id, &form.id, &answer)
+                        .await
+                        .map_err(http_err)?;
+                }
+                Ok(cancelled)
+            }
+        }
     }
 
     /// `settleRequest`: the request ends, resolved or cancelled, with its node and item.
@@ -2277,7 +2396,9 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
         &self,
         input: ProviderAdapterV2RuntimeRequestResponseInput,
     ) -> Result<(), ProviderAdapterV2Error> {
-        let pending = {
+        // The entry stays until the reply lands, so a failed reply can be retried. A second
+        // answer while one is in flight is refused, as upstream's `answering` flag does.
+        let (key, pending) = {
             let mut guard = self.inner.lock();
             let key = guard
                 .pending
@@ -2290,119 +2411,21 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                     input.request_id
                 )));
             };
-            guard.pending.remove(&key).expect("just found")
-        };
-        match pending.ask {
-            Ask::Permission {
-                action,
-                resources,
-                save,
-            } => {
-                let decision = input.decision.ok_or_else(|| {
-                    ProviderAdapterV2Error::protocol(format!(
-                        "OpenCode approval request {} requires a decision",
-                        input.request_id
-                    ))
-                })?;
-                if matches!(
-                    decision,
-                    ProviderApprovalDecision::AcceptForSession
-                        | ProviderApprovalDecision::AcceptAlways
-                ) {
-                    let patterns = if save.is_empty() {
-                        vec!["*".to_owned()]
-                    } else {
-                        save.clone()
-                    };
-                    let rules = {
-                        let mut guard = self.inner.lock();
-                        guard.threads.get_mut(&pending.session_id).map(|thread| {
-                            for resource in &patterns {
-                                let grant = SessionPermissionRule {
-                                    action: action.clone(),
-                                    resource: resource.clone(),
-                                    effect: "allow".to_owned(),
-                                };
-                                if !thread.grants.iter().any(|existing| {
-                                    existing.action == grant.action
-                                        && existing.resource == grant.resource
-                                }) {
-                                    thread.grants.push(grant);
-                                }
-                            }
-                            let rules = session_permission_rules(
-                                mode_name(thread.runtime_mode),
-                                &thread.interaction,
-                                &thread.grants,
-                                &[],
-                            );
-                            thread.rules = rules.clone();
-                            rules
-                        })
-                    };
-                    if let Some(rules) = rules {
-                        let _ = self
-                            .client
-                            .update_session(&pending.session_id, &json!({ "permissions": rules }))
-                            .await;
-                    }
-                }
-                if decision == ProviderApprovalDecision::Decline {
-                    let note = declined_note(&action, &resources);
-                    let _ = self
-                        .client
-                        .synthetic(
-                            &pending.session_id,
-                            &json!({ "text": note, "delivery": "steer", "resume": false }),
-                        )
-                        .await;
-                }
-                let mut body = json!({ "decision": v2_permission_decision(decision) });
-                if decision == ProviderApprovalDecision::Decline {
-                    body["message"] = json!(DECLINED);
-                }
-                self.client
-                    .reply_permission(&pending.session_id, &pending.native_id, &body)
-                    .await
-                    .map_err(http_err)?;
-                let cancelled = matches!(
-                    decision,
-                    ProviderApprovalDecision::Decline | ProviderApprovalDecision::Cancel
-                );
-                let mut guard = self.inner.lock();
-                self.settle_request(
-                    &mut guard,
-                    &pending.request_id,
-                    &pending.session_id,
-                    &pending.node,
-                    &pending.item,
-                    cancelled,
-                );
+            let entry = guard.pending.get_mut(&key).expect("just found");
+            if entry.answering {
+                return Err(ProviderAdapterV2Error::protocol(format!(
+                    "OpenCode request {} is already being answered",
+                    input.request_id
+                )));
             }
-            Ask::Form(form) => {
-                let decline = matches!(
-                    input.decision,
-                    Some(ProviderApprovalDecision::Decline | ProviderApprovalDecision::Cancel)
-                );
-                let cancelled = input.answers.is_none() || decline;
-                if cancelled {
-                    self.client
-                        .cancel_form(&pending.session_id, &form.id, None)
-                        .await
-                        .map_err(http_err)?;
-                } else {
-                    let answers = input.answers.unwrap_or_default();
-                    let map = answers
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect();
-                    let answer = form_answer(&form, &map);
-                    self.client
-                        .reply_form(&pending.session_id, &form.id, &answer)
-                        .await
-                        .map_err(http_err)?;
-                }
-                let mut guard = self.inner.lock();
+            entry.answering = true;
+            (key, entry.clone())
+        };
+        let outcome = self.answer(&pending, &input).await;
+        let mut guard = self.inner.lock();
+        match outcome {
+            Ok(cancelled) => {
+                guard.pending.remove(&key);
                 self.settle_request(
                     &mut guard,
                     &pending.request_id,
@@ -2411,9 +2434,15 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                     &pending.item,
                     cancelled,
                 );
+                Ok(())
+            }
+            Err(err) => {
+                if let Some(entry) = guard.pending.get_mut(&key) {
+                    entry.answering = false;
+                }
+                Err(err)
             }
         }
-        Ok(())
     }
 
     async fn read_thread_snapshot(

@@ -461,6 +461,9 @@ struct ClaudeSessionRuntime {
     >,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
+/// Aborting the actor drops its CLI handle, which SIGKILLs the process group. A
+/// graceful close cannot run from `Drop`, and a detached one would let grandchildren
+/// outlive the session (PORTING.md, Deviations, session drop).
 impl Drop for ClaudeSessionRuntime {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.lock().take() {
@@ -838,9 +841,8 @@ impl ClaudeActor {
                 Action::Flush => self.flush_thinking(),
             }
         }
-        if let Some(mut claude) = self.claude.take() {
-            let _ = claude.close().await;
-        }
+        // The CLI is not closed here. Dropping `claude` SIGKILLs its process group;
+        // see `ClaudeSessionRuntime`'s `Drop` and PORTING.md (session drop).
     }
     fn emit(&self, event: ProviderAdapterV2Event) {
         let _ = self.events.send(Ok(event));

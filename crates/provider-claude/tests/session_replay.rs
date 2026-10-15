@@ -1197,6 +1197,53 @@ async fn subagent_frames_stay_out_of_the_parent_turn() {
     assert_eq!(subagents[1]["progress"], "running echo");
 }
 
+/// A `local_bash` task is background work on the thread's roster until its
+/// notification. Each change re-emits the thread with the roster.
+#[tokio::test]
+async fn background_bash_task_is_on_the_roster_until_it_notifies() {
+    let harness = one_turn(vec![
+        json!({
+            "type": "system", "subtype": "background_tasks_changed",
+            "tasks": [{"task_id": "bg-1", "task_type": "local_bash", "description": "npm test"}],
+            "session_id": "todo-session", "uuid": "00000000-0000-4000-8000-000000000601",
+        }),
+        json!({
+            "type": "system", "subtype": "task_notification", "task_id": "bg-1",
+            "status": "completed", "summary": "ok", "session_id": "todo-session",
+            "uuid": "00000000-0000-4000-8000-000000000602",
+        }),
+    ]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Run the tests in the background"))
+        .await
+        .expect("start turn");
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+
+    let rosters: Vec<Value> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::ProviderThreadUpdated {
+                provider_thread, ..
+            } => serde_json::to_value(&provider_thread.pending_background_tasks).ok(),
+            _ => None,
+        })
+        .collect();
+    // The turn also re-emits the thread with an empty roster; the edges are the
+    // listed roster and the cleared one after the notification.
+    let listed = rosters
+        .iter()
+        .position(|roster| roster != &json!([]))
+        .expect("the roster lists bg-1");
+    assert_eq!(rosters[listed][0]["taskId"], "bg-1");
+    assert_eq!(rosters[listed][0]["kind"], "command");
+    assert_eq!(rosters[listed][0]["description"], "npm test");
+    assert_eq!(rosters.last(), Some(&json!([])), "{rosters:?}");
+}
+
 /// A Stop is confirmed by the task's native `stopped` frame, which the CLI
 /// sends after `stop_task`. A repeat Stop answers from that confirmed outcome.
 #[tokio::test]

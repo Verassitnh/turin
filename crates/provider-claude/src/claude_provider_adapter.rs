@@ -2,6 +2,9 @@
 // `ProviderAdapterV2Error` is the provider-core trait's error type; boxing it
 // here would only diverge from the trait.
 #![allow(clippy::result_large_err)]
+use crate::claude_background_tasks::{
+    Roster, is_opaque_task_type, parse_roster_entry, pending_task,
+};
 use crate::claude_tool_titles::{ToolPresentation, fallback_presentation, presentations_from_meta};
 use crate::{
     claude_adapter_v2::{ClaudeAdapterEvent, ClaudeAdapterV2, ClaudeHostRequest},
@@ -24,7 +27,11 @@ use async_trait::async_trait;
 use futures::stream;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -367,6 +374,10 @@ impl ProviderAdapterV2 for ClaudeProviderAdapter {
             plans: PlanState::default(),
             subagents: SubagentRegistry::default(),
             stop_waiters: HashMap::new(),
+            roster: Roster::default(),
+            monitor_tool_uses: HashSet::new(),
+            monitor_tasks: HashSet::new(),
+            last_thread: None,
             pending_requests: HashMap::new(),
             commands: command_rx,
             events,
@@ -668,6 +679,13 @@ struct ClaudeActor {
     subagents: SubagentRegistry,
     /// Stops waiting for the native outcome of a task, by CLI task id.
     stop_waiters: HashMap<String, Vec<StopReply>>,
+    /// Background work that is not a subagent (upstream `pendingBackgroundTasksByNativeThread`).
+    roster: Roster,
+    /// The tool_use ids of Monitor calls, and the task ids they started.
+    monitor_tool_uses: HashSet<String>,
+    monitor_tasks: HashSet<String>,
+    /// The thread as last emitted, for a roster change between turns.
+    last_thread: Option<OrchestrationV2ProviderThread>,
     pending_requests: HashMap<RuntimeRequestId, PendingRequest>,
     commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedSender<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>,
@@ -896,6 +914,7 @@ impl ClaudeActor {
             app_thread: input.app_thread.clone(),
             model_selection: input.model_selection.clone(),
         });
+        self.last_thread = Some(thread.clone());
         self.active = Some(ActiveTurn {
             input,
             turn,
@@ -1318,14 +1337,22 @@ impl ClaudeActor {
             .into_iter()
             .flatten()
         {
-            if block.get("type").and_then(Value::as_str) != Some("tool_use")
-                || block.get("name").and_then(Value::as_str) != Some("Agent")
-            {
+            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
                 continue;
             }
-            if let Some(id) = block.get("id").and_then(Value::as_str) {
-                let input = block.get("input").cloned().unwrap_or(Value::Null);
-                self.subagents.remember_launch(id, &input, owner.as_deref());
+            let Some(id) = block.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            match block.get("name").and_then(Value::as_str) {
+                Some("Agent") => {
+                    let input = block.get("input").cloned().unwrap_or(Value::Null);
+                    self.subagents.remember_launch(id, &input, owner.as_deref());
+                }
+                // A Monitor runs as a local_bash task; its task_started names this call.
+                Some("Monitor") => {
+                    self.monitor_tool_uses.insert(id.to_owned());
+                }
+                _ => {}
             }
         }
         // A subagent's frames belong to the subagent. Its text and tool calls go
@@ -1367,6 +1394,7 @@ impl ClaudeActor {
     /// turn is active, so this does not depend on one.
     fn background(&mut self, frame: turin_claude_protocol::Frame) {
         let now = UtcDateTime::now();
+        let roster_changed = self.background_roster(&frame.raw);
         let events = match frame.raw.get("subtype").and_then(Value::as_str) {
             Some("task_started") => {
                 // A task's turn item is numbered in the turn that is running, if any.
@@ -1394,6 +1422,93 @@ impl ClaudeActor {
             let task_id = task_id.to_owned();
             self.resolve_stop_waiters(&task_id);
         }
+        if roster_changed {
+            self.emit_roster();
+        }
+    }
+    /// The roster edges of a background frame: a `background_tasks_changed`
+    /// snapshot, a non-subagent task_started, or its task_notification.
+    /// Returns whether the roster changed.
+    fn background_roster(&mut self, raw: &Value) -> bool {
+        let text = |key: &str| raw.get(key).and_then(Value::as_str);
+        match text("subtype") {
+            Some("background_tasks_changed") => {
+                let Some(entries) = raw.get("tasks").and_then(Value::as_array) else {
+                    return false;
+                };
+                let listed: HashSet<&str> = entries
+                    .iter()
+                    .filter_map(|entry| entry.get("task_id").and_then(Value::as_str))
+                    .collect();
+                let tasks: Vec<_> = entries
+                    .iter()
+                    .filter_map(|entry| {
+                        parse_roster_entry(entry, |id| self.monitor_tasks.contains(id))
+                    })
+                    .collect();
+                // A monitor the snapshot no longer lists has ended.
+                self.monitor_tasks.retain(|id| listed.contains(id.as_str()));
+                self.roster.replace(tasks);
+                true
+            }
+            Some("task_started") => {
+                // A foreground task blocks its tool call, so it is not background work.
+                let task_type = text("task_type");
+                if !is_opaque_task_type(task_type)
+                    || raw.get("is_backgrounded").and_then(Value::as_bool) == Some(false)
+                {
+                    return false;
+                }
+                let Some(task_id) = text("task_id").filter(|id| !id.is_empty()) else {
+                    return false;
+                };
+                let task_id = task_id.to_owned();
+                if text("tool_use_id").is_some_and(|id| self.monitor_tool_uses.contains(id)) {
+                    self.monitor_tasks.insert(task_id.clone());
+                }
+                let by_monitor = self.monitor_tasks.contains(&task_id);
+                let Some(task) = pending_task(&task_id, task_type, by_monitor, text("description"))
+                else {
+                    return false;
+                };
+                self.roster.upsert(task);
+                true
+            }
+            Some("task_notification") => {
+                let Some(task_id) = text("task_id") else {
+                    return false;
+                };
+                self.monitor_tasks.remove(task_id);
+                self.roster.remove(task_id)
+            }
+            _ => false,
+        }
+    }
+    /// Upstream `emitProviderThreadRoster`: the thread with its roster. Between
+    /// turns it is idle; during a turn an idle thread is active.
+    fn emit_roster(&mut self) {
+        let base = match self.active.as_ref() {
+            Some(active) => Some(active.thread.clone()),
+            None => self.last_thread.clone(),
+        };
+        let Some(mut thread) = base else {
+            return;
+        };
+        thread.status = match (self.active.is_some(), thread.status) {
+            (false, _) => OrchestrationV2ProviderThreadStatus::Idle,
+            (true, OrchestrationV2ProviderThreadStatus::Idle) => {
+                OrchestrationV2ProviderThreadStatus::Active
+            }
+            (true, status) => status,
+        };
+        thread.pending_background_tasks = self.roster.tasks().to_vec();
+        thread.updated_at = UtcDateTime::now();
+        self.last_thread = Some(thread.clone());
+        self.emit(ProviderAdapterV2Event::ProviderThreadUpdated {
+            driver: driver(),
+            provider_thread: thread,
+            retained_native_turn_ids: None,
+        });
     }
     /// Upstream `compact_boundary`: a completed "Context compacted" item. A
     /// positive post-compaction size also becomes the turn's used tokens.
@@ -1609,6 +1724,11 @@ impl ClaudeActor {
     /// The CLI went away before a result. An interrupt that was asked for
     /// ends the turn as interrupted, and the process is reusable only then.
     fn fail_active(&mut self, error: &str) {
+        // The process or its turn failed: its background work died with it.
+        self.monitor_tasks.clear();
+        if self.roster.clear() {
+            self.emit_roster();
+        }
         let Some(mut active) = self.active.take() else {
             return;
         };

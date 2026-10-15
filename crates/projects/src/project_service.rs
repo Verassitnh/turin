@@ -708,6 +708,8 @@ impl ProjectServiceApi for ProjectService {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use futures::future::join_all;
@@ -1096,25 +1098,37 @@ mod tests {
         store: Arc<FakeStore>,
         threads: Arc<FakeThreads>,
         settings: Arc<FakeSettings>,
+        enrichment: Arc<ProjectEnrichmentService>,
     }
 
     impl Harness {
         fn new() -> Self {
+            Self::with_metadata(Arc::new(NoMetadata), Arc::new(NoMetadata), |store| {
+                Arc::clone(store) as Arc<dyn ProjectEventSink>
+            })
+        }
+
+        /// `sink` wraps the fake store, so a case can hold a commit between plan and write.
+        fn with_metadata(
+            identity: Arc<dyn RepositoryIdentitySource>,
+            favicon: Arc<dyn FaviconSource>,
+            sink: impl FnOnce(&Arc<FakeStore>) -> Arc<dyn ProjectEventSink>,
+        ) -> Self {
             let dir = tempfile::tempdir().expect("tempdir");
             let store = Arc::new(FakeStore::default());
             let threads = Arc::new(FakeThreads::default());
             let settings = Arc::new(FakeSettings::default());
             let enrichment = Arc::new(ProjectEnrichmentService::new(
-                Arc::new(NoMetadata),
-                Arc::new(NoMetadata),
+                identity,
+                favicon,
                 ProjectEnrichmentServiceOptions::default(),
             ));
             let service = ProjectService::new(ProjectServiceDeps {
                 projects: Arc::clone(&store) as Arc<dyn ProjectStoreReads>,
-                enrichment,
+                enrichment: Arc::clone(&enrichment),
                 workspace_paths: Arc::new(WorkspacePaths::new(String::new())),
                 planner: Arc::new(FakePlanner),
-                event_sink: Arc::clone(&store) as Arc<dyn ProjectEventSink>,
+                event_sink: sink(&store),
                 event_ids: Arc::new(FakeEventIds::default()),
                 threads: Arc::clone(&threads) as Arc<dyn ThreadDeletions>,
                 settings: Arc::clone(&settings) as Arc<dyn ProjectSettingsOverrides>,
@@ -1125,6 +1139,32 @@ mod tests {
                 store,
                 threads,
                 settings,
+                enrichment,
+            }
+        }
+
+        /// Upstream `waitForProject`: re-read until `ready` holds, woken by enrichment changes.
+        /// Subscribes before each read, so a change between read and wait is not lost.
+        async fn wait_for(
+            &self,
+            project_id: &ProjectId,
+            ready: impl Fn(&Project) -> bool,
+        ) -> Project {
+            let mut changes = self.enrichment.subscribe_changes();
+            loop {
+                let project = self
+                    .service
+                    .get_by_id(project_id, false)
+                    .await
+                    .expect("read")
+                    .expect("project");
+                if ready(&project) {
+                    return project;
+                }
+                tokio::time::timeout(Duration::from_secs(5), changes.recv())
+                    .await
+                    .expect("enrichment change in time")
+                    .ok();
             }
         }
 
@@ -1152,6 +1192,16 @@ mod tests {
         fn update_title(&self, command: &str, project: &str, title: &str) -> ProjectUpdateInput {
             let mut payload = update_payload();
             payload.title = Some(trimmed(title));
+            ProjectUpdateInput {
+                command_id: cid(command),
+                project_id: pid(project),
+                payload,
+            }
+        }
+
+        fn update_root(&self, command: &str, project: &str, root: &str) -> ProjectUpdateInput {
+            let mut payload = update_payload();
+            payload.workspace_root = Some(trimmed(root));
             ProjectUpdateInput {
                 command_id: cid(command),
                 project_id: pid(project),
@@ -1566,5 +1616,393 @@ mod tests {
                 .iter()
                 .all(|command| command == &cid("command:cascade-delete"))
         );
+    }
+
+    /// Identity and favicon answers that move with a version counter, as the moved-project case needs.
+    struct VersionedMetadata {
+        version: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl RepositoryIdentitySource for VersionedMetadata {
+        async fn resolve(
+            &self,
+            workspace_root: &str,
+        ) -> Option<turin_contracts::environment::RepositoryIdentity> {
+            let version = self.version.load(Ordering::SeqCst);
+            Some(
+                serde_json::from_value(json!({
+                    "canonicalKey": format!("example.test/v{version}{workspace_root}"),
+                    "locator": {
+                        "source": "git-remote",
+                        "remoteName": "origin",
+                        "remoteUrl": format!("https://example.test/v{version}{workspace_root}.git"),
+                    },
+                    "rootPath": workspace_root,
+                }))
+                .expect("identity"),
+            )
+        }
+    }
+
+    #[async_trait]
+    impl FaviconSource for VersionedMetadata {
+        async fn resolve_path(
+            &self,
+            workspace_root: &str,
+        ) -> Result<Option<String>, crate::project_favicon_resolver::ProjectFaviconResolutionError>
+        {
+            let version = self.version.load(Ordering::SeqCst);
+            Ok(Some(format!("{workspace_root}/favicon-v{version}.svg")))
+        }
+    }
+
+    /// Favicon lookup that always fails, as a permission error on the workspace would.
+    struct FailingFavicon;
+
+    #[async_trait]
+    impl FaviconSource for FailingFavicon {
+        async fn resolve_path(
+            &self,
+            workspace_root: &str,
+        ) -> Result<Option<String>, crate::project_favicon_resolver::ProjectFaviconResolutionError>
+        {
+            Err(
+                crate::project_favicon_resolver::ProjectFaviconResolutionError {
+                    operation:
+                        crate::project_favicon_resolver::ProjectFaviconOperation::StatCandidate,
+                    workspace_root: workspace_root.to_owned(),
+                    relative_path: None,
+                    absolute_path: None,
+                    cause: Box::new(crate::project_favicon_resolver::ProjectFaviconCause::Io(
+                        std::io::Error::other("permission denied"),
+                    )),
+                },
+            )
+        }
+    }
+
+    /// Identity resolution that holds until released, and a favicon lookup that counts calls.
+    struct SlowIdentity {
+        started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: tokio::sync::watch::Receiver<bool>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl RepositoryIdentitySource for SlowIdentity {
+        async fn resolve(
+            &self,
+            workspace_root: &str,
+        ) -> Option<turin_contracts::environment::RepositoryIdentity> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(started) = self.started.lock().take() {
+                let _ = started.send(());
+            }
+            let mut release = self.release.clone();
+            let _ = release.wait_for(|released| *released).await;
+            Some(
+                serde_json::from_value(json!({
+                    "canonicalKey": "github.com/t3tools/slow-project",
+                    "locator": {
+                        "source": "git-remote",
+                        "remoteName": "origin",
+                        "remoteUrl": "git@github.com:t3tools/slow-project.git",
+                    },
+                    "rootPath": workspace_root,
+                }))
+                .expect("identity"),
+            )
+        }
+    }
+
+    struct CountingFavicon {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl FaviconSource for CountingFavicon {
+        async fn resolve_path(
+            &self,
+            workspace_root: &str,
+        ) -> Result<Option<String>, crate::project_favicon_resolver::ProjectFaviconResolutionError>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(format!("{workspace_root}/favicon.svg")))
+        }
+    }
+
+    /// Holds a `project.delete` commit between its plan and its write, as upstream's gated sink does.
+    struct GatedSink {
+        inner: Arc<FakeStore>,
+        reached: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: tokio::sync::watch::Receiver<bool>,
+    }
+
+    #[async_trait]
+    impl ProjectEventSink for GatedSink {
+        async fn commit_project_command(
+            &self,
+            command_id: &CommandId,
+            project_id: &ProjectId,
+            command_type: &str,
+            accepted_at: &UtcDateTime,
+            event: &ProjectEventPayload,
+        ) -> Result<ProjectCommandReceipt, PortError> {
+            if command_type == "project.delete" {
+                if let Some(reached) = self.reached.lock().take() {
+                    let _ = reached.send(());
+                }
+                let mut release = self.release.clone();
+                let _ = release.wait_for(|released| *released).await;
+            }
+            self.inner
+                .commit_project_command(command_id, project_id, command_type, accepted_at, event)
+                .await
+        }
+
+        async fn commit_rejected_project_command(
+            &self,
+            command_id: &CommandId,
+            project_id: &ProjectId,
+            command_type: &str,
+            rejected_at: &UtcDateTime,
+            error: &Value,
+        ) -> Result<ProjectCommandReceipt, PortError> {
+            self.inner
+                .commit_rejected_project_command(
+                    command_id,
+                    project_id,
+                    command_type,
+                    rejected_at,
+                    error,
+                )
+                .await
+        }
+    }
+
+    fn favicon_of(project: &Project) -> Option<String> {
+        project
+            .favicon_path
+            .clone()
+            .flatten()
+            .map(|path| path.as_str().to_owned())
+    }
+
+    fn identity_of(project: &Project) -> Option<turin_contracts::environment::RepositoryIdentity> {
+        project.repository_identity.clone().flatten()
+    }
+
+    #[tokio::test]
+    async fn keeps_project_snapshots_available_when_optional_metadata_enrichment_fails() {
+        let h = Harness::with_metadata(Arc::new(NoMetadata), Arc::new(FailingFavicon), |store| {
+            Arc::clone(store) as Arc<dyn ProjectEventSink>
+        });
+        let root = h.root("failed-enrichment");
+        h.service
+            .create(h.create(
+                "command:failed-enrichment:create",
+                "project:failed-enrichment",
+                "Still visible",
+                &root,
+            ))
+            .await
+            .expect("create");
+
+        let snapshot = h.service.snapshot().await.expect("snapshot");
+
+        assert_eq!(snapshot.projects.len(), 1);
+        assert_eq!(
+            snapshot.projects[0].id.as_str(),
+            "project:failed-enrichment"
+        );
+        assert_eq!(snapshot.projects[0].title.as_str(), "Still visible");
+        assert_eq!(identity_of(&snapshot.projects[0]), None);
+        assert_eq!(favicon_of(&snapshot.projects[0]), None);
+    }
+
+    #[tokio::test]
+    async fn invalidates_workspace_derived_metadata_when_a_project_moves() {
+        let version = Arc::new(AtomicU64::new(1));
+        let metadata = Arc::new(VersionedMetadata {
+            version: Arc::clone(&version),
+        });
+        let h = Harness::with_metadata(metadata.clone(), metadata, |store| {
+            Arc::clone(store) as Arc<dyn ProjectEventSink>
+        });
+        let original = h.root("original");
+        let temporary = h.root("temporary");
+        let project = pid("project:moved-enrichment");
+        h.service
+            .create(h.create(
+                "command:moved-enrichment:create",
+                "project:moved-enrichment",
+                "Moved",
+                &original,
+            ))
+            .await
+            .expect("create");
+        let at = |root: &str, v: u64| Some(format!("{root}/favicon-v{v}.svg"));
+        assert_eq!(
+            favicon_of(
+                &h.wait_for(&project, |p| favicon_of(p) == at(&original, 1))
+                    .await
+            ),
+            at(&original, 1)
+        );
+
+        version.store(2, Ordering::SeqCst);
+        h.service
+            .update(h.update_root(
+                "command:moved-enrichment:away",
+                "project:moved-enrichment",
+                &temporary,
+            ))
+            .await
+            .expect("move away");
+        h.service.snapshot().await.expect("snapshot");
+        version.store(3, Ordering::SeqCst);
+        h.service
+            .update(h.update_root(
+                "command:moved-enrichment:return",
+                "project:moved-enrichment",
+                &original,
+            ))
+            .await
+            .expect("move back");
+
+        assert_eq!(
+            favicon_of(
+                &h.wait_for(&project, |p| favicon_of(p) == at(&original, 3))
+                    .await
+            ),
+            at(&original, 3)
+        );
+    }
+
+    #[tokio::test]
+    async fn returns_project_mutations_before_slow_enrichment_and_shares_the_eventual_result() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        let identity_calls = Arc::new(AtomicUsize::new(0));
+        let favicon_calls = Arc::new(AtomicUsize::new(0));
+        let h = Harness::with_metadata(
+            Arc::new(SlowIdentity {
+                started: Mutex::new(Some(started_tx)),
+                release: release_rx,
+                calls: Arc::clone(&identity_calls),
+            }),
+            Arc::new(CountingFavicon {
+                calls: Arc::clone(&favicon_calls),
+            }),
+            |store| Arc::clone(store) as Arc<dyn ProjectEventSink>,
+        );
+        let root = h.root("slow-enrichment");
+        let project = pid("project:slow-enrichment");
+
+        let created = h
+            .service
+            .create(h.create(
+                "command:slow-enrichment:create",
+                "project:slow-enrichment",
+                "Slow enrichment",
+                &root,
+            ))
+            .await
+            .expect("create");
+        assert_eq!(identity_of(&created), None);
+        assert_eq!(favicon_of(&created), None);
+        started_rx.await.expect("identity started");
+        // The favicon lands while identity is still held.
+        h.wait_for(&project, |p| favicon_of(p).is_some()).await;
+
+        let updated = h
+            .service
+            .update(h.update_title(
+                "command:slow-enrichment:update",
+                "project:slow-enrichment",
+                "Updated before enrichment",
+            ))
+            .await
+            .expect("update");
+        assert_eq!(updated.title.as_str(), "Updated before enrichment");
+        assert_eq!(identity_of(&updated), None);
+        assert_eq!(favicon_of(&updated), Some(format!("{root}/favicon.svg")));
+        let immediate = h
+            .service
+            .get_by_id(&project, false)
+            .await
+            .expect("read")
+            .expect("project");
+        assert_eq!(identity_of(&immediate), None);
+        assert_eq!(favicon_of(&immediate), Some(format!("{root}/favicon.svg")));
+        let snapshot = h.service.snapshot().await.expect("snapshot");
+        assert_eq!(identity_of(&snapshot.projects[0]), None);
+
+        release_tx.send(true).expect("release identity");
+        let first = h.wait_for(&project, |p| identity_of(p).is_some()).await;
+        assert_eq!(
+            identity_of(&first).map(|identity| identity.canonical_key.as_str().to_owned()),
+            Some("github.com/t3tools/slow-project".to_owned())
+        );
+        assert_eq!(favicon_of(&first), Some(format!("{root}/favicon.svg")));
+        assert_eq!(identity_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(favicon_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn rejects_an_update_that_waited_on_the_lock_while_its_project_was_deleted() {
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        let h = Harness::with_metadata(Arc::new(NoMetadata), Arc::new(NoMetadata), move |store| {
+            Arc::new(GatedSink {
+                inner: Arc::clone(store),
+                reached: Mutex::new(Some(reached_tx)),
+                release: release_rx,
+            }) as Arc<dyn ProjectEventSink>
+        });
+        let root = h.root("update-race");
+        let project = "project:update-race";
+        h.service
+            .create(h.create("command:update-race:create", project, "Update race", &root))
+            .await
+            .expect("create");
+
+        let deletion = h
+            .service
+            .delete(h.delete("command:update-race:delete", project));
+        let update = async {
+            // The delete holds the project lock between its plan and its commit.
+            reached_rx.await.expect("delete reached its commit");
+            h.service
+                .update(h.update_title("command:update-race:update", project, "Too late"))
+                .await
+        };
+        let release = async {
+            tokio::task::yield_now().await;
+            release_tx.send(true).expect("release delete");
+        };
+        let (deleted, updated, ()) = tokio::join!(deletion, update, release);
+
+        assert!(deleted.expect("delete").deleted_at.is_some());
+        assert!(matches!(
+            updated.expect_err("update after delete"),
+            ProjectServiceError::NotFound { .. }
+        ));
+        let row = h
+            .service
+            .get_by_id(&pid(project), true)
+            .await
+            .expect("read")
+            .expect("deleted row");
+        assert_eq!(row.title.as_str(), "Update race");
+        let state = h.store.state.lock();
+        assert!(state.receipts.contains_key("command:update-race:update"));
+        let types: Vec<&str> = state
+            .events
+            .iter()
+            .map(|event| event["type"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(types, vec!["project.created", "project.deleted"]);
     }
 }

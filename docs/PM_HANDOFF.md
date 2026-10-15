@@ -43,3 +43,11 @@ QC runs wf_8b97ef76-9c9 (T02) and wf_42618e43-71a (T04) were resumed after the r
 2. When T01 finishes → QC → merge → dispatch wave 2: T05 shared (GLM), T06 git (Grok), T07 source-control (Grok), T08 provider-core (Codex, now logged in again).
 3. T00c (Sonnet): QC low items in base_schemas after T01 merges.
 4. Push task branches to origin on every check-in.
+
+
+## Update 2026-10-14 ~20:10
+
+- OpenRouter credits exhausted: GLM tasks T01, T05a, T07 died; work saved (GLM-attributed WIP commits) and reassigned to Sonnet 5.5 (T01 r2, T05a r2, T07 r2). T21 fix round (T21b) on Sonnet too. Ask the user to top up OpenRouter before using GLM again.
+- T06 (Grok), T07 (Sonnet), T08 (Codex) are based on task/T01-contracts and are waiting for the PM to say "merge T01" once T01 compiles.
+- T24 icon: QC PASS; user asked to see 1.0x vs 1.25x T before deciding (agent producing assets/prod/compare-scale-options.png).
+- Live QC reports in docs/qc/. Board in TASKS.md is current.

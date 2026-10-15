@@ -73,7 +73,7 @@ impl RenderOnce for PullRequestCopyableCode {
             .w_auto()
             .min_w_0()
             .max_w_full()
-            .flex_shrink_0()
+            .flex_shrink_1()
             .when(self.ml_auto, |this| this.ml_auto())
             .rounded(px(4.))
             .px_1()

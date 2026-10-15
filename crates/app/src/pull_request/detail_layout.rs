@@ -112,6 +112,7 @@ pub fn header_body(body: HeaderBody, theme: &AppTheme) -> Div {
                         .flex()
                         .flex_1()
                         .min_w_0()
+                        .overflow_hidden()
                         .items_center()
                         .gap(rems(0.375))
                         .font_family(theme.fonts.mono.clone())

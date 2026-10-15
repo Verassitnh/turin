@@ -121,12 +121,19 @@ pub trait DiffSource: 'static {
     fn turns(&self) -> Vec<TurnDiffSummary>;
 
     /// `useCheckpointDiff`: the unified patch for turns `from..=to`.
-    fn checkpoint_diff(&self, from_turn_count: u64, to_turn_count: u64, ignore_whitespace: bool)
-    -> Loadable<String>;
+    fn checkpoint_diff(
+        &self,
+        from_turn_count: u64,
+        to_turn_count: u64,
+        ignore_whitespace: bool,
+    ) -> Loadable<String>;
 
     /// `reviewEnvironment.diffPreview`.
-    fn git_diff_preview(&self, base_ref: Option<&str>, ignore_whitespace: bool)
-    -> Loadable<GitDiffPreview>;
+    fn git_diff_preview(
+        &self,
+        base_ref: Option<&str>,
+        ignore_whitespace: bool,
+    ) -> Loadable<GitDiffPreview>;
 
     /// `reviewEnvironment.diffFilePatch`: one file's patch for a truncated
     /// source.
@@ -154,7 +161,12 @@ pub trait DiffSource: 'static {
     fn list_refs(&self, query: &str) -> DiffRefs;
 
     /// `openDiffFilePrimaryAction`'s sinks.
-    fn open_in_thread_file_viewer(&self, thread: &ScopedThreadRef, workspace_file_path: &str, cx: &mut App);
+    fn open_in_thread_file_viewer(
+        &self,
+        thread: &ScopedThreadRef,
+        workspace_file_path: &str,
+        cx: &mut App,
+    );
     fn open_in_editor(&self, target_path: &str, cx: &mut App);
 
     /// `refreshPreviewQuery` (focus refresh, the refresh button).
@@ -177,7 +189,8 @@ pub fn load_diff_files(
 ) -> Result<(Option<FileContents>, FileContents), String> {
     let new_path = super::diff_rendering::resolve_file_diff_path(file);
     let old_path = file.prev_name.clone().unwrap_or_else(|| new_path.clone());
-    let contents = source.diff_file_contents(kind, base_ref, head_ref, &old_path, &new_path, file.r#type)?;
+    let contents =
+        source.diff_file_contents(kind, base_ref, head_ref, &old_path, &new_path, file.r#type)?;
     let new_file = FileContents {
         name: new_path.clone(),
         contents: contents.new_contents,

@@ -1,6 +1,10 @@
 //! The diff panel (upstream `DiffPanel.tsx` and friends), its pure logic and
 //! the ports of the `@pierre/diffs` pieces it renders with.
 
+// The ports are complete ahead of their callers (the real orchestrator and git
+// sources, the composer, settings persistence); unused pieces are intentional.
+#![allow(dead_code)]
+
 pub mod annotation;
 pub mod base_ref_choices;
 pub mod comment_submit_shortcut;
@@ -11,8 +15,8 @@ pub mod diff_panel_store;
 pub mod diff_rendering;
 pub mod file_tree;
 pub mod highlight;
-pub mod mock_fixtures;
 pub mod menu;
+pub mod mock_fixtures;
 pub mod mock_source;
 pub mod natural;
 pub mod panel;

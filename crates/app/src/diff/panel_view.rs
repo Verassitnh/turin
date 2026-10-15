@@ -53,7 +53,12 @@ struct Metrics {
 }
 
 /// The advance width of `text` in `family` at `size`.
-fn measure_text(window: &Window, text: &str, family: &SharedString, size: gpui_kit::Pixels) -> gpui_kit::Pixels {
+fn measure_text(
+    window: &Window,
+    text: &str,
+    family: &SharedString,
+    size: gpui_kit::Pixels,
+) -> gpui_kit::Pixels {
     let run = gpui_kit::TextRun {
         len: text.len(),
         font: font(family.clone()),
@@ -62,13 +67,21 @@ fn measure_text(window: &Window, text: &str, family: &SharedString, size: gpui_k
         underline: None,
         strikethrough: None,
     };
-    window.text_system().layout_line(text, size, &[run], None).width
+    window
+        .text_system()
+        .layout_line(text, size, &[run], None)
+        .width
 }
 
 /// A label that truncates when its row is too narrow. GPUI sizes a
 /// `truncate` flex child from its min-content (it collapses to nothing), so
 /// the label's own width is measured and given as its flex basis.
-fn fitted_text(window: &Window, text: impl Into<SharedString>, family: &SharedString, size: gpui_kit::Pixels) -> gpui_kit::Div {
+fn fitted_text(
+    window: &Window,
+    text: impl Into<SharedString>,
+    family: &SharedString,
+    size: gpui_kit::Pixels,
+) -> gpui_kit::Div {
     let text: SharedString = text.into();
     let width = measure_text(window, &text, family, size) + px(1.);
     div().min_w_0().w(width).truncate().child(text)
@@ -78,7 +91,7 @@ fn thousands(value: usize) -> String {
     let digits = value.to_string();
     let mut out = String::new();
     for (index, c) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -86,7 +99,10 @@ fn thousands(value: usize) -> String {
     out
 }
 
-fn expand_tabs(text: &str, tokens: Vec<(Range<usize>, Hsla)>) -> (String, Vec<(Range<usize>, Hsla)>) {
+fn expand_tabs(
+    text: &str,
+    tokens: Vec<(Range<usize>, Hsla)>,
+) -> (String, Vec<(Range<usize>, Hsla)>) {
     if !text.contains('\t') {
         return (text.to_string(), tokens);
     }
@@ -194,7 +210,10 @@ impl DiffPanel {
                     Button::new("diff-scope")
                         .variant(ButtonVariant::Secondary)
                         .size(ButtonSize::Xs)
-                        .pressed(matches!(self.menu, Some(OpenMenu::Scope | OpenMenu::ScopeTurns)))
+                        .pressed(matches!(
+                            self.menu,
+                            Some(OpenMenu::Scope | OpenMenu::ScopeTurns)
+                        ))
                         .child(fitted_text(window, label, &sans, px(12.)))
                         .child(
                             Icon::new(IconName::ChevronDown)
@@ -231,7 +250,12 @@ impl DiffPanel {
         let all_collapsed = self.all_files_collapsed();
         let has_files = !self.derived.files.is_empty();
         let settings = self.settings;
-        let segmented = |id: &'static str, icon: IconName, pressed: bool, tooltip: &'static str, to: DiffLayout, panel: gpui_kit::Entity<DiffPanel>| {
+        let segmented = |id: &'static str,
+                         icon: IconName,
+                         pressed: bool,
+                         tooltip: &'static str,
+                         to: DiffLayout,
+                         panel: gpui_kit::Entity<DiffPanel>| {
             Toggle::new(id)
                 .variant(ToggleVariant::Segmented)
                 .size(ToggleSize::Segmented)
@@ -277,7 +301,11 @@ impl DiffPanel {
                         this.child(self.toolbar_icon_button(
                             "diff-refresh",
                             IconName::RefreshCw,
-                            if refreshing { "Refreshing diff…" } else { "Refresh diff" },
+                            if refreshing {
+                                "Refreshing diff…"
+                            } else {
+                                "Refresh diff"
+                            },
                             |panel, _, cx| panel.refresh(cx),
                             cx,
                         ))
@@ -372,7 +400,11 @@ impl DiffPanel {
     }
 
     /// `HEAD → base` with the comparison-target combobox.
-    fn render_compare(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_compare(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let theme = cx.app_theme().clone();
         if !matches!(self.derived.scope, Scope::Branch { .. }) {
             return None;
@@ -415,7 +447,9 @@ impl DiffPanel {
                                 .variant(ButtonVariant::GhostMuted)
                                 .size(ButtonSize::Xs)
                                 .pressed(open)
-                                .child(fitted_text(window, base_ref, &sans, px(12.)).max_w(rems(12.)))
+                                .child(
+                                    fitted_text(window, base_ref, &sans, px(12.)).max_w(rems(12.)),
+                                )
                                 .child(
                                     Icon::new(IconName::ChevronDown)
                                         .size(rems(0.875))
@@ -450,12 +484,13 @@ impl DiffPanel {
             Scope::Turn { run_id } => format!("turn:{run_id}"),
             _ => String::new(),
         };
-        let item = |id: &'static str, value: &'static str, label: &'static str, cx: &mut Context<Self>| {
-            let panel = panel.clone();
-            menu_radio_item(id, selected_value == value, label, cx).on_click(move |_, _, cx| {
-                panel.update(cx, |panel, cx| panel.select_scope(value, cx));
-            })
-        };
+        let item =
+            |id: &'static str, value: &'static str, label: &'static str, cx: &mut Context<Self>| {
+                let panel = panel.clone();
+                menu_radio_item(id, selected_value == value, label, cx).on_click(move |_, _, cx| {
+                    panel.update(cx, |panel, cx| panel.select_scope(value, cx));
+                })
+            };
         let turns_open = self.menu == Some(OpenMenu::ScopeTurns);
         let turns: Vec<_> = self.derived.turns.clone();
         let timestamp_format = TimestampFormat::default();
@@ -469,16 +504,18 @@ impl DiffPanel {
             .child(item("diff-scope-latest", "latest", "Latest turn", cx))
             .child({
                 let panel = panel.clone();
-                menu_sub_trigger("diff-scope-turn", "Turn", turns_open, cx).on_click(move |_, _, cx| {
-                    panel.update(cx, |panel, cx| {
-                        panel.menu = Some(if panel.menu == Some(OpenMenu::ScopeTurns) {
-                            OpenMenu::Scope
-                        } else {
-                            OpenMenu::ScopeTurns
+                menu_sub_trigger("diff-scope-turn", "Turn", turns_open, cx).on_click(
+                    move |_, _, cx| {
+                        panel.update(cx, |panel, cx| {
+                            panel.menu = Some(if panel.menu == Some(OpenMenu::ScopeTurns) {
+                                OpenMenu::Scope
+                            } else {
+                                OpenMenu::ScopeTurns
+                            });
+                            cx.notify();
                         });
-                        cx.notify();
-                    });
-                })
+                    },
+                )
             });
         if turns_open {
             let theme = cx.app_theme().clone();
@@ -508,7 +545,10 @@ impl DiffPanel {
                                     .ml_auto()
                                     .text_size(TEXT_XS.size)
                                     .text_color(theme.muted_foreground)
-                                    .child(format_short_timestamp(&turn.completed_at, timestamp_format)),
+                                    .child(format_short_timestamp(
+                                        &turn.completed_at,
+                                        timestamp_format,
+                                    )),
                             ),
                         cx,
                     )
@@ -532,7 +572,12 @@ impl DiffPanel {
             Scope::Branch { .. } => "branch".into(),
             Scope::Unstaged => "unstaged".into(),
             Scope::Turn { run_id } => {
-                if self.derived.turns.first().is_some_and(|t| &t.run_id == run_id) {
+                if self
+                    .derived
+                    .turns
+                    .first()
+                    .is_some_and(|t| &t.run_id == run_id)
+                {
                     "latest".into()
                 } else {
                     format!("turn:{run_id}")
@@ -603,7 +648,13 @@ impl DiffPanel {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .child(div().min_w_0().flex_1().truncate().child(choice.label.clone()))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .child(choice.label.clone()),
+                        )
                         .when(has_both, |this| {
                             this.child(
                                 div()
@@ -692,10 +743,13 @@ impl DiffPanel {
     fn render_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.app_theme().clone();
         match self.derived.body.clone() {
-            BodyState::NoThread => self.centered_message("Select a thread to inspect turn diffs.", cx),
-            BodyState::NotGit => {
-                self.centered_message("Turn diffs are unavailable because this project is not a git repository.", cx)
+            BodyState::NoThread => {
+                self.centered_message("Select a thread to inspect turn diffs.", cx)
             }
+            BodyState::NotGit => self.centered_message(
+                "Turn diffs are unavailable because this project is not a git repository.",
+                cx,
+            ),
             BodyState::NoTurns => self.centered_message("No completed turns yet.", cx),
             BodyState::NoFileAccess(message) => self.centered_message(message, cx),
             BodyState::Loading(_) => diff_panel_loading_state(cx),
@@ -837,7 +891,11 @@ impl DiffPanel {
     }
 
     /// `stickyHeaders: true`: the header of the file at the top stays put.
-    fn render_sticky_header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_sticky_header(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let top = self.list.logical_scroll_top();
         let item = *self.items.get(top.item_ix)?;
         let file_index = match item {
@@ -862,7 +920,12 @@ impl DiffPanel {
 
     // ── list items ──────────────────────────────────────────────────────
 
-    pub(super) fn render_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_item(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(item) = self.items.get(ix).copied() else {
             return div().into_any_element();
         };
@@ -871,9 +934,17 @@ impl DiffPanel {
             FlatItem::Header(file) => self.render_file_header(file, false, window, cx),
             FlatItem::Row(file, row) => self.render_row(file, row, window, cx),
             FlatItem::Annotation(file, row) => self.render_annotation(file, row, window, cx),
-            FlatItem::Gap(_) => div().h(px(8.)).w_full().bg(theme.code_background).into_any_element(),
+            FlatItem::Gap(_) => div()
+                .h(px(8.))
+                .w_full()
+                .bg(theme.code_background)
+                .into_any_element(),
             FlatItem::LoadingBoundary => {
-                let remaining = self.derived.files.len().saturating_sub(self.derived.settled_count);
+                let remaining = self
+                    .derived
+                    .files
+                    .len()
+                    .saturating_sub(self.derived.settled_count);
                 let panel = cx.entity();
                 cx.defer(move |cx| {
                     panel.update(cx, |panel, cx| panel.load_next_files(cx));
@@ -885,7 +956,13 @@ impl DiffPanel {
 
     /// The pierre file header with the app's overrides
     /// (`min-height: 32px`, 12px sans, `padding-inline: 8px 12px`).
-    fn render_file_header(&mut self, file_index: usize, sticky: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_file_header(
+        &mut self,
+        file_index: usize,
+        sticky: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let colors = DiffColors::resolve(&theme);
         let metrics = self.metrics(window, cx);
@@ -946,35 +1023,52 @@ impl DiffPanel {
                 .font_family(metrics.mono.clone())
                 .text_size(px(11.))
                 .when(deletions > 0 || additions == 0, |this| {
-                    this.child(div().text_color(colors.deletion_base).child(format!("-{}", thousands(deletions))))
+                    this.child(
+                        div()
+                            .text_color(colors.deletion_base)
+                            .child(format!("-{}", thousands(deletions))),
+                    )
                 })
                 .when(additions > 0 || deletions == 0, |this| {
-                    this.child(div().text_color(colors.addition_base).child(format!("+{}", thousands(additions))))
+                    this.child(
+                        div()
+                            .text_color(colors.addition_base)
+                            .child(format!("+{}", thousands(additions))),
+                    )
                 })
                 .into_any_element()
         };
         let status_button = (entry.stat.is_some() && (entry.error || entry.truncated)).then(|| {
             let retry_panel = panel.clone();
             let error = entry.error;
-            Button::new(ElementId::Name(format!("diff-status-{}-{sticky}", file_index).into()))
-                .variant(ButtonVariant::GhostMuted)
-                .size(ButtonSize::IconMicro)
-                .tooltip(if error {
-                    "Retry loading diff"
+            Button::new(ElementId::Name(
+                format!("diff-status-{}-{sticky}", file_index).into(),
+            ))
+            .variant(ButtonVariant::GhostMuted)
+            .size(ButtonSize::IconMicro)
+            .tooltip(if error {
+                "Retry loading diff"
+            } else {
+                "This file is too large to show in full. Counts include all changes."
+            })
+            .child(
+                Icon::new(if error {
+                    IconName::RotateCw
                 } else {
-                    "This file is too large to show in full. Counts include all changes."
+                    IconName::Info
                 })
-                .child(
-                    Icon::new(if error { IconName::RotateCw } else { IconName::Info }).size(rems(0.75)),
-                )
-                .on_click(move |_, _, cx| {
-                    if error {
-                        retry_panel.update(cx, |panel, cx| panel.reload(cx));
-                    }
-                })
+                .size(rems(0.75)),
+            )
+            .on_click(move |_, _, cx| {
+                if error {
+                    retry_panel.update(cx, |panel, cx| panel.reload(cx));
+                }
+            })
         });
         div()
-            .id(ElementId::Name(format!("diff-header-{}-{sticky}", file_index).into()))
+            .id(ElementId::Name(
+                format!("diff-header-{}-{sticky}", file_index).into(),
+            ))
             .group(group.clone())
             .relative()
             .flex()
@@ -1012,37 +1106,47 @@ impl DiffPanel {
                     .items_center()
                     .gap(px(8.))
                     .child(
-                        Button::new(ElementId::Name(format!("diff-collapse-{}-{sticky}", file_index).into()))
-                            .variant(ButtonVariant::Ghost)
-                            .size(ButtonSize::IconMicro)
-                            .ml(px(-2.))
-                            .disabled(entry.pending)
-                            .tooltip(if collapsed { "Expand diff" } else { "Collapse diff" })
-                            .child(
-                                Icon::new(if collapsed {
-                                    IconName::ChevronRight
-                                } else {
-                                    IconName::ChevronDown
-                                })
-                                .size(rems(1.))
-                                .color(tone),
-                            )
-                            .on_click(move |_, _, cx| {
-                                let key = toggle_key.clone();
-                                toggle_panel.update(cx, |panel, cx| panel.toggle_file_collapsed(&key, cx));
-                            }),
+                        Button::new(ElementId::Name(
+                            format!("diff-collapse-{}-{sticky}", file_index).into(),
+                        ))
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::IconMicro)
+                        .ml(px(-2.))
+                        .disabled(entry.pending)
+                        .tooltip(if collapsed {
+                            "Expand diff"
+                        } else {
+                            "Collapse diff"
+                        })
+                        .child(
+                            Icon::new(if collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .size(rems(1.))
+                            .color(tone),
+                        )
+                        .on_click(move |_, _, cx| {
+                            let key = toggle_key.clone();
+                            toggle_panel
+                                .update(cx, |panel, cx| panel.toggle_file_collapsed(&key, cx));
+                        }),
                     )
                     .child(Icon::path(change_icon).size(rems(1.)).color(change_color))
                     .when_some(file.prev_name.clone(), |this, prev| {
-                        this.child(
-                            fitted_text(window, prev, &metrics.sans, px(12.)).opacity(0.7),
-                        )
-                        .child(Icon::path(diff_icons::ARROW_RIGHT_SHORT).size(rems(1.)).color(colors.fg))
+                        this.child(fitted_text(window, prev, &metrics.sans, px(12.)).opacity(0.7))
+                            .child(
+                                Icon::path(diff_icons::ARROW_RIGHT_SHORT)
+                                    .size(rems(1.))
+                                    .color(colors.fg),
+                            )
                     })
                     .child(
                         div()
-                            .id(ElementId::Name(format!("diff-title-{}-{sticky}", file_index).into()))
-                            
+                            .id(ElementId::Name(
+                                format!("diff-title-{}-{sticky}", file_index).into(),
+                            ))
                             .min_w_0()
                             .w(measure_text(window, &path, &metrics.sans, px(12.)) + px(1.))
                             .truncate()
@@ -1063,37 +1167,43 @@ impl DiffPanel {
                             .child(path.clone()),
                     )
                     .child(
-                        Button::new(ElementId::Name(format!("diff-copy-{}-{sticky}", file_index).into()))
-                            .variant(ButtonVariant::GhostMuted)
-                            .size(ButtonSize::IconMicro)
-                            .tooltip(if copied { "Copied" } else { "Copy path" })
-                            .child(
-                                Icon::new(if copied { IconName::Check } else { IconName::Copy })
-                                    .size(rems(0.75))
-                                    .when(copied, |icon| icon.color(theme.success_foreground)),
-                            )
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
-                                let path = copy_path.clone();
-                                let panel = copy_panel.clone();
-                                panel.update(cx, |panel, cx| {
-                                    panel.copied_path = Some(path.clone());
-                                    cx.notify();
-                                    cx.spawn(async move |this, cx| {
-                                        cx.background_executor()
-                                            .timer(std::time::Duration::from_millis(2000))
-                                            .await;
-                                        this.update(cx, |panel, cx| {
-                                            if panel.copied_path.as_deref() == Some(path.as_str()) {
-                                                panel.copied_path = None;
-                                                cx.notify();
-                                            }
-                                        })
-                                        .ok();
+                        Button::new(ElementId::Name(
+                            format!("diff-copy-{}-{sticky}", file_index).into(),
+                        ))
+                        .variant(ButtonVariant::GhostMuted)
+                        .size(ButtonSize::IconMicro)
+                        .tooltip(if copied { "Copied" } else { "Copy path" })
+                        .child(
+                            Icon::new(if copied {
+                                IconName::Check
+                            } else {
+                                IconName::Copy
+                            })
+                            .size(rems(0.75))
+                            .when(copied, |icon| icon.color(theme.success_foreground)),
+                        )
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                            let path = copy_path.clone();
+                            let panel = copy_panel.clone();
+                            panel.update(cx, |panel, cx| {
+                                panel.copied_path = Some(path.clone());
+                                cx.notify();
+                                cx.spawn(async move |this, cx| {
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_millis(2000))
+                                        .await;
+                                    this.update(cx, |panel, cx| {
+                                        if panel.copied_path.as_deref() == Some(path.as_str()) {
+                                            panel.copied_path = None;
+                                            cx.notify();
+                                        }
                                     })
-                                    .detach();
-                                });
-                            }),
+                                    .ok();
+                                })
+                                .detach();
+                            });
+                        }),
                     )
                     .children(status_button),
             )
@@ -1107,7 +1217,13 @@ impl DiffPanel {
 
     // ── rows ────────────────────────────────────────────────────────────
 
-    fn render_row(&mut self, file_index: usize, row_index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(
+        &mut self,
+        file_index: usize,
+        row_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let colors = DiffColors::resolve(&theme);
         let metrics = self.metrics(window, cx);
@@ -1156,20 +1272,49 @@ impl DiffPanel {
                     .flex()
                     .w_full()
                     .bg(ctx.colors.bg)
-                    .child(div().flex().flex_1().min_w_0().border_r_1().border_color(ctx.colors.bg).child(left_el))
-                    .child(div().flex().flex_1().min_w_0().border_l_1().border_color(ctx.colors.bg).child(right_el))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .border_r_1()
+                            .border_color(ctx.colors.bg)
+                            .child(left_el),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .border_l_1()
+                            .border_color(ctx.colors.bg)
+                            .child(right_el),
+                    )
                     .into_any_element()
             }
             DiffRow::NoNewline { left, right, kind } => {
                 let marker = |ctx: &RowCtx| self.no_newline_cell(ctx, kind);
                 match self.settings.layout {
-                    DiffLayout::Stacked => div().flex().w_full().bg(ctx.colors.bg).child(marker(&ctx)).into_any_element(),
+                    DiffLayout::Stacked => div()
+                        .flex()
+                        .w_full()
+                        .bg(ctx.colors.bg)
+                        .child(marker(&ctx))
+                        .into_any_element(),
                     DiffLayout::Split => div()
                         .flex()
                         .w_full()
                         .bg(ctx.colors.bg)
-                        .child(div().flex().flex_1().min_w_0().child(if left { marker(&ctx) } else { self.buffer_cell(&ctx) }))
-                        .child(div().flex().flex_1().min_w_0().child(if right { marker(&ctx) } else { self.buffer_cell(&ctx) }))
+                        .child(div().flex().flex_1().min_w_0().child(if left {
+                            marker(&ctx)
+                        } else {
+                            self.buffer_cell(&ctx)
+                        }))
+                        .child(div().flex().flex_1().min_w_0().child(if right {
+                            marker(&ctx)
+                        } else {
+                            self.buffer_cell(&ctx)
+                        }))
                         .into_any_element(),
                 }
             }
@@ -1239,7 +1384,12 @@ impl DiffPanel {
             .into_any_element()
     }
 
-    fn kind_backgrounds(&self, colors: &DiffColors, kind: LineKind, selected: bool) -> (Hsla, Hsla) {
+    fn kind_backgrounds(
+        &self,
+        colors: &DiffColors,
+        kind: LineKind,
+        selected: bool,
+    ) -> (Hsla, Hsla) {
         match (kind, selected) {
             (_, true) => (colors.selected_line_bg, colors.selected_number_bg),
             (LineKind::Addition, _) => (colors.line_bg_addition, colors.number_bg_addition),
@@ -1333,7 +1483,11 @@ impl DiffPanel {
             .child(
                 div()
                     .id(ElementId::Name(
-                        format!("diff-num-{}-{:?}-{}-{}", file_index, cell.side, cell.number, cell.line_index).into(),
+                        format!(
+                            "diff-num-{}-{:?}-{}-{}",
+                            file_index, cell.side, cell.number, cell.line_index
+                        )
+                        .into(),
                     ))
                     .relative()
                     .flex_shrink_0()
@@ -1351,13 +1505,23 @@ impl DiffPanel {
                     .whitespace_nowrap()
                     .cursor(CursorStyle::PointingHand)
                     .children(bar_color.map(|color| {
-                        div().absolute().top_0().bottom_0().left_0().w(px(4.)).bg(color)
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(px(4.))
+                            .bg(color)
                     }))
                     .child(cell.number.to_string())
                     .child(
                         div()
                             .id(ElementId::Name(
-                                format!("diff-plus-{}-{:?}-{}-{}", file_index, cell.side, cell.number, cell.line_index).into(),
+                                format!(
+                                    "diff-plus-{}-{:?}-{}-{}",
+                                    file_index, cell.side, cell.number, cell.line_index
+                                )
+                                .into(),
                             ))
                             .absolute()
                             .top_0()
@@ -1409,7 +1573,12 @@ impl DiffPanel {
 
     /// `createSeparator` (`line-info`): a 24px pill with the expand buttons
     /// and "N unmodified lines".
-    fn render_separator(&mut self, ctx: &RowCtx, separator: Separator, cx: &mut Context<Self>) -> AnyElement {
+    fn render_separator(
+        &mut self,
+        ctx: &RowCtx,
+        separator: Separator,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let colors = ctx.colors;
         let panel = cx.entity();
         let buttons = separator.buttons();
@@ -1474,7 +1643,9 @@ impl DiffPanel {
         let chunked = separator.chunked && expandable;
         let expand_all_panel = panel.clone();
         let text = div()
-            .id(ElementId::Name(format!("diff-sep-text-{file_index}-{hunk_index}").into()))
+            .id(ElementId::Name(
+                format!("diff-sep-text-{file_index}-{hunk_index}").into(),
+            ))
             .flex()
             .flex_1()
             .min_w_0()
@@ -1486,15 +1657,25 @@ impl DiffPanel {
             .font_family(ctx.metrics.sans.clone())
             .text_size(px(11.))
             .overflow_hidden()
-            .when(!separator.expandable || buttons.is_empty(), |this| this.rounded(px(6.)))
-            .when(separator.expandable && !buttons.is_empty(), |this| this.rounded_r(px(6.)))
+            .when(!separator.expandable || buttons.is_empty(), |this| {
+                this.rounded(px(6.))
+            })
+            .when(separator.expandable && !buttons.is_empty(), |this| {
+                this.rounded_r(px(6.))
+            })
             .when(expandable, |this| {
                 this.cursor(CursorStyle::PointingHand)
                     .hover(move |style| style.bg(hover_bg).text_color(fg_hover))
                     .on_click(move |event, _, cx| {
                         let all = event.modifiers().shift;
                         text_panel.update(cx, |panel, cx| {
-                            panel.expand_hunk(file_index, hunk_index, ExpandDirection::Both, all, cx)
+                            panel.expand_hunk(
+                                file_index,
+                                hunk_index,
+                                ExpandDirection::Both,
+                                all,
+                                cx,
+                            )
                         });
                     })
             })
@@ -1510,7 +1691,9 @@ impl DiffPanel {
                     .flex()
                     .w_full()
                     .h_full()
-                    .when(expandable && !buttons.is_empty(), |this| this.child(button_column))
+                    .when(expandable && !buttons.is_empty(), |this| {
+                        this.child(button_column)
+                    })
                     .child(text)
                     .when(chunked, |this| {
                         this.child(
@@ -1531,7 +1714,13 @@ impl DiffPanel {
                                 .child("Expand all")
                                 .on_click(move |_, _, cx| {
                                     expand_all_panel.update(cx, |panel, cx| {
-                                        panel.expand_hunk(file_index, hunk_index, ExpandDirection::Both, true, cx)
+                                        panel.expand_hunk(
+                                            file_index,
+                                            hunk_index,
+                                            ExpandDirection::Both,
+                                            true,
+                                            cx,
+                                        )
                                     });
                                 }),
                         )
@@ -1543,7 +1732,13 @@ impl DiffPanel {
     // ── comments ────────────────────────────────────────────────────────
 
     /// `renderAnnotation`: the saved comments and the draft after a row.
-    fn render_annotation(&mut self, file_index: usize, row_index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_annotation(
+        &mut self,
+        file_index: usize,
+        row_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let colors = DiffColors::resolve(&theme);
         let Some(entry) = self.derived.files.get(file_index).cloned() else {
@@ -1562,7 +1757,10 @@ impl DiffPanel {
             {
                 continue;
             }
-            let Some(range) = super::review_comment_context::restore_diff_review_comment_range(&entry.file, comment) else {
+            let Some(range) = super::review_comment_context::restore_diff_review_comment_range(
+                &entry.file,
+                comment,
+            ) else {
                 continue;
             };
             let side = super::panel::annotation_side(&range);
@@ -1573,7 +1771,11 @@ impl DiffPanel {
         }
         if let Some(draft) = self.draft.clone()
             && draft.file_key == entry.key
-            && super::panel::row_index_for_line(&rows, draft.annotation.side, draft.annotation.line_number) == Some(row_index)
+            && super::panel::row_index_for_line(
+                &rows,
+                draft.annotation.side,
+                draft.annotation.line_number,
+            ) == Some(row_index)
         {
             has_draft = true;
             sections.push(self.draft_comment(&draft.range_label, window, cx));
@@ -1585,14 +1787,20 @@ impl DiffPanel {
             .text_color(theme.foreground)
             .when(has_draft, |this| this.py_1())
             .when(!has_draft, |this| {
-                this.border_y_1().border_color(with_alpha(theme.border, 0.3))
+                this.border_y_1()
+                    .border_color(with_alpha(theme.border, 0.3))
             })
             .children(sections)
             .into_any_element()
     }
 
     /// `DiffCommentAnnotation` kind `comment`.
-    fn saved_comment(&self, comment: &super::review_comment_context::ReviewCommentContext, theme: &AppTheme, cx: &mut Context<Self>) -> AnyElement {
+    fn saved_comment(
+        &self,
+        comment: &super::review_comment_context::ReviewCommentContext,
+        theme: &AppTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let panel = cx.entity();
         let id = comment.id.clone();
         let group: SharedString = format!("diff-comment-{}", comment.id).into();
@@ -1628,22 +1836,29 @@ impl DiffPanel {
                     .opacity(0.)
                     .group_hover(group, |style| style.opacity(1.))
                     .child(
-                        Button::new(ElementId::Name(format!("diff-comment-delete-{}", comment.id).into()))
-                            .variant(ButtonVariant::GhostMuted)
-                            .size(ButtonSize::IconXs)
-                            .tooltip("Delete comment")
-                            .child(Icon::new(IconName::Trash).size(rems(0.75)))
-                            .on_click(move |_, _, cx| {
-                                let id = id.clone();
-                                panel.update(cx, |panel, cx| panel.delete_comment(&id, cx));
-                            }),
+                        Button::new(ElementId::Name(
+                            format!("diff-comment-delete-{}", comment.id).into(),
+                        ))
+                        .variant(ButtonVariant::GhostMuted)
+                        .size(ButtonSize::IconXs)
+                        .tooltip("Delete comment")
+                        .child(Icon::new(IconName::Trash).size(rems(0.75)))
+                        .on_click(move |_, _, cx| {
+                            let id = id.clone();
+                            panel.update(cx, |panel, cx| panel.delete_comment(&id, cx));
+                        }),
                     ),
             )
             .into_any_element()
     }
 
     /// `DiffCommentAnnotation` kind `draft`.
-    fn draft_comment(&mut self, range_label: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn draft_comment(
+        &mut self,
+        range_label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         use gpui_kit::base::input::Textarea;
         let theme = cx.app_theme().clone();
         if self.comment_input.is_none() {
@@ -1711,7 +1926,8 @@ impl DiffPanel {
                             .disabled(!can_send)
                             .on_click(move |_, _, cx| {
                                 let text = send_state.read(cx).value().to_string();
-                                send_panel.update(cx, |panel, cx| panel.try_submit_draft(&text, cx));
+                                send_panel
+                                    .update(cx, |panel, cx| panel.try_submit_draft(&text, cx));
                             }),
                     ),
             )
@@ -1769,6 +1985,28 @@ impl Render for DiffPanel {
             .id("diff-panel")
             .key_context("DiffPanel")
             .track_focus(&self.focus_handle)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    window.focus(&this.focus_handle, cx);
+                }),
+            )
+            .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _, cx| {
+                let key = event.keystroke.key.as_str();
+                if key == "escape" {
+                    if this.menu.take().is_some() {
+                        cx.notify();
+                    } else if this.draft.is_some() {
+                        this.cancel_draft(cx);
+                    } else if this.selection.take().is_some() {
+                        cx.notify();
+                    }
+                    return;
+                }
+                if !event.keystroke.modifiers.modified() && this.scroll_key(key, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .flex()
             .flex_col()
             .size_full()

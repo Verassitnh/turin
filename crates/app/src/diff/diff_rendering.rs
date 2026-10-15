@@ -87,7 +87,9 @@ pub struct DiffLineStat {
 }
 
 /// `getDiffLineStat`.
-pub fn get_diff_line_stat<'a>(files: impl IntoIterator<Item = &'a FileDiffMetadata>) -> DiffLineStat {
+pub fn get_diff_line_stat<'a>(
+    files: impl IntoIterator<Item = &'a FileDiffMetadata>,
+) -> DiffLineStat {
     let mut total = DiffLineStat::default();
     for file in files {
         for hunk in &file.hunks {
@@ -126,8 +128,16 @@ fn hide_whitespace_changes(file: &FileDiffMetadata) -> FileDiffMetadata {
         .hunks
         .iter()
         .map(|hunk| {
-            let old_contents = slice(&file.deletion_lines, hunk.deletion_line_index, hunk.deletion_count);
-            let new_contents = slice(&file.addition_lines, hunk.addition_line_index, hunk.addition_count);
+            let old_contents = slice(
+                &file.deletion_lines,
+                hunk.deletion_line_index,
+                hunk.deletion_count,
+            );
+            let new_contents = slice(
+                &file.addition_lines,
+                hunk.addition_line_index,
+                hunk.addition_count,
+            );
             let old = FileContents {
                 name: file.name.clone(),
                 contents: old_contents,
@@ -163,7 +173,8 @@ fn hide_whitespace_changes(file: &FileDiffMetadata) -> FileDiffMetadata {
                 }],
             };
             next.split_line_start = (hunk.split_line_start as isize + split_delta).max(0) as usize;
-            next.unified_line_start = (hunk.unified_line_start as isize + unified_delta).max(0) as usize;
+            next.unified_line_start =
+                (hunk.unified_line_start as isize + unified_delta).max(0) as usize;
             next.split_line_count = filtered
                 .as_ref()
                 .map_or(hunk.addition_count, |f| f.split_line_count);
@@ -216,7 +227,10 @@ pub fn get_renderable_patch(
     if normalized.is_empty() {
         return None;
     }
-    let parsed = parse_patch_files(normalized, Some(&build_patch_cache_key(normalized, cache_scope)));
+    let parsed = parse_patch_files(
+        normalized,
+        Some(&build_patch_cache_key(normalized, cache_scope)),
+    );
     let source_files: Vec<FileDiffMetadata> = parsed.into_iter().flat_map(|p| p.files).collect();
     let files: Vec<FileDiffMetadata> = source_files
         .iter()
@@ -234,7 +248,10 @@ pub fn get_renderable_patch(
         })
         .collect();
     if !files.is_empty() {
-        return Some(RenderablePatch::Files { files, source_files });
+        return Some(RenderablePatch::Files {
+            files,
+            source_files,
+        });
     }
     Some(RenderablePatch::Raw {
         text: normalized.to_string(),
@@ -254,9 +271,7 @@ pub fn resolve_file_diff_path(file: &FileDiffMetadata) -> String {
 
 /// `resolveFileDiffPreviousPath`.
 pub fn resolve_file_diff_previous_path(file: &FileDiffMetadata) -> String {
-    file.prev_name
-        .clone()
-        .unwrap_or_else(|| file.name.clone())
+    file.prev_name.clone().unwrap_or_else(|| file.name.clone())
 }
 
 /// `buildFileDiffIdentityKey`: stable across re-renders of the same file,
@@ -274,7 +289,11 @@ pub fn build_file_diff_identity_key(file: &FileDiffMetadata) -> String {
 /// `buildFileDiffRenderKey`.
 pub fn build_file_diff_render_key(file: &FileDiffMetadata) -> String {
     match &file.cache_key {
-        None => format!("{}:{}", file.prev_name.as_deref().unwrap_or("none"), file.name),
+        None => format!(
+            "{}:{}",
+            file.prev_name.as_deref().unwrap_or("none"),
+            file.name
+        ),
         Some(key) => key.strip_suffix(":hydrated").unwrap_or(key).to_string(),
     }
 }
@@ -297,7 +316,13 @@ pub fn build_file_diff_content_version(file: &FileDiffMetadata) -> u32 {
     append(kind, value);
     let (kind, value) = string(&file.prev_name);
     append(if value.is_some() { kind } else { "undefined" }, value);
-    for value in [&file.lang, &file.new_object_id, &file.prev_object_id, &file.mode, &file.prev_mode] {
+    for value in [
+        &file.lang,
+        &file.new_object_id,
+        &file.prev_object_id,
+        &file.mode,
+        &file.prev_mode,
+    ] {
         let (kind, value) = string(value);
         append(if value.is_some() { kind } else { "undefined" }, value);
     }
@@ -397,8 +422,8 @@ pub fn get_diff_collapse_icon_tone(file: &FileDiffMetadata) -> DiffCollapseIconT
 mod tests {
     use super::*;
     use crate::diff::pierre::hydrate_partial_diff::hydrate_partial_diff;
-    use crate::diff::review_comment_context::{ReviewPosition, resolve_diff_review_position};
     use crate::diff::pierre::types::SelectionSide;
+    use crate::diff::review_comment_context::{ReviewPosition, resolve_diff_review_position};
 
     fn files(patch: &str, scope: &str, options: RenderablePatchOptions) -> Vec<FileDiffMetadata> {
         match get_renderable_patch(Some(patch), scope, options) {
@@ -473,14 +498,31 @@ mod tests {
         let shown = get_renderable_patch(Some(&patch), "pr", compact).unwrap();
         let hidden = get_renderable_patch(Some(&patch), "pr", hidden_options).unwrap();
         let (
-            RenderablePatch::Files { files: shown_files, .. },
-            RenderablePatch::Files { files: hidden_files, source_files },
+            RenderablePatch::Files {
+                files: shown_files, ..
+            },
+            RenderablePatch::Files {
+                files: hidden_files,
+                source_files,
+            },
         ) = (shown, hidden)
         else {
             panic!("expected files");
         };
-        assert_eq!(get_diff_line_stat(&shown_files), DiffLineStat { additions: 6, deletions: 4 });
-        assert_eq!(get_diff_line_stat(&hidden_files), DiffLineStat { additions: 3, deletions: 1 });
+        assert_eq!(
+            get_diff_line_stat(&shown_files),
+            DiffLineStat {
+                additions: 6,
+                deletions: 4
+            }
+        );
+        assert_eq!(
+            get_diff_line_stat(&hidden_files),
+            DiffLineStat {
+                additions: 3,
+                deletions: 1
+            }
+        );
         let file = &hidden_files[0];
         assert_eq!(file.addition_lines, shown_files[0].addition_lines);
         assert_eq!(file.deletion_lines, shown_files[0].deletion_lines);
@@ -520,7 +562,12 @@ mod tests {
         );
         let second = &file.hunks[1];
         assert_eq!(
-            (second.addition_start, second.deletion_start, second.split_line_start, second.unified_line_start),
+            (
+                second.addition_start,
+                second.deletion_start,
+                second.split_line_start,
+                second.unified_line_start
+            ),
             (82, 80, 7, 7)
         );
         let prefix = "unchanged\n".repeat(39);
@@ -528,18 +575,27 @@ mod tests {
         let join = |lines: &[String]| lines.concat();
         let old = FileContents {
             name: file.name.clone(),
-            contents: format!("{prefix}{}{gap}const value = 1;\n", join(&file.deletion_lines[..5])),
+            contents: format!(
+                "{prefix}{}{gap}const value = 1;\n",
+                join(&file.deletion_lines[..5])
+            ),
             cache_key: None,
         };
         let new = FileContents {
             name: file.name.clone(),
-            contents: format!("{prefix}{}{gap}const value = 2;\n", join(&file.addition_lines[..7])),
+            contents: format!(
+                "{prefix}{}{gap}const value = 2;\n",
+                join(&file.addition_lines[..7])
+            ),
             cache_key: None,
         };
         let hydrated = hydrate_partial_diff(file, Some(&old), Some(&new)).unwrap();
         assert_eq!(
             get_diff_line_stat([&hydrated]),
-            DiffLineStat { additions: 3, deletions: 1 }
+            DiffLineStat {
+                additions: 3,
+                deletions: 1
+            }
         );
         assert_eq!(
             resolve_diff_review_position(&hydrated, 43, Some(SelectionSide::Additions)),
@@ -574,7 +630,10 @@ mod tests {
             );
             assert_eq!(
                 get_diff_line_stat(&filtered),
-                DiffLineStat { additions, deletions },
+                DiffLineStat {
+                    additions,
+                    deletions
+                },
                 "{before:?} -> {after:?}"
             );
         }
@@ -587,7 +646,11 @@ mod tests {
                 "diff --git a/blank.txt b/blank.txt",
                 "--- a/blank.txt",
                 "+++ b/blank.txt",
-                if sign == "+" { "@@ -0,0 +1 @@" } else { "@@ -1 +0,0 @@" },
+                if sign == "+" {
+                    "@@ -0,0 +1 @@"
+                } else {
+                    "@@ -1 +0,0 @@"
+                },
                 &format!("{sign}  "),
                 "\\ No newline at end of file",
             ]);
@@ -659,10 +722,16 @@ mod tests {
         assert_eq!(file.hunks[0].collapsed_before, 47);
         assert_eq!(file.hunks[0].unified_line_start, 0);
         assert!(file.hunks[1].collapsed_before > 0);
-        assert_eq!(file.hunks[1].unified_line_start, file.hunks[0].unified_line_count);
+        assert_eq!(
+            file.hunks[1].unified_line_start,
+            file.hunks[0].unified_line_count
+        );
         assert_eq!(
             file.unified_line_count,
-            file.hunks.iter().map(|h| h.unified_line_count).sum::<usize>()
+            file.hunks
+                .iter()
+                .map(|h| h.unified_line_count)
+                .sum::<usize>()
         );
     }
 
@@ -775,7 +844,13 @@ mod tests {
             "+description",
         ]);
         let parsed = files(&patch, "diff-panel", Default::default());
-        assert_eq!(get_diff_line_stat(&parsed), DiffLineStat { additions: 3, deletions: 2 });
+        assert_eq!(
+            get_diff_line_stat(&parsed),
+            DiffLineStat {
+                additions: 3,
+                deletions: 2
+            }
+        );
     }
 
     fn quoted_patch(written: &str) -> String {
@@ -799,7 +874,10 @@ mod tests {
     fn a_file_name_a_patch_header_cannot_carry_plainly() {
         assert_eq!(path_of(&quoted_patch("tab\\tfile.txt")), "tab\tfile.txt");
         assert_eq!(path_of(&quoted_patch("line\\nfile.txt")), "line\nfile.txt");
-        assert_eq!(path_of(&quoted_patch("back\\\\slash.txt")), "back\\slash.txt");
+        assert_eq!(
+            path_of(&quoted_patch("back\\\\slash.txt")),
+            "back\\slash.txt"
+        );
         assert_eq!(
             path_of(&quoted_patch("caf\\303\\251/r\\303\\251sum\\303\\251.ts")),
             "café/résumé.ts"

@@ -107,14 +107,38 @@ pub mod diff_icons {
 
 const BRAND: &[(&str, &[u8])] = &[
     (SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg")),
-    (diff_icons::SYMBOL_ADDED, include_bytes!("../assets/diff/symbol-added.svg")),
-    (diff_icons::SYMBOL_DELETED, include_bytes!("../assets/diff/symbol-deleted.svg")),
-    (diff_icons::SYMBOL_MODIFIED, include_bytes!("../assets/diff/symbol-modified.svg")),
-    (diff_icons::SYMBOL_MOVED, include_bytes!("../assets/diff/symbol-moved.svg")),
-    (diff_icons::ARROW_RIGHT_SHORT, include_bytes!("../assets/diff/arrow-right-short.svg")),
-    (diff_icons::EXPAND, include_bytes!("../assets/diff/expand.svg")),
-    (diff_icons::EXPAND_UP, include_bytes!("../assets/diff/expand-up.svg")),
-    (diff_icons::EXPAND_ALL, include_bytes!("../assets/diff/expand-all.svg")),
+    (
+        diff_icons::SYMBOL_ADDED,
+        include_bytes!("../assets/diff/symbol-added.svg"),
+    ),
+    (
+        diff_icons::SYMBOL_DELETED,
+        include_bytes!("../assets/diff/symbol-deleted.svg"),
+    ),
+    (
+        diff_icons::SYMBOL_MODIFIED,
+        include_bytes!("../assets/diff/symbol-modified.svg"),
+    ),
+    (
+        diff_icons::SYMBOL_MOVED,
+        include_bytes!("../assets/diff/symbol-moved.svg"),
+    ),
+    (
+        diff_icons::ARROW_RIGHT_SHORT,
+        include_bytes!("../assets/diff/arrow-right-short.svg"),
+    ),
+    (
+        diff_icons::EXPAND,
+        include_bytes!("../assets/diff/expand.svg"),
+    ),
+    (
+        diff_icons::EXPAND_UP,
+        include_bytes!("../assets/diff/expand-up.svg"),
+    ),
+    (
+        diff_icons::EXPAND_ALL,
+        include_bytes!("../assets/diff/expand-all.svg"),
+    ),
     (diff_icons::PLUS, include_bytes!("../assets/diff/plus.svg")),
 ];
 

@@ -12,7 +12,9 @@ use parking_lot::Mutex;
 
 use super::base_ref_choices::VcsRef;
 use super::diff_panel_store::ScopedThreadRef;
-use super::diff_rendering::{RenderablePatch, RenderablePatchOptions, get_diff_line_stat, get_renderable_patch};
+use super::diff_rendering::{
+    RenderablePatch, RenderablePatchOptions, get_diff_line_stat, get_renderable_patch,
+};
 use super::mock_fixtures::{FixtureFile, branch_changes, turn_sets, uncommitted_changes};
 use super::pierre::hydrate_partial_diff::unified_hunks;
 use super::pierre::types::ChangeType;
@@ -57,8 +59,16 @@ pub fn git_patch(file: &FixtureFile) -> String {
     if file.binary {
         out.push_str(&format!(
             "index {old_id}..{new_id}\nBinary files {} and {} differ\n",
-            if file.old.is_some() { format!("a/{previous}") } else { "/dev/null".into() },
-            if file.new.is_some() { format!("b/{path}") } else { "/dev/null".into() },
+            if file.old.is_some() {
+                format!("a/{previous}")
+            } else {
+                "/dev/null".into()
+            },
+            if file.new.is_some() {
+                format!("b/{path}")
+            } else {
+                "/dev/null".into()
+            },
         ));
         return out;
     }
@@ -69,10 +79,22 @@ pub fn git_patch(file: &FixtureFile) -> String {
     }
     out.push_str(&format!(
         "--- {}\n+++ {}\n",
-        if file.old.is_some() { format!("a/{previous}") } else { "/dev/null".into() },
-        if file.new.is_some() { format!("b/{path}") } else { "/dev/null".into() },
+        if file.old.is_some() {
+            format!("a/{previous}")
+        } else {
+            "/dev/null".into()
+        },
+        if file.new.is_some() {
+            format!("b/{path}")
+        } else {
+            "/dev/null".into()
+        },
     ));
-    out.push_str(&unified_hunks(file.old.unwrap_or(""), file.new.unwrap_or(""), Some(3)));
+    out.push_str(&unified_hunks(
+        file.old.unwrap_or(""),
+        file.new.unwrap_or(""),
+        Some(3),
+    ));
     out
 }
 
@@ -116,10 +138,12 @@ fn vcs_ref(name: &str, remote: Option<&str>) -> VcsRef {
     }
 }
 
+type Notifier = Arc<dyn Fn(&mut App) + Send + Sync>;
+
 pub struct MockDiffSource {
     turns: Vec<TurnDiffSummary>,
     thread: ScopedThreadRef,
-    notifier: Mutex<Option<Arc<dyn Fn(&mut App) + Send + Sync>>>,
+    notifier: Mutex<Option<Notifier>>,
     loading: bool,
     lazy: bool,
 }
@@ -174,7 +198,11 @@ impl DiffSource for MockDiffSource {
         Loadable::Ready(patch)
     }
 
-    fn git_diff_preview(&self, base_ref: Option<&str>, _ignore_whitespace: bool) -> Loadable<GitDiffPreview> {
+    fn git_diff_preview(
+        &self,
+        base_ref: Option<&str>,
+        _ignore_whitespace: bool,
+    ) -> Loadable<GitDiffPreview> {
         if self.loading {
             return Loadable::Pending;
         }
@@ -190,7 +218,11 @@ impl DiffSource for MockDiffSource {
                     kind: GitSourceKind::BranchRange,
                     base_ref: Some(base),
                     head_ref: Some("feature/diff-panel".into()),
-                    diff: if lazy { String::new() } else { patch_for(&branch) },
+                    diff: if lazy {
+                        String::new()
+                    } else {
+                        patch_for(&branch)
+                    },
                     diff_hash: object_id("branch"),
                     truncated: lazy,
                     files: Some(stats_for(&branch)),
@@ -254,7 +286,8 @@ impl DiffSource for MockDiffSource {
 
     fn list_refs(&self, query: &str) -> DiffRefs {
         let query = query.trim().to_lowercase();
-        let keep = |reference: &VcsRef| query.is_empty() || reference.name.to_lowercase().contains(&query);
+        let keep =
+            |reference: &VcsRef| query.is_empty() || reference.name.to_lowercase().contains(&query);
         DiffRefs {
             local: ["main", "develop", "release/1.4"]
                 .iter()
@@ -315,7 +348,10 @@ mod tests {
             .collect();
         assert!(types.contains(&("README.md".into(), ChangeType::Change)));
         assert!(types.contains(&("apps/web/legacy/unused.js".into(), ChangeType::Deleted)));
-        assert!(types.contains(&("apps/web/src/lib/names.ts".into(), ChangeType::RenameChanged)));
+        assert!(types.contains(&(
+            "apps/web/src/lib/names.ts".into(),
+            ChangeType::RenameChanged
+        )));
         assert!(types.contains(&("apps/web/src/lib/diffCollapse.ts".into(), ChangeType::New)));
         let binary = files.iter().find(|f| f.name.ends_with("logo.png")).unwrap();
         assert!(binary.hunks.is_empty());
@@ -323,7 +359,12 @@ mod tests {
 
     #[test]
     fn the_panel_fixture_has_separate_hunks_with_hidden_context() {
-        let files = parsed(&git_patch(&branch_changes().into_iter().find(|f| f.path.ends_with("DiffPanel.tsx")).unwrap()));
+        let files = parsed(&git_patch(
+            &branch_changes()
+                .into_iter()
+                .find(|f| f.path.ends_with("DiffPanel.tsx"))
+                .unwrap(),
+        ));
         let hunks = &files[0].hunks;
         assert!(hunks.len() >= 3, "{}", hunks.len());
         assert!(hunks.iter().skip(1).all(|h| h.collapsed_before > 0));

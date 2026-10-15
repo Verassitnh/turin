@@ -28,6 +28,8 @@ pub struct TreeState {
     pub collapsed_dirs: HashSet<String>,
     pub known_file_keys: HashSet<String>,
     pub selected: Option<String>,
+    /// The keyboard cursor (any row, directories included).
+    pub cursor: Option<String>,
 }
 
 /// `--trees-git-*-color` light/dark.
@@ -89,9 +91,11 @@ impl DiffPanel {
                 // A row hides when an ancestor directory is closed. Flattened
                 // directory ids carry every merged segment, so closing the
                 // merged row hides what is below its id.
-                !self.tree.collapsed_dirs.iter().any(|closed| {
-                    row.path != *closed && row.path.starts_with(closed.as_str())
-                })
+                !self
+                    .tree
+                    .collapsed_dirs
+                    .iter()
+                    .any(|closed| row.path != *closed && row.path.starts_with(closed.as_str()))
             })
             .collect()
     }
@@ -121,14 +125,93 @@ impl DiffPanel {
         cx.notify();
     }
 
+    /// Arrow-key navigation of the tree: up/down move the cursor, left/right
+    /// close/open a directory (or step to its parent/first child), enter and
+    /// space activate the row.
+    pub(super) fn tree_key_down(&mut self, key: &str, cx: &mut Context<Self>) {
+        let rows = self.visible_tree_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let current = self
+            .tree
+            .cursor
+            .clone()
+            .or_else(|| self.tree.selected.clone())
+            .and_then(|path| rows.iter().position(|row| row.path == path));
+        let move_to = |index: usize| rows[index.min(rows.len() - 1)].path.clone();
+        let next = match key {
+            "down" => Some(move_to(current.map_or(0, |i| i + 1))),
+            "up" => Some(move_to(current.map_or(0, |i| i.saturating_sub(1)))),
+            "home" => Some(move_to(0)),
+            "end" => Some(move_to(rows.len() - 1)),
+            "right" | "left" | "enter" | "space" => None,
+            _ => return,
+        };
+        if let Some(path) = next {
+            self.tree.cursor = Some(path);
+            cx.notify();
+            return;
+        }
+        let Some(index) = current else {
+            self.tree.cursor = Some(move_to(0));
+            cx.notify();
+            return;
+        };
+        let row = rows[index].clone();
+        match key {
+            "left" if row.is_directory && !self.tree.collapsed_dirs.contains(&row.path) => {
+                self.tree.collapsed_dirs.insert(row.path);
+            }
+            "left" => {
+                // The parent directory: the nearest row above that is shallower.
+                if let Some(parent) = rows[..index]
+                    .iter()
+                    .rev()
+                    .find(|candidate| candidate.is_directory && candidate.depth < row.depth)
+                {
+                    self.tree.cursor = Some(parent.path.clone());
+                }
+            }
+            "right" if row.is_directory && self.tree.collapsed_dirs.contains(&row.path) => {
+                self.tree.collapsed_dirs.remove(&row.path);
+            }
+            "right" if row.is_directory => {
+                if let Some(child) = rows.get(index + 1) {
+                    self.tree.cursor = Some(child.path.clone());
+                }
+            }
+            _ => {
+                if row.is_directory {
+                    if !self.tree.collapsed_dirs.remove(&row.path) {
+                        self.tree.collapsed_dirs.insert(row.path);
+                    }
+                } else {
+                    self.tree.selected = Some(row.path.clone());
+                    self.reveal_file(&row.path, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
     /// `DiffFileTree`.
-    pub(super) fn render_file_tree(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_file_tree(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let dark = theme.is_dark();
         let rows = self.visible_tree_rows();
         let has_directories = rows.iter().any(|row| row.is_directory);
         let expanded = self.all_directories_expanded();
-        let selected = self.tree.selected.clone().or_else(|| self.derived.selected_file_path.clone());
+        let selected = self
+            .tree
+            .cursor
+            .clone()
+            .or_else(|| self.tree.selected.clone())
+            .or_else(|| self.derived.selected_file_path.clone());
         let entry_count = self.derived.tree_entries.len();
         let panel = cx.entity();
         let toggle_panel = panel.clone();
@@ -189,6 +272,13 @@ impl DiffPanel {
             list = list.child(self.tree_row(&row, selected.as_deref(), &theme, dark, &panel));
         }
         div()
+            .id("diff-file-tree")
+            .key_context("DiffFileTree")
+            .track_focus(&self.tree_focus)
+            .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _, cx| {
+                this.tree_key_down(&event.keystroke.key, cx);
+                cx.stop_propagation();
+            }))
             .flex()
             .flex_col()
             .size_full()
@@ -208,10 +298,15 @@ impl DiffPanel {
         panel: &gpui_kit::Entity<DiffPanel>,
     ) -> AnyElement {
         let entry: Option<&DiffFileTreeEntry> = (!row.is_directory)
-            .then(|| self.derived.tree_entries.iter().find(|e| e.path == row.path))
+            .then(|| {
+                self.derived
+                    .tree_entries
+                    .iter()
+                    .find(|e| e.path == row.path)
+            })
             .flatten();
         let status = entry.map(|e| e.status);
-        let is_selected = !row.is_directory && selected == Some(row.path.as_str());
+        let is_selected = selected == Some(row.path.as_str());
         let foreground = theme.foreground;
         let closed = row.is_directory && self.tree.collapsed_dirs.contains(&row.path);
         let name_color: Hsla = match status {
@@ -227,7 +322,9 @@ impl DiffPanel {
         let click_panel = panel.clone();
         let is_directory = row.is_directory;
         div()
-            .id(gpui_kit::ElementId::Name(format!("diff-tree:{}", row.path).into()))
+            .id(gpui_kit::ElementId::Name(
+                format!("diff-tree:{}", row.path).into(),
+            ))
             .flex()
             .flex_shrink_0()
             .h(px(24.))
@@ -242,20 +339,24 @@ impl DiffPanel {
             .when(!is_selected, |this| {
                 this.hover(move |style| style.bg(with_alpha(foreground, 0.07)))
             })
-            .child(div().flex().flex_shrink_0().w(px(16.)).justify_center().when(
-                is_directory,
-                |this| {
-                    this.child(
-                        Icon::new(if closed {
-                            IconName::ChevronRight
-                        } else {
-                            IconName::ChevronDown
-                        })
-                        .size(px_rems(12.))
-                        .color(theme.muted_foreground),
-                    )
-                },
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .w(px(16.))
+                    .justify_center()
+                    .when(is_directory, |this| {
+                        this.child(
+                            Icon::new(if closed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .size(px_rems(12.))
+                            .color(theme.muted_foreground),
+                        )
+                    }),
+            )
             .child(
                 Icon::new(if is_directory {
                     if closed {
@@ -289,9 +390,11 @@ impl DiffPanel {
                             .child(status_letter(status))
                     }),
             )
-            .on_click(move |_, _, cx| {
+            .on_click(move |_, window, cx| {
                 let path = path.clone();
                 click_panel.update(cx, |panel, cx| {
+                    window.focus(&panel.tree_focus, cx);
+                    panel.tree.cursor = Some(path.clone());
                     if is_directory {
                         if !panel.tree.collapsed_dirs.remove(&path) {
                             panel.tree.collapsed_dirs.insert(path);

@@ -94,7 +94,11 @@ pub fn get_expanded_region(
             render_all: true,
         };
     }
-    let region = expanded.regions.get(&hunk_index).copied().unwrap_or_default();
+    let region = expanded
+        .regions
+        .get(&hunk_index)
+        .copied()
+        .unwrap_or_default();
     let from_start = region.from_start.min(range_size);
     let from_end = region.from_end.min(range_size);
     let expanded_count = from_start + from_end;
@@ -209,8 +213,10 @@ pub fn iterate_over_diff(
     let mut events = Vec::new();
     let final_hunk_index = diff.hunks.len().wrapping_sub(1);
     for (hunk_index, hunk) in diff.hunks.iter().enumerate() {
-        let deletion_boundary = get_hunk_side_start_boundary(hunk.deletion_start, hunk.deletion_count);
-        let addition_boundary = get_hunk_side_start_boundary(hunk.addition_start, hunk.addition_count);
+        let deletion_boundary =
+            get_hunk_side_start_boundary(hunk.deletion_start, hunk.deletion_count);
+        let addition_boundary =
+            get_hunk_side_start_boundary(hunk.addition_start, hunk.addition_count);
         let deletion_start_index = if !diff.is_partial && hunk.deletion_count == 0 {
             deletion_boundary
         } else {
@@ -244,12 +250,18 @@ pub fn iterate_over_diff(
                 DiffStyle::Unified => {
                     unified_index == hunk.unified_line_start + hunk.unified_line_count - 1
                 }
-                DiffStyle::Split => split_index == hunk.split_line_start + hunk.split_line_count - 1,
+                DiffStyle::Split => {
+                    split_index == hunk.split_line_start + hunk.split_line_count - 1
+                }
             };
-            if last_row { trailing.collapsed_lines } else { 0 }
+            if last_row {
+                trailing.collapsed_lines
+            } else {
+                0
+            }
         };
         let mut consumed_collapsed = leading.collapsed_lines == 0;
-        let mut consume = |consumed: &mut bool| -> usize {
+        let consume = |consumed: &mut bool| -> usize {
             if *consumed {
                 0
             } else {
@@ -271,11 +283,7 @@ pub fn iterate_over_diff(
                                 consumed: &mut bool,
                                 first_consumes: bool| {
             for index in 0..count {
-                let collapsed_before = if first_consumes {
-                    consume(consumed)
-                } else {
-                    0
-                };
+                let collapsed_before = if first_consumes { consume(consumed) } else { 0 };
                 events.push(LineEvent {
                     hunk_index,
                     has_hunk: true,
@@ -411,7 +419,9 @@ pub fn iterate_over_diff(
                                     && hunk.no_eofcr_deletions
                             }
                             DiffStyle::Split => {
-                                is_last_content && index == split_count - 1 && hunk.no_eofcr_deletions
+                                is_last_content
+                                    && index == split_count - 1
+                                    && hunk.no_eofcr_deletions
                             }
                         };
                         let no_eofcr_addition = match style {
@@ -421,7 +431,9 @@ pub fn iterate_over_diff(
                                     && hunk.no_eofcr_additions
                             }
                             DiffStyle::Split => {
-                                is_last_content && index == split_count - 1 && hunk.no_eofcr_additions
+                                is_last_content
+                                    && index == split_count - 1
+                                    && hunk.no_eofcr_additions
                             }
                         };
                         let deletion = unified_deletion.map(|unified| SideLine {
@@ -431,15 +443,16 @@ pub fn iterate_over_diff(
                             unified_line_index: unified,
                             split_line_index: resolved_split,
                         });
-                        let addition = unified_addition.zip(addition_offset).map(|(unified, offset)| {
-                            SideLine {
-                                line_number: addition_number + offset,
-                                line_index: addition_index + offset,
-                                no_eofcr: no_eofcr_addition,
-                                unified_line_index: unified,
-                                split_line_index: resolved_split,
-                            }
-                        });
+                        let addition =
+                            unified_addition
+                                .zip(addition_offset)
+                                .map(|(unified, offset)| SideLine {
+                                    line_number: addition_number + offset,
+                                    line_index: addition_index + offset,
+                                    no_eofcr: no_eofcr_addition,
+                                    unified_line_index: unified,
+                                    split_line_index: resolved_split,
+                                });
                         events.push(LineEvent {
                             hunk_index,
                             has_hunk: true,
@@ -504,10 +517,7 @@ mod tests {
     use crate::diff::pierre::parse_patch_files::parse_patch_files;
 
     fn file(patch: &str) -> FileDiffMetadata {
-        parse_patch_files(patch, None)
-            .remove(0)
-            .files
-            .remove(0)
+        parse_patch_files(patch, None).remove(0).files.remove(0)
     }
 
     const TWO_HUNKS: &str = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -10,2 +10,2 @@\n-x\n+y\n z\n@@ -40 +40 @@\n-p\n+q\n";
@@ -553,7 +563,10 @@ mod tests {
         expanded.expand(1, ExpandDirection::Up, 100);
         expanded.expand(1, ExpandDirection::Down, 100);
         let region = get_expanded_region(false, 300, &expanded, 1, 1);
-        assert_eq!((region.from_start, region.from_end, region.collapsed_lines), (100, 100, 100));
+        assert_eq!(
+            (region.from_start, region.from_end, region.collapsed_lines),
+            (100, 100, 100)
+        );
         expanded.expand(1, ExpandDirection::Both, 100);
         assert!(get_expanded_region(false, 300, &expanded, 1, 1).render_all);
         assert!(get_expanded_region(false, 1, &ExpandedHunks::default(), 0, 1).render_all);

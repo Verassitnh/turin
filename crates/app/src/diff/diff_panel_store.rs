@@ -106,7 +106,12 @@ impl DiffPanelStore {
         self.branch_base_ref_by_thread_key.insert(key, normalized);
     }
 
-    pub fn select_turn(&mut self, thread: &ScopedThreadRef, turn_id: &str, file_path: Option<&str>) {
+    pub fn select_turn(
+        &mut self,
+        thread: &ScopedThreadRef,
+        turn_id: &str,
+        file_path: Option<&str>,
+    ) {
         let key = thread.key();
         let reveal_request_id = match self.by_thread_key.get(&key) {
             Some(DiffPanelSelection::Turn {
@@ -127,7 +132,11 @@ impl DiffPanelStore {
         );
     }
 
-    pub fn reconcile_turn_selection(&mut self, thread: &ScopedThreadRef, available_turn_ids: &[String]) {
+    pub fn reconcile_turn_selection(
+        &mut self,
+        thread: &ScopedThreadRef,
+        available_turn_ids: &[String],
+    ) {
         let key = thread.key();
         let Some(DiffPanelSelection::Turn {
             turn_id,
@@ -198,7 +207,10 @@ mod tests {
         store.select_git_scope(&thread(), GitScope::Branch);
         store.select_turn(&thread(), "turn-1", None);
         store.select_git_scope(&thread(), GitScope::Branch);
-        assert_eq!(store.selection(Some(&thread())), branch(Some("origin/release")));
+        assert_eq!(
+            store.selection(Some(&thread())),
+            branch(Some("origin/release"))
+        );
     }
 
     #[test]
@@ -213,13 +225,20 @@ mod tests {
         let mut store = DiffPanelStore::default();
         store.select_turn(&thread(), "turn-1", Some("src/app.ts"));
         store.select_git_scope(&thread(), GitScope::Unstaged);
-        assert_eq!(store.selection(Some(&thread())), DiffPanelSelection::Unstaged);
+        assert_eq!(
+            store.selection(Some(&thread())),
+            DiffPanelSelection::Unstaged
+        );
         store.select_branch_base_ref(&thread(), Some(" origin/main "));
-        assert_eq!(store.selection(Some(&thread())), branch(Some("origin/main")));
+        assert_eq!(
+            store.selection(Some(&thread())),
+            branch(Some("origin/main"))
+        );
     }
 
     #[test]
-    fn clears_a_threads_turn_and_file_when_selecting_working_tree_without_changing_another_threads_branch_base() {
+    fn clears_a_threads_turn_and_file_when_selecting_working_tree_without_changing_another_threads_branch_base()
+     {
         let other = ScopedThreadRef::new("environment-1", "thread-2");
         let mut store = DiffPanelStore::default();
         store.select_branch_base_ref(&thread(), Some("origin/release"));
@@ -228,11 +247,17 @@ mod tests {
 
         store.select_git_scope(&thread(), GitScope::Unstaged);
 
-        assert_eq!(store.selection(Some(&thread())), DiffPanelSelection::Unstaged);
+        assert_eq!(
+            store.selection(Some(&thread())),
+            DiffPanelSelection::Unstaged
+        );
         assert_eq!(store.selection(Some(&other)), branch(Some("origin/main")));
 
         store.select_git_scope(&thread(), GitScope::Branch);
-        assert_eq!(store.selection(Some(&thread())), branch(Some("origin/release")));
+        assert_eq!(
+            store.selection(Some(&thread())),
+            branch(Some("origin/release"))
+        );
     }
 
     #[test]
@@ -256,7 +281,10 @@ mod tests {
         store.select_branch_base_ref(&thread(), Some("origin/main"));
         store.select_git_scope(&thread(), GitScope::Unstaged);
         store.select_git_scope(&thread(), GitScope::Branch);
-        assert_eq!(store.selection(Some(&thread())), branch(Some("origin/main")));
+        assert_eq!(
+            store.selection(Some(&thread())),
+            branch(Some("origin/main"))
+        );
     }
 
     #[test]

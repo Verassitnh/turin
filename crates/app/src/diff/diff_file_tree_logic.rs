@@ -5,8 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::pierre::types::{ChangeType, FileDiffMetadata};
 use super::diff_rendering::resolve_file_diff_path;
+use super::pierre::types::{ChangeType, FileDiffMetadata};
 
 /// `GitStatus` of `@pierre/trees` (the four a diff can produce).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -131,9 +131,11 @@ pub fn build_diff_file_tree_updates(
     previous_paths: &[String],
     next_paths: &[String],
 ) -> Vec<FileTreeBatchOperation> {
-    let previous_directories: HashSet<String> =
-        collect_directory_paths(previous_paths).into_iter().collect();
-    let next_directories: HashSet<String> = collect_directory_paths(next_paths).into_iter().collect();
+    let previous_directories: HashSet<String> = collect_directory_paths(previous_paths)
+        .into_iter()
+        .collect();
+    let next_directories: HashSet<String> =
+        collect_directory_paths(next_paths).into_iter().collect();
     let previous: HashSet<&String> = previous_paths.iter().collect();
     let next: HashSet<&String> = next_paths.iter().collect();
     let mut updates = Vec::new();
@@ -335,7 +337,11 @@ mod tests {
     #[test]
     fn lists_every_ancestor_once_parents_first_with_pierres_trailing_slash() {
         assert_eq!(
-            collect_directory_paths(&strings(&["apps/web/src/a.ts", "apps/web/b.ts", "README.md"])),
+            collect_directory_paths(&strings(&[
+                "apps/web/src/a.ts",
+                "apps/web/b.ts",
+                "README.md"
+            ])),
             strings(&["apps/", "apps/web/", "apps/web/src/"])
         );
     }
@@ -367,11 +373,20 @@ mod tests {
     #[test]
     fn adds_a_new_files_directories_before_the_file() {
         assert_eq!(
-            build_diff_file_tree_updates(&strings(&["README.md"]), &strings(&["README.md", "src/lib/a.ts"])),
+            build_diff_file_tree_updates(
+                &strings(&["README.md"]),
+                &strings(&["README.md", "src/lib/a.ts"])
+            ),
             vec![
-                FileTreeBatchOperation::Add { path: "src/".into() },
-                FileTreeBatchOperation::Add { path: "src/lib/".into() },
-                FileTreeBatchOperation::Add { path: "src/lib/a.ts".into() },
+                FileTreeBatchOperation::Add {
+                    path: "src/".into()
+                },
+                FileTreeBatchOperation::Add {
+                    path: "src/lib/".into()
+                },
+                FileTreeBatchOperation::Add {
+                    path: "src/lib/a.ts".into()
+                },
             ]
         );
     }
@@ -379,10 +394,19 @@ mod tests {
     #[test]
     fn removes_files_before_their_now_empty_directories_deepest_first() {
         assert_eq!(
-            build_diff_file_tree_updates(&strings(&["src/lib/a.ts", "src/b.ts"]), &strings(&["src/b.ts"])),
+            build_diff_file_tree_updates(
+                &strings(&["src/lib/a.ts", "src/b.ts"]),
+                &strings(&["src/b.ts"])
+            ),
             vec![
-                FileTreeBatchOperation::Remove { path: "src/lib/a.ts".into(), recursive: false },
-                FileTreeBatchOperation::Remove { path: "src/lib/".into(), recursive: true },
+                FileTreeBatchOperation::Remove {
+                    path: "src/lib/a.ts".into(),
+                    recursive: false
+                },
+                FileTreeBatchOperation::Remove {
+                    path: "src/lib/".into(),
+                    recursive: true
+                },
             ]
         );
     }
@@ -390,13 +414,22 @@ mod tests {
     #[test]
     fn keeps_a_directory_that_still_holds_a_file() {
         assert_eq!(
-            build_diff_file_tree_updates(&strings(&["src/a.ts", "src/b.ts"]), &strings(&["src/b.ts"])),
-            vec![FileTreeBatchOperation::Remove { path: "src/a.ts".into(), recursive: false }]
+            build_diff_file_tree_updates(
+                &strings(&["src/a.ts", "src/b.ts"]),
+                &strings(&["src/b.ts"])
+            ),
+            vec![FileTreeBatchOperation::Remove {
+                path: "src/a.ts".into(),
+                recursive: false
+            }]
         );
     }
 
     #[test]
     fn produces_nothing_when_the_paths_are_unchanged() {
-        assert!(build_diff_file_tree_updates(&strings(&["src/a.ts"]), &strings(&["src/a.ts"])).is_empty());
+        assert!(
+            build_diff_file_tree_updates(&strings(&["src/a.ts"]), &strings(&["src/a.ts"]))
+                .is_empty()
+        );
     }
 }

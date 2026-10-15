@@ -64,9 +64,19 @@ pub fn diff_file_header_skeleton(title: SkeletonWidth, cx: &App) -> AnyElement {
                 .size(rems(1.25))
                 .items_center()
                 .justify_center()
-                .child(skeleton(rems(0.625).into(), rems(0.625).to_pixels(px(16.)), false, cx)),
+                .child(skeleton(
+                    rems(0.625).into(),
+                    rems(0.625).to_pixels(px(16.)),
+                    false,
+                    cx,
+                )),
         )
-        .child(skeleton(rems(1.25).into(), rems(1.25).to_pixels(px(16.)), false, cx))
+        .child(skeleton(
+            rems(1.25).into(),
+            rems(1.25).to_pixels(px(16.)),
+            false,
+            cx,
+        ))
         .child(
             div()
                 .min_w_0()

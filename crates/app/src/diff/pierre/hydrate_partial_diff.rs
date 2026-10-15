@@ -123,8 +123,9 @@ fn hydrate_hunks(
                 }
             }
         }
-        let collapsed_before = get_hunk_side_start_boundary(hunk.addition_start, hunk.addition_count)
-            .saturating_sub(last_hunk_addition_end);
+        let collapsed_before =
+            get_hunk_side_start_boundary(hunk.addition_start, hunk.addition_count)
+                .saturating_sub(last_hunk_addition_end);
         let mut next = hunk.clone();
         next.collapsed_before = collapsed_before;
         next.addition_line_index = addition_line_index;
@@ -139,7 +140,8 @@ fn hydrate_hunks(
         hydrated.push(next);
         split_line_count += collapsed_before + hunk_split;
         unified_line_count += collapsed_before + hunk_unified;
-        last_hunk_addition_end = get_hunk_side_end_boundary(hunk.addition_start, hunk.addition_count);
+        last_hunk_addition_end =
+            get_hunk_side_end_boundary(hunk.addition_start, hunk.addition_count);
     }
     if let Some(last) = hydrated.last() {
         let last_end = get_hunk_side_end_boundary(last.addition_start, last.addition_count);
@@ -215,7 +217,11 @@ pub fn parse_diff_from_file(
 
 /// jsdiff `createTwoFilesPatch` (without the `Index:` banner, which the
 /// parser ignores).
-fn create_two_files_patch(old: &FileContents, new: &FileContents, context: Option<usize>) -> String {
+fn create_two_files_patch(
+    old: &FileContents,
+    new: &FileContents,
+    context: Option<usize>,
+) -> String {
     let mut out = format!("--- {}\n+++ {}\n", old.name, new.name);
     out.push_str(&unified_hunks(&old.contents, &new.contents, context));
     out
@@ -232,7 +238,10 @@ pub fn unified_hunks(old: &str, new: &str, context: Option<usize>) -> String {
         Some(context) => diff.grouped_ops(context),
         None => {
             let ops = diff.ops().to_vec();
-            if ops.iter().all(|op| matches!(op.tag(), similar::DiffTag::Equal)) {
+            if ops
+                .iter()
+                .all(|op| matches!(op.tag(), similar::DiffTag::Equal))
+            {
                 Vec::new()
             } else {
                 vec![ops]
@@ -251,9 +260,17 @@ pub fn unified_hunks(old: &str, new: &str, context: Option<usize>) -> String {
         out.push_str(&format!(
             "@@ -{}{} +{}{} @@\n",
             header_start(old_start, old_len),
-            if old_len == 1 { String::new() } else { format!(",{old_len}") },
+            if old_len == 1 {
+                String::new()
+            } else {
+                format!(",{old_len}")
+            },
             header_start(new_start, new_len),
-            if new_len == 1 { String::new() } else { format!(",{new_len}") },
+            if new_len == 1 {
+                String::new()
+            } else {
+                format!(",{new_len}")
+            },
         ));
         for op in &group {
             for change in diff.iter_changes(op) {
@@ -309,7 +326,8 @@ mod tests {
 
     #[test]
     fn hydrating_a_partial_diff_recomputes_layout() {
-        let patch = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -3,3 +3,3 @@\n c\n-d\n+D\n e\n";
+        let patch =
+            "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -3,3 +3,3 @@\n c\n-d\n+D\n e\n";
         let partial = crate::diff::pierre::parse_patch_files::parse_patch_files(patch, None)
             .remove(0)
             .files

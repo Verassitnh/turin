@@ -21,7 +21,7 @@ use crate::diff::mock_source::MockDiffSource;
 use crate::diff::panel::DiffPanel;
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
-use crate::theme::tokens::{RADIUS_MD, TEXT_SM, TEXT_XS, WORKSPACE_TOPBAR_HEIGHT};
+use crate::theme::tokens::{RADIUS_MD, TEXT_XS, WORKSPACE_TOPBAR_HEIGHT};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 
 /// A surface tab: `h-6 max-w-36 rounded-md pl-1.5 pr-2 text-xs gap-0.5`,
@@ -127,12 +127,7 @@ impl RenderOnce for RightPanelTabs {
             .child(
                 // The diff surface (`DiffPanel`, mode "embedded"): below the tab
                 // bar, filling the rest of the column.
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .child(diff_panel),
+                div().flex().flex_col().flex_1().min_h_0().child(diff_panel),
             )
     }
 }

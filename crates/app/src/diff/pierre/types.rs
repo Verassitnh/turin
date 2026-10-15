@@ -219,10 +219,9 @@ pub fn get_hunk_side_end_boundary(start: usize, count: usize) -> usize {
 
 /// `cleanLastNewline`.
 pub fn clean_last_newline(contents: &str) -> &str {
-    let contents = contents.strip_suffix('\n').map_or(contents, |rest| {
-        rest.strip_suffix('\r').unwrap_or(rest)
-    });
     contents
+        .strip_suffix('\n')
+        .map_or(contents, |rest| rest.strip_suffix('\r').unwrap_or(rest))
 }
 
 /// `splitWithNewlines`: lines keep their `\n`; empty input is `[""]`.

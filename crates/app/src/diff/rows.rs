@@ -106,7 +106,11 @@ pub enum DiffRow {
         right: Option<Cell>,
     },
     /// `\ No newline at end of file` (`createNoNewlineElement`).
-    NoNewline { left: bool, right: bool, kind: LineKind },
+    NoNewline {
+        left: bool,
+        right: bool,
+        kind: LineKind,
+    },
 }
 
 /// Whether `loadDiffFiles` can hydrate this partial diff
@@ -201,8 +205,12 @@ fn push_event(
             // one-sided for changes, so each carries its own flag).
             let eof = if is_change {
                 match (event.deletion, event.addition) {
-                    (Some(line), None) => line.no_eofcr.then_some((true, false, LineKind::Deletion)),
-                    (None, Some(line)) => line.no_eofcr.then_some((false, true, LineKind::Addition)),
+                    (Some(line), None) => {
+                        line.no_eofcr.then_some((true, false, LineKind::Deletion))
+                    }
+                    (None, Some(line)) => {
+                        line.no_eofcr.then_some((false, true, LineKind::Addition))
+                    }
                     _ => None,
                 }
             } else {
@@ -217,8 +225,16 @@ fn push_event(
             };
             if let Some((left, right, kind)) = eof {
                 if !is_change && left && right {
-                    rows.push(DiffRow::NoNewline { left: true, right: false, kind });
-                    rows.push(DiffRow::NoNewline { left: false, right: true, kind });
+                    rows.push(DiffRow::NoNewline {
+                        left: true,
+                        right: false,
+                        kind,
+                    });
+                    rows.push(DiffRow::NoNewline {
+                        left: false,
+                        right: true,
+                        kind,
+                    });
                 } else {
                     rows.push(DiffRow::NoNewline { left, right, kind });
                 }
@@ -226,7 +242,10 @@ fn push_event(
         }
         DiffStyle::Split => {
             let (left, right) = if is_change {
-                (deletion_cell(LineKind::Deletion), addition_cell(LineKind::Addition))
+                (
+                    deletion_cell(LineKind::Deletion),
+                    addition_cell(LineKind::Addition),
+                )
             } else {
                 (deletion_cell(context_kind), addition_cell(context_kind))
             };
@@ -292,12 +311,9 @@ fn push_event(
 
 /// `totalLines` of `createPreElement`: sizes the number column.
 pub fn total_lines(file: &FileDiffMetadata) -> usize {
-    let from_hunks = file
-        .hunks
-        .last()
-        .map_or(0, |hunk| {
-            (hunk.addition_start + hunk.addition_count).max(hunk.deletion_start + hunk.deletion_count)
-        });
+    let from_hunks = file.hunks.last().map_or(0, |hunk| {
+        (hunk.addition_start + hunk.addition_count).max(hunk.deletion_start + hunk.deletion_count)
+    });
     from_hunks
         .max(file.addition_lines.len())
         .max(file.deletion_lines.len())
@@ -316,7 +332,12 @@ mod tests {
 
     #[test]
     fn unified_rows_interleave_separators() {
-        let rows = build_rows(&parse(PATCH), DiffStyle::Unified, &ExpandedHunks::default(), false);
+        let rows = build_rows(
+            &parse(PATCH),
+            DiffStyle::Unified,
+            &ExpandedHunks::default(),
+            false,
+        );
         let kinds: Vec<String> = rows
             .iter()
             .map(|row| match row {
@@ -343,19 +364,35 @@ mod tests {
 
     #[test]
     fn partial_separators_are_not_expandable_without_a_loader() {
-        let rows = build_rows(&parse(PATCH), DiffStyle::Unified, &ExpandedHunks::default(), false);
-        let DiffRow::Separator(first) = rows[0] else { panic!() };
+        let rows = build_rows(
+            &parse(PATCH),
+            DiffStyle::Unified,
+            &ExpandedHunks::default(),
+            false,
+        );
+        let DiffRow::Separator(first) = rows[0] else {
+            panic!()
+        };
         assert!(!first.expandable);
         assert!(first.buttons().is_empty());
     }
 
     #[test]
     fn a_loader_makes_separators_expandable_with_an_unknown_trailing_range() {
-        let rows = build_rows(&parse(PATCH), DiffStyle::Unified, &ExpandedHunks::default(), true);
-        let DiffRow::Separator(first) = rows[0] else { panic!() };
+        let rows = build_rows(
+            &parse(PATCH),
+            DiffStyle::Unified,
+            &ExpandedHunks::default(),
+            true,
+        );
+        let DiffRow::Separator(first) = rows[0] else {
+            panic!()
+        };
         assert!(first.expandable);
         assert_eq!(first.buttons(), vec![ExpandButton::Down]);
-        let DiffRow::Separator(last) = *rows.last().unwrap() else { panic!() };
+        let DiffRow::Separator(last) = *rows.last().unwrap() else {
+            panic!()
+        };
         assert_eq!(last.collapsed_lines, None);
         assert!(last.is_last);
         assert_eq!(last.buttons(), vec![ExpandButton::Up]);
@@ -364,11 +401,18 @@ mod tests {
 
     #[test]
     fn split_pairs_changes_and_leaves_an_empty_side() {
-        let rows = build_rows(&parse(PATCH), DiffStyle::Split, &ExpandedHunks::default(), false);
+        let rows = build_rows(
+            &parse(PATCH),
+            DiffStyle::Split,
+            &ExpandedHunks::default(),
+            false,
+        );
         let pairs: Vec<(Option<usize>, Option<usize>)> = rows
             .iter()
             .filter_map(|row| match row {
-                DiffRow::Split { left, right } => Some((left.map(|c| c.number), right.map(|c| c.number))),
+                DiffRow::Split { left, right } => {
+                    Some((left.map(|c| c.number), right.map(|c| c.number)))
+                }
                 _ => None,
             })
             .collect();
@@ -391,8 +435,22 @@ mod tests {
         );
         let rows = build_rows(&file, DiffStyle::Unified, &ExpandedHunks::default(), false);
         assert_eq!(rows.len(), 4);
-        assert!(matches!(rows[1], DiffRow::NoNewline { left: true, right: false, kind: LineKind::Deletion }));
-        assert!(matches!(rows[3], DiffRow::NoNewline { left: false, right: true, kind: LineKind::Addition }));
+        assert!(matches!(
+            rows[1],
+            DiffRow::NoNewline {
+                left: true,
+                right: false,
+                kind: LineKind::Deletion
+            }
+        ));
+        assert!(matches!(
+            rows[3],
+            DiffRow::NoNewline {
+                left: false,
+                right: true,
+                kind: LineKind::Addition
+            }
+        ));
     }
 
     #[test]
@@ -411,6 +469,9 @@ mod tests {
             expandable: true,
             chunked: true,
         };
-        assert_eq!(separator.buttons(), vec![ExpandButton::Up, ExpandButton::Down]);
+        assert_eq!(
+            separator.buttons(),
+            vec![ExpandButton::Up, ExpandButton::Down]
+        );
     }
 }

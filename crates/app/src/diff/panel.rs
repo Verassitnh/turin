@@ -95,7 +95,10 @@ pub enum BodyState {
     NoFileAccess(String),
     Loading(&'static str),
     Message(&'static str),
-    Raw { text: String, reason: String },
+    Raw {
+        text: String,
+        reason: String,
+    },
     Files,
 }
 
@@ -242,6 +245,7 @@ pub struct DiffPanel {
     pub(super) last_patch: Option<(String, Arc<Vec<FileDiffMetadata>>)>,
     pub(super) tree: super::file_tree::TreeState,
     pub(super) focus_handle: FocusHandle,
+    pub(super) tree_focus: FocusHandle,
     pub(super) copied_path: Option<String>,
     pub(super) comment_input: Option<super::annotation::CommentInput>,
     pub(super) handled_reveal: Option<(String, u64)>,
@@ -299,6 +303,7 @@ impl DiffPanel {
             last_patch: None,
             tree: Default::default(),
             focus_handle: cx.focus_handle(),
+            tree_focus: cx.focus_handle(),
             copied_path: None,
             comment_input: None,
             handled_reveal: None,
@@ -338,6 +343,24 @@ impl DiffPanel {
             Some("baseref") => Some(OpenMenu::BaseRef),
             _ => None,
         };
+        if let Some(spec) = env("TURIN_DIFF_EXPAND_CONTEXT") {
+            // `<hunk>[:down|up]` on the first expanded file.
+            let mut parts = spec.split(':');
+            let hunk = parts.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+            let direction = match parts.next() {
+                Some("up") => ExpandDirection::Up,
+                Some("down") => ExpandDirection::Down,
+                _ => ExpandDirection::Both,
+            };
+            if let Some(index) = panel
+                .derived
+                .files
+                .iter()
+                .position(|entry| !panel.collapsed_keys.contains(&entry.key))
+            {
+                panel.expand_hunk(index, hunk, direction, false, cx);
+            }
+        }
         if let Some(mode) = env("TURIN_DIFF_COMMENT") {
             panel.dev_comment(&mode, window, cx);
         }
@@ -346,18 +369,17 @@ impl DiffPanel {
 
     /// `TURIN_DIFF_COMMENT=draft|saved|select`.
     fn dev_comment(&mut self, mode: &str, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(index) = self
-            .derived
-            .files
-            .iter()
-            .position(|entry| !self.collapsed_keys.contains(&entry.key) && !entry.file.hunks.is_empty())
-        else {
+        let Some(index) = self.derived.files.iter().position(|entry| {
+            !self.collapsed_keys.contains(&entry.key) && !entry.file.hunks.is_empty()
+        }) else {
             return;
         };
         let entry = self.derived.files[index].clone();
         let Some(cell) = self.file_rows[index].iter().find_map(|row| match row {
             DiffRow::Line(cell) if cell.kind == LineKind::Addition => Some(*cell),
-            DiffRow::Split { right: Some(cell), .. } if cell.kind == LineKind::Addition => Some(*cell),
+            DiffRow::Split {
+                right: Some(cell), ..
+            } if cell.kind == LineKind::Addition => Some(*cell),
             _ => None,
         }) else {
             return;
@@ -400,13 +422,38 @@ impl DiffPanel {
 
     /// `useDiffPanelStore.selectTurn` for "Open diff" on a turn's changed
     /// files card.
-    pub fn open_turn_diff(&mut self, run_id: &str, file_path: Option<&str>, cx: &mut Context<Self>) {
+    pub fn open_turn_diff(
+        &mut self,
+        run_id: &str,
+        file_path: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(thread) = self.derived.context.thread.clone() else {
             return;
         };
         self.store.select_turn(&thread, run_id, file_path);
         self.reload(cx);
         cx.notify();
+    }
+
+    /// Keyboard scrolling of the code view (the focusable custom element
+    /// scrolls with the arrow, page, home and end keys).
+    pub(super) fn scroll_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let page = self.list.viewport_bounds().size.height * 0.9;
+        match key {
+            "down" => self.list.scroll_by(px(40.)),
+            "up" => self.list.scroll_by(px(-40.)),
+            "pagedown" | "space" => self.list.scroll_by(page),
+            "pageup" => self.list.scroll_by(-page),
+            "home" => self.list.scroll_to(gpui_kit::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            }),
+            "end" => self.list.scroll_to_end(),
+            _ => return false,
+        }
+        cx.notify();
+        true
     }
 
     pub fn thread(&self) -> Option<&ScopedThreadRef> {
@@ -497,9 +544,9 @@ impl DiffPanel {
                 GitScope::Branch => "Changes".into(),
             },
         };
-        derived.collapse_scope_key = thread.as_ref().map(|thread| {
-            format!("{}:{}", thread.key(), derived.review_section_id)
-        });
+        derived.collapse_scope_key = thread
+            .as_ref()
+            .map(|thread| format!("{}:{}", thread.key(), derived.review_section_id));
         derived.scope = match &selected_run_id {
             Some(_) => selected_turn
                 .as_ref()
@@ -530,7 +577,8 @@ impl DiffPanel {
         } else if selected_run_id.is_some() && derived.turns.is_empty() {
             derived.body = BodyState::NoTurns;
         } else if selected_run_id.is_none() && !context.can_read_files {
-            derived.body = BodyState::NoFileAccess("This connection cannot read local diffs.".into());
+            derived.body =
+                BodyState::NoFileAccess("This connection cannot read local diffs.".into());
         } else {
             let mut patch: Option<String> = None;
             let mut loading = false;
@@ -589,11 +637,21 @@ impl DiffPanel {
             }
             if let Some(stats) = lazy_files {
                 derived.lazy = true;
-                self.derive_lazy_files(&mut derived, &stats, git_source.as_ref(), selected_base_ref.as_deref());
+                self.derive_lazy_files(
+                    &mut derived,
+                    &stats,
+                    git_source.as_ref(),
+                    selected_base_ref.as_deref(),
+                );
             } else {
                 let has_patch = patch.is_some();
-                let has_no_net_changes = patch.as_deref().is_some_and(|text| text.trim().is_empty());
-                let renderable = self.renderable_files(patch.as_deref(), &derived.collapse_scope_key, selected_run_id.is_none());
+                let has_no_net_changes =
+                    patch.as_deref().is_some_and(|text| text.trim().is_empty());
+                let renderable = self.renderable_files(
+                    patch.as_deref(),
+                    &derived.collapse_scope_key,
+                    selected_run_id.is_none(),
+                );
                 match renderable {
                     Some(Ok(files)) => {
                         derived.files = self.entries_for(files);
@@ -630,7 +688,10 @@ impl DiffPanel {
                 _ => get_diff_line_stat(derived.files.iter().map(|entry| entry.file.as_ref())),
             };
             derived.has_stat = !derived.files.is_empty()
-                || (!turn_selected && git_source.as_ref().is_some_and(|s| s.files.as_ref().is_some_and(|f| !f.is_empty())));
+                || (!turn_selected
+                    && git_source
+                        .as_ref()
+                        .is_some_and(|s| s.files.as_ref().is_some_and(|f| !f.is_empty())));
             if derived.lazy {
                 derived.settled_count = derived
                     .files
@@ -661,7 +722,11 @@ impl DiffPanel {
                     .map(|entry| entry.key.clone())
                     .collect()
             } else if self.settings.files_collapsed {
-                derived.files.iter().map(|entry| entry.key.clone()).collect()
+                derived
+                    .files
+                    .iter()
+                    .map(|entry| entry.key.clone())
+                    .collect()
             } else {
                 HashSet::new()
             };
@@ -783,7 +848,8 @@ impl DiffPanel {
                         };
                         match get_renderable_patch(Some(&file_source.diff), "diff-panel", options) {
                             Some(RenderablePatch::Files { files, .. }) if files.len() == 1 => {
-                                let mut file = files.into_iter().next().unwrap_or_else(|| unreachable!());
+                                let mut file =
+                                    files.into_iter().next().unwrap_or_else(|| unreachable!());
                                 file.name = stat.path.clone();
                                 file.prev_name = stat.previous_path.clone();
                                 entry_file = Some(file);
@@ -815,7 +881,11 @@ impl DiffPanel {
                 file
             });
             let key = build_file_diff_identity_key(&file);
-            let file = self.hydrated.get(&key).cloned().unwrap_or_else(|| Arc::new(file));
+            let file = self
+                .hydrated
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| Arc::new(file));
             files.push(FileEntry {
                 key,
                 path: stat.path.clone(),
@@ -1084,11 +1154,11 @@ impl DiffPanel {
                     return;
                 }
             }
-            if let Some(updated) = self.hydrated.get(&entry.key).cloned() {
-                if let Some(slot) = self.derived.files.get_mut(file_index) {
-                    slot.version = build_file_diff_content_version(&updated);
-                    slot.file = updated;
-                }
+            if let Some(updated) = self.hydrated.get(&entry.key).cloned()
+                && let Some(slot) = self.derived.files.get_mut(file_index)
+            {
+                slot.version = build_file_diff_content_version(&updated);
+                slot.file = updated;
             }
         }
         let count = if all {
@@ -1096,7 +1166,11 @@ impl DiffPanel {
         } else {
             super::pierre::iterate_over_diff::DEFAULT_EXPANSION_LINE_COUNT
         };
-        let direction = if all { ExpandDirection::Both } else { direction };
+        let direction = if all {
+            ExpandDirection::Both
+        } else {
+            direction
+        };
         self.expanded
             .entry(entry.key.clone())
             .or_default()
@@ -1126,7 +1200,8 @@ impl DiffPanel {
         }
         impl DiffFileTargets for Targets<'_> {
             fn open_in_thread_file_viewer(&mut self, thread: &ScopedThreadRef, path: &str) {
-                self.source.open_in_thread_file_viewer(thread, path, self.cx);
+                self.source
+                    .open_in_thread_file_viewer(thread, path, self.cx);
             }
             fn open_in_editor(&mut self, target_path: &str) {
                 self.source.open_in_editor(target_path, self.cx);
@@ -1184,7 +1259,11 @@ impl DiffPanel {
     /// Applies the external selection's file reveal once per request.
     fn apply_reveal(&mut self, cx: &mut Context<Self>) {
         if let Some(key) = self.pending_reveal.take()
-            && let Some(index) = self.derived.files.iter().position(|e| e.key == key && !e.pending)
+            && let Some(index) = self
+                .derived
+                .files
+                .iter()
+                .position(|e| e.key == key && !e.pending)
         {
             self.scroll_to_file(index);
         }
@@ -1209,7 +1288,12 @@ impl DiffPanel {
 
     // ── comments ────────────────────────────────────────────────────────
 
-    pub fn begin_comment(&mut self, file_index: usize, range: SelectedLineRange, cx: &mut Context<Self>) {
+    pub fn begin_comment(
+        &mut self,
+        file_index: usize,
+        range: SelectedLineRange,
+        cx: &mut Context<Self>,
+    ) {
         let Some(entry) = self.derived.files.get(file_index) else {
             return;
         };
@@ -1244,7 +1328,13 @@ impl DiffPanel {
 
     /// The "+" button of a line: comments on the current selection when it
     /// holds the line, else on the line alone (`onGutterUtilityClick`).
-    pub fn begin_comment_at(&mut self, file_key: &str, file_index: usize, cell: super::rows::Cell, cx: &mut Context<Self>) {
+    pub fn begin_comment_at(
+        &mut self,
+        file_key: &str,
+        file_index: usize,
+        cell: super::rows::Cell,
+        cx: &mut Context<Self>,
+    ) {
         if self.draft.is_some() {
             return;
         }
@@ -1272,7 +1362,13 @@ impl DiffPanel {
 
     /// Clicking a line number selects it; shift extends within the file
     /// (`enableLineSelection`; off while a comment is open).
-    pub fn select_line(&mut self, file_key: &str, cell: super::rows::Cell, shift: bool, cx: &mut Context<Self>) {
+    pub fn select_line(
+        &mut self,
+        file_key: &str,
+        cell: super::rows::Cell,
+        shift: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.draft.is_some() {
             return;
         }
@@ -1320,7 +1416,13 @@ impl DiffPanel {
         let Some(draft) = self.draft.clone() else {
             return;
         };
-        let Some(entry) = self.derived.files.iter().find(|e| e.key == draft.file_key).cloned() else {
+        let Some(entry) = self
+            .derived
+            .files
+            .iter()
+            .find(|e| e.key == draft.file_key)
+            .cloned()
+        else {
             return;
         };
         if let Some(comment) = build_diff_review_comment(BuildDiffReviewCommentInput {
@@ -1377,12 +1479,12 @@ pub fn row_index_for_line(rows: &[DiffRow], side: SelectionSide, number: usize) 
 }
 
 fn matches_kind(kind: LineKind, side: SelectionSide) -> bool {
-    match (kind, side) {
-        (LineKind::Context, _) => true,
-        (LineKind::Addition, SelectionSide::Additions) => true,
-        (LineKind::Deletion, SelectionSide::Deletions) => true,
-        _ => false,
-    }
+    matches!(
+        (kind, side),
+        (LineKind::Context, _)
+            | (LineKind::Addition, SelectionSide::Additions)
+            | (LineKind::Deletion, SelectionSide::Deletions)
+    )
 }
 
 fn cell_matches(
@@ -1421,9 +1523,18 @@ mod tests {
     #[test]
     fn annotation_rows_attach_to_the_commented_line() {
         let rows = rows();
-        assert_eq!(row_index_for_line(&rows, SelectionSide::Additions, 2), Some(2));
-        assert_eq!(row_index_for_line(&rows, SelectionSide::Deletions, 2), Some(1));
-        assert_eq!(row_index_for_line(&rows, SelectionSide::Additions, 3), Some(3));
+        assert_eq!(
+            row_index_for_line(&rows, SelectionSide::Additions, 2),
+            Some(2)
+        );
+        assert_eq!(
+            row_index_for_line(&rows, SelectionSide::Deletions, 2),
+            Some(1)
+        );
+        assert_eq!(
+            row_index_for_line(&rows, SelectionSide::Additions, 3),
+            Some(3)
+        );
         assert_eq!(row_index_for_line(&rows, SelectionSide::Additions, 9), None);
     }
 

@@ -61,6 +61,9 @@ mod tests {
         assert_eq!(natural_compare("src/a.ts", "src/b.ts"), Ordering::Less);
         let mut paths = vec!["docs/z.md", "README.md", "docs/a.md", "crates/x.rs"];
         paths.sort_by(|a, b| natural_compare(a, b));
-        assert_eq!(paths, vec!["crates/x.rs", "docs/a.md", "docs/z.md", "README.md"]);
+        assert_eq!(
+            paths,
+            vec!["crates/x.rs", "docs/a.md", "docs/z.md", "README.md"]
+        );
     }
 }

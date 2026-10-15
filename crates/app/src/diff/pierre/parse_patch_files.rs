@@ -326,19 +326,13 @@ pub fn process_file(file_diff: &str, options: ProcessFileOptions<'_>) -> Option<
                         hunk.no_eofcr_additions = true;
                     }
                     if is_partial
-                        && matches!(
-                            last_line_type,
-                            Some(LineType::Addition | LineType::Context)
-                        )
+                        && matches!(last_line_type, Some(LineType::Addition | LineType::Context))
                         && let Some(last) = file.addition_lines.last_mut()
                     {
                         *last = clean_last_newline(last).to_string();
                     }
                     if is_partial
-                        && matches!(
-                            last_line_type,
-                            Some(LineType::Deletion | LineType::Context)
-                        )
+                        && matches!(last_line_type, Some(LineType::Deletion | LineType::Context))
                         && let Some(last) = file.deletion_lines.last_mut()
                     {
                         *last = clean_last_newline(last).to_string();
@@ -363,8 +357,10 @@ pub fn process_file(file_diff: &str, options: ProcessFileOptions<'_>) -> Option<
                 get_hunk_side_start_boundary(hunk.deletion_start, hunk.deletion_count)
                     + usize::from(parsed_deletions != 0);
             if !is_partial {
-                let addition_delta = repaired_addition_start as isize - hunk.addition_start as isize;
-                let deletion_delta = repaired_deletion_start as isize - hunk.deletion_start as isize;
+                let addition_delta =
+                    repaired_addition_start as isize - hunk.addition_start as isize;
+                let deletion_delta =
+                    repaired_deletion_start as isize - hunk.deletion_start as isize;
                 let shift = |value: usize, delta: isize| (value as isize + delta).max(0) as usize;
                 hunk.addition_line_index = shift(hunk.addition_line_index, addition_delta);
                 hunk.deletion_line_index = shift(hunk.deletion_line_index, deletion_delta);
@@ -385,7 +381,8 @@ pub fn process_file(file_diff: &str, options: ProcessFileOptions<'_>) -> Option<
             (get_hunk_side_start_boundary(hunk.addition_start, hunk.addition_count) as isize
                 - last_hunk_end)
                 .max(0) as usize;
-        last_hunk_end = get_hunk_side_end_boundary(hunk.addition_start, hunk.addition_count) as isize;
+        last_hunk_end =
+            get_hunk_side_end_boundary(hunk.addition_start, hunk.addition_count) as isize;
         for content in &hunk.hunk_content {
             match *content {
                 HunkContent::Context { lines, .. } => {
@@ -581,7 +578,9 @@ pub fn parse_quoted_diff_file_name(input: &str) -> Option<String> {
             out.push(read_octal_byte(bytes, index + 1)?);
             index += 4;
             if !(bytes.get(index) == Some(&b'\\')
-                && bytes.get(index + 1).is_some_and(|b| (b'0'..=b'7').contains(b)))
+                && bytes
+                    .get(index + 1)
+                    .is_some_and(|b| (b'0'..=b'7').contains(b)))
             {
                 break;
             }
@@ -995,7 +994,10 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(file.addition_lines, vec!["one\n", "TWO\n", "three\n", "four\n"]);
+        assert_eq!(
+            file.addition_lines,
+            vec!["one\n", "TWO\n", "three\n", "four\n"]
+        );
         assert!(file.cache_key.as_deref().unwrap().starts_with("ck1:"));
     }
 

@@ -123,7 +123,11 @@ pub fn build_file_review_comment(
 ) -> ReviewCommentContext {
     let start = start_line.min(end_line).max(1);
     let end = start.max(start_line.max(end_line));
-    let selected: Vec<&str> = contents.split('\n').skip(start - 1).take(end - start + 1).collect();
+    let selected: Vec<&str> = contents
+        .split('\n')
+        .skip(start - 1)
+        .take(end - start + 1)
+        .collect();
     ReviewCommentContext {
         id: id.into(),
         section_id: format!("file:{file_path}"),
@@ -195,7 +199,13 @@ fn build_diff_review_lines(
             let new_hunk_start = hunk.addition_start + usize::from(hunk.addition_count == 0);
             let context_lines = (old_hunk_start as isize - old_context_start as isize)
                 .min(new_hunk_start as isize - new_context_start as isize);
-            push_context_gap(&mut rows, &mut row_index, old_context_start, new_context_start, context_lines);
+            push_context_gap(
+                &mut rows,
+                &mut row_index,
+                old_context_start,
+                new_context_start,
+                context_lines,
+            );
         }
         let mut old_line_number = hunk.deletion_start;
         let mut new_line_number = hunk.addition_start;
@@ -280,7 +290,13 @@ fn build_diff_review_lines(
     if include_expanded_context {
         let trailing = (file.deletion_lines.len() as isize - old_context_start as isize + 1)
             .min(file.addition_lines.len() as isize - new_context_start as isize + 1);
-        push_context_gap(&mut rows, &mut row_index, old_context_start, new_context_start, trailing);
+        push_context_gap(
+            &mut rows,
+            &mut row_index,
+            old_context_start,
+            new_context_start,
+            trailing,
+        );
     }
     rows
 }
@@ -294,7 +310,8 @@ fn selection_point(line: &DiffReviewLine) -> Option<(usize, SelectionSide)> {
     if let Some(new) = line.new_line_number {
         return Some((new, SelectionSide::Additions));
     }
-    line.old_line_number.map(|old| (old, SelectionSide::Deletions))
+    line.old_line_number
+        .map(|old| (old, SelectionSide::Deletions))
 }
 
 /// `restoreDiffReviewCommentRange`.
@@ -342,21 +359,25 @@ fn find_diff_review_line_index(
         let mut row_index = 0usize;
         let mut old_context_start = 1usize;
         let mut new_context_start = 1usize;
-        let find_context_index = |row_index: usize, old_start: usize, new_start: usize, line_count: isize| {
-            let count = line_count.max(0) as isize;
-            let selected_start = if left { old_start } else { new_start };
-            let offset = line_number as isize - selected_start as isize;
-            (offset >= 0 && offset < count).then(|| row_index + offset as usize)
-        };
+        let find_context_index =
+            |row_index: usize, old_start: usize, new_start: usize, line_count: isize| {
+                let count = line_count.max(0);
+                let selected_start = if left { old_start } else { new_start };
+                let offset = line_number as isize - selected_start as isize;
+                (offset >= 0 && offset < count).then(|| row_index + offset as usize)
+            };
         for hunk in &file.hunks {
             if include_expanded_context {
                 let old_end = hunk.deletion_start + usize::from(hunk.deletion_count == 0);
                 let new_end = hunk.addition_start + usize::from(hunk.addition_count == 0);
                 let context_lines = (old_end as isize - old_context_start as isize)
                     .min(new_end as isize - new_context_start as isize);
-                if let Some(found) =
-                    find_context_index(row_index, old_context_start, new_context_start, context_lines)
-                {
+                if let Some(found) = find_context_index(
+                    row_index,
+                    old_context_start,
+                    new_context_start,
+                    context_lines,
+                ) {
                     return Some(found);
                 }
                 row_index += context_lines.max(0) as usize;
@@ -383,12 +404,18 @@ fn find_diff_review_line_index(
                         additions,
                         ..
                     } => {
-                        if left && line_number >= old_line_number && line_number < old_line_number + deletions {
+                        if left
+                            && line_number >= old_line_number
+                            && line_number < old_line_number + deletions
+                        {
                             return Some(row_index + line_number - old_line_number);
                         }
                         row_index += deletions;
                         old_line_number += deletions;
-                        if !left && line_number >= new_line_number && line_number < new_line_number + additions {
+                        if !left
+                            && line_number >= new_line_number
+                            && line_number < new_line_number + additions
+                        {
                             return Some(row_index + line_number - new_line_number);
                         }
                         row_index += additions;
@@ -425,9 +452,17 @@ pub enum ContextSide {
 /// `PullRequestReviewPosition`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReviewPosition {
-    Added { new_line: usize },
-    Deleted { old_line: usize },
-    Context { old_line: usize, new_line: usize, side: ContextSide },
+    Added {
+        new_line: usize,
+    },
+    Deleted {
+        old_line: usize,
+    },
+    Context {
+        old_line: usize,
+        new_line: usize,
+        side: ContextSide,
+    },
 }
 
 /// `resolveDiffReviewPosition`: host-facing coordinates of a selected line.
@@ -442,8 +477,12 @@ pub fn resolve_diff_review_position(
         .into_iter()
         .next()?;
     match line.change {
-        Change::Add => line.new_line_number.map(|new_line| ReviewPosition::Added { new_line }),
-        Change::Delete => line.old_line_number.map(|old_line| ReviewPosition::Deleted { old_line }),
+        Change::Add => line
+            .new_line_number
+            .map(|new_line| ReviewPosition::Added { new_line }),
+        Change::Delete => line
+            .old_line_number
+            .map(|old_line| ReviewPosition::Deleted { old_line }),
         Change::Context => Some(ReviewPosition::Context {
             old_line: line.old_line_number?,
             new_line: line.new_line_number?,
@@ -459,7 +498,13 @@ pub fn resolve_diff_review_position(
 fn get_diff_range(lines: &[DiffReviewLine], old: bool) -> (usize, usize) {
     let numbers: Vec<usize> = lines
         .iter()
-        .filter_map(|line| if old { line.old_line_number } else { line.new_line_number })
+        .filter_map(|line| {
+            if old {
+                line.old_line_number
+            } else {
+                line.new_line_number
+            }
+        })
         .collect();
     (numbers.first().copied().unwrap_or(0), numbers.len())
 }
@@ -486,7 +531,8 @@ fn format_diff_review_range_label(lines: &[DiffReviewLine]) -> String {
         };
     };
     let first_marker = change_marker(first.change).trim();
-    let marker = if !first_marker.is_empty() && lines.iter().all(|line| line.change == first.change) {
+    let marker = if !first_marker.is_empty() && lines.iter().all(|line| line.change == first.change)
+    {
         first_marker
     } else {
         ""
@@ -509,10 +555,16 @@ pub struct BuildDiffReviewCommentInput<'a> {
 }
 
 /// `buildDiffReviewComment`.
-pub fn build_diff_review_comment(input: BuildDiffReviewCommentInput<'_>) -> Option<ReviewCommentContext> {
+pub fn build_diff_review_comment(
+    input: BuildDiffReviewCommentInput<'_>,
+) -> Option<ReviewCommentContext> {
     let include = !input.file_diff.is_partial;
-    let start_index =
-        find_diff_review_line_index(input.file_diff, input.range.start, input.range.side, include)?;
+    let start_index = find_diff_review_line_index(
+        input.file_diff,
+        input.range.start,
+        input.range.side,
+        include,
+    )?;
     let end_index = find_diff_review_line_index(
         input.file_diff,
         input.range.end,
@@ -528,7 +580,9 @@ pub fn build_diff_review_comment(input: BuildDiffReviewCommentInput<'_>) -> Opti
     );
     let (old_start, old_count) = get_diff_range(&selected, true);
     let (new_start, new_count) = get_diff_range(&selected, false);
-    let mut diff = vec![format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@")];
+    let mut diff = vec![format!(
+        "@@ -{old_start},{old_count} +{new_start},{new_count} @@"
+    )];
     diff.extend(
         selected
             .iter()
@@ -583,7 +637,10 @@ mod tests {
     use crate::diff::pierre::parse_patch_files::parse_patch_files;
 
     fn parse(patch: &str, key: &str) -> FileDiffMetadata {
-        parse_patch_files(patch, Some(key)).remove(0).files.remove(0)
+        parse_patch_files(patch, Some(key))
+            .remove(0)
+            .files
+            .remove(0)
     }
 
     #[test]
@@ -670,10 +727,16 @@ mod tests {
             text: "Keep both sides.",
         })
         .unwrap();
-        assert_eq!(restore_diff_review_comment_range(&file, &comment), Some(range));
+        assert_eq!(
+            restore_diff_review_comment_range(&file, &comment),
+            Some(range)
+        );
         // Without the stored selection the row indexes alone restore it.
         comment.selection = None;
-        assert_eq!(restore_diff_review_comment_range(&file, &comment), Some(range));
+        assert_eq!(
+            restore_diff_review_comment_range(&file, &comment),
+            Some(range)
+        );
     }
 
     #[test]

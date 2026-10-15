@@ -118,21 +118,25 @@ pub fn resolve_diff_path_for_workspace(
     repository_root: Option<&str>,
 ) -> Option<String> {
     let file_segments = normalized_relative_path_segments(file_path)?;
-    let workspace_segments = repository_relative_workspace_segments(workspace_root, repository_root);
+    let workspace_segments =
+        repository_relative_workspace_segments(workspace_root, repository_root);
     let Some(workspace_segments) = workspace_segments.filter(|s| !s.is_empty()) else {
         return Some(file_segments.join("/"));
     };
     let case_insensitive = repository_root.is_some_and(is_windows_absolute_path);
-    let belongs = workspace_segments.iter().enumerate().all(|(index, segment)| {
-        let Some(candidate) = file_segments.get(index) else {
-            return false;
-        };
-        if case_insensitive {
-            candidate.to_lowercase() == *segment
-        } else {
-            candidate == segment
-        }
-    });
+    let belongs = workspace_segments
+        .iter()
+        .enumerate()
+        .all(|(index, segment)| {
+            let Some(candidate) = file_segments.get(index) else {
+                return false;
+            };
+            if case_insensitive {
+                candidate.to_lowercase() == *segment
+            } else {
+                candidate == segment
+            }
+        });
     if !belongs {
         return None;
     }
@@ -167,11 +171,9 @@ pub fn open_diff_file_primary_action(
     input: OpenDiffFilePrimaryActionInput<'_>,
     targets: &mut dyn DiffFileTargets,
 ) {
-    let Some(workspace_file_path) = resolve_diff_path_for_workspace(
-        input.file_path,
-        input.active_cwd,
-        input.repository_root,
-    ) else {
+    let Some(workspace_file_path) =
+        resolve_diff_path_for_workspace(input.file_path, input.active_cwd, input.repository_root)
+    else {
         return;
     };
     if let Some(thread) = input.thread {
@@ -220,7 +222,10 @@ mod tests {
             },
             &mut targets,
         );
-        assert_eq!(targets.viewer, vec!["apps/web/src/components/DiffPanel.tsx"]);
+        assert_eq!(
+            targets.viewer,
+            vec!["apps/web/src/components/DiffPanel.tsx"]
+        );
         assert!(targets.editor.is_empty());
     }
 
@@ -286,9 +291,7 @@ mod tests {
 
     #[test]
     fn handles_filesystem_roots() {
-        for (workspace_root, repository_root) in
-            [("/frontend", "/"), ("C:\\frontend", "C:\\")]
-        {
+        for (workspace_root, repository_root) in [("/frontend", "/"), ("C:\\frontend", "C:\\")] {
             assert_eq!(
                 resolve_diff_path_for_workspace(
                     "frontend/index.ts",

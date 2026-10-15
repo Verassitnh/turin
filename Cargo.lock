@@ -6722,6 +6722,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "turin-contracts",
  "uuid",
 ]

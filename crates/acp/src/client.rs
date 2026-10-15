@@ -4,7 +4,7 @@
 //! `extRequestHandlers` and `extNotificationHandlers`. A JSON-RPC request is
 //! never delivered to a notification handler.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,8 +29,8 @@ use crate::cursor::{
 use crate::errors::{AcpError, AcpRequestError, SchemaIssue};
 use crate::meta::{self, agent, client as client_methods, v1_agent, v1_client};
 use crate::protocol::{
-    Connection, ConnectionConfig, IncomingNotification, NotificationCallback, RequestCallback,
-    RequestContext,
+    Connection, ConnectionConfig, ConnectionHooks, IncomingNotification, NotificationCallback,
+    RequestCallback, RequestContext,
 };
 use crate::schema::is_create_elicitation_request;
 
@@ -49,18 +49,158 @@ struct Handlers {
     ext_notifications: HashMap<String, NotifyHandler>,
     unknown_ext_request: Option<RequestHandler>,
     unknown_ext_notification: Option<UnknownNotificationHandler>,
-    session_updates: Vec<NotifyHandler>,
-    pending_session_updates: Vec<Value>,
-    elicitation_complete: Vec<NotifyHandler>,
-    pending_elicitation_complete: Vec<Value>,
+    session_updates: Arc<ReplayQueue>,
+    elicitation_complete: Arc<ReplayQueue>,
 }
 
+/// Bound on elicitation completions buffered before a handler registers. Upstream
+/// leaves its buffer unbounded; Turin drops the oldest (see PORTING.md Deviations).
+const MAX_BUFFERED_ELICITATIONS: usize = 32;
+
+/// Notification handlers plus the notifications that arrived before any handler
+/// was registered. Replay and live delivery share one FIFO and a single drainer,
+/// so they cannot interleave or reorder. Upstream flushes inline in the
+/// registering fiber (client.ts handleSessionUpdate), and live updates arriving
+/// during the flush queue behind it.
+#[derive(Default)]
+struct ReplayQueue {
+    state: Mutex<ReplayState>,
+}
+
+#[derive(Default)]
+struct ReplayState {
+    handlers: Vec<NotifyHandler>,
+    pending: VecDeque<Value>,
+    draining: bool,
+}
+
+impl ReplayQueue {
+    /// Queues one notification, then drains unless a drain is already running.
+    /// `capacity` bounds the pre-registration buffer, dropping the oldest entry.
+    async fn deliver(&self, params: Value, capacity: Option<usize>) {
+        let start = {
+            let mut state = self.state.lock();
+            if let Some(capacity) = capacity
+                && state.pending.len() >= capacity
+            {
+                state.pending.pop_front();
+            }
+            state.pending.push_back(params);
+            claim_drain(&mut state)
+        };
+        if start {
+            self.drain().await;
+        }
+    }
+
+    /// Adds a handler and replays anything buffered. The replay runs on a
+    /// spawned task because registration is synchronous. Without a runtime the
+    /// buffer waits for the next delivery, which drains it first.
+    fn register(self: Arc<Self>, handler: NotifyHandler) {
+        let start = {
+            let mut state = self.state.lock();
+            state.handlers.push(handler);
+            claim_drain(&mut state)
+        };
+        if !start {
+            return;
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move { self.drain().await });
+            }
+            Err(_) => self.state.lock().draining = false,
+        }
+    }
+
+    async fn drain(&self) {
+        loop {
+            let next = {
+                let mut state = self.state.lock();
+                match state.pending.pop_front() {
+                    Some(params) => (state.handlers.clone(), params),
+                    None => {
+                        state.draining = false;
+                        return;
+                    }
+                }
+            };
+            run_notify_handlers(&next.0, next.1).await;
+        }
+    }
+}
+
+/// Marks a drain as running when there is work and a handler to run it.
+fn claim_drain(state: &mut ReplayState) -> bool {
+    if state.draining || state.handlers.is_empty() || state.pending.is_empty() {
+        return false;
+    }
+    state.draining = true;
+    true
+}
+
+type TerminationHook = Arc<dyn Fn(&AcpError) + Send + Sync>;
+type IncomingRequestHook = Arc<dyn Fn(&str, &str, &Value) + Send + Sync>;
+type OutgoingResponseHook = Arc<dyn Fn(&str) + Send + Sync>;
+type OutgoingResponseFailureHook = Arc<dyn Fn(&str, &AcpError) + Send + Sync>;
+
+/// Connection hooks for one client. Active prompts are always failed on
+/// termination. The public `on_*` setters fill the optional slots.
+#[derive(Default)]
+struct ClientHooks {
+    prompts: Arc<Mutex<PromptWaiters>>,
+    termination: Mutex<Option<TerminationHook>>,
+    incoming_request: Mutex<Option<IncomingRequestHook>>,
+    outgoing_response: Mutex<Option<OutgoingResponseHook>>,
+    outgoing_response_failure: Mutex<Option<OutgoingResponseFailureHook>>,
+}
+
+impl ConnectionHooks for ClientHooks {
+    fn on_termination(&self, error: &AcpError) {
+        fail_prompts(&self.prompts, error);
+        let hook = self.termination.lock().clone();
+        if let Some(hook) = hook {
+            hook(error);
+        }
+    }
+
+    fn on_incoming_request(&self, request_id: &str, method: &str, params: &Value) {
+        let hook = self.incoming_request.lock().clone();
+        if let Some(hook) = hook {
+            hook(request_id, method, params);
+        }
+    }
+
+    fn on_outgoing_response(&self, request_id: &str) {
+        let hook = self.outgoing_response.lock().clone();
+        if let Some(hook) = hook {
+            hook(request_id);
+        }
+    }
+
+    fn on_outgoing_response_failure(&self, request_id: &str, error: &AcpError) {
+        let hook = self.outgoing_response_failure.lock().clone();
+        if let Some(hook) = hook {
+            hook(request_id, error);
+        }
+    }
+}
+
+/// Client handle for one ACP connection. Cheap to clone.
+///
+/// Handlers registered through the `on_*` methods are stored on the connection
+/// they serve, so they must not capture a strong `AcpClient`. The stored
+/// closure would keep the connection alive: its tasks never abort, and the
+/// child process is never signalled on drop. Capture a
+/// `std::sync::Weak<AcpClient>` instead (keep the owner in an `Arc`), or a
+/// narrow handle such as one channel sender or one shared-state `Arc`.
 #[derive(Clone)]
 pub struct AcpClient {
     connection: Connection,
     handlers: Arc<Mutex<Handlers>>,
     generation: Arc<Mutex<Option<ProtocolGeneration>>>,
     prompts: Arc<Mutex<PromptWaiters>>,
+    hooks: Arc<ClientHooks>,
     next_prompt: Arc<AtomicU64>,
     shutdown: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
@@ -78,7 +218,7 @@ impl AcpClient {
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        Self::connect_with(read, write, None, None)
+        Self::connect_with(read, write, None, None, None)
     }
 
     pub fn connect_with<R, W>(
@@ -87,6 +227,7 @@ impl AcpClient {
         termination_on_eof: Option<
             Arc<dyn Fn() -> futures::future::BoxFuture<'static, AcpError> + Send + Sync>,
         >,
+        termination_on_exit: Option<futures::future::BoxFuture<'static, AcpError>>,
         shutdown: Option<Arc<dyn std::any::Any + Send + Sync>>,
     ) -> Self
     where
@@ -99,7 +240,10 @@ impl AcpClient {
         let on_request = client_request_callback(Arc::clone(&handlers));
         let on_notification =
             client_notification_callback(Arc::clone(&handlers), Arc::clone(&prompts));
-        let prompts_for_end = Arc::clone(&prompts);
+        let hooks = Arc::new(ClientHooks {
+            prompts: Arc::clone(&prompts),
+            ..ClientHooks::default()
+        });
         let transform_generation = Arc::clone(&generation);
         let connection = Connection::start(
             read,
@@ -107,8 +251,9 @@ impl AcpClient {
             ConnectionConfig {
                 on_request,
                 on_notification,
-                on_termination: Arc::new(move |error| fail_prompts(&prompts_for_end, error)),
+                hooks: Arc::clone(&hooks) as Arc<dyn ConnectionHooks>,
                 termination_on_eof,
+                termination_on_exit,
                 transform_session_update: Arc::new(move |value| {
                     normalize_session_notification(value, *transform_generation.lock())
                 }),
@@ -119,9 +264,49 @@ impl AcpClient {
             handlers,
             generation,
             prompts,
+            hooks,
             next_prompt: Arc::new(AtomicU64::new(1)),
             shutdown,
         }
+    }
+
+    /// Runs once when the connection ends, after active prompts have failed.
+    /// Replaces any earlier hook.
+    pub fn on_termination<F>(&self, handler: F)
+    where
+        F: Fn(&AcpError) + Send + Sync + 'static,
+    {
+        *self.hooks.termination.lock() = Some(Arc::new(handler));
+    }
+
+    /// The error that ended the connection, if it has ended.
+    pub fn termination_error(&self) -> Option<AcpError> {
+        self.connection.termination_error()
+    }
+
+    /// Observes each inbound request before it is dispatched: request id,
+    /// method, params. A panic here ends the connection.
+    pub fn on_incoming_request<F>(&self, handler: F)
+    where
+        F: Fn(&str, &str, &Value) + Send + Sync + 'static,
+    {
+        *self.hooks.incoming_request.lock() = Some(Arc::new(handler));
+    }
+
+    /// Runs after a response to an inbound request has been written.
+    pub fn on_outgoing_response<F>(&self, handler: F)
+    where
+        F: Fn(&str) + Send + Sync + 'static,
+    {
+        *self.hooks.outgoing_response.lock() = Some(Arc::new(handler));
+    }
+
+    /// Runs when writing a response to an inbound request fails.
+    pub fn on_outgoing_response_failure<F>(&self, handler: F)
+    where
+        F: Fn(&str, &AcpError) + Send + Sync + 'static,
+    {
+        *self.hooks.outgoing_response_failure.lock() = Some(Arc::new(handler));
     }
 
     pub async fn initialize(
@@ -331,23 +516,24 @@ impl AcpClient {
             }
             prompts.insert(session_id.clone(), (token, tx));
         }
-        if let Err(error) = self
-            .connection
+        // Armed before the first await. A dropped future (timeout, select!,
+        // abort on interrupt) must not leave the session marked busy; upstream
+        // uses Effect.ensuring here.
+        let _active = ActivePrompt {
+            prompts: Arc::clone(&self.prompts),
+            session_id,
+            token,
+        };
+        self.connection
             .rpc_request(agent::SESSION_PROMPT, payload)
-            .await
-        {
-            self.clear_prompt(&session_id, token);
-            return Err(error);
-        }
-        let result = match rx.await {
+            .await?;
+        match rx.await {
             Ok(result) => result,
             Err(_) => Err(self
                 .connection
                 .termination_error()
                 .unwrap_or_else(|| AcpError::transport("ACP prompt completion closed"))),
-        };
-        self.clear_prompt(&session_id, token);
-        result
+        }
     }
 
     pub async fn cancel(&self, payload: Value) -> Result<(), AcpError> {
@@ -414,23 +600,21 @@ impl AcpClient {
         F: Fn(Value) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), AcpError>> + Send + 'static,
     {
-        let handler = box_notify(handler);
-        let pending = {
-            let mut handlers = self.handlers.lock();
-            handlers.session_updates.push(Arc::clone(&handler));
-            std::mem::take(&mut handlers.pending_session_updates)
-        };
-        if pending.is_empty() {
-            return;
-        }
-        let handlers = { self.handlers.lock().session_updates.clone() };
-        tokio::spawn(async move {
-            for params in pending {
-                run_notify_handlers(&handlers, params).await;
-            }
-        });
+        let queue = Arc::clone(&self.handlers.lock().session_updates);
+        queue.register(box_notify(handler));
     }
 
+    pub fn on_elicitation_complete<F, Fut>(&self, handler: F)
+    where
+        F: Fn(Value) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), AcpError>> + Send + 'static,
+    {
+        let queue = Arc::clone(&self.handlers.lock().elicitation_complete);
+        queue.register(box_notify(handler));
+    }
+
+    /// Registers a handler for an extension request. Do not capture a strong
+    /// `AcpClient` in `handler`; see the type docs.
     pub fn on_ext_request<F, Fut>(&self, method: impl Into<String>, handler: F)
     where
         F: Fn(Value, RequestContext) -> Fut + Send + Sync + 'static,
@@ -603,14 +787,24 @@ impl AcpClient {
             self.connection.rpc_request(method, payload).await
         }
     }
+}
 
-    fn clear_prompt(&self, session_id: &str, token: u64) {
+/// Removes a session's active-prompt entry when the owning `prompt` call ends,
+/// by return, error or drop. The token check keeps a newer prompt's entry.
+struct ActivePrompt {
+    prompts: Arc<Mutex<PromptWaiters>>,
+    session_id: String,
+    token: u64,
+}
+
+impl Drop for ActivePrompt {
+    fn drop(&mut self) {
         let mut prompts = self.prompts.lock();
         if prompts
-            .get(session_id)
-            .is_some_and(|(current, _)| *current == token)
+            .get(&self.session_id)
+            .is_some_and(|(current, _)| *current == self.token)
         {
-            prompts.remove(session_id);
+            prompts.remove(&self.session_id);
         }
     }
 }
@@ -659,32 +853,12 @@ fn client_notification_callback(
             match notification {
                 IncomingNotification::SessionUpdate { params } => {
                     complete_idle_prompt(&prompts, &params);
-                    let pending_or_handlers = {
-                        let mut handlers = handlers.lock();
-                        if handlers.session_updates.is_empty() {
-                            handlers.pending_session_updates.push(params);
-                            None
-                        } else {
-                            Some((handlers.session_updates.clone(), params))
-                        }
-                    };
-                    if let Some((list, params)) = pending_or_handlers {
-                        run_notify_handlers(&list, params).await;
-                    }
+                    let queue = Arc::clone(&handlers.lock().session_updates);
+                    queue.deliver(params, None).await;
                 }
                 IncomingNotification::ElicitationComplete { params, .. } => {
-                    let pending_or_handlers = {
-                        let mut handlers = handlers.lock();
-                        if handlers.elicitation_complete.is_empty() {
-                            handlers.pending_elicitation_complete.push(params);
-                            None
-                        } else {
-                            Some((handlers.elicitation_complete.clone(), params))
-                        }
-                    };
-                    if let Some((list, params)) = pending_or_handlers {
-                        run_notify_handlers(&list, params).await;
-                    }
+                    let queue = Arc::clone(&handlers.lock().elicitation_complete);
+                    queue.deliver(params, Some(MAX_BUFFERED_ELICITATIONS)).await;
                 }
                 IncomingNotification::Ext { method, params } => {
                     let (specific, unknown) = {
@@ -882,6 +1056,34 @@ mod tests {
         let mut bytes = serde_json::to_vec(&value).unwrap();
         bytes.push(b'\n');
         write.write_all(&bytes).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn weak_handler_capture_lets_the_client_drop() {
+        use tokio::io::AsyncReadExt;
+        let (client, mut agent_read, _agent_write) = pair();
+        let owner = Arc::new(client);
+        let handler_weak = Arc::downgrade(&owner);
+        owner.on_request_permission(move |_params, _ctx| {
+            let handler_weak = handler_weak.clone();
+            async move {
+                let _client = handler_weak
+                    .upgrade()
+                    .ok_or_else(|| AcpError::transport("client dropped"))?;
+                Ok(json!({"outcome": {"outcome": "cancelled"}}))
+            }
+        });
+        let owner_weak = Arc::downgrade(&owner);
+        drop(owner);
+        // The stored handler holds only the weak handle, so the last strong
+        // handle drop tears the connection down and closes the outbound stream.
+        let mut buf = [0_u8; 16];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), agent_read.read(&mut buf))
+            .await
+            .expect("a weak-capturing handler kept the connection alive")
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(owner_weak.upgrade().is_none());
     }
 
     #[tokio::test]
@@ -1135,6 +1337,194 @@ mod tests {
         )
         .await;
         assert_eq!(prompt.await.unwrap().unwrap()["stopReason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn aborted_prompt_releases_the_session_for_the_next_prompt() {
+        let (client, mut read, mut write) = pair();
+        let init = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .initialize(InitializeRequest {
+                        protocol_version: 1,
+                        client_capabilities: None,
+                        client_info: None,
+                        meta: None,
+                    })
+                    .await
+            }
+        });
+        let request = read_value(&mut read).await;
+        write_value(
+            &mut write,
+            json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {"protocolVersion": 2, "info": {"name": "mock", "version": "0"}, "capabilities": {}}
+            }),
+        )
+        .await;
+        init.await.unwrap().unwrap();
+        let first = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .prompt(json!({"sessionId": "s1", "prompt": []}))
+                    .await
+            }
+        });
+        let _first_request = read_value(&mut read).await;
+        // Dropping the future is what a timeout, select! or interrupt does.
+        first.abort();
+        let _ = first.await;
+        let second = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .prompt(json!({"sessionId": "s1", "prompt": []}))
+                    .await
+            }
+        });
+        let second_request =
+            tokio::time::timeout(std::time::Duration::from_secs(2), read_value(&mut read))
+                .await
+                .expect("second prompt was rejected before reaching the wire");
+        assert_eq!(second_request["method"], "session/prompt");
+        // v2 prompts complete on the idle state_update, not the RPC reply.
+        write_value(
+            &mut write,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "s1",
+                    "update": {"sessionUpdate": "state_update", "state": "idle", "stopReason": "end_turn"}
+                }
+            }),
+        )
+        .await;
+        write_value(
+            &mut write,
+            json!({"jsonrpc": "2.0", "id": second_request["id"], "result": {}}),
+        )
+        .await;
+        let second = tokio::time::timeout(std::time::Duration::from_secs(2), second)
+            .await
+            .expect("second prompt did not complete")
+            .unwrap();
+        assert_eq!(second.unwrap()["stopReason"], "end_turn");
+    }
+
+    // Needs a multi-thread runtime so the replay task and the reader can overlap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn buffered_and_live_session_updates_replay_in_arrival_order() {
+        let (client, _read, mut write) = pair();
+        let update = |index: usize| {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"sessionId": format!("s{index}"), "update": {"sessionUpdate": "plan", "entries": []}}
+            })
+        };
+        for index in 0..2_000 {
+            write_value(&mut write, update(index)).await;
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while client
+            .handlers
+            .lock()
+            .session_updates
+            .state
+            .lock()
+            .pending
+            .len()
+            < 2_000
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "reader did not buffer"
+            );
+            tokio::task::yield_now().await;
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = Arc::clone(&seen);
+        client.on_session_update(move |params| {
+            let seen_cb = Arc::clone(&seen_cb);
+            async move {
+                let index: usize = params["sessionId"].as_str().unwrap()[1..].parse().unwrap();
+                seen_cb.lock().push(index);
+                tokio::task::yield_now().await;
+                Ok(())
+            }
+        });
+        // Live updates arrive while the replay is still draining.
+        for index in 2_000..2_050 {
+            write_value(&mut write, update(index)).await;
+        }
+        while seen.lock().len() < 2_050 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "handler saw {} updates",
+                seen.lock().len()
+            );
+            tokio::task::yield_now().await;
+        }
+        let order = seen.lock().clone();
+        assert_eq!(order, (0..2_050).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn client_hooks_observe_inbound_requests_responses_and_termination() {
+        let (client, mut read, mut write) = pair();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        client.on_incoming_request({
+            let seen = Arc::clone(&seen);
+            move |id, method, _params| seen.lock().push(format!("in:{id}:{method}"))
+        });
+        client.on_outgoing_response({
+            let seen = Arc::clone(&seen);
+            move |id| seen.lock().push(format!("out:{id}"))
+        });
+        client.on_termination({
+            let seen = Arc::clone(&seen);
+            move |_error| seen.lock().push("terminated".to_owned())
+        });
+        client.on_ext_request("x/ping", |_params, _ctx| async {
+            Ok::<Value, AcpError>(json!({"pong": true}))
+        });
+        write_value(
+            &mut write,
+            json!({"jsonrpc": "2.0", "id": 5, "method": "x/ping", "params": {}}),
+        )
+        .await;
+        let reply = read_value(&mut read).await;
+        assert_eq!(reply["result"]["pong"], true);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while seen.lock().len() < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "outgoing hook never ran"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            *seen.lock(),
+            vec![
+                "in:$t3:jsonrpc:number:5:x/ping".to_owned(),
+                "out:$t3:jsonrpc:number:5".to_owned(),
+            ]
+        );
+        assert!(client.termination_error().is_none());
+        drop(write);
+        while !seen.lock().iter().any(|entry| entry == "terminated") {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "termination hook never ran"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(client.termination_error().is_some());
     }
 
     #[test]

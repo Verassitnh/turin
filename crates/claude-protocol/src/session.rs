@@ -4,7 +4,7 @@ use crate::{
     launch::LaunchOptions,
 };
 use anyhow::{Context, Result};
-use futures::{FutureExt, StreamExt};
+use futures::FutureExt;
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
@@ -15,12 +15,11 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
     process::Command,
     sync::{Notify, mpsc, oneshot},
     task::JoinSet,
 };
-use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::sync::CancellationToken;
 
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<Option<Value>>> + Send>>;
@@ -574,58 +573,75 @@ async fn write_loop(
 const MAX_STDOUT_LINE: usize = 32 * 1024 * 1024;
 
 async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
-    let mut lines = FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_STDOUT_LINE));
+    // Raw bytes, not `LinesCodec`: that codec fails the whole stream on the first non-UTF-8 line
+    // while the CLI is still alive. Upstream reads with readline, which decodes lossily, so a bad
+    // line becomes a parse error below and reading goes on.
+    let mut reader = tokio::io::BufReader::new(stdout);
     let mut handlers = JoinSet::new();
+    let mut line = Vec::new();
     loop {
         while handlers.try_join_next().is_some() {}
-        match lines.next().await {
-            Some(Ok(line)) => {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let value: Value = match serde_json::from_str(&line) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let _ = state
-                            .events
-                            .send(SessionEvent::Error(format!("stdout JSON: {e}")));
-                        continue;
-                    }
-                };
-                match value.get("type").and_then(Value::as_str) {
-                    Some("control_response") => {
-                        let response = value.get("response").cloned().unwrap_or(Value::Null);
-                        route_control_response(&state, response, &mut handlers);
-                    }
-                    Some("control_request") => dispatch(value, &state, &mut handlers),
-                    Some("control_cancel_request") => {
-                        if let Some(id) = value.get("request_id").and_then(Value::as_str)
-                            && let Some(token) = state.inbound.lock().unwrap().remove(id)
-                        {
-                            token.cancel();
-                        }
-                    }
-                    Some("keep_alive" | "transcript_mirror") => {}
-                    _ => match Frame::decode(value) {
-                        Ok(frame) => {
-                            let _ = state.events.send(SessionEvent::Frame(frame));
-                        }
-                        Err(e) => {
-                            let _ = state
-                                .events
-                                .send(SessionEvent::Error(format!("invalid known frame: {e}")));
-                            break;
-                        }
-                    },
-                }
+        line.clear();
+        // `take` caps a single line. A line longer than the cap is the only reader-fatal case.
+        match (&mut reader)
+            .take(MAX_STDOUT_LINE as u64)
+            .read_until(b'\n', &mut line)
+            .await
+        {
+            Ok(0) => break,
+            Ok(_) if line.len() == MAX_STDOUT_LINE && line.last() != Some(&b'\n') => {
+                let _ = state.events.send(SessionEvent::Error(format!(
+                    "stdout: line exceeds {MAX_STDOUT_LINE} bytes"
+                )));
+                break;
             }
-            Some(Err(e)) => {
+            Ok(_) => {}
+            Err(e) => {
                 let _ = state
                     .events
                     .send(SessionEvent::Error(format!("stdout: {e}")));
                 break;
             }
-            None => break,
+        }
+        let text = String::from_utf8_lossy(&line);
+        let text = text.trim_end_matches(['\n', '\r']);
+        if text.trim().is_empty() {
+            continue;
+        }
+        let value: Value = match serde_json::from_str(text) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = state
+                    .events
+                    .send(SessionEvent::Error(format!("stdout JSON: {e}")));
+                continue;
+            }
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("control_response") => {
+                let response = value.get("response").cloned().unwrap_or(Value::Null);
+                route_control_response(&state, response, &mut handlers);
+            }
+            Some("control_request") => dispatch(value, &state, &mut handlers),
+            Some("control_cancel_request") => {
+                if let Some(id) = value.get("request_id").and_then(Value::as_str)
+                    && let Some(token) = state.inbound.lock().unwrap().remove(id)
+                {
+                    token.cancel();
+                }
+            }
+            Some("keep_alive" | "transcript_mirror") => {}
+            _ => match Frame::decode(value) {
+                Ok(frame) => {
+                    let _ = state.events.send(SessionEvent::Frame(frame));
+                }
+                Err(e) => {
+                    let _ = state
+                        .events
+                        .send(SessionEvent::Error(format!("invalid known frame: {e}")));
+                    break;
+                }
+            },
         }
     }
     handlers.abort_all();
@@ -1173,6 +1189,55 @@ for line in sys.stdin:
                 _ => {}
             }
         }
+        session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    /// A non-UTF-8 stdout line is a bad line, like bad JSON: it becomes one Error event and the
+    /// reader keeps going, so later frames and control replies still arrive.
+    #[tokio::test]
+    async fn non_utf8_stdout_line_is_an_error_and_reading_continues() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-utf8-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")!="control_request":
+        continue
+    if value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        sys.stdout.buffer.write(b"\xff\n")
+        sys.stdout.buffer.flush()
+        print(json.dumps({"type":"system","subtype":"status","status":"after-invalid"}),flush=True)
+    else:
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{}}}),flush=True)
+"#,
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        let mut errors = vec![];
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                SessionEvent::Frame(frame) if frame.raw["status"] == "after-invalid" => break,
+                SessionEvent::Error(error) => errors.push(error),
+                SessionEvent::Eof => panic!("reader stopped after a non-UTF-8 line"),
+                _ => {}
+            }
+        }
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("stdout JSON"), "{errors:?}");
+        let reply = tokio::time::timeout(Duration::from_secs(2), session.get_mcp_status())
+            .await
+            .expect("request hung after a non-UTF-8 line")
+            .unwrap();
+        assert_eq!(reply, json!({}));
         session.shutdown().await.unwrap();
         fs::remove_dir_all(dir).unwrap();
     }

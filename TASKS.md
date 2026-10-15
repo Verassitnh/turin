@@ -32,6 +32,14 @@ workflows unlimited. Cheap models still go first on mechanical work. Cheap
 models go first on anything mechanical; escalate to Codex only on failure or
 when the logic is subtle (state machines, protocol framing, concurrency).
 
+## Storage policy (user, 2026-10-15)
+
+Disk hit 100% once. Lean dev/test profiles via `../.cargo/config.toml`
+(line tables only, no dep debug info). When a task merges, PM removes its
+worktree (`git worktree remove`) — branches stay on origin. QC/scratch builds
+share `CARGO_TARGET_DIR=/tmp/turin-scratch-target`; PM sweeps `/tmp` after QC
+runs. Never keep copies of user databases.
+
 ## Integration branch
 
 `stage` = main + every in-flight foundation branch (T01, T02b, T08, T09a, T10a, T11a, T12a). PM re-merges it when those move; dependent tasks base on it and `git merge stage` when told. Never merged to main directly — tasks merge to main individually after QC.

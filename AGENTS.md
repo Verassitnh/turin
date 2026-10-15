@@ -27,3 +27,9 @@ TASKS.md is the PM's board; don't edit it.
   `git config core.hooksPath scripts/git-hooks` (already set).
 - Pulling in `main` when asked: `git merge main -m "merge: main into <task>" -m "Model: …"`
   (merge commits need the trailer too).
+
+- **Storage (user rule): disk space is tight.** Build only the crates you own
+  (`-p`). Lean debug profiles come from `../.cargo/config.toml` — don't
+  override them. Throwaway crates/builds go under `/tmp/turin-scratch-<task>/`
+  and must reuse `CARGO_TARGET_DIR=/tmp/turin-scratch-target` (shared); delete
+  your scratch dir when done. Never copy user databases anywhere.

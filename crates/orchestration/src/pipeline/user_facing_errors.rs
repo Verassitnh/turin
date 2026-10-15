@@ -9,20 +9,38 @@ const GENERIC: [&str; 3] = [
     "Provider adapter failed while dispatching orchestration command ",
 ];
 
+/// Upstream `PROVIDER_DISPLAY_NAMES` (packages/contracts/src/model.ts).
 fn provider_name(id: &str) -> String {
     match id {
+        "antigravity" => "Antigravity".into(),
         "codex" => "Codex".into(),
         "claudeAgent" => "Claude".into(),
-        "opencode" => "OpenCode".into(),
         "cursor" => "Cursor".into(),
+        "grok" => "Grok".into(),
+        "muse" => "Muse Code".into(),
+        "acpRegistry" => "ACP Registry".into(),
+        "pi" => "Pi".into(),
+        "opencode" => "OpenCode".into(),
         _ => {
-            let trimmed = id.strip_suffix("Agent").unwrap_or(id).trim();
+            // Upstream `instanceId.replace(/Agent$/i, "")`: trailing only, any case.
+            let trimmed = strip_agent_suffix(id).trim();
             let mut chars = trimmed.chars();
             chars
                 .next()
                 .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
                 .unwrap_or_else(|| id.into())
         }
+    }
+}
+
+fn strip_agent_suffix(id: &str) -> &str {
+    const AGENT: &str = "agent";
+    let Some(cut) = id.len().checked_sub(AGENT.len()) else {
+        return id;
+    };
+    match (id.get(..cut), id.get(cut..)) {
+        (Some(head), Some(tail)) if tail.eq_ignore_ascii_case(AGENT) => head,
+        _ => id,
     }
 }
 
@@ -201,6 +219,33 @@ mod tests {
         assert_eq!(
             user_facing_dispatch_error_message(&value).as_deref(),
             Some("Codex cannot stop a run once it has started.")
+        );
+    }
+
+    #[test]
+    fn names_providers_from_upstream_display_names_and_any_case_agent_suffix() {
+        let name_for = |id: &str| {
+            let value = serde_json::json!({
+                "message": "Failed to dispatch orchestration command message.dispatch (command-1).",
+                "cause": {
+                    "_tag": "CommandPolicyUnsupportedError",
+                    "providerInstanceId": id,
+                }
+            });
+            user_facing_dispatch_error_message(&value).unwrap()
+        };
+        // Upstream probe: `/Agent$/i` strips "agent" from "myagent" -> "My".
+        assert_eq!(
+            name_for("myagent"),
+            "My cannot deliver a message that way right now."
+        );
+        assert_eq!(
+            name_for("acpRegistry"),
+            "ACP Registry cannot deliver a message that way right now."
+        );
+        assert_eq!(
+            name_for("muse"),
+            "Muse Code cannot deliver a message that way right now."
         );
     }
 

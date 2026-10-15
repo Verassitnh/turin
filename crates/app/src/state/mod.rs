@@ -10,7 +10,10 @@ pub mod contracts;
 pub mod entities;
 pub mod helpers;
 pub mod models;
+pub mod shell_reducer;
 pub mod subagent_display;
 pub mod subagent_runtime;
 pub mod support;
+#[cfg(test)]
+pub mod test_fixtures;
 pub mod time;

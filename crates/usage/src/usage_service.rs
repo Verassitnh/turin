@@ -42,6 +42,7 @@ use turin_provider_core::usage::{
     ProviderUsageInstance, ProviderUsageReader, ProviderUsageScanInput, TranscriptDirectory,
     TranscriptUsageFormat, UsageRecord,
 };
+use turin_shared::atomic_write::write_file_string_atomically;
 
 use crate::usage_aggregation::{
     AggregateOptions, UsageAggregator, provider_name, resolve_model_aliases,
@@ -278,16 +279,12 @@ fn scan_key(input: &UsageSummaryInput, settings: &ServerSettings) -> String {
     .unwrap_or_default()
 }
 
-/// Writes through a temp file and a rename, so a crash mid-write leaves the old file.
-async fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(".tmp");
-    let temp = PathBuf::from(temp);
-    tokio::fs::write(&temp, contents).await?;
-    tokio::fs::rename(&temp, path).await
+/// Upstream `writeFileStringAtomically`, run off the async workers: it does
+/// blocking file I/O and is a temp-file-plus-rename write.
+async fn write_atomically(path: PathBuf, contents: String) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || write_file_string_atomically(&path, &contents))
+        .await
+        .map_err(std::io::Error::other)?
 }
 
 impl UsageService {
@@ -437,7 +434,7 @@ impl UsageService {
         }
         let contents = json!({ "fetchedAtMs": now, "document": document }).to_string();
         // A rates cache we cannot write is a slower next start, not a failed read.
-        let _ = write_atomically(&self.rates_cache_path(), &contents).await;
+        let _ = write_atomically(self.rates_cache_path(), contents).await;
     }
 
     async fn read_rates_cache(&self) -> Option<(f64, Value)> {
@@ -673,7 +670,7 @@ impl UsageService {
                 .lock()
                 .write(&state.file_cache, &extra)
         };
-        if write_atomically(&self.scan_cache_path(), &contents)
+        if write_atomically(self.scan_cache_path(), contents)
             .await
             .is_err()
         {

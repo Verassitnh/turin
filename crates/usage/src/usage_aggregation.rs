@@ -17,6 +17,7 @@ use turin_contracts::usage::{
     UsageTokenTotals,
 };
 use turin_provider_core::usage::{UsageRecord, UsageSpeed, empty_totals};
+use turin_shared::js_string::locale_compare;
 
 use crate::usage_pricing::{RateTable, cache_savings_usd, price_usage};
 
@@ -391,17 +392,15 @@ impl UsageAggregator {
             .collect();
         // Stable ordering keeps payloads diffable and snapshot tests meaningful.
         buckets.sort_by(|a, b| {
-            a.day
-                .as_str()
-                .cmp(b.day.as_str())
+            locale_compare(a.day.as_str(), b.day.as_str())
                 .then_with(|| {
-                    a.hour_start
-                        .as_ref()
-                        .map_or("", |hour| hour.as_str())
-                        .cmp(b.hour_start.as_ref().map_or("", |hour| hour.as_str()))
+                    locale_compare(
+                        a.hour_start.as_ref().map_or("", |hour| hour.as_str()),
+                        b.hour_start.as_ref().map_or("", |hour| hour.as_str()),
+                    )
                 })
-                .then_with(|| provider_name(a.provider).cmp(provider_name(b.provider)))
-                .then_with(|| a.model.as_str().cmp(b.model.as_str()))
+                .then_with(|| locale_compare(provider_name(a.provider), provider_name(b.provider)))
+                .then_with(|| locale_compare(a.model.as_str(), b.model.as_str()))
         });
 
         AggregateResult {
@@ -851,5 +850,23 @@ mod tests {
         .map(|(model, target)| (model.to_owned(), target.to_owned()))
         .collect();
         assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn orders_buckets_with_locale_compare_not_code_units() {
+        // Byte order puts "Zeta" first (uppercase sorts before lowercase); the
+        // en-US collation upstream uses puts "alpha" first.
+        let mut zeta = record();
+        zeta.model = "Zeta-model".to_owned();
+        let mut alpha = record();
+        alpha.model = "alpha-model".to_owned();
+        let result = aggregate(&[zeta, alpha], "UTC", UsageResolution::Day);
+
+        let models: Vec<&str> = result
+            .buckets
+            .iter()
+            .map(|bucket| bucket.model.as_str())
+            .collect();
+        assert_eq!(models, ["alpha-model", "Zeta-model"]);
     }
 }

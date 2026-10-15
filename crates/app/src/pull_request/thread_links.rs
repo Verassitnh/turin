@@ -13,8 +13,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, ClickEvent, Context, CursorStyle, Entity, EventEmitter, FontWeight,
-    Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    App, AppContext as _, ClickEvent, Context, CursorStyle, Entity, EventEmitter, Focusable as _,
+    FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px, rems,
 };
 use turin_contracts::ThreadId;
@@ -93,7 +93,10 @@ pub fn link_menu_item(
 
 /// Threads matching `query` in title or project name, newest first (`candidates` in
 /// `ThreadPicker`).
-pub fn thread_picker_candidates<'a>(threads: &'a [ThreadChoice], query: &str) -> Vec<&'a ThreadChoice> {
+pub fn thread_picker_candidates<'a>(
+    threads: &'a [ThreadChoice],
+    query: &str,
+) -> Vec<&'a ThreadChoice> {
     let search = turin_contracts::js_trim(query).to_lowercase();
     let mut candidates: Vec<&ThreadChoice> = threads
         .iter()
@@ -136,13 +139,15 @@ impl ThreadPickerDialog {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search threads or projects..."));
-        let subscription = cx.subscribe_in(&input, window, |this, state, event: &InputEvent, _, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.query = state.read(cx).value().to_string();
-                cx.notify();
-            }
-        });
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search threads or projects..."));
+        let subscription =
+            cx.subscribe_in(&input, window, |this, state, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.query = state.read(cx).value().to_string();
+                    cx.notify();
+                }
+            });
         let focus = input.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         Self {
@@ -180,7 +185,10 @@ impl Render for ThreadPickerDialog {
                 };
                 let disabled = self.pending || linked;
                 div()
-                    .id(SharedString::from(format!("pr-thread-pick-{}", thread.id.as_str())))
+                    .id(SharedString::from(format!(
+                        "pr-thread-pick-{}",
+                        thread.id.as_str()
+                    )))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -192,8 +200,10 @@ impl Render for ThreadPickerDialog {
                         this.cursor(CursorStyle::PointingHand)
                             .hover(|style| style.bg(theme.accent))
                             .on_click(move |_, _, cx| {
-                                page.update(cx, |_, cx| cx.emit(ThreadPickerEvent::Select(id.clone())))
-                                    .ok();
+                                page.update(cx, |_, cx| {
+                                    cx.emit(ThreadPickerEvent::Select(id.clone()))
+                                })
+                                .ok();
                             })
                     })
                     .when(disabled, |this| this.opacity(0.64))
@@ -227,7 +237,8 @@ impl Render for ThreadPickerDialog {
         let dismiss: Rc<dyn Fn(&mut Window, &mut App)> = {
             let page = page.clone();
             Rc::new(move |_, cx| {
-                page.update(cx, |_, cx| cx.emit(ThreadPickerEvent::Dismiss)).ok();
+                page.update(cx, |_, cx| cx.emit(ThreadPickerEvent::Dismiss))
+                    .ok();
             })
         };
         dialog_overlay(
@@ -260,8 +271,9 @@ impl Render for ThreadPickerDialog {
                         ),
                 )
                 .child(
-                    div().max_h(rems(20.)).child(
-                        scroll_area("pr-thread-picker-list").child(
+                    div()
+                        .max_h(rems(20.))
+                        .child(scroll_area("pr-thread-picker-list").child(
                             div().flex().flex_col().p(rems(0.375)).map(|list| {
                                 if rows.is_empty() {
                                     list.child(
@@ -278,8 +290,7 @@ impl Render for ThreadPickerDialog {
                                     list.children(rows)
                                 }
                             }),
-                        ),
-                    ),
+                        )),
                 ),
             cx,
         )

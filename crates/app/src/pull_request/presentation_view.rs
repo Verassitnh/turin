@@ -9,7 +9,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, App, Hsla, InteractiveElement as _, IntoElement,
     ParentElement, Pixels, Rems, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled,
-    Transformation, Window, div, percentage, svg, px, rems, rgb,
+    Transformation, Window, div, percentage, px, rems, rgb, svg,
 };
 use turin_contracts::pull_request::{
     PullRequestActor, PullRequestCheckStatus, PullRequestChecksState, PullRequestLabel,
@@ -273,7 +273,9 @@ impl RenderOnce for PullRequestConflictGlyph {
 /// Tone and icon of one check's status (`CHECK_STATUS_PRESENTATION`).
 pub fn check_status_icon(status: PullRequestCheckStatus, theme: &AppTheme) -> (IconName, Hsla) {
     match status {
-        PullRequestCheckStatus::Pending => (IconName::LoaderCircle, tone_color("text-amber-500", theme)),
+        PullRequestCheckStatus::Pending => {
+            (IconName::LoaderCircle, tone_color("text-amber-500", theme))
+        }
         PullRequestCheckStatus::ActionRequired => (
             IconName::CircleDot,
             tone_color("text-amber-600 dark:text-amber-400/90", theme),
@@ -402,7 +404,10 @@ impl RenderOnce for PullRequestReviewDecisionGlyph {
 }
 
 /// Tone and icon of a review verdict (`REVIEW_OUTCOME_PRESENTATION`).
-pub fn review_outcome_icon(outcome: PullRequestReviewOutcome, theme: &AppTheme) -> (IconName, Hsla) {
+pub fn review_outcome_icon(
+    outcome: PullRequestReviewOutcome,
+    theme: &AppTheme,
+) -> (IconName, Hsla) {
     let icon = match outcome {
         PullRequestReviewOutcome::Approved => IconName::CircleCheck,
         PullRequestReviewOutcome::ChangesRequested => IconName::CircleX,
@@ -436,12 +441,14 @@ impl RenderOnce for PullRequestReviewOutcomeBadge {
         Badge::new()
             .size(BadgeSize::Sm)
             .variant(variant)
-            .child(Icon::new(match self.outcome {
-                PullRequestReviewOutcome::Approved => IconName::CircleCheck,
-                PullRequestReviewOutcome::ChangesRequested => IconName::CircleX,
-                PullRequestReviewOutcome::Dismissed => IconName::CircleDashed,
-            })
-            .size(rems(0.75)))
+            .child(
+                Icon::new(match self.outcome {
+                    PullRequestReviewOutcome::Approved => IconName::CircleCheck,
+                    PullRequestReviewOutcome::ChangesRequested => IconName::CircleX,
+                    PullRequestReviewOutcome::Dismissed => IconName::CircleDashed,
+                })
+                .size(rems(0.75)),
+            )
             .child(pull_request_review_outcome_label(self.outcome))
     }
 }
@@ -528,7 +535,11 @@ pub struct PullRequestActorAvatar {
 impl PullRequestActorAvatar {
     pub fn new(actor: Option<&PullRequestActor>) -> Self {
         Self {
-            login: SharedString::from(actor.map_or("ghost", |actor| actor.login.as_str()).to_owned()),
+            login: SharedString::from(
+                actor
+                    .map_or("ghost", |actor| actor.login.as_str())
+                    .to_owned(),
+            ),
             size: px(16.),
         }
     }
@@ -543,7 +554,12 @@ impl PullRequestActorAvatar {
 impl RenderOnce for PullRequestActorAvatar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme();
-        let initial: String = self.login.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+        let initial: String = self
+            .login
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().collect())
+            .unwrap_or_default();
         div()
             .flex()
             .flex_shrink_0()
@@ -626,7 +642,12 @@ impl RenderOnce for PullRequestActorLabel {
                         .child(login),
                 )
             });
-        let element = div().id("pr-actor-label").flex().min_w_0().flex_shrink_1().child(body);
+        let element = div()
+            .id("pr-actor-label")
+            .flex()
+            .min_w_0()
+            .flex_shrink_1()
+            .child(body);
         if self.tooltip {
             element
                 .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))

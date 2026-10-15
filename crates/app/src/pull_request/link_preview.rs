@@ -60,7 +60,10 @@ pub fn link_preview_card(card: &LinkPreviewCard<'_>, cx: &App) -> impl IntoEleme
                             .flex_shrink_0()
                             .items_center()
                             .gap_1()
-                            .child(PullRequestStateGlyph::new(card.state, card.is_draft).size(rems(0.75)))
+                            .child(
+                                PullRequestStateGlyph::new(card.state, card.is_draft)
+                                    .size(rems(0.75)),
+                            )
                             .child(state.label),
                     ),
             )
@@ -90,11 +93,10 @@ pub fn link_preview_card(card: &LinkPreviewCard<'_>, cx: &App) -> impl IntoEleme
                             .child(SharedString::from(link_preview_author_label(card.author))),
                     )
                     .child("·")
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .child(format!("opened {}", format_relative_time_label(card.created_at))),
-                    ),
+                    .child(div().flex_shrink_0().child(format!(
+                        "opened {}",
+                        format_relative_time_label(card.created_at)
+                    ))),
             ),
     )
 }

@@ -12,11 +12,11 @@ use gpui_kit::{App, AppContext as _, Entity, Window};
 
 use super::detail_context::DetailTab;
 use super::link_dialog::{LinkPullRequestDialog, LinkPullRequestDialogEvent};
-use super::thread_panel::ThreadPullRequestsPanelEvent;
 use super::list_page::{PullRequestsPage, PullRequestsPageEvent};
-use super::pull_request_list_preferences::{PullRequestListPreferences, PullRequestListSort};
 use super::mock_source::{MockPullRequestSource, demo_environment_id, demo_reference};
 use super::panel_host::PullRequestPanelHost;
+use super::pull_request_list_preferences::{PullRequestListPreferences, PullRequestListSort};
+use super::thread_panel::ThreadPullRequestsPanelEvent;
 use super::view_model::PullRequestStore;
 use crate::components::app_sidebar_layout::AppSidebarLayout;
 
@@ -24,9 +24,14 @@ use crate::components::app_sidebar_layout::AppSidebarLayout;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scenario {
     List(Option<String>),
-    Detail { tab: Option<DetailTab>, number: Option<u64> },
+    Detail {
+        tab: Option<DetailTab>,
+        number: Option<u64>,
+    },
     /// The thread view's right panel on the linked pull requests of the demo thread.
-    Thread { link_dialog: Option<String> },
+    Thread {
+        link_dialog: Option<String>,
+    },
 }
 
 pub fn scenario_from_env() -> Option<Scenario> {
@@ -89,28 +94,43 @@ pub fn install(
                 let dialog_layout = layout.clone();
                 let dialog_store = store.clone();
                 window
-                    .subscribe(&dialog, cx, move |_, event: &LinkPullRequestDialogEvent, _, cx| {
-                        if let LinkPullRequestDialogEvent::Link(link) = event
-                            && let Some(source) = dialog_store.read(cx).source()
-                            && let Some(number) = turin_contracts::PositiveInt::new(link.number)
-                            && let Some(reference) =
-                                super::mock_source::reference_for(&link.host, &link.repository, number)
-                        {
-                            source.link_thread(&super::mock_source::demo_thread_id(), &reference, cx);
-                        }
-                        dialog_layout.update(cx, |layout, cx| layout.set_overlay(None, cx));
-                    })
+                    .subscribe(
+                        &dialog,
+                        cx,
+                        move |_, event: &LinkPullRequestDialogEvent, _, cx| {
+                            if let LinkPullRequestDialogEvent::Link(link) = event
+                                && let Some(source) = dialog_store.read(cx).source()
+                                && let Some(number) = turin_contracts::PositiveInt::new(link.number)
+                                && let Some(reference) = super::mock_source::reference_for(
+                                    &link.host,
+                                    &link.repository,
+                                    number,
+                                )
+                            {
+                                source.link_thread(
+                                    &super::mock_source::demo_thread_id(),
+                                    &reference,
+                                    cx,
+                                );
+                            }
+                            dialog_layout.update(cx, |layout, cx| layout.set_overlay(None, cx));
+                        },
+                    )
                     .detach();
                 layout.update(cx, |layout, cx| layout.set_overlay(Some(dialog.into()), cx));
             }
         };
         let handler = open_dialog.clone();
         window
-            .subscribe(&panel, cx, move |_, event: &ThreadPullRequestsPanelEvent, window, cx| {
-                if matches!(event, ThreadPullRequestsPanelEvent::OpenLinkDialog) {
-                    handler(None, window, cx);
-                }
-            })
+            .subscribe(
+                &panel,
+                cx,
+                move |_, event: &ThreadPullRequestsPanelEvent, window, cx| {
+                    if matches!(event, ThreadPullRequestsPanelEvent::OpenLinkDialog) {
+                        handler(None, window, cx);
+                    }
+                },
+            )
             .detach();
         if let Some(prefill) = link_dialog {
             open_dialog(Some(prefill), window, cx);
@@ -126,18 +146,22 @@ pub fn install(
     let panel_host = host.clone();
     let panel_layout = layout.clone();
     window
-        .subscribe(&page, cx, move |_, event: &PullRequestsPageEvent, window, cx| {
-            let PullRequestsPageEvent::Select {
-                environment_id,
-                reference,
-            } = event;
-            panel_host.update(cx, |host, cx| {
-                host.open(environment_id.clone(), reference.clone(), None, window, cx)
-            });
-            panel_layout.update(cx, |layout, cx| {
-                layout.set_right_panel_content(Some(panel_host.clone().into()), cx);
-            });
-        })
+        .subscribe(
+            &page,
+            cx,
+            move |_, event: &PullRequestsPageEvent, window, cx| {
+                let PullRequestsPageEvent::Select {
+                    environment_id,
+                    reference,
+                } = event;
+                panel_host.update(cx, |host, cx| {
+                    host.open(environment_id.clone(), reference.clone(), None, window, cx)
+                });
+                panel_layout.update(cx, |layout, cx| {
+                    layout.set_right_panel_content(Some(panel_host.clone().into()), cx);
+                });
+            },
+        )
         .detach();
     match scenario {
         Scenario::List(preset) => apply_list_preset(&page, &store, preset.as_deref(), cx),
@@ -182,12 +206,15 @@ fn apply_list_preset(
             store.update(cx, |store, cx| {
                 store.update_list(cx, |list| {
                     list.merged = None;
-                    list.error = Some("gh: could not reach api.github.com. Check your connection.".into());
+                    list.error =
+                        Some("gh: could not reach api.github.com. Check your connection.".into());
                 })
             });
         }
         Some("loading") => {
-            store.update(cx, |store, cx| store.update_list(cx, |list| list.merged = None));
+            store.update(cx, |store, cx| {
+                store.update_list(cx, |list| list.merged = None)
+            });
         }
         _ => {}
     }
@@ -201,10 +228,16 @@ mod tests {
     #[test]
     fn parses_scenarios() {
         assert_eq!(parse("list"), Some(Scenario::List(None)));
-        assert_eq!(parse("list:empty"), Some(Scenario::List(Some("empty".into()))));
+        assert_eq!(
+            parse("list:empty"),
+            Some(Scenario::List(Some("empty".into())))
+        );
         assert_eq!(
             parse("detail:code:12"),
-            Some(Scenario::Detail { tab: Some(DetailTab::Code), number: Some(12) })
+            Some(Scenario::Detail {
+                tab: Some(DetailTab::Code),
+                number: Some(12)
+            })
         );
         assert_eq!(parse("nope"), None);
     }

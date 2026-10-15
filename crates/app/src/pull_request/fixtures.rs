@@ -281,12 +281,27 @@ pub fn detail_view_for(entry: &PullRequestListEntry) -> PullRequestDetailView {
     let mut value = serde_json::to_value(detail_view()).expect("detail encodes");
     let row = serde_json::to_value(entry).expect("entry encodes");
     for key in [
-        "title", "url", "author", "state", "isDraft", "mergeability", "additions", "deletions",
-        "headBranch", "baseBranch", "createdAt", "updatedAt", "labels", "number",
+        "title",
+        "url",
+        "author",
+        "state",
+        "isDraft",
+        "mergeability",
+        "additions",
+        "deletions",
+        "headBranch",
+        "baseBranch",
+        "createdAt",
+        "updatedAt",
+        "labels",
+        "number",
     ] {
         value[key] = row[key].clone();
     }
-    value["body"] = json!(format!("Automated description for {}.", entry.title.as_str()));
+    value["body"] = json!(format!(
+        "Automated description for {}.",
+        entry.title.as_str()
+    ));
     value["changedFiles"] = json!(3);
     value["comments"] = json!([]);
     value["commentCount"] = json!(0);
@@ -299,18 +314,22 @@ pub fn detail_view_for(entry: &PullRequestListEntry) -> PullRequestDetailView {
         object.remove("headSha");
     }
     if entry.state != turin_contracts::pull_request::PullRequestState::Open {
-        value["mergedAt"] = if entry.state == turin_contracts::pull_request::PullRequestState::Merged {
-            json!(ago(2 * DAY))
-        } else {
-            Value::Null
-        };
+        value["mergedAt"] =
+            if entry.state == turin_contracts::pull_request::PullRequestState::Merged {
+                json!(ago(2 * DAY))
+            } else {
+                Value::Null
+            };
         value["closedAt"] = json!(ago(2 * DAY));
     }
     decode(value)
 }
 
 /// A freshly posted review-thread reply by the viewer.
-pub fn new_thread_comment(id: &str, body: &str) -> turin_contracts::pull_request::PullRequestThreadComment {
+pub fn new_thread_comment(
+    id: &str,
+    body: &str,
+) -> turin_contracts::pull_request::PullRequestThreadComment {
     decode(json!({
         "id": id, "author": actor(DEMO_VIEWER, "Jackson Wells"),
         "body": body, "createdAt": ago(0), "url": null, "canEdit": true,
@@ -691,16 +710,32 @@ pub fn thread_links() -> Vec<ThreadPullRequestLink> {
 
 /// The active threads of the demo project, newest first.
 pub fn thread_choices() -> Vec<super::view_model::ThreadChoice> {
-    let thread = |id: &str, title: &str, project: &str, secs: i64| super::view_model::ThreadChoice {
-        id: turin_contracts::ThreadId::new(id).expect("static id"),
-        title: title.to_owned(),
-        project_title: project.to_owned(),
-        updated_at: ago(secs),
-    };
+    let thread =
+        |id: &str, title: &str, project: &str, secs: i64| super::view_model::ThreadChoice {
+            id: turin_contracts::ThreadId::new(id).expect("static id"),
+            title: title.to_owned(),
+            project_title: project.to_owned(),
+            updated_at: ago(secs),
+        };
     vec![
-        thread("thread-pr-views", "Port the pull request views", DEMO_PROJECT_TITLE, 12 * MINUTE),
-        thread("thread-composer", "Composer: restore draft when a send fails", DEMO_PROJECT_TITLE, 3 * HOUR),
-        thread("thread-sidebar", "Review sidebar status for stacks", "t3code", DAY),
+        thread(
+            "thread-pr-views",
+            "Port the pull request views",
+            DEMO_PROJECT_TITLE,
+            12 * MINUTE,
+        ),
+        thread(
+            "thread-composer",
+            "Composer: restore draft when a send fails",
+            DEMO_PROJECT_TITLE,
+            3 * HOUR,
+        ),
+        thread(
+            "thread-sidebar",
+            "Review sidebar status for stacks",
+            "t3code",
+            DAY,
+        ),
         thread("thread-untitled", "", "t3code", 2 * DAY),
     ]
 }

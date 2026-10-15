@@ -12,8 +12,7 @@ use std::rc::Rc;
 
 use gpui_kit::{
     AnyElement, App, ClickEvent, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement, Pixels, SharedString, StatefulInteractiveElement as _, Styled,
-    Window, div, px, relative, rems,
+    MouseButton, ParentElement, Pixels, SharedString, Styled, Window, div, px, relative, rems,
 };
 
 use crate::theme::color::{MixSpace, color_mix, with_alpha};
@@ -58,7 +57,9 @@ pub fn dialog_overlay(
         .p_4()
         .bg(dialog_backdrop_color(theme))
         .occlude()
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| dismiss_backdrop(window, cx))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            dismiss_backdrop(window, cx)
+        })
         .child(
             div()
                 .id(id)
@@ -99,7 +100,11 @@ pub fn dialog_overlay(
 /// `DialogHeader`: `flex flex-col gap-2 p-6` (`pb-3` when a panel follows).
 pub fn dialog_header(has_panel: bool) -> Div {
     let header = div().flex().flex_col().gap_2().p(rems(1.5));
-    if has_panel { header.pb(rems(0.75)) } else { header }
+    if has_panel {
+        header.pb(rems(0.75))
+    } else {
+        header
+    }
 }
 
 /// `DialogTitle`: `font-semibold text-xl leading-none`.
@@ -122,7 +127,13 @@ pub fn dialog_description(text: impl Into<SharedString>, cx: &App) -> Div {
 
 /// `DialogPanel`: `space-y-4 p-6`, `pt-1` under a header.
 pub fn dialog_panel() -> Div {
-    div().flex().flex_col().gap_4().px(rems(1.5)).pb(rems(1.5)).pt(px(4.))
+    div()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .px(rems(1.5))
+        .pb(rems(1.5))
+        .pt(px(4.))
 }
 
 /// `DialogFooter`: `border-t bg-muted/72 px-6 py-4`, buttons right-aligned.

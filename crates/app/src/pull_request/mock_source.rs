@@ -40,7 +40,8 @@ impl MockPullRequestSource {
         });
         store.update(cx, |store, cx| {
             store.set_source(source);
-            let merged = merge_pull_request_lists(&[(demo_environment_id(), fixtures::list_result())]);
+            let merged =
+                merge_pull_request_lists(&[(demo_environment_id(), fixtures::list_result())]);
             store.set_thread_links(&demo_thread_id(), fixtures::thread_links(), cx);
             store.set_threads(fixtures::thread_choices(), cx);
             store.update_list(cx, |list| {
@@ -57,7 +58,11 @@ impl MockPullRequestSource {
         store
     }
 
-    fn with_store(&self, cx: &mut App, update: impl FnOnce(&mut PullRequestStore, &mut gpui_kit::Context<PullRequestStore>)) {
+    fn with_store(
+        &self,
+        cx: &mut App,
+        update: impl FnOnce(&mut PullRequestStore, &mut gpui_kit::Context<PullRequestStore>),
+    ) {
         if let Some(store) = self.store.upgrade() {
             store.update(cx, update);
         }
@@ -84,7 +89,11 @@ impl MockPullRequestSource {
         .detach();
     }
 
-    fn list_entry(&self, reference: &PullRequestRef, cx: &App) -> Option<super::pull_request_list_logic::EnvironmentPullRequestEntry> {
+    fn list_entry(
+        &self,
+        reference: &PullRequestRef,
+        cx: &App,
+    ) -> Option<super::pull_request_list_logic::EnvironmentPullRequestEntry> {
         let store = self.store.upgrade()?;
         store
             .read(cx)
@@ -92,12 +101,21 @@ impl MockPullRequestSource {
             .iter()
             .find(|entry| {
                 entry.number.get() == reference.number.get()
-                    && entry.repository.as_str().eq_ignore_ascii_case(reference.repository.as_str())
+                    && entry
+                        .repository
+                        .as_str()
+                        .eq_ignore_ascii_case(reference.repository.as_str())
             })
             .cloned()
     }
 
-    fn patch_list_state(&self, cx: &mut App, reference: &PullRequestRef, state: PullRequestState, is_draft: Option<bool>) {
+    fn patch_list_state(
+        &self,
+        cx: &mut App,
+        reference: &PullRequestRef,
+        state: PullRequestState,
+        is_draft: Option<bool>,
+    ) {
         let number = reference.number.get();
         self.with_store(cx, |store, cx| {
             store.update_list(cx, |list| {
@@ -119,12 +137,18 @@ impl MockPullRequestSource {
 
 impl PullRequestSource for MockPullRequestSource {
     fn refresh_list(&self, cx: &mut App) {
-        self.with_store(cx, |store, cx| store.update_list(cx, |list| list.refreshing = true));
+        self.with_store(cx, |store, cx| {
+            store.update_list(cx, |list| list.refreshing = true)
+        });
         let store = self.store.clone();
         cx.spawn(async move |cx| {
-            cx.background_executor().timer(Duration::from_millis(700)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(700))
+                .await;
             if let Some(store) = store.upgrade() {
-                store.update(cx, |store, cx| store.update_list(cx, |list| list.refreshing = false));
+                store.update(cx, |store, cx| {
+                    store.update_list(cx, |list| list.refreshing = false)
+                });
             }
         })
         .detach();
@@ -170,11 +194,13 @@ impl PullRequestSource for MockPullRequestSource {
                         .collect();
                     snapshot.guide = Loadable::Ready(fixtures::guide_result());
                 } else {
-                    snapshot.guide = Loadable::Ready(turin_contracts::pull_request_review_guide::PullRequestReviewGuideResult {
-                        guide: None,
-                        run: None,
-                        current_head_sha: None,
-                    });
+                    snapshot.guide = Loadable::Ready(
+                        turin_contracts::pull_request_review_guide::PullRequestReviewGuideResult {
+                            guide: None,
+                            run: None,
+                            current_head_sha: None,
+                        },
+                    );
                 }
             });
         });
@@ -231,8 +257,9 @@ impl PullRequestSource for MockPullRequestSource {
                     PullRequestAction::EnableAutoMerge => detail.auto_merge_enabled = Some(true),
                     PullRequestAction::DisableAutoMerge => detail.auto_merge_enabled = Some(false),
                     PullRequestAction::UpdateBranch => {
-                        detail.base_comparison =
-                            Some(turin_contracts::pull_request::PullRequestBaseComparison::UpToDate);
+                        detail.base_comparison = Some(
+                            turin_contracts::pull_request::PullRequestBaseComparison::UpToDate,
+                        );
                         detail.behind_by = None;
                     }
                     _ => {}
@@ -266,12 +293,20 @@ impl PullRequestSource for MockPullRequestSource {
         self.with_store(cx, |store, cx| {
             store.update_detail(reference, cx, |snapshot| {
                 if let Loadable::Ready(detail) = &mut snapshot.detail {
-                    for comment in detail.comments.iter_mut().filter(|c| c.id.as_str() == comment_id) {
+                    for comment in detail
+                        .comments
+                        .iter_mut()
+                        .filter(|c| c.id.as_str() == comment_id)
+                    {
                         comment.body = body.clone();
                         comment.edited_at = Some(Some(fixtures::ago(0)));
                     }
                     for thread in &mut detail.review_threads {
-                        for comment in thread.comments.iter_mut().filter(|c| c.id.as_str() == comment_id) {
+                        for comment in thread
+                            .comments
+                            .iter_mut()
+                            .filter(|c| c.id.as_str() == comment_id)
+                        {
                             comment.body = body.clone();
                             comment.edited_at = Some(Some(fixtures::ago(0)));
                         }
@@ -308,26 +343,47 @@ impl PullRequestSource for MockPullRequestSource {
         self.post_comment(reference, body, cx);
     }
 
-    fn reply_to_thread(&self, reference: &PullRequestRef, thread_id: &str, body: String, cx: &mut App) {
+    fn reply_to_thread(
+        &self,
+        reference: &PullRequestRef,
+        thread_id: &str,
+        body: String,
+        cx: &mut App,
+    ) {
         let thread_id = thread_id.to_owned();
         self.with_store(cx, |store, cx| {
             store.update_detail(reference, cx, |snapshot| {
                 if let Loadable::Ready(detail) = &mut snapshot.detail
-                    && let Some(thread) = detail.review_threads.iter_mut().find(|t| t.id.as_str() == thread_id)
+                    && let Some(thread) = detail
+                        .review_threads
+                        .iter_mut()
+                        .find(|t| t.id.as_str() == thread_id)
                 {
-                    let comment = fixtures::new_thread_comment(&format!("RC_new_{}", thread.comments.len()), &body);
+                    let comment = fixtures::new_thread_comment(
+                        &format!("RC_new_{}", thread.comments.len()),
+                        &body,
+                    );
                     thread.comments.push(comment);
                 }
             });
         });
     }
 
-    fn set_thread_resolved(&self, reference: &PullRequestRef, thread_id: &str, resolved: bool, cx: &mut App) {
+    fn set_thread_resolved(
+        &self,
+        reference: &PullRequestRef,
+        thread_id: &str,
+        resolved: bool,
+        cx: &mut App,
+    ) {
         let thread_id = thread_id.to_owned();
         self.with_store(cx, |store, cx| {
             store.update_detail(reference, cx, |snapshot| {
                 if let Loadable::Ready(detail) = &mut snapshot.detail
-                    && let Some(thread) = detail.review_threads.iter_mut().find(|t| t.id.as_str() == thread_id)
+                    && let Some(thread) = detail
+                        .review_threads
+                        .iter_mut()
+                        .find(|t| t.id.as_str() == thread_id)
                 {
                     thread.is_resolved = resolved;
                 }
@@ -335,7 +391,13 @@ impl PullRequestSource for MockPullRequestSource {
         });
     }
 
-    fn toggle_reaction(&self, reference: &PullRequestRef, _subject_id: &str, content: PullRequestReactionContent, cx: &mut App) {
+    fn toggle_reaction(
+        &self,
+        reference: &PullRequestRef,
+        _subject_id: &str,
+        content: PullRequestReactionContent,
+        cx: &mut App,
+    ) {
         self.with_store(cx, |store, cx| {
             store.update_detail(reference, cx, |snapshot| {
                 if let Loadable::Ready(detail) = &mut snapshot.detail
@@ -352,7 +414,10 @@ impl PullRequestSource for MockPullRequestSource {
         let key = commit.clone();
         self.with_store(cx, |store, cx| {
             store.update_detail(reference, cx, |snapshot| {
-                snapshot.diffs.entry(key.clone()).or_insert(Loadable::Pending);
+                snapshot
+                    .diffs
+                    .entry(key.clone())
+                    .or_insert(Loadable::Pending);
             });
         });
         self.later(250, cx, reference, move |snapshot| {
@@ -362,7 +427,12 @@ impl PullRequestSource for MockPullRequestSource {
         });
     }
 
-    fn set_files_viewed(&self, reference: &PullRequestRef, files: Vec<(String, bool)>, cx: &mut App) {
+    fn set_files_viewed(
+        &self,
+        reference: &PullRequestRef,
+        files: Vec<(String, bool)>,
+        cx: &mut App,
+    ) {
         self.with_store(cx, |store, cx| {
             store.update_detail(reference, cx, |snapshot| {
                 for (path, viewed) in files {
@@ -373,7 +443,9 @@ impl PullRequestSource for MockPullRequestSource {
                     };
                     match snapshot.files_viewed.iter_mut().find(|f| f.path == path) {
                         Some(file) => file.state = state,
-                        None => snapshot.files_viewed.push(PullRequestFileViewed { path, state }),
+                        None => snapshot
+                            .files_viewed
+                            .push(PullRequestFileViewed { path, state }),
                     }
                 }
             });
@@ -434,7 +506,11 @@ impl PullRequestSource for MockPullRequestSource {
 }
 
 /// A reference to a pull request of the demo repository.
-pub fn reference_for(host: &str, repository: &str, number: turin_contracts::PositiveInt) -> Option<PullRequestRef> {
+pub fn reference_for(
+    host: &str,
+    repository: &str,
+    number: turin_contracts::PositiveInt,
+) -> Option<PullRequestRef> {
     serde_json::from_value(serde_json::json!({
         "projectId": fixtures::DEMO_PROJECT_ID,
         "host": host,
@@ -471,8 +547,14 @@ pub fn demo_link_project() -> super::link_dialog::LinkDialogProject {
         host: fixtures::DEMO_HOST.to_owned(),
         repository: fixtures::DEMO_REPOSITORY.to_owned(),
         readable_repositories: vec![
-            (fixtures::DEMO_HOST.to_owned(), fixtures::DEMO_REPOSITORY.to_owned()),
-            (fixtures::DEMO_HOST.to_owned(), "pingdotgg/t3code".to_owned()),
+            (
+                fixtures::DEMO_HOST.to_owned(),
+                fixtures::DEMO_REPOSITORY.to_owned(),
+            ),
+            (
+                fixtures::DEMO_HOST.to_owned(),
+                "pingdotgg/t3code".to_owned(),
+            ),
         ],
     }
 }

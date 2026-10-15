@@ -10,7 +10,10 @@ use std::rc::Rc;
 
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{Anchor, AnyElement, App, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, rems};
+use gpui_kit::{
+    Anchor, AnyElement, App, Context, IntoElement, ParentElement, SharedString, Styled, Window,
+    div, rems,
+};
 use turin_contracts::pull_request::{
     PullRequestChecksFilter, PullRequestDraftFilter, PullRequestInvolvement, PullRequestListState,
     PullRequestReviewFilter,
@@ -47,55 +50,131 @@ impl<V> FilterOption<V> {
 pub fn involvement_tabs() -> Vec<FilterOption<PullRequestInvolvement>> {
     vec![
         FilterOption::new(PullRequestInvolvement::All, "All", IconName::Layers),
-        FilterOption::new(PullRequestInvolvement::Reviewing, "Reviewing", IconName::Eye),
-        FilterOption::new(PullRequestInvolvement::Authored, "Authored", IconName::PenLine),
+        FilterOption::new(
+            PullRequestInvolvement::Reviewing,
+            "Reviewing",
+            IconName::Eye,
+        ),
+        FilterOption::new(
+            PullRequestInvolvement::Authored,
+            "Authored",
+            IconName::PenLine,
+        ),
     ]
 }
 
 pub fn state_tabs() -> Vec<FilterOption<PullRequestListState>> {
     vec![
         FilterOption::new(PullRequestListState::All, "All", IconName::Layers),
-        FilterOption::new(PullRequestListState::Open, "Open", IconName::GitPullRequestArrow),
-        FilterOption::new(PullRequestListState::Closed, "Closed", IconName::GitPullRequestClosed),
+        FilterOption::new(
+            PullRequestListState::Open,
+            "Open",
+            IconName::GitPullRequestArrow,
+        ),
+        FilterOption::new(
+            PullRequestListState::Closed,
+            "Closed",
+            IconName::GitPullRequestClosed,
+        ),
         FilterOption::new(PullRequestListState::Merged, "Merged", IconName::GitMerge),
     ]
 }
 
 pub fn sort_options() -> Vec<FilterOption<PullRequestListSort>> {
     vec![
-        FilterOption::new(PullRequestListSort::Ready, "Merge readiness", IconName::ListChecks),
-        FilterOption::new(PullRequestListSort::Blocked, "Blocked on me", IconName::UserLock),
-        FilterOption::new(PullRequestListSort::Updated, "Recently updated", IconName::Clock),
-        FilterOption::new(PullRequestListSort::Newest, "Newest shown", IconName::CalendarArrowDown),
-        FilterOption::new(PullRequestListSort::Oldest, "Oldest shown", IconName::CalendarArrowUp),
-        FilterOption::new(PullRequestListSort::Largest, "Largest shown", IconName::Maximize2),
-        FilterOption::new(PullRequestListSort::Smallest, "Smallest shown", IconName::Minimize2),
+        FilterOption::new(
+            PullRequestListSort::Ready,
+            "Merge readiness",
+            IconName::ListChecks,
+        ),
+        FilterOption::new(
+            PullRequestListSort::Blocked,
+            "Blocked on me",
+            IconName::UserLock,
+        ),
+        FilterOption::new(
+            PullRequestListSort::Updated,
+            "Recently updated",
+            IconName::Clock,
+        ),
+        FilterOption::new(
+            PullRequestListSort::Newest,
+            "Newest shown",
+            IconName::CalendarArrowDown,
+        ),
+        FilterOption::new(
+            PullRequestListSort::Oldest,
+            "Oldest shown",
+            IconName::CalendarArrowUp,
+        ),
+        FilterOption::new(
+            PullRequestListSort::Largest,
+            "Largest shown",
+            IconName::Maximize2,
+        ),
+        FilterOption::new(
+            PullRequestListSort::Smallest,
+            "Smallest shown",
+            IconName::Minimize2,
+        ),
     ]
 }
 
 fn draft_options() -> Vec<FilterOption<Option<PullRequestDraftFilter>>> {
     vec![
         FilterOption::new(None, "All", IconName::Layers),
-        FilterOption::new(Some(PullRequestDraftFilter::Only), "Drafts only", IconName::GitPullRequestDraft),
-        FilterOption::new(Some(PullRequestDraftFilter::Hide), "Hide drafts", IconName::EyeOff),
+        FilterOption::new(
+            Some(PullRequestDraftFilter::Only),
+            "Drafts only",
+            IconName::GitPullRequestDraft,
+        ),
+        FilterOption::new(
+            Some(PullRequestDraftFilter::Hide),
+            "Hide drafts",
+            IconName::EyeOff,
+        ),
     ]
 }
 
 fn review_options() -> Vec<FilterOption<Option<PullRequestReviewFilter>>> {
     vec![
         FilterOption::new(None, "All", IconName::Layers),
-        FilterOption::new(Some(PullRequestReviewFilter::Approved), "Approved", IconName::CircleCheck),
-        FilterOption::new(Some(PullRequestReviewFilter::ChangesRequested), "Changes requested", IconName::CircleX),
-        FilterOption::new(Some(PullRequestReviewFilter::ReviewRequired), "Review required", IconName::CircleDashed),
-        FilterOption::new(Some(PullRequestReviewFilter::None), "No reviews", IconName::CircleSlash),
+        FilterOption::new(
+            Some(PullRequestReviewFilter::Approved),
+            "Approved",
+            IconName::CircleCheck,
+        ),
+        FilterOption::new(
+            Some(PullRequestReviewFilter::ChangesRequested),
+            "Changes requested",
+            IconName::CircleX,
+        ),
+        FilterOption::new(
+            Some(PullRequestReviewFilter::ReviewRequired),
+            "Review required",
+            IconName::CircleDashed,
+        ),
+        FilterOption::new(
+            Some(PullRequestReviewFilter::None),
+            "No reviews",
+            IconName::CircleSlash,
+        ),
     ]
 }
 
 fn checks_options() -> Vec<FilterOption<Option<PullRequestChecksFilter>>> {
     vec![
         FilterOption::new(None, "All", IconName::Layers),
-        FilterOption::new(Some(PullRequestChecksFilter::Passing), "Passing", IconName::CircleCheck),
-        FilterOption::new(Some(PullRequestChecksFilter::Failing), "Failing", IconName::CircleX),
+        FilterOption::new(
+            Some(PullRequestChecksFilter::Passing),
+            "Passing",
+            IconName::CircleCheck,
+        ),
+        FilterOption::new(
+            Some(PullRequestChecksFilter::Failing),
+            "Failing",
+            IconName::CircleX,
+        ),
     ]
 }
 
@@ -176,7 +255,7 @@ fn radio_items<V: Clone + PartialEq + 'static>(
 #[allow(clippy::too_many_arguments)]
 pub fn compact_filter_menu<V: Clone + PartialEq + 'static>(
     id: &'static str,
-    label: &'static str,
+    _label: &'static str,
     trigger_icon: Option<IconName>,
     trigger_label: Option<&'static str>,
     outlined: bool,
@@ -209,7 +288,9 @@ pub fn compact_filter_menu<V: Clone + PartialEq + 'static>(
         button.child(Icon::new(current.icon).size(rems(1.)))
     } else if let Some(trigger_label) = trigger_label {
         button
-            .when_some(trigger_icon, |this, icon| this.child(Icon::new(icon).size(rems(1.))))
+            .when_some(trigger_icon, |this, icon| {
+                this.child(Icon::new(icon).size(rems(1.)))
+            })
             .child(trigger_label)
     } else {
         button
@@ -221,7 +302,11 @@ pub fn compact_filter_menu<V: Clone + PartialEq + 'static>(
                     .whitespace_nowrap()
                     .child(current.label.clone()),
             )
-            .child(Icon::new(IconName::ChevronDown).size(rems(0.75)).color(muted.into()))
+            .child(
+                Icon::new(IconName::ChevronDown)
+                    .size(rems(0.75))
+                    .color(muted.into()),
+            )
     };
     Some(
         dropdown(id, Anchor::TopLeft, button, move |menu, _, _| {
@@ -251,9 +336,12 @@ fn radio_submenu<V: Clone + PartialEq + 'static>(
         .or(options.first())
         .map(|option| option.label.to_string())
         .unwrap_or_default();
-    menu.submenu(submenu_label(name, &current), window, cx, move |submenu, _, _| {
-        radio_items(submenu.label(name), &value, &options, on_pick.clone())
-    })
+    menu.submenu(
+        submenu_label(name, &current),
+        window,
+        cx,
+        move |submenu, _, _| radio_items(submenu.label(name), &value, &options, on_pick.clone()),
+    )
 }
 
 /// An option callback that reports `wrap(value)` as a scope change.
@@ -295,11 +383,7 @@ pub fn filter_count(scope: &PullRequestListPreferences) -> usize {
 }
 
 /// `PullRequestFiltersMenu`.
-pub fn filters_menu(
-    input: FiltersMenuInput,
-    on_change: OnScopeChange,
-    cx: &App,
-) -> AnyElement {
+pub fn filters_menu(input: FiltersMenuInput, on_change: OnScopeChange, cx: &App) -> AnyElement {
     let theme = cx.app_theme();
     let count = filter_count(&input.scope);
     let badge_bg = theme.muted;
@@ -319,125 +403,188 @@ pub fn filters_menu(
                     .child(count.to_string()),
             )
         });
-    dropdown("pr-filters-menu", Anchor::TopRight, button, move |menu, window, cx| {
-        let scope = input.scope.clone();
-        let change = on_change.clone();
-        let mut menu = menu;
-        menu = radio_submenu(menu, "State", scope.state, state_tabs(), pick_with(&change, ScopeChange::State), window, cx);
-        menu = radio_submenu(menu, "Involvement", scope.involvement, involvement_tabs(), pick_with(&change, ScopeChange::Involvement), window, cx);
-        menu = menu.separator();
-        // Author: a flat list of the authors seen in the loaded rows, "Anyone" first.
-        let authors = input.authors.clone();
-        let author_value = scope.author.clone();
-        let author_change = change.clone();
-        menu = menu.submenu(
-            submenu_label("Author", author_value.as_deref().unwrap_or("Anyone")),
-            window,
-            cx,
-            move |submenu, _, _| {
-                let mut submenu = submenu.label("Author");
-                let anyone = author_change.clone();
-                submenu = submenu.item(
-                    PopupMenuItem::new("Anyone")
-                        .icon(menu_icon(IconName::Layers))
-                        .checked(author_value.is_none())
-                        .on_click(move |_, window, cx| anyone(ScopeChange::Author(None), window, cx)),
-                );
-                for facet in authors.iter().take(10) {
-                    let login = facet.actor.login.as_str().to_owned();
-                    let checked = author_value
-                        .as_deref()
-                        .is_some_and(|value| value.eq_ignore_ascii_case(&login));
-                    let change = author_change.clone();
-                    let target = login.clone();
+    dropdown(
+        "pr-filters-menu",
+        Anchor::TopRight,
+        button,
+        move |menu, window, cx| {
+            let scope = input.scope.clone();
+            let change = on_change.clone();
+            let mut menu = menu;
+            menu = radio_submenu(
+                menu,
+                "State",
+                scope.state,
+                state_tabs(),
+                pick_with(&change, ScopeChange::State),
+                window,
+                cx,
+            );
+            menu = radio_submenu(
+                menu,
+                "Involvement",
+                scope.involvement,
+                involvement_tabs(),
+                pick_with(&change, ScopeChange::Involvement),
+                window,
+                cx,
+            );
+            menu = menu.separator();
+            // Author: a flat list of the authors seen in the loaded rows, "Anyone" first.
+            let authors = input.authors.clone();
+            let author_value = scope.author.clone();
+            let author_change = change.clone();
+            menu = menu.submenu(
+                submenu_label("Author", author_value.as_deref().unwrap_or("Anyone")),
+                window,
+                cx,
+                move |submenu, _, _| {
+                    let mut submenu = submenu.label("Author");
+                    let anyone = author_change.clone();
                     submenu = submenu.item(
-                        PopupMenuItem::new(format!("{login}  ·  {} merges loaded", facet.merged_count))
+                        PopupMenuItem::new("Anyone")
+                            .icon(menu_icon(IconName::Layers))
+                            .checked(author_value.is_none())
+                            .on_click(move |_, window, cx| {
+                                anyone(ScopeChange::Author(None), window, cx)
+                            }),
+                    );
+                    for facet in authors.iter().take(10) {
+                        let login = facet.actor.login.as_str().to_owned();
+                        let checked = author_value
+                            .as_deref()
+                            .is_some_and(|value| value.eq_ignore_ascii_case(&login));
+                        let change = author_change.clone();
+                        let target = login.clone();
+                        submenu = submenu.item(
+                            PopupMenuItem::new(format!(
+                                "{login}  ·  {} merges loaded",
+                                facet.merged_count
+                            ))
                             .icon(menu_icon(IconName::UserRound))
                             .checked(checked)
                             .on_click(move |_, window, cx| {
                                 change(ScopeChange::Author(Some(target.clone())), window, cx)
                             }),
-                    );
-                }
-                if authors.is_empty() {
-                    submenu = submenu.item(PopupMenuItem::new("No authors found").disabled(true));
-                }
-                submenu
-            },
-        );
-        // Labels: checkbox list with the count of rows carrying each.
-        let labels = input.labels.clone();
-        let selected: Vec<String> = scope.labels.clone().unwrap_or_default();
-        let label_change = change.clone();
-        let summary = if selected.is_empty() {
-            "Any".to_owned()
-        } else {
-            format!("{} selected", selected.len())
-        };
-        menu = menu.submenu(submenu_label("Labels", &summary), window, cx, move |submenu, _, _| {
-            if labels.is_empty() {
-                return submenu.item(PopupMenuItem::new("No labels in this view").disabled(true));
-            }
-            let mut submenu = submenu;
-            for facet in &labels {
-                let name = facet.label.name.as_str().to_owned();
-                let checked = selected.iter().any(|value| value.eq_ignore_ascii_case(&name));
-                let next: Vec<String> = if checked {
-                    selected
-                        .iter()
-                        .filter(|value| !value.eq_ignore_ascii_case(&name))
-                        .cloned()
-                        .collect()
-                } else {
-                    selected.iter().cloned().chain([name.clone()]).collect()
-                };
-                let change = label_change.clone();
-                submenu = submenu.item(
-                    PopupMenuItem::new(format!("{name}  ·  {}", facet.count))
-                        .icon(menu_icon(IconName::Tag))
-                        .checked(checked)
-                        .on_click(move |_, window, cx| {
-                            change(ScopeChange::Labels(next.clone()), window, cx)
-                        }),
-                );
-            }
-            submenu
-        });
-        menu = radio_submenu(menu, "Draft", scope.draft, draft_options(), pick_with(&change, ScopeChange::Draft), window, cx);
-        menu = radio_submenu(menu, "Review", scope.review, review_options(), pick_with(&change, ScopeChange::Review), window, cx);
-        menu = radio_submenu(menu, "Checks", scope.checks, checks_options(), pick_with(&change, ScopeChange::Checks), window, cx);
-        if input.host_options.len() > 2 {
-            menu = menu.separator();
-            let host_value = scope.host.clone().unwrap_or_default();
-            let change = change.clone();
+                        );
+                    }
+                    if authors.is_empty() {
+                        submenu =
+                            submenu.item(PopupMenuItem::new("No authors found").disabled(true));
+                    }
+                    submenu
+                },
+            );
+            // Labels: checkbox list with the count of rows carrying each.
+            let labels = input.labels.clone();
+            let selected: Vec<String> = scope.labels.clone().unwrap_or_default();
+            let label_change = change.clone();
+            let summary = if selected.is_empty() {
+                "Any".to_owned()
+            } else {
+                format!("{} selected", selected.len())
+            };
+            menu = menu.submenu(
+                submenu_label("Labels", &summary),
+                window,
+                cx,
+                move |submenu, _, _| {
+                    if labels.is_empty() {
+                        return submenu
+                            .item(PopupMenuItem::new("No labels in this view").disabled(true));
+                    }
+                    let mut submenu = submenu;
+                    for facet in &labels {
+                        let name = facet.label.name.as_str().to_owned();
+                        let checked = selected
+                            .iter()
+                            .any(|value| value.eq_ignore_ascii_case(&name));
+                        let next: Vec<String> = if checked {
+                            selected
+                                .iter()
+                                .filter(|value| !value.eq_ignore_ascii_case(&name))
+                                .cloned()
+                                .collect()
+                        } else {
+                            selected.iter().cloned().chain([name.clone()]).collect()
+                        };
+                        let change = label_change.clone();
+                        submenu = submenu.item(
+                            PopupMenuItem::new(format!("{name}  ·  {}", facet.count))
+                                .icon(menu_icon(IconName::Tag))
+                                .checked(checked)
+                                .on_click(move |_, window, cx| {
+                                    change(ScopeChange::Labels(next.clone()), window, cx)
+                                }),
+                        );
+                    }
+                    submenu
+                },
+            );
             menu = radio_submenu(
                 menu,
-                "Host",
-                host_value,
-                input.host_options.clone(),
-                Rc::new(move |value: String, window, cx| {
-                    change(ScopeChange::Host((!value.is_empty()).then_some(value)), window, cx)
-                }),
+                "Draft",
+                scope.draft,
+                draft_options(),
+                pick_with(&change, ScopeChange::Draft),
                 window,
                 cx,
             );
-        }
-        menu = menu.separator();
-        let project_change = change.clone();
-        radio_submenu(
-            menu,
-            "Project",
-            input.project_value.clone(),
-            input.projects.clone(),
-            Rc::new(move |value: String, window, cx| {
-                let project = value
-                    .split_once('\u{1f}')
-                    .map(|(environment, project)| (environment.to_owned(), project.to_owned()));
-                project_change(ScopeChange::Project(project), window, cx)
-            }),
-            window,
-            cx,
-        )
-    })
+            menu = radio_submenu(
+                menu,
+                "Review",
+                scope.review,
+                review_options(),
+                pick_with(&change, ScopeChange::Review),
+                window,
+                cx,
+            );
+            menu = radio_submenu(
+                menu,
+                "Checks",
+                scope.checks,
+                checks_options(),
+                pick_with(&change, ScopeChange::Checks),
+                window,
+                cx,
+            );
+            if input.host_options.len() > 2 {
+                menu = menu.separator();
+                let host_value = scope.host.clone().unwrap_or_default();
+                let change = change.clone();
+                menu = radio_submenu(
+                    menu,
+                    "Host",
+                    host_value,
+                    input.host_options.clone(),
+                    Rc::new(move |value: String, window, cx| {
+                        change(
+                            ScopeChange::Host((!value.is_empty()).then_some(value)),
+                            window,
+                            cx,
+                        )
+                    }),
+                    window,
+                    cx,
+                );
+            }
+            menu = menu.separator();
+            let project_change = change.clone();
+            radio_submenu(
+                menu,
+                "Project",
+                input.project_value.clone(),
+                input.projects.clone(),
+                Rc::new(move |value: String, window, cx| {
+                    let project = value
+                        .split_once('\u{1f}')
+                        .map(|(environment, project)| (environment.to_owned(), project.to_owned()));
+                    project_change(ScopeChange::Project(project), window, cx)
+                }),
+                window,
+                cx,
+            )
+        },
+    )
     .into_any_element()
 }

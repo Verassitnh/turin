@@ -792,7 +792,12 @@ fn reuses_the_legacy_reference_only_for_the_same_pull_request_on_the_same_host()
     // The legacy reference carries no host: reusing it means returning it as it is.
     assert_eq!(
         on_host("github.com"),
-        Some(expected_panel_target("proj-a", None, "pingdotgg/t3code", 15046))
+        Some(expected_panel_target(
+            "proj-a",
+            None,
+            "pingdotgg/t3code",
+            15046
+        ))
     );
     assert_eq!(
         on_host("github.example.com")

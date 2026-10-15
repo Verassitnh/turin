@@ -152,7 +152,10 @@ const BRAND: &[(&str, &[u8])] = &[
         CHEVRON_DOWN,
         include_bytes!("../assets/brand/chevron-down.svg"),
     ),
-    (BRANCH_MARK, include_bytes!("../assets/brand/branch-mark.svg")),
+    (
+        BRANCH_MARK,
+        include_bytes!("../assets/brand/branch-mark.svg"),
+    ),
     (SMILE_PLUS, include_bytes!("../assets/brand/smile-plus.svg")),
 ];
 

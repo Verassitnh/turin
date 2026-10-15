@@ -6,11 +6,11 @@
 //! PullRequestActorLabel, PullRequestDiffStat, PullRequestMetaLine. Icon values are represented
 //! by glyph names so GPUI views can choose their own icon objects.
 
+pub use super::pull_request_detail_logic::PullRequestReviewOutcome;
 use turin_contracts::pull_request::{
     PullRequestCheck, PullRequestCheckStatus, PullRequestChecksState, PullRequestMergeability,
     PullRequestState,
 };
-pub use super::pull_request_detail_logic::PullRequestReviewOutcome;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PullRequestStatePresentation {

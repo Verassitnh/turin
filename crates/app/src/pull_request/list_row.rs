@@ -57,14 +57,21 @@ fn row_labels(entry: &EnvironmentPullRequestEntry, meta_width: Pixels) -> Option
             .min_w_0()
             .items_center()
             .gap_1()
-            .children(entry.labels.iter().take(visible).enumerate().map(|(index, label)| {
-                let chip = PullRequestLabelChip::new(label.clone()).size(BadgeSize::Sm);
-                if index + 1 == visible && remaining > 0 {
-                    chip.trailing(format!("+{remaining}")).into_any_element()
-                } else {
-                    chip.into_any_element()
-                }
-            }))
+            .children(
+                entry
+                    .labels
+                    .iter()
+                    .take(visible)
+                    .enumerate()
+                    .map(|(index, label)| {
+                        let chip = PullRequestLabelChip::new(label.clone()).size(BadgeSize::Sm);
+                        if index + 1 == visible && remaining > 0 {
+                            chip.trailing(format!("+{remaining}")).into_any_element()
+                        } else {
+                            chip.into_any_element()
+                        }
+                    }),
+            )
             .into_any_element(),
     )
 }
@@ -79,7 +86,10 @@ pub struct PullRequestRow {
     meta_width: Pixels,
     on_select: SelectRow,
     /// The store and layer callback the stack trigger opens its menu with.
-    stack: Option<(gpui_kit::Entity<super::view_model::PullRequestStore>, super::stack_popover::SelectLayer)>,
+    stack: Option<(
+        gpui_kit::Entity<super::view_model::PullRequestStore>,
+        super::stack_popover::SelectLayer,
+    )>,
 }
 
 impl PullRequestRow {
@@ -205,42 +215,44 @@ impl RenderOnce for PullRequestRow {
             .items_center()
             .gap(rems(0.375))
             .text_size(meta_text_size())
-            .when_some(entry.stack.as_ref(), |this, stack| match self.stack.clone() {
-                Some((store, on_select)) => {
-                    let reference = turin_contracts::pull_request::PullRequestRef {
-                        project_id: entry.project_id.clone(),
-                        host: Some(entry.host.clone()),
-                        expected_account_id: None,
-                        allow_stale: None,
-                        repository: entry.repository.clone(),
-                        number: entry.number,
-                    };
-                    this.child(super::stack_popover::PullRequestStackPopover::new(
-                        store,
-                        reference,
-                        stack.clone(),
-                        on_select,
-                    ))
-                }
-                None => {
-                    let label = format!(
-                        "View stack #{}, layer {} of {}",
-                        stack.number.get(),
-                        stack.position.get(),
-                        stack.size.get()
-                    );
-                    this.child(with_tooltip(
-                        "pr-stack-trigger",
-                        label,
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_size(TEXT_XS.size)
-                            .text_color(theme.muted_foreground)
-                            .child(Icon::new(IconName::Layers).size(rems(0.75)))
-                            .child(format!("{}/{}", stack.position.get(), stack.size.get())),
-                    ))
+            .when_some(entry.stack.as_ref(), |this, stack| {
+                match self.stack.clone() {
+                    Some((store, on_select)) => {
+                        let reference = turin_contracts::pull_request::PullRequestRef {
+                            project_id: entry.project_id.clone(),
+                            host: Some(entry.host.clone()),
+                            expected_account_id: None,
+                            allow_stale: None,
+                            repository: entry.repository.clone(),
+                            number: entry.number,
+                        };
+                        this.child(super::stack_popover::PullRequestStackPopover::new(
+                            store,
+                            reference,
+                            stack.clone(),
+                            on_select,
+                        ))
+                    }
+                    None => {
+                        let label = format!(
+                            "View stack #{}, layer {} of {}",
+                            stack.number.get(),
+                            stack.position.get(),
+                            stack.size.get()
+                        );
+                        this.child(with_tooltip(
+                            "pr-stack-trigger",
+                            label,
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_size(TEXT_XS.size)
+                                .text_color(theme.muted_foreground)
+                                .child(Icon::new(IconName::Layers).size(rems(0.75)))
+                                .child(format!("{}/{}", stack.position.get(), stack.size.get())),
+                        ))
+                    }
                 }
             })
             .child(PullRequestDiffStat::new(entry.additions, entry.deletions).mono());

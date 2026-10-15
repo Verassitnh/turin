@@ -833,7 +833,9 @@ impl PullRequestDetailPanel {
                 guide.update(cx, |guide, cx| {
                     guide.set_on_finish(
                         Some(std::rc::Rc::new(move |cx: &mut App| {
-                            composer.update(cx, |composer, cx| composer.open_review(cx)).ok();
+                            composer
+                                .update(cx, |composer, cx| composer.open_review(cx))
+                                .ok();
                         })),
                         cx,
                     )

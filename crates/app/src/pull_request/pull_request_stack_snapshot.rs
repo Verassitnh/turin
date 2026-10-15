@@ -42,7 +42,7 @@ pub fn saved_pull_request_stack(
     } else {
         exact
     };
-    candidates.sort_by(|a, b| saved_at(b).cmp(&saved_at(a)));
+    candidates.sort_by_key(|link| std::cmp::Reverse(saved_at(link)));
     let stack = candidates.first()?.stack.as_ref()?;
     if !stack
         .layers
@@ -65,7 +65,7 @@ pub fn saved_pull_request_stack(
                     .copied()
                     .filter(|link| link.number == layer.number)
                     .collect();
-                layers_links.sort_by(|a, b| saved_at(b).cmp(&saved_at(a)));
+                layers_links.sort_by_key(|link| std::cmp::Reverse(saved_at(link)));
                 let snapshot = layers_links.first().and_then(|link| link.snapshot.as_ref());
                 PullRequestStackLayer {
                     number: layer.number,

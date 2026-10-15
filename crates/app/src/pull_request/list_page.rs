@@ -19,10 +19,10 @@ use gpui_kit::{
     IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
     px, rems,
 };
+use turin_contracts::EnvironmentId;
 use turin_contracts::pull_request::{
     PullRequestInvolvement, PullRequestListFilters, PullRequestListState, PullRequestRef,
 };
-use turin_contracts::EnvironmentId;
 
 use super::list_filters::{
     FilterOption, FiltersMenuInput, OnScopeChange, ScopeChange, compact_filter_menu, filters_menu,
@@ -76,7 +76,11 @@ pub struct PullRequestsPage {
 impl EventEmitter<PullRequestsPageEvent> for PullRequestsPage {}
 
 impl PullRequestsPage {
-    pub fn new(store: Entity<PullRequestStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Entity<PullRequestStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let search = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search pull requests, or label:bug")
         });
@@ -124,7 +128,10 @@ impl PullRequestsPage {
     }
 
     pub fn select(&mut self, entry: &EnvironmentPullRequestEntry, cx: &mut Context<Self>) {
-        self.selected_key = Some(pull_request_entry_key(&entry.entry, Some(entry.environment_id.as_str())));
+        self.selected_key = Some(pull_request_entry_key(
+            &entry.entry,
+            Some(entry.environment_id.as_str()),
+        ));
         cx.emit(PullRequestsPageEvent::Select {
             environment_id: entry.environment_id.clone(),
             reference: PullRequestRef {
@@ -171,7 +178,10 @@ impl PullRequestsPage {
     }
 
     /// The route's pipeline from the loaded rows to the groups on screen.
-    fn display_groups(&self, cx: &App) -> (Vec<PullRequestGroup<EnvironmentPullRequestEntry>>, String) {
+    fn display_groups(
+        &self,
+        cx: &App,
+    ) -> (Vec<PullRequestGroup<EnvironmentPullRequestEntry>>, String) {
         let store = self.store.read(cx);
         let Some(merged) = store.list().merged.as_ref() else {
             return (Vec::new(), String::new());
@@ -185,13 +195,18 @@ impl PullRequestsPage {
             .iter()
             .filter(|entry| {
                 (self.scope.state == PullRequestListState::All
-                    || entry.state == super::pull_request_list_logic::list_state_to_state(self.scope.state))
+                    || entry.state
+                        == super::pull_request_list_logic::list_state_to_state(self.scope.state))
                     && self
                         .scope
                         .project_id
                         .as_ref()
                         .is_none_or(|project| entry.project_id.as_str() == project.as_str())
-                    && self.scope.host.as_deref().is_none_or(|host| entry.host.as_str() == host)
+                    && self
+                        .scope
+                        .host
+                        .as_deref()
+                        .is_none_or(|host| entry.host.as_str() == host)
             })
             .cloned()
             .collect();
@@ -226,7 +241,7 @@ impl PullRequestsPage {
             &groups,
             self.scope.sort.unwrap_or(PullRequestListSort::Ready),
             &parsed.text,
-            &|entry: &EnvironmentPullRequestEntry| entry.additions + entry.deletions > 0,
+            |entry: &EnvironmentPullRequestEntry| entry.additions + entry.deletions > 0,
             self.scope.involvement,
         );
         (sorted, parsed.text)
@@ -277,7 +292,9 @@ impl PullRequestsPage {
             .shadow(crate::theme::tokens::shadow_xs(0.05))
             .pl(rems(0.6875))
             .child(if busy {
-                Spinner::new("pr-search-busy").size(rems(1.)).into_any_element()
+                Spinner::new("pr-search-busy")
+                    .size(rems(1.))
+                    .into_any_element()
             } else {
                 Icon::new(IconName::Search)
                     .size(rems(1.))
@@ -312,37 +329,38 @@ impl Render for PullRequestsPage {
         };
 
         // Hosts the workspace reads, then the provider pill that switches between them.
-        let host_options: Vec<FilterOption<String>> = std::iter::once(FilterOption::new(
-            String::new(),
-            "All",
-            IconName::Plug2,
-        ))
-        .chain(
-            list.merged
-                .as_ref()
-                .map(|merged| merged.providers.as_slice())
-                .unwrap_or(&[])
-                .iter()
-                .map(|provider| {
-                    let mut option =
-                        FilterOption::new(provider.host.as_str().to_owned(), "GitHub", IconName::Github);
-                    if !provider.configured {
-                        option.unavailable = Some(
-                            provider
-                                .detail
-                                .as_ref()
-                                .map_or("This host could not be read.".into(), |detail| {
-                                    SharedString::from(detail.as_str().to_owned())
-                                }),
-                        );
-                    }
-                    option
-                }),
-        )
-        .collect();
+        let host_options: Vec<FilterOption<String>> =
+            std::iter::once(FilterOption::new(String::new(), "All", IconName::Plug2))
+                .chain(
+                    list.merged
+                        .as_ref()
+                        .map(|merged| merged.providers.as_slice())
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|provider| {
+                            let mut option = FilterOption::new(
+                                provider.host.as_str().to_owned(),
+                                "GitHub",
+                                IconName::Github,
+                            );
+                            if !provider.configured {
+                                option.unavailable =
+                                    Some(
+                                        provider.detail.as_ref().map_or(
+                                            "This host could not be read.".into(),
+                                            |detail| SharedString::from(detail.as_str().to_owned()),
+                                        ),
+                                    );
+                            }
+                            option
+                        }),
+                )
+                .collect();
 
         let facets = collect_pull_request_list_facets(
-            list.merged.as_ref().map_or(&[][..], |merged| merged.entries.as_slice()),
+            list.merged
+                .as_ref()
+                .map_or(&[][..], |merged| merged.entries.as_slice()),
             self.scope.state,
         );
         let project_options: Vec<FilterOption<String>> = std::iter::once(FilterOption::new(
@@ -401,7 +419,11 @@ impl Render for PullRequestsPage {
             self.scope.host.clone().unwrap_or_default(),
             host_options,
             Rc::new(move |value: String, window, cx| {
-                change(ScopeChange::Host((!value.is_empty()).then_some(value)), window, cx)
+                change(
+                    ScopeChange::Host((!value.is_empty()).then_some(value)),
+                    window,
+                    cx,
+                )
             }),
             cx,
         );
@@ -411,9 +433,13 @@ impl Render for PullRequestsPage {
             .size(ButtonSize::Icon)
             .disabled(refreshing)
             .child(if refreshing {
-                Spinner::new("pr-refresh-spin").size(rems(1.)).into_any_element()
+                Spinner::new("pr-refresh-spin")
+                    .size(rems(1.))
+                    .into_any_element()
             } else {
-                Icon::new(IconName::RefreshCw).size(rems(1.)).into_any_element()
+                Icon::new(IconName::RefreshCw)
+                    .size(rems(1.))
+                    .into_any_element()
             })
             .on_click(move |_, _, cx| {
                 if let Some(source) = store.read(cx).source() {
@@ -497,10 +523,18 @@ impl Render for PullRequestsPage {
                         .flex_col()
                         .gap(px(2.))
                         .when(!group.label.is_empty(), |this| {
-                            this.child(group_header(group.key, &group.label, group.entries.len(), cx))
+                            this.child(group_header(
+                                group.key,
+                                &group.label,
+                                group.entries.len(),
+                                cx,
+                            ))
                         })
                         .children(group.entries.iter().map(|entry| {
-                            let key = pull_request_entry_key(&entry.entry, Some(entry.environment_id.as_str()));
+                            let key = pull_request_entry_key(
+                                &entry.entry,
+                                Some(entry.environment_id.as_str()),
+                            );
                             let stack_select: super::stack_popover::SelectLayer = {
                                 let page = page.clone();
                                 let environment_id = entry.environment_id.clone();
@@ -561,7 +595,8 @@ impl Render for PullRequestsPage {
             gpui_kit::canvas(
                 move |bounds, _, cx| {
                     let width = f32::from(bounds.size.width);
-                    page.update(cx, |page, cx| page.set_column_width(width, cx)).ok();
+                    page.update(cx, |page, cx| page.set_column_width(width, cx))
+                        .ok();
                 },
                 |_, _, _, _| {},
             )

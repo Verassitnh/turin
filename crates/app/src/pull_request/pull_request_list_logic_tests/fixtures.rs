@@ -94,7 +94,13 @@ pub(super) fn numbers_of<E: ListEntry>(entries: &[E]) -> Vec<u64> {
 pub(super) fn batch_numbers(batches: &[PullRequestStatsBatch]) -> Vec<u64> {
     batches
         .iter()
-        .flat_map(|batch| batch.input.refs.iter().map(|reference| reference.number.get()))
+        .flat_map(|batch| {
+            batch
+                .input
+                .refs
+                .iter()
+                .map(|reference| reference.number.get())
+        })
         .collect()
 }
 

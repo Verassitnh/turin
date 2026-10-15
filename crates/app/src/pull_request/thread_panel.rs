@@ -12,14 +12,12 @@ use std::rc::Rc;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, ClipboardItem, Context, CursorStyle, Entity, EventEmitter,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px, rems,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Window, div, px, rems,
 };
 use turin_contracts::ThreadId;
-use turin_contracts::thread_pull_request::{
-    ThreadPullRequestLink, ThreadPullRequestLinkSource,
-};
 use turin_contracts::pull_request::PullRequestState;
+use turin_contracts::thread_pull_request::{ThreadPullRequestLink, ThreadPullRequestLinkSource};
 
 use super::dropdown::dropdown;
 use super::presentation_view::{
@@ -138,7 +136,10 @@ fn link_row(
             Some(snapshot) => div()
                 .relative()
                 .flex()
-                .child(PullRequestStateGlyph::new(snapshot.state, snapshot.is_draft))
+                .child(PullRequestStateGlyph::new(
+                    snapshot.state,
+                    snapshot.is_draft,
+                ))
                 .child(
                     div().absolute().right(px(-4.)).bottom(px(-4.)).child(
                         PullRequestConflictGlyph::new(
@@ -238,7 +239,9 @@ fn link_row(
                     "GitHub stack of {}: merging a layer lands the ones below it.",
                     stack.size
                 ),
-                ChainKind::Derived => format!("{} pull requests chained by base branch.", stack.size),
+                ChainKind::Derived => {
+                    format!("{} pull requests chained by base branch.", stack.size)
+                }
             },
             div()
                 .flex()
@@ -292,28 +295,42 @@ fn link_row(
                         .font_family(theme.fonts.mono.clone())
                         .child(SharedString::from(link.repository.as_str().to_owned())),
                 )
-                .child(branches(snapshot.head_branch.as_str(), snapshot.base_branch.as_str())),
+                .child(branches(
+                    snapshot.head_branch.as_str(),
+                    snapshot.base_branch.as_str(),
+                )),
             None => this.child(
                 div()
                     .truncate()
                     .font_family(theme.fonts.mono.clone())
-                    .child(format!("{}/{}", link.host.as_str(), link.repository.as_str())),
+                    .child(format!(
+                        "{}/{}",
+                        link.host.as_str(),
+                        link.repository.as_str()
+                    )),
             ),
         })
         .child(div().flex_1())
-        .when_some(snapshot.and_then(|s| s.updated_at.as_deref()), |this, updated| {
-            this.child(
-                div()
-                    .flex_shrink_0()
-                    .whitespace_nowrap()
-                    .child(format_relative_time_label(updated)),
-            )
-        });
+        .when_some(
+            snapshot.and_then(|s| s.updated_at.as_deref()),
+            |this, updated| {
+                this.child(
+                    div()
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .child(format_relative_time_label(updated)),
+                )
+            },
+        );
 
     let url = link.url.as_str().to_owned();
     let url_for_copy = url.clone();
     let url_for_open = url.clone();
-    let ref_for_menu = (link.host.as_str().to_owned(), link.repository.as_str().to_owned(), link.number);
+    let ref_for_menu = (
+        link.host.as_str().to_owned(),
+        link.repository.as_str().to_owned(),
+        link.number,
+    );
     let dismiss = link.source == ThreadPullRequestLinkSource::Stack;
     let store_for_menu = store.clone();
     let thread_for_menu = thread_id.clone();
@@ -347,7 +364,9 @@ fn link_row(
                     .on_click(move |_, _, cx| {
                         let url = open_url.clone();
                         panel
-                            .update(cx, |_, cx| cx.emit(ThreadPullRequestsPanelEvent::Open { url }))
+                            .update(cx, |_, cx| {
+                                cx.emit(ThreadPullRequestsPanelEvent::Open { url })
+                            })
                             .ok();
                     }),
             )
@@ -429,7 +448,8 @@ fn link_row(
 impl Render for ThreadPullRequestsPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.app_theme().clone();
-        let links: Vec<ThreadPullRequestLink> = self.store.read(cx).thread_links(&self.thread_id).to_vec();
+        let links: Vec<ThreadPullRequestLink> =
+            self.store.read(cx).thread_links(&self.thread_id).to_vec();
         let visible = visible_thread_pull_requests(&links);
         if visible.is_empty() {
             let panel = cx.entity().downgrade();
@@ -487,13 +507,19 @@ impl Render for ThreadPullRequestsPanel {
             .count();
         let last_synced = visible
             .iter()
-            .filter_map(|link| link.snapshot.as_ref().map(|snapshot| snapshot.synced_at.as_str()))
+            .filter_map(|link| {
+                link.snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.synced_at.as_str())
+            })
             .max();
         let panel = cx.entity().downgrade();
         let rows: Vec<AnyElement> = lines
             .iter()
             .enumerate()
-            .map(|(index, line)| link_row(line, index, &self.store, &self.thread_id, panel.clone(), cx))
+            .map(|(index, line)| {
+                link_row(line, index, &self.store, &self.thread_id, panel.clone(), cx)
+            })
             .collect();
         let footer_text = format!(
             "{} open · {} linked{}",

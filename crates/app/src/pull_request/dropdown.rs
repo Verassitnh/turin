@@ -38,12 +38,14 @@ where
         .anchor(anchor)
         .trigger(trigger)
         .content(move |_, window, cx: &mut Context<_>| {
-            let state = window.use_keyed_state(popover_id.clone(), cx, |_, _| DropdownState::default());
+            let state =
+                window.use_keyed_state(popover_id.clone(), cx, |_, _| DropdownState::default());
             if let Some(menu) = state.read(cx).menu.clone() {
                 return menu;
             }
             let build = build.clone();
-            let menu = PopupMenu::build(window, cx, move |menu, window, cx| build(menu, window, cx));
+            let menu =
+                PopupMenu::build(window, cx, move |menu, window, cx| build(menu, window, cx));
             menu.focus_handle(cx).focus(window, cx);
             let popover_state = cx.entity().downgrade();
             let weak_state = state.downgrade();

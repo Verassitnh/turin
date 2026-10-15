@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{
-    Focusable as _, App, AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Window, div, px,
+    App, AppContext as _, Context, Entity, EventEmitter, Focusable as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px,
 };
 
 use super::link_pull_request_dialog_logic::{
@@ -50,12 +50,10 @@ impl LinkDialogProject {
     }
 
     fn can_link(&self, link: &ResolvedLink) -> bool {
-        self.readable_repositories
-            .iter()
-            .any(|(host, repository)| {
-                host.eq_ignore_ascii_case(&link.host)
-                    && repository.eq_ignore_ascii_case(&link.repository)
-            })
+        self.readable_repositories.iter().any(|(host, repository)| {
+            host.eq_ignore_ascii_case(&link.host)
+                && repository.eq_ignore_ascii_case(&link.repository)
+        })
     }
 }
 
@@ -84,8 +82,10 @@ impl LinkPullRequestDialog {
         cx: &mut Context<Self>,
     ) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Pull request URL or #42"));
-        let subscription = cx.subscribe_in(&input, window, |this, state, event: &InputEvent, _, cx| {
-            match event {
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, state, event: &InputEvent, _, cx| match event {
                 InputEvent::Change => {
                     this.dirty = true;
                     this.reference = state.read(cx).value().to_string();
@@ -93,8 +93,8 @@ impl LinkPullRequestDialog {
                 }
                 InputEvent::PressEnter { .. } => this.submit(cx),
                 _ => {}
-            }
-        });
+            },
+        );
         let focus = input.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         Self {
@@ -110,18 +110,24 @@ impl LinkPullRequestDialog {
 
     fn resolution(&self) -> Option<LinkPullRequestResolution> {
         let project = self.project.clone();
-        let own = project.as_ref().map(|project| (project.host.clone(), project.repository.clone()));
+        let own = project
+            .as_ref()
+            .map(|project| (project.host.clone(), project.repository.clone()));
         let web_url = {
             let project = project.clone();
             move |number: u64| project.as_ref().and_then(|project| project.web_url(number))
         };
-        let own_project = own.as_ref().map(|(host, repository)| LinkPullRequestProject {
-            host,
-            repository,
-            web_url: &web_url,
-        });
+        let own_project = own
+            .as_ref()
+            .map(|(host, repository)| LinkPullRequestProject {
+                host,
+                repository,
+                web_url: &web_url,
+            });
         resolve_link_pull_request_input(&self.reference, own_project.as_ref(), &|link| {
-            project.as_ref().is_some_and(|project| project.can_link(link))
+            project
+                .as_ref()
+                .is_some_and(|project| project.can_link(link))
         })
     }
 
@@ -138,7 +144,8 @@ impl LinkPullRequestDialog {
     pub fn prefill(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.reference = text.to_owned();
         self.dirty = true;
-        self.input.update(cx, |input, cx| input.set_value(text.to_owned(), window, cx));
+        self.input
+            .update(cx, |input, cx| input.set_value(text.to_owned(), window, cx));
         cx.notify();
     }
 
@@ -154,11 +161,8 @@ impl Render for LinkPullRequestDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.app_theme().clone();
         let resolution = self.resolution();
-        let validation = link_pull_request_validation_message(
-            self.dirty,
-            &self.reference,
-            resolution.as_ref(),
-        );
+        let validation =
+            link_pull_request_validation_message(self.dirty, &self.reference, resolution.as_ref());
         let summary = link_pull_request_summary(resolution.as_ref());
         let error = validation.or_else(|| self.submit_error.clone());
         let can_submit = !self.pending && link_pull_request_can_submit(resolution.as_ref());
@@ -166,7 +170,8 @@ impl Render for LinkPullRequestDialog {
         let dismiss: Rc<dyn Fn(&mut Window, &mut App)> = {
             let page = page.clone();
             Rc::new(move |_, cx| {
-                page.update(cx, |_, cx| cx.emit(LinkPullRequestDialogEvent::Dismiss)).ok();
+                page.update(cx, |_, cx| cx.emit(LinkPullRequestDialogEvent::Dismiss))
+                    .ok();
             })
         };
         let cancel = dismiss.clone();

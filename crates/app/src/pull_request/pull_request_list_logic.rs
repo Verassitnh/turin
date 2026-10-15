@@ -23,8 +23,8 @@ use turin_contracts::pull_request::{
     PullRequestListCursors, PullRequestListEntry, PullRequestListFilters,
     PullRequestListProjectError, PullRequestListResult, PullRequestListState,
     PullRequestListStatsInput, PullRequestMergeability, PullRequestProviderSummary,
-    PullRequestQualifierValue, PullRequestRef, PullRequestReviewDecision,
-    PullRequestReviewFilter, PullRequestState, resolve_pull_request_author_filter,
+    PullRequestQualifierValue, PullRequestRef, PullRequestReviewDecision, PullRequestReviewFilter,
+    PullRequestState, resolve_pull_request_author_filter,
 };
 use turin_contracts::{EnvironmentId, PositiveInt, js_trim};
 
@@ -527,7 +527,12 @@ impl QueryFilters {
             .labels
             .into_iter()
             .take(MAX_QUALIFIER_VALUES)
-            .map(|group| group.iter().filter_map(|name| qualifier_value(name)).collect())
+            .map(|group| {
+                group
+                    .iter()
+                    .filter_map(|name| qualifier_value(name))
+                    .collect()
+            })
             .collect();
         let excluded_labels: Vec<PullRequestQualifierValue> = self
             .excluded_labels
@@ -781,7 +786,10 @@ pub fn group_pull_requests_by_involvement<E: ListEntry>(
 /// Repository plus number is unique on one host, so the host makes the key unique overall, and
 /// the environment on top of that, because two connected machines can hold the same repository and
 /// would otherwise contribute two rows under one key.
-pub fn pull_request_entry_key(entry: &PullRequestListEntry, environment_id: Option<&str>) -> String {
+pub fn pull_request_entry_key(
+    entry: &PullRequestListEntry,
+    environment_id: Option<&str>,
+) -> String {
     let scope = environment_id.map_or(String::new(), |id| format!("{id}:"));
     format!(
         "{scope}{}:{}#{}",
@@ -964,14 +972,16 @@ pub fn pull_request_stats_refresh_batches(
     if requested_scope.key != current_scope.key || requested_scope.policy != current_scope.policy {
         return None;
     }
-    Some(pull_request_stats_request_batches(PullRequestStatsRequest {
-        entries_by_key,
-        candidate_keys,
-        policy: requested_scope.policy,
-        active_batches: &[],
-        stats_by_row,
-        refresh: true,
-    }))
+    Some(pull_request_stats_request_batches(
+        PullRequestStatsRequest {
+            entries_by_key,
+            candidate_keys,
+            policy: requested_scope.policy,
+            active_batches: &[],
+            stats_by_row,
+            refresh: true,
+        },
+    ))
 }
 
 /// Drops completed batches once every row in them has left the observer window.
@@ -1407,7 +1417,12 @@ pub fn score_pull_request_match<E: ListEntry>(entry: &E, query: &str) -> u8 {
     } else if terms.len() > 1 && terms.iter().all(|term| title.contains(term)) {
         // Every word, in any order: "wizard welcome" is still about the welcome wizard.
         70
-    } else if listing.head_branch.as_str().to_lowercase().contains(&needle) {
+    } else if listing
+        .head_branch
+        .as_str()
+        .to_lowercase()
+        .contains(&needle)
+    {
         60
     } else if listing
         .author
@@ -1436,9 +1451,9 @@ pub fn rank_pull_request_matches<E: ListEntry>(entries: &[E], query: &str) -> Ve
         .map(|entry| (score_pull_request_match(entry, query), entry.clone()))
         .collect();
     scored.sort_by(|(left_score, left), (right_score, right)| {
-        right_score.cmp(left_score).then_with(|| {
-            locale_compare(&right.listing().updated_at, &left.listing().updated_at)
-        })
+        right_score
+            .cmp(left_score)
+            .then_with(|| locale_compare(&right.listing().updated_at, &left.listing().updated_at))
     });
     scored.into_iter().map(|(_, entry)| entry).collect()
 }
@@ -1638,15 +1653,16 @@ pub fn sort_pull_request_groups<E: ListEntry>(
                     PullRequestInvolvement::Authored => {
                         with_entries(group, rank_pull_requests_blocked_on_author(&group.entries))
                     }
-                    PullRequestInvolvement::Reviewing => {
-                        with_entries(group, rank_pull_requests_blocked_on_reviewer(&group.entries))
-                    }
+                    PullRequestInvolvement::Reviewing => with_entries(
+                        group,
+                        rank_pull_requests_blocked_on_reviewer(&group.entries),
+                    ),
                 }
             })
             .collect(),
-        PullRequestListSort::Ready | PullRequestListSort::Blocked | PullRequestListSort::Updated => {
-            groups.to_vec()
-        }
+        PullRequestListSort::Ready
+        | PullRequestListSort::Blocked
+        | PullRequestListSort::Updated => groups.to_vec(),
         PullRequestListSort::Newest
         | PullRequestListSort::Oldest
         | PullRequestListSort::Largest

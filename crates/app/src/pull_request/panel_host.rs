@@ -64,7 +64,13 @@ impl PullRequestPanelHost {
                 let panel_reference = reference.clone();
                 let panel_environment = environment_id.clone();
                 let panel = cx.new(|cx| {
-                    PullRequestDetailPanel::new(store, panel_environment, panel_reference, window, cx)
+                    PullRequestDetailPanel::new(
+                        store,
+                        panel_environment,
+                        panel_reference,
+                        window,
+                        cx,
+                    )
                 });
                 // A stack layer chosen in the panel opens as another tab of this host.
                 let host = cx.entity().downgrade();

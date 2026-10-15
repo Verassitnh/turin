@@ -811,6 +811,7 @@ pub struct PullRequestTimelineEvent {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum PullRequestTimelineRow {
     Event(PullRequestTimelineEvent),
     Comments(Vec<PullRequestTimelineEvent>),

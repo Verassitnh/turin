@@ -5,8 +5,8 @@
 use std::time::Duration;
 
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyElement, App, Div, ElementId, Hsla, IntoElement, ParentElement,
-    Pixels, Styled, div, px,
+    Animation, AnimationExt as _, AnyElement, App, Div, ElementId, Hsla, IntoElement, Pixels,
+    Styled, div, px,
 };
 
 use crate::theme::ActiveAppTheme;

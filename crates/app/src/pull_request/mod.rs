@@ -4,6 +4,9 @@
 //! from the view-model seam in `view_model` and never call the pull request service directly.
 
 #![allow(dead_code)]
+// Callback-heavy view props (`Rc<dyn Fn(..)>` in tuples/options) and `RenderOnce` impls that
+// return a concrete element type are the idiom of every view here.
+#![allow(clippy::type_complexity, refining_impl_trait)]
 
 pub mod checks_popover;
 pub mod code_tab;

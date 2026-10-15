@@ -61,7 +61,7 @@ pub fn settle_file_viewed_overlay(
             && (answered.contains(path)
                 || (states.get(path) == Some(&PullRequestFileViewedState::Viewed)) == *pressed)
         {
-            next.remove(path);
+            next.shift_remove(path);
         }
     }
     next
@@ -75,7 +75,7 @@ pub fn revert_file_viewed_overlay(
     let mut next = overlay.clone();
     for file in batch {
         if owned.contains(&file.path) && next.get(&file.path) == Some(&file.viewed) {
-            next.remove(&file.path);
+            next.shift_remove(&file.path);
         }
     }
     next

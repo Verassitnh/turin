@@ -10,13 +10,15 @@ use gpui_kit::{
     SharedString, Styled, Window, div, px, rems, svg,
 };
 
-use super::pull_request_list_logic::PullRequestGroupKey;
 use super::presentation_view::Spinner;
+use super::pull_request_list_logic::PullRequestGroupKey;
 use crate::assets::BRANCH_MARK;
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::TEXT_XS;
-use crate::ui::empty::{Empty, EmptySize, empty_description, empty_header, empty_media_icon, empty_title};
+use crate::ui::empty::{
+    Empty, EmptySize, empty_description, empty_header, empty_media_icon, empty_title,
+};
 use crate::ui::skeleton::{SkeletonShape, skeleton, skeleton_group};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 
@@ -46,21 +48,23 @@ pub fn group_header(key: PullRequestGroupKey, label: &str, count: usize, cx: &Ap
         .line_height(TEXT_XS.line_height)
         .font_weight(FontWeight::MEDIUM)
         .text_color(muted)
-        .child(Icon::new(group_icon(key)).size(rems(0.875)).color(muted.into()))
-        .child(div().flex_shrink_0().child(SharedString::from(label.to_owned())))
+        .child(
+            Icon::new(group_icon(key))
+                .size(rems(0.875))
+                .color(muted.into()),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .child(SharedString::from(label.to_owned())),
+        )
         .child(
             div()
                 .flex_shrink_0()
                 .text_color(with_alpha(theme.muted_foreground, 0.5))
                 .child(count.to_string()),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w(rems(0.5))
-                .h(px(1.))
-                .bg(theme.border),
-        )
+        .child(div().flex_1().min_w(rems(0.5)).h(px(1.)).bg(theme.border))
 }
 
 /// Widths cycle rather than randomize, so the ghost renders the same on every pass.
@@ -94,7 +98,11 @@ pub fn list_ghost(rows: usize, caption: Option<String>, cx: &App) -> AnyElement 
                 .rounded(crate::theme::tokens::RADIUS_MD)
                 .px_3()
                 .py(rems(0.625))
-                .child(skeleton(SkeletonShape::Pill, cx).size(rems(1.)).flex_shrink_0())
+                .child(
+                    skeleton(SkeletonShape::Pill, cx)
+                        .size(rems(1.))
+                        .flex_shrink_0(),
+                )
                 .child(
                     div()
                         .flex()
@@ -102,8 +110,16 @@ pub fn list_ghost(rows: usize, caption: Option<String>, cx: &App) -> AnyElement 
                         .flex_1()
                         .min_w_0()
                         .gap(rems(0.375))
-                        .child(skeleton(SkeletonShape::Block, cx).h(rems(1.)).w(gpui_kit::relative(title)))
-                        .child(skeleton(SkeletonShape::Block, cx).h(rems(0.875)).w(gpui_kit::relative(meta))),
+                        .child(
+                            skeleton(SkeletonShape::Block, cx)
+                                .h(rems(1.))
+                                .w(gpui_kit::relative(title)),
+                        )
+                        .child(
+                            skeleton(SkeletonShape::Block, cx)
+                                .h(rems(0.875))
+                                .w(gpui_kit::relative(meta)),
+                        ),
                 )
                 .child(
                     div()
@@ -142,7 +158,9 @@ fn refresh_button(
         .child(if refreshing {
             Spinner::new(id).size(rems(0.875)).into_any_element()
         } else {
-            Icon::new(IconName::RefreshCw).size(rems(0.875)).into_any_element()
+            Icon::new(IconName::RefreshCw)
+                .size(rems(0.875))
+                .into_any_element()
         })
         .child(if refreshing { "Checking..." } else { label })
         .on_click(move |event, window, cx| on_refresh(event, window, cx))
@@ -199,7 +217,10 @@ impl RenderOnce for PullRequestListEmptyState {
         if self.searching {
             return list_ghost(
                 5,
-                Some(format!("Searching every host for “{}”", truncated_query(&self.query))),
+                Some(format!(
+                    "Searching every host for “{}”",
+                    truncated_query(&self.query)
+                )),
                 cx,
             );
         }
@@ -335,12 +356,17 @@ impl RenderOnce for PullRequestsUnavailableState {
             )
             .when_some(self.on_retry, |this, on_retry| {
                 this.child(
-                    div().flex().flex_wrap().justify_center().gap_2().child(refresh_button(
-                        "pr-unavailable-retry",
-                        "Retry",
-                        self.refreshing,
-                        on_retry,
-                    )),
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .justify_center()
+                        .gap_2()
+                        .child(refresh_button(
+                            "pr-unavailable-retry",
+                            "Retry",
+                            self.refreshing,
+                            on_retry,
+                        )),
                 )
             })
     }

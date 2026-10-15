@@ -30,9 +30,10 @@ use super::pull_request_list_logic::{EnvironmentPullRequestEntry, MergedPullRequ
 
 /// A read that may not have answered yet, or may have failed. `stale` data is kept on screen
 /// while a refresh is in flight, as the upstream atoms do (SWR).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Loadable<T> {
     /// Nothing read yet: the view draws skeletons.
+    #[default]
     Pending,
     Ready(T),
     /// The host refused or could not be reached; the message is the host's own sentence.
@@ -56,12 +57,6 @@ impl<T> Loadable<T> {
             Self::Failed(message) => Some(message),
             _ => None,
         }
-    }
-}
-
-impl<T> Default for Loadable<T> {
-    fn default() -> Self {
-        Self::Pending
     }
 }
 

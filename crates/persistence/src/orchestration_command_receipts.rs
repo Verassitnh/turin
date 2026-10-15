@@ -71,7 +71,7 @@ pub fn insert_if_absent(
     receipt: &OrchestrationCommandReceipt,
 ) -> Result<bool, PersistenceError> {
     let mut stmt = conn
-        .prepare(
+        .prepare_cached(
             "
             INSERT INTO orchestration_command_receipts (
               command_id, aggregate_kind, aggregate_id, command_type,
@@ -145,7 +145,7 @@ pub fn get_by_command_id(
     command_id: &CommandId,
 ) -> Result<Option<OrchestrationCommandReceipt>, PersistenceError> {
     let mut stmt = conn
-        .prepare(
+        .prepare_cached(
             "
             SELECT command_id, aggregate_kind, aggregate_id, command_type,
                    accepted_at, result_sequence, status, error

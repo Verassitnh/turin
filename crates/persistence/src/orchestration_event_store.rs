@@ -480,7 +480,7 @@ pub(crate) fn append_project_event(
     })?;
     let actor = infer_actor_kind(event);
     let mut stmt = conn
-        .prepare(
+        .prepare_cached(
             "
             INSERT INTO orchestration_events (
               event_id, aggregate_kind, stream_id, stream_version, event_type,
@@ -586,7 +586,7 @@ fn append_agent_events(
             hint,
             prompt.as_ref().map(|(_, text)| text.as_str()),
         );
-        let mut stmt = conn.prepare(&sql).map_err(|err| {
+        let mut stmt = conn.prepare_cached(&sql).map_err(|err| {
             PersistenceError::sql("OrchestrationEventStore.appendAgentEvents:insert", &err)
         })?;
         let mut rows = stmt.query(params_from_iter(params)).map_err(|err| {
@@ -974,7 +974,7 @@ fn query_rows(
         "
     );
     let mut stmt = conn
-        .prepare(&sql)
+        .prepare_cached(&sql)
         .map_err(|err| PersistenceError::sql(operation, &err))?;
     let rows = stmt
         .query_map(params_from_iter(params), map_row)
@@ -1032,7 +1032,9 @@ fn row_to_application(
     operation: &'static str,
 ) -> Result<ApplicationStoredEvent, PersistenceError> {
     if row.aggregate_kind == "project" {
-        Ok(ApplicationStoredEvent::Project(row_to_project(row, operation)?))
+        Ok(ApplicationStoredEvent::Project(row_to_project(
+            row, operation,
+        )?))
     } else {
         Ok(ApplicationStoredEvent::Agent(row_to_agent(row, operation)?))
     }

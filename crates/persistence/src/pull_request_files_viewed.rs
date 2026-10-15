@@ -41,7 +41,7 @@ pub fn list(
     scope: &PullRequestFilesViewedScope,
 ) -> Result<PullRequestFilesViewedPage, PersistenceError> {
     let mut stmt = conn
-        .prepare(
+        .prepare_cached(
             "
             SELECT path, revision
             FROM pull_request_files_viewed
@@ -88,7 +88,7 @@ pub fn set(
 ) -> Result<(), PersistenceError> {
     for file in files {
         if file.viewed {
-            conn.execute(
+            conn.prepare_cached(
                 "
                 INSERT INTO pull_request_files_viewed (
                   provider, host, repository, number, viewer, path, revision, viewed_at
@@ -97,7 +97,9 @@ pub fn set(
                 ON CONFLICT (provider, host, repository, number, viewer, path)
                 DO UPDATE SET revision = excluded.revision, viewed_at = excluded.viewed_at
                 ",
-                params![
+            )
+            .and_then(|mut stmt| {
+                stmt.execute(params![
                     scope.provider,
                     scope.host,
                     scope.repository,
@@ -106,25 +108,27 @@ pub fn set(
                     file.path,
                     file.revision,
                     viewed_at,
-                ],
-            )
+                ])
+            })
             .map_err(|err| PersistenceError::sql("setPullRequestFilesViewed", &err))?;
         } else {
-            conn.execute(
+            conn.prepare_cached(
                 "
                 DELETE FROM pull_request_files_viewed
                 WHERE provider = ?1 AND host = ?2 AND repository = ?3
                   AND number = ?4 AND viewer = ?5 AND path = ?6
                 ",
-                params![
+            )
+            .and_then(|mut stmt| {
+                stmt.execute(params![
                     scope.provider,
                     scope.host,
                     scope.repository,
                     scope.number,
                     scope.viewer,
                     file.path,
-                ],
-            )
+                ])
+            })
             .map_err(|err| PersistenceError::sql("setPullRequestFilesViewed", &err))?;
         }
     }

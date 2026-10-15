@@ -174,7 +174,7 @@ pub fn list(
     } else {
         format!("{SELECT_ONE} ORDER BY last_seen_at ASC, thread_id ASC")
     };
-    let mut stmt = conn.prepare(&sql).map_err(|err| {
+    let mut stmt = conn.prepare_cached(&sql).map_err(|err| {
         PersistenceError::sql("ProviderSessionRuntimeRepository.list:query", &err)
     })?;
     let rows = stmt.query_map([], decode_raw).map_err(|err| {

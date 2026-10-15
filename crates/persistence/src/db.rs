@@ -297,6 +297,7 @@ fn open_memory() -> Result<Db, PersistenceError> {
 }
 
 fn finish_writer(conn: &Connection) -> Result<(), PersistenceError> {
+    conn.set_prepared_statement_cache_capacity(200);
     apply_writer_pragmas(conn)?;
     run_migrations(
         conn,
@@ -334,6 +335,7 @@ fn open_reader(path: &Path) -> Option<Mutex<Connection>> {
             return None;
         }
     };
+    conn.set_prepared_statement_cache_capacity(200);
     if let Err(err) = conn.execute_batch("PRAGMA busy_timeout = 5000;") {
         tracing::warn!(%err, "SQLite reader unavailable; reads use the writer");
         return None;

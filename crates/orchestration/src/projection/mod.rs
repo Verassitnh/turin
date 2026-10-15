@@ -1,5 +1,6 @@
 //! Read model for orchestration-v2.
 
+pub mod applier;
 pub mod assistant_streaming;
 pub mod error;
 pub mod event;

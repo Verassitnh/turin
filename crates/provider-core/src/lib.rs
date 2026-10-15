@@ -13,4 +13,5 @@ pub mod path_expansion;
 pub mod process_group;
 pub mod provider_latest_versions;
 pub mod runtime_instructions;
+pub mod server_provider;
 pub mod turn_item;

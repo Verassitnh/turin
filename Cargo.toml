@@ -45,6 +45,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 dirs = "6"
+libc = "0.2"
+notify = "8"
 tempfile = "3"
 pretty_assertions = "1"
 

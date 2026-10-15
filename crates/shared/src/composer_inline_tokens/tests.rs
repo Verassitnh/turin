@@ -252,6 +252,20 @@ fn leaves_a_context_reference_link_alone() {
 }
 
 #[test]
+fn a_rejected_file_link_candidate_consumes_its_span() {
+    // Upstream `matchAll` consumes `[y.txt](y.txt)` when the label check
+    // rejects it, so no mention starts inside the rejected span.
+    assert_eq!(
+        collect_composer_inline_tokens("[x [y.txt](y.txt) ", Default::default()),
+        vec![]
+    );
+    assert_eq!(
+        collect_composer_inline_tokens("[a [b.md](b.md) and [c.md](c.md) ", Default::default()),
+        vec![mention("c.md", "[c.md](c.md)", 20, 32)]
+    );
+}
+
+#[test]
 fn stays_fast_on_unterminated_bracket_runs() {
     // Unbounded, the label body rescanned the rest of the text from every
     // whitespace: this input took seconds.

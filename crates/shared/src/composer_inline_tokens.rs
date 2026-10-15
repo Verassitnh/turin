@@ -307,14 +307,26 @@ fn scan_file_link_tokens(text: &str, units: &CharUnits, tokens: &mut Vec<Compose
         let ch = units.chars[index];
         if units.starts_token_here(index)
             && ch == '['
-            && let Some(token) = scan_file_link_at(text, units, index)
+            && let Some(FileLinkMatch { end, token }) = scan_file_link_at(text, units, index)
         {
-            index = token_end_index(units, token.end);
-            tokens.push(token);
+            // Upstream `matchAll` consumes a candidate even when it is then
+            // rejected, so a rejected link's inner brackets never form tokens.
+            index = token_end_index(units, end);
+            if let Some(token) = token {
+                tokens.push(token);
+            }
             continue;
         }
         index += 1;
     }
+}
+
+/// A file-link regex match at one `[`. `token` is `None` when the match
+/// consumed its span but failed the path/label checks.
+struct FileLinkMatch {
+    /// UTF-16 offset just past the closing `)`.
+    end: usize,
+    token: Option<ComposerInlineToken>,
 }
 
 fn token_end_index(units: &CharUnits, end_units: usize) -> usize {
@@ -322,7 +334,7 @@ fn token_end_index(units: &CharUnits, end_units: usize) -> usize {
     units.offsets.partition_point(|offset| *offset < end_units)
 }
 
-fn scan_file_link_at(text: &str, units: &CharUnits, index: usize) -> Option<ComposerInlineToken> {
+fn scan_file_link_at(text: &str, units: &CharUnits, index: usize) -> Option<FileLinkMatch> {
     // Label body: `(?:\\.|[^\]\\]){0,512}`.
     let mut cursor = index + 1;
     let mut body_units = 0usize;
@@ -389,17 +401,20 @@ fn scan_file_link_at(text: &str, units: &CharUnits, index: usize) -> Option<Comp
         None => path.as_str(),
     };
     let has_external_scheme = has_uri_scheme(&path) && !is_windows_drive_path(&path);
+    let end = units.unit_at(cursor);
     if path.is_empty() || has_external_scheme || label != basename {
-        return None;
+        return Some(FileLinkMatch { end, token: None });
     }
     let start = units.unit_at(index);
-    let end = units.unit_at(cursor);
-    Some(ComposerInlineToken {
-        kind: ComposerInlineTokenKind::Mention,
-        value: path,
-        source: units.slice_text(text, start, end).to_owned(),
-        start,
+    Some(FileLinkMatch {
         end,
+        token: Some(ComposerInlineToken {
+            kind: ComposerInlineTokenKind::Mention,
+            value: path,
+            source: units.slice_text(text, start, end).to_owned(),
+            start,
+            end,
+        }),
     })
 }
 

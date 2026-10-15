@@ -9,6 +9,9 @@
 //! transcript, which is routed to that child thread; the model canonicalisation
 //! through the catalog; and the workflow coordinator's members. A subagent here
 //! therefore has no child thread, and its frames are dropped, not routed.
+use crate::claude_workflow_progress::{
+    CLAUDE_WORKFLOW_TASK_TYPE, has_claude_workflow_snapshot, merge_claude_workflow_progress,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use turin_contracts::{
@@ -21,9 +24,9 @@ use turin_contracts::{
 };
 use turin_provider_core::id_allocator::derive;
 
-/// The `task_type` the CLI gives a subagent. `local_bash` is shell work, not
-/// a subagent, and is ignored here.
-const SUBAGENT_TASK_TYPE: &str = "local_agent";
+/// The `task_type`s the CLI gives a subagent. A workflow is a coordinator
+/// subagent. `local_bash` is shell work, not a subagent, and is ignored here.
+const SUBAGENT_TASK_TYPES: [&str; 2] = ["local_agent", CLAUDE_WORKFLOW_TASK_TYPE];
 
 /// Where a new subagent is parented. Set when a turn starts and kept after it,
 /// because a background subagent reports its progress after its turn settles.
@@ -122,7 +125,8 @@ impl SubagentRegistry {
     /// task_started registers the subagent and opens its run. Returns the
     /// subagent to emit, or `None` for shell tasks and when no scope is set yet.
     pub fn started(&mut self, raw: &Value, now: UtcDateTime) -> Option<OrchestrationV2Subagent> {
-        if raw.get("task_type").and_then(Value::as_str) != Some(SUBAGENT_TASK_TYPE) {
+        let task_type = raw.get("task_type").and_then(Value::as_str)?;
+        if !SUBAGENT_TASK_TYPES.contains(&task_type) {
             return None;
         }
         let scope = self.scope.clone()?;
@@ -140,6 +144,17 @@ impl SubagentRegistry {
             .and_then(|owner_task| self.tasks.get(owner_task))
             .map(|owner| owner.id.clone())
             .unwrap_or_else(|| scope.root_node_id.clone());
+        // Workflow telemetry is cumulative. The coordinator's first frame seeds it.
+        let workflow = (task_type == CLAUDE_WORKFLOW_TASK_TYPE)
+            .then(|| {
+                merge_claude_workflow_progress(
+                    None,
+                    text(raw, "workflow_name").as_deref(),
+                    None,
+                    raw,
+                )
+            })
+            .flatten();
         let subagent = OrchestrationV2Subagent {
             id: derive::node_from_provider_item(&scope.driver, &format!("task:{task_id}")),
             thread_id: scope.thread_id.clone(),
@@ -163,7 +178,7 @@ impl SubagentRegistry {
             completion_delivery: None,
             status: OrchestrationV2SubagentStatus::Running,
             progress: None,
-            workflow: None,
+            workflow,
             result: None,
             started_at: Some(now),
             completed_at: None,
@@ -177,14 +192,53 @@ impl SubagentRegistry {
         Some(subagent)
     }
 
-    /// task_progress updates a running subagent's progress line.
+    /// task_progress updates a running subagent's progress line, and a
+    /// workflow coordinator's phase and member snapshot.
     pub fn progress(&mut self, raw: &Value, now: UtcDateTime) -> Option<OrchestrationV2Subagent> {
         let task = self.tasks.get_mut(&text(raw, "task_id")?)?;
         if task.status != OrchestrationV2SubagentStatus::Running {
             return None;
         }
-        let progress = text(raw, "summary").or_else(|| text(raw, "description"))?;
-        task.progress = Some(progress);
+        let mut changed = false;
+        if let Some(progress) = text(raw, "summary").or_else(|| text(raw, "description")) {
+            task.progress = Some(progress);
+            changed = true;
+        }
+        if task.workflow.is_some() && has_claude_workflow_snapshot(raw) {
+            if let Some(workflow) =
+                merge_claude_workflow_progress(task.workflow.as_ref(), None, None, raw)
+            {
+                task.workflow = Some(workflow);
+                changed = true;
+            }
+        }
+        if !changed {
+            return None;
+        }
+        task.updated_at = now;
+        Some(task.clone())
+    }
+
+    /// The Workflow tool's launch acknowledgement carries the run's handles.
+    /// It is the only carrier of them, so they land on the coordinator it started.
+    pub fn run_handles(
+        &mut self,
+        tool_use_id: &str,
+        handles: &Value,
+        now: UtcDateTime,
+    ) -> Option<OrchestrationV2Subagent> {
+        let task_id = self.task_by_run_tool_use.get(tool_use_id)?.clone();
+        let task = self.tasks.get_mut(&task_id)?;
+        if task.status != OrchestrationV2SubagentStatus::Running {
+            return None;
+        }
+        let workflow = merge_claude_workflow_progress(
+            task.workflow.as_ref(),
+            None,
+            Some(handles),
+            &Value::Null,
+        )?;
+        task.workflow = Some(workflow);
         task.updated_at = now;
         Some(task.clone())
     }
@@ -311,6 +365,40 @@ mod tests {
             )
             .expect("result lands after the status");
         assert_eq!(noted.result.as_deref(), Some("B_DONE"));
+    }
+
+    #[test]
+    fn workflow_coordinator_takes_its_name_and_run_handles() {
+        let mut registry = SubagentRegistry::default();
+        registry.set_scope(scope());
+        let now = UtcDateTime::now();
+        let started = registry
+            .started(
+                &json!({"task_id": "task_w", "tool_use_id": "toolu_wf", "task_type": "local_workflow", "workflow_name": "review"}),
+                now,
+            )
+            .expect("workflow coordinator starts");
+        assert_eq!(
+            started
+                .workflow
+                .as_ref()
+                .and_then(|w| w.name.as_ref())
+                .map(|n| n.as_str()),
+            Some("review")
+        );
+        let handled = registry
+            .run_handles(
+                "toolu_wf",
+                &json!({"runId": "run-7", "transcriptDir": "/tmp/t", "scriptPath": "/tmp/s.js"}),
+                now,
+            )
+            .expect("launch ack lands on the coordinator");
+        let handles = handled.workflow.unwrap().run_handles.unwrap();
+        assert_eq!(handles.run_id.as_ref().map(|v| v.as_str()), Some("run-7"));
+        assert_eq!(
+            handles.script_path.as_ref().map(|v| v.as_str()),
+            Some("/tmp/s.js")
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ use crate::{
         reasoning_item, tool_call_artifacts,
     },
     claude_turn_token_usage::normalize_claude_turn_token_usage,
+    claude_workflow_progress::parse_claude_workflow_run_handles,
 };
 use async_trait::async_trait;
 use futures::stream;
@@ -1292,13 +1293,48 @@ impl ClaudeActor {
         if parent_tool_use_id(&frame).is_some() {
             return;
         }
-        let events = match self.active.as_mut() {
-            Some(active) => tool_result_events(&mut self.plans, active, &frame),
-            None => return,
-        };
+        let mut events = self.workflow_handles(&frame);
+        if let Some(active) = self.active.as_mut() {
+            events.extend(tool_result_events(&mut self.plans, active, &frame));
+        }
         for event in events {
             self.emit(event);
         }
+    }
+    /// A Workflow tool's result carries the handles of the coordinator it
+    /// started. That tool call is an ordinary tool, so this reads the result
+    /// wherever it lands, with or without an active turn.
+    fn workflow_handles(
+        &mut self,
+        frame: &turin_claude_protocol::Frame,
+    ) -> Vec<ProviderAdapterV2Event> {
+        let now = UtcDateTime::now();
+        let results: Vec<&Value> = frame
+            .raw
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+            .collect();
+        let structured = (results.len() == 1)
+            .then(|| frame.raw.get("tool_use_result"))
+            .flatten();
+        results
+            .into_iter()
+            .filter_map(|block| {
+                let tool_use_id = block.get("tool_use_id").and_then(Value::as_str)?;
+                let output = structured
+                    .cloned()
+                    .unwrap_or_else(|| block.get("content").cloned().unwrap_or(Value::Null));
+                let handles = parse_claude_workflow_run_handles(&output)?;
+                self.subagents.run_handles(tool_use_id, &handles, now)
+            })
+            .map(|subagent| ProviderAdapterV2Event::SubagentUpdated {
+                driver: driver(),
+                subagent,
+            })
+            .collect()
     }
     fn result(&mut self, frame: turin_claude_protocol::Frame) {
         let Some(active) = self.active.as_mut() else {

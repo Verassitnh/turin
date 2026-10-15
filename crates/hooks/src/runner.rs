@@ -2323,4 +2323,38 @@ blocking = true
             assert!(wait_for_pid_gone(pid), "{name} job {pid} survived");
         }
     }
+
+    #[tokio::test]
+    async fn job_started_in_its_own_session_survives_the_group_kill() {
+        // The documented way to leave a daemon running: leave the group.
+        // (`perl` is how the docs spell setsid on macOS.)
+        if std::process::Command::new("perl")
+            .arg("-v")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let (_dir, project, config_path) = project_with_config(
+            r#"
+[[hook]]
+event = "thread.created"
+command = "perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' sleep 600 >/dev/null 2>&1 & echo $! > out/daemon.pid; sleep 601 & echo $! > out/holder.pid; exit 0"
+blocking = true
+"#,
+        );
+        let runner = runner(&config_path);
+        runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        let holder = read_pid(&project.join("out/holder.pid"));
+        assert!(wait_for_pid_gone(holder), "pipe holder {holder} survived");
+        let daemon = read_pid(&project.join("out/daemon.pid"));
+        let alive = pid_alive(daemon);
+        unsafe { libc::kill(daemon, libc::SIGKILL) };
+        assert!(alive, "setsid job {daemon} should have left the group");
+    }
 }

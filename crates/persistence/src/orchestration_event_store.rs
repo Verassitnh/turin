@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params_from_iter};
 use tokio::sync::mpsc;
 
-use turin_contracts::{CommandId, EventId, NodeId, RawEventId, RunId, ThreadId};
+use turin_contracts::{CommandId, EventId, NodeId, RawEventId, RunId, ThreadId, UtcDateTime};
 
 use crate::db::{AbortOnDrop, Db};
 use crate::errors::{PersistenceDecodeError, PersistenceError, PersistenceSqlError};
@@ -78,7 +78,7 @@ pub struct AgentEvent {
     pub id: EventId,
     pub thread_id: ThreadId,
     pub event_type: String,
-    pub occurred_at: String,
+    pub occurred_at: UtcDateTime,
     pub payload: serde_json::Value,
     pub run_id: Option<RunId>,
     pub node_id: Option<NodeId>,
@@ -639,7 +639,7 @@ fn agent_insert_sql(
         SqlValue::text(&event.id),
         SqlValue::text(&event.thread_id),
         SqlValue::text(&event.event_type),
-        SqlValue::text(&event.occurred_at),
+        SqlValue::text(event.occurred_at.to_string()),
         SqlValue::opt_text(command_id.map(str::to_owned)),
         SqlValue::text(actor),
         SqlValue::text(payload_json),
@@ -1078,7 +1078,9 @@ fn row_to_agent(
             id: parse_brand(operation, &row.event_id, new_event_id)?,
             thread_id: parse_brand(operation, &row.stream_id, new_thread_id)?,
             event_type: row.event_type.clone(),
-            occurred_at: row.occurred_at.clone(),
+            occurred_at: row.occurred_at.parse().map_err(
+                |err: turin_contracts::ContractError| decode_err(operation, err.to_string()),
+            )?,
             payload,
             run_id: parse_brand_opt(operation, field("runId").as_deref(), new_run_id)?,
             node_id: parse_brand_opt(operation, field("nodeId").as_deref(), new_node_id)?,
@@ -1546,7 +1548,7 @@ fn wire_event(event: &ApplicationStoredEvent) -> serde_json::Value {
             }
             body.insert(
                 "occurredAt".into(),
-                serde_json::Value::String(event.occurred_at.clone()),
+                serde_json::Value::String(event.occurred_at.to_string()),
             );
             body.insert(
                 "type".into(),

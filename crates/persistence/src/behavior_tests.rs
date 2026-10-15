@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use rusqlite::Connection;
-use turin_contracts::{CommandId, EventId, ThreadId};
+use turin_contracts::{CommandId, EventId, ThreadId, UtcDateTime};
 
 use crate::db::{CHECKPOINT_FRAMES, Db, WAL_SIZE_LIMIT_BYTES, WRITER_BACKSTOP_FRAMES};
 use crate::errors::PersistenceError;
@@ -41,6 +41,10 @@ fn command_id(value: &str) -> CommandId {
     CommandId::new(value).unwrap()
 }
 
+fn at(value: &str) -> UtcDateTime {
+    value.parse().unwrap()
+}
+
 async fn memory_db() -> Db {
     Db::open_in_memory().await.expect("memory db")
 }
@@ -58,7 +62,7 @@ fn subagent(id: &str, node: &str, prompt: &str, progress: &str) -> AgentEvent {
         id: event_id(id),
         thread_id: thread_id("thread:subagent-prompt"),
         event_type: "subagent.updated".into(),
-        occurred_at: NOW.into(),
+        occurred_at: at(NOW),
         payload: serde_json::json!({
             "id": node,
             "prompt": prompt,
@@ -813,7 +817,7 @@ async fn live_buffer_counts_the_full_agent_event() {
                     id: event_id(&format!("e{index}")),
                     thread_id: thread_id("t"),
                     event_type: "message.updated".into(),
-                    occurred_at: NOW.into(),
+                    occurred_at: at(NOW),
                     payload: serde_json::json!({ "body": body }),
                     run_id: None,
                     node_id: None,
@@ -835,7 +839,10 @@ async fn live_buffer_counts_the_full_agent_event() {
             Ok(_) => continue,
             Err(err) => {
                 let message = err.to_string();
-                assert!(message.contains("streamApplicationEvents:buffer"), "{message}");
+                assert!(
+                    message.contains("streamApplicationEvents:buffer"),
+                    "{message}"
+                );
                 assert!(!message.contains("SQLITE"), "{message}");
                 saw_error = true;
                 break;
@@ -886,7 +893,7 @@ async fn live_stream_replays_then_delivers_a_committed_publish() {
                 id: event_id("live-after"),
                 thread_id: thread_id("target"),
                 event_type: "provider-session.detached".into(),
-                occurred_at: NOW.into(),
+                occurred_at: at(NOW),
                 payload: serde_json::json!({
                     "providerSessionId": "live-session",
                     "detachedAt": NOW,
@@ -1123,7 +1130,7 @@ async fn unknown_event_types_are_rejected_before_insert() {
                 id: event_id("evt-agent-unknown"),
                 thread_id: thread_id("thread-unknown"),
                 event_type: "thread.nope".into(),
-                occurred_at: NOW.into(),
+                occurred_at: at(NOW),
                 payload: serde_json::json!({"title": "Nope"}),
                 run_id: None,
                 node_id: None,

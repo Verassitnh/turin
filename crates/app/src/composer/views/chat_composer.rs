@@ -335,7 +335,7 @@ impl ChatComposer {
             .map(|entry| entry.skills.clone())
             .unwrap_or_default();
         let disabled = !vm.can_operate_thread;
-        let rich_text = vm.settings.composer_rich_text_enabled;
+        let (rich_text, literal_text) = editor_text_modes(vm);
         self.editor.update(cx, |editor, cx| {
             editor.set_skills(skills);
             editor.set_config(
@@ -343,7 +343,7 @@ impl ChatComposer {
                     placeholder: placeholder_for(vm).into(),
                     disabled,
                     rich_text,
-                    literal_text: !rich_text,
+                    literal_text,
                     ..EditorConfig::default()
                 },
                 cx,
@@ -712,6 +712,20 @@ impl ChatComposer {
     }
 }
 
+/// `(rich_text, literal_text)` for the editor. The setting only toggles
+/// styling (`ComposerPromptEditorTiptap.tsx`: "The setting toggles styling,
+/// not the engine"): plain mode still builds `@path` and `$skill` chips.
+/// Literal text is reserved for pending answers with an initial answer, and
+/// a literal editor is never styled.
+fn editor_text_modes(vm: &ComposerViewModel) -> (bool, bool) {
+    let literal_text = vm
+        .pending_answer
+        .as_ref()
+        .is_some_and(|answer| answer.initial_answer.is_some());
+    let rich_text = vm.settings.composer_rich_text_enabled && !literal_text;
+    (rich_text, literal_text)
+}
+
 fn placeholder_for(vm: &ComposerViewModel) -> String {
     if let Some(answer) = &vm.pending_answer {
         if answer.is_choice_only {
@@ -828,5 +842,83 @@ impl Render for ChatComposer {
             .children(menu_drawer)
             .children(drawers)
             .child(frame)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::composer::editor_state::EditorState;
+    use crate::composer::rich_doc::{Block, InlineContent, SkillMeta};
+    use crate::composer::view_model::PendingAnswer;
+
+    const PROMPT: &str = "read @README.md then $review now";
+
+    fn skill_label(name: &str) -> SkillMeta {
+        SkillMeta {
+            label: name.to_owned(),
+            description: None,
+        }
+    }
+
+    fn view_model(rich_text_enabled: bool) -> ComposerViewModel {
+        let mut vm = ComposerViewModel::default();
+        vm.settings.composer_rich_text_enabled = rich_text_enabled;
+        vm
+    }
+
+    fn pending(initial_answer: Option<&str>) -> PendingAnswer {
+        PendingAnswer {
+            request_id: "request-1".to_owned(),
+            custom_answer: String::new(),
+            initial_answer: initial_answer.map(str::to_owned),
+            is_choice_only: false,
+            is_responding: false,
+            question_index: 0,
+            is_last_question: true,
+            can_advance: true,
+            is_complete: false,
+        }
+    }
+
+    /// Chip atoms in the first (only) paragraph of `value`'s document.
+    fn chip_count(value: &str, rich_text: bool, literal_text: bool) -> usize {
+        let state = EditorState::from_value(value, &skill_label, rich_text, literal_text);
+        let Block::Paragraph(inline) = &state.doc().blocks[0] else {
+            panic!("expected a paragraph");
+        };
+        inline
+            .iter()
+            .filter(|node| matches!(node.content, InlineContent::Atom(_)))
+            .count()
+    }
+
+    #[test]
+    fn plain_mode_keeps_mention_and_skill_chips() {
+        let (rich_text, literal_text) = editor_text_modes(&view_model(false));
+        assert!(!rich_text, "the setting turns styling off");
+        assert!(!literal_text, "plain mode is not literal text");
+        assert_eq!(chip_count(PROMPT, rich_text, literal_text), 2);
+    }
+
+    #[test]
+    fn rich_mode_keeps_mention_and_skill_chips() {
+        let (rich_text, literal_text) = editor_text_modes(&view_model(true));
+        assert!(rich_text);
+        assert!(!literal_text);
+        assert_eq!(chip_count(PROMPT, rich_text, literal_text), 2);
+    }
+
+    #[test]
+    fn literal_text_is_reserved_for_pending_answers_with_an_initial_answer() {
+        let mut vm = view_model(true);
+        vm.pending_answer = Some(pending(None));
+        assert_eq!(editor_text_modes(&vm), (true, false));
+
+        vm.pending_answer = Some(pending(Some("yes")));
+        let (rich_text, literal_text) = editor_text_modes(&vm);
+        assert!(literal_text);
+        assert!(!rich_text, "a literal editor is never styled");
+        assert_eq!(chip_count(PROMPT, rich_text, literal_text), 0);
     }
 }

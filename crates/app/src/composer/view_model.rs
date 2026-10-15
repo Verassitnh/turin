@@ -188,6 +188,9 @@ pub struct ThreadRef {
 pub struct PendingAnswer {
     pub request_id: String,
     pub custom_answer: String,
+    /// `activeQuestion.initialAnswer`. A pending answer that carries one is
+    /// edited as literal text (`isLiteralPendingAnswer`).
+    pub initial_answer: Option<String>,
     pub is_choice_only: bool,
     pub is_responding: bool,
     pub question_index: usize,

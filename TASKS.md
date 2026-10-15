@@ -123,8 +123,8 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T15 | Sidebar (projects, threads, status, snooze, search, drag) | `crates/app/src/components/sidebar` | Opus | **merged to main** (852 tests; QC PASS + fixes) |
 | T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/components/chat` | Opus | **merged to main** (915 tests; QC PASS + T16c fixes; Sonnet look-and-feel pass pending) |
 | T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus | QC fixes done → re-merging main, then merge |
-| T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus | todo |
-| T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Opus | todo |
+| T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus | **merged to main** (917 tests; QC PASS + T18c fixes) |
+| T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Opus | built (490 PR tests, 53 screenshots) → QC running wf_ad6bdf98-949 |
 | T20 | Settings + keybindings UI | `crates/app/src/settings` | Opus | built (172 tests, 25 screenshots) → QC running wf_31fbaa39-885 |
 
 ### Wave 5: glue

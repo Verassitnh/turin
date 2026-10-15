@@ -92,7 +92,11 @@ pub type OrchestrationGetFullThreadDiffResult = ThreadTurnDiff;
 
 /// `OrchestrationGetTurnDiffError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum OrchestrationGetTurnDiffError {
     #[serde(rename = "OrchestrationGetTurnDiffError")]
     #[error("{message}")]
@@ -105,7 +109,11 @@ pub enum OrchestrationGetTurnDiffError {
 
 /// `OrchestrationGetFullThreadDiffError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum OrchestrationGetFullThreadDiffError {
     #[serde(rename = "OrchestrationGetFullThreadDiffError")]
     #[error("{message}")]
@@ -143,11 +151,51 @@ mod tests {
 
     #[test]
     fn get_turn_diff_input_rejects_inverted_range() {
-        assert!(serde_json::from_value::<OrchestrationGetTurnDiffInput>(serde_json::json!({
-            "fromTurnCount": 3,
-            "toTurnCount": 1,
-            "threadId": "t1",
+        assert!(
+            serde_json::from_value::<OrchestrationGetTurnDiffInput>(serde_json::json!({
+                "fromTurnCount": 3,
+                "toTurnCount": 1,
+                "threadId": "t1",
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_turn_diff_input_when_from_is_at_or_below_to() {
+        let parsed = serde_json::from_value::<OrchestrationGetTurnDiffInput>(serde_json::json!({
+            "threadId": "thread-1",
+            "fromTurnCount": 1,
+            "toTurnCount": 2,
         }))
-        .is_err());
+        .unwrap();
+        assert_eq!(parsed.from_turn_count, 1);
+        assert_eq!(parsed.to_turn_count, 2);
+        assert_eq!(parsed.ignore_whitespace, None);
+    }
+
+    #[test]
+    fn parses_turn_diff_input_with_whitespace_ignoring_enabled() {
+        let parsed = serde_json::from_value::<OrchestrationGetTurnDiffInput>(serde_json::json!({
+            "threadId": "thread-1",
+            "fromTurnCount": 1,
+            "toTurnCount": 2,
+            "ignoreWhitespace": true,
+        }))
+        .unwrap();
+        assert_eq!(parsed.ignore_whitespace, Some(true));
+    }
+
+    #[test]
+    fn parses_full_thread_diff_input_with_whitespace_ignoring_enabled() {
+        let parsed =
+            serde_json::from_value::<OrchestrationGetFullThreadDiffInput>(serde_json::json!({
+                "threadId": "thread-1",
+                "toTurnCount": 2,
+                "ignoreWhitespace": true,
+            }))
+            .unwrap();
+        assert_eq!(parsed.to_turn_count, 2);
+        assert_eq!(parsed.ignore_whitespace, Some(true));
     }
 }

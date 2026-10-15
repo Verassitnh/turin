@@ -11,30 +11,81 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fmt, num::NonZeroU64, str::FromStr};
 
-/// ECMAScript WhiteSpace and LineTerminator code points, i.e. what
-/// `String.prototype.trim` strips. Differs from Rust's `char::is_whitespace`:
-/// U+FEFF is included and U+0085 is not.
-fn is_js_whitespace(c: char) -> bool {
-    matches!(
-        c,
-        '\u{0009}'..='\u{000D}'
-            | '\u{0020}'
-            | '\u{00A0}'
-            | '\u{1680}'
-            | '\u{2000}'..='\u{200A}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}'
-            | '\u{FEFF}'
-    )
+/// ECMAScript WhiteSpace and LineTerminator code points, in code point order.
+/// This is what `String.prototype.trim` strips. Differs from Rust's
+/// `char::is_whitespace`: U+FEFF is included and U+0085 is not.
+pub const JS_WHITESPACE_CHARS: [char; 25] = [
+    '\u{0009}', '\u{000a}', '\u{000b}', '\u{000c}', '\u{000d}', '\u{0020}', '\u{00a0}', '\u{1680}',
+    '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}',
+    '\u{2008}', '\u{2009}', '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}',
+    '\u{feff}',
+];
+
+/// JS `\s` test on a `char`: WhiteSpace and LineTerminator.
+pub fn is_js_whitespace(c: char) -> bool {
+    JS_WHITESPACE_CHARS.contains(&c)
 }
 
 /// `String.prototype.trim` exactly. Use this, never `str::trim`, anywhere
 /// upstream calls `.trim()`.
 pub fn js_trim(value: &str) -> &str {
     value.trim_matches(is_js_whitespace)
+}
+
+/// JS `string.length` (UTF-16 code units). `Schema.isMaxLength` and friends
+/// count this, not bytes or `char`s.
+pub fn js_len(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+
+/// Largest integer a JS number holds exactly (`Number.MAX_SAFE_INTEGER`).
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// Writes a `Schema.Number` the way `JSON.stringify` does: a whole number has
+/// no fractional part (`2`, not `2.0`), so re-saved JSON stays byte-identical
+/// to what the TS server writes.
+pub fn serialize_js_number<S: Serializer>(value: f64, s: S) -> Result<S::Ok, S::Error> {
+    if value.is_finite() && value.fract() == 0.0 && value.abs() <= MAX_SAFE_INTEGER {
+        s.serialize_i64(value as i64)
+    } else {
+        s.serialize_f64(value)
+    }
+}
+
+/// `Schema.Number` field codec (`#[serde(with = "js_number")] f64`); decodes
+/// any JSON number, encodes whole numbers without a fraction.
+pub mod js_number {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &f64, s: S) -> Result<S::Ok, S::Error> {
+        super::serialize_js_number(*value, s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        f64::deserialize(d)
+    }
+}
+
+/// `Option<f64>` counterpart of [`js_number`]: `NullOr(Schema.Number)` (encodes
+/// `null`) or, with `skip_serializing_if`, `optional(Schema.Number)`.
+pub mod js_number_nullable {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(value) => super::serialize_js_number(*value, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+        Option::<f64>::deserialize(d)
+    }
+}
+
+/// `String.prototype.trimEnd`, with the same whitespace set as [`js_trim`].
+pub fn js_trim_end(value: &str) -> &str {
+    value.trim_end_matches(is_js_whitespace)
 }
 
 #[doc(hidden)]
@@ -64,6 +115,12 @@ impl TrimmedString {
     }
     pub fn into_inner(self) -> String {
         self.0
+    }
+}
+
+impl AsRef<str> for TrimmedString {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 
@@ -103,6 +160,12 @@ impl TrimmedNonEmptyString {
     }
     pub fn into_inner(self) -> String {
         self.0
+    }
+}
+
+impl AsRef<str> for TrimmedNonEmptyString {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 
@@ -167,34 +230,195 @@ impl fmt::Display for PositiveInt {
 /// so persisted values round-trip byte for byte.
 pub type IsoDateTime = String;
 
-/// `DateTimeUtc` / `DateTimeUtcFromString`: parses any RFC 3339 timestamp and
-/// always serializes as `YYYY-MM-DDTHH:MM:SS.sssZ`. Upstream compares these
-/// strings as text (`ORDER BY created_at`), so the format must never drift.
+/// `DateTimeUtc` / `DateTimeUtcFromString`: always serializes as
+/// `YYYY-MM-DDTHH:MM:SS.sssZ`. Upstream compares these strings as text
+/// (`ORDER BY created_at`), so the format must never drift.
 ///
-/// Precision is truncated to milliseconds (like a JS `Date`) by [`Self::now`],
-/// [`Self::from_datetime`], parsing and deserializing, so equality agrees with
-/// the wire form. Build values through those, not the public field, unless the
-/// `DateTime` is already millisecond-aligned.
+/// Parses the ISO forms upstream's `DateTime.makeUnsafe` (`new Date(s)`, with
+/// `Z` appended when `hasZone` fails) accepts, with V8's rules:
+/// `YYYY[-MM[-DD]]` or `±YYYYYY[-MM[-DD]]`, then optionally `T`/`t` +
+/// `HH:mm[:ss[.f+]]`, then optionally `Z` or `±HH[:]mm` (date-only forms take
+/// `Z` only). No zone means UTC. Days 1..=31 roll over (`02-30` is `03-01`),
+/// `24:00[:00[.000]]` is the next midnight, `:60` and lowercase `z` fail, and
+/// digits past milliseconds are truncated. Unlike upstream, the instant must
+/// fall in years 0..=9999 so the fixed format always round-trips; V8's
+/// non-ISO fallback forms (`Jan 2 2024`, `2024/01/02`, space separators) are
+/// not accepted.
+///
+/// Every constructor ([`Self::now`], [`Self::from_datetime`], `From`, parsing
+/// and deserializing) truncates to milliseconds like a JS `Date`, so equality
+/// and order agree with the wire form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct UtcDateTime(pub DateTime<Utc>);
+pub struct UtcDateTime(DateTime<Utc>);
+
+fn utc_year_bounds() -> (DateTime<Utc>, DateTime<Utc>) {
+    let min = chrono::NaiveDate::from_ymd_opt(0, 1, 1).expect("year 0 is valid");
+    let max = chrono::NaiveDate::from_ymd_opt(9999, 12, 31).expect("year 9999 is valid");
+    (
+        min.and_hms_milli_opt(0, 0, 0, 0)
+            .expect("valid time")
+            .and_utc(),
+        max.and_hms_milli_opt(23, 59, 59, 999)
+            .expect("valid time")
+            .and_utc(),
+    )
+}
 
 impl UtcDateTime {
     pub fn now() -> Self {
         Self::from_datetime(Utc::now())
     }
+    /// Truncates to milliseconds and clamps to years 0..=9999.
     pub fn from_datetime(value: DateTime<Utc>) -> Self {
+        let (min, max) = utc_year_bounds();
+        let value = value.clamp(min, max);
         let sub_milli = value.timestamp_subsec_nanos() % 1_000_000;
         Self(value - chrono::Duration::nanoseconds(i64::from(sub_milli)))
     }
+    pub fn as_datetime(&self) -> DateTime<Utc> {
+        self.0
+    }
+}
+
+impl From<DateTime<Utc>> for UtcDateTime {
+    /// Same as [`UtcDateTime::from_datetime`].
+    fn from(value: DateTime<Utc>) -> Self {
+        Self::from_datetime(value)
+    }
+}
+
+/// Byte cursor for [`parse_js_iso_date`].
+struct IsoCursor<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl IsoCursor<'_> {
+    fn eat(&mut self, byte: u8) -> bool {
+        let matched = self.bytes.get(self.at) == Some(&byte);
+        self.at += usize::from(matched);
+        matched
+    }
+    fn sign(&mut self) -> Option<i64> {
+        if self.eat(b'+') {
+            Some(1)
+        } else if self.eat(b'-') {
+            Some(-1)
+        } else {
+            None
+        }
+    }
+    fn digits(&mut self, count: usize) -> Option<i64> {
+        let run = self.bytes.get(self.at..self.at + count)?;
+        if !run.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        self.at += count;
+        Some(run.iter().fold(0, |n, d| n * 10 + i64::from(d - b'0')))
+    }
+    /// Milliseconds from one or more fraction digits, truncated.
+    fn fraction_millis(&mut self) -> Option<i64> {
+        let start = self.at;
+        while self.bytes.get(self.at).is_some_and(u8::is_ascii_digit) {
+            self.at += 1;
+        }
+        let run = &self.bytes[start..self.at];
+        if run.is_empty() {
+            return None;
+        }
+        Some(
+            run.iter()
+                .chain([b'0'; 3].iter())
+                .take(3)
+                .fold(0, |n, d| n * 10 + i64::from(d - b'0')),
+        )
+    }
+}
+
+/// The instant `new Date(s)` yields for the ISO forms documented on
+/// [`UtcDateTime`], before the year bound.
+fn parse_js_iso_date(value: &str) -> Option<DateTime<Utc>> {
+    let mut at = IsoCursor {
+        bytes: value.as_bytes(),
+        at: 0,
+    };
+    let year = match at.sign() {
+        Some(sign) => {
+            let year = at.digits(6)?;
+            if sign < 0 && year == 0 {
+                return None;
+            }
+            sign * year
+        }
+        None => at.digits(4)?,
+    };
+    let (mut month, mut day) = (1, 1);
+    if at.eat(b'-') {
+        month = at.digits(2)?;
+        if at.eat(b'-') {
+            day = at.digits(2)?;
+        }
+    }
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    let (mut hour, mut minute, mut second, mut millis) = (0, 0, 0, 0);
+    let has_time = at.eat(b'T') || at.eat(b't');
+    if has_time {
+        hour = at.digits(2)?;
+        if !at.eat(b':') {
+            return None;
+        }
+        minute = at.digits(2)?;
+        if at.eat(b':') {
+            second = at.digits(2)?;
+            if at.eat(b'.') {
+                millis = at.fraction_millis()?;
+            }
+        }
+    }
+    if hour > 24 || minute > 59 || second > 59 || (hour == 24 && minute + second + millis > 0) {
+        return None;
+    }
+
+    let mut offset_minutes = 0;
+    if !at.eat(b'Z')
+        && has_time
+        && let Some(sign) = at.sign()
+    {
+        let hours = at.digits(2)?;
+        at.eat(b':');
+        let minutes = at.digits(2)?;
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
+        offset_minutes = sign * (hours * 60 + minutes);
+    }
+    if at.at != at.bytes.len() {
+        return None;
+    }
+
+    let first_of_month =
+        chrono::NaiveDate::from_ymd_opt(i32::try_from(year).ok()?, u32::try_from(month).ok()?, 1)?;
+    let midnight = first_of_month.and_hms_opt(0, 0, 0)?.and_utc();
+    let offset = chrono::Duration::days(day - 1)
+        + chrono::Duration::hours(hour)
+        + chrono::Duration::minutes(minute - offset_minutes)
+        + chrono::Duration::seconds(second)
+        + chrono::Duration::milliseconds(millis);
+    midnight.checked_add_signed(offset)
 }
 
 impl FromStr for UtcDateTime {
     type Err = ContractError;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        DateTime::parse_from_rfc3339(value)
-            .map(|parsed| Self::from_datetime(parsed.with_timezone(&Utc)))
-            .map_err(|_| ContractError {
-                expected: "an RFC 3339 timestamp",
+        let (min, max) = utc_year_bounds();
+        parse_js_iso_date(value)
+            .filter(|instant| (min..=max).contains(instant))
+            .map(Self)
+            .ok_or_else(|| ContractError {
+                expected: "an ISO 8601 timestamp in years 0000-9999",
                 got: value.to_owned(),
             })
     }
@@ -483,6 +707,33 @@ pub mod forward_compatible_union_array {
             .filter_map(ForwardCompatible::into_known)
             .collect())
     }
+
+    /// `optional`/`optionalKey(ForwardCompatibleUnionArray(X))`: use on
+    /// `Option<Vec<X>>` with `#[serde(default, skip_serializing_if =
+    /// "Option::is_none", with = "forward_compatible_union_array::optional")]`.
+    /// An absent key is `None`; `null` fails, as upstream.
+    pub mod optional {
+        use super::*;
+
+        pub fn serialize<S, T>(values: &Option<Vec<T>>, s: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+            T: Serialize,
+        {
+            match values {
+                Some(values) => super::serialize(values, s),
+                None => s.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D, T>(d: D) -> Result<Option<Vec<T>>, D::Error>
+        where
+            D: Deserializer<'de>,
+            T: TaggedUnion + serde::de::DeserializeOwned,
+        {
+            super::deserialize(d).map(Some)
+        }
+    }
 }
 
 /// `ForwardCompatibleArray`: wire codec for a server→client array whose
@@ -522,6 +773,33 @@ pub mod forward_compatible_array {
             .into_iter()
             .filter_map(|value| serde_json::from_value(value).ok())
             .collect())
+    }
+
+    /// `optional`/`optionalKey(ForwardCompatibleArray(X))`: use on
+    /// `Option<Vec<X>>` with `#[serde(default, skip_serializing_if =
+    /// "Option::is_none", with = "forward_compatible_array::optional")]`.
+    /// An absent key is `None`; `null` fails, as upstream.
+    pub mod optional {
+        use super::*;
+
+        pub fn serialize<S, T>(values: &Option<Vec<T>>, s: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+            T: Serialize,
+        {
+            match values {
+                Some(values) => super::serialize(values, s),
+                None => s.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D, T>(d: D) -> Result<Option<Vec<T>>, D::Error>
+        where
+            D: Deserializer<'de>,
+            T: serde::de::DeserializeOwned,
+        {
+            super::deserialize(d).map(Some)
+        }
     }
 }
 
@@ -637,7 +915,6 @@ pub mod omitted_when_null {
     }
 }
 
-
 /// Wire form of upstream `Schema.Option(X)`: `Some` encodes as
 /// `{"_tag":"Some","value":…}`, `None` as `{"_tag":"None"}`.
 ///
@@ -647,16 +924,20 @@ pub mod omitted_when_null {
 /// `Option<T>` (which maps `Schema.optionalKey` / `Schema.NullOr`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "_tag")]
+#[derive(Default)]
 pub enum EffectOption<T> {
     #[serde(rename = "Some")]
     Some { value: Box<T> },
     #[serde(rename = "None")]
+    #[default]
     None,
 }
 
 impl<T> EffectOption<T> {
     pub fn some(value: T) -> Self {
-        Self::Some { value: Box::new(value) }
+        Self::Some {
+            value: Box::new(value),
+        }
     }
     pub fn as_ref_option(&self) -> Option<&T> {
         match self {
@@ -669,12 +950,6 @@ impl<T> EffectOption<T> {
             Self::Some { value } => Some(*value),
             Self::None => None,
         }
-    }
-}
-
-impl<T> Default for EffectOption<T> {
-    fn default() -> Self {
-        Self::None
     }
 }
 
@@ -745,6 +1020,8 @@ mod tests {
         assert_eq!(js_trim("\u{0085}a\u{0085}"), "\u{0085}a\u{0085}");
         assert_eq!(js_trim("\u{feff}a\u{feff}"), "a");
         assert_eq!(js_trim("\u{180e}a"), "\u{180e}a");
+        assert_eq!(js_trim_end("a\u{2003}\u{feff}"), "a");
+        assert_eq!(js_trim_end("a\u{0085}"), "a\u{0085}");
     }
 
     #[test]
@@ -846,6 +1123,176 @@ mod tests {
         let now = UtcDateTime::now().to_string();
         assert!(now.ends_with('Z') && now.len() == 24, "{now}");
         assert_eq!(IsoDateTime::from("kept as-is"), "kept as-is");
+    }
+
+    /// Expected values are what effect 4.0.4 `DateTime.make(s)` + `formatIso`
+    /// produce under Node 22 (TZ=America/Los_Angeles, so a local-time
+    /// misparse would show).
+    #[test]
+    fn utc_datetime_accepts_what_upstream_make_accepts() {
+        let cases = [
+            ("2024-01-02T03:04:05.123Z", "2024-01-02T03:04:05.123Z"),
+            ("2024-01-02T03:04:05Z", "2024-01-02T03:04:05.000Z"),
+            (
+                "2024-01-02T03:04:05.123456789012345678Z",
+                "2024-01-02T03:04:05.123Z",
+            ),
+            ("2024-01-02T03:04:05.9995Z", "2024-01-02T03:04:05.999Z"),
+            ("2024-01-02T03:04:05.1", "2024-01-02T03:04:05.100Z"),
+            // No zone means UTC.
+            ("2024-01-02T03:04:05", "2024-01-02T03:04:05.000Z"),
+            ("2024-01-02T03:04:05.12345", "2024-01-02T03:04:05.123Z"),
+            // Minute precision.
+            ("2024-01-02T03:04Z", "2024-01-02T03:04:00.000Z"),
+            ("2024-01-02T03:04", "2024-01-02T03:04:00.000Z"),
+            ("2024T03:04", "2024-01-01T03:04:00.000Z"),
+            ("2024-01T03:04Z", "2024-01-01T03:04:00.000Z"),
+            // Date-only forms, with or without `Z`.
+            ("2024-01-02", "2024-01-02T00:00:00.000Z"),
+            ("2024-01", "2024-01-01T00:00:00.000Z"),
+            ("2024", "2024-01-01T00:00:00.000Z"),
+            ("2024-01-02Z", "2024-01-02T00:00:00.000Z"),
+            ("2024-01Z", "2024-01-01T00:00:00.000Z"),
+            ("2024Z", "2024-01-01T00:00:00.000Z"),
+            // Offsets, with and without the colon.
+            ("2024-01-02T03:04:05+02:00", "2024-01-02T01:04:05.000Z"),
+            ("2024-01-02T03:04:05+0200", "2024-01-02T01:04:05.000Z"),
+            ("2024-01-02T03:04+0200", "2024-01-02T01:04:00.000Z"),
+            ("2024-01-02T03:04:05-0530", "2024-01-02T08:34:05.000Z"),
+            ("2024-01-02T03:04:05.5+02:00", "2024-01-02T01:04:05.500Z"),
+            ("2024-01-02T03:04:05.123-00:00", "2024-01-02T03:04:05.123Z"),
+            ("2024-01-02T03:04:05+23:59", "2024-01-01T03:05:05.000Z"),
+            ("2024-01-02T03:04:05-23:59", "2024-01-03T03:03:05.000Z"),
+            ("2024T03:04:05+0200", "2024-01-01T01:04:05.000Z"),
+            // Lowercase `t` is accepted upstream; lowercase `z` is not.
+            ("2024-01-02t03:04:05Z", "2024-01-02T03:04:05.000Z"),
+            ("2024-01-02t03:04", "2024-01-02T03:04:00.000Z"),
+            ("2024-01-02t03:04:05+02:00", "2024-01-02T01:04:05.000Z"),
+            // 24:00 is the next midnight; days past month end roll over.
+            ("2024-01-02T24:00:00Z", "2024-01-03T00:00:00.000Z"),
+            ("2024-01-02T24:00Z", "2024-01-03T00:00:00.000Z"),
+            ("2024-01-02T24:00", "2024-01-03T00:00:00.000Z"),
+            ("2024-01-02T24:00:00.000Z", "2024-01-03T00:00:00.000Z"),
+            ("2024-12-31T24:00:00Z", "2025-01-01T00:00:00.000Z"),
+            ("2024-02-29T24:00", "2024-03-01T00:00:00.000Z"),
+            ("2024-02-29", "2024-02-29T00:00:00.000Z"),
+            ("2024-02-30T00:00:00Z", "2024-03-01T00:00:00.000Z"),
+            ("2023-02-29", "2023-03-01T00:00:00.000Z"),
+            ("2023-02-31", "2023-03-03T00:00:00.000Z"),
+            ("2024-04-31T00:00:00Z", "2024-05-01T00:00:00.000Z"),
+            // Expanded years, and the year bounds.
+            ("+002024-01-02T00:00:00Z", "2024-01-02T00:00:00.000Z"),
+            ("+002024-01-02T03:04+02:00", "2024-01-02T01:04:00.000Z"),
+            ("+000000-01-01T00:00:00Z", "0000-01-01T00:00:00.000Z"),
+            ("0000-01-01T00:00:00Z", "0000-01-01T00:00:00.000Z"),
+            ("0001-01-01", "0001-01-01T00:00:00.000Z"),
+            ("9999-12-31T23:59:59.999Z", "9999-12-31T23:59:59.999Z"),
+        ];
+        for (wire, expected) in cases {
+            let parsed: UtcDateTime = wire.parse().unwrap_or_else(|e| panic!("{wire}: {e}"));
+            assert_eq!(parsed.to_string(), expected, "{wire}");
+            let json = serde_json::to_string(wire).unwrap();
+            assert_eq!(serde_json::from_str::<UtcDateTime>(&json).unwrap(), parsed);
+            assert_eq!(expected.parse::<UtcDateTime>().unwrap(), parsed, "{wire}");
+        }
+    }
+
+    #[test]
+    fn utc_datetime_rejects_what_upstream_make_rejects() {
+        for wire in [
+            "",
+            "yesterday",
+            "2024-01-02T23:59:60Z",
+            "2024-01-02T00:00:60",
+            "2024-01-02T03:04:05z",
+            "2024-01-02T03:04:05+02",
+            "2024-01-02T03:04:05+2:00",
+            "2024-01-02T03:04:05+02:0",
+            "2024-01-02T03:04:05+0",
+            "2024-01-02T03:04:05+020",
+            "2024-01-02T03:04:05+02000",
+            "2024-01-02T03:04:05+24:00",
+            "2024-01-02T03:04:05+02:60",
+            "2024-01-02T03:04:05.123+02:00:00",
+            "2024-01-02T03:04:05.123+02:00Z",
+            "2024-01-02T03:04:05.123ZZ",
+            "2024-01-02T03:04:05GMT",
+            "2024-01-02T03:04:05ZGMT",
+            "2024-01-02+02:00",
+            "2024-01-02T24:00:01Z",
+            "2024-01-02T24:00:00.001Z",
+            "2024-01-02T25:00Z",
+            "2024-01-02T03:60Z",
+            "2024-13-01",
+            "2024-00-01",
+            "2024-01-00",
+            "2024-01-32",
+            "20240102",
+            "2024-01-02T3:04:05Z",
+            "2024-01-02T03:04:5Z",
+            "2024-01-02T03Z",
+            "2024-01-02T03",
+            "2024-01-02T03:04:05.Z",
+            "2024-01-02T03:04:05,123Z",
+            "2024-01-02TZ",
+            "2024-01-02T",
+            "-000000-01-01T00:00:00Z",
+            " 2024-01-02T03:04:05Z",
+            "2024-01-02T03:04:05Z ",
+        ] {
+            assert!(wire.parse::<UtcDateTime>().is_err(), "{wire}");
+            let json = serde_json::to_string(wire).unwrap();
+            assert!(
+                serde_json::from_str::<UtcDateTime>(&json).is_err(),
+                "{wire}"
+            );
+        }
+    }
+
+    #[test]
+    fn utc_datetime_rejects_years_outside_0000_to_9999() {
+        // Upstream accepts these but encodes them as `+010000-…` / `-000001-…`,
+        // which the fixed `YYYY-…` format cannot carry.
+        for wire in [
+            "+010000-01-01T00:00:00Z",
+            "-000001-01-01T00:00:00Z",
+            "9999-12-31T23:59:59.999-01:00",
+            "9999-12-31T24:00Z",
+            "0000-01-01T00:00:00+01:00",
+        ] {
+            assert!(wire.parse::<UtcDateTime>().is_err(), "{wire}");
+        }
+    }
+
+    #[test]
+    fn utc_datetime_from_datetime_clamps_to_the_encodable_years() {
+        let far_future = DateTime::<Utc>::MAX_UTC;
+        assert_eq!(
+            UtcDateTime::from_datetime(far_future).to_string(),
+            "9999-12-31T23:59:59.999Z"
+        );
+        assert_eq!(
+            UtcDateTime::from_datetime(DateTime::<Utc>::MIN_UTC).to_string(),
+            "0000-01-01T00:00:00.000Z"
+        );
+        for value in [far_future, DateTime::<Utc>::MIN_UTC] {
+            let at = UtcDateTime::from_datetime(value);
+            assert_eq!(at.to_string().parse::<UtcDateTime>().unwrap(), at);
+        }
+    }
+
+    #[test]
+    fn utc_datetime_from_truncates_so_equality_matches_the_wire() {
+        let base: DateTime<Utc> = "2026-01-02T01:04:05.123Z".parse().unwrap();
+        let a = UtcDateTime::from(base + chrono::Duration::nanoseconds(456_789));
+        let b = UtcDateTime::from(base + chrono::Duration::nanoseconds(999_999));
+        assert_eq!(a, b);
+        assert_eq!(a.as_datetime(), base);
+        assert_eq!(a.to_string(), "2026-01-02T01:04:05.123Z");
+        assert_eq!(a.to_string().parse::<UtcDateTime>().unwrap(), a);
+        assert_eq!(UtcDateTime::from(base), UtcDateTime::from_datetime(base));
+        let later = UtcDateTime::from(a.as_datetime() + chrono::Duration::microseconds(1));
+        assert_eq!(later, a);
     }
 
     // --- tagged unions --------------------------------------------------
@@ -1058,7 +1505,87 @@ mod tests {
         );
     }
 
+    #[test]
+    fn optional_union_array_keeps_absent_empty_and_filtered_distinct() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Holder {
+            #[serde(
+                default,
+                skip_serializing_if = "Option::is_none",
+                with = "forward_compatible_union_array::optional"
+            )]
+            shapes: Option<Vec<Shape>>,
+        }
+        let cases = [
+            (json!({}), None, json!({})),
+            (json!({"shapes": []}), Some(vec![]), json!({"shapes": []})),
+            (
+                json!({"shapes": [{"kind": "triangle"}, {"kind": "square", "side": 2}]}),
+                Some(vec![Shape::Square { side: 2.0 }]),
+                json!({"shapes": [{"kind": "square", "side": 2.0}]}),
+            ),
+            (
+                json!({"shapes": [{"kind": "triangle"}]}),
+                Some(vec![]),
+                json!({"shapes": []}),
+            ),
+        ];
+        for (wire, expected, encoded) in cases {
+            let decoded: Holder = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(decoded.shapes, expected, "{wire}");
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), encoded, "{wire}");
+        }
+        for broken in [
+            json!({"shapes": null}),
+            json!({"shapes": {"kind": "square", "side": 2}}),
+            json!({"shapes": [{"kind": "square", "side": "wide"}]}),
+        ] {
+            assert!(
+                serde_json::from_value::<Holder>(broken.clone()).is_err(),
+                "{broken}"
+            );
+        }
+    }
+
     // --- ForwardCompatibleArray ----------------------------------------
+
+    #[test]
+    fn optional_array_keeps_absent_empty_and_filtered_distinct() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Holder {
+            #[serde(
+                default,
+                skip_serializing_if = "Option::is_none",
+                with = "forward_compatible_array::optional"
+            )]
+            modes: Option<Vec<ClientSurface>>,
+        }
+        let cases = [
+            (json!({}), None, json!({})),
+            (json!({"modes": []}), Some(vec![]), json!({"modes": []})),
+            (
+                json!({"modes": ["desktop", "hologram", 5, null, "cli"]}),
+                Some(vec![ClientSurface::Desktop, ClientSurface::Cli]),
+                json!({"modes": ["desktop", "cli"]}),
+            ),
+            (
+                json!({"modes": ["hologram"]}),
+                Some(vec![]),
+                json!({"modes": []}),
+            ),
+        ];
+        for (wire, expected, encoded) in cases {
+            let decoded: Holder = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(decoded.modes, expected, "{wire}");
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), encoded, "{wire}");
+        }
+        for broken in [json!({"modes": null}), json!({"modes": "desktop"})] {
+            assert!(
+                serde_json::from_value::<Holder>(broken.clone()).is_err(),
+                "{broken}"
+            );
+        }
+    }
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     struct ArrayHolder<T>

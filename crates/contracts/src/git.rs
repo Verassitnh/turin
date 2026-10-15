@@ -1,13 +1,36 @@
 //! Port of upstream/packages/contracts/src/git.ts
 
-use crate::base_schemas::{NonNegativeInt, PositiveInt, ProjectId, ThreadId, TrimmedNonEmptyString};
+use crate::base_schemas::{
+    NonNegativeInt, PositiveInt, ProjectId, ThreadId, TrimmedNonEmptyString,
+};
 use crate::source_control::{SourceControlProviderError, SourceControlProviderInfo};
 use crate::vcs::VcsDriverKind;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-// Upstream bounds listRefs limit with this; enforced at the service boundary.
-#[allow(dead_code)]
-const GIT_LIST_BRANCHES_MAX_LIMIT: u64 = 200;
+/// Upper bound for `VcsListRefsInput.limit`, enforced on decode.
+pub const GIT_LIST_BRANCHES_MAX_LIMIT: u64 = 200;
+
+// `TrimmedNonEmptyString.check(Schema.isMaxLength(n))`: length counted in UTF-16
+// code units on the trimmed value.
+crate::max_len!(max_10000, 10_000);
+crate::max_len!(max_256, 256);
+
+/// `PositiveInt.check(Schema.isLessThanOrEqualTo(GIT_LIST_BRANCHES_MAX_LIMIT))`.
+mod list_limit {
+    use super::*;
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<PositiveInt>, D::Error> {
+        let value = Option::<PositiveInt>::deserialize(d)?;
+        if let Some(limit) = value
+            && limit.get() > GIT_LIST_BRANCHES_MAX_LIMIT
+        {
+            return Err(serde::de::Error::custom(format!(
+                "expected a value less than or equal to {GIT_LIST_BRANCHES_MAX_LIMIT}"
+            )));
+        }
+        Ok(value)
+    }
+}
 
 /// `GitFilePath`: a non-empty, *untrimmed* path string.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -54,8 +77,8 @@ impl<'de> Deserialize<'de> for GitFilePath {
     }
 }
 
-/// Serde adapter for `Option<Vec<GitFilePath>>` (upstream checks non-empty on
-/// each element; the min-length-1 array check is noted in PORTING.md).
+/// Serde adapter for `Option<Vec<GitFilePath>>`: non-empty elements
+/// (`GitFilePath`) in an array of at least one (`Schema.isMinLength(1)`).
 mod file_paths {
     use super::*;
 
@@ -63,10 +86,10 @@ mod file_paths {
         d: D,
     ) -> Result<Option<Vec<GitFilePath>>, D::Error> {
         let values = Option::<Vec<GitFilePath>>::deserialize(d)?;
-        if let Some(paths) = &values {
-            if paths.is_empty() {
-                return Err(serde::de::Error::custom("filePaths must not be empty"));
-            }
+        if let Some(paths) = &values
+            && paths.is_empty()
+        {
+            return Err(serde::de::Error::custom("filePaths must not be empty"));
         }
         Ok(values)
     }
@@ -173,7 +196,11 @@ pub struct GitRunStackedActionToastRunAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum GitRunStackedActionToastCta {
     #[serde(rename = "none")]
     None,
@@ -258,11 +285,19 @@ pub struct GitRunStackedActionInput {
     pub action_id: TrimmedNonEmptyString,
     pub cwd: TrimmedNonEmptyString,
     pub action: GitStackedAction,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "max_10000::optional"
+    )]
     pub commit_message: Option<TrimmedNonEmptyString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_branch: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "file_paths::deserialize")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "file_paths::deserialize"
+    )]
     pub file_paths: Option<Vec<GitFilePath>>,
     /// The thread the action runs beside; a pull request it creates is linked to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -283,7 +318,11 @@ pub enum VcsListRefsRefKind {
 #[serde(rename_all = "camelCase")]
 pub struct VcsListRefsInput {
     pub cwd: TrimmedNonEmptyString,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "max_256::optional"
+    )]
     pub query: Option<TrimmedNonEmptyString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<NonNegativeInt>,
@@ -293,7 +332,11 @@ pub struct VcsListRefsInput {
     pub ref_kind: Option<VcsListRefsRefKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "list_limit::deserialize"
+    )]
     pub limit: Option<PositiveInt>,
 }
 
@@ -464,7 +507,11 @@ pub struct VcsStatusResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum VcsStatusStreamEvent {
     #[serde(rename = "snapshot")]
     Snapshot {
@@ -474,7 +521,9 @@ pub enum VcsStatusStreamEvent {
     #[serde(rename = "localUpdated")]
     LocalUpdated { local: VcsStatusLocalResult },
     #[serde(rename = "remoteUpdated")]
-    RemoteUpdated { remote: Option<VcsStatusRemoteResult> },
+    RemoteUpdated {
+        remote: Option<VcsStatusRemoteResult>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -618,7 +667,11 @@ pub enum GitCommandFailureReason {
 /// `GitCommandError` (Schema.TaggedError). Display mirrors upstream's message
 /// getter: `Git command failed in {operation} ({cwd}): {detail} (reason)`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum GitCommandError {
     #[serde(rename = "GitCommandError")]
     GitCommandError {
@@ -627,14 +680,19 @@ pub enum GitCommandError {
         cwd: String,
         // `Schema.Number` upstream: floats, not ints.
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         argument_count: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         exit_code: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         stdout_length: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         stderr_length: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "crate::base_schemas::js_number_nullable")]
         output_length: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<GitCommandFailureReason>,
@@ -647,13 +705,17 @@ pub enum GitCommandError {
 impl std::fmt::Display for GitCommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::GitCommandError { operation, cwd, detail, reason, .. } => write!(
-                f,
-                "Git command failed in {operation} ({cwd}): {detail}"
-            )
-            .and_then(|_| match reason {
-                Some(reason) => write!(f, " ({reason})"),
-                None => Ok(()),
+            Self::GitCommandError {
+                operation,
+                cwd,
+                detail,
+                reason,
+                ..
+            } => write!(f, "Git command failed in {operation} ({cwd}): {detail}").and_then(|_| {
+                match reason {
+                    Some(reason) => write!(f, " ({reason})"),
+                    None => Ok(()),
+                }
             }),
         }
     }
@@ -663,7 +725,11 @@ impl std::error::Error for GitCommandError {}
 
 /// `TextGenerationError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum TextGenerationError {
     #[serde(rename = "TextGenerationError")]
     #[error("Text generation failed in {operation}: {detail}")]
@@ -677,7 +743,11 @@ pub enum TextGenerationError {
 
 /// `GitManagerError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum GitManagerError {
     #[serde(rename = "GitManagerError")]
     #[error("Git manager failed in {operation}: {detail}")]
@@ -692,10 +762,16 @@ pub enum GitManagerError {
 
 /// `GitPullRequestMaterializationError` (Schema.TaggedError).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum GitPullRequestMaterializationError {
     #[serde(rename = "GitPullRequestMaterializationError")]
-    #[error("Failed to materialize pull request #{pull_request_number} branch {head_branch} as {local_branch}.")]
+    #[error(
+        "Failed to materialize pull request #{pull_request_number} branch {head_branch} as {local_branch}."
+    )]
     GitPullRequestMaterializationError {
         cwd: TrimmedNonEmptyString,
         pull_request_number: PositiveInt,
@@ -724,7 +800,11 @@ pub enum GitManagerServiceError {
 
 /// `GitActionProgressEvent`: union on `kind`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum GitActionProgressEvent {
     #[serde(rename = "action_started")]
     ActionStarted {
@@ -783,6 +863,21 @@ pub enum GitActionProgressEvent {
     },
 }
 
+impl std::fmt::Display for GitCommandFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::AuthenticationFailed => "authentication_failed",
+            Self::BranchAlreadyExists => "branch_already_exists",
+            Self::BranchCheckedOutInWorktree => "branch_checked_out_in_worktree",
+            Self::HostKeyUnverified => "host_key_unverified",
+            Self::NotARepository => "not_a_repository",
+            Self::PathAlreadyExists => "path_already_exists",
+            Self::RemoteUnreachable => "remote_unreachable",
+            Self::TagWouldBeClobbered => "tag_would_be_clobbered",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -806,7 +901,10 @@ mod tests {
             "path": "/tmp/worktree",
         }))
         .unwrap();
-        assert_eq!(with_base.base_ref_name.as_ref().unwrap().as_str(), "origin/main");
+        assert_eq!(
+            with_base.base_ref_name.as_ref().unwrap().as_str(),
+            "origin/main"
+        );
     }
 
     #[test]
@@ -842,13 +940,14 @@ mod tests {
         .unwrap();
         assert!(parsed.is_on_pull_request_head);
 
-        let explicit: GitPreparePullRequestThreadResult = serde_json::from_value(serde_json::json!({
-            "pullRequest": resolved_pr(),
-            "branch": "feature/pr-threads",
-            "worktreePath": "/tmp/pr-threads",
-            "isOnPullRequestHead": false,
-        }))
-        .unwrap();
+        let explicit: GitPreparePullRequestThreadResult =
+            serde_json::from_value(serde_json::json!({
+                "pullRequest": resolved_pr(),
+                "branch": "feature/pr-threads",
+                "worktreePath": "/tmp/pr-threads",
+                "isOnPullRequestHead": false,
+            }))
+            .unwrap();
         assert!(!explicit.is_on_pull_request_head);
     }
 
@@ -857,7 +956,10 @@ mod tests {
         let parsed: GitResolvePullRequestResult =
             serde_json::from_value(serde_json::json!({ "pullRequest": resolved_pr() })).unwrap();
         assert_eq!(parsed.pull_request.number.get(), 42);
-        assert_eq!(parsed.pull_request.head_branch.as_str(), "feature/pr-threads");
+        assert_eq!(
+            parsed.pull_request.head_branch.as_str(),
+            "feature/pr-threads"
+        );
     }
 
     #[test]
@@ -870,16 +972,24 @@ mod tests {
             "filePaths": [" leading.txt", "trailing.txt "],
         }))
         .unwrap();
-        assert_eq!(parsed.file_paths.as_ref().unwrap()[0].as_str(), " leading.txt");
-        assert_eq!(parsed.file_paths.as_ref().unwrap()[1].as_str(), "trailing.txt ");
+        assert_eq!(
+            parsed.file_paths.as_ref().unwrap()[0].as_str(),
+            " leading.txt"
+        );
+        assert_eq!(
+            parsed.file_paths.as_ref().unwrap()[1].as_str(),
+            "trailing.txt "
+        );
 
-        assert!(serde_json::from_value::<GitRunStackedActionInput>(serde_json::json!({
-            "actionId": "action-1",
-            "cwd": "/repo",
-            "action": "commit",
-            "filePaths": [""],
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<GitRunStackedActionInput>(serde_json::json!({
+                "actionId": "action-1",
+                "cwd": "/repo",
+                "action": "commit",
+                "filePaths": [""],
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -903,19 +1013,21 @@ mod tests {
         assert_eq!(parsed.working_tree.files[0].path.as_str(), " leading.txt");
         assert_eq!(parsed.working_tree.files[1].path.as_str(), "trailing.txt ");
 
-        assert!(serde_json::from_value::<VcsStatusLocalResult>(serde_json::json!({
-            "isRepo": true,
-            "hasPrimaryRemote": true,
-            "isDefaultRef": false,
-            "refName": "main",
-            "hasWorkingTreeChanges": true,
-            "workingTree": {
-                "files": [{ "path": "", "insertions": 0, "deletions": 0 }],
-                "insertions": 0,
-                "deletions": 0,
-            },
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<VcsStatusLocalResult>(serde_json::json!({
+                "isRepo": true,
+                "hasPrimaryRemote": true,
+                "isDefaultRef": false,
+                "refName": "main",
+                "hasWorkingTreeChanges": true,
+                "workingTree": {
+                    "files": [{ "path": "", "insertions": 0, "deletions": 0 }],
+                    "insertions": 0,
+                    "deletions": 0,
+                },
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -950,19 +1062,376 @@ mod tests {
             GitRunStackedActionToastCta::RunAction { ref action, .. } if action.kind == GitStackedAction::CreatePr
         ));
     }
-}
 
-impl std::fmt::Display for GitCommandFailureReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::AuthenticationFailed => "authentication_failed",
-            Self::BranchAlreadyExists => "branch_already_exists",
-            Self::BranchCheckedOutInWorktree => "branch_checked_out_in_worktree",
-            Self::HostKeyUnverified => "host_key_unverified",
-            Self::NotARepository => "not_a_repository",
-            Self::PathAlreadyExists => "path_already_exists",
-            Self::RemoteUnreachable => "remote_unreachable",
-            Self::TagWouldBeClobbered => "tag_would_be_clobbered",
+    use serde_json::{Value, json};
+
+    fn round_trip<T: Serialize + serde::de::DeserializeOwned>(value: Value) -> T {
+        let parsed: T = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), value);
+        parsed
+    }
+
+    #[test]
+    fn list_refs_input_bounds_and_optional_keys() {
+        let decode = |extra: Value| {
+            let mut value = json!({ "cwd": "/repo" });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<VcsListRefsInput>(value)
+        };
+        assert!(decode(json!({})).unwrap().limit.is_none());
+        assert_eq!(
+            decode(json!({ "limit": 200 }))
+                .unwrap()
+                .limit
+                .unwrap()
+                .get(),
+            200
+        );
+        assert!(decode(json!({ "limit": 201 })).is_err());
+        assert!(decode(json!({ "limit": 0 })).is_err());
+        assert!(decode(json!({ "cursor": 0 })).is_ok());
+        assert!(decode(json!({ "cursor": -1 })).is_err());
+        assert!(decode(json!({ "refKind": "remote" })).is_ok());
+        assert!(decode(json!({ "refKind": "tags" })).is_err());
+
+        // Query is trimmed first, then capped at 256 UTF-16 code units.
+        let padded = format!("  {}  ", "a".repeat(256));
+        assert!(decode(json!({ "query": padded })).is_ok());
+        assert!(decode(json!({ "query": "a".repeat(257) })).is_err());
+        assert!(decode(json!({ "query": "😀".repeat(128) })).is_ok());
+        assert!(decode(json!({ "query": "😀".repeat(129) })).is_err());
+
+        // Absent keys stay absent on re-encode.
+        let input: VcsListRefsInput = round_trip(json!({ "cwd": "/repo", "limit": 5 }));
+        assert_eq!(input.limit.unwrap().get(), 5);
+    }
+
+    #[test]
+    fn run_stacked_action_input_bounds() {
+        let decode = |extra: Value| {
+            let mut value = json!({ "actionId": "a", "cwd": "/repo", "action": "commit_push_pr" });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<GitRunStackedActionInput>(value)
+        };
+        assert!(decode(json!({ "commitMessage": "m".repeat(10_000) })).is_ok());
+        assert!(decode(json!({ "commitMessage": "m".repeat(10_001) })).is_err());
+        assert!(decode(json!({ "commitMessage": "😀".repeat(5_001) })).is_err());
+        assert!(decode(json!({ "commitMessage": "   " })).is_err());
+        assert!(decode(json!({ "filePaths": [] })).is_err());
+        assert!(decode(json!({ "filePaths": ["a"], "threadId": "t", "projectId": "p" })).is_ok());
+        assert!(decode(json!({ "threadId": "  " })).is_err());
+        assert!(decode(json!({ "action": "squash" })).is_err());
+        let full: GitRunStackedActionInput = round_trip(json!({
+            "actionId": "a", "cwd": "/repo", "action": "commit_push_pr",
+            "commitMessage": "msg", "featureBranch": true, "filePaths": ["x y"],
+            "threadId": "t", "projectId": "p",
+        }));
+        assert_eq!(full.action, GitStackedAction::CommitPushPr);
+    }
+
+    #[test]
+    fn nullable_required_keys_encode_null() {
+        let input: VcsCreateWorktreeInput =
+            round_trip(json!({ "cwd": "/repo", "refName": "main", "path": null }));
+        assert!(input.path.is_none());
+        let r#ref: VcsRef = round_trip(json!({
+            "name": "main", "current": true, "isDefault": true, "worktreePath": null,
+        }));
+        assert_eq!(r#ref.is_remote, None);
+        let remote: VcsRef = round_trip(json!({
+            "name": "origin/main", "isRemote": true, "remoteName": "origin",
+            "current": false, "isDefault": false, "worktreePath": "/wt",
+        }));
+        assert_eq!(remote.is_remote, Some(true));
+        let _: VcsSwitchRefResult = round_trip(json!({ "refName": null }));
+        let _: VcsPullResult = round_trip(
+            json!({ "status": "skipped_up_to_date", "refName": "main", "upstreamRef": null }),
+        );
+        let _: VcsListRefsResult = round_trip(json!({
+            "refs": [], "isRepo": true, "hasPrimaryRemote": false,
+            "nextCursor": null, "totalCount": 0,
+        }));
+    }
+
+    #[test]
+    fn prepare_result_always_encodes_head_flag() {
+        let parsed: GitPreparePullRequestThreadResult = serde_json::from_value(json!({
+            "pullRequest": resolved_pr(), "branch": "b", "worktreePath": null,
+        }))
+        .unwrap();
+        assert!(parsed.is_on_pull_request_head);
+        let encoded = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(encoded["isOnPullRequestHead"], json!(true));
+        assert_eq!(encoded["worktreePath"], Value::Null);
+    }
+
+    #[test]
+    fn change_request_updated_at_distinguishes_absent_null_and_value() {
+        let base = |extra: Value| {
+            let mut value = json!({
+                "number": 7, "title": "t", "url": "u", "baseRef": "main",
+                "headRef": "feat", "state": "merged",
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            value
+        };
+        let absent: VcsStatusChangeRequest = round_trip(base(json!({})));
+        assert_eq!(absent.updated_at, None);
+        let null: VcsStatusChangeRequest = round_trip(base(json!({ "updatedAt": null })));
+        assert_eq!(null.updated_at, Some(None));
+        let value: VcsStatusChangeRequest = round_trip(base(
+            json!({ "updatedAt": "2026-01-01T00:00:00Z", "isDraft": false }),
+        ));
+        assert_eq!(
+            value.updated_at,
+            Some(Some("2026-01-01T00:00:00Z".to_owned()))
+        );
+        assert_eq!(value.is_draft, Some(false));
+        assert!(
+            serde_json::from_value::<VcsStatusChangeRequest>(base(json!({ "number": 0 }))).is_err()
+        );
+        assert!(
+            serde_json::from_value::<VcsStatusChangeRequest>(base(json!({ "state": "draft" })))
+                .is_err()
+        );
+    }
+
+    fn local_status() -> Value {
+        json!({
+            "isRepo": true, "hasPrimaryRemote": true, "isDefaultRef": false,
+            "refName": null, "hasWorkingTreeChanges": false,
+            "workingTree": { "files": [], "insertions": 0, "deletions": 0 },
         })
+    }
+
+    #[test]
+    fn status_results_and_stream_events_round_trip() {
+        let mut local = local_status();
+        local["sourceControlProvider"] =
+            json!({ "kind": "github", "name": "GitHub", "baseUrl": "https://github.com" });
+        local["branchChanges"] = json!({ "baseRef": null, "insertions": 1, "deletions": 2 });
+        let parsed: VcsStatusLocalResult = round_trip(local.clone());
+        assert!(parsed.source_control_provider.is_some());
+        assert_eq!(parsed.branch_changes.unwrap().base_ref, None);
+        // A required NullOr key always encodes `null`, never omits the key.
+        assert_eq!(
+            serde_json::to_value(round_trip::<VcsStatusLocalResult>(local_status())).unwrap()["refName"],
+            Value::Null
+        );
+
+        let remote = json!({
+            "hasUpstream": true, "aheadCount": 1, "behindCount": 0,
+            "aheadOfDefaultCount": 3, "pr": null,
+        });
+        let _: VcsStatusRemoteResult = round_trip(remote.clone());
+
+        let mut full = local_status();
+        full.as_object_mut()
+            .unwrap()
+            .extend(remote.as_object().unwrap().clone());
+        let _: VcsStatusResult = round_trip(full);
+
+        let snapshot: VcsStatusStreamEvent =
+            round_trip(json!({ "_tag": "snapshot", "local": local_status(), "remote": null }));
+        assert!(matches!(
+            snapshot,
+            VcsStatusStreamEvent::Snapshot { remote: None, .. }
+        ));
+        let _: VcsStatusStreamEvent =
+            round_trip(json!({ "_tag": "localUpdated", "local": local_status() }));
+        let _: VcsStatusStreamEvent =
+            round_trip(json!({ "_tag": "remoteUpdated", "remote": remote }));
+        assert!(
+            serde_json::from_value::<VcsStatusStreamEvent>(json!({ "_tag": "other" })).is_err()
+        );
+    }
+
+    #[test]
+    fn toast_cta_union_branches() {
+        let none: GitRunStackedActionToastCta = round_trip(json!({ "kind": "none" }));
+        assert_eq!(none, GitRunStackedActionToastCta::None);
+        let _: GitRunStackedActionToastCta =
+            round_trip(json!({ "kind": "open_pr", "label": "Open", "url": "https://x" }));
+        assert!(
+            serde_json::from_value::<GitRunStackedActionToastCta>(
+                json!({ "kind": "open_pr", "label": " ", "url": "https://x" })
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<GitRunStackedActionToastCta>(json!({ "kind": "copy" }))
+                .is_err()
+        );
+        let toast: GitRunStackedActionToast =
+            round_trip(json!({ "title": "Done", "cta": { "kind": "none" } }));
+        assert_eq!(toast.description, None);
+    }
+
+    #[test]
+    fn small_inputs_round_trip() {
+        let _: VcsStatusSubscriptionInput =
+            round_trip(json!({ "cwd": "/r", "includeRemote": false }));
+        let _: VcsStatusInput = round_trip(json!({ "cwd": "/r" }));
+        let _: VcsPullInput = round_trip(json!({ "cwd": "/r" }));
+        let _: VcsRemoveWorktreeInput =
+            round_trip(json!({ "cwd": "/r", "path": "/p", "force": true }));
+        let _: VcsCreateRefInput =
+            round_trip(json!({ "cwd": "/r", "refName": "b", "switchRef": true }));
+        let _: VcsCreateRefResult = round_trip(json!({ "refName": "b" }));
+        let _: VcsSwitchRefInput = round_trip(json!({ "cwd": "/r", "refName": "b" }));
+        let init: VcsInitInput = round_trip(json!({ "cwd": "/r", "kind": "jj" }));
+        assert_eq!(init.kind, Some(VcsDriverKind::Jj));
+        let _: GitPullRequestRefInput = round_trip(json!({ "cwd": "/r", "reference": "#1" }));
+        let _: GitPreparePullRequestThreadInput =
+            round_trip(json!({ "cwd": "/r", "reference": "#1", "mode": "local", "threadId": "t" }));
+        let _: VcsCreateWorktreeResult =
+            round_trip(json!({ "worktree": { "path": "/w", "refName": "b" } }));
+        assert!(
+            serde_json::from_value::<VcsInitInput>(json!({ "cwd": "/r", "kind": "svn" })).is_err()
+        );
+    }
+
+    #[test]
+    fn progress_events_decode_every_kind() {
+        let base = |kind: &str, extra: Value| {
+            let mut value = json!({ "kind": kind, "actionId": "a", "cwd": "/r", "action": "push" });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            value
+        };
+        let samples = [
+            base(
+                "action_started",
+                json!({ "phases": ["branch", "commit", "push", "pr"] }),
+            ),
+            base(
+                "phase_started",
+                json!({ "phase": "push", "label": "Pushing" }),
+            ),
+            base("hook_started", json!({ "hookName": "pre-commit" })),
+            base(
+                "hook_output",
+                json!({ "hookName": null, "stream": "stderr", "text": "x" }),
+            ),
+            base(
+                "hook_finished",
+                json!({ "hookName": "h", "exitCode": -1, "durationMs": null }),
+            ),
+            base("action_failed", json!({ "phase": null, "message": "boom" })),
+            base(
+                "action_finished",
+                json!({
+                    "result": {
+                        "action": "push",
+                        "branch": { "status": "skipped_not_requested" },
+                        "commit": { "status": "skipped_no_changes" },
+                        "push": { "status": "skipped_up_to_date", "setUpstream": true },
+                        "pr": { "status": "opened_existing", "url": "u", "number": 3 },
+                        "toast": { "title": "t", "cta": { "kind": "none" } },
+                    },
+                }),
+            ),
+        ];
+        for sample in samples {
+            let _: GitActionProgressEvent = round_trip(sample);
+        }
+        // Closed union: an unknown kind, or a broken known payload, fails.
+        assert!(
+            serde_json::from_value::<GitActionProgressEvent>(base("future", json!({}))).is_err()
+        );
+        assert!(
+            serde_json::from_value::<GitActionProgressEvent>(base(
+                "hook_output",
+                json!({ "hookName": null, "stream": "stdin", "text": "x" })
+            ))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<GitActionProgressEvent>(base(
+                "hook_started",
+                json!({ "hookName": "" })
+            ))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<GitActionProgressEvent>(base(
+                "hook_finished",
+                json!({ "hookName": "h", "exitCode": 1.5, "durationMs": 1 })
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn command_error_numbers_encode_like_json_stringify() {
+        let error: GitCommandError = round_trip(json!({
+            "_tag": "GitCommandError", "operation": "push", "command": "git", "cwd": "/r",
+            "argumentCount": 7, "exitCode": 128, "stdoutLength": 0, "stderrLength": 2.5,
+            "outputLength": 10, "reason": "remote_unreachable", "detail": "no route",
+            "cause": { "message": "x" },
+        }));
+        assert_eq!(
+            error.to_string(),
+            "Git command failed in push (/r): no route (remote_unreachable)"
+        );
+        let minimal: GitCommandError = round_trip(json!({
+            "_tag": "GitCommandError", "operation": "o", "command": "c", "cwd": "/r", "detail": "d",
+        }));
+        assert_eq!(minimal.to_string(), "Git command failed in o (/r): d");
+        assert!(
+            serde_json::from_value::<GitCommandError>(json!({
+                "_tag": "GitCommandError", "operation": "o", "command": "c", "cwd": "/r",
+                "detail": "d", "reason": "disk_full",
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn manager_service_error_union_decodes_by_tag() {
+        let samples = [
+            json!({ "_tag": "GitManagerError", "operation": "o", "cwd": "/r", "detail": "d" }),
+            json!({
+                "_tag": "GitPullRequestMaterializationError", "cwd": "/r",
+                "pullRequestNumber": 4, "headRepository": null, "headBranch": "h",
+                "localBranch": "l", "cause": "boom",
+            }),
+            json!({
+                "_tag": "GitCommandError", "operation": "o", "command": "c", "cwd": "/r", "detail": "d",
+            }),
+            json!({
+                "_tag": "SourceControlProviderError", "provider": "github", "operation": "o",
+                "cwd": "/r", "detail": "d",
+            }),
+            json!({ "_tag": "TextGenerationError", "operation": "o", "detail": "d" }),
+        ];
+        let expected = [
+            "Git manager failed in o: d",
+            "Failed to materialize pull request #4 branch h as l.",
+            "Git command failed in o (/r): d",
+            "Source control provider github failed in o: d",
+            "Text generation failed in o: d",
+        ];
+        for (sample, message) in samples.into_iter().zip(expected) {
+            let error: GitManagerServiceError = round_trip(sample);
+            assert_eq!(error.to_string(), message);
+        }
+        assert!(
+            serde_json::from_value::<GitManagerServiceError>(
+                json!({ "_tag": "Other", "detail": "d" })
+            )
+            .is_err()
+        );
     }
 }

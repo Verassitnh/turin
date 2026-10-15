@@ -6,29 +6,64 @@
 //! the combinators that omit keys on encode (`optionalKey`,
 //! `ForwardCompatibleOptional`, `OmittedWhenNull`) skip serialization.
 //!
-//! Cut-module fields (device hosts, auth scopes, in-app preview browser
-//! defaults, browser profiles) are dropped; see the task's deviation report.
+//! Fields and helpers tied to cut modules are dropped (device hosts, auth
+//! scope helpers, preview browser defaults, browser profiles, the Antigravity
+//! provider settings); see the Deviations table in PORTING.md.
+//!
+//! Optionality follows PORTING.md: `optionalKey(X)` is `Option<X>` with the
+//! file-local `optional_key` codec (explicit `null` is rejected, as upstream
+//! does), `optionalKey(NullOr(X))` is `double_option`, and
+//! `withDecodingDefault` is a non-`Option` field with `default = "..."` and no
+//! `skip_serializing_if`. `Schema.Number` fields are written without a `.0`
+//! like `JSON.stringify` does (`js_number`).
 
-use crate::base_schemas::{ContractError, ProjectId, ThreadId, TrimmedNonEmptyString, TrimmedString};
+use crate::base_schemas::{
+    ContractError, ProjectId, ThreadId, TrimmedNonEmptyString, TrimmedString, js_len, js_number,
+    js_number_nullable, serialize_js_number,
+};
 use crate::environment::{EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules};
 use crate::keybindings::KeybindingShortcut;
 use crate::model::{
-    CustomModelSetting, ProviderOptionSelection, ProviderOptionSelectionValue,
-    DEFAULT_TEXT_GENERATION_MODEL, DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
+    CustomModelSetting, DEFAULT_TEXT_GENERATION_MODEL, DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
+    ProviderOptionSelection, ProviderOptionSelectionValue,
 };
 use crate::model_selection::ModelSelection;
 use crate::project::ProjectScript;
 use crate::provider_instance::{
     ProviderDriverKind, ProviderInstanceConfig, ProviderInstanceConfigMap, ProviderInstanceId,
 };
-use crate::provider_policy::{RuntimeMode, DEFAULT_RUNTIME_MODE};
+use crate::provider_policy::{DEFAULT_RUNTIME_MODE, RuntimeMode};
 use crate::pull_request::PullRequestMergeMethod;
 use crate::usage_limit_source_id::UsageLimitSourceId;
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
-use std::sync::LazyLock;
 use std::time::Duration;
+
+// ── Local serde helpers ────────────────────────────────────────
+
+/// `Schema.optionalKey(X)` / `Schema.optional(X)` for a non-nullable `X`: the
+/// key may be absent, but an explicit `null` is an invalid value, not "absent"
+/// (plain serde `Option<T>` silently turns `null` into `None`, so a patch like
+/// `{ "wordWrap": null }` would decode instead of being rejected as upstream
+/// does). Use as `#[serde(default, skip_serializing_if = "Option::is_none",
+/// with = "optional_key")]`. Nullable keys use `double_option` instead.
+mod optional_key {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer, T: Serialize>(
+        value: &Option<T>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+        d: D,
+    ) -> Result<Option<T>, D::Error> {
+        T::deserialize(d).map(Some)
+    }
+}
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -72,8 +107,7 @@ pub enum SidebarThreadSortOrder {
 }
 // Not exported: mobile was the last consumer of the value itself; the
 // wire field keeps its decoding default below.
-const DEFAULT_SIDEBAR_THREAD_SORT_ORDER: SidebarThreadSortOrder =
-    SidebarThreadSortOrder::UpdatedAt;
+const DEFAULT_SIDEBAR_THREAD_SORT_ORDER: SidebarThreadSortOrder = SidebarThreadSortOrder::UpdatedAt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SidebarProjectGroupingMode {
@@ -163,7 +197,7 @@ impl fmt::Display for SidebarAutoSettleAfterDays {
 
 impl Serialize for SidebarAutoSettleAfterDays {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_f64(self.0)
+        serialize_js_number(self.0, s)
     }
 }
 
@@ -300,8 +334,7 @@ impl<'de> Deserialize<'de> for PanelAnimationDurationMs {
     }
 }
 
-const DEFAULT_PANEL_ANIMATION_DURATION_MS: PanelAnimationDurationMs =
-    PanelAnimationDurationMs(0);
+const DEFAULT_PANEL_ANIMATION_DURATION_MS: PanelAnimationDurationMs = PanelAnimationDurationMs(0);
 
 /**
  * Font size preferences, in CSS pixels. The ranges are deliberately narrow:
@@ -672,16 +705,11 @@ mod quit_confirmation_mode_setting {
     use super::QuitConfirmationMode;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub fn serialize<S: Serializer>(
-        value: &QuitConfirmationMode,
-        s: S,
-    ) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(value: &QuitConfirmationMode, s: S) -> Result<S::Ok, S::Error> {
         value.serialize(s)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<QuitConfirmationMode, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<QuitConfirmationMode, D::Error> {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Wire {
@@ -709,9 +737,9 @@ pub struct FontFamilyPreference(String);
 impl FontFamilyPreference {
     const MAX_LENGTH: usize = 200;
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
-        if value.as_ref().chars().count() > Self::MAX_LENGTH {
+        if js_len(value.as_ref()) > Self::MAX_LENGTH {
             return Err(ContractError {
-                expected: "a font family of at most 200 chars",
+                expected: "a font family of at most 200 UTF-16 code units",
                 got: value.as_ref().to_owned(),
             });
         }
@@ -757,9 +785,9 @@ pub struct DefaultThemePreference(String);
 impl DefaultThemePreference {
     const MAX_LENGTH: usize = 64;
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
-        if value.as_ref().chars().count() > Self::MAX_LENGTH {
+        if js_len(value.as_ref()) > Self::MAX_LENGTH {
             return Err(ContractError {
-                expected: "a theme id of at most 64 chars",
+                expected: "a string of at most 64 UTF-16 code units",
                 got: value.as_ref().to_owned(),
             });
         }
@@ -798,12 +826,39 @@ impl<'de> Deserialize<'de> for DefaultThemePreference {
 pub const DEFAULT_BROWSER_AUTO_SHOW_FLOATING_PREVIEW: bool = true;
 pub const BROWSER_RECORDING_FRAME_RATES: &[i64] = &[30, 60];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `Schema.Literals([30, 60])`: numeric literals, so they travel as JSON
+/// numbers (`30`), not strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BrowserRecordingFrameRate {
-    #[serde(rename = "30")]
     Thirty,
-    #[serde(rename = "60")]
     Sixty,
+}
+
+impl BrowserRecordingFrameRate {
+    pub fn get(self) -> i64 {
+        match self {
+            Self::Thirty => 30,
+            Self::Sixty => 60,
+        }
+    }
+}
+
+impl Serialize for BrowserRecordingFrameRate {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_i64(self.get())
+    }
+}
+
+impl<'de> Deserialize<'de> for BrowserRecordingFrameRate {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match i64::deserialize(d)? {
+            30 => Ok(Self::Thirty),
+            60 => Ok(Self::Sixty),
+            other => Err(serde::de::Error::custom(format!(
+                "expected 30 or 60, got {other}"
+            ))),
+        }
+    }
 }
 pub const DEFAULT_BROWSER_RECORDING_FRAME_RATE: BrowserRecordingFrameRate =
     BrowserRecordingFrameRate::Thirty;
@@ -915,10 +970,6 @@ pub struct ModelPreferences {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_false() -> bool {
-    false
 }
 
 fn default_notification_mode() -> NotificationMode {
@@ -1156,7 +1207,8 @@ pub struct ClientSettings {
     #[serde(default)]
     pub provider_model_preferences: ProviderModelPreferences,
     #[serde(default)]
-    pub pull_request_merge_method_overrides: IndexMap<TrimmedNonEmptyString, PullRequestMergeMethod>,
+    pub pull_request_merge_method_overrides:
+        IndexMap<TrimmedNonEmptyString, PullRequestMergeMethod>,
     // Legacy plan mode. The composer's Build/Plan toggle was removed from the
     // default UI; this beta flag restores it (plus the /plan and /default slash
     // commands) for users who still rely on the old workflow.
@@ -1269,7 +1321,7 @@ impl fmt::Display for UsageModelTokenPrice {
 
 impl Serialize for UsageModelTokenPrice {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_f64(self.0)
+        serialize_js_number(self.0, s)
     }
 }
 
@@ -1285,16 +1337,27 @@ impl<'de> Deserialize<'de> for UsageModelTokenPrice {
 pub struct UsageModelPriceOverride {
     pub input_cost_per_million_tokens: UsageModelTokenPrice,
     pub output_cost_per_million_tokens: UsageModelTokenPrice,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub cache_read_cost_per_million_tokens: Option<UsageModelTokenPrice>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub cache_write_cost_per_million_tokens: Option<UsageModelTokenPrice>,
 }
 
 /// `makeBinaryPathSetting(fallback)`: a binary path setting that decodes empty
 /// input to the provider's default executable. Encoding is the plain encoding,
-/// and the field's decoding default is the fallback itself.
-fn decode_binary_path_setting<'de, D>(d: D, fallback: &str) -> Result<TrimmedString, D::Error>
+/// and the field's decoding default is the fallback itself. serde `with`
+/// modules cannot take a parameter, so each provider settings struct wraps this
+/// in a two-line module (see `codex_binary_path`) and pairs it with
+/// `#[serde(default = "...")]` returning the same fallback.
+pub fn decode_binary_path_setting<'de, D>(d: D, fallback: &str) -> Result<TrimmedString, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -1355,16 +1418,36 @@ pub struct ProviderSettingsFormOption {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSettingsFormAnnotation {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub control: Option<ProviderSettingsFormControl>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub placeholder: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub hidden: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub clear_when_empty: Option<ClearWhenEmpty>,
     /** Choices for a `select` control. The first entry is the default. */
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub options: Option<Vec<ProviderSettingsFormOption>>,
 }
 
@@ -1379,7 +1462,11 @@ pub enum ClearWhenEmpty {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSettingsFormSchemaAnnotation {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub order: Option<Vec<String>>,
 }
 
@@ -1402,7 +1489,11 @@ pub enum CodexSetupMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexSettings {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub setup_mode: Option<CodexSetupMode>,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -1497,68 +1588,137 @@ pub struct ClaudeSettings {
     pub auto_compact_window: AutoCompactWindow,
 }
 
-/**
- * Antigravity ACP auth methods. Personal and Enterprise open a Google sign-in
- * in the browser. The API key and Agent Platform methods take credentials from
- * the instance config and never open a browser.
- */
-pub static ANTIGRAVITY_AUTH_METHODS: LazyLock<Vec<ProviderSettingsFormOption>> =
-    LazyLock::new(|| {
-        vec![
-            ProviderSettingsFormOption {
-                value: "oauth-personal".to_owned(),
-                label: "Google account".to_owned(),
-            },
-            ProviderSettingsFormOption {
-                value: "oauth-business".to_owned(),
-                label: "Gemini Enterprise".to_owned(),
-            },
-            ProviderSettingsFormOption {
-                value: "gemini-api-key".to_owned(),
-                label: "Gemini API key".to_owned(),
-            },
-            ProviderSettingsFormOption {
-                value: "agent-platform".to_owned(),
-                label: "Agent Platform (Vertex AI)".to_owned(),
-            },
-        ]
-    });
+/// `secretSettingsFields(CodexSettings)`: neither built-in provider schema has
+/// a `secretSetting` field.
+pub const CODEX_SECRET_SETTINGS_FIELDS: &[&str] = &[];
+/// `secretSettingsFields(ClaudeSettings)`.
+pub const CLAUDE_SECRET_SETTINGS_FIELDS: &[&str] = &[];
+/// `secretSettingsFields(UsageLimitSourceConfig)`: stored in the secret store
+/// and redacted before reaching a client.
+pub const USAGE_LIMIT_SOURCE_SECRET_SETTINGS_FIELDS: &[&str] = &["managementKey"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum AntigravityAuthMethod {
-    #[serde(rename = "oauth-personal")]
-    OauthPersonal,
-    #[serde(rename = "oauth-business")]
-    OauthBusiness,
-    #[serde(rename = "gemini-api-key")]
-    GeminiApiKey,
-    #[serde(rename = "agent-platform")]
-    AgentPlatform,
+/// Order the settings form renders `CodexSettings` fields in
+/// (`makeProviderSettingsSchema` options).
+pub const CODEX_SETTINGS_FORM_ORDER: &[&str] =
+    &["binaryPath", "homePath", "shadowHomePath", "launchArgs"];
+/// Order the settings form renders `ClaudeSettings` fields in.
+pub const CLAUDE_SETTINGS_FORM_ORDER: &[&str] =
+    &["binaryPath", "homePath", "autoCompactWindow", "launchArgs"];
+
+/// The `Schema.annotateKey` metadata upstream attaches to one provider
+/// settings field: its title, description and `providerSettingsForm`
+/// annotation. The settings UI renders its form from these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSettingsFormField {
+    pub field: &'static str,
+    pub title: Option<&'static str>,
+    pub description: Option<&'static str>,
+    pub annotation: ProviderSettingsFormAnnotation,
 }
 
-fn default_antigravity_auth_method() -> AntigravityAuthMethod {
-    AntigravityAuthMethod::OauthPersonal
+fn hidden_form_field(field: &'static str) -> ProviderSettingsFormField {
+    ProviderSettingsFormField {
+        field,
+        title: None,
+        description: None,
+        annotation: ProviderSettingsFormAnnotation {
+            hidden: Some(true),
+            ..Default::default()
+        },
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AntigravitySettings {
-    #[serde(default = "default_false")]
-    pub enabled: bool,
-    #[serde(default = "default_antigravity_auth_method")]
-    pub auth_method: AntigravityAuthMethod,
-    // `secretSetting`: stored separately on the host and redacted before it
-    // reaches a client.
-    #[serde(default)]
-    pub api_key: TrimmedString,
-    #[serde(default)]
-    pub gcp_project: TrimmedString,
-    #[serde(default)]
-    pub gcp_location: TrimmedString,
-    #[serde(default)]
-    pub binary_path: TrimmedString,
-    #[serde(default)]
-    pub custom_models: Vec<CustomModelSetting>,
+fn form_field(
+    field: &'static str,
+    title: &'static str,
+    description: &'static str,
+    placeholder: Option<&'static str>,
+    clear_when_empty: Option<ClearWhenEmpty>,
+) -> ProviderSettingsFormField {
+    ProviderSettingsFormField {
+        field,
+        title: Some(title),
+        description: Some(description),
+        annotation: ProviderSettingsFormAnnotation {
+            placeholder: placeholder.map(str::to_owned),
+            clear_when_empty,
+            ..Default::default()
+        },
+    }
+}
+
+/// Annotations of `CodexSettings`, in declaration order.
+pub fn codex_settings_form_fields() -> Vec<ProviderSettingsFormField> {
+    vec![
+        hidden_form_field("setupMode"),
+        hidden_form_field("enabled"),
+        form_field(
+            "binaryPath",
+            "Binary path",
+            "Path to the Codex binary used by this instance.",
+            Some("codex"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+        form_field(
+            "homePath",
+            "CODEX_HOME path",
+            "Custom Codex home and config directory.",
+            Some("~/.codex"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+        form_field(
+            "shadowHomePath",
+            "Shadow home path",
+            "Account-specific Codex home. Keeps auth.json separate while sharing state from CODEX_HOME.",
+            Some("~/.codex-t3/personal"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+        // No `providerSettingsForm` annotation, only a title and description.
+        form_field(
+            "launchArgs",
+            "Launch arguments",
+            "Additional CLI arguments passed to codex app-server on session start.",
+            None,
+            None,
+        ),
+        hidden_form_field("customModels"),
+    ]
+}
+
+/// Annotations of `ClaudeSettings`, in declaration order.
+pub fn claude_settings_form_fields() -> Vec<ProviderSettingsFormField> {
+    vec![
+        hidden_form_field("enabled"),
+        form_field(
+            "binaryPath",
+            "Binary path",
+            "Path to the Claude binary used by this instance.",
+            Some("claude"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+        form_field(
+            "homePath",
+            "CLAUDE_CONFIG_DIR path",
+            "Custom Claude home and config directory. Keeps .claude.json and .claude separate.",
+            Some("~/.claude"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+        hidden_form_field("customModels"),
+        form_field(
+            "launchArgs",
+            "Launch arguments",
+            "Additional CLI arguments passed on session start.",
+            Some("e.g. --chrome"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+        form_field(
+            "autoCompactWindow",
+            "Auto-compact after",
+            "Compact after 100,000 to 1,000,000 tokens. Leave empty to use Claude's default.",
+            Some("e.g. 300000"),
+            Some(ClearWhenEmpty::Omit),
+        ),
+    ]
 }
 
 string_literal!(
@@ -1577,7 +1737,11 @@ string_literal!(
 #[serde(rename_all = "camelCase")]
 pub struct UsageLimitSourceConfig {
     pub kind: CliproxyKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub label: Option<TrimmedNonEmptyString>,
     pub url: TrimmedNonEmptyString,
     // `secretSetting`: stored separately on the host.
@@ -1595,8 +1759,10 @@ impl GitHubHost {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
         let trimmed = TrimmedNonEmptyString::new(value)?;
         // Lowercasing a trimmed, non-empty host leaves it trimmed and non-empty.
-        Ok(Self(TrimmedNonEmptyString::new(trimmed.as_str().to_lowercase())
-            .expect("lowercasing a trimmed non-empty host keeps it non-empty")))
+        Ok(Self(
+            TrimmedNonEmptyString::new(trimmed.as_str().to_lowercase())
+                .expect("lowercasing a trimmed non-empty host keeps it non-empty"),
+        ))
     }
     pub fn as_str(&self) -> &str {
         self.0.as_str()
@@ -1736,23 +1902,59 @@ pub enum BackgroundActivityProfileSelection {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundActivityOverrides {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub automatic_git_fetch_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub provider_health_refresh_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub host_power_monitor_active_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub host_power_monitor_idle_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub idle_client_ttl: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub pause_when_host_locked: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub pause_when_host_low_power: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub pause_when_client_low_power: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub pause_when_on_battery: Option<bool>,
 }
 
@@ -1777,7 +1979,11 @@ pub struct BackgroundActivitySettings {
     pub schema_version: BackgroundActivitySchemaVersion,
     #[serde(default = "default_background_activity_profile_selection")]
     pub profile: BackgroundActivityProfileSelection,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub base_profile: Option<BackgroundActivityProfile>,
     #[serde(default)]
     pub overrides: BackgroundActivityOverrides,
@@ -1915,7 +2121,11 @@ pub const PROJECT_SCOPED_SERVER_SETTING_KEYS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectProviderInstanceOverride {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub enabled: Option<bool>,
 }
 
@@ -1948,11 +2158,23 @@ pub struct ProjectSettingsOverrides {
         with = "crate::base_schemas::double_option"
     )]
     pub default_model_selection: Option<Option<ModelSelection>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub default_runtime_mode: Option<RuntimeMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub default_thread_env_mode: Option<ThreadEnvMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub new_worktrees_start_from_origin: Option<bool>,
     #[serde(
         default,
@@ -1960,15 +2182,35 @@ pub struct ProjectSettingsOverrides {
         with = "crate::base_schemas::forward_compatible_optional"
     )]
     pub worktree_submodules: Option<WorktreeSubmodules>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub default_auto_pull: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub default_project_scripts: Option<Vec<ProjectScript>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub enable_agent_browser_access: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub enable_agent_device_access: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub text_generation_model_selection: Option<ModelSelection>,
     #[serde(
         default,
@@ -1982,17 +2224,41 @@ pub struct ProjectSettingsOverrides {
         with = "crate::base_schemas::double_option"
     )]
     pub review_guide_model_selection: Option<Option<ModelSelection>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub review_guide_instructions: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub source_control_writing_style: Option<SourceControlWritingStyleSettings>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub remove_agent_credits_on_merge: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub branch_naming_mode: Option<BranchNamingMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub branch_name_prefix: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub branch_name_instructions: Option<TrimmedString>,
     #[serde(
         default,
@@ -2000,7 +2266,11 @@ pub struct ProjectSettingsOverrides {
         with = "crate::base_schemas::double_option"
     )]
     pub pull_request_merge_method: Option<Option<PullRequestMergeMethod>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub sidebar_auto_settle_on_merge: Option<bool>,
     #[serde(
         default,
@@ -2008,13 +2278,29 @@ pub struct ProjectSettingsOverrides {
         with = "crate::base_schemas::double_option"
     )]
     pub sidebar_auto_settle_after_days: Option<Option<SidebarAutoSettleAfterDays>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub sidebar_auto_settle_keep_pull_requests: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub continue_threads_after_server_update: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub response_streaming_mode: Option<ResponseStreamingMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub provider_instances: Option<IndexMap<ProviderInstanceId, ProjectProviderInstanceOverride>>,
 }
 
@@ -2066,9 +2352,9 @@ pub struct StorageCleanupReportEntry {
     pub path: Option<String>,
     pub thread_id: Option<ThreadId>,
     pub thread_title: Option<String>,
-    #[serde(default)]
+    #[serde(default, with = "js_number_nullable")]
     pub bytes: Option<f64>,
-    #[serde(default)]
+    #[serde(default, with = "js_number_nullable")]
     pub files: Option<f64>,
 }
 
@@ -2082,8 +2368,11 @@ pub enum StorageCleanupReportTrigger {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageCleanupCounts {
+    #[serde(with = "js_number")]
     pub removed: f64,
+    #[serde(with = "js_number")]
     pub kept: f64,
+    #[serde(with = "js_number")]
     pub failed: f64,
 }
 
@@ -2095,8 +2384,9 @@ pub struct StorageCleanupReport {
     pub finished_at: String,
     pub entries: Vec<StorageCleanupReportEntry>,
     pub counts: StorageCleanupCounts,
+    #[serde(with = "js_number")]
     pub omitted_count: f64,
-    #[serde(default)]
+    #[serde(default, with = "js_number")]
     pub bytes_freed: f64,
 }
 
@@ -2107,6 +2397,7 @@ fn default_storage_cleanup() -> StorageCleanupSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageCleanupSettings {
+    #[serde(default = "default_worktree_keep_when")]
     pub worktree_keep_when: WorktreeKeepWhen,
     #[serde(default)]
     pub worktree_after_days: Option<StorageRetentionDays>,
@@ -2581,19 +2872,35 @@ impl fmt::Display for ServerSettingsOperation {
 /// `ServerSettingsError` (upstream `Schema.TaggedError`). The Display mirrors
 /// upstream's `get message()`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ServerSettingsError {
     #[serde(rename = "ServerSettingsError")]
     ServerSettingsError {
         settings_path: String,
         operation: ServerSettingsOperation,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "optional_key"
+        )]
         provider_instance_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "optional_key"
+        )]
         environment_variable: Option<String>,
         // Validation failures (e.g. a create colliding with an existing
         // instance) originate without an upstream defect.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "optional_key"
+        )]
         cause: Option<serde_json::Value>,
     },
 }
@@ -2660,9 +2967,17 @@ pub fn default_unified_settings() -> UnifiedSettings {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSelectionPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub instance_id: Option<ProviderInstanceId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub model: Option<TrimmedNonEmptyString>,
     #[serde(
         default,
@@ -2721,16 +3036,28 @@ pub struct SetProviderModelOrder {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrateModelPreferences {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub favorites: Option<ModelFavorites>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub provider_model_preferences: Option<ProviderModelPreferences>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeCleanupRulesPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub worktree_keep_when: Option<WorktreeKeepWhen>,
     #[serde(
         default,
@@ -2738,11 +3065,23 @@ pub struct WorktreeCleanupRulesPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub worktree_after_days: Option<Option<StorageRetentionDays>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub worktree_on_merge: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub worktree_on_delete: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub worktree_unchanged: Option<bool>,
 }
 
@@ -2753,15 +3092,17 @@ pub enum WorktreeCleanupPatch {
     #[serde(rename = "off")]
     Off,
     #[serde(rename = "custom")]
-    Custom {
-        rules: WorktreeCleanupRulesPatch,
-    },
+    Custom { rules: WorktreeCleanupRulesPatch },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageCleanupSettingsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub worktree_keep_when: Option<WorktreeKeepWhen>,
     #[serde(
         default,
@@ -2769,11 +3110,23 @@ pub struct StorageCleanupSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub worktree_after_days: Option<Option<StorageRetentionDays>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub worktree_on_merge: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub worktree_on_delete: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub worktree_unchanged: Option<bool>,
     #[serde(
         default,
@@ -2789,79 +3142,124 @@ pub struct StorageCleanupSettingsPatch {
     pub logs_after_days: Option<Option<StorageRetentionDays>>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BackgroundActivityOverridesPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub automatic_git_fetch_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_health_refresh_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_power_monitor_active_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_power_monitor_idle_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idle_client_ttl: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_when_host_locked: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_when_host_low_power: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_when_client_low_power: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_when_on_battery: Option<bool>,
-}
+/// Upstream's patch reuses `BackgroundActivityOverrides` (every key is already
+/// optional).
+pub type BackgroundActivityOverridesPatch = BackgroundActivityOverrides;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundActivitySettingsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub schema_version: Option<BackgroundActivitySchemaVersion>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub profile: Option<BackgroundActivityProfileSelection>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub base_profile: Option<BackgroundActivityProfile>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub overrides: Option<BackgroundActivityOverridesPatch>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceControlWritingStyleSettingsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub mode: Option<SourceControlWritingStyleMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub custom_instructions: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub follow_change_request_templates: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservabilitySettingsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub otlp_traces_url: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub otlp_metrics_url: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub otlp_logs_url: Option<TrimmedString>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerSettingsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub set_model_favorites: Option<Vec<SetModelFavorite>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub set_models_hidden: Option<Vec<SetModelHidden>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub set_provider_model_order: Option<SetProviderModelOrder>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub favorites: Option<ModelFavorites>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub provider_model_preferences: Option<ProviderModelPreferences>,
     // Applied under the settings service's write lock, only while still unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub migrate_model_preferences: Option<MigrateModelPreferences>,
     #[serde(
         default,
@@ -2869,28 +3267,72 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub worktree_cleanup: Option<Option<WorktreeCleanupPatch>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub storage_cleanup: Option<StorageCleanupSettingsPatch>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub worktrees_directory: Option<TrimmedString>,
     // Server settings
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub response_streaming_mode: Option<ResponseStreamingMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub enable_provider_update_checks: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub continue_threads_after_server_update: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub enable_agent_browser_access: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub project_agent_browser_access_overrides: Option<IndexMap<ProjectId, Option<bool>>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub default_auto_pull: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub default_project_scripts: Option<Vec<ProjectScript>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub project_script_overrides: Option<IndexMap<ProjectId, Option<Vec<ProjectScript>>>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub project_auto_pull_overrides: Option<IndexMap<ProjectId, Option<bool>>>,
     #[serde(
         default,
@@ -2898,7 +3340,11 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub default_model_selection: Option<Option<ModelSelection>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub default_runtime_mode: Option<RuntimeMode>,
     /**
      * Per-project entry replacement: each entry replaces that project's whole
@@ -2912,13 +3358,29 @@ pub struct ServerSettingsPatch {
      * that field existed cannot wipe it by editing another key. Clearing every
      * provider override for a project means sending `providerInstances: {}`.
      */
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub project_settings_overrides: Option<IndexMap<ProjectId, Option<ProjectSettingsOverrides>>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub enable_agent_device_access: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub enable_device_support: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub device_onboarding_completed: Option<bool>,
     #[serde(
         default,
@@ -2926,21 +3388,53 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub sidebar_auto_settle_after_days: Option<Option<SidebarAutoSettleAfterDays>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub sidebar_auto_settle_keep_pull_requests: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub sidebar_auto_settle_on_merge: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub auto_resume_limited_threads: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub snooze_limited_threads: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub background_activity: Option<BackgroundActivitySettingsPatch>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub automatic_git_fetch_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub provider_health_refresh_interval: Option<DurationFromMillis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub background_activity_profile: Option<BackgroundActivityProfile>,
     #[serde(
         default,
@@ -2954,7 +3448,11 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub default_thread_env_mode: Option<Option<ThreadEnvMode>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub new_worktrees_start_from_origin: Option<bool>,
     #[serde(
         default,
@@ -2962,19 +3460,47 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub worktree_submodules: Option<Option<WorktreeSubmodules>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub add_project_base_directory: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub text_generation_model_selection: Option<ModelSelectionPatch>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub branch_naming_mode: Option<BranchNamingMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub branch_name_prefix: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub branch_name_instructions: Option<TrimmedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub remove_agent_credits_on_merge: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub source_control_writing_style: Option<SourceControlWritingStyleSettingsPatch>,
     #[serde(
         default,
@@ -2982,7 +3508,11 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub source_control_writer_model_selection: Option<Option<ModelSelection>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub review_guides_enabled: Option<bool>,
     #[serde(
         default,
@@ -2990,7 +3520,11 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub review_guide_model_selection: Option<Option<ModelSelection>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub review_guide_instructions: Option<TrimmedString>,
     #[serde(
         default,
@@ -2998,84 +3532,199 @@ pub struct ServerSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub pull_request_merge_method: Option<Option<PullRequestMergeMethod>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub observability: Option<ObservabilitySettingsPatch>,
     /**
      * Merges per host: a patched field replaces the saved one, so a client sends a per-server-host
      * map whole, with the redaction marker for each saved secret it keeps. An empty or omitted
      * secret is removed from the secret store.
      */
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub source_control_hosts: Option<IndexMap<String, SourceControlHostSettings>>,
     // Whole-map replacement for the new instance config. Patching individual
     // entries is intentionally out of scope: the map is small, and partial
     // patches risk leaving driver-specific config in a half-merged state.
     // The web UI sends a fully-formed map every time it edits this field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub provider_instances: Option<ProviderInstanceConfigMap>,
     // Per-entry, unlike `providerInstances`: a client only ever adds or removes
     // one source, and sending the whole map races another edit that has not
     // echoed back yet. `null` removes; the server merges into its current map.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub usage_limit_sources: Option<IndexMap<UsageLimitSourceId, Option<UsageLimitSourceConfig>>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub cursor_keychain_usage_enabled: Option<bool>,
     /** Each entry replaces one model's rates; `null` restores automatic pricing. */
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub usage_price_overrides:
         Option<IndexMap<TrimmedNonEmptyString, Option<UsageModelPriceOverride>>>,
     /** Each entry replaces one model's mapping; `null` removes it. */
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage_model_aliases:
-        Option<IndexMap<TrimmedNonEmptyString, Option<TrimmedNonEmptyString>>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
+    pub usage_model_aliases: Option<IndexMap<TrimmedNonEmptyString, Option<TrimmedNonEmptyString>>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientSettingsPatch {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub notification_mode: Option<NotificationMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub in_app_notifications_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub diff_color_scheme: Option<DiffColorScheme>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub chat_width: Option<ChatWidth>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub load_balancing_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub load_balancing_weights: Option<LoadBalancingWeights>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub appearance_contrast: Option<AppearanceContrast>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub panel_animation_duration_ms: Option<PanelAnimationDurationMs>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub browser_recording_frame_rate: Option<BrowserRecordingFrameRate>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub browser_recording_show_key_presses: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub browser_recording_show_mouse_presses: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub browser_link_target: Option<BrowserLinkTarget>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub browser_auto_show_floating_preview: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub confirm_quit: Option<QuitConfirmationMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub confirm_thread_archive: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub confirm_thread_delete: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub confirm_thread_unpin: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub diff_files_collapsed: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub diff_ignore_whitespace: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub diff_layout: Option<DiffLayout>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub environment_identification_mode: Option<EnvironmentIdentificationMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub glass_opacity: Option<GlassOpacity>,
     #[serde(
         default,
@@ -3083,80 +3732,229 @@ pub struct ClientSettingsPatch {
         with = "crate::base_schemas::double_option"
     )]
     pub onboarding_completed_at: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub font_size_interface: Option<InterfaceFontSize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub font_size_prompt: Option<PromptFontSize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub font_size_code: Option<CodeFontSize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub font_size_terminal: Option<TerminalFontSize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub font_family_code: Option<FontFamilyPreference>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub font_family_composer: Option<FontFamilyPreference>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub font_family_sans: Option<FontFamilyPreference>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub font_family_terminal: Option<FontFamilyPreference>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub font_smoothing: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub persist_composer_context_strip: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub favorites: Option<ModelFavorites>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub provider_model_preferences: Option<ProviderModelPreferences>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pull_request_merge_method_overrides: Option<IndexMap<TrimmedNonEmptyString, PullRequestMergeMethod>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
+    pub pull_request_merge_method_overrides:
+        Option<IndexMap<TrimmedNonEmptyString, PullRequestMergeMethod>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub plan_mode_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub context_window_meter_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub composer_collapse_on_scroll: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub composer_rich_text_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub send_shortcut: Option<SendShortcut>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub follow_up_behavior: Option<FollowUpBehavior>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub proactive_panels_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub show_skills_in_slash_menu: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub legacy_sidebar_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub sidebar_working_shelf_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub sidebar_project_grouping_mode: Option<SidebarProjectGroupingMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub sidebar_project_grouping_overrides:
         Option<IndexMap<TrimmedNonEmptyString, SidebarProjectGroupingMode>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub sidebar_project_sort_order: Option<SidebarProjectSortOrder>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub sidebar_thread_sort_order: Option<SidebarThreadSortOrder>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub sidebar_thread_preview_count: Option<SidebarThreadPreviewCount>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub timestamp_format: Option<TimestampFormat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub snap_shot_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub snap_shot_include_accessibility: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub snap_shot_shortcut: Option<SnapShotShortcut>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub snap_shot_play_sound: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub snap_shot_sound: Option<SnapShotSound>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub snap_shot_flash: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub snap_shot_animations: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_key"
+    )]
     pub word_wrap: Option<bool>,
 }
 
@@ -3201,7 +3999,11 @@ mod tests {
         ProjectId::new(id).unwrap()
     }
 
-    fn config(driver: &str, enabled: Option<bool>, config: serde_json::Value) -> ProviderInstanceConfig {
+    fn config(
+        driver: &str,
+        enabled: Option<bool>,
+        config: serde_json::Value,
+    ) -> ProviderInstanceConfig {
         ProviderInstanceConfig {
             driver: provider_driver(driver),
             display_name: None,
@@ -3236,10 +4038,13 @@ mod tests {
                 json!(mode)
             );
             let patch = decode_server_patch(input.clone());
-            assert_eq!(patch.response_streaming_mode, Some(match mode {
-                "turn" => ResponseStreamingMode::Turn,
-                _ => ResponseStreamingMode::Paragraph,
-            }));
+            assert_eq!(
+                patch.response_streaming_mode,
+                Some(match mode {
+                    "turn" => ResponseStreamingMode::Turn,
+                    _ => ResponseStreamingMode::Paragraph,
+                })
+            );
         }
     }
 
@@ -3346,17 +4151,21 @@ mod tests {
             })
         );
         assert_eq!(
-            decode_server_patch(json!({ "storageCleanup": { "worktreeKeepWhen": "tracked-changes" } }))
-                .storage_cleanup,
+            decode_server_patch(
+                json!({ "storageCleanup": { "worktreeKeepWhen": "tracked-changes" } })
+            )
+            .storage_cleanup,
             Some(StorageCleanupSettingsPatch {
                 worktree_keep_when: Some(WorktreeKeepWhen::TrackedChanges),
                 ..Default::default()
             })
         );
-        assert!(serde_json::from_value::<ServerSettingsPatch>(
-            json!({ "storageCleanup": { "worktreeKeepWhen": "unknown" } })
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<ServerSettingsPatch>(
+                json!({ "storageCleanup": { "worktreeKeepWhen": "unknown" } })
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3384,10 +4193,7 @@ mod tests {
     fn rich_text_preserves_explicit_opt_out() {
         let settings = decode_client(json!({ "composerRichTextEnabled": false }));
         assert!(!settings.composer_rich_text_enabled);
-        assert_eq!(
-            encode(&settings)["composerRichTextEnabled"],
-            json!(false)
-        );
+        assert_eq!(encode(&settings)["composerRichTextEnabled"], json!(false));
         assert_eq!(
             decode_client_patch(json!({ "composerRichTextEnabled": false }))
                 .composer_rich_text_enabled,
@@ -3433,27 +4239,30 @@ mod tests {
                 encoded["projectSettingsOverrides"]["project"]["defaultRuntimeMode"],
                 json!(mode_json)
             );
-            assert_eq!(
-                decode_server_patch(input).default_runtime_mode,
-                Some(mode)
-            );
+            assert_eq!(decode_server_patch(input).default_runtime_mode, Some(mode));
         }
     }
 
     #[test]
     fn default_permissions_reject_unsupported() {
-        assert!(serde_json::from_value::<ServerSettings>(json!({
-            "defaultRuntimeMode": "unsupported"
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<ServerSettingsPatch>(json!({
-            "defaultRuntimeMode": "unsupported"
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<ServerSettingsPatch>(json!({
-            "projectSettingsOverrides": { "project": { "defaultRuntimeMode": "unsupported" } }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ServerSettings>(json!({
+                "defaultRuntimeMode": "unsupported"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ServerSettingsPatch>(json!({
+                "defaultRuntimeMode": "unsupported"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ServerSettingsPatch>(json!({
+                "projectSettingsOverrides": { "project": { "defaultRuntimeMode": "unsupported" } }
+            }))
+            .is_err()
+        );
     }
 
     // ── ServerSettings usage price overrides ─────────────────────
@@ -3474,8 +4283,8 @@ mod tests {
             encoded["usagePriceOverrides"],
             json!({
                 "vendor/example-model": {
-                    "inputCostPerMillionTokens": 2.0,
-                    "outputCostPerMillionTokens": 8.0
+                    "inputCostPerMillionTokens": 2,
+                    "outputCostPerMillionTokens": 8
                 }
             })
         );
@@ -3492,8 +4301,7 @@ mod tests {
             },
             "removed-model": null
         });
-        let patch =
-            decode_server_patch(json!({ "usagePriceOverrides": overrides.clone() }));
+        let patch = decode_server_patch(json!({ "usagePriceOverrides": overrides.clone() }));
         let decoded = patch.usage_price_overrides.as_ref().unwrap();
         assert_eq!(decoded.len(), 2);
         assert_eq!(
@@ -3522,14 +4330,18 @@ mod tests {
                         field: value
                     }
                 });
-                assert!(serde_json::from_value::<ServerSettings>(json!({
-                    "usagePriceOverrides": usage_price_overrides
-                }))
-                .is_err());
-                assert!(serde_json::from_value::<ServerSettingsPatch>(json!({
-                    "usagePriceOverrides": usage_price_overrides
-                }))
-                .is_err());
+                assert!(
+                    serde_json::from_value::<ServerSettings>(json!({
+                        "usagePriceOverrides": usage_price_overrides
+                    }))
+                    .is_err()
+                );
+                assert!(
+                    serde_json::from_value::<ServerSettingsPatch>(json!({
+                        "usagePriceOverrides": usage_price_overrides
+                    }))
+                    .is_err()
+                );
             }
         }
     }
@@ -3669,8 +4481,9 @@ mod tests {
     fn notifications_round_trip_in_app_preference() {
         for enabled in [true, false] {
             assert_eq!(
-                encode(&decode_client(json!({ "inAppNotificationsEnabled": enabled })))
-                    ["inAppNotificationsEnabled"],
+                encode(&decode_client(
+                    json!({ "inAppNotificationsEnabled": enabled })
+                ))["inAppNotificationsEnabled"],
                 json!(enabled)
             );
             assert_eq!(
@@ -3684,14 +4497,18 @@ mod tests {
     #[test]
     fn notifications_reject_invalid_in_app_preference() {
         for value in [json!("true"), json!(1), json!(null)] {
-            assert!(serde_json::from_value::<ClientSettings>(json!({
-                "inAppNotificationsEnabled": value
-            }))
-            .is_err());
-            assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-                "inAppNotificationsEnabled": value
-            }))
-            .is_err());
+            assert!(
+                serde_json::from_value::<ClientSettings>(json!({
+                    "inAppNotificationsEnabled": value
+                }))
+                .is_err()
+            );
+            assert!(
+                serde_json::from_value::<ClientSettingsPatch>(json!({
+                    "inAppNotificationsEnabled": value
+                }))
+                .is_err()
+            );
         }
     }
 
@@ -3720,14 +4537,18 @@ mod tests {
     #[test]
     fn notifications_reject_unsupported_modes() {
         for mode in [json!("always"), json!(true), json!(null)] {
-            assert!(serde_json::from_value::<ClientSettings>(json!({
-                "notificationMode": mode
-            }))
-            .is_err());
-            assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-                "notificationMode": mode
-            }))
-            .is_err());
+            assert!(
+                serde_json::from_value::<ClientSettings>(json!({
+                    "notificationMode": mode
+                }))
+                .is_err()
+            );
+            assert!(
+                serde_json::from_value::<ClientSettingsPatch>(json!({
+                    "notificationMode": mode
+                }))
+                .is_err()
+            );
         }
     }
 
@@ -3824,9 +4645,12 @@ mod tests {
         assert!(!settings.legacy_sidebar_enabled);
         assert!(settings.word_wrap);
         assert!(settings.composer_collapse_on_scroll);
-        assert_eq!(decode_client_patch(json!({
-            "compactSidebarEnabled": true, "sidebarCompactThreadRows": true
-        })), ClientSettingsPatch::default());
+        assert_eq!(
+            decode_client_patch(json!({
+                "compactSidebarEnabled": true, "sidebarCompactThreadRows": true
+            })),
+            ClientSettingsPatch::default()
+        );
     }
 
     #[test]
@@ -3834,8 +4658,7 @@ mod tests {
         assert!(decode_client(json!({})).diff_files_collapsed);
         for collapsed in [true, false] {
             assert_eq!(
-                encode(&decode_client(json!({ "diffFilesCollapsed": collapsed })))
-                    ["diffFilesCollapsed"],
+                encode(&decode_client(json!({ "diffFilesCollapsed": collapsed })))["diffFilesCollapsed"],
                 json!(collapsed)
             );
             assert_eq!(
@@ -3865,14 +4688,18 @@ mod tests {
                 Some(expected)
             );
         }
-        assert!(serde_json::from_value::<ClientSettings>(json!({
-            "diffColorScheme": "purple-yellow"
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "diffColorScheme": "purple-yellow"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettings>(json!({
+                "diffColorScheme": "purple-yellow"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "diffColorScheme": "purple-yellow"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -3892,10 +4719,12 @@ mod tests {
                 Some(expected)
             );
         }
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "chatWidth": "huge"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "chatWidth": "huge"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -3913,10 +4742,12 @@ mod tests {
 
     #[test]
     fn load_balancing_weights_are_range_checked() {
-        assert!(serde_json::from_value::<ClientSettings>(json!({
-            "loadBalancingWeights": { "gpt-5.6": 101 }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettings>(json!({
+                "loadBalancingWeights": { "gpt-5.6": 101 }
+            }))
+            .is_err()
+        );
         let decoded = decode_client(json!({ "loadBalancingWeights": { "gpt-5.6": 60 } }));
         assert_eq!(
             decoded.load_balancing_weights,
@@ -3948,8 +4779,7 @@ mod tests {
     fn proactive_panels_are_opt_in() {
         assert!(!decode_client(json!({})).proactive_panels_enabled);
         assert_eq!(
-            decode_client_patch(json!({ "proactivePanelsEnabled": true }))
-                .proactive_panels_enabled,
+            decode_client_patch(json!({ "proactivePanelsEnabled": true })).proactive_panels_enabled,
             Some(true)
         );
     }
@@ -3957,7 +4787,10 @@ mod tests {
     #[test]
     fn context_window_meter_defaults_off() {
         assert!(!decode_client(json!({})).context_window_meter_enabled);
-        assert!(decode_client(json!({ "contextWindowMeterEnabled": true })).context_window_meter_enabled);
+        assert!(
+            decode_client(json!({ "contextWindowMeterEnabled": true }))
+                .context_window_meter_enabled
+        );
         assert_eq!(
             decode_client_patch(json!({ "contextWindowMeterEnabled": true }))
                 .context_window_meter_enabled,
@@ -3970,18 +4803,24 @@ mod tests {
         assert_eq!(decode_client(json!({})).send_shortcut, SendShortcut::Enter);
         for shortcut in ["enter", "mod-enter-multiline", "mod-enter"] {
             assert_eq!(
-                decode_client(json!({ "sendShortcut": shortcut })).send_shortcut.as_str_name(),
+                decode_client(json!({ "sendShortcut": shortcut }))
+                    .send_shortcut
+                    .as_str_name(),
                 shortcut
             );
             assert_eq!(
-                decode_client_patch(json!({ "sendShortcut": shortcut })).send_shortcut.map(|s| s.as_str_name()),
+                decode_client_patch(json!({ "sendShortcut": shortcut }))
+                    .send_shortcut
+                    .map(|s| s.as_str_name()),
                 Some(shortcut)
             );
         }
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "sendShortcut": "invalid"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "sendShortcut": "invalid"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -3992,18 +4831,24 @@ mod tests {
         );
         for behavior in ["queue", "steer"] {
             assert_eq!(
-                decode_client(json!({ "followUpBehavior": behavior })).follow_up_behavior.as_str_name(),
+                decode_client(json!({ "followUpBehavior": behavior }))
+                    .follow_up_behavior
+                    .as_str_name(),
                 behavior
             );
             assert_eq!(
-                decode_client_patch(json!({ "followUpBehavior": behavior })).follow_up_behavior.map(|b| b.as_str_name()),
+                decode_client_patch(json!({ "followUpBehavior": behavior }))
+                    .follow_up_behavior
+                    .map(|b| b.as_str_name()),
                 Some(behavior)
             );
         }
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "followUpBehavior": "invalid"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "followUpBehavior": "invalid"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -4063,10 +4908,12 @@ mod tests {
 
     #[test]
     fn snapshot_rejects_unknown_sounds() {
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "snapShotSound": "doorbell"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "snapShotSound": "doorbell"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -4085,21 +4932,25 @@ mod tests {
             snap_shot_shortcut_modifier_pair(&patch.snap_shot_shortcut.unwrap()),
             SnapShotModifier::Meta
         );
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "snapShotShortcut": { "kind": "modifier-pair", "modifier": "hyper" }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "snapShotShortcut": { "kind": "modifier-pair", "modifier": "hyper" }
+            }))
+            .is_err()
+        );
     }
 
     #[test]
     fn snapshot_rejects_chords_without_a_modifier() {
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "snapShotShortcut": {
-                "key": "w", "metaKey": false, "ctrlKey": false,
-                "shiftKey": false, "altKey": false, "modKey": false
-            }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "snapShotShortcut": {
+                    "key": "w", "metaKey": false, "ctrlKey": false,
+                    "shiftKey": false, "altKey": false, "modKey": false
+                }
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -4147,7 +4998,10 @@ mod tests {
 
     #[test]
     fn quit_confirmation_defaults_to_hold() {
-        assert_eq!(decode_client(json!({})).confirm_quit, QuitConfirmationMode::Hold);
+        assert_eq!(
+            decode_client(json!({})).confirm_quit,
+            QuitConfirmationMode::Hold
+        );
     }
 
     #[test]
@@ -4180,10 +5034,12 @@ mod tests {
 
     #[test]
     fn quit_confirmation_rejects_booleans_at_the_patch_boundary() {
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "confirmQuit": true
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "confirmQuit": true
+            }))
+            .is_err()
+        );
     }
 
     // ── ClientSettings recording and appearance ranges ───────────
@@ -4194,7 +5050,13 @@ mod tests {
             decode_client(json!({})).browser_recording_frame_rate,
             BrowserRecordingFrameRate::Thirty
         );
-        for (rate, ok) in [(30, true), (60, true), (24, false), (59, false), (120, false)] {
+        for (rate, ok) in [
+            (30, true),
+            (60, true),
+            (24, false),
+            (59, false),
+            (120, false),
+        ] {
             assert_eq!(
                 serde_json::from_value::<ClientSettings>(json!({
                     "browserRecordingFrameRate": rate
@@ -4227,8 +5089,17 @@ mod tests {
 
     #[test]
     fn glass_opacity_ranges() {
-        assert_eq!(decode_client(json!({})).glass_opacity, GlassOpacity::new(80).unwrap());
-        for (value, ok) in [(39, false), (101, false), (40, true), (75, true), (100, true)] {
+        assert_eq!(
+            decode_client(json!({})).glass_opacity,
+            GlassOpacity::new(80).unwrap()
+        );
+        for (value, ok) in [
+            (39, false),
+            (101, false),
+            (40, true),
+            (75, true),
+            (100, true),
+        ] {
             assert_eq!(
                 serde_json::from_value::<ClientSettings>(json!({ "glassOpacity": value })).is_ok(),
                 ok
@@ -4249,7 +5120,14 @@ mod tests {
             decode_client(json!({})).appearance_contrast,
             AppearanceContrast::new(100).unwrap()
         );
-        for (value, ok) in [(49, false), (201, false), (50, true), (100, true), (150, true), (200, true)] {
+        for (value, ok) in [
+            (49, false),
+            (201, false),
+            (50, true),
+            (100, true),
+            (150, true),
+            (200, true),
+        ] {
             assert_eq!(
                 serde_json::from_value::<ClientSettings>(json!({ "appearanceContrast": value }))
                     .is_ok(),
@@ -4263,7 +5141,10 @@ mod tests {
                 ok
             );
         }
-        assert!(serde_json::from_value::<ClientSettings>(json!({ "appearanceContrast": 92.5 })).is_err());
+        assert!(
+            serde_json::from_value::<ClientSettings>(json!({ "appearanceContrast": 92.5 }))
+                .is_err()
+        );
     }
 
     #[test]
@@ -4272,7 +5153,13 @@ mod tests {
             decode_client(json!({})).panel_animation_duration_ms,
             PanelAnimationDurationMs::new(0).unwrap()
         );
-        for (value, ok) in [(0, true), (400, true), (-1, false), (401, false), (150, true)] {
+        for (value, ok) in [
+            (0, true),
+            (400, true),
+            (-1, false),
+            (401, false),
+            (150, true),
+        ] {
             assert_eq!(
                 serde_json::from_value::<ClientSettingsPatch>(json!({
                     "panelAnimationDurationMs": value
@@ -4281,19 +5168,27 @@ mod tests {
                 ok
             );
         }
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "panelAnimationDurationMs": 150.5
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "panelAnimationDurationMs": 150.5
+            }))
+            .is_err()
+        );
     }
 
     #[test]
     fn font_sizes_default_and_range_check() {
         let settings = decode_client(json!({}));
-        assert_eq!(settings.font_size_interface, InterfaceFontSize::new(16).unwrap());
+        assert_eq!(
+            settings.font_size_interface,
+            InterfaceFontSize::new(16).unwrap()
+        );
         assert_eq!(settings.font_size_prompt, PromptFontSize::new(14).unwrap());
         assert_eq!(settings.font_size_code, CodeFontSize::new(13).unwrap());
-        assert_eq!(settings.font_size_terminal, TerminalFontSize::new(12).unwrap());
+        assert_eq!(
+            settings.font_size_terminal,
+            TerminalFontSize::new(12).unwrap()
+        );
         for (value, ok) in [(11, false), (12, true), (20, true), (21, false)] {
             assert_eq!(
                 serde_json::from_value::<ClientSettings>(json!({ "fontSizeInterface": value }))
@@ -4302,7 +5197,9 @@ mod tests {
             );
         }
         assert!(serde_json::from_value::<ClientSettings>(json!({ "fontSizeCode": 9 })).is_err());
-        assert!(serde_json::from_value::<ClientSettings>(json!({ "fontSizeTerminal": 21 })).is_err());
+        assert!(
+            serde_json::from_value::<ClientSettings>(json!({ "fontSizeTerminal": 21 })).is_err()
+        );
     }
 
     #[test]
@@ -4319,10 +5216,12 @@ mod tests {
                 Some(mode)
             );
         }
-        assert!(serde_json::from_value::<ClientSettings>(json!({
-            "environmentIdentificationMode": "badge"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettings>(json!({
+                "environmentIdentificationMode": "badge"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -4344,7 +5243,10 @@ mod tests {
 
     #[test]
     fn timestamp_format_round_trips() {
-        assert_eq!(decode_client(json!({})).timestamp_format, TimestampFormat::Locale);
+        assert_eq!(
+            decode_client(json!({})).timestamp_format,
+            TimestampFormat::Locale
+        );
         for (format, expected) in [
             ("locale", TimestampFormat::Locale),
             ("12-hour", TimestampFormat::TwelveHour),
@@ -4365,7 +5267,11 @@ mod tests {
 
     #[test]
     fn client_pr_merge_method_overrides_default_empty() {
-        assert!(decode_client(json!({})).pull_request_merge_method_overrides.is_empty());
+        assert!(
+            decode_client(json!({}))
+                .pull_request_merge_method_overrides
+                .is_empty()
+        );
         let patch = decode_client_patch(json!({
             "pullRequestMergeMethodOverrides": { "project": "squash" }
         }));
@@ -4380,10 +5286,12 @@ mod tests {
                 .collect()
             )
         );
-        assert!(serde_json::from_value::<ClientSettingsPatch>(json!({
-            "pullRequestMergeMethodOverrides": { "project": "fast-forward" }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({
+                "pullRequestMergeMethodOverrides": { "project": "fast-forward" }
+            }))
+            .is_err()
+        );
     }
 
     // ── ServerSettings thread settlement ─────────────────────────
@@ -4417,14 +5325,18 @@ mod tests {
     #[test]
     fn thread_settlement_rejects_out_of_range_thresholds() {
         for value in [json!(-1), json!(0), json!(91)] {
-            assert!(serde_json::from_value::<ServerSettings>(json!({
-                "sidebarAutoSettleAfterDays": value
-            }))
-            .is_err());
-            assert!(serde_json::from_value::<ServerSettingsPatch>(json!({
-                "sidebarAutoSettleAfterDays": value
-            }))
-            .is_err());
+            assert!(
+                serde_json::from_value::<ServerSettings>(json!({
+                    "sidebarAutoSettleAfterDays": value
+                }))
+                .is_err()
+            );
+            assert!(
+                serde_json::from_value::<ServerSettingsPatch>(json!({
+                    "sidebarAutoSettleAfterDays": value
+                }))
+                .is_err()
+            );
         }
     }
 
@@ -4458,27 +5370,41 @@ mod tests {
         }));
         let instances = &decoded.provider_instances;
         assert_eq!(
-            instances.get(&provider_instance_id("codex_personal")).unwrap().driver.as_str(),
+            instances
+                .get(&provider_instance_id("codex_personal"))
+                .unwrap()
+                .driver
+                .as_str(),
             "codex"
         );
         assert_eq!(
-            instances.get(&provider_instance_id("codex_work")).unwrap().config,
+            instances
+                .get(&provider_instance_id("codex_work"))
+                .unwrap()
+                .config,
             Some(json!({ "homePath": "~/.codex_work" }))
         );
         // Critical: a config naming a driver this build does not know about
         // must round-trip without loss. The runtime handles "driver not
         // installed" — the schema must not.
-        let ollama = instances.get(&provider_instance_id("ollama_local")).unwrap();
+        let ollama = instances
+            .get(&provider_instance_id("ollama_local"))
+            .unwrap();
         assert_eq!(ollama.driver.as_str(), "ollama");
-        assert_eq!(ollama.config, Some(json!({ "endpoint": "http://localhost:11434" })));
+        assert_eq!(
+            ollama.config,
+            Some(json!({ "endpoint": "http://localhost:11434" }))
+        );
     }
 
     #[test]
     fn provider_instances_reject_invalid_slug_keys() {
-        assert!(serde_json::from_value::<ServerSettings>(json!({
-            "providerInstances": { "1bad": { "driver": "codex" } }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ServerSettings>(json!({
+                "providerInstances": { "1bad": { "driver": "codex" } }
+            }))
+            .is_err()
+        );
     }
 
     // ── provider enabled defaults ────────────────────────────────
@@ -4486,8 +5412,16 @@ mod tests {
     #[test]
     fn provider_enabled_keeps_muse_disabled_until_configured() {
         let muse = provider_driver("muse");
-        assert!(!resolve_provider_instance_enabled(&config("muse", None, json!({}))));
-        assert!(resolve_provider_instance_enabled(&config("muse", Some(true), json!({}))));
+        assert!(!resolve_provider_instance_enabled(&config(
+            "muse",
+            None,
+            json!({})
+        )));
+        assert!(resolve_provider_instance_enabled(&config(
+            "muse",
+            Some(true),
+            json!({})
+        )));
         assert!(!resolve_provider_instance_enabled(&config(
             "muse",
             Some(true),
@@ -4498,9 +5432,8 @@ mod tests {
 
     #[test]
     fn provider_enabled_enables_only_stable_bindings_by_default() {
-        let enabled_by_default = |driver: &str| {
-            resolve_provider_instance_enabled(&config(driver, None, json!({})))
-        };
+        let enabled_by_default =
+            |driver: &str| resolve_provider_instance_enabled(&config(driver, None, json!({})));
         assert!(enabled_by_default("codex"));
         assert!(enabled_by_default("claudeAgent"));
         for driver in ["cursor", "grok", "muse", "pi", "opencode", "antigravity"] {
@@ -4511,15 +5444,39 @@ mod tests {
     #[test]
     fn provider_enabled_resolves_with_explicit_false_winning() {
         // No flags anywhere: driver default applies.
-        assert!(!resolve_provider_instance_enabled(&config("grok", None, json!({}))));
-        assert!(resolve_provider_instance_enabled(&config("codex", None, json!({}))));
+        assert!(!resolve_provider_instance_enabled(&config(
+            "grok",
+            None,
+            json!({})
+        )));
+        assert!(resolve_provider_instance_enabled(&config(
+            "codex",
+            None,
+            json!({})
+        )));
         // Unknown fork drivers stay enabled.
-        assert!(resolve_provider_instance_enabled(&config("ollama", None, json!({}))));
+        assert!(resolve_provider_instance_enabled(&config(
+            "ollama",
+            None,
+            json!({})
+        )));
         // Envelope flag wins over the driver default.
-        assert!(resolve_provider_instance_enabled(&config("grok", Some(true), json!({}))));
-        assert!(!resolve_provider_instance_enabled(&config("codex", Some(false), json!({}))));
+        assert!(resolve_provider_instance_enabled(&config(
+            "grok",
+            Some(true),
+            json!({})
+        )));
+        assert!(!resolve_provider_instance_enabled(&config(
+            "codex",
+            Some(false),
+            json!({})
+        )));
         // Legacy in-config flag fills in when the envelope is silent.
-        assert!(resolve_provider_instance_enabled(&config("grok", None, json!({ "enabled": true }))));
+        assert!(resolve_provider_instance_enabled(&config(
+            "grok",
+            None,
+            json!({ "enabled": true })
+        )));
         // Conflicting flags: the explicit false wins, whichever side it is on.
         assert!(!resolve_provider_instance_enabled(&config(
             "grok",
@@ -4536,8 +5493,14 @@ mod tests {
     #[test]
     fn provider_instance_config_enabled_flag_reads_legacy_blobs() {
         assert_eq!(provider_instance_config_enabled_flag(None), None);
-        assert_eq!(provider_instance_config_enabled_flag(Some(&json!(null))), None);
-        assert_eq!(provider_instance_config_enabled_flag(Some(&json!([true]))), None);
+        assert_eq!(
+            provider_instance_config_enabled_flag(Some(&json!(null))),
+            None
+        );
+        assert_eq!(
+            provider_instance_config_enabled_flag(Some(&json!([true]))),
+            None
+        );
         assert_eq!(
             provider_instance_config_enabled_flag(Some(&json!({ "enabled": true }))),
             Some(true)
@@ -4572,7 +5535,9 @@ mod tests {
     fn inherited_thread_env_mode_stays_off_the_wire() {
         let encoded = encode(&decode_server(json!({})));
         assert!(encoded.get("defaultThreadEnvMode").is_none());
-        let encoded = encode(&decode_server(json!({ "defaultThreadEnvMode": "worktree" })));
+        let encoded = encode(&decode_server(
+            json!({ "defaultThreadEnvMode": "worktree" }),
+        ));
         assert_eq!(encoded["defaultThreadEnvMode"], json!("worktree"));
     }
 
@@ -4700,11 +5665,21 @@ mod tests {
             "~/Development"
         );
         assert_eq!(
-            patch.text_generation_model_selection.unwrap().model.unwrap().as_str(),
+            patch
+                .text_generation_model_selection
+                .unwrap()
+                .model
+                .unwrap()
+                .as_str(),
             "gpt-5.4-mini"
         );
         assert_eq!(
-            patch.observability.unwrap().otlp_traces_url.unwrap().as_str(),
+            patch
+                .observability
+                .unwrap()
+                .otlp_traces_url
+                .unwrap()
+                .as_str(),
             "http://localhost:4318/v1/traces"
         );
         let instances = patch.provider_instances.unwrap();
@@ -4712,9 +5687,15 @@ mod tests {
             .get(&provider_instance_id("codex_personal"))
             .unwrap();
         assert_eq!(instance.driver.as_str(), "codex");
-        assert_eq!(instance.display_name.as_ref().unwrap().as_str(), "Codex Personal");
+        assert_eq!(
+            instance.display_name.as_ref().unwrap().as_str(),
+            "Codex Personal"
+        );
         // The driver-specific config blob stays opaque: no trimming inside it.
-        assert_eq!(instance.config, Some(json!({ "homePath": "  ~/.codex-personal  " })));
+        assert_eq!(
+            instance.config,
+            Some(json!({ "homePath": "  ~/.codex-personal  " }))
+        );
     }
 
     #[test]
@@ -4766,7 +5747,10 @@ mod tests {
             assert_eq!(encode(&settings)["environmentIcon"], json!(kind));
         }
         // Null (the default) stays on the wire: the field is required upstream.
-        assert_eq!(encode(&decode_server(json!({})))["environmentIcon"], json!(null));
+        assert_eq!(
+            encode(&decode_server(json!({})))["environmentIcon"],
+            json!(null)
+        );
     }
 
     // ── branch naming settings ───────────────────────────────────
@@ -4798,8 +5782,14 @@ mod tests {
             assert_eq!(encoded["branchNamingMode"], json!(mode));
             assert_eq!(encoded["branchNamePrefix"], json!("team/"));
             let patch = decode_server_patch(input);
-            assert_eq!(patch.branch_naming_mode.map(|m| m.as_str_name()), Some(mode));
-            assert_eq!(patch.branch_name_prefix.map(|p| p.as_str().to_owned()), Some("team/".to_owned()));
+            assert_eq!(
+                patch.branch_naming_mode.map(|m| m.as_str_name()),
+                Some(mode)
+            );
+            assert_eq!(
+                patch.branch_name_prefix.map(|p| p.as_str().to_owned()),
+                Some("team/".to_owned())
+            );
         }
     }
 
@@ -4837,7 +5827,11 @@ mod tests {
         ] {
             assert!(is_nullable_project_settings_override(key), "{key}");
         }
-        for key in ["worktreeCleanup", "defaultRuntimeMode", "responseStreamingMode"] {
+        for key in [
+            "worktreeCleanup",
+            "defaultRuntimeMode",
+            "responseStreamingMode",
+        ] {
             assert!(!is_nullable_project_settings_override(key), "{key}");
         }
         assert_eq!(PROJECT_SCOPED_SERVER_SETTING_KEYS.len(), 25);
@@ -4891,12 +5885,16 @@ mod tests {
         )]
         .into_iter()
         .collect::<ProviderInstanceConfigMap>();
-        let overrides = overrides_for(Some([(
-            provider_instance_id("codex_work"),
-            ProjectProviderInstanceOverride { enabled: Some(true) },
-        )]
-        .into_iter()
-        .collect()));
+        let overrides = overrides_for(Some(
+            [(
+                provider_instance_id("codex_work"),
+                ProjectProviderInstanceOverride {
+                    enabled: Some(true),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
         assert!(resolve_project_provider_instance_enabled(
             &instances,
             &overrides,
@@ -4913,12 +5911,16 @@ mod tests {
         )]
         .into_iter()
         .collect::<ProviderInstanceConfigMap>();
-        let overrides = overrides_for(Some([(
-            provider_instance_id("codex_work"),
-            ProjectProviderInstanceOverride { enabled: Some(false) },
-        )]
-        .into_iter()
-        .collect()));
+        let overrides = overrides_for(Some(
+            [(
+                provider_instance_id("codex_work"),
+                ProjectProviderInstanceOverride {
+                    enabled: Some(false),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
         assert!(!resolve_project_provider_instance_enabled(
             &instances,
             &overrides,
@@ -4935,12 +5937,16 @@ mod tests {
         )]
         .into_iter()
         .collect::<ProviderInstanceConfigMap>();
-        let overrides = overrides_for(Some([(
-            provider_instance_id("codex_work"),
-            ProjectProviderInstanceOverride { enabled: Some(false) },
-        )]
-        .into_iter()
-        .collect()));
+        let overrides = overrides_for(Some(
+            [(
+                provider_instance_id("codex_work"),
+                ProjectProviderInstanceOverride {
+                    enabled: Some(false),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
         assert!(resolve_project_provider_instance_enabled(
             &instances,
             &overrides,
@@ -4971,12 +5977,16 @@ mod tests {
         assert_eq!(with_project, without_project);
         assert!(!with_project);
 
-        let overridden = overrides_for(Some([(
-            provider_instance_id("codex_work"),
-            ProjectProviderInstanceOverride { enabled: Some(true) },
-        )]
-        .into_iter()
-        .collect()));
+        let overridden = overrides_for(Some(
+            [(
+                provider_instance_id("codex_work"),
+                ProjectProviderInstanceOverride {
+                    enabled: Some(true),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
         assert!(resolve_project_provider_instance_enabled(
             &instances,
             &overridden,
@@ -4987,10 +5997,18 @@ mod tests {
 
     #[test]
     fn unconfigured_default_instances_are_codex_and_claude() {
-        assert!(is_unconfigured_default_instance_enabled(&provider_instance_id("codex")));
-        assert!(is_unconfigured_default_instance_enabled(&provider_instance_id("claudeAgent")));
-        assert!(!is_unconfigured_default_instance_enabled(&provider_instance_id("cursor")));
-        assert!(!is_unconfigured_default_instance_enabled(&provider_instance_id("codex_work")));
+        assert!(is_unconfigured_default_instance_enabled(
+            &provider_instance_id("codex")
+        ));
+        assert!(is_unconfigured_default_instance_enabled(
+            &provider_instance_id("claudeAgent")
+        ));
+        assert!(!is_unconfigured_default_instance_enabled(
+            &provider_instance_id("cursor")
+        ));
+        assert!(!is_unconfigured_default_instance_enabled(
+            &provider_instance_id("codex_work")
+        ));
     }
 
     // ── server model preferences ────────────────────────────────
@@ -5011,10 +6029,12 @@ mod tests {
         );
         assert_eq!(encode(&patch), input);
         // The flag is required.
-        assert!(serde_json::from_value::<ServerSettingsPatch>(json!({
-            "setModelsHidden": [{ "provider": "codex_work", "model": "sol" }]
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ServerSettingsPatch>(json!({
+                "setModelsHidden": [{ "provider": "codex_work", "model": "sol" }]
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -5026,11 +6046,14 @@ mod tests {
         let encoded = encode(&decode_server(input.clone()));
         assert_eq!(encoded["favorites"], json!([]));
         assert_eq!(encoded["providerModelPreferences"], json!({}));
-        assert_eq!(decode_server_patch(input.clone()), ServerSettingsPatch {
-            favorites: Some(Vec::new()),
-            provider_model_preferences: Some(ProviderModelPreferences::default()),
-            ..Default::default()
-        });
+        assert_eq!(
+            decode_server_patch(input.clone()),
+            ServerSettingsPatch {
+                favorites: Some(Vec::new()),
+                provider_model_preferences: Some(ProviderModelPreferences::default()),
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
@@ -5064,7 +6087,10 @@ mod tests {
             )
         );
         let encoded = encode(&settings);
-        assert_eq!(encoded["favorites"], json!([{ "provider": "codex_work", "model": "sol" }]));
+        assert_eq!(
+            encoded["favorites"],
+            json!([{ "provider": "codex_work", "model": "sol" }])
+        );
         assert_eq!(
             encoded["providerModelPreferences"],
             json!({ "codex_work": { "hiddenModels": ["astra"], "modelOrder": ["sol"] } })
@@ -5179,11 +6205,14 @@ mod tests {
                 "options": [{ "id": "reasoningEffort", "value": DEFAULT_TEXT_GENERATION_REASONING_EFFORT }]
             })
         );
-        assert_eq!(encoded["backgroundActivity"], json!({
-            "schemaVersion": 1,
-            "profile": "balanced",
-            "overrides": {}
-        }));
+        assert_eq!(
+            encoded["backgroundActivity"],
+            json!({
+                "schemaVersion": 1,
+                "profile": "balanced",
+                "overrides": {}
+            })
+        );
         assert_eq!(encoded["automaticGitFetchInterval"], json!(30000));
         assert_eq!(encoded["branchNamingMode"], json!("static"));
         assert_eq!(encoded["branchNamePrefix"], json!("t3"));
@@ -5196,7 +6225,10 @@ mod tests {
         assert_eq!(encoded["favorites"], json!([]));
         assert_eq!(encoded["onboardingCompletedAt"], json!(null));
         assert_eq!(encoded["notificationMode"], json!("off"));
-        assert_eq!(encoded["snapShotShortcut"], json!({ "kind": "both-shift-keys" }));
+        assert_eq!(
+            encoded["snapShotShortcut"],
+            json!({ "kind": "both-shift-keys" })
+        );
         assert_eq!(encoded["sidebarProjectSortOrder"], json!("updated_at"));
     }
 
@@ -5309,21 +6341,27 @@ mod tests {
             encoded["defaultModelSelection"],
             json!({ "instanceId": "claudeAgent", "model": "claude-opus-5-5" })
         );
-        assert_eq!(encoded["providerInstances"]["codex"], json!({
-            "driver": "codex",
-            "enabled": true,
-            "config": {
-                "binaryPath": "codex",
-                "homePath": "",
-                "shadowHomePath": "",
-                "launchArgs": "",
-                "customModels": [],
-                "setupMode": "managed"
-            }
-        }));
-        assert_eq!(encoded["providerInstances"]["claudeAgent_2"], json!({
-            "driver": "claudeAgent", "displayName": "Claude", "enabled": false
-        }));
+        assert_eq!(
+            encoded["providerInstances"]["codex"],
+            json!({
+                "driver": "codex",
+                "enabled": true,
+                "config": {
+                    "binaryPath": "codex",
+                    "homePath": "",
+                    "shadowHomePath": "",
+                    "launchArgs": "",
+                    "customModels": [],
+                    "setupMode": "managed"
+                }
+            })
+        );
+        assert_eq!(
+            encoded["providerInstances"]["claudeAgent_2"],
+            json!({
+                "driver": "claudeAgent", "displayName": "Claude", "enabled": false
+            })
+        );
         // The saved file's key order within providerInstances is preserved.
         let keys: Vec<&str> = encoded["providerInstances"]
             .as_object()
@@ -5331,7 +6369,16 @@ mod tests {
             .keys()
             .map(|k| k.as_str())
             .collect();
-        assert_eq!(keys, ["codex", "claudeAgent_2", "claudeAgent", "cursor", "opencode"]);
+        assert_eq!(
+            keys,
+            [
+                "codex",
+                "claudeAgent_2",
+                "claudeAgent",
+                "cursor",
+                "opencode"
+            ]
+        );
         // ...and decoding the re-encoded file still succeeds (round trip).
         let redecoded: ServerSettings = serde_json::from_value(encoded).unwrap();
         assert_eq!(redecoded, settings);
@@ -5415,7 +6462,10 @@ mod tests {
             settings.notification_mode,
             NotificationMode::NotificationsAndSound
         );
-        assert_eq!(settings.appearance_contrast, AppearanceContrast::new(125).unwrap());
+        assert_eq!(
+            settings.appearance_contrast,
+            AppearanceContrast::new(125).unwrap()
+        );
         assert_eq!(
             settings.panel_animation_duration_ms,
             PanelAnimationDurationMs::new(25).unwrap()
@@ -5508,10 +6558,12 @@ mod tests {
             encode(&settings)["usageModelAliases"],
             json!({ "gpt-6-preview": "gpt-6" })
         );
-        assert!(serde_json::from_value::<ServerSettings>(json!({
-            "usageModelAliases": { " ": "x" }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<ServerSettings>(json!({
+                "usageModelAliases": { " ": "x" }
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -5545,7 +6597,10 @@ mod tests {
             activity.base_profile,
             Some(BackgroundActivityProfile::BatterySaver)
         );
-        assert_eq!(activity.overrides.automatic_git_fetch_interval, Some(60_000));
+        assert_eq!(
+            activity.overrides.automatic_git_fetch_interval,
+            Some(60_000)
+        );
         assert_eq!(activity.overrides.pause_when_on_battery, Some(true));
         assert_eq!(
             encode(&settings)["backgroundActivity"],
@@ -5604,5 +6659,678 @@ mod tests {
             assert_eq!(decoded.as_str(), operation);
             assert_eq!(encode(&decoded), json!(operation));
         }
+    }
+    // ── audit: exact default snapshots and re-encode ─────────────
+
+    /// Every `withDecodingDefault` of `ServerSettings`, spelled out from
+    /// settings.ts, minus the cut `deviceHosts` and the omitted-when-null
+    /// `defaultThreadEnvMode`. Decoding `{}` and re-encoding must write all of
+    /// them with exactly these values.
+    fn expected_default_server_json() -> serde_json::Value {
+        {
+            let raw = r####"{
+            "favorites": null,
+            "providerModelPreferences": null,
+            "worktreeCleanup": null,
+            "storageCleanup": {
+                "worktreeKeepWhen": "uncommitted-changes",
+                "worktreeAfterDays": null,
+                "worktreeOnMerge": false,
+                "worktreeOnDelete": false,
+                "worktreeUnchanged": false,
+                "browserArtifactsAfterDays": null,
+                "logsAfterDays": null
+            },
+            "worktreesDirectory": "",
+            "previousWorktreesDirectories": [],
+            "responseStreamingMode": "paragraph",
+            "enableProviderUpdateChecks": true,
+            "continueThreadsAfterServerUpdate": true,
+            "enableAgentBrowserAccess": true,
+            "projectAgentBrowserAccessOverrides": {},
+            "defaultAutoPull": false,
+            "defaultProjectScripts": [],
+            "projectScriptOverrides": {},
+            "projectAutoPullOverrides": {},
+            "defaultModelSelection": null,
+            "defaultRuntimeMode": "full-access",
+            "projectSettingsOverrides": {},
+            "projectSettingsFolded": false,
+            "enableAgentDeviceAccess": false,
+            "enableDeviceSupport": false,
+            "deviceOnboardingCompleted": false,
+            "sidebarAutoSettleAfterDays": 3,
+            "snoozeLimitedThreads": false,
+            "autoResumeLimitedThreads": false,
+            "sidebarAutoSettleKeepPullRequests": false,
+            "sidebarAutoSettleOnMerge": true,
+            "backgroundActivity": { "schemaVersion": 1, "profile": "balanced", "overrides": {} },
+            "automaticGitFetchInterval": 30000,
+            "providerHealthRefreshInterval": 300000,
+            "backgroundActivityProfile": "balanced",
+            "defaultTheme": "",
+            "defaultThemeSetAt": "",
+            "environmentIcon": null,
+            "newWorktreesStartFromOrigin": true,
+            "worktreeSubmodules": null,
+            "addProjectBaseDirectory": "",
+            "textGenerationModelSelection": {
+                "instanceId": "codex",
+                "model": "$MODEL",
+                "options": [{ "id": "reasoningEffort", "value": "$EFFORT" }]
+            },
+            "branchNamingMode": "static",
+            "branchNamePrefix": "t3",
+            "branchNameInstructions": "",
+            "removeAgentCreditsOnMerge": false,
+            "sourceControlWritingStyle": {
+                "mode": "repo_conventions",
+                "customInstructions": "",
+                "followChangeRequestTemplates": true
+            },
+            "sourceControlWriterModelSelection": null,
+            "reviewGuidesEnabled": false,
+            "reviewGuideModelSelection": null,
+            "reviewGuideInstructions": "",
+            "pullRequestMergeMethod": null,
+            "providerInstances": {},
+            "observability": { "otlpTracesUrl": "", "otlpMetricsUrl": "", "otlpLogsUrl": "" },
+            "sourceControlHosts": {},
+            "usageLimitSources": {},
+            "cursorKeychainUsageEnabled": false,
+            "usagePriceOverrides": {},
+            "usageModelAliases": {}
+        }"####;
+            serde_json::from_str(
+                &raw.replace("$MODEL", DEFAULT_TEXT_GENERATION_MODEL)
+                    .replace("$EFFORT", DEFAULT_TEXT_GENERATION_REASONING_EFFORT),
+            )
+            .unwrap()
+        }
+    }
+
+    #[test]
+    fn default_server_settings_encode_every_decoding_default_exactly() {
+        assert_eq!(
+            encode(&decode_server(json!({}))),
+            expected_default_server_json()
+        );
+        // Re-decoding the written defaults gives the same settings back.
+        let again: ServerSettings = serde_json::from_value(expected_default_server_json()).unwrap();
+        assert_eq!(again, default_server_settings());
+    }
+
+    #[test]
+    fn default_client_settings_encode_every_decoding_default_exactly() {
+        let expected = serde_json::from_str::<serde_json::Value>(
+            r####"{
+            "notificationMode": "off",
+            "inAppNotificationsEnabled": false,
+            "diffColorScheme": "red-green",
+            "chatWidth": "comfortable",
+            "loadBalancingEnabled": false,
+            "loadBalancingWeights": {},
+            "appearanceContrast": 100,
+            "panelAnimationDurationMs": 0,
+            "browserRecordingFrameRate": 30,
+            "browserRecordingShowKeyPresses": false,
+            "browserRecordingShowMousePresses": false,
+            "browserLinkTarget": "system",
+            "browserAutoShowFloatingPreview": true,
+            "confirmQuit": "hold",
+            "confirmThreadArchive": false,
+            "confirmThreadDelete": true,
+            "confirmThreadUnpin": false,
+            "dismissedProviderUpdateNotificationKeys": [],
+            "diffFilesCollapsed": true,
+            "diffIgnoreWhitespace": true,
+            "diffLayout": "stacked",
+            "environmentIdentificationMode": "artwork",
+            "glassOpacity": 80,
+            "fontSizeInterface": 16,
+            "fontSizePrompt": 14,
+            "fontSizeCode": 13,
+            "fontSizeTerminal": 12,
+            "fontFamilyCode": "",
+            "fontFamilyComposer": "",
+            "fontFamilySans": "",
+            "fontFamilyTerminal": "",
+            "fontSmoothing": true,
+            "onboardingCompletedAt": null,
+            "persistComposerContextStrip": false,
+            "favorites": [],
+            "providerModelPreferences": {},
+            "pullRequestMergeMethodOverrides": {},
+            "planModeEnabled": false,
+            "contextWindowMeterEnabled": false,
+            "composerCollapseOnScroll": true,
+            "composerRichTextEnabled": true,
+            "sendShortcut": "enter",
+            "followUpBehavior": "queue",
+            "proactivePanelsEnabled": false,
+            "showSkillsInSlashMenu": true,
+            "legacySidebarEnabled": false,
+            "sidebarWorkingShelfEnabled": false,
+            "sidebarProjectGroupingMode": "repository",
+            "sidebarProjectGroupingOverrides": {},
+            "sidebarProjectSortOrder": "updated_at",
+            "sidebarThreadSortOrder": "updated_at",
+            "sidebarThreadPreviewCount": 6,
+            "timestampFormat": "locale",
+            "snapShotEnabled": false,
+            "snapShotIncludeAccessibility": true,
+            "snapShotShortcut": { "kind": "both-shift-keys" },
+            "snapShotPlaySound": true,
+            "snapShotSound": "soft-pop",
+            "snapShotFlash": true,
+            "snapShotAnimations": true,
+            "wordWrap": true
+        }"####,
+        )
+        .unwrap();
+        assert_eq!(encode(&decode_client(json!({}))), expected);
+        assert_eq!(decode_client(expected), default_client_settings());
+    }
+
+    #[test]
+    fn provider_settings_defaults_encode_every_key() {
+        let codex: CodexSettings = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(
+            encode(&codex),
+            json!({
+                "enabled": true,
+                "binaryPath": "codex",
+                "homePath": "",
+                "shadowHomePath": "",
+                "launchArgs": "",
+                "customModels": []
+            })
+        );
+        let claude: ClaudeSettings = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(
+            encode(&claude),
+            json!({
+                "enabled": true,
+                "binaryPath": "claude",
+                "homePath": "",
+                "customModels": [],
+                "launchArgs": "",
+                "autoCompactWindow": ""
+            })
+        );
+        // Whitespace is trimmed on decode, but launchArgs is a plain string.
+        let claude: ClaudeSettings = serde_json::from_value(json!({
+            "binaryPath": "  /opt/claude  ",
+            "homePath": "  ~/.claude  ",
+            "launchArgs": "  --chrome ",
+            "autoCompactWindow": " 300000 "
+        }))
+        .unwrap();
+        assert_eq!(claude.binary_path.as_str(), "/opt/claude");
+        assert_eq!(claude.home_path.as_str(), "~/.claude");
+        assert_eq!(claude.launch_args, "  --chrome ");
+        assert_eq!(claude.auto_compact_window.as_str(), "300000");
+    }
+
+    #[test]
+    fn provider_settings_form_metadata_matches_upstream() {
+        let codex = codex_settings_form_fields();
+        let names: Vec<_> = codex.iter().map(|field| field.field).collect();
+        assert_eq!(
+            names,
+            [
+                "setupMode",
+                "enabled",
+                "binaryPath",
+                "homePath",
+                "shadowHomePath",
+                "launchArgs",
+                "customModels"
+            ]
+        );
+        assert_eq!(codex[0].annotation.hidden, Some(true));
+        assert_eq!(codex[2].annotation.placeholder.as_deref(), Some("codex"));
+        assert_eq!(
+            codex[5].annotation,
+            ProviderSettingsFormAnnotation::default()
+        );
+        let claude = claude_settings_form_fields();
+        assert_eq!(claude.last().unwrap().field, "autoCompactWindow");
+        assert_eq!(
+            CLAUDE_SETTINGS_FORM_ORDER,
+            ["binaryPath", "homePath", "autoCompactWindow", "launchArgs"]
+        );
+        assert_eq!(USAGE_LIMIT_SOURCE_SECRET_SETTINGS_FIELDS, ["managementKey"]);
+    }
+
+    // ── audit: absent vs null in optionalKey fields ──────────────
+
+    #[test]
+    fn optional_key_fields_reject_explicit_null() {
+        // `Schema.optionalKey(X)` with a non-nullable X: absent is fine, null is
+        // a type error (plain serde would turn it into "absent").
+        for patch in [
+            json!({ "wordWrap": null }),
+            json!({ "confirmThreadUnpin": "yes" }),
+            json!({ "glassOpacity": null }),
+            json!({ "sidebarThreadPreviewCount": null }),
+            json!({ "snapShotShortcut": null }),
+        ] {
+            assert!(
+                serde_json::from_value::<ClientSettingsPatch>(patch.clone()).is_err(),
+                "{patch} should be rejected"
+            );
+        }
+        for patch in [
+            json!({ "defaultRuntimeMode": null }),
+            json!({ "enableAgentBrowserAccess": null }),
+            json!({ "defaultProjectScripts": null }),
+            json!({ "textGenerationModelSelection": null }),
+            json!({ "textGenerationModelSelection": { "model": null } }),
+            json!({ "storageCleanup": { "worktreeOnMerge": null } }),
+            json!({ "backgroundActivity": { "baseProfile": null } }),
+            json!({ "providerInstances": null }),
+            json!({ "projectSettingsOverrides": { "p": { "defaultRuntimeMode": null } } }),
+            json!({ "projectSettingsOverrides": { "p": { "providerInstances": null } } }),
+        ] {
+            assert!(
+                serde_json::from_value::<ServerSettingsPatch>(patch.clone()).is_err(),
+                "{patch} should be rejected"
+            );
+        }
+        assert!(
+            serde_json::from_value::<ServerSettings>(json!({
+                "projectSettingsOverrides": { "p": { "branchNamePrefix": null } }
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<UsageModelPriceOverride>(json!({
+                "inputCostPerMillionTokens": 1,
+                "outputCostPerMillionTokens": 1,
+                "cacheReadCostPerMillionTokens": null
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<UsageLimitSourceConfig>(json!({
+                "kind": "cliproxy", "url": "http://x", "label": null
+            }))
+            .is_err()
+        );
+        // The same keys are fine when absent.
+        assert_eq!(
+            decode_client_patch(json!({})),
+            ClientSettingsPatch::default()
+        );
+        assert_eq!(
+            decode_server_patch(json!({})),
+            ServerSettingsPatch::default()
+        );
+    }
+
+    #[test]
+    fn nullable_patch_fields_keep_absent_null_and_value_apart() {
+        // optionalKey(NullOr(X)): absent = unchanged, null = clear.
+        let absent = decode_server_patch(json!({}));
+        assert_eq!(absent.default_model_selection, None);
+        let cleared = decode_server_patch(json!({ "defaultModelSelection": null }));
+        assert_eq!(cleared.default_model_selection, Some(None));
+        assert_eq!(encode(&cleared), json!({ "defaultModelSelection": null }));
+        let set = decode_server_patch(json!({
+            "defaultModelSelection": { "instanceId": "codex", "model": "m" }
+        }));
+        assert!(matches!(set.default_model_selection, Some(Some(_))));
+
+        for key in [
+            "sourceControlWriterModelSelection",
+            "reviewGuideModelSelection",
+            "pullRequestMergeMethod",
+            "sidebarAutoSettleAfterDays",
+            "environmentIcon",
+            "defaultThreadEnvMode",
+            "worktreeSubmodules",
+            "worktreeCleanup",
+        ] {
+            let patch = decode_server_patch(json!({ key: null }));
+            assert_eq!(
+                encode(&patch),
+                json!({ key: null }),
+                "{key} null must round-trip"
+            );
+            assert_eq!(encode(&decode_server_patch(json!({}))), json!({}), "{key}");
+        }
+        let client = decode_client_patch(json!({ "onboardingCompletedAt": null }));
+        assert_eq!(client.onboarding_completed_at, Some(None));
+        assert_eq!(encode(&client), json!({ "onboardingCompletedAt": null }));
+        let client =
+            decode_client_patch(json!({ "onboardingCompletedAt": "2026-01-01T00:00:00.000Z" }));
+        assert_eq!(
+            client.onboarding_completed_at,
+            Some(Some("2026-01-01T00:00:00.000Z".to_owned()))
+        );
+        assert_eq!(decode_client_patch(json!({})).onboarding_completed_at, None);
+
+        // Record entries: null removes, a value replaces.
+        let patch = decode_server_patch(json!({
+            "projectSettingsOverrides": { "gone": null, "kept": { "defaultAutoPull": true } },
+            "projectScriptOverrides": { "gone": null },
+            "projectAutoPullOverrides": { "gone": null, "on": true },
+            "projectAgentBrowserAccessOverrides": { "gone": null },
+            "usageLimitSources": { "gone": null },
+            "usageModelAliases": { "gone": null, "preview": "released" }
+        }));
+        let overrides = patch.project_settings_overrides.as_ref().unwrap();
+        assert_eq!(overrides.get(&project_id("gone")), Some(&None));
+        assert!(matches!(overrides.get(&project_id("kept")), Some(Some(_))));
+        let encoded = encode(&patch);
+        assert_eq!(encoded["projectSettingsOverrides"]["gone"], json!(null));
+        assert_eq!(encoded["projectScriptOverrides"]["gone"], json!(null));
+        assert_eq!(
+            encoded["projectAutoPullOverrides"],
+            json!({ "gone": null, "on": true })
+        );
+        assert_eq!(encoded["usageLimitSources"]["gone"], json!(null));
+        assert_eq!(
+            encoded["usageModelAliases"],
+            json!({ "gone": null, "preview": "released" })
+        );
+    }
+
+    #[test]
+    fn project_overrides_distinguish_inherit_from_explicit_null() {
+        let input = json!({
+            "defaultModelSelection": null,
+            "sourceControlWriterModelSelection": null,
+            "reviewGuideModelSelection": null,
+            "pullRequestMergeMethod": null,
+            "sidebarAutoSettleAfterDays": null,
+            "worktreeCleanup": null
+        });
+        let overrides: ProjectSettingsOverrides = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(overrides.default_model_selection, Some(None));
+        assert_eq!(overrides.worktree_cleanup, Some(None));
+        assert_eq!(overrides.sidebar_auto_settle_after_days, Some(None));
+        assert_eq!(encode(&overrides), input);
+        // Inheriting writes nothing.
+        let inherit: ProjectSettingsOverrides = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(inherit, ProjectSettingsOverrides::default());
+        assert_eq!(encode(&inherit), json!({}));
+        // Non-null values and the forward-compatible submodule mode.
+        let overrides: ProjectSettingsOverrides = serde_json::from_value(json!({
+            "sidebarAutoSettleAfterDays": 7,
+            "worktreeSubmodules": "shallow-from-the-future",
+            "pullRequestMergeMethod": "squash"
+        }))
+        .unwrap();
+        assert_eq!(
+            overrides.sidebar_auto_settle_after_days,
+            Some(Some(SidebarAutoSettleAfterDays::new(7.0).unwrap()))
+        );
+        assert_eq!(overrides.worktree_submodules, None);
+        assert_eq!(
+            encode(&overrides),
+            json!({ "sidebarAutoSettleAfterDays": 7, "pullRequestMergeMethod": "squash" })
+        );
+    }
+
+    // ── audit: decoding defaults inside nested structs ───────────
+
+    #[test]
+    fn nested_decoding_defaults_fill_missing_keys() {
+        // storageCleanup keeps its own defaults, including the keep-when policy.
+        let settings = decode_server(json!({ "storageCleanup": {} }));
+        assert_eq!(settings.storage_cleanup, StorageCleanupSettings::default());
+        let settings = decode_server(json!({ "storageCleanup": { "logsAfterDays": 30 } }));
+        assert_eq!(
+            settings.storage_cleanup.logs_after_days,
+            Some(StorageRetentionDays::new(30).unwrap())
+        );
+        // sourceControlWritingStyle, observability, backgroundActivity: `{}`.
+        let settings = decode_server(json!({
+            "sourceControlWritingStyle": {},
+            "observability": {},
+            "backgroundActivity": {}
+        }));
+        assert_eq!(
+            settings.source_control_writing_style,
+            SourceControlWritingStyleSettings::default()
+        );
+        assert_eq!(settings.observability, ObservabilitySettings::default());
+        assert_eq!(
+            settings.background_activity,
+            BackgroundActivitySettings::default()
+        );
+        // Per-provider model preferences default both lists.
+        let preferences: ProviderModelPreferences =
+            serde_json::from_value(json!({ "codex": {} })).unwrap();
+        assert_eq!(
+            preferences.get(&provider_instance_id("codex")),
+            Some(&ProviderModelPreferencesEntry::default())
+        );
+        // A usage limit source defaults its key and enabled flag.
+        let source: UsageLimitSourceConfig =
+            serde_json::from_value(json!({ "kind": "cliproxy", "url": " http://hub " })).unwrap();
+        assert_eq!(source.management_key.as_str(), "");
+        assert!(source.enabled);
+        assert_eq!(source.url.as_str(), "http://hub");
+        assert_eq!(source.label, None);
+        assert_eq!(
+            encode(&source),
+            json!({ "kind": "cliproxy", "url": "http://hub", "managementKey": "", "enabled": true })
+        );
+        assert!(
+            serde_json::from_value::<UsageLimitSourceConfig>(
+                json!({ "kind": "other", "url": "http://hub" })
+            )
+            .is_err()
+        );
+        // Report entries default bytes/files to null and the report bytesFreed to 0.
+        let entry: StorageCleanupReportEntry = serde_json::from_value(json!({
+            "kind": "browser-artifacts",
+            "outcome": "kept",
+            "reason": "recent",
+            "path": null,
+            "threadId": null,
+            "threadTitle": null
+        }))
+        .unwrap();
+        assert_eq!(entry.bytes, None);
+        assert_eq!(entry.files, None);
+        assert_eq!(encode(&entry)["bytes"], json!(null));
+        let report: StorageCleanupReport = serde_json::from_value(json!({
+            "trigger": "manual",
+            "startedAt": "a",
+            "finishedAt": "b",
+            "entries": [],
+            "counts": { "removed": 1, "kept": 2, "failed": 0 },
+            "omittedCount": 0
+        }))
+        .unwrap();
+        assert_eq!(report.bytes_freed, 0.0);
+        let encoded = encode(&report);
+        assert_eq!(encoded["bytesFreed"], json!(0));
+        assert_eq!(
+            encoded["counts"],
+            json!({ "removed": 1, "kept": 2, "failed": 0 })
+        );
+    }
+
+    #[test]
+    fn schema_numbers_encode_like_json_stringify() {
+        let price: UsageModelPriceOverride = serde_json::from_value(json!({
+            "inputCostPerMillionTokens": 3.0,
+            "outputCostPerMillionTokens": 0.25,
+            "cacheReadCostPerMillionTokens": 0,
+        }))
+        .unwrap();
+        assert_eq!(
+            encode(&price),
+            json!({
+                "inputCostPerMillionTokens": 3,
+                "outputCostPerMillionTokens": 0.25,
+                "cacheReadCostPerMillionTokens": 0
+            })
+        );
+        let text = serde_json::to_string(&price).unwrap();
+        assert!(text.contains("\"inputCostPerMillionTokens\":3,"), "{text}");
+        let settings = decode_server(json!({ "sidebarAutoSettleAfterDays": 2.5 }));
+        assert_eq!(encode(&settings)["sidebarAutoSettleAfterDays"], json!(2.5));
+        let text = serde_json::to_string(&default_server_settings()).unwrap();
+        assert!(text.contains("\"sidebarAutoSettleAfterDays\":3,"), "{text}");
+    }
+
+    #[test]
+    fn browser_recording_frame_rate_is_a_numeric_literal() {
+        let settings = decode_client(json!({ "browserRecordingFrameRate": 60 }));
+        assert_eq!(
+            settings.browser_recording_frame_rate,
+            BrowserRecordingFrameRate::Sixty
+        );
+        assert_eq!(encode(&settings)["browserRecordingFrameRate"], json!(60));
+        // The strings "30"/"60" are not the numeric literals.
+        assert!(
+            serde_json::from_value::<ClientSettings>(json!({ "browserRecordingFrameRate": "30" }))
+                .is_err()
+        );
+        assert_eq!(BROWSER_RECORDING_FRAME_RATES, [30, 60]);
+        assert_eq!(DEFAULT_BROWSER_RECORDING_FRAME_RATE.get(), 30);
+    }
+
+    #[test]
+    fn length_limits_count_utf16_code_units() {
+        // 100 astral characters = 200 UTF-16 code units: accepted. 101 = 202: rejected.
+        let ok = "😀".repeat(100);
+        let too_long = "😀".repeat(101);
+        assert!(FontFamilyPreference::new(&ok).is_ok());
+        assert!(FontFamilyPreference::new(&too_long).is_err());
+        assert!(FontFamilyPreference::new("a".repeat(200)).is_ok());
+        assert!(FontFamilyPreference::new("a".repeat(201)).is_err());
+        assert!(
+            serde_json::from_value::<ClientSettingsPatch>(json!({ "fontFamilyCode": too_long }))
+                .is_err()
+        );
+        assert!(DefaultThemePreference::new("😀".repeat(32)).is_ok());
+        assert!(DefaultThemePreference::new("😀".repeat(33)).is_err());
+        assert!(
+            serde_json::from_value::<ServerSettings>(
+                json!({ "defaultThemeSetAt": "a".repeat(65) })
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ServerSettings>(json!({ "defaultTheme": "a".repeat(64) }))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn snapshot_shortcut_union_members_decode_in_order() {
+        let both: SnapShotShortcut =
+            serde_json::from_value(json!({ "kind": "both-shift-keys" })).unwrap();
+        assert!(is_modifier_pair_shortcut(&both));
+        let pair: SnapShotShortcut =
+            serde_json::from_value(json!({ "kind": "modifier-pair", "modifier": "alt" })).unwrap();
+        assert_eq!(
+            snap_shot_shortcut_modifier_pair(&pair),
+            SnapShotModifier::Alt
+        );
+        assert_eq!(
+            encode(&pair),
+            json!({ "kind": "modifier-pair", "modifier": "alt" })
+        );
+        let chord = json!({
+            "key": "k", "metaKey": false, "ctrlKey": false,
+            "shiftKey": false, "altKey": false, "modKey": true
+        });
+        let decoded: SnapShotShortcut = serde_json::from_value(chord.clone()).unwrap();
+        assert!(!is_modifier_pair_shortcut(&decoded));
+        assert_eq!(encode(&decoded), chord);
+        assert_eq!(
+            snap_shot_modifier_pair_label(SnapShotModifier::Meta, true),
+            "Command + Command"
+        );
+        assert_eq!(
+            snap_shot_modifier_pair_label(SnapShotModifier::Control, false),
+            "Ctrl + Ctrl"
+        );
+    }
+
+    #[test]
+    fn full_server_settings_round_trip_preserves_every_value() {
+        let input = serde_json::from_str::<serde_json::Value>(r####"{
+            "favorites": [{ "provider": "codex", "model": "m" }],
+            "providerModelPreferences": { "codex": { "hiddenModels": ["a"], "modelOrder": ["b"] } },
+            "worktreeCleanup": { "mode": "custom", "rules": {
+                "worktreeKeepWhen": "tracked-changes", "worktreeAfterDays": 14,
+                "worktreeOnMerge": true, "worktreeOnDelete": false, "worktreeUnchanged": true } },
+            "storageCleanup": {
+                "worktreeKeepWhen": "any-local-files", "worktreeAfterDays": 8,
+                "worktreeOnMerge": true, "worktreeOnDelete": true, "worktreeUnchanged": true,
+                "browserArtifactsAfterDays": 3650, "logsAfterDays": 1 },
+            "worktreesDirectory": "~/wt",
+            "previousWorktreesDirectories": ["/old"],
+            "responseStreamingMode": "turn",
+            "enableProviderUpdateChecks": false,
+            "continueThreadsAfterServerUpdate": false,
+            "enableAgentBrowserAccess": false,
+            "projectAgentBrowserAccessOverrides": { "p": true },
+            "defaultAutoPull": true,
+            "projectScriptOverrides": { "p": null },
+            "projectAutoPullOverrides": { "p": false },
+            "defaultModelSelection": { "instanceId": "claudeAgent", "model": "m" },
+            "defaultRuntimeMode": "approval-required",
+            "projectSettingsOverrides": { "p": { "defaultModelSelection": null, "branchNamePrefix": "x" } },
+            "projectSettingsFolded": true,
+            "enableAgentDeviceAccess": true,
+            "enableDeviceSupport": true,
+            "deviceOnboardingCompleted": true,
+            "sidebarAutoSettleAfterDays": null,
+            "snoozeLimitedThreads": true,
+            "autoResumeLimitedThreads": true,
+            "sidebarAutoSettleKeepPullRequests": true,
+            "sidebarAutoSettleOnMerge": false,
+            "backgroundActivity": {
+                "schemaVersion": 1, "profile": "custom", "baseProfile": "battery-saver",
+                "overrides": { "idleClientTtl": 1000, "pauseWhenOnBattery": true } },
+            "automaticGitFetchInterval": 60000,
+            "providerHealthRefreshInterval": 120000,
+            "backgroundActivityProfile": "performance",
+            "defaultTheme": "dracula",
+            "defaultThemeSetAt": "2026-01-01T00:00:00.000Z",
+            "environmentIcon": "linux",
+            "defaultThreadEnvMode": "worktree",
+            "newWorktreesStartFromOrigin": false,
+            "worktreeSubmodules": "top-level",
+            "addProjectBaseDirectory": "~/dev",
+            "branchNamingMode": "custom",
+            "branchNamePrefix": "me/",
+            "branchNameInstructions": "Include the issue.",
+            "removeAgentCreditsOnMerge": true,
+            "sourceControlWritingStyle": {
+                "mode": "custom", "customInstructions": "Be brief.", "followChangeRequestTemplates": false },
+            "sourceControlWriterModelSelection": { "instanceId": "codex", "model": "w" },
+            "reviewGuidesEnabled": true,
+            "reviewGuideModelSelection": { "instanceId": "codex", "model": "g" },
+            "reviewGuideInstructions": "Dwell on tests.",
+            "pullRequestMergeMethod": "rebase",
+            "providerInstances": { "codex_work": { "driver": "codex", "enabled": false } },
+            "observability": { "otlpTracesUrl": "http://t", "otlpMetricsUrl": "", "otlpLogsUrl": "" },
+            "sourceControlHosts": { "github": { "token": "redacted", "n": 1 } },
+            "usageLimitSources": { "hub": { "kind": "cliproxy", "url": "http://hub",
+                "managementKey": "k", "enabled": false, "label": "Hub" } },
+            "cursorKeychainUsageEnabled": true,
+            "usagePriceOverrides": { "m": { "inputCostPerMillionTokens": 1, "outputCostPerMillionTokens": 2.5 } },
+            "usageModelAliases": { "preview": "released" }
+        }"####).unwrap();
+        let settings = decode_server(input.clone());
+        let encoded = encode(&settings);
+        for (key, value) in input.as_object().unwrap() {
+            if key == "textGenerationModelSelection" {
+                continue;
+            }
+            assert_eq!(&encoded[key], value, "{key} must round-trip");
+        }
+        assert_eq!(decode_server(encoded), settings);
     }
 }

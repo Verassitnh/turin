@@ -1,6 +1,6 @@
 //! Port of upstream/packages/contracts/src/model.ts
 
-use crate::base_schemas::TrimmedNonEmptyString;
+use crate::base_schemas::{TrimmedNonEmptyString, js_trim};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -129,25 +129,28 @@ pub mod provider_option_selections {
     ) -> Vec<ProviderOptionSelection> {
         let mut entries = Vec::new();
         for (raw_key, raw_value) in record {
-            let id = raw_key.trim();
+            let id = js_trim(&raw_key);
             if id.is_empty() {
                 continue;
             }
             match raw_value {
                 serde_json::Value::String(raw) => {
-                    let trimmed = raw.trim();
+                    let trimmed = js_trim(&raw);
                     if !trimmed.is_empty() {
                         entries.push(ProviderOptionSelection {
-                            id: TrimmedNonEmptyString::new(id).expect("trimmed non-empty checked above"),
+                            id: TrimmedNonEmptyString::new(id)
+                                .expect("trimmed non-empty checked above"),
                             value: ProviderOptionSelectionValue::Str(
-                                TrimmedNonEmptyString::new(trimmed).expect("trimmed non-empty checked above"),
+                                TrimmedNonEmptyString::new(trimmed)
+                                    .expect("trimmed non-empty checked above"),
                             ),
                         });
                     }
                 }
                 serde_json::Value::Bool(value) => {
                     entries.push(ProviderOptionSelection {
-                        id: TrimmedNonEmptyString::new(id).expect("trimmed non-empty checked above"),
+                        id: TrimmedNonEmptyString::new(id)
+                            .expect("trimmed non-empty checked above"),
                         value: ProviderOptionSelectionValue::Bool(value),
                     });
                 }
@@ -238,7 +241,9 @@ pub fn default_text_generation_model_by_provider(driver: &str) -> Option<&'stati
 }
 
 /// Upstream `MODEL_SLUG_ALIASES_BY_PROVIDER`: (alias, canonical) pairs per driver.
-pub fn model_slug_aliases_by_provider(driver: &str) -> Option<&'static [(&'static str, &'static str)]> {
+pub fn model_slug_aliases_by_provider(
+    driver: &str,
+) -> Option<&'static [(&'static str, &'static str)]> {
     match driver {
         "codex" => Some(&[
             ("gpt-5-codex", "gpt-5.4"),
@@ -314,8 +319,14 @@ mod tests {
         .unwrap();
         assert_eq!(holder.options.len(), 2);
         assert_eq!(holder.options[0].id.as_str(), "effort");
-        assert_eq!(holder.options[0].value, ProviderOptionSelectionValue::Str(TrimmedNonEmptyString::new("max").unwrap()));
-        assert_eq!(holder.options[1].value, ProviderOptionSelectionValue::Bool(true));
+        assert_eq!(
+            holder.options[0].value,
+            ProviderOptionSelectionValue::Str(TrimmedNonEmptyString::new("max").unwrap())
+        );
+        assert_eq!(
+            holder.options[1].value,
+            ProviderOptionSelectionValue::Bool(true)
+        );
 
         // Re-encode is the canonical array.
         let encoded = serde_json::to_string(&holder.options).unwrap();
@@ -345,5 +356,94 @@ mod tests {
         let entry: CustomModelSetting =
             serde_json::from_str(r#"{"slug":"my-model","name":"My Model"}"#).unwrap();
         assert!(matches!(entry, CustomModelSetting::Entry(_)));
+    }
+
+    #[test]
+    fn legacy_option_ids_use_js_trim() {
+        #[derive(Deserialize)]
+        struct Holder {
+            #[serde(with = "provider_option_selections")]
+            options: Vec<ProviderOptionSelection>,
+        }
+        // U+FEFF is trimmed by JS, so "\u{feff}" is a blank key and is dropped;
+        // U+0085 is not, so it survives.
+        let holder: Holder = serde_json::from_str(
+            "{\"options\":{\"\\ufeff\":\"x\",\"  a  \":\" b \",\"c\\u0085\":true}}",
+        )
+        .unwrap();
+        assert_eq!(holder.options.len(), 2);
+        assert_eq!(holder.options[0].id.as_str(), "a");
+        assert_eq!(
+            holder.options[0].value,
+            ProviderOptionSelectionValue::Str(TrimmedNonEmptyString::new("b").unwrap())
+        );
+        assert_eq!(holder.options[1].id.as_str(), "c\u{85}");
+    }
+
+    #[test]
+    fn selections_reject_non_container_and_broken_array_entries() {
+        #[derive(Deserialize)]
+        struct Holder {
+            #[allow(dead_code)]
+            #[serde(with = "provider_option_selections")]
+            options: Vec<ProviderOptionSelection>,
+        }
+        for raw in [
+            r#"{"options":"x"}"#,
+            r#"{"options":null}"#,
+            r#"{"options":[{"id":"a","value":5}]}"#,
+            r#"{"options":[{"id":"a","value":"  "}]}"#,
+        ] {
+            assert!(serde_json::from_str::<Holder>(raw).is_err(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn descriptor_optional_fields_round_trip_without_nulls() {
+        let raw = r#"{"id":"effort","label":"Effort","description":"d","type":"select","options":[{"id":"low","label":"Low","description":"x","isDefault":true}],"currentValue":"low","promptInjectedValues":["a"]}"#;
+        let decoded: ProviderOptionDescriptor = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::from_str::<serde_json::Value>(raw).unwrap()
+        );
+        // Wrong literal for either member fails the union.
+        assert!(
+            serde_json::from_str::<ProviderOptionDescriptor>(
+                r#"{"type":"text","id":"a","label":"A"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn selection_value_prefers_string_then_boolean() {
+        let s: ProviderOptionSelection =
+            serde_json::from_str(r#"{"id":"a","value":" x "}"#).unwrap();
+        assert_eq!(
+            s.value,
+            ProviderOptionSelectionValue::Str(TrimmedNonEmptyString::new("x").unwrap())
+        );
+        let b: ProviderOptionSelection =
+            serde_json::from_str(r#"{"id":"a","value":false}"#).unwrap();
+        assert_eq!(b.value, ProviderOptionSelectionValue::Bool(false));
+    }
+
+    #[test]
+    fn default_tables_match_upstream() {
+        assert_eq!(
+            default_model_by_provider("claudeAgent"),
+            Some("claude-fable-5-1")
+        );
+        assert_eq!(default_model_by_provider("nope"), None);
+        assert_eq!(
+            default_text_generation_model_by_provider("codex"),
+            Some("gpt-6-luna")
+        );
+        assert_eq!(
+            model_slug_aliases_by_provider("codex").unwrap()[0],
+            ("gpt-5-codex", "gpt-5.4")
+        );
+        assert_eq!(provider_display_name("muse"), Some("Muse Code"));
+        assert_eq!(PREFERRED_DEFAULT_CODEX_MODELS[0], DEFAULT_MODEL);
     }
 }

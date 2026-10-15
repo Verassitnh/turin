@@ -49,6 +49,8 @@ pub struct ParentLink {
     input: ProviderAdapterV2TurnInput,
     /// The top-level turn that approvals from this subagent are asked on.
     owner_native_turn: String,
+    /// The native subagent thread the parent turn runs in, when the parent is a child turn.
+    subagent: Option<String>,
 }
 
 /// One native subagent thread: upstream's `CodexSubagentThreadContext`.
@@ -108,12 +110,18 @@ pub fn owner_native_turn(state: &RuntimeState, turn: &TurnState) -> String {
     }
 }
 
-/// The subagent node a child turn's work hangs off, for approvals to parent under.
+/// The top-level subagent node a child turn's work runs under: the one on the
+/// owner's thread that leads to the turn. Approvals from the turn parent under it.
+/// Upstream's `approvalOwnerCodexTurn` walks up to the last subagent on the way.
 pub fn subagent_node(state: &RuntimeState, turn: &TurnState) -> Option<NodeId> {
-    turn.subagent
-        .as_ref()
-        .and_then(|thread| state.subagents.get(thread))
-        .map(|sub| sub.node.clone())
+    let mut node = None;
+    let mut thread = turn.subagent.clone();
+    while let Some(current) = thread {
+        let sub = state.subagents.get(&current)?;
+        node = Some(sub.node.clone());
+        thread = sub.parent.subagent.clone();
+    }
+    node
 }
 
 fn link_of(state: &RuntimeState, turn: &TurnState) -> ParentLink {
@@ -124,6 +132,7 @@ fn link_of(state: &RuntimeState, turn: &TurnState) -> ParentLink {
         provider_turn: derive::provider_turn(&driver(), &turn.native_turn),
         input: turn.input.clone(),
         owner_native_turn: owner_native_turn(state, turn),
+        subagent: turn.subagent.clone(),
     }
 }
 

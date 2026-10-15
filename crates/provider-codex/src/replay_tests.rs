@@ -1608,3 +1608,239 @@ async fn subagent_continue_replay_reopens_the_child_on_a_later_run() {
     assert_eq!(child_turns.len(), 2, "the child has two provider turns");
     replay.driver.verify_complete().unwrap();
 }
+
+#[tokio::test]
+async fn subagent_v2_approval_replay_asks_on_the_parent_turn_under_the_subagent() {
+    let transcript = fixture("subagent_v2_approval");
+    let policy = recorded_policy(&transcript, RuntimeMode::ApprovalRequired);
+    let mut replay = open(transcript.clone()).await;
+    replay.start(&recorded_text(&transcript, 0), policy).await;
+    let before = replay
+        .next_until(|event| !runtime_requests(std::slice::from_ref(event)).is_empty())
+        .await;
+    let request = runtime_requests(&before).remove(0);
+    assert_eq!(request.kind, OrchestrationV2RuntimeRequestKind::Command);
+    let subagent = subagents(&before).remove(0);
+
+    // The approval is the parent's: its run, its root provider turn, its thread.
+    let root_turn = before
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::ProviderTurnUpdated {
+                thread_id: Some(thread),
+                provider_turn,
+                ..
+            } if thread.as_str() == "thread-1" => Some(provider_turn.id.clone()),
+            _ => None,
+        })
+        .expect("root provider turn");
+    assert_eq!(request.provider_turn_id, Some(root_turn));
+    let node = before
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::NodeUpdated { node, .. } if node.id == request.node_id => {
+                Some(node.clone())
+            }
+            _ => None,
+        })
+        .expect("approval node");
+    assert_eq!(node.kind, OrchestrationV2ExecutionNodeKind::ApprovalRequest);
+    assert_eq!(node.parent_node_id, Some(subagent.id.clone()));
+    assert_eq!(node.thread_id, id("thread-1"));
+    assert_eq!(node.run_id, Some(id("run-1")));
+    assert_eq!(node.status, OrchestrationV2ExecutionNodeStatus::Waiting);
+
+    replay
+        .runtime
+        .respond_to_runtime_request(accept(&request))
+        .await
+        .unwrap();
+    let mut seen = before;
+    seen.extend(replay.next_until(is_terminal).await);
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    assert_eq!(
+        runtime_requests(&seen).len(),
+        1,
+        "the child asks nothing itself"
+    );
+    let settled = subagents(&seen).remove(0);
+    assert_eq!(settled.result.as_deref(), Some("Written."));
+    assert_eq!(settled.status, OrchestrationV2SubagentStatus::Completed);
+    let child = settled
+        .child_thread_id
+        .as_ref()
+        .expect("child thread")
+        .as_str();
+    let items = latest_items(&seen);
+    assert!(
+        items_of(&items, child, "command_execution")
+            .iter()
+            .any(|item| item["status"] == "completed"),
+        "the child runs its own command after approval"
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn subagent_v2_nested_replay_chains_subagents_to_the_leaf() {
+    let transcript = fixture("subagent_v2_nested");
+    let policy = recorded_policy(&transcript, RuntimeMode::FullAccess);
+    let mut replay = open(transcript.clone()).await;
+    replay.start(&recorded_text(&transcript, 0), policy).await;
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+
+    let subagents = subagents(&seen);
+    assert_eq!(subagents.len(), 3);
+    let first = subagents
+        .iter()
+        .find(|subagent| subagent.thread_id == id("thread-1"))
+        .expect("first subagent under the root");
+    let second = subagents
+        .iter()
+        .find(|subagent| Some(&subagent.thread_id) == first.child_thread_id.as_ref())
+        .expect("second subagent under the first child");
+    let third = subagents
+        .iter()
+        .find(|subagent| Some(&subagent.thread_id) == second.child_thread_id.as_ref())
+        .expect("third subagent under the second child");
+    for (subagent, parent_title) in [
+        (first, None),
+        (second, first.title.as_deref()),
+        (third, second.title.as_deref()),
+    ] {
+        assert_eq!(subagent.status, OrchestrationV2SubagentStatus::Completed);
+        assert_eq!(subagent.result.as_deref(), Some("Hello."));
+        assert_eq!(
+            subagent.origin,
+            OrchestrationV2SubagentOrigin::ProviderNative
+        );
+        let title = subagent.title.as_deref().expect("agent path title");
+        match parent_title {
+            None => assert!(title.starts_with("/root/") && title.matches('/').count() == 2),
+            Some(parent) => assert!(
+                title.starts_with(&format!("{parent}/"))
+                    && title[parent.len() + 1..].find('/').is_none(),
+                "{title} extends {parent} by one segment"
+            ),
+        }
+    }
+
+    let items = latest_items(&seen);
+    let leaf = third
+        .child_thread_id
+        .as_ref()
+        .expect("leaf thread")
+        .as_str();
+    assert!(
+        items_of(&items, leaf, "subagent").is_empty(),
+        "the leaf spawns nothing"
+    );
+    assert!(
+        items_of(&items, leaf, "assistant_message")
+            .iter()
+            .any(|item| item["text"] == "Hello."),
+        "the leaf holds its answer"
+    );
+    let apps = app_threads(&seen);
+    let second_child = second
+        .child_thread_id
+        .as_ref()
+        .expect("second child")
+        .as_str();
+    let second_app = apps
+        .iter()
+        .find(|app| app["id"] == second_child)
+        .expect("second child app thread");
+    assert_eq!(
+        second_app["lineage"]["parentThreadId"],
+        first
+            .child_thread_id
+            .as_ref()
+            .expect("first child")
+            .as_str()
+    );
+    assert_eq!(second_app["lineage"]["rootThreadId"], "thread-1");
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn subagent_v2_nested_approval_replay_asks_on_the_root_under_the_top_subagent() {
+    let transcript = fixture("subagent_v2_nested_approval");
+    let policy = recorded_policy(&transcript, RuntimeMode::ApprovalRequired);
+    let mut replay = open(transcript.clone()).await;
+    replay.start(&recorded_text(&transcript, 0), policy).await;
+    let before = replay
+        .next_until(|event| !runtime_requests(std::slice::from_ref(event)).is_empty())
+        .await;
+    let request = runtime_requests(&before).remove(0);
+    assert_eq!(request.kind, OrchestrationV2RuntimeRequestKind::Command);
+
+    // The grandchild asked. The approval hangs off the top-level subagent on the root.
+    let top = subagents(&before)
+        .into_iter()
+        .find(|subagent| subagent.thread_id == id("thread-1"))
+        .expect("top-level subagent");
+    let node = before
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::NodeUpdated { node, .. } if node.id == request.node_id => {
+                Some(node.clone())
+            }
+            _ => None,
+        })
+        .expect("approval node");
+    assert_eq!(node.kind, OrchestrationV2ExecutionNodeKind::ApprovalRequest);
+    assert_eq!(node.thread_id, id("thread-1"));
+    assert_eq!(node.run_id, Some(id("run-1")));
+    assert_eq!(node.parent_node_id, Some(top.id.clone()));
+
+    replay
+        .runtime
+        .respond_to_runtime_request(accept(&request))
+        .await
+        .unwrap();
+    let mut seen = before;
+    seen.extend(replay.next_until(is_terminal).await);
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    assert_eq!(runtime_requests(&seen).len(), 1);
+    let subagents = subagents(&seen);
+    assert_eq!(
+        subagents.len(),
+        2,
+        "the top-level subagent and the grandchild"
+    );
+    let grandchild = subagents
+        .iter()
+        .find(|subagent| Some(&subagent.thread_id) == top.child_thread_id.as_ref())
+        .expect("grandchild under the top-level subagent");
+    assert_eq!(grandchild.status, OrchestrationV2SubagentStatus::Completed);
+    assert_eq!(grandchild.result.as_deref(), Some("Written."));
+    let top = subagents
+        .iter()
+        .find(|subagent| subagent.thread_id == id("thread-1"))
+        .expect("top-level subagent");
+    assert_eq!(top.result.as_deref(), Some("Written."));
+    let leaf = grandchild
+        .child_thread_id
+        .as_ref()
+        .expect("grandchild thread")
+        .as_str();
+    let items = latest_items(&seen);
+    assert!(
+        items_of(&items, leaf, "command_execution")
+            .iter()
+            .any(|item| item["status"] == "completed"),
+        "the grandchild runs its command after approval"
+    );
+    replay.driver.verify_complete().unwrap();
+}

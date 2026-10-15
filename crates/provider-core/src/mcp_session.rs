@@ -4,13 +4,13 @@
 //! still read the config when a host supplies one, and still apply the device
 //! environment the same way.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt};
 
 use turin_contracts::{EnvironmentId, ThreadId, provider_instance::ProviderInstanceId};
 
-use crate::host_process::ProcessEnv;
+use crate::host_process::{ProcessEnv, RedactedEnvironment};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct McpProviderSessionConfig {
     pub environment_id: EnvironmentId,
     pub thread_id: ThreadId,
@@ -26,6 +26,30 @@ pub struct McpProviderSessionConfig {
     /// Set when the session may drive devices. Adapters spread this into the
     /// provider subprocess environment so `agent-device` is on `PATH`.
     pub agent_device_environment: Option<ProcessEnv>,
+}
+
+/// The bearer header and device environment values are credentials, so they
+/// print as `[REDACTED]`.
+impl fmt::Debug for McpProviderSessionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("McpProviderSessionConfig")
+            .field("environment_id", &self.environment_id)
+            .field("thread_id", &self.thread_id)
+            .field("provider_session_id", &self.provider_session_id)
+            .field("provider_instance_id", &self.provider_instance_id)
+            .field("endpoint", &self.endpoint)
+            .field("authorization_header", &"[REDACTED]")
+            .field("browser_tools_available", &self.browser_tools_available)
+            .field("capabilities", &self.capabilities)
+            .field(
+                "agent_device_environment",
+                &self
+                    .agent_device_environment
+                    .as_ref()
+                    .map(RedactedEnvironment),
+            )
+            .finish()
+    }
 }
 
 /// Provider env with the device variables applied over `base`, or `base` untouched.
@@ -108,6 +132,30 @@ mod tests {
                 ("AGENT_DEVICE_DAEMON_AUTH_TOKEN", "fixture-device"),
             ])
         );
+    }
+
+    #[test]
+    fn debug_output_redacts_the_bearer_and_device_token() {
+        let config = McpProviderSessionConfig {
+            environment_id: EnvironmentId::new("env").unwrap(),
+            thread_id: ThreadId::new("thread").unwrap(),
+            provider_session_id: "session".into(),
+            provider_instance_id: ProviderInstanceId::new("codex").unwrap(),
+            endpoint: "http://127.0.0.1".into(),
+            authorization_header: "Bearer fixture-bearer".into(),
+            browser_tools_available: false,
+            capabilities: None,
+            agent_device_environment: Some(env(&[(
+                "AGENT_DEVICE_DAEMON_AUTH_TOKEN",
+                "fixture-device",
+            )])),
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("fixture-bearer"), "{debug}");
+        assert!(!debug.contains("fixture-device"), "{debug}");
+        // Keys and non-secret fields stay visible for diagnostics.
+        assert!(debug.contains("AGENT_DEVICE_DAEMON_AUTH_TOKEN"), "{debug}");
+        assert!(debug.contains("http://127.0.0.1"), "{debug}");
     }
 
     #[test]

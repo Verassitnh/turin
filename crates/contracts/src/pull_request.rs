@@ -6,16 +6,10 @@
 
 use crate::base_schemas::{
     ContractError, IsoDateTime, NonNegativeInt, PositiveInt, ProjectId, ThreadId,
-    TrimmedNonEmptyString, js_trim,
+    TrimmedNonEmptyString, js_len, js_trim,
 };
 use crate::source_control::SourceControlProviderKind;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-/// Length as `Schema.isMaxLength`/`isMinLength`/`isNonEmpty` count it: UTF-16
-/// code units (JS `string.length`), not bytes or chars.
-fn utf16_len(value: &str) -> usize {
-    value.encode_utf16().count()
-}
 
 /// Defines a `deserialize_with` module that decodes `$ty` normally and then
 /// runs `$check` (returning `Some(message)` on failure) over the decoded
@@ -112,7 +106,7 @@ pub struct PullRequestQualifierValue(TrimmedNonEmptyString);
 impl PullRequestQualifierValue {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
         let value = TrimmedNonEmptyString::new(value)?;
-        if utf16_len(value.as_str()) > 200 {
+        if js_len(value.as_str()) > 200 {
             return Err(ContractError {
                 expected: "a search qualifier of at most 200 characters",
                 got: value.as_str().to_owned(),
@@ -821,7 +815,7 @@ pub struct PullRequestListCursor(TrimmedNonEmptyString);
 impl PullRequestListCursor {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
         let value = TrimmedNonEmptyString::new(value)?;
-        if utf16_len(value.as_str()) > 4096 {
+        if js_len(value.as_str()) > 4096 {
             return Err(ContractError {
                 expected: "a continuation of at most 4096 characters",
                 got: value.as_str().to_owned(),
@@ -859,7 +853,7 @@ checked_field!(project_ids: Vec<ProjectId>, |v| {
     (v.len() > 100).then_some("at most 100 project ids")
 });
 checked_field!(list_query: TrimmedNonEmptyString, |v| {
-    (utf16_len(v.as_str()) > 200).then_some("a search of at most 200 characters")
+    (js_len(v.as_str()) > 200).then_some("a search of at most 200 characters")
 });
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1524,7 +1518,7 @@ pub struct PullRequestDiffFileContentsResult {
 // is keyed by the name the host gave. Bounded because a path arrives from a
 // client rather than from the host.
 checked_field!(file_path: String, |v| {
-    if v.is_empty() || utf16_len(v) > 4096 {
+    if v.is_empty() || js_len(v) > 4096 {
         Some("file paths must be 1..=4096 characters and are not trimmed")
     } else {
         None
@@ -1638,7 +1632,7 @@ checked_field!(set_files_viewed_field: Vec<PullRequestSetFilesViewedFile>, |v| {
 // spaces are a line break. A whitespace-only body is valid here; the service
 // rejects it.
 checked_field!(comment_body: String, |v| {
-    if v.is_empty() || utf16_len(v) > 65_536 {
+    if v.is_empty() || js_len(v) > 65_536 {
         Some("comment bodies must be 1..=65,536 characters and are not trimmed")
     } else {
         None
@@ -1646,10 +1640,10 @@ checked_field!(comment_body: String, |v| {
 });
 // A body that may be empty (`Schema.String.check(isMaxLength(65_536))`).
 checked_field!(markdown_body: String, |v| {
-    (utf16_len(v) > 65_536).then_some("bodies must be at most 65,536 characters")
+    (js_len(v) > 65_536).then_some("bodies must be at most 65,536 characters")
 });
 checked_field!(update_title: TrimmedNonEmptyString, |v| {
-    (utf16_len(v.as_str()) > 1024).then_some("titles must be at most 1024 characters")
+    (js_len(v.as_str()) > 1024).then_some("titles must be at most 1024 characters")
 });
 checked_field!(reviewer_requests: Vec<PullRequestReviewerRequestReviewer>, |v| {
     (v.is_empty() || v.len() > 25).then_some("between 1 and 25 reviewers")

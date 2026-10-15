@@ -2272,6 +2272,27 @@ mod tests {
     }
 
     #[test]
+    fn user_input_initial_answer_keeps_absent_and_exact_text() {
+        let question = |initial: Option<&str>| {
+            let mut value = json!({
+                "id": "editor", "header": "Message", "question": "Edit message", "options": [],
+            });
+            if let Some(initial) = initial {
+                value["initialAnswer"] = json!(initial);
+            }
+            value
+        };
+        let absent = serde_json::from_value::<UserInputQuestion>(question(None)).unwrap();
+        assert_eq!(absent.initial_answer, None);
+        let long = "detail\n".repeat(500);
+        for initial in ["", "  fix(server): keep whitespace\n\n", long.as_str()] {
+            let parsed =
+                serde_json::from_value::<UserInputQuestion>(question(Some(initial))).unwrap();
+            assert_eq!(parsed.initial_answer.as_deref(), Some(initial));
+        }
+    }
+
+    #[test]
     fn user_input_question_and_request_payloads() {
         let parsed = decode(event(
             "user-input.requested",

@@ -537,6 +537,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn html_event_stream_is_an_unsupported_server() {
+        let server = FakeServer::spawn(|_| FakeResponse {
+            status: 200,
+            content_type: Some("text/html".to_string()),
+            body: b"<!doctype html>".to_vec(),
+            stream: None,
+            hold: false,
+        })
+        .await;
+        let client = V1Client::new(&server.url, "/work", None).unwrap();
+        match client.events().await {
+            Err(err) => assert!(
+                err.detail.contains(
+                    "Request is not supported by this version of OpenCode Server (Server responded with text/html)"
+                ),
+                "{}",
+                err.detail
+            ),
+            Ok(_) => panic!("html was accepted as an event stream"),
+        }
+    }
+
+    #[tokio::test]
     async fn event_stream_yields_properties_and_does_not_reconnect() {
         let mut server = FakeServer::spawn(|_| {
             FakeResponse::sse(
@@ -629,6 +652,9 @@ mod tests {
             Ok(_) => panic!("a second subscription opened"),
         }
         drop(first);
-        client.events().await.expect("subscribe again after the first stream is dropped");
+        let _again = client
+            .events()
+            .await
+            .expect("subscribe again after the first stream is dropped");
     }
 }

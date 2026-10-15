@@ -134,6 +134,13 @@ impl HttpClient {
                 .with_cause(err)
         })?;
         let status = response.status().as_u16();
+        let content_type = header_str(response.headers(), reqwest::header::CONTENT_TYPE);
+        if content_type.as_deref() == Some("text/html") {
+            return Err(OpenCodeRuntimeError::new(
+                operation,
+                "Request is not supported by this version of OpenCode Server (Server responded with text/html)",
+            ));
+        }
         if status != 200 {
             let body = response.text().await.unwrap_or_default();
             return Err(OpenCodeRuntimeError::new(

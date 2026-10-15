@@ -293,23 +293,53 @@ impl OrchestrationEventStore {
         self.hub.publish(events);
     }
 
+    #[cfg(test)]
+    pub fn live_subscriber_count(&self) -> usize {
+        self.hub
+            .subs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .len()
+    }
+
     pub fn stream_application_events(&self, after_sequence: i64) -> EventSubscription {
         let (tx, rx) = mpsc::channel(1);
         let db = self.db.clone();
         let hub = Arc::clone(&self.hub);
         let sub = hub.subscribe();
+        let unregister = Unregister {
+            id: sub.id,
+            hub: Arc::clone(&hub),
+        };
         let task = AbortOnDrop::new(tokio::spawn(async move {
             if let Err(err) = drive_stream(db, sub, after_sequence, tx.clone()).await {
                 let _ = tx.send(Err(err)).await;
             }
         }));
-        EventSubscription { rx, _task: task }
+        EventSubscription {
+            rx,
+            _unregister: unregister,
+            _task: task,
+        }
     }
 }
 
 pub struct EventSubscription {
     pub rx: mpsc::Receiver<Result<ApplicationStoredEvent, PersistenceError>>,
+    /// Dropped before the drive task so a closed stream leaves the hub immediately.
+    _unregister: Unregister,
     _task: AbortOnDrop<()>,
+}
+
+struct Unregister {
+    id: u64,
+    hub: Arc<LiveHub>,
+}
+
+impl Drop for Unregister {
+    fn drop(&mut self) {
+        self.hub.unsubscribe(self.id);
+    }
 }
 
 async fn drive_stream(
@@ -1153,6 +1183,13 @@ impl LiveHub {
             .unwrap_or_else(|err| err.into_inner())
             .push(clone_sub(&sub));
         sub
+    }
+
+    fn unsubscribe(&self, id: u64) {
+        self.subs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .retain(|sub| sub.id != id);
     }
 
     fn publish(&self, events: Vec<ApplicationStoredEvent>) {

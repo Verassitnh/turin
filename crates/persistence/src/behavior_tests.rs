@@ -724,6 +724,15 @@ async fn high_water_and_command_reads_use_their_indexes() {
 }
 
 #[tokio::test]
+async fn dropping_a_subscription_removes_it_from_the_live_hub() {
+    let store = memory_store().await;
+    let subscription = store.stream_application_events(0);
+    assert_eq!(store.live_subscriber_count(), 1);
+    drop(subscription);
+    assert_eq!(store.live_subscriber_count(), 0);
+}
+
+#[tokio::test]
 async fn live_stream_replays_then_delivers_a_committed_publish() {
     let store = memory_store().await;
     store

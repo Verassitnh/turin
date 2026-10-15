@@ -893,7 +893,11 @@ mod tests {
                 Some(projection_with(
                     "thread-current",
                     vec![],
-                    vec![transfer("thread-current", "thread-missing-transfer", "consumed")]
+                    vec![transfer(
+                        "thread-current",
+                        "thread-missing-transfer",
+                        "consumed"
+                    )]
                 ))
             ),
             vec!["thread-dated-fork", "thread-missing-transfer"]

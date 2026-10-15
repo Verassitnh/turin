@@ -18,6 +18,7 @@ pub use turin_contracts::provider_policy::*;
 pub use turin_contracts::pull_request::{
     PullRequestState, RepositoryIdentityLike, pull_request_host_of,
 };
+pub use turin_contracts::settings::{ClientSettings, SidebarProjectGroupingMode};
 pub use turin_contracts::source_control::SourceControlProviderKind;
 pub use turin_contracts::thread_pull_request::*;
 pub use turin_contracts::thread_search::*;

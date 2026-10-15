@@ -18,18 +18,20 @@ pub(super) use crate::components::chat::timeline::session_logic::{
     TimelineEntriesInput, derive_timeline_entries_from_visible_turn_items,
 };
 pub(super) use crate::components::chat::timeline::turn_item::{
-    ProjectedTurnItem, ProjectedVisibility, ProviderFailure, ProviderFailureClass,
-    ProviderRequestKind, ProviderRetry, ToolActivityIcon, ToolActivitySurface, TurnItem,
-    TurnItemPayload, TurnItemStatus, TurnItemType,
+    CheckpointFileSummary, ProjectedTurnItem, ProjectedVisibility, ProviderFailure,
+    ProviderFailureClass, ProviderRequestKind, ProviderRetry, ToolActivityIcon,
+    ToolActivitySurface, TurnItem, TurnItemPayload, TurnItemStatus, TurnItemType,
 };
 pub(super) use crate::components::chat::timeline::types::{
-    Actor, AttemptStatus, ChatMessage, CreationSource, InputIntent, MessageRole, RunStatus,
-    TimelineAttempt, TimelineEntry, TimelineEntryKind, TimelineLatestRun, ToolLifecycleStatus,
-    WorkLogEntry, WorkTone,
+    Actor, AttemptStatus, ChatMessage, CheckpointStatus, CreationSource, InputIntent, MessageRole,
+    RunStatus, TimelineAttempt, TimelineEntry, TimelineEntryKind, TimelineLatestRun,
+    ToolLifecycleStatus, TurnDiffSummary, WorkLogEntry, WorkTone,
 };
 pub(super) use MessagesTimelineRowContent as Row;
 
 mod derive_rows;
+mod derive_rows_folds;
+mod derive_rows_messages;
 mod helpers;
 mod stable_rows;
 

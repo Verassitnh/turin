@@ -12,6 +12,7 @@ use crate::{
         PlanBody, PlanState, apply_task_tool, project_plan, task_steps, todo_steps,
     },
     claude_query_options::{ClaudeQueryOptionsInput, make_claude_query_options},
+    claude_subagents::{SubagentRegistry, SubagentScope},
     claude_turn_items::{
         ItemOrdinals, ToolCall, TurnScope, assistant_artifacts, compaction_item, item_ordinal,
         reasoning_item, tool_call_artifacts,
@@ -362,6 +363,7 @@ impl ProviderAdapterV2 for ClaudeProviderAdapter {
             host_requests: None,
             active: None,
             plans: PlanState::default(),
+            subagents: SubagentRegistry::default(),
             pending_requests: HashMap::new(),
             commands: command_rx,
             events,
@@ -597,6 +599,8 @@ struct ClaudeActor {
     host_requests: Option<mpsc::UnboundedReceiver<ClaudeHostRequest>>,
     active: Option<ActiveTurn>,
     plans: PlanState,
+    /// Session-scoped: a background subagent reports after its turn has settled.
+    subagents: SubagentRegistry,
     pending_requests: HashMap<RuntimeRequestId, PendingRequest>,
     commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedSender<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>,
@@ -813,6 +817,14 @@ impl ClaudeActor {
             provider_thread_id: input.provider_thread.id.clone(),
             provider_turn_id: turn.id.clone(),
         };
+        self.subagents.set_scope(SubagentScope {
+            driver: driver(),
+            provider_instance_id: self.instance_id.clone(),
+            thread_id: input.thread_id.clone(),
+            run_id: input.run_id.clone(),
+            root_node_id: input.root_node_id.clone(),
+            provider_thread_id: input.provider_thread.id.clone(),
+        });
         self.active = Some(ActiveTurn {
             input,
             turn,
@@ -1164,6 +1176,7 @@ impl ClaudeActor {
             ClaudeAdapterEvent::Assistant(frame) => self.assistant(frame),
             ClaudeAdapterEvent::User(frame) => self.user(frame),
             ClaudeAdapterEvent::Compaction(frame) => self.compaction(frame),
+            ClaudeAdapterEvent::Background(frame) => self.background(frame),
             ClaudeAdapterEvent::Result(frame) => self.result(frame),
             ClaudeAdapterEvent::Error(error) => self.fail_active(&error),
             ClaudeAdapterEvent::Eof => {
@@ -1173,6 +1186,29 @@ impl ClaudeActor {
         }
     }
     fn assistant(&mut self, frame: turin_claude_protocol::Frame) {
+        let owner = parent_tool_use_id(&frame).map(str::to_owned);
+        for block in frame
+            .raw
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if block.get("type").and_then(Value::as_str) != Some("tool_use")
+                || block.get("name").and_then(Value::as_str) != Some("Agent")
+            {
+                continue;
+            }
+            if let Some(id) = block.get("id").and_then(Value::as_str) {
+                let input = block.get("input").cloned().unwrap_or(Value::Null);
+                self.subagents.remember_launch(id, &input, owner.as_deref());
+            }
+        }
+        // A subagent's frames belong to the subagent. Its text, tool calls and
+        // uuid must not reach the parent turn, or its rollback cursor.
+        if owner.is_some() {
+            return;
+        }
         let events = match self.active.as_mut() {
             Some(active) => {
                 if let Some(uuid) = frame.raw.get("uuid").and_then(Value::as_str) {
@@ -1184,6 +1220,24 @@ impl ClaudeActor {
         };
         for event in events {
             self.emit(event);
+        }
+    }
+    /// Subagent lifecycle frames. Task lifecycle is also reported while no
+    /// turn is active, so this does not depend on one.
+    fn background(&mut self, frame: turin_claude_protocol::Frame) {
+        let now = UtcDateTime::now();
+        let subagent = match frame.raw.get("subtype").and_then(Value::as_str) {
+            Some("task_started") => self.subagents.started(&frame.raw, now),
+            Some("task_progress") => self.subagents.progress(&frame.raw, now),
+            Some("task_updated") => self.subagents.updated(&frame.raw, now),
+            Some("task_notification") => self.subagents.notified(&frame.raw, now),
+            _ => None,
+        };
+        if let Some(subagent) = subagent {
+            self.emit(ProviderAdapterV2Event::SubagentUpdated {
+                driver: driver(),
+                subagent,
+            });
         }
     }
     /// Upstream `compact_boundary`: a completed "Context compacted" item. A
@@ -1234,6 +1288,10 @@ impl ClaudeActor {
         }
     }
     fn user(&mut self, frame: turin_claude_protocol::Frame) {
+        // A subagent's tool results answer its own tool calls, which are not tracked here.
+        if parent_tool_use_id(&frame).is_some() {
+            return;
+        }
         let events = match self.active.as_mut() {
             Some(active) => tool_result_events(&mut self.plans, active, &frame),
             None => return,
@@ -1482,10 +1540,6 @@ fn assistant_events(
                 });
             }
             Some("thinking") => {
-                // Subagent narration belongs to the subagent, not this log.
-                if parent_tool_use_id(frame).is_some() {
-                    continue;
-                }
                 let index = active
                     .thinking_blocks
                     .entry(message_id.clone())
@@ -1519,14 +1573,18 @@ fn assistant_events(
                     .and_then(Value::as_str)
                     .unwrap_or("tool")
                     .to_owned();
+                // An Agent call is the subagent, not a tool call. The registry
+                // took its launch in `assistant`.
+                if name == "Agent" {
+                    continue;
+                }
                 let input = block.get("input").cloned().unwrap_or(Value::Null);
                 let presentation = presentations
                     .get(native)
                     .cloned()
                     .unwrap_or_else(|| fallback_presentation(&name));
-                // TodoWrite projects its own list before the call item, as
-                // upstream does. Subagent frames never touch the main list.
-                if name == "TodoWrite" && parent_tool_use_id(frame).is_none() {
+                // TodoWrite projects its own list before the call item, as upstream does.
+                if name == "TodoWrite" {
                     events.extend(project_plan(
                         plans,
                         &active.scope,
@@ -1647,11 +1705,7 @@ fn tool_result_events(
             driver: driver(),
             turn_item: artifacts.turn_item,
         });
-        // A subagent's task tools must not replace the parent's list.
-        if let Some(native_thread) = native_thread
-            .as_deref()
-            .filter(|_| !failed && parent_tool_use_id(frame).is_none())
-        {
+        if let Some(native_thread) = native_thread.as_deref().filter(|_| !failed) {
             let current = plans.task_list(native_thread);
             if let Some(tasks) =
                 apply_task_tool(&current, call.tool_name, call.input, Some(&task_output))

@@ -1068,3 +1068,95 @@ async fn tool_items_take_their_upstream_titles() {
     assert_eq!(title("toolu_skill"), Some(Some("Skill: review".into())));
     assert_eq!(titles["toolu_mcp"].1.as_deref(), Some("Linear"));
 }
+
+/// Subagent frames carry `parent_tool_use_id`. Their text and tool calls stay
+/// out of the parent turn. The subagent's own lifecycle reaches its record.
+#[tokio::test]
+async fn subagent_frames_stay_out_of_the_parent_turn() {
+    let harness = one_turn(vec![
+        assistant_tool_use(
+            "00000000-0000-4000-8000-000000000401",
+            None,
+            "toolu_agent",
+            "Agent",
+            json!({"description": "Agent A", "prompt": "Reply A", "model": "haiku"}),
+        ),
+        json!({
+            "type": "system", "subtype": "task_started", "task_id": "task_a",
+            "tool_use_id": "toolu_agent", "description": "Agent A",
+            "task_type": "local_agent", "session_id": "todo-session",
+            "uuid": "00000000-0000-4000-8000-000000000402",
+        }),
+        json!({
+            "type": "assistant",
+            "message": {"id": "msg_child", "role": "assistant", "content": [
+                {"type": "text", "text": "child narration"},
+                {"type": "tool_use", "id": "toolu_child_bash", "name": "Bash", "input": {"command": "echo hi"}}
+            ]},
+            "uuid": "00000000-0000-4000-8000-000000000403", "session_id": "todo-session",
+            "parent_tool_use_id": "toolu_agent",
+        }),
+        user_tool_result(
+            "00000000-0000-4000-8000-000000000404",
+            Some("toolu_agent"),
+            "toolu_child_bash",
+            "hi",
+            Value::Null,
+        ),
+        json!({
+            "type": "system", "subtype": "task_progress", "task_id": "task_a",
+            "tool_use_id": "toolu_agent", "summary": "running echo",
+            "session_id": "todo-session", "uuid": "00000000-0000-4000-8000-000000000405",
+        }),
+        json!({
+            "type": "system", "subtype": "task_notification", "task_id": "task_a",
+            "tool_use_id": "toolu_agent", "status": "completed", "summary": "A_FIRST",
+            "session_id": "todo-session", "uuid": "00000000-0000-4000-8000-000000000406",
+        }),
+        user_tool_result(
+            "00000000-0000-4000-8000-000000000407",
+            None,
+            "toolu_agent",
+            "A_FIRST",
+            Value::Null,
+        ),
+        assistant_text("00000000-0000-4000-8000-000000000408", "parent done"),
+    ]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Launch a subagent"))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    let texts = assistant_texts(&seen);
+    assert_eq!(texts, vec!["parent done".to_owned()]);
+    assert!(
+        turn_items(&seen)
+            .iter()
+            .all(|item| !matches!(item, OrchestrationV2TurnItem::DynamicTool { .. })),
+        "the Agent call and the subagent's Bash must not become parent tool items"
+    );
+    let subagents: Vec<Value> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::SubagentUpdated { subagent, .. } => {
+                serde_json::to_value(subagent).ok()
+            }
+            _ => None,
+        })
+        .collect();
+    let statuses: Vec<&Value> = subagents.iter().map(|s| &s["status"]).collect();
+    assert_eq!(
+        statuses,
+        vec![&json!("running"), &json!("running"), &json!("completed")]
+    );
+    let last = subagents.last().unwrap();
+    assert_eq!(last["result"], "A_FIRST");
+    assert_eq!(last["title"], "Agent A");
+    assert_eq!(last["model"], "haiku");
+    assert_eq!(subagents[1]["progress"], "running echo");
+}

@@ -546,4 +546,29 @@ mod tests {
             "t3code://threads/env-1/thread-1?prompt=hi"
         );
     }
+
+    #[test]
+    fn builds_a_link_that_parses_back_to_the_same_prompt() {
+        let repository = PromptLinkRepository {
+            owner: "pingdotgg".to_owned(),
+            name: "t3code".to_owned(),
+        };
+        let link = build_new_thread_link(NewThreadLinkInput {
+            prompt: "Swear count & rating?",
+            repository: Some(&repository),
+            provider: Some("claudeAgent"),
+            model: Some("opus"),
+            origin: None,
+        });
+        let parsed_url = Url::parse(&link).unwrap();
+        let search = format!("?{}", parsed_url.query().unwrap_or_default());
+        let path = prompt_link_app_path(&link, None).unwrap();
+        assert_eq!(path, format!("{}{search}", parsed_url.path()));
+        match parse_new_thread_link(&search) {
+            PromptLinkResult::Success(NewThreadLink::New { prompt, .. }) => {
+                assert_eq!(prompt.text, "Swear count & rating?");
+            }
+            other => panic!("expected a new-thread link, got {other:?}"),
+        }
+    }
 }

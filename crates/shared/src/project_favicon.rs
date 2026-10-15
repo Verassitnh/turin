@@ -102,6 +102,10 @@ mod tests {
         assert!(is_project_favicon_fallback_url(Some(
             "/api/assets/signed-token/project-favicon-missing"
         )));
+    }
+
+    #[test]
+    fn does_not_mistake_real_favicons_or_query_parameters_for_fallbacks() {
         assert!(!is_project_favicon_fallback_url(Some(
             "https://environment.example/api/assets/token/favicon.svg"
         )));

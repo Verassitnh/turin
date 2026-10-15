@@ -320,6 +320,11 @@ mod tests {
     }
 
     #[test]
+    fn rejects_malformed_json_after_lenient_preprocessing() {
+        assert!(parse_lenient_json("{ \"enabled\": true,, }").is_err());
+    }
+
+    #[test]
     fn rejects_malformed_json_without_the_secret() {
         let error = parse_lenient_json("{\"token\":\"credential=secret-value\",,}").unwrap_err();
         assert_eq!(error, "Invalid value");

@@ -18,7 +18,7 @@ pub mod favicon;
 pub mod file_links;
 pub mod file_preview;
 pub mod git_patch_path;
-//TODO pub mod github_markdown_links;
+pub mod github_markdown_links;
 pub mod github_media;
 pub mod host_classification;
 pub mod image;

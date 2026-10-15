@@ -310,6 +310,119 @@ mod tests {
                 height: 4032
             })
         );
+        // A later XMP APP1 segment must not clear the rotation.
+        let mut xmp = vec![0xff, 0xe1];
+        xmp.extend_from_slice(&u16_bytes(2 + 29));
+        xmp.extend_from_slice(b"http://ns.adobe.com/xap/1.0/\0");
+        let mut rotated_with_xmp = vec![0xff, 0xd8];
+        rotated_with_xmp.extend_from_slice(&app1);
+        rotated_with_xmp.extend_from_slice(&xmp);
+        rotated_with_xmp.extend_from_slice(&sof0);
+        assert_eq!(
+            read_image_dimensions(&rotated_with_xmp),
+            Some(ImageDimensions {
+                width: 3024,
+                height: 4032
+            })
+        );
+        // Orientation 1 leaves the frame size alone.
+        let mut upright = tiff;
+        upright[19] = 0x01;
+        let mut app1_upright = vec![0xff, 0xe1];
+        app1_upright.extend_from_slice(&u16_bytes(2 + 6 + upright.len() as u16));
+        app1_upright.extend_from_slice(b"Exif\0\0");
+        app1_upright.extend_from_slice(&upright);
+        let mut upright_jpeg = vec![0xff, 0xd8];
+        upright_jpeg.extend_from_slice(&app1_upright);
+        upright_jpeg.extend_from_slice(&sof0);
+        assert_eq!(
+            read_image_dimensions(&upright_jpeg),
+            Some(ImageDimensions {
+                width: 4032,
+                height: 3024
+            })
+        );
+    }
+
+    #[test]
+    fn steps_over_standalone_tem_and_restart_markers() {
+        let mut sof0 = vec![0xff, 0xc0];
+        sof0.extend_from_slice(&u16_bytes(17));
+        sof0.push(8);
+        sof0.extend_from_slice(&u16_bytes(10));
+        sof0.extend_from_slice(&u16_bytes(20));
+        let jpeg = [&[0xff, 0xd8, 0xff, 0x01, 0xff, 0xd3][..], &sof0].concat();
+        assert_eq!(
+            read_image_dimensions(&jpeg),
+            Some(ImageDimensions {
+                width: 20,
+                height: 10
+            })
+        );
+    }
+
+    #[test]
+    fn does_not_mistake_a_huffman_table_marker_for_a_frame() {
+        let mut dht = vec![0xff, 0xc4];
+        dht.extend_from_slice(&u16_bytes(4));
+        dht.extend_from_slice(&[0, 0]);
+        let mut sof2 = vec![0xff, 0xc2];
+        sof2.extend_from_slice(&u16_bytes(17));
+        sof2.push(8);
+        sof2.extend_from_slice(&u16_bytes(10));
+        sof2.extend_from_slice(&u16_bytes(20));
+        let jpeg = [&[0xff, 0xd8][..], &dht, &sof2].concat();
+        assert_eq!(
+            read_image_dimensions(&jpeg),
+            Some(ImageDimensions {
+                width: 20,
+                height: 10
+            })
+        );
+    }
+
+    #[test]
+    fn reads_each_webp_container_flavour() {
+        let riff = |chunk: &[u8], body: &[u8]| {
+            let mut out = b"RIFF".to_vec();
+            out.extend_from_slice(&[0, 0, 0, 0]);
+            out.extend_from_slice(b"WEBP");
+            out.extend_from_slice(chunk);
+            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            out.extend_from_slice(body);
+            out
+        };
+        // VP8: frame tag (3), start code (3), then 14-bit width and height.
+        let mut vp8 = vec![0, 0, 0, 0x9d, 0x01, 0x2a];
+        vp8.extend_from_slice(&u16_le(800));
+        vp8.extend_from_slice(&u16_le(600));
+        assert_eq!(
+            read_image_dimensions(&riff(b"VP8 ", &vp8)),
+            Some(ImageDimensions {
+                width: 800,
+                height: 600
+            })
+        );
+        // VP8L: signature 0x2f, then width-1 (14 bits) and height-1 (14 bits) packed LE.
+        let packed: u32 = (800 - 1) | ((600 - 1) << 14);
+        let mut vp8l = vec![0x2f];
+        vp8l.extend_from_slice(&packed.to_le_bytes());
+        assert_eq!(
+            read_image_dimensions(&riff(b"VP8L", &vp8l)),
+            Some(ImageDimensions {
+                width: 800,
+                height: 600
+            })
+        );
+        // VP8X: flags (4), then 24-bit width-1 and height-1.
+        let vp8x: [u8; 10] = [0, 0, 0, 0, 0x1f, 0x03, 0, 0x57, 0x02, 0];
+        assert_eq!(
+            read_image_dimensions(&riff(b"VP8X", &vp8x)),
+            Some(ImageDimensions {
+                width: 800,
+                height: 600
+            })
+        );
     }
 
     #[test]

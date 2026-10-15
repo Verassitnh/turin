@@ -112,6 +112,20 @@ mod tests {
         assert_eq!(image_mime_type("report.png", "application/pdf"), None);
         assert_eq!(image_mime_type("archive.jpg", "application/zip"), None);
         assert_eq!(image_mime_type("clip.png", "video/mp4"), None);
+    }
+
+    #[test]
+    fn recognizes_a_legacy_picture_sent_as_a_plain_file() {
+        // Older messages recorded these as plain files; the bytes are still a picture.
+        assert_eq!(
+            image_mime_type("IMG_4996.PNG", "application/octet-stream"),
+            Some("image/png")
+        );
+        assert_eq!(image_mime_type("1000000020.png", ""), Some("image/png"));
+    }
+
+    #[test]
+    fn still_falls_back_when_the_type_is_absent_or_generic() {
         assert_eq!(
             image_mime_type("IMG_4996.PNG", "application/octet-stream"),
             Some("image/png")

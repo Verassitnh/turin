@@ -1410,10 +1410,11 @@ async fn bash_output_comes_from_the_structured_streams() {
     );
 }
 
-/// Thinking deltas stream into the reasoning item. The completed block then
-/// replaces its text under the same native id.
+/// Thinking deltas coalesce on the 50 ms flush (upstream `flushIntervalMs: 50`).
+/// A block that completes inside the window writes only its completed text, and
+/// that replaces the block's text under the same native id.
 #[tokio::test]
-async fn thinking_deltas_stream_into_the_reasoning_item() {
+async fn thinking_deltas_coalesce_into_the_completed_reasoning_item() {
     let stream = |event: Value| {
         json!({
             "type": "stream_event", "event": event, "parent_tool_use_id": null,
@@ -1464,11 +1465,56 @@ async fn thinking_deltas_stream_into_the_reasoning_item() {
     assert_eq!(
         reasoning,
         vec![
-            at("Plan", true, "running"),
-            at("Plan it", true, "running"),
             at("Plan it", false, "completed"),
             at("Plan it", false, "completed"),
         ]
+    );
+}
+
+/// A block still open when the turn's result arrives writes its buffered text
+/// before the turn ends, rather than waiting for the flush timer.
+#[tokio::test]
+async fn thinking_text_still_open_at_the_result_is_written_before_the_turn_ends() {
+    let stream = |event: Value| {
+        json!({
+            "type": "stream_event", "event": event, "parent_tool_use_id": null,
+            "session_id": "todo-session", "uuid": "00000000-0000-4000-8000-000000000611",
+        })
+    };
+    let harness = one_turn(vec![
+        stream(json!({"type": "message_start", "message": {"id": "msg_open"}})),
+        stream(json!({"type": "content_block_start", "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""}})),
+        stream(json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Still "}})),
+        stream(json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "thinking"}})),
+    ]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Think, then stop"))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    let reasoning: Vec<(String, String)> = turn_items(&seen)
+        .iter()
+        .filter_map(|item| serde_json::to_value(item).ok())
+        .filter(|item| item["type"] == "reasoning")
+        .map(|item| {
+            (
+                item["text"].as_str().unwrap_or_default().to_owned(),
+                item["status"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reasoning.last(),
+        Some(&("Still thinking".to_owned(), "running".to_owned())),
+        "{reasoning:?}"
     );
 }
 

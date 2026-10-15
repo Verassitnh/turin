@@ -423,6 +423,10 @@ impl Drop for ClaudeSessionRuntime {
 type StopReply =
     oneshot::Sender<Result<Option<ProviderAdapterV2SubagentOutcome>, ProviderAdapterV2Error>>;
 
+/// Upstream `makeProviderTextDeltaCoalescer({ flushIntervalMs: 50 })`: thinking
+/// deltas reach the reasoning item at most once per interval, trailing.
+const THINKING_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Upstream `subagentStopOutcomes`: how long a Stop waits for the CLI's outcome.
 const SUBAGENT_STOP_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -613,6 +617,8 @@ struct ActiveTurn {
     last_assistant: Option<OrchestrationV2ConversationMessage>,
     /// A root assistant frame of this turn was checked against an active goal.
     goal_checked: bool,
+    /// When the buffered thinking text is next flushed, if any is waiting.
+    thinking_flush_at: Option<tokio::time::Instant>,
     scope: TurnScope,
     item_ordinals: ItemOrdinals,
     tool_calls: HashMap<String, TrackedTool>,
@@ -637,6 +643,8 @@ struct StreamState {
     /// Thinking blocks started in this message. Numbers their item ids the way
     /// the completed message does.
     thinking_started: u64,
+    /// Blocks whose text grew since the last flush, by the stream's block index.
+    dirty: HashSet<u64>,
 }
 struct StreamedThinking {
     native: String,
@@ -705,6 +713,7 @@ enum Action {
     Command(Option<Command>),
     Event(Option<ClaudeAdapterEvent>),
     Host(Option<ClaudeHostRequest>),
+    Flush,
 }
 impl ClaudeActor {
     async fn run(mut self) {
@@ -713,6 +722,7 @@ impl ClaudeActor {
                 command = self.commands.recv() => Action::Command(command),
                 event = async { match self.claude.as_mut() { Some(claude) => claude.next_event().await, None => std::future::pending().await } } => Action::Event(event),
                 request = async { match self.host_requests.as_mut() { Some(requests) => requests.recv().await, None => std::future::pending().await } } => Action::Host(request),
+                () = async { match self.active.as_ref().and_then(|active| active.thinking_flush_at) { Some(at) => tokio::time::sleep_until(at).await, None => std::future::pending().await } } => Action::Flush,
             };
             match action {
                 Action::Command(Some(command)) => self.command(command).await,
@@ -725,6 +735,7 @@ impl ClaudeActor {
                 }
                 Action::Host(Some(request)) => self.host_request(request),
                 Action::Host(None) => self.host_requests = None,
+                Action::Flush => self.flush_thinking(),
             }
         }
         if let Some(mut claude) = self.claude.take() {
@@ -941,6 +952,7 @@ impl ClaudeActor {
             last_thinking: None,
             last_assistant: None,
             goal_checked: false,
+            thinking_flush_at: None,
             scope,
             item_ordinals: ItemOrdinals::new(),
             tool_calls: HashMap::new(),
@@ -1394,6 +1406,26 @@ impl ClaudeActor {
             self.emit(event);
         }
     }
+    /// Writes the thinking text that grew since the last flush (upstream
+    /// `flushDirty`). A block that stopped is not dirty any more.
+    fn flush_thinking(&mut self) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        active.thinking_flush_at = None;
+        let now = UtcDateTime::now();
+        let mut dirty: Vec<u64> = active.stream.dirty.drain().collect();
+        dirty.sort_unstable();
+        let events: Vec<ProviderAdapterV2Event> = dirty
+            .iter()
+            .filter_map(|index| active.stream.thinking.get(index))
+            .filter(|block| !block.text.is_empty())
+            .map(|block| reasoning_update(&active.scope, block, now, false))
+            .collect();
+        for event in events {
+            self.emit(event);
+        }
+    }
     /// Stream deltas. A subagent's stream belongs to the subagent.
     fn stream(&mut self, frame: turin_claude_protocol::Frame) {
         if parent_tool_use_id(&frame).is_some() {
@@ -1656,6 +1688,8 @@ impl ClaudeActor {
             .collect()
     }
     fn result(&mut self, frame: turin_claude_protocol::Frame) {
+        // The turn's buffered thinking text is written before the turn ends (upstream `flushTurn`).
+        self.flush_thinking();
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -1792,6 +1826,7 @@ impl ClaudeActor {
     /// The CLI went away before a result. An interrupt that was asked for
     /// ends the turn as interrupted, and the process is reusable only then.
     fn fail_active(&mut self, error: &str) {
+        self.flush_thinking();
         // The process or its turn failed: its background work died with it.
         self.monitor_tasks.clear();
         if self.roster.clear() {
@@ -1917,10 +1952,16 @@ fn stream_events(
                 .unwrap_or_default();
             if let Some(block) = active.stream.thinking.get_mut(&index) {
                 block.text.push_str(delta);
-                events.push(reasoning_update(&active.scope, block, now, false));
+                // Flushed on the timer, not per delta.
+                active.stream.dirty.insert(index);
+                active
+                    .thinking_flush_at
+                    .get_or_insert_with(|| tokio::time::Instant::now() + THINKING_FLUSH_INTERVAL);
             }
         }
         Some("content_block_stop") => {
+            // The final text below supersedes any flush still waiting for this block.
+            active.stream.dirty.remove(&index);
             if let Some(block) = active.stream.thinking.remove(&index)
                 && !block.text.is_empty()
             {

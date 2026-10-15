@@ -6662,11 +6662,20 @@ dependencies = [
 name = "turin-contracts"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "pretty_assertions",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "turin-contracts-id-consumer",
  "uuid",
+]
+
+[[package]]
+name = "turin-contracts-id-consumer"
+version = "0.1.0"
+dependencies = [
+ "turin-contracts",
 ]
 
 [[package]]

@@ -119,6 +119,12 @@ pub struct EditorConfig {
     pub disabled: bool,
     pub rich_text: bool,
     pub literal_text: bool,
+    /// Height bounds in rems: the composer body is `min-h-19.5` up to 13rem;
+    /// a one-line field (the picker search) uses its own.
+    pub min_height: f32,
+    pub max_height: f32,
+    /// Overrides the prompt font size (px).
+    pub font_size: Option<f32>,
 }
 
 impl Default for EditorConfig {
@@ -128,6 +134,9 @@ impl Default for EditorConfig {
             disabled: false,
             rich_text: true,
             literal_text: false,
+            min_height: 4.875,
+            max_height: 13.,
+            font_size: None,
         }
     }
 }
@@ -1177,7 +1186,7 @@ impl Render for PromptEditor {
         let entity = cx.entity();
         let focus = self.focus.clone();
         let empty = self.state.is_empty() && !self.config.placeholder.is_empty();
-        let size = px(theme.fonts.size_prompt);
+        let size = px(self.config.font_size.unwrap_or(theme.fonts.size_prompt));
         let line_height = size * LEADING_RELAXED;
         div()
             .id("composer-editor")
@@ -1187,8 +1196,8 @@ impl Render for PromptEditor {
             .w_full()
             // `-m-1 p-1`: the padding keeps the caret off the clip edge.
             .m(px(-4.))
-            .min_h(rems(4.875))
-            .max_h(rems(13.))
+            .min_h(rems(self.config.min_height))
+            .max_h(rems(self.config.max_height))
             .overflow_hidden()
             .cursor(CursorStyle::IBeam)
             .font_family(theme.fonts.composer.clone())
@@ -1204,8 +1213,8 @@ impl Render for PromptEditor {
                 div()
                     .id("composer-editor-scroll")
                     .size_full()
-                    .min_h(rems(4.875))
-                    .max_h(rems(13.))
+                    .min_h(rems(self.config.min_height))
+                    .max_h(rems(self.config.max_height))
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .p(px(4.))
@@ -1240,7 +1249,7 @@ impl PromptEditor {
         FlowEnv {
             theme,
             rem: window.rem_size(),
-            size: px(theme.fonts.size_prompt),
+            size: px(self.config.font_size.unwrap_or(theme.fonts.size_prompt)),
             family: theme.fonts.composer.clone().into(),
             mono: theme.fonts.mono.clone().into(),
             sans: theme.fonts.sans.clone().into(),

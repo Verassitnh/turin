@@ -57,6 +57,8 @@ icon_assets!(
         ListChecks,
         ListFilter,
         ListPlus,
+        Lock,
+        LockOpen,
         LoaderCircle,
         Maximize2,
         MessageCircle,
@@ -71,6 +73,7 @@ icon_assets!(
         PanelLeftClose,
         PanelRight,
         Paperclip,
+        PenLine,
         PencilRuler,
         Pin,
         Play,
@@ -101,7 +104,28 @@ icon_assets!(
 /// The composer's send arrow (ComposerPrimaryActions.tsx).
 pub const SEND_ARROW: &str = "brand/send-arrow.svg";
 
-const BRAND: &[(&str, &[u8])] = &[(SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg"))];
+/// Provider marks (components/Icons.tsx), keyed by driver kind in
+/// [`provider_icon_path`].
+pub const PROVIDER_OPENAI: &str = "brand/openai.svg";
+pub const PROVIDER_CLAUDE: &str = "brand/claude.svg";
+pub const PROVIDER_CURSOR: &str = "brand/cursor.svg";
+
+/// The bundled mark for a provider driver kind, if upstream has one inline.
+pub fn provider_icon_path(driver_kind: &str) -> Option<&'static str> {
+    match driver_kind {
+        "codex" => Some(PROVIDER_OPENAI),
+        "claudeAgent" => Some(PROVIDER_CLAUDE),
+        "cursor" => Some(PROVIDER_CURSOR),
+        _ => None,
+    }
+}
+
+const BRAND: &[(&str, &[u8])] = &[
+    (SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg")),
+    (PROVIDER_OPENAI, include_bytes!("../assets/brand/openai.svg")),
+    (PROVIDER_CLAUDE, include_bytes!("../assets/brand/claude.svg")),
+    (PROVIDER_CURSOR, include_bytes!("../assets/brand/cursor.svg")),
+];
 
 pub struct AppAssets;
 

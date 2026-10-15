@@ -37,6 +37,7 @@ pub enum SessionPhase {
 pub enum RuntimeMode {
     ApprovalRequired,
     AutoAcceptEdits,
+    Auto,
     #[default]
     FullAccess,
 }
@@ -46,6 +47,7 @@ impl RuntimeMode {
         match self {
             Self::ApprovalRequired => "approval-required",
             Self::AutoAcceptEdits => "auto-accept-edits",
+            Self::Auto => "auto",
             Self::FullAccess => "full-access",
         }
     }
@@ -54,6 +56,7 @@ impl RuntimeMode {
         Some(match value {
             "approval-required" => Self::ApprovalRequired,
             "auto-accept-edits" => Self::AutoAcceptEdits,
+            "auto" => Self::Auto,
             "full-access" => Self::FullAccess,
             _ => return None,
         })

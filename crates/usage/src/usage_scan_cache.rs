@@ -16,6 +16,7 @@
 //! more CPU per persist; see PORTING.md.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::IndexMap;
 use serde_json::{Map, Value, json};
@@ -48,7 +49,11 @@ const SPEEDS: [UsageSpeed; 3] = [
     UsageSpeed::Ultrafast,
 ];
 
-#[derive(Debug, Clone, PartialEq)]
+static NEXT_ENTRY_ID: AtomicU64 = AtomicU64::new(1);
+
+/// One cached transcript. Entries are replaced, never edited, so an entry's id
+/// names its content: the writer memoises each entry's JSON under that id.
+#[derive(Debug, Clone)]
 pub struct CachedFile {
     /// `-1` for a legacy entry whose size was never recorded; it never matches a file.
     pub size: i64,
@@ -61,6 +66,39 @@ pub struct CachedFile {
     /// re-reads that segment and would otherwise double count it.
     pub tail_records: Vec<UsageRecord>,
     pub position: TranscriptParsePosition,
+    id: u64,
+}
+
+impl PartialEq for CachedFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.size == other.size
+            && self.mtime_ms == other.mtime_ms
+            && self.provider == other.provider
+            && self.records == other.records
+            && self.tail_records == other.tail_records
+            && self.position == other.position
+    }
+}
+
+impl CachedFile {
+    pub fn new(
+        size: i64,
+        mtime_ms: f64,
+        provider: UsageProviderKind,
+        records: Vec<UsageRecord>,
+        tail_records: Vec<UsageRecord>,
+        position: TranscriptParsePosition,
+    ) -> Self {
+        Self {
+            size,
+            mtime_ms,
+            provider,
+            records,
+            tail_records,
+            position,
+            id: NEXT_ENTRY_ID.fetch_add(1, Ordering::Relaxed),
+        }
+    }
 }
 
 /// Insertion order is kept: the aggregator's first-seen dedupe follows walk order.
@@ -137,35 +175,53 @@ fn serialize_file(entry: &CachedFile, tables: &mut InternTables) -> Value {
     })
 }
 
-/// Serialises the cache, interning the repeated model and session strings.
+/// Serialises the cache as one document, with fresh intern tables.
 pub fn encode_scan_cache(cache: &ScanCache) -> Value {
-    let mut tables = InternTables::default();
-    let mut files = Map::new();
-    for (path, entry) in cache {
-        files.insert(path.clone(), serialize_file(entry, &mut tables));
-    }
-    json!({
-        "version": USAGE_SCAN_CACHE_VERSION,
-        "models": tables.models,
-        "sessions": tables.sessions,
-        "files": files,
-    })
+    serde_json::from_str(&ScanCacheWriter::default().write(cache, &Map::new()))
+        .expect("the writer emits valid JSON")
 }
 
-/// Serialises the cache to the JSON text written to disk. `extra` keys (the
-/// scanned-source table, for one) lead the document, as in the TS writer.
-pub fn write_scan_cache(cache: &ScanCache, extra: &Map<String, Value>) -> String {
-    let mut tables = InternTables::default();
-    let mut files = Map::new();
-    for (path, entry) in cache {
-        files.insert(path.clone(), serialize_file(entry, &mut tables));
+/// Writes the cache to JSON text. It keeps its intern tables and each entry's
+/// JSON between writes, so a persist re-encodes only the entries that changed
+/// (tables only grow, so a memoised entry's indexes stay valid).
+#[derive(Default)]
+pub struct ScanCacheWriter {
+    tables: InternTables,
+    /// Entry JSON by path, with the entry id it was encoded from.
+    fragments: HashMap<String, (u64, String)>,
+}
+
+impl ScanCacheWriter {
+    /// `extra` keys (the scanned-source table, for one) lead the document, as in the TS writer.
+    pub fn write(&mut self, cache: &ScanCache, extra: &Map<String, Value>) -> String {
+        let mut files = Vec::with_capacity(cache.len());
+        for (path, entry) in cache {
+            let fragment = match self.fragments.get(path) {
+                Some((id, fragment)) if *id == entry.id => fragment.clone(),
+                _ => {
+                    let fragment = serialize_file(entry, &mut self.tables).to_string();
+                    self.fragments
+                        .insert(path.clone(), (entry.id, fragment.clone()));
+                    fragment
+                }
+            };
+            files.push(format!("{}:{fragment}", Value::String(path.clone())));
+        }
+        // Entries removed from the cache leave their fragments behind otherwise.
+        self.fragments.retain(|path, _| cache.contains_key(path));
+
+        // Encoded after the files, which may have added to the intern tables.
+        let mut head = extra.clone();
+        head.insert("version".to_owned(), json!(USAGE_SCAN_CACHE_VERSION));
+        head.insert("models".to_owned(), json!(self.tables.models));
+        head.insert("sessions".to_owned(), json!(self.tables.sessions));
+        let head = Value::Object(head).to_string();
+        format!(
+            "{},\"files\":{{{}}}}}",
+            &head[..head.len() - 1],
+            files.join(",")
+        )
     }
-    let mut document = extra.clone();
-    document.insert("version".to_owned(), json!(USAGE_SCAN_CACHE_VERSION));
-    document.insert("models".to_owned(), json!(tables.models));
-    document.insert("sessions".to_owned(), json!(tables.sessions));
-    document.insert("files".to_owned(), Value::Object(files));
-    Value::Object(document).to_string()
 }
 
 /// Whether a JSON number is a safe integer (JS `Number.isSafeInteger`).
@@ -292,14 +348,14 @@ where
         };
         cache.insert(
             path.clone(),
-            CachedFile {
-                size: if legacy { -1 } else { size as i64 },
+            CachedFile::new(
+                if legacy { -1 } else { size as i64 },
                 mtime_ms,
                 provider,
                 records,
                 tail_records,
                 position,
-            },
+            ),
         );
     }
 
@@ -457,14 +513,14 @@ mod tests {
     }
 
     fn cached(path_mtime: f64, records: Vec<UsageRecord>) -> CachedFile {
-        CachedFile {
-            size: records.len() as i64 * 10,
-            mtime_ms: path_mtime,
-            provider: UsageProviderKind::Claude,
+        CachedFile::new(
+            records.len() as i64 * 10,
+            path_mtime,
+            UsageProviderKind::Claude,
             records,
-            tail_records: Vec::new(),
-            position: position(|_| {}),
-        }
+            Vec::new(),
+            position(|_| {}),
+        )
     }
 
     fn cache_with(entries: Vec<(&str, f64, Vec<UsageRecord>)>) -> ScanCache {
@@ -512,29 +568,26 @@ mod tests {
                 })],
             ),
         ]);
-        original.insert(
-            "/codex.jsonl".to_owned(),
-            CachedFile {
-                size: 80,
-                mtime_ms: 400.0,
-                provider: UsageProviderKind::Codex,
-                records: vec![record(|record| {
-                    record.provider = UsageProviderKind::Codex;
-                    record.model = "gpt-6-astra".to_owned();
-                    record.dedupe_key = None;
-                    record.speed = UsageSpeed::Ultrafast;
-                })],
-                tail_records: Vec::new(),
-                position: position(|position| {
-                    position.state = json!({
-                        "session": "session-c",
-                        "model": "gpt-6-astra",
-                        "speed": "ultrafast",
-                        "last": null,
-                    });
-                }),
-            },
+        let mut codex = cached(
+            400.0,
+            vec![record(|record| {
+                record.provider = UsageProviderKind::Codex;
+                record.model = "gpt-6-astra".to_owned();
+                record.dedupe_key = None;
+                record.speed = UsageSpeed::Ultrafast;
+            })],
         );
+        codex.size = 80;
+        codex.provider = UsageProviderKind::Codex;
+        codex.position = position(|position| {
+            position.state = json!({
+                "session": "session-c",
+                "model": "gpt-6-astra",
+                "speed": "ultrafast",
+                "last": null,
+            });
+        });
+        original.insert("/codex.jsonl".to_owned(), codex);
 
         let restored = roundtrip(&original);
 
@@ -603,7 +656,7 @@ mod tests {
             json!({ "claude\u{0}/projects": { "dir": "/projects", "volumeId": "1:2" } }),
         );
 
-        let text = write_scan_cache(&cache, &extra);
+        let text = ScanCacheWriter::default().write(&cache, &extra);
         let document: Value = serde_json::from_str(&text).unwrap();
 
         assert_eq!(decode(&document), cache);
@@ -707,5 +760,39 @@ mod tests {
             dedupe_within_file(&[keyless.clone(), keyless], &mut HashSet::new()).len(),
             2
         );
+    }
+
+    #[test]
+    fn writer_reuses_unchanged_entries_and_forgets_removed_ones() {
+        let mut writer = ScanCacheWriter::default();
+        let mut cache = cache_with(vec![
+            ("/a.jsonl", 100.0, vec![plain_record()]),
+            (
+                "/b.jsonl",
+                200.0,
+                vec![record(|record| record.session_id = "session-b".to_owned())],
+            ),
+        ]);
+        let first = writer.write(&cache, &Map::new());
+        let a_fragment = writer.fragments["/a.jsonl"].1.clone();
+
+        // Replacing /b gives it a new id; /a keeps its id and its memoised JSON.
+        cache.insert(
+            "/b.jsonl".to_owned(),
+            cached(
+                300.0,
+                vec![record(|record| record.session_id = "session-c".to_owned())],
+            ),
+        );
+        let second = writer.write(&cache, &Map::new());
+        assert_eq!(writer.fragments["/a.jsonl"].1, a_fragment);
+        assert_eq!(decode(&serde_json::from_str(&second).unwrap()), cache);
+
+        // A removed entry leaves no fragment behind.
+        cache.shift_remove("/a.jsonl");
+        let third = writer.write(&cache, &Map::new());
+        assert_eq!(writer.fragments.len(), 1);
+        assert_eq!(decode(&serde_json::from_str(&third).unwrap()), cache);
+        assert_ne!(first, third);
     }
 }

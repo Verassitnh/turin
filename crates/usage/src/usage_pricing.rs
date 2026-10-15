@@ -5,7 +5,10 @@
 //! against. Everything here is pure: fetching and caching the table lives in
 //! `usage_service`.
 
+use std::collections::HashMap;
+
 use indexmap::IndexMap;
+use parking_lot::Mutex;
 use turin_contracts::base_schemas::js_trim;
 use turin_contracts::settings::UsageModelPriceOverride;
 use turin_contracts::usage::{UsageCategoryCost, UsageCostSource, UsageTokenTotals};
@@ -36,7 +39,54 @@ pub struct ModelRate {
     pub ultrafast: Option<TokenRates>,
 }
 
-pub type RateTable = IndexMap<String, ModelRate>;
+/// A parsed rate table. Tables are built once and then only read, so resolved
+/// lookups are memoised per table: a scan prices every record against a few dozen
+/// models. Any insert clears the memo.
+#[derive(Debug, Default)]
+pub struct RateTable {
+    rates: IndexMap<String, ModelRate>,
+    resolved: Mutex<HashMap<String, Option<ModelRate>>>,
+}
+
+impl Clone for RateTable {
+    fn clone(&self) -> Self {
+        Self {
+            rates: self.rates.clone(),
+            resolved: Mutex::new(self.resolved.lock().clone()),
+        }
+    }
+}
+
+impl RateTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, key: String, rate: ModelRate) {
+        self.resolved.get_mut().clear();
+        self.rates.insert(key, rate);
+    }
+
+    pub fn get(&self, key: &str) -> Option<&ModelRate> {
+        self.rates.get(key)
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.rates.contains_key(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.rates.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rates.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &ModelRate)> {
+        self.rates.iter()
+    }
+}
 
 /// Custom IDs keep their case, provider prefix, and variant suffix. Custom rates
 /// apply as entered, at every speed.
@@ -46,38 +96,37 @@ pub fn create_override_rate_table(
         UsageModelPriceOverride,
     >,
 ) -> RateTable {
-    overrides
-        .iter()
-        .map(|(model, prices)| {
-            let input = prices.input_cost_per_million_tokens.get() / 1_000_000.0;
-            let cache_read = prices
-                .cache_read_cost_per_million_tokens
-                .map_or(prices.input_cost_per_million_tokens.get(), |price| {
-                    price.get()
-                })
-                / 1_000_000.0;
-            let cache_creation = prices
-                .cache_write_cost_per_million_tokens
-                .map_or(prices.input_cost_per_million_tokens.get(), |price| {
-                    price.get()
-                })
-                / 1_000_000.0;
-            (
-                js_trim(model.as_str()).to_owned(),
-                ModelRate {
-                    base: TokenRates {
-                        input_cost_per_token: input,
-                        output_cost_per_token: prices.output_cost_per_million_tokens.get()
-                            / 1_000_000.0,
-                        cache_read_cost_per_token: cache_read,
-                        cache_creation_cost_per_token: cache_creation,
-                    },
-                    fast: None,
-                    ultrafast: None,
+    let mut table = RateTable::new();
+    for (model, prices) in overrides.iter() {
+        let input = prices.input_cost_per_million_tokens.get() / 1_000_000.0;
+        let cache_read = prices
+            .cache_read_cost_per_million_tokens
+            .map_or(prices.input_cost_per_million_tokens.get(), |price| {
+                price.get()
+            })
+            / 1_000_000.0;
+        let cache_creation = prices
+            .cache_write_cost_per_million_tokens
+            .map_or(prices.input_cost_per_million_tokens.get(), |price| {
+                price.get()
+            })
+            / 1_000_000.0;
+        table.insert(
+            js_trim(model.as_str()).to_owned(),
+            ModelRate {
+                base: TokenRates {
+                    input_cost_per_token: input,
+                    output_cost_per_token: prices.output_cost_per_million_tokens.get()
+                        / 1_000_000.0,
+                    cache_read_cost_per_token: cache_read,
+                    cache_creation_cost_per_token: cache_creation,
                 },
-            )
-        })
-        .collect()
+                fast: None,
+                ultrafast: None,
+            },
+        );
+    }
+    table
 }
 
 /// Reads one rate set, `suffix` selecting a tier such as `_priority`. Returns
@@ -176,7 +225,7 @@ pub fn parse_rate_table(document: &serde_json::Value) -> RateTable {
 
     // `None` marks a bare name claimed at conflicting rates: no alias for it.
     let mut alias_candidates: IndexMap<String, Option<ModelRate>> = IndexMap::new();
-    for (key, rate) in &table {
+    for (key, rate) in table.iter() {
         let alias = bare_model_name(key);
         if alias.is_empty() || alias == key || table.contains_key(alias) {
             continue;
@@ -259,13 +308,23 @@ const UNPRICEABLE_MODELS: &[&str] = &[
     "fable",
 ];
 
-pub fn lookup_rate<'a>(table: &'a RateTable, model: &str) -> Option<&'a ModelRate> {
+/// Resolves a model to its rate. Memoised per table, keyed by the raw model name.
+pub fn lookup_rate(table: &RateTable, model: &str) -> Option<ModelRate> {
+    if let Some(resolved) = table.resolved.lock().get(model) {
+        return *resolved;
+    }
+    let resolved = resolve_rate(table, model);
+    table.resolved.lock().insert(model.to_owned(), resolved);
+    resolved
+}
+
+fn resolve_rate(table: &RateTable, model: &str) -> Option<ModelRate> {
     let key = strip_variant_suffix(&normalize_rate_key(model)).to_owned();
     let bare_name = bare_model_name(&key);
     if bare_name.is_empty() || UNPRICEABLE_MODELS.contains(&bare_name) {
         return None;
     }
-    table.get(&key)
+    table.get(&key).copied()
 }
 
 /// What `cost_usd` is split into, and where it came from.
@@ -313,7 +372,9 @@ pub fn price_usage(
     record: &UsageRecord,
     overrides: Option<&RateTable>,
 ) -> PricedUsage {
-    let override_rate = overrides.and_then(|overrides| overrides.get(js_trim(&record.model)));
+    let override_rate = overrides
+        .and_then(|overrides| overrides.get(js_trim(&record.model)))
+        .copied();
     let reported = match (override_rate, record.reported_cost_usd) {
         (None, Some(cost)) if cost.is_finite() => Some(cost),
         _ => None,
@@ -329,7 +390,7 @@ pub fn price_usage(
         };
     };
 
-    let list_cost = cost_by_category(&record.totals, &rates_at(rate, record.speed));
+    let list_cost = cost_by_category(&record.totals, &rates_at(&rate, record.speed));
     let list_cost_usd = sum_categories(&list_cost);
     if let Some(reported) = reported.filter(|_| list_cost_usd <= 0.0) {
         return unsplit(reported, UsageCostSource::ProviderReported);
@@ -369,11 +430,12 @@ pub fn cache_savings_usd(
 ) -> f64 {
     let rate = overrides
         .and_then(|overrides| overrides.get(js_trim(&record.model)))
+        .copied()
         .or_else(|| lookup_rate(table, record.rate_model.as_deref().unwrap_or(&record.model)));
     let Some(rate) = rate else {
         return 0.0;
     };
-    let rates = rates_at(rate, record.speed);
+    let rates = rates_at(&rate, record.speed);
     record.totals.cached_input_tokens as f64
         * (rates.input_cost_per_token - rates.cache_read_cost_per_token)
 }
@@ -800,5 +862,31 @@ mod tests {
             3.0
         );
         assert!(lookup_rate(&table, "example-model").is_none());
+    }
+
+    #[test]
+    fn a_resolved_lookup_is_memoised_and_an_insert_clears_the_memo() {
+        let mut table = parse_rate_table(&json!({ "claude-fable-5": rate(1e-5, None) }));
+        assert_eq!(
+            lookup_rate(&table, "claude-fable-5[1m]"),
+            lookup_rate(&table, "claude-fable-5")
+        );
+        assert!(lookup_rate(&table, "gpt-6-sol").is_none());
+        assert!(table.resolved.lock().contains_key("gpt-6-sol"));
+
+        table.insert(
+            "gpt-6-sol".to_owned(),
+            ModelRate {
+                base: TokenRates {
+                    input_cost_per_token: 2e-6,
+                    output_cost_per_token: 1e-5,
+                    cache_read_cost_per_token: 2e-7,
+                    cache_creation_cost_per_token: 2.5e-6,
+                },
+                fast: None,
+                ultrafast: None,
+            },
+        );
+        assert!(lookup_rate(&table, "gpt-6-sol").is_some());
     }
 }

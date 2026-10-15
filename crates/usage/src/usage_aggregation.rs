@@ -59,6 +59,42 @@ fn parse_fixed_offset(name: &str) -> Option<FixedOffset> {
     FixedOffset::east_opt(sign * (hours * 3600 + minutes * 60))
 }
 
+/// Days of instants in one reporting zone. Formatting a day is the expensive part
+/// of bucketing, and a quarter-hour slot almost never straddles midnight, so each
+/// slot is formatted once: when both its ends fall on one day, every instant in it
+/// does too. A slot that does straddle one (a fixed offset such as `+00:01`) is
+/// formatted per record.
+struct DayFormatter {
+    zone: Zone,
+    /// `None` marks a slot that straddles midnight.
+    slots: HashMap<i64, Option<String>>,
+}
+
+const QUARTER_HOUR_MS: i64 = 15 * 60 * 1000;
+
+impl DayFormatter {
+    fn new(zone: Zone) -> Self {
+        Self {
+            zone,
+            slots: HashMap::new(),
+        }
+    }
+
+    fn day(&mut self, timestamp_ms: i64) -> String {
+        let slot = timestamp_ms.div_euclid(QUARTER_HOUR_MS);
+        let zone = &self.zone;
+        let cached = self.slots.entry(slot).or_insert_with(|| {
+            let first = day_of(zone, slot * QUARTER_HOUR_MS);
+            let last = day_of(zone, (slot + 1) * QUARTER_HOUR_MS - 1);
+            (first == last).then_some(first)
+        });
+        match cached {
+            Some(day) => day.clone(),
+            None => day_of(&self.zone, timestamp_ms),
+        }
+    }
+}
+
 /// Formats an instant as a `YYYY-MM-DD` day in `zone`.
 fn day_of(zone: &Zone, timestamp_ms: i64) -> String {
     let Some(instant) = DateTime::<Utc>::from_timestamp_millis(timestamp_ms) else {
@@ -178,7 +214,7 @@ pub struct AggregateResult {
 pub struct UsageAggregator {
     buckets: IndexMap<BucketKey, MutableBucket>,
     seen: HashSet<String>,
-    zone: Zone,
+    days: DayFormatter,
     /// `(sinceTimeMs, untilTimeMs)` for hourly requests, `None` for daily ones.
     hourly_window: Option<(i64, i64)>,
     options: AggregateOptions,
@@ -198,7 +234,7 @@ impl UsageAggregator {
         Ok(Self {
             buckets: IndexMap::new(),
             seen: HashSet::new(),
-            zone: parse_zone(&options.time_zone),
+            days: DayFormatter::new(parse_zone(&options.time_zone)),
             hourly_window,
             options,
             duplicates_dropped: 0,
@@ -241,7 +277,7 @@ impl UsageAggregator {
             return false;
         }
 
-        let day = day_of(&self.zone, timestamp_ms);
+        let day = self.days.day(timestamp_ms);
         if self.hourly_window.is_none()
             && (day < self.options.since_day || day > self.options.until_day)
         {

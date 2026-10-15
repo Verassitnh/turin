@@ -843,7 +843,11 @@ async fn reports_unreadable_transcripts_as_partial_and_recovers_once_they_can_be
     let unreadable = transcript.with_file_name("other.jsonl");
     write_file(&transcript, claude_line(1, 5));
     write_file(&unreadable, claude_line(2, 7));
-    std::fs::set_permissions(&unreadable, std::os::unix::fs::PermissionsExt::from_mode(0)).unwrap();
+    std::fs::set_permissions(
+        &unreadable,
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
     seed_rates(&state, fable_rates());
 
     let service = default_service(&state, &home);

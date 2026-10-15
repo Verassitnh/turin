@@ -48,8 +48,8 @@ use crate::usage_aggregation::{
 };
 use crate::usage_pricing::{RateTable, create_override_rate_table, parse_rate_table};
 use crate::usage_scan_cache::{
-    CachedFile, LEGACY_SCAN_CACHE_FILE_NAME, SCAN_CACHE_FILE_NAME, ScanCache, decode_scan_cache,
-    dedupe_within_file, prune_scan_cache, write_scan_cache,
+    CachedFile, LEGACY_SCAN_CACHE_FILE_NAME, SCAN_CACHE_FILE_NAME, ScanCache, ScanCacheWriter,
+    decode_scan_cache, dedupe_within_file, prune_scan_cache,
 };
 use crate::usage_transcript_reader::{
     TranscriptFile, TranscriptParsePosition, list_transcript_files, read_directory_volume_id,
@@ -171,6 +171,8 @@ struct Inner {
     /// In-flight scans by request key, so identical concurrent reads share one scan.
     inflight: Mutex<HashMap<String, watch::Receiver<Option<SummaryResult>>>>,
     persists: Mutex<Vec<JoinHandle<()>>>,
+    /// Holds the intern tables and encoded entries between persists.
+    cache_writer: Mutex<ScanCacheWriter>,
 }
 
 /// The usage page's read model. Cheap to clone; clones share all caches.
@@ -308,6 +310,7 @@ impl UsageService {
                 scan_cache_loaded: OnceCell::new(),
                 inflight: Mutex::new(HashMap::new()),
                 persists: Mutex::new(Vec::new()),
+                cache_writer: Mutex::new(ScanCacheWriter::default()),
             }),
         }
     }
@@ -665,7 +668,10 @@ impl UsageService {
             state.cache_dirty = false;
             let mut extra = Map::new();
             extra.insert("sources".to_owned(), json!(state.source_cache));
-            write_scan_cache(&state.file_cache, &extra)
+            self.inner
+                .cache_writer
+                .lock()
+                .write(&state.file_cache, &extra)
         };
         if write_atomically(&self.scan_cache_path(), &contents)
             .await
@@ -784,14 +790,14 @@ impl UsageService {
             records: out,
             failed: false,
             update: Some(CacheUpdate {
-                entry: CachedFile {
+                entry: CachedFile::new(
                     size,
-                    mtime_ms: file.mtime_ms,
+                    file.mtime_ms,
                     provider,
                     records,
                     tail_records,
-                    position: parsed.position,
-                },
+                    parsed.position,
+                ),
                 replaces,
             }),
         }

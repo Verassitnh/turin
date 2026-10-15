@@ -7,10 +7,12 @@
 //! shapes. See PORTING.md "No client/server split".
 
 pub mod archived_threads;
+pub mod client_state;
 pub mod command_result;
 pub mod composer_dispatch;
 pub mod contracts;
 pub mod entities;
+pub mod events;
 pub mod helpers;
 pub mod item_support;
 pub mod models;
@@ -25,6 +27,7 @@ pub mod support;
 #[cfg(test)]
 pub mod test_fixtures;
 pub mod thread_checkpoints;
+pub mod thread_detail;
 pub mod thread_execution;
 pub mod thread_feedback;
 pub mod thread_history_merge;

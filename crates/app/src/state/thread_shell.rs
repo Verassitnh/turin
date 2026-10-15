@@ -230,6 +230,7 @@ pub struct ShellViewBuilder {
     cache: PresentationCache,
     projects: HashMap<ProjectId, (ProjectShellRow, bool, Arc<EnvironmentProject>)>,
     previous: Option<ShellView>,
+    previous_scratch_workspace_root: Option<String>,
 }
 
 impl ShellViewBuilder {
@@ -247,6 +248,7 @@ impl ShellViewBuilder {
         if let Some(previous) = &self.previous
             && Arc::ptr_eq(&previous.snapshot, snapshot)
             && previous.environment_id == *environment_id
+            && self.previous_scratch_workspace_root.as_deref() == scratch_workspace_root
         {
             return previous.clone();
         }
@@ -392,6 +394,7 @@ impl ShellViewBuilder {
             project_index: Arc::new(project_index),
         };
         self.previous = Some(view.clone());
+        self.previous_scratch_workspace_root = scratch_workspace_root.map(str::to_owned);
         view
     }
 }

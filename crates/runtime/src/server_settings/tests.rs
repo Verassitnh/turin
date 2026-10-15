@@ -2024,4 +2024,367 @@ mod service {
             json!("sk-or-secret")
         );
     }
+
+    // Ports of upstream serverSettings.test.ts, lines 1700-2186 (batch 8).
+    // Adaptations: bitbucket is cut (PORTING), so the source-control cases run
+    // on GitHub only. The terminal environment case (1855) belongs to the
+    // terminal manager and is not ported here.
+
+    /// A store with scripted failures: reads of the new value fail, and writes
+    /// of it fail after storing (a partially committed write).
+    struct Scripted {
+        inner: MemorySecretStore,
+        reject_new: AtomicBool,
+        partial_write: bool,
+    }
+
+    #[async_trait]
+    impl SecretStore for Scripted {
+        async fn get(&self, name: &str) -> Result<Option<Vec<u8>>, SecretStoreError> {
+            let value = self.inner.get(name).await?;
+            if !self.partial_write
+                && self.reject_new.load(Ordering::SeqCst)
+                && value.as_deref() == Some(b"sk-new")
+            {
+                return Err(SecretStoreError::Read {
+                    resource: format!("secret {name}"),
+                    detail: "Forced response materialization failure.".into(),
+                });
+            }
+            Ok(value)
+        }
+        async fn set(&self, name: &str, value: &[u8]) -> Result<(), SecretStoreError> {
+            self.inner.set(name, value).await?;
+            if self.partial_write && self.reject_new.load(Ordering::SeqCst) && value == b"sk-new" {
+                return Err(SecretStoreError::Persist {
+                    resource: format!("secret {name}"),
+                    detail: "chmod failed after rename".into(),
+                });
+            }
+            Ok(())
+        }
+        async fn remove(&self, name: &str) -> Result<(), SecretStoreError> {
+            self.inner.remove(name).await
+        }
+    }
+
+    fn github_tokens_patch(tokens: Value) -> ServerSettingsPatch {
+        patch(json!({"sourceControlHosts": {"github": {"hosts": {}, "tokens": tokens}}}))
+    }
+
+    #[tokio::test]
+    async fn github_host_tokens_keep_their_lifecycle_and_clients_only_see_redacted_values() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let saved = service
+            .update_settings(&github_tokens_patch(
+                json!({"github.com": "ghp_dotcom", "ghe.acme.test": "ghp_ghe"}),
+            ))
+            .await
+            .unwrap();
+        let raw = std::fs::read_to_string(&fx.path).unwrap();
+        for secret in ["ghp_dotcom", "ghp_ghe"] {
+            assert!(!raw.contains(secret));
+        }
+        let client = redact_server_settings_for_client(&saved).unwrap();
+        let client_tokens = &settings_value(&client)["sourceControlHosts"]["github"]["tokens"];
+        assert_ne!(client_tokens["github.com"], json!("ghp_dotcom"));
+        assert!(!client_tokens["github.com"].as_str().unwrap().is_empty());
+
+        // Echoing the redacted values keeps them.
+        service
+            .update_settings(&github_tokens_patch(client_tokens.clone()))
+            .await
+            .unwrap();
+        let kept = settings_value(&service.get_settings().await.unwrap());
+        assert_eq!(
+            kept["sourceControlHosts"]["github"]["tokens"],
+            json!({"github.com": "ghp_dotcom", "ghe.acme.test": "ghp_ghe"})
+        );
+
+        // An empty value removes that one token and leaves the other.
+        let cleared = service
+            .update_settings(&github_tokens_patch(json!({
+                "github.com": "",
+                "ghe.acme.test": "ghp_ghe",
+            })))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&cleared)["sourceControlHosts"]["github"]["tokens"]["ghe.acme.test"],
+            json!("ghp_ghe")
+        );
+        let dotcom = source_control_host_secret_name("github", "tokens", Some("github.com"));
+        let ghe = source_control_host_secret_name("github", "tokens", Some("ghe.acme.test"));
+        assert!(fx.secrets.get(&dotcom).await.unwrap().is_none());
+        assert!(fx.secrets.get(&ghe).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn retired_github_keys_stay_for_another_load_when_a_token_cannot_be_copied() {
+        let fx = fixture().await;
+        let legacy = json!({"github": {
+            "hosts": {"github.com": {"account": "work"}},
+            "tokens": {"github.com": SECRET_REDACTED},
+        }})
+        .to_string();
+        write_raw_settings(&fx.path, &legacy);
+        let service = ServerSettingsService::new(&fx.path, Arc::new(ReadFailing), fx.db.clone());
+        let _ = service.get_settings().await;
+        assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), legacy);
+    }
+
+    #[tokio::test]
+    async fn retired_github_keys_and_their_secrets_move_on_load() {
+        let fx = fixture().await;
+        let legacy_name = format!(
+            "github-token-{}",
+            <base64::engine::GeneralPurpose as base64::Engine>::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                "github.com"
+            )
+        );
+        fx.secrets.set(&legacy_name, b"ghp_saved").await.unwrap();
+        write_raw_settings(
+            &fx.path,
+            &json!({"github": {
+                "hosts": {"github.com": {"account": "work"}},
+                "tokens": {"github.com": SECRET_REDACTED},
+            }})
+            .to_string(),
+        );
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let loaded = settings_value(&service.get_settings().await.unwrap());
+        assert_eq!(
+            loaded["sourceControlHosts"]["github"]["tokens"],
+            json!({"github.com": "ghp_saved"})
+        );
+        assert_eq!(
+            loaded["sourceControlHosts"]["github"]["hosts"],
+            json!({"github.com": {"account": "work"}})
+        );
+        let raw = read_file(&fx.path);
+        assert!(raw.get("github").is_none());
+        assert!(raw.get("sourceControlHosts").is_some());
+        assert!(fx.secrets.get(&legacy_name).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_hand_edited_github_token_moves_into_the_store_when_settings_load() {
+        let fx = fixture().await;
+        write_raw_settings(
+            &fx.path,
+            r#"{"sourceControlHosts":{"github":{"hosts":{},"tokens":{"github.com":"hand-edited-token"}}}}"#,
+        );
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        // Loading alone moves it: no settings update is needed.
+        let loaded = settings_value(&service.get_settings().await.unwrap());
+        assert_eq!(
+            loaded["sourceControlHosts"]["github"]["tokens"]["github.com"],
+            json!("hand-edited-token")
+        );
+        assert!(
+            !std::fs::read_to_string(&fx.path)
+                .unwrap()
+                .contains("hand-edited-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_settings_file_commit_rolls_back_secret_changes() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let instance = |value: &str| {
+            serde_json::from_value::<ProviderInstanceMutation>(json!({
+                "operation": "upsert",
+                "instanceId": "codex_write_failure",
+                "instance": {
+                    "driver": "codex",
+                    "environment": [{"name": "OPENROUTER_API_KEY", "value": value, "sensitive": true}],
+                    "config": {},
+                },
+            }))
+            .unwrap()
+        };
+        service
+            .update_provider_instance(&instance("sk-kept"), None)
+            .await
+            .unwrap();
+
+        // A read-only settings directory makes the atomic write fail after the
+        // secret store has already changed.
+        let directory = fx.path.parent().unwrap().to_path_buf();
+        let mut locked = std::fs::metadata(&directory).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut locked, 0o555);
+        std::fs::set_permissions(&directory, locked).unwrap();
+        let failed = service
+            .update_provider_instance(&instance("sk-new"), None)
+            .await;
+        let removed = service
+            .update_provider_instance(
+                &serde_json::from_value::<ProviderInstanceMutation>(json!({
+                    "operation": "remove",
+                    "instanceId": "codex_write_failure",
+                }))
+                .unwrap(),
+                None,
+            )
+            .await;
+        let mut unlocked = std::fs::metadata(&directory).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut unlocked, 0o755);
+        std::fs::set_permissions(&directory, unlocked).unwrap();
+
+        assert!(failed.is_err());
+        assert!(removed.is_err());
+        let value = settings_value(&service.get_settings().await.unwrap());
+        assert_eq!(
+            value["providerInstances"]["codex_write_failure"]["environment"][0]["value"],
+            json!("sk-kept")
+        );
+    }
+
+    #[tokio::test]
+    async fn secret_changes_roll_back_when_the_new_value_cannot_be_read_back_or_written() {
+        for partial_write in [false, true] {
+            let fx = fixture().await;
+            let store = Arc::new(Scripted {
+                inner: MemorySecretStore::new(),
+                reject_new: AtomicBool::new(false),
+                partial_write,
+            });
+            let service = ServerSettingsService::new(&fx.path, store.clone(), fx.db.clone());
+            let update = |value: &str| {
+                patch(
+                    json!({"providerInstances": {"codex_materialization_failure": {
+                        "driver": "codex",
+                        "environment": [{"name": "OPENROUTER_API_KEY", "value": value, "sensitive": true}],
+                        "config": {},
+                    }}}),
+                )
+            };
+            service.update_settings(&update("sk-kept")).await.unwrap();
+
+            store.reject_new.store(true, Ordering::SeqCst);
+            let failed = service.update_settings(&update("sk-new")).await;
+            store.reject_new.store(false, Ordering::SeqCst);
+            assert!(failed.is_err(), "partial_write={partial_write}");
+            let value = settings_value(&service.get_settings().await.unwrap());
+            assert_eq!(
+                value["providerInstances"]["codex_materialization_failure"]["environment"][0]["value"],
+                json!("sk-kept"),
+                "partial_write={partial_write}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_project_overrides_fold_into_project_settings_once() {
+        let fx = fixture().await;
+        let legacy = "project-legacy";
+        let scripted = "project-scripted";
+        let script = json!({"id": "check", "name": "Check", "command": "npm test", "icon": "play", "runOnWorktreeCreate": false});
+        let model = json!({"instanceId": "codex", "model": "gpt-5.5"});
+        let rows = [
+            (
+                legacy,
+                Some(model.to_string()),
+                Some("worktree"),
+                1_i64,
+                json!([script]).to_string(),
+            ),
+            (scripted, None, None, 0_i64, json!([script]).to_string()),
+        ];
+        let inserted = rows.clone();
+        fx.db
+            .write(move |tx| {
+                for (project_id, model, env_mode, auto_pull, scripts) in inserted {
+                    tx.execute(
+                        "INSERT INTO projection_projects (
+                            project_id, title, workspace_root, default_model_selection_json,
+                            default_thread_env_mode, auto_pull, scripts_json, created_at, updated_at
+                         ) VALUES (?1, 'Project', ?2, ?3, ?4, ?5, ?6, '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z')",
+                        rusqlite::params![
+                            project_id,
+                            format!("/tmp/{project_id}"),
+                            model,
+                            env_mode,
+                            auto_pull,
+                            scripts
+                        ],
+                    )
+                    .map_err(|err| turin_persistence::PersistenceError::sql("test.insertProject", &err))?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        write_raw_settings(
+            &fx.path,
+            &json!({
+                "projectAgentBrowserAccessOverrides": {legacy: false},
+                "projectAutoPullOverrides": {scripted: true},
+                "projectScriptOverrides": {legacy: null},
+            })
+            .to_string(),
+        );
+
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let settings = settings_value(&service.get_settings().await.unwrap());
+        assert_eq!(settings["projectSettingsFolded"], json!(true));
+        assert_eq!(
+            settings["projectSettingsOverrides"],
+            json!({
+                legacy: {
+                    "enableAgentBrowserAccess": false,
+                    "defaultModelSelection": model,
+                    "defaultThreadEnvMode": "worktree",
+                    "defaultAutoPull": true,
+                },
+                scripted: {"defaultAutoPull": true, "defaultProjectScripts": [script]},
+            })
+        );
+        // Derived legacy views keep older clients reading the same values.
+        assert_eq!(
+            settings["projectAutoPullOverrides"],
+            json!({legacy: true, scripted: true})
+        );
+        assert_eq!(
+            settings["projectScriptOverrides"],
+            json!({scripted: [script]})
+        );
+
+        // A reset survives the next load: the fold does not run again.
+        service
+            .update_settings(&patch(json!({"projectSettingsOverrides": {legacy: null}})))
+            .await
+            .unwrap();
+        let persisted = read_file(&fx.path);
+        assert_eq!(persisted["projectSettingsFolded"], json!(true));
+        assert!(persisted["projectSettingsOverrides"].get(legacy).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_settings_file_is_left_untouched_instead_of_folded_over() {
+        let fx = fixture().await;
+        fx.db
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO projection_projects (project_id, title, workspace_root, auto_pull, scripts_json, created_at, updated_at)
+                     VALUES ('project-broken', 'Project', '/tmp/project-broken', 1, '[]', '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z')",
+                    [],
+                )
+                .map_err(|err| turin_persistence::PersistenceError::sql("test.insertBrokenProject", &err))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let broken = r#"{"defaultAutoPull": tru"#;
+        write_raw_settings(&fx.path, broken);
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let settings = settings_value(&service.get_settings().await.unwrap());
+        assert_eq!(settings["projectSettingsFolded"], json!(false));
+        assert_eq!(settings["continueThreadsAfterServerUpdate"], json!(false));
+        assert_eq!(settings["projectSettingsOverrides"], json!({}));
+        assert_eq!(std::fs::read_to_string(&fx.path).unwrap(), broken);
+    }
 }

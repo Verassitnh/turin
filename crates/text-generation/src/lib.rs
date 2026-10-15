@@ -10,6 +10,7 @@ pub mod cli_args;
 pub mod codex_launch_args;
 pub mod codex_text_generation;
 pub mod command;
+pub mod cursor_text_generation;
 pub mod git_branch_names;
 pub mod json_reply;
 pub mod opencode2_text_generation;

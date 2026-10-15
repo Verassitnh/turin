@@ -7219,6 +7219,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "turin-acp",
  "turin-contracts",
  "turin-provider-core",
  "url",

@@ -5,23 +5,12 @@ mod branding;
 mod components;
 mod hooks;
 mod theme;
+mod timestamp_format;
 // The ui primitives are a library: every upstream variant and size is ported
 // ahead of its callers.
 #[allow(dead_code)]
 mod ui;
 
-<<<<<<< HEAD
-mod assets;
-mod timestamp_format;
-// Ported upstream constants and helpers (storage keys, brand-width
-// minimum, statuses) land before their callers.
-#[allow(dead_code)]
-mod components;
-#[allow(dead_code)]
-mod hooks;
-
-=======
->>>>>>> task/T03-design-system
 use gpui_kit::*;
 
 use components::app_sidebar_layout::{self, AppSidebarLayout};

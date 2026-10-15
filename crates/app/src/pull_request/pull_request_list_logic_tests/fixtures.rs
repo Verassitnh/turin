@@ -160,7 +160,9 @@ pub(super) fn provider(overrides: Value) -> PullRequestProviderSummary {
         "configured": true,
         "detail": null,
     });
-    let fields = summary.as_object_mut().expect("fixture summary is an object");
+    let fields = summary
+        .as_object_mut()
+        .expect("fixture summary is an object");
     for (key, value) in overrides.as_object().expect("overrides are an object") {
         fields.insert(key.clone(), value.clone());
     }

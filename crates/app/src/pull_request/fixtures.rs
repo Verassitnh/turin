@@ -689,6 +689,22 @@ pub fn thread_links() -> Vec<ThreadPullRequestLink> {
     decode(links)
 }
 
+/// The active threads of the demo project, newest first.
+pub fn thread_choices() -> Vec<super::view_model::ThreadChoice> {
+    let thread = |id: &str, title: &str, project: &str, secs: i64| super::view_model::ThreadChoice {
+        id: turin_contracts::ThreadId::new(id).expect("static id"),
+        title: title.to_owned(),
+        project_title: project.to_owned(),
+        updated_at: ago(secs),
+    };
+    vec![
+        thread("thread-pr-views", "Port the pull request views", DEMO_PROJECT_TITLE, 12 * MINUTE),
+        thread("thread-composer", "Composer: restore draft when a send fails", DEMO_PROJECT_TITLE, 3 * HOUR),
+        thread("thread-sidebar", "Review sidebar status for stacks", "t3code", DAY),
+        thread("thread-untitled", "", "t3code", 2 * DAY),
+    ]
+}
+
 /// The link a thread gets when the reader links `entry` by hand.
 pub fn link_for_entry(entry: &PullRequestListEntry) -> ThreadPullRequestLink {
     decode(json!({

@@ -136,6 +136,15 @@ pub struct PullRequestDetailSnapshot {
     pub can_write: bool,
 }
 
+/// An active thread the reader can link a pull request to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadChoice {
+    pub id: ThreadId,
+    pub title: String,
+    pub project_title: String,
+    pub updated_at: String,
+}
+
 /// A thread linked to this pull request (`pullRequests.linkedThreads`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkedThread {
@@ -272,6 +281,7 @@ pub struct PullRequestStore {
     list: PullRequestListSnapshot,
     details: HashMap<String, PullRequestDetailSnapshot>,
     thread_links: HashMap<String, Vec<ThreadPullRequestLink>>,
+    threads: Vec<ThreadChoice>,
     source: Option<Arc<dyn PullRequestSource>>,
 }
 
@@ -281,6 +291,7 @@ impl PullRequestStore {
             list: PullRequestListSnapshot::default(),
             details: HashMap::new(),
             thread_links: HashMap::new(),
+            threads: Vec::new(),
             source: None,
         }
     }
@@ -312,6 +323,16 @@ impl PullRequestStore {
         self.thread_links
             .get(thread_id.as_str())
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// The active threads the thread picker offers (`useThreadShells`).
+    pub fn threads(&self) -> &[ThreadChoice] {
+        &self.threads
+    }
+
+    pub fn set_threads(&mut self, threads: Vec<ThreadChoice>, cx: &mut Context<Self>) {
+        self.threads = threads;
+        cx.notify();
     }
 
     pub fn update_list(

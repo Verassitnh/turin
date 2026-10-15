@@ -42,6 +42,7 @@ impl MockPullRequestSource {
             store.set_source(source);
             let merged = merge_pull_request_lists(&[(demo_environment_id(), fixtures::list_result())]);
             store.set_thread_links(&demo_thread_id(), fixtures::thread_links(), cx);
+            store.set_threads(fixtures::thread_choices(), cx);
             store.update_list(cx, |list| {
                 list.merged = merged;
                 list.projects = vec![PullRequestProject {

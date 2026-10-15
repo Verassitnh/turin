@@ -28,7 +28,12 @@ fn row(number: u64, state: &str) -> EnvironmentPullRequestEntry {
     listed(json!({ "number": number, "state": state, "isDraft": false, "labels": [] }))
 }
 
-fn override_at(state: PullRequestState, updated_at: &str, token: u64, at: i64) -> PullRequestListOverride {
+fn override_at(
+    state: PullRequestState,
+    updated_at: &str,
+    token: u64,
+    at: i64,
+) -> PullRequestListOverride {
     PullRequestListOverride {
         state,
         is_draft: None,
@@ -77,7 +82,10 @@ fn save_snapshot(storage: &mut MemorySnapshotStorage, scope: &str, data: MergedP
     );
 }
 
-fn read_snapshot(storage: Option<&MemorySnapshotStorage>, env: &str) -> Option<PullRequestListSnapshot> {
+fn read_snapshot(
+    storage: Option<&MemorySnapshotStorage>,
+    env: &str,
+) -> Option<PullRequestListSnapshot> {
     read_pull_request_list_snapshot(storage.map(|storage| storage as &dyn SnapshotStorage), env)
 }
 
@@ -107,7 +115,10 @@ impl PreferenceStorage for DeniedPreferences {
     }
 }
 
-fn preferences(involvement: PullRequestInvolvement, state: PullRequestListState) -> PullRequestListPreferences {
+fn preferences(
+    involvement: PullRequestInvolvement,
+    state: PullRequestListState,
+) -> PullRequestListPreferences {
     PullRequestListPreferences {
         involvement,
         state,
@@ -142,11 +153,14 @@ fn ranks_authored_work_by_how_surely_it_is_the_authors_to_unblock_newest_first_w
         "checksState": "failing",
         "updatedAt": "2026-08-02T00:00:00Z",
     }));
-    let approved = listed(json!({ "number": 4, "checksState": "passing", "reviewDecision": "approved" }));
+    let approved =
+        listed(json!({ "number": 4, "checksState": "passing", "reviewDecision": "approved" }));
     let draft = listed(json!({ "number": 5, "isDraft": true, "checksState": "passing" }));
     let waiting = listed(json!({ "number": 6 }));
-    let merged = listed(json!({ "number": 7, "state": "merged", "updatedAt": "2026-08-01T00:00:00Z" }));
-    let newer_closed = listed(json!({ "number": 8, "state": "closed", "updatedAt": "2026-08-03T00:00:00Z" }));
+    let merged =
+        listed(json!({ "number": 7, "state": "merged", "updatedAt": "2026-08-01T00:00:00Z" }));
+    let newer_closed =
+        listed(json!({ "number": 8, "state": "closed", "updatedAt": "2026-08-03T00:00:00Z" }));
     let newer_failing = listed(json!({
         "number": 9,
         "checksState": "failing",
@@ -173,8 +187,10 @@ fn ranks_authored_work_by_how_surely_it_is_the_authors_to_unblock_newest_first_w
 fn ranks_reviewer_work_with_open_rows_first_newest_first() {
     let older_open = listed(json!({ "number": 1, "updatedAt": "2026-08-01T00:00:00Z" }));
     let newer_open = listed(json!({ "number": 2, "updatedAt": "2026-08-02T00:00:00Z" }));
-    let older_finished = listed(json!({ "number": 3, "state": "merged", "updatedAt": "2026-08-01T00:00:00Z" }));
-    let newer_finished = listed(json!({ "number": 4, "state": "closed", "updatedAt": "2026-08-03T00:00:00Z" }));
+    let older_finished =
+        listed(json!({ "number": 3, "state": "merged", "updatedAt": "2026-08-01T00:00:00Z" }));
+    let newer_finished =
+        listed(json!({ "number": 4, "state": "closed", "updatedAt": "2026-08-03T00:00:00Z" }));
 
     assert_eq!(
         numbers_of(&rank_pull_requests_blocked_on_reviewer(&[
@@ -215,7 +231,10 @@ fn ranks_blocked_groups_according_to_their_involvement() {
         PullRequestInvolvement::All,
     );
     assert_eq!(
-        sorted.iter().map(|group| numbers_of(&group.entries)).collect::<Vec<_>>(),
+        sorted
+            .iter()
+            .map(|group| numbers_of(&group.entries))
+            .collect::<Vec<_>>(),
         vec![vec![2, 1], vec![3, 4], vec![5, 6]]
     );
     let others_as_authored = sort_pull_request_groups(
@@ -417,7 +436,10 @@ fn gives_authored_precedence_over_review_requested_and_orders_partitions_by_rece
     );
     assert_eq!(
         groups.iter().map(|group| group.key).collect::<Vec<_>>(),
-        vec![PullRequestGroupKey::Authored, PullRequestGroupKey::ReviewRequested]
+        vec![
+            PullRequestGroupKey::Authored,
+            PullRequestGroupKey::ReviewRequested
+        ]
     );
     assert_eq!(numbers_of(&groups[0].entries), vec![1]);
     assert_eq!(numbers_of(&groups[1].entries), vec![2, 3]);
@@ -441,19 +463,30 @@ fn lets_the_feeds_copy_of_a_partitioned_row_replace_the_partitions() {
 #[test]
 fn hydrates_the_retained_rows_so_ghosts_never_replace_them() {
     let mut storage = MemorySnapshotStorage::default();
-    save_snapshot(&mut storage, "env-1:open:all::", held_list(vec![listed(json!({ "number": 1 }))]));
+    save_snapshot(
+        &mut storage,
+        "env-1:open:all::",
+        held_list(vec![listed(json!({ "number": 1 }))]),
+    );
     let snapshot = read_snapshot(Some(&storage), ENV_1);
     assert_eq!(
         snapshot.as_ref().map(|snapshot| snapshot.scope.as_str()),
         Some("env-1:open:all::")
     );
-    assert_eq!(numbers_of(&snapshot.expect("snapshot is held").data.entries), vec![1]);
+    assert_eq!(
+        numbers_of(&snapshot.expect("snapshot is held").data.entries),
+        vec![1]
+    );
 }
 
 #[test]
 fn carries_neither_stale_failures_nor_stale_cursors() {
     let mut storage = MemorySnapshotStorage::default();
-    save_snapshot(&mut storage, "s", held_list(vec![listed(json!({ "number": 1 }))]));
+    save_snapshot(
+        &mut storage,
+        "s",
+        held_list(vec![listed(json!({ "number": 1 }))]),
+    );
     let snapshot = read_snapshot(Some(&storage), ENV_1).expect("snapshot is held");
     assert!(snapshot.data.errors.is_empty());
     assert!(snapshot.data.next_cursors.is_empty());
@@ -462,7 +495,11 @@ fn carries_neither_stale_failures_nor_stale_cursors() {
 #[test]
 fn answers_nothing_for_another_environment() {
     let mut storage = MemorySnapshotStorage::default();
-    save_snapshot(&mut storage, "s", held_list(vec![listed(json!({ "number": 1 }))]));
+    save_snapshot(
+        &mut storage,
+        "s",
+        held_list(vec![listed(json!({ "number": 1 }))]),
+    );
     assert!(read_snapshot(Some(&storage), ENV_2).is_none());
 }
 
@@ -501,9 +538,11 @@ fn caps_the_accumulated_rows_but_keeps_the_whole_host_set() {
     // list rather than one round's answer — capped at the one page a cold start needs, while
     // the hosts it was read from (which do not grow with the page) are kept in full.
     let mut storage = MemorySnapshotStorage::default();
-    let many_entries: Vec<EnvironmentPullRequestEntry> =
-        (1..=120).map(|number| listed(json!({ "number": number }))).collect();
-    let viewers: PullRequestViewers = viewers_for(&[("github.com", "Bilal"), ("gitlab.com", "Bilal")]);
+    let many_entries: Vec<EnvironmentPullRequestEntry> = (1..=120)
+        .map(|number| listed(json!({ "number": number })))
+        .collect();
+    let viewers: PullRequestViewers =
+        viewers_for(&[("github.com", "Bilal"), ("gitlab.com", "Bilal")]);
     let providers = vec![
         provider(json!({ "host": "github.com", "kind": "github", "detail": null })),
         provider(json!({ "host": "gitlab.com", "kind": "gitlab", "detail": null })),
@@ -606,14 +645,18 @@ fn tags_every_row_with_the_environment_that_read_it_newest_first() {
         (
             env(ENV_1),
             PullRequestListResult {
-                entries: vec![listing(json!({ "number": 1, "updatedAt": "2026-07-01T00:00:00Z" }))],
+                entries: vec![listing(
+                    json!({ "number": 1, "updatedAt": "2026-07-01T00:00:00Z" }),
+                )],
                 ..answer()
             },
         ),
         (
             env(ENV_2),
             PullRequestListResult {
-                entries: vec![listing(json!({ "number": 2, "updatedAt": "2026-08-01T00:00:00Z" }))],
+                entries: vec![listing(
+                    json!({ "number": 2, "updatedAt": "2026-08-01T00:00:00Z" }),
+                )],
                 ..answer()
             },
         ),
@@ -636,7 +679,10 @@ fn tells_two_environments_copies_of_one_pull_request_apart() {
         environment_id: env(ENV_2),
         ..row.clone()
     };
-    assert_ne!(pull_request_entry_key_of(&row), pull_request_entry_key_of(&other));
+    assert_ne!(
+        pull_request_entry_key_of(&row),
+        pull_request_entry_key_of(&other)
+    );
 }
 
 #[test]
@@ -842,9 +888,13 @@ fn projects() -> Vec<ScopedProject> {
 #[test]
 fn takes_the_server_it_was_given() {
     assert_eq!(
-        find_scoped_project(&projects(), Some(ENV_2), Some("project-1"), |project| project.id, |project| {
-            project.environment_id
-        })
+        find_scoped_project(
+            &projects(),
+            Some(ENV_2),
+            Some("project-1"),
+            |project| project.id,
+            |project| { project.environment_id }
+        )
         .map(|project| project.environment_id),
         Some(ENV_2)
     );
@@ -853,17 +903,25 @@ fn takes_the_server_it_was_given() {
 #[test]
 fn answers_a_bare_id_only_where_one_server_has_it() {
     assert_eq!(
-        find_scoped_project(&projects(), None, Some("project-2"), |project| project.id, |project| {
-            project.environment_id
-        })
+        find_scoped_project(
+            &projects(),
+            None,
+            Some("project-2"),
+            |project| project.id,
+            |project| { project.environment_id }
+        )
         .map(|project| project.environment_id),
         Some(ENV_2)
     );
     // Two servers hold this id: narrowing to either would be a coin toss the reader cannot see.
     assert!(
-        find_scoped_project(&projects(), None, Some("project-1"), |project| project.id, |project| {
-            project.environment_id
-        })
+        find_scoped_project(
+            &projects(),
+            None,
+            Some("project-1"),
+            |project| project.id,
+            |project| { project.environment_id }
+        )
         .is_none()
     );
 }
@@ -871,9 +929,13 @@ fn answers_a_bare_id_only_where_one_server_has_it() {
 #[test]
 fn answers_nothing_for_a_server_that_does_not_have_it() {
     assert!(
-        find_scoped_project(&projects(), Some(ENV_1), Some("project-2"), |project| project.id, |project| {
-            project.environment_id
-        })
+        find_scoped_project(
+            &projects(),
+            Some(ENV_1),
+            Some("project-2"),
+            |project| project.id,
+            |project| { project.environment_id }
+        )
         .is_none()
     );
 }
@@ -912,7 +974,13 @@ fn asks_only_the_environments_that_actually_hold_an_ambiguous_bare_id_never_a_th
     // Two servers can genuinely hold the same project id string; the third holds no such project
     // and asking it would return an unrelated project's rows rather than an honest empty answer.
     assert_eq!(
-        resolve_query_environment_ids(&[ENV_1, ENV_2, ENV_3], &projects, None, Some("project-1"), true),
+        resolve_query_environment_ids(
+            &[ENV_1, ENV_2, ENV_3],
+            &projects,
+            None,
+            Some("project-1"),
+            true
+        ),
         vec![ENV_1, ENV_2]
     );
 }
@@ -921,7 +989,13 @@ fn asks_only_the_environments_that_actually_hold_an_ambiguous_bare_id_never_a_th
 fn asks_nothing_for_a_bare_id_no_environment_holds() {
     let projects = vec![("project-1".to_owned(), ENV_1)];
     assert_eq!(
-        resolve_query_environment_ids(&[ENV_1, ENV_2, ENV_3], &projects, None, Some("project-9"), true),
+        resolve_query_environment_ids(
+            &[ENV_1, ENV_2, ENV_3],
+            &projects,
+            None,
+            Some("project-9"),
+            true
+        ),
         Vec::<&str>::new()
     );
 }
@@ -1022,11 +1096,15 @@ fn leaves_a_name_that_already_carries_its_own_namespace_alone() {
 #[test]
 fn excludes_one_the_same_way() {
     assert_eq!(
-        parse_pull_request_query("-size:XXL").filters.excluded_labels,
+        parse_pull_request_query("-size:XXL")
+            .filters
+            .excluded_labels,
         list_filters(json!({ "excludedLabels": ["size:XXL"] })).excluded_labels
     );
     assert_eq!(
-        parse_pull_request_query("-size:S,XS").filters.excluded_labels,
+        parse_pull_request_query("-size:S,XS")
+            .filters
+            .excluded_labels,
         list_filters(json!({ "excludedLabels": ["size:S", "size:XS"] })).excluded_labels
     );
 }
@@ -1071,7 +1149,10 @@ fn shares_the_ceiling_with_the_labels_typed_as_labels() {
         .collect::<Vec<_>>()
         .join(" ");
     assert_eq!(
-        parse_pull_request_query(&many).filters.labels.map(|labels| labels.len()),
+        parse_pull_request_query(&many)
+            .filters
+            .labels
+            .map(|labels| labels.len()),
         Some(10)
     );
 }
@@ -1130,8 +1211,13 @@ fn maps_the_actions_that_change_a_rows_state_and_nothing_else() {
         })
     );
     assert_eq!(
-        pull_request_override_after_action(&row(1, "closed").entry, PullRequestAction::Reopen, now, 1)
-            .map(|applied| applied.state),
+        pull_request_override_after_action(
+            &row(1, "closed").entry,
+            PullRequestAction::Reopen,
+            now,
+            1
+        )
+        .map(|applied| applied.state),
         Some(PullRequestState::Open)
     );
     assert_eq!(
@@ -1179,7 +1265,12 @@ fn writes_the_override_over_the_row_and_drops_it_from_a_list_whose_state_it_left
         vec![(1, PullRequestState::Closed), (2, PullRequestState::Open)]
     );
     assert_eq!(
-        apply_pull_request_overrides(&rows, &IndexMap::new(), hash_key, PullRequestListState::Open),
+        apply_pull_request_overrides(
+            &rows,
+            &IndexMap::new(),
+            hash_key,
+            PullRequestListState::Open
+        ),
         rows
     );
 }
@@ -1274,7 +1365,8 @@ fn keeps_an_override_until_an_answer_agrees_with_it() {
 #[test]
 fn does_not_hand_back_the_old_order_when_only_the_order_changed() {
     let previous = vec![row(1, "open"), row(2, "open")];
-    let swapped = reuse_pull_request_entries(&previous, &[row(2, "open"), row(1, "open")], hash_key);
+    let swapped =
+        reuse_pull_request_entries(&previous, &[row(2, "open"), row(1, "open")], hash_key);
     assert_ne!(swapped, previous);
     assert_eq!(numbers_of(&swapped), vec![2, 1]);
 }

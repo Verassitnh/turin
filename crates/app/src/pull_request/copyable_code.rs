@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, ClipboardItem, CursorStyle, ElementId, InteractiveElement as _, IntoElement,
     ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -24,10 +25,8 @@ pub struct PullRequestCopyableCode {
     id: ElementId,
     value: SharedString,
     copy_label: SharedString,
-    copied_label: SharedString,
     /// `className="ml-auto font-mono"`.
     ml_auto: bool,
-    min_w_0: bool,
 }
 
 impl PullRequestCopyableCode {
@@ -35,15 +34,12 @@ impl PullRequestCopyableCode {
         id: impl Into<ElementId>,
         value: impl Into<SharedString>,
         copy_label: impl Into<SharedString>,
-        copied_label: impl Into<SharedString>,
     ) -> Self {
         Self {
             id: id.into(),
             value: value.into(),
             copy_label: copy_label.into(),
-            copied_label: copied_label.into(),
             ml_auto: false,
-            min_w_0: true,
         }
     }
 
@@ -68,8 +64,6 @@ impl RenderOnce for PullRequestCopyableCode {
             if is_copied { "Copied" } else { self.copy_label.as_ref() },
             self.value
         ));
-        let aria = if is_copied { self.copied_label } else { self.copy_label };
-        let _ = aria;
         let group = SharedString::from(format!("copyable:{:?}", self.id));
         div()
             .id(self.id)
@@ -80,7 +74,7 @@ impl RenderOnce for PullRequestCopyableCode {
             .min_w_0()
             .max_w_full()
             .flex_shrink_0()
-            .when_ml_auto(self.ml_auto)
+            .when(self.ml_auto, |this| this.ml_auto())
             .rounded(px(4.))
             .px_1()
             .py(px(2.))
@@ -124,16 +118,5 @@ impl RenderOnce for PullRequestCopyableCode {
                     .variant(TooltipVariant::Code)
                     .build(window, cx)
             })
-    }
-}
-
-/// `ml-auto` as a builder step.
-trait WhenMlAuto: Sized {
-    fn when_ml_auto(self, on: bool) -> Self;
-}
-
-impl<T: gpui_kit::Styled> WhenMlAuto for T {
-    fn when_ml_auto(self, on: bool) -> Self {
-        if on { self.ml_auto() } else { self }
     }
 }

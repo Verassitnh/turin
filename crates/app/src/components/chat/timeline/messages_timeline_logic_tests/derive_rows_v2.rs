@@ -202,3 +202,173 @@ fn hides_subagents_in_folded_turns_when_they_arrive_before_commentary() {
         vec!["user-entry", "turn-fold:turn-1", "assistant-final-entry"]
     );
 }
+
+/// `{ ...entry, attempt }`: the entry as attributed to `attempt`.
+pub(super) fn in_attempt(entry: TimelineEntry, attempt: &TimelineAttempt) -> TimelineEntry {
+    TimelineEntry {
+        attempt: Some(attempt.clone()),
+        ..entry
+    }
+}
+
+#[test]
+fn collapses_only_output_from_a_superseded_v2_attempt_within_the_active_logical_run() {
+    let run_id = "run-steered";
+    let superseded = TimelineAttempt {
+        attempt_ordinal: 1,
+        ..attempt("attempt-1", run_id, AttemptStatus::Superseded, None)
+    };
+    let active = TimelineAttempt {
+        attempt_ordinal: 2,
+        ..attempt("attempt-2", run_id, AttemptStatus::Running, None)
+    };
+    let timeline_entries = vec![
+        in_attempt(
+            message_entry(
+                "initial-user-entry",
+                "2026-01-01T00:00:00Z",
+                ChatMessage {
+                    input_intent: Some(InputIntent::TurnStart),
+                    ..user_message(
+                        "initial-user",
+                        "Build it",
+                        Some(run_id),
+                        "2026-01-01T00:00:00Z",
+                    )
+                },
+            ),
+            &superseded,
+        ),
+        in_attempt(
+            message_entry(
+                "superseded-assistant-entry",
+                "2026-01-01T00:00:02Z",
+                assistant_message(
+                    "superseded-assistant",
+                    "Partial old response",
+                    Some(run_id),
+                    "2026-01-01T00:00:02Z",
+                    "2026-01-01T00:00:03Z",
+                    false,
+                ),
+            ),
+            &superseded,
+        ),
+        in_attempt(
+            work_entry(
+                "superseded-work-entry",
+                "2026-01-01T00:00:04Z",
+                work_log(
+                    "superseded-work",
+                    "2026-01-01T00:00:04Z",
+                    Some(run_id),
+                    "Old command",
+                    WorkTone::Tool,
+                ),
+            ),
+            &superseded,
+        ),
+        in_attempt(
+            event_entry(
+                "superseded-thread-created-entry",
+                "2026-01-01T00:00:04.500Z",
+                projected(
+                    0,
+                    turn_item(
+                        "superseded-thread-created",
+                        "2026-01-01T00:00:04.500Z",
+                        TurnItemPayload::ThreadCreated {
+                            target_thread_id: "thread-2".into(),
+                            target_model: "gpt-5".into(),
+                        },
+                    ),
+                ),
+            ),
+            &superseded,
+        ),
+        in_attempt(
+            message_entry(
+                "steer-user-entry",
+                "2026-01-01T00:00:05Z",
+                ChatMessage {
+                    input_intent: Some(InputIntent::Steer),
+                    ..user_message(
+                        "steer-user",
+                        "Change direction",
+                        Some(run_id),
+                        "2026-01-01T00:00:05Z",
+                    )
+                },
+            ),
+            &active,
+        ),
+        in_attempt(
+            message_entry(
+                "active-assistant-entry",
+                "2026-01-01T00:00:06Z",
+                assistant_message(
+                    "active-assistant",
+                    "Current response",
+                    Some(run_id),
+                    "2026-01-01T00:00:06Z",
+                    "2026-01-01T00:00:07Z",
+                    true,
+                ),
+            ),
+            &active,
+        ),
+    ];
+    let input = MessagesTimelineRowsInput {
+        latest_run: Some(latest_run(
+            run_id,
+            RunStatus::Running,
+            Some("2026-01-01T00:00:00Z"),
+            None,
+        )),
+        ..rows_input(timeline_entries, false)
+    };
+
+    let collapsed = derive(&input);
+    assert_eq!(
+        ids(&collapsed),
+        vec![
+            "initial-user-entry",
+            "attempt-fold:attempt-1",
+            "superseded-thread-created-entry",
+            "steer-user-entry",
+            "active-assistant-entry",
+        ]
+    );
+    match find_kind(&collapsed, MessagesTimelineRowKind::AttemptFold) {
+        Some(Row::AttemptFold {
+            attempt_id,
+            run_id: row_run,
+            label,
+            expanded,
+            ..
+        }) => {
+            assert_eq!(attempt_id, "attempt-1");
+            assert_eq!(row_run, run_id);
+            assert_eq!(label, "Superseded attempt");
+            assert!(!expanded);
+        }
+        other => panic!("expected an attempt fold, got {other:?}"),
+    }
+
+    let expanded = derive(&MessagesTimelineRowsInput {
+        expanded_attempt_ids: set(&["attempt-1"]),
+        ..input
+    });
+    assert_eq!(
+        ids(&expanded),
+        vec![
+            "initial-user-entry",
+            "attempt-fold:attempt-1",
+            "superseded-assistant-entry",
+            "superseded-work-entry",
+            "superseded-thread-created-entry",
+            "steer-user-entry",
+            "active-assistant-entry",
+        ]
+    );
+}

@@ -975,3 +975,96 @@ async fn compact_boundary_becomes_a_context_compacted_item() {
     assert_eq!(compaction.2, Some(250));
     assert_eq!(compaction.3, OrchestrationV2TurnItemStatus::Completed);
 }
+
+#[tokio::test]
+async fn tool_items_take_their_upstream_titles() {
+    let mcp_frame = json!({
+        "type": "assistant",
+        "message": {"id": "msg_mcp", "role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_mcp", "name": "mcp__linear__create_issue", "input": {}}
+        ]},
+        "uuid": "00000000-0000-4000-8000-000000000305", "session_id": "title-session",
+        "tool_use_meta": [{"id": "toolu_mcp", "display_name": "Create issue",
+            "server_display_name": "Linear"}],
+    });
+    let harness = one_turn(vec![
+        assistant_tool_use(
+            "00000000-0000-4000-8000-000000000301",
+            None,
+            "toolu_read",
+            "Read",
+            json!({"file_path": " src/lib.rs "}),
+        ),
+        user_tool_result(
+            "00000000-0000-4000-8000-000000000302",
+            None,
+            "toolu_read",
+            "fn main() {}",
+            Value::Null,
+        ),
+        assistant_tool_use(
+            "00000000-0000-4000-8000-000000000303",
+            None,
+            "toolu_grep",
+            "Grep",
+            json!({"pattern": "TODO", "path": "/repo/src/"}),
+        ),
+        user_tool_result(
+            "00000000-0000-4000-8000-000000000304",
+            None,
+            "toolu_grep",
+            "a.rs:1",
+            Value::Null,
+        ),
+        mcp_frame,
+        user_tool_result(
+            "00000000-0000-4000-8000-000000000306",
+            None,
+            "toolu_mcp",
+            "created",
+            Value::Null,
+        ),
+        assistant_tool_use(
+            "00000000-0000-4000-8000-000000000307",
+            None,
+            "toolu_skill",
+            "Skill",
+            json!({"skill": "review"}),
+        ),
+    ]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Use tools"))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    let titles: BTreeMap<String, (Option<String>, Option<String>)> = turn_items(&seen)
+        .into_iter()
+        .filter_map(|item| match item {
+            OrchestrationV2TurnItem::DynamicTool {
+                native_item_ref,
+                title,
+                tool_source,
+                ..
+            } => {
+                let native = native_item_ref?.native_id?.as_str().to_owned();
+                let source = tool_source.map(|source| source.name.as_str().to_owned());
+                Some((native, (title, source)))
+            }
+            _ => None,
+        })
+        .collect();
+    let title = |native: &str| titles.get(native).map(|(title, _)| title.clone());
+    assert_eq!(title("toolu_read"), Some(Some("Read src/lib.rs".into())));
+    assert_eq!(
+        title("toolu_grep"),
+        Some(Some("Searched TODO in src".into()))
+    );
+    assert_eq!(title("toolu_mcp"), Some(Some("Create issue".into())));
+    assert_eq!(title("toolu_skill"), Some(Some("Skill: review".into())));
+    assert_eq!(titles["toolu_mcp"].1.as_deref(), Some("Linear"));
+}

@@ -2,6 +2,7 @@
 // `ProviderAdapterV2Error` is the provider-core trait's error type; boxing it
 // here would only diverge from the trait.
 #![allow(clippy::result_large_err)]
+use crate::claude_tool_titles::{ToolPresentation, fallback_presentation, presentations_from_meta};
 use crate::{
     claude_adapter_v2::{ClaudeAdapterEvent, ClaudeAdapterV2, ClaudeHostRequest},
     claude_model_catalog::ClaudeModelCatalog,
@@ -564,6 +565,7 @@ struct ActiveTurn {
 struct TrackedTool {
     name: String,
     input: Value,
+    presentation: ToolPresentation,
     ordinal: u64,
     started_at: UtcDateTime,
     finished: bool,
@@ -1438,6 +1440,16 @@ fn assistant_events(
         .unwrap_or_default();
     let now = UtcDateTime::now();
     let mut events = Vec::new();
+    let tool_names: HashMap<String, String> = blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .filter_map(|b| {
+            let id = b.get("id")?.as_str()?;
+            let name = b.get("name")?.as_str()?;
+            Some((id.to_owned(), name.to_owned()))
+        })
+        .collect();
+    let presentations = presentations_from_meta(&frame.raw, &tool_names);
     for (index, block) in blocks.iter().enumerate() {
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
@@ -1508,6 +1520,10 @@ fn assistant_events(
                     .unwrap_or("tool")
                     .to_owned();
                 let input = block.get("input").cloned().unwrap_or(Value::Null);
+                let presentation = presentations
+                    .get(native)
+                    .cloned()
+                    .unwrap_or_else(|| fallback_presentation(&name));
                 // TodoWrite projects its own list before the call item, as
                 // upstream does. Subagent frames never touch the main list.
                 if name == "TodoWrite" && parent_tool_use_id(frame).is_none() {
@@ -1529,6 +1545,7 @@ fn assistant_events(
                     native_item_id: native,
                     tool_name: &name,
                     input: &input,
+                    presentation: &presentation,
                     output: None,
                     status: "running",
                     ordinal,
@@ -1549,6 +1566,7 @@ fn assistant_events(
                     TrackedTool {
                         name,
                         input,
+                        presentation,
                         ordinal,
                         started_at: now,
                         finished: false,
@@ -1613,6 +1631,7 @@ fn tool_result_events(
             native_item_id: native,
             tool_name: &tracked.name,
             input: &tracked.input,
+            presentation: &tracked.presentation,
             output: Some(&output),
             status: if failed { "failed" } else { "completed" },
             ordinal: tracked.ordinal,
@@ -1678,6 +1697,7 @@ fn finish_running_tools(
             native_item_id: &native,
             tool_name: &tracked.name,
             input: &tracked.input,
+            presentation: &tracked.presentation,
             output: None,
             status,
             ordinal: tracked.ordinal,

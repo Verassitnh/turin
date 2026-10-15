@@ -3,11 +3,9 @@
 //! table, and the proposed-plan capture. Items are assembled in the contract's
 //! wire shape and decoded, so the contract types validate every one.
 //!
-//! Plan and todo projections live in `claude_plan_items`.
-//!
-//! Titles from upstream's `formatReadToolLabel`, `formatSearchToolLabel`,
-//! `dynamicToolTitle`, and `mcpToolPresentation` are not ported; those rows are
-//! `title: null`.
+//! Plan and todo projections live in `claude_plan_items`. Titles and MCP
+//! presentation live in `claude_tool_titles`.
+use crate::claude_tool_titles::{ToolPresentation, read_label, search_label, skill_title};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use turin_contracts::{
@@ -118,13 +116,17 @@ pub enum ToolItemType {
     WebSearch,
 }
 
-pub fn classify_tool(tool_name: &str) -> ToolItemType {
-    let normalized: String = tool_name
+/// Upstream `normalizedClaudeToolName`: lowercase, with whitespace, `_` and `-` removed.
+pub fn normalized_tool_name(tool_name: &str) -> String {
+    tool_name
         .to_lowercase()
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '_' && *c != '-')
-        .collect();
-    match normalized.as_str() {
+        .collect()
+}
+
+pub fn classify_tool(tool_name: &str) -> ToolItemType {
+    match normalized_tool_name(tool_name).as_str() {
         "bash" => ToolItemType::CommandExecution,
         "edit" | "multiedit" | "notebookedit" | "write" => ToolItemType::FileChange,
         "webfetch" | "websearch" => ToolItemType::WebSearch,
@@ -204,6 +206,15 @@ pub fn compaction_item(
     decode(item)
 }
 
+/// Upstream `firstStringInputField`: the first key holding a non-blank string,
+/// trimmed.
+fn first_trimmed_string(input: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        let value = input.get(*key)?.as_str()?.trim();
+        (!value.is_empty()).then(|| value.to_owned())
+    })
+}
+
 pub struct ToolCallArtifacts {
     pub node: OrchestrationV2ExecutionNode,
     pub turn_item: OrchestrationV2TurnItem,
@@ -213,6 +224,7 @@ pub struct ToolCall<'a> {
     pub native_item_id: &'a str,
     pub tool_name: &'a str,
     pub input: &'a Value,
+    pub presentation: &'a ToolPresentation,
     /// The `tool_result` content once the call has finished.
     pub output: Option<&'a Value>,
     /// One of `running`, `completed`, `failed`, `interrupted`, `cancelled`.
@@ -240,16 +252,29 @@ pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallAr
 
     let output_value = call.output.cloned();
     let output_text = call.output.and_then(tool_output_text);
+    let input = call.input;
+    // Upstream order: a Read names its file, a search names its query, then a
+    // Skill, then the MCP presentation.
+    let normalized = normalized_tool_name(call.tool_name);
+    let read_path = matches!(normalized.as_str(), "read" | "readfile")
+        .then(|| first_trimmed_string(input, &["file_path", "path"]))
+        .flatten();
+    let title = match read_path {
+        Some(path) => Some(read_label(&path)),
+        None if matches!(normalized.as_str(), "grep" | "glob" | "ls") => search_label(input),
+        None => None,
+    }
+    .or_else(|| skill_title(call.tool_name, input))
+    .or_else(|| call.presentation.title.clone());
     let common = json!({
         "id": item_id, "threadId": scope.thread_id, "runId": scope.run_id,
         "nodeId": node_id, "providerThreadId": scope.provider_thread_id,
         "providerTurnId": scope.provider_turn_id, "nativeItemRef": native,
         "parentItemId": null, "ordinal": call.ordinal, "status": call.status,
-        "title": null, "startedAt": call.started_at, "completedAt": completed_at,
+        "title": title, "startedAt": call.started_at, "completedAt": completed_at,
         "updatedAt": call.updated_at,
     });
     let mut item = common.as_object().cloned().unwrap_or_default();
-    let input = call.input;
     let str_field = |keys: &[&str]| {
         keys.iter()
             .find_map(|key| input.get(*key).and_then(Value::as_str))
@@ -285,6 +310,8 @@ pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallAr
                 "toolName": call.tool_name,
                 "input": input,
                 "output": output_value,
+                "toolIcon": call.presentation.tool_icon,
+                "toolSource": call.presentation.tool_source,
             })
         }
     };
@@ -359,6 +386,7 @@ mod tests {
                 native_item_id: "toolu_1",
                 tool_name: "Bash",
                 input: &input,
+                presentation: &ToolPresentation::default(),
                 output: Some(&json!("out")),
                 status: "completed",
                 ordinal: 102,

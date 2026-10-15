@@ -7112,6 +7112,7 @@ dependencies = [
  "turin-claude-protocol",
  "turin-contracts",
  "turin-provider-core",
+ "url",
  "uuid",
 ]
 

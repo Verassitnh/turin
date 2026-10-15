@@ -347,7 +347,7 @@ def build_icns(macos_png: Path, out: Path, tmp: Path) -> None:
             px = pt * scale
             name = f"icon_{pt}x{pt}{'@2x' if scale == 2 else ''}.png"
             if px == 1024:
-                shutil.copy(macos_png, iconset / name)
+                (iconset / name).write_bytes(srgb_png(to_srgb8(macos_png.read_bytes())))
             else:
                 subprocess.run(["sips", "-z", str(px), str(px), str(macos_png), "--out", str(iconset / name)],
                                check=True, capture_output=True)
@@ -484,9 +484,13 @@ def export(tool: str, out_dir: Path, scale: float, keep_macos_png: bool, quiet: 
         (out_dir / OUTPUTS["favicon_ico"]).write_bytes(ico)
         (out_dir / OUTPUTS["windows_ico"]).write_bytes(ico)
 
-        if not keep_macos_png:
+        macos_png = out_dir / OUTPUTS["macos"]
+        if keep_macos_png:
+            # A native Icon Composer 27 export is 16-bit Display P3; normalise it like the rest.
+            macos_png.write_bytes(srgb_png(to_srgb8(macos_png.read_bytes())))
+        else:
             mac = macos_pre_tahoe(UPSTREAM_PROD / "black-macos-1024.png", upstream_mark, upstream_t, turin_t)
-            (out_dir / OUTPUTS["macos"]).write_bytes(srgb_png(mac))
+            macos_png.write_bytes(srgb_png(mac))
         build_icns(out_dir / OUTPUTS["macos"], out_dir / OUTPUTS["icns"], tmp)
 
     compare_sheet(out_dir)

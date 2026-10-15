@@ -60,6 +60,16 @@ impl AccountUsageRead {
             error,
         }
     }
+
+    /// A read that ended without records. The account key is kept when it is known.
+    fn failed(account_key: Option<String>) -> Self {
+        Self {
+            account_key,
+            records: Vec::new(),
+            missing: false,
+            error: Some(GENERIC_ERROR.to_owned()),
+        }
+    }
 }
 
 /// Why a keychain read did not produce a token. Turin does not open Keychain.
@@ -164,21 +174,20 @@ pub async fn read_cursor_account_usage(
         TokenLoad::Failed { error } => return AccountUsageRead::empty(false, Some(error)),
         TokenLoad::Token(token) => token,
     };
+    // Identity is decoded before the timed read so a timeout can still report it.
+    let Some((account_key, user_id)) = account_identity(&token) else {
+        return AccountUsageRead::failed(None);
+    };
+    let cookie = format!(
+        "WorkosCursorSessionToken={}",
+        encode_uri_component(&format!("{user_id}::{token}"))
+    );
     let read = tokio::time::timeout(
         READ_TIMEOUT,
-        read_with_token(token, since_ms, end_date, client),
+        read_with_token(account_key.clone(), cookie, since_ms, end_date, client),
     )
     .await;
-    match read {
-        Ok(Ok(result)) => result,
-        Ok(Err(failure)) => AccountUsageRead {
-            account_key: failure.account_key,
-            records: Vec::new(),
-            missing: false,
-            error: Some(GENERIC_ERROR.to_owned()),
-        },
-        Err(_) => AccountUsageRead::empty(false, Some(GENERIC_ERROR.to_owned())),
-    }
+    read.unwrap_or_else(|_| AccountUsageRead::failed(Some(account_key)))
 }
 
 enum TokenLoad {
@@ -226,10 +235,6 @@ fn load_token(source: &CredentialSource) -> TokenLoad {
     }
 }
 
-struct ReadFailure {
-    account_key: Option<String>,
-}
-
 enum PageOutcome {
     Events {
         events: Vec<Value>,
@@ -239,70 +244,62 @@ enum PageOutcome {
 }
 
 async fn read_with_token(
-    access_token: String,
+    account_key: String,
+    cookie: String,
     since_ms: f64,
     end_date: f64,
     client: Arc<dyn DashboardClient>,
-) -> Result<AccountUsageRead, ReadFailure> {
-    let subject = jwt_subject(&access_token).map_err(|_| ReadFailure { account_key: None })?;
-    let user_id = subject
-        .rsplit('|')
-        .next()
-        .filter(|id| !id.is_empty())
-        .ok_or(ReadFailure { account_key: None })?;
-    let account_key = sha256_hex(subject.as_bytes());
+) -> AccountUsageRead {
     if !since_ms.is_finite() || !end_date.is_finite() || since_ms < 0.0 || since_ms > end_date {
-        return Err(ReadFailure {
-            account_key: Some(account_key),
-        });
+        return AccountUsageRead::failed(Some(account_key));
     }
-    let cookie = format!(
-        "WorkosCursorSessionToken={}",
-        encode_uri_component(&format!("{user_id}::{access_token}"))
-    );
     let mut total: Option<u64> = None;
-    let mut ahead: VecDeque<tokio::task::JoinHandle<Result<PageOutcome, ()>>> = VecDeque::new();
+    let mut ahead = Prefetch::default();
     let mut pages: Vec<Vec<Value>> = Vec::new();
     let mut page = 1u64;
     loop {
         let target = prefetch_target(total, page);
-        while ahead.len() < target {
-            let next = page + ahead.len() as u64;
+        while ahead.pages.len() < target {
+            let next = page + ahead.pages.len() as u64;
             let client = Arc::clone(&client);
             let cookie = cookie.clone();
             let known_total = total;
-            ahead.push_back(tokio::spawn(async move {
+            ahead.pages.push_back(tokio::spawn(async move {
                 read_page(client, next, known_total, since_ms, end_date, cookie).await
             }));
         }
-        let outcome = if let Some(handle) = ahead.pop_front() {
-            match handle.await {
-                Ok(result) => result,
-                Err(_) => Err(()),
+        let outcome = match ahead.pages.front_mut() {
+            // Await the handle in place so dropping this future still reaches it through `ahead`.
+            Some(handle) => {
+                let joined = handle.await;
+                ahead.pages.pop_front();
+                joined.unwrap_or(Err(()))
             }
-        } else {
-            read_page(
-                Arc::clone(&client),
-                page,
-                total,
-                since_ms,
-                end_date,
-                cookie.clone(),
-            )
-            .await
+            None => {
+                read_page(
+                    Arc::clone(&client),
+                    page,
+                    total,
+                    since_ms,
+                    end_date,
+                    cookie.clone(),
+                )
+                .await
+            }
         };
-        let outcome = outcome.map_err(|_| ReadFailure {
-            account_key: Some(account_key.clone()),
-        })?;
+        let Ok(outcome) = outcome else {
+            ahead.shutdown().await;
+            return AccountUsageRead::failed(Some(account_key));
+        };
         match outcome {
             PageOutcome::Denied => {
-                abort_ahead(&mut ahead);
-                return Ok(AccountUsageRead {
+                ahead.shutdown().await;
+                return AccountUsageRead {
                     account_key: Some(account_key),
                     records: Vec::new(),
                     missing: false,
                     error: Some("Sign in to Cursor again to read account usage.".to_owned()),
-                });
+                };
             }
             PageOutcome::Events {
                 events,
@@ -320,13 +317,36 @@ async fn read_with_token(
         }
         page += 1;
     }
-    abort_ahead(&mut ahead);
+    ahead.shutdown().await;
     assemble_records(pages, total, since_ms, end_date, account_key)
 }
 
-fn abort_ahead(ahead: &mut VecDeque<tokio::task::JoinHandle<Result<PageOutcome, ()>>>) {
-    for handle in ahead.drain(..) {
-        handle.abort();
+/// Prefetched page reads. Dropping it aborts every read still in flight, so a
+/// read that is cancelled by its caller does not leave cookie-bearing requests
+/// running. Upstream forks them into the read's scope for the same reason.
+#[derive(Default)]
+struct Prefetch {
+    pages: VecDeque<tokio::task::JoinHandle<Result<PageOutcome, ()>>>,
+}
+
+impl Prefetch {
+    /// Aborts the reads still in flight and waits until each has stopped, so
+    /// no request is open once the read has returned.
+    async fn shutdown(&mut self) {
+        for handle in &self.pages {
+            handle.abort();
+        }
+        for handle in self.pages.drain(..) {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for Prefetch {
+    fn drop(&mut self) {
+        for handle in &self.pages {
+            handle.abort();
+        }
     }
 }
 
@@ -440,14 +460,12 @@ fn assemble_records(
     since_ms: f64,
     end_date: f64,
     account_key: String,
-) -> Result<AccountUsageRead, ReadFailure> {
+) -> AccountUsageRead {
     let raw_count: usize = pages.iter().map(Vec::len).sum();
     if let Some(total) = total
         && raw_count < total as usize
     {
-        return Err(ReadFailure {
-            account_key: Some(account_key),
-        });
+        return AccountUsageRead::failed(Some(account_key));
     }
     let mut removals_remaining = total.map(|total| raw_count - total as usize).unwrap_or(0);
     let mut previous_keys: Vec<String> = Vec::new();
@@ -466,28 +484,24 @@ fn assemble_records(
         removals_remaining -= removal_count;
         previous_keys = event_keys;
         for raw in events.iter().skip(removal_count) {
-            let Some(record) =
-                record_from_event(raw, since_ms, end_date, &account_key, &mut occurrences)
-                    .map_err(|_| ReadFailure {
-                        account_key: Some(account_key.clone()),
-                    })?
-            else {
-                continue;
-            };
+            let record =
+                match record_from_event(raw, since_ms, end_date, &account_key, &mut occurrences) {
+                    Ok(Some(record)) => record,
+                    Ok(None) => continue,
+                    Err(()) => return AccountUsageRead::failed(Some(account_key)),
+                };
             records.push(record);
         }
     }
     if removals_remaining != 0 {
-        return Err(ReadFailure {
-            account_key: Some(account_key),
-        });
+        return AccountUsageRead::failed(Some(account_key));
     }
-    Ok(AccountUsageRead {
+    AccountUsageRead {
         account_key: Some(account_key),
         records,
         missing: false,
         error: None,
-    })
+    }
 }
 
 fn record_from_event(
@@ -616,6 +630,18 @@ fn tokens(value: Option<&Value>) -> u64 {
     } else {
         0
     }
+}
+
+/// The account key (a hash of the JWT subject, never the token) and the user
+/// id that goes in the session cookie. `None` means the token is unusable.
+fn account_identity(access_token: &str) -> Option<(String, String)> {
+    let subject = jwt_subject(access_token).ok()?;
+    let user_id = subject
+        .rsplit('|')
+        .next()
+        .filter(|id| !id.is_empty())?
+        .to_owned();
+    Some((sha256_hex(subject.as_bytes()), user_id))
 }
 
 fn jwt_subject(access_token: &str) -> Result<String, ()> {
@@ -1055,5 +1081,113 @@ mod tests {
             result.records.last().unwrap().timestamp_ms,
             1_780_000_008_000.0
         );
+    }
+
+    /// Marks a dashboard request that has started and not yet finished. An
+    /// aborted request drops its future, which is what ends it here.
+    struct OpenRequest(Arc<AtomicUsize>);
+
+    impl OpenRequest {
+        fn start(open: &Arc<AtomicUsize>) -> Self {
+            open.fetch_add(1, Ordering::SeqCst);
+            Self(Arc::clone(open))
+        }
+    }
+
+    impl Drop for OpenRequest {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_page_read_leaves_no_request_open() {
+        let access = token("auth|demo");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::json!({"accessToken": access}).to_string(),
+        )
+        .unwrap();
+        let full_page = serde_json::json!({
+            "totalUsageEventsCount": 8001,
+            "usageEventsDisplay": (0..1000)
+                .map(|_| serde_json::json!({"tokenUsage": null}))
+                .collect::<Vec<_>>(),
+        });
+        // Page 3 fails while pages 4 onwards are still waiting on Cursor.
+        for (second_status, second_body, expected) in [
+            (
+                200,
+                full_page.clone(),
+                "Cursor account usage could not be read.",
+            ),
+            (
+                401,
+                Value::Null,
+                "Sign in to Cursor again to read account usage.",
+            ),
+        ] {
+            let open = Arc::new(AtomicUsize::new(0));
+            let open_task = Arc::clone(&open);
+            let first = full_page.clone();
+            let client = script(move |request| {
+                let page = serde_json::from_str::<Value>(&request.body).unwrap()["page"]
+                    .as_u64()
+                    .unwrap();
+                let open = Arc::clone(&open_task);
+                let first = first.clone();
+                let second_body = second_body.clone();
+                async move {
+                    match page {
+                        1 => Ok(json_response(200, first)),
+                        2 => Ok(json_response(second_status, second_body)),
+                        3 => Err(()),
+                        _ => {
+                            let _request = OpenRequest::start(&open);
+                            std::future::pending::<()>().await;
+                            Err(())
+                        }
+                    }
+                }
+            });
+            let result = read_cursor_account_usage(
+                CredentialSource::File(path.clone()),
+                0.0,
+                1_781_000_000_000.0,
+                client,
+            )
+            .await;
+            assert_eq!(result.error.as_deref(), Some(expected));
+            assert!(result.records.is_empty());
+            assert_eq!(open.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_that_never_answers_keeps_the_account_key() {
+        let access = token("auth|demo");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::json!({"accessToken": access}).to_string(),
+        )
+        .unwrap();
+        let client =
+            script(|_| async { std::future::pending::<Result<DashboardResponse, ()>>().await });
+        let result = read_cursor_account_usage(
+            CredentialSource::File(path),
+            0.0,
+            1_781_000_000_000.0,
+            client,
+        )
+        .await;
+        assert_eq!(
+            result.error.as_deref(),
+            Some("Cursor account usage could not be read.")
+        );
+        assert_eq!(result.account_key, Some(sha256_hex(b"auth|demo")));
     }
 }

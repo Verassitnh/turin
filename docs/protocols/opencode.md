@@ -2,7 +2,7 @@
 
 ## Versions and evidence
 
-Upstream pins `@opencode/client@2.0.28` and also `@opencode-ai/sdk@1.15.13` (`upstream/pnpm-lock.yaml:4516-4519`). The **2.x adapter** uses `@opencode/client/effect`; the 1.x SDK is for the older provider path and must not supply 2.x endpoint/types (`upstream/packages/provider-opencode/src/server/v2/OpenCode2Client.ts:1-2`, `v2/adapter.ts:1-20`; older `server/adapter.ts`, `server/OpenCodeRuntime.ts`). This document uses the exact packed client’s generated route code `dist/chunks/service-probe-ecs5ftka.js:147-1040` and types `dist/promise/generated/types.d.ts`, cross-checked with the v2 adapter.
+Upstream pins `@opencode/client@2.0.28` and also `@opencode-ai/sdk@1.15.13` (`upstream/pnpm-lock.yaml:4516-4519`). The **2.x adapter** uses `@opencode/client/effect`; the 1.x SDK is for the older provider path and must not supply 2.x endpoint/types (`upstream/packages/provider-opencode/src/server/v2/OpenCode2Client.ts:1-2`, `v2/adapter.ts:1-20`; older `server/adapter.ts`, `server/OpenCodeRuntime.ts`). This document uses the exact packed client’s generated route code `dist/chunks/service-probe-ecs5ftka.js:147-1040` and types `dist/promise/generated/types.d.ts`, cross-checked with the v2 adapter. The installed local CLI is `1.19.0`, so it cannot be used to validate the 2.x wire behavior live.
 
 ## Transport, launch, and authentication
 
@@ -18,7 +18,7 @@ JSON HTTP endpoints send/receive camelCase-ish OpenCode schema fields, notably `
 | `POST /api/session/{id}/command`, `/compact` | Slash command and compaction. Command lacks T3's prompt id, so adapter records prior message boundary (`adapter.ts:3719-3740`). |
 | `POST /api/session/{id}/interrupt` | Stops current execution; terminal SSE `session.execution.interrupted` follows (`adapter.ts:4140-4175`). |
 | `GET /api/session/{id}/permission`; `POST /api/session/{id}/permission/{requestID}/reply` | List pending and `{decision:"once"|"always"|"reject",message?}` → 204 (`service-probe-ecs5ftka.js:930-969`). |
-| `GET /api/session/{id}/form`; `POST .../form/{formID}/reply`; `POST .../form/{formID}/cancel` | Tool question form lifecycle (`adapter.ts:2910-2930,4280-4305`). |
+| `GET /api/session/{id}/form`; `POST .../form/{formID}/reply`; `DELETE .../form/{formID}` | Tool question form lifecycle (`service-probe-ecs5ftka.js:550-590`; `adapter.ts:2910-2930,4280-4305`). |
 | `GET /api/session/{id}/message` | Ordered/paged history for replay and reconnect (`adapter.ts:2760-2800,3260-3315`). |
 | `POST /api/session/{id}/fork`, `/move`, `/agent`, `/model`; `PATCH /api/session/{id}` | Fork before boundary, change directory/agent/model, update title/permissions (`adapter.ts:3100-3130,3860-4025,4410-4470`). |
 | `POST /api/session/{id}/revert/stage`, `/revert/commit`; `GET /api/session/{id}/inbox`, `DELETE /inbox/{inboxID}` | Rollback and queued steer cleanup (`adapter.ts:3200-3255`). |

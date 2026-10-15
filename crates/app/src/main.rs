@@ -18,7 +18,6 @@ mod hooks;
 use gpui_kit::*;
 
 use components::app_sidebar_layout::{self, AppSidebarLayout};
-use theme::theme_palettes::ThemeAppearance;
 
 /// Upstream's Electron window: 1100×780 default, 840×620 minimum,
 /// `titleBarStyle: "hiddenInset"` with the traffic lights centred in the
@@ -42,18 +41,14 @@ fn window_options(cx: &App) -> WindowOptions {
     }
 }
 
-/// Dev overrides for screenshots: `TURIN_APPEARANCE=light|dark` pins the
-/// appearance, `TURIN_RIGHT_PANEL=1` opens the right panel.
+/// Dev overrides for screenshots: `TURIN_APPEARANCE=light|dark|<theme id>` sets
+/// the theme preference, `TURIN_RIGHT_PANEL=1` opens the right panel.
 fn dev_overrides(cx: &mut App) -> bool {
-    let appearance = match std::env::var("TURIN_APPEARANCE").as_deref() {
-        Ok("dark") => Some(ThemeAppearance::Dark),
-        Ok("light") => Some(ThemeAppearance::Light),
-        _ => None,
-    };
-    if appearance.is_some() {
+    // Any ThemePreference: light, dark, system or a theme id.
+    if let Ok(theme) = std::env::var("TURIN_APPEARANCE") {
         theme::set_preferences(
             theme::AppearancePreferences {
-                appearance,
+                theme,
                 ..Default::default()
             },
             cx,

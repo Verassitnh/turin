@@ -1,9 +1,17 @@
-//! Turin's design system: upstream's theme palettes and `index.css` tokens,
-//! resolved into concrete colors and pushed into gpui-component's [`Theme`]
-//! so built-in components paint with them too.
+//! Port of upstream/apps/web/src/index.css (the semantic token layer: `:root`
+//! defaults, `html[data-theme-id]` palette mapping, `--contrast-*`) and of
+//! `applyThemePalette` in upstream/apps/web/src/themePalette.ts, which
+//! writes a palette's roles into those tokens.
+//!
+//! Turin's design system: the tokens are resolved once into concrete colors
+//! ([`AppTheme`]) and pushed into gpui-component's [`Theme`] so built-in
+//! components paint with them too.
 //!
 //! - [`theme_palettes`]: port of `packages/shared/src/themePalettes.ts`.
-//! - [`color`]: color parsing / `color-mix()` (port of `themePreview.ts` math).
+//! - [`theme_palette`]: port of `apps/web/src/themePalette.ts` resolution.
+//! - [`theme_preview`]: port of `packages/shared/src/themePreview.ts`.
+//! - [`color`]: color parsing / `color-mix()`.
+//! - [`sidebar_scope`]: the `[data-app-sidebar]` token scope.
 //! - [`tokens`]: radii, spacing, text sizes, shadows from `index.css`.
 //! - [`appearance_fonts`], [`appearance_contrast`]: Settings → Appearance logic.
 //! - [`component_theme`]: [`AppTheme`] → gpui-component `ThemeConfig`.
@@ -18,7 +26,9 @@ pub mod appearance_fonts;
 pub mod color;
 pub mod component_theme;
 pub mod sidebar_scope;
+pub mod theme_palette;
 pub mod theme_palettes;
+pub mod theme_preview;
 pub mod tokens;
 
 use gpui_kit::component::{Theme, ThemeMode};
@@ -28,19 +38,22 @@ use appearance_contrast::AppearanceContrast;
 use appearance_fonts::{AppearanceFontPreferences, ResolvedFonts, resolve_appearance_fonts};
 use color::{MixSpace, color, color_mix, with_alpha};
 use sidebar_scope::SidebarScope;
-use theme_palettes::{
-    DEFAULT_THEME_ID, ThemeAppearance, ThemeColors, ThemeDefinition, find_theme,
-    get_theme_colors_for_appearance,
+use theme_palette::{
+    ThemePreferenceMode, get_standard_theme_colors, get_theme_colors_for_mode,
+    get_theme_definition, resolve_theme_appearance,
 };
+use theme_palettes::{ThemeAppearance, ThemeColors, ThemeDefinition};
 use tokens::tw;
 
 /// Which palette the user picked and how it follows the OS.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppearancePreferences {
-    /// `"t3-code"` (the standard palette) or a built-in theme id.
-    pub theme_id: String,
-    /// `None` follows the system appearance.
-    pub appearance: Option<ThemeAppearance>,
+    /// Upstream `ThemePreference`: `"system"` / `"light"` / `"dark"` (the
+    /// standard palette) or a theme id (legacy aliases accepted).
+    pub theme: String,
+    /// Upstream `THEME_APPEARANCE_MODE_STORAGE_KEY`; `None` derives it from
+    /// `theme` (`"system"` follows the OS).
+    pub appearance_mode: Option<ThemePreferenceMode>,
     pub contrast: u32,
     pub fonts: AppearanceFontPreferences,
 }
@@ -48,8 +61,8 @@ pub struct AppearancePreferences {
 impl Default for AppearancePreferences {
     fn default() -> Self {
         Self {
-            theme_id: DEFAULT_THEME_ID.to_string(),
-            appearance: None,
+            theme: "system".to_string(),
+            appearance_mode: None,
             contrast: appearance_contrast::DEFAULT_APPEARANCE_CONTRAST,
             fonts: AppearanceFontPreferences::default(),
         }
@@ -60,7 +73,9 @@ impl Default for AppearancePreferences {
 /// (`--sidebar-row-hover` → `sidebar_row_hover`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppTheme {
-    pub theme_id: &'static str,
+    /// The applied theme's id; `None` is the standard look (no
+    /// `data-theme-id`).
+    pub theme_id: Option<&'static str>,
     pub appearance: ThemeAppearance,
     pub fonts: ResolvedFonts,
 
@@ -152,16 +167,21 @@ fn rgba(value: &str) -> Rgba {
 }
 
 impl AppTheme {
+    /// `definition: None` is the standard look. `appearance` should come
+    /// from [`resolve_theme_appearance`], which keeps a single-appearance
+    /// theme on its own half; any other half falls back to the standard
+    /// palette, as upstream clears `data-theme-id` when a theme cannot render.
     pub fn resolve(
-        theme: &'static ThemeDefinition,
+        definition: Option<&'static ThemeDefinition>,
         appearance: ThemeAppearance,
         contrast: u32,
         fonts: ResolvedFonts,
     ) -> Self {
-        // Built-ins ship both appearances; a single-appearance theme keeps its
-        // own colors rather than leaving the UI unstyled.
-        let palette: ThemeColors =
-            get_theme_colors_for_appearance(theme, appearance).unwrap_or(theme.colors);
+        let themed = definition
+            .and_then(|definition| get_theme_colors_for_mode(definition, appearance))
+            .map(|colors| (definition.map(|d| d.id), colors));
+        let (theme_id, palette): (Option<&'static str>, ThemeColors) =
+            themed.unwrap_or((None, get_standard_theme_colors(appearance)));
         let dark = appearance.is_dark();
         let contrast = AppearanceContrast::new(contrast);
         let target = if dark { tw::WHITE } else { tw::BLACK };
@@ -200,7 +220,7 @@ impl AppTheme {
         };
 
         Self {
-            theme_id: theme.id,
+            theme_id,
             appearance,
             fonts,
             background: c(p.canvas),
@@ -238,7 +258,7 @@ impl AppTheme {
             error: c(p.error),
             error_foreground: c(p.error_foreground),
             error_surface: c(p.error_surface),
-            tool_error_icon: if theme.id == DEFAULT_THEME_ID {
+            tool_error_icon: if theme_id.is_none() {
                 if dark {
                     // index.css dark `--tool-error-icon: #fca5a5` (a literal).
                     color::hex(0xfca5a5).into()
@@ -287,13 +307,7 @@ impl AppTheme {
             sidebar_icon_color,
             scrollbar_thumb,
             scrollbar_thumb_hover,
-            sidebar_scope: SidebarScope::resolve(
-                p,
-                theme.id == DEFAULT_THEME_ID,
-                Some(theme.id),
-                dark,
-                contrast,
-            ),
+            sidebar_scope: SidebarScope::resolve(p, theme_id.is_none(), theme_id, dark, contrast),
         }
     }
 
@@ -355,21 +369,29 @@ pub fn init(cx: &mut App) {
 /// system appearance, and pushes it into gpui-component.
 pub fn apply(window_appearance: Option<WindowAppearance>, cx: &mut App) {
     let preferences = cx.global::<ThemeState>().preferences.clone();
-    let theme = find_theme(&preferences.theme_id)
-        .or_else(|| find_theme(DEFAULT_THEME_ID))
-        .expect("the standard palette always resolves");
-    let appearance = preferences.appearance.unwrap_or_else(|| {
-        system_appearance(window_appearance.unwrap_or_else(|| cx.window_appearance()))
-    });
+    let definition = get_theme_definition(&preferences.theme);
+    let system_dark =
+        system_appearance(window_appearance.unwrap_or_else(|| cx.window_appearance())).is_dark();
+    let appearance = resolve_theme_appearance(
+        &preferences.theme,
+        system_dark,
+        None,
+        preferences.appearance_mode,
+    );
     let fonts = resolve_fonts(&preferences.fonts, cx);
 
     let light = AppTheme::resolve(
-        theme,
+        definition,
         ThemeAppearance::Light,
         preferences.contrast,
         fonts.clone(),
     );
-    let dark = AppTheme::resolve(theme, ThemeAppearance::Dark, preferences.contrast, fonts);
+    let dark = AppTheme::resolve(
+        definition,
+        ThemeAppearance::Dark,
+        preferences.contrast,
+        fonts,
+    );
     let active = if appearance.is_dark() { &dark } else { &light };
     cx.set_global(active.clone());
 

@@ -301,17 +301,16 @@ pub async fn read_transcript_records(
         }
         _ => None,
     };
-    if let Some(position) = resume_from {
-        if position.resume_offset > 0
-            && (format.state.is_none() || saved_state.is_some())
-            && guard_matches(&mut file, position).await
-        {
-            if let Some(saved) = saved_state {
-                state = saved;
-            }
-            start = position.resume_offset;
-            resumed = true;
+    if let Some(position) = resume_from
+        && position.resume_offset > 0
+        && (format.state.is_none() || saved_state.is_some())
+        && guard_matches(&mut file, position).await
+    {
+        if let Some(saved) = saved_state {
+            state = saved;
         }
+        start = position.resume_offset;
+        resumed = true;
     }
 
     file.seek(std::io::SeekFrom::Start(start)).await.ok()?;

@@ -233,11 +233,12 @@ impl UsageAggregator {
         }
 
         let timestamp_ms = record.timestamp_ms as i64;
-        if let Some((since, until)) = self.hourly_window {
-            if timestamp_ms < since || timestamp_ms >= until {
-                self.out_of_window += 1;
-                return false;
-            }
+        if self
+            .hourly_window
+            .is_some_and(|(since, until)| timestamp_ms < since || timestamp_ms >= until)
+        {
+            self.out_of_window += 1;
+            return false;
         }
 
         let day = day_of(&self.zone, timestamp_ms);

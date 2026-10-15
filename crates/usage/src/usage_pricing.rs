@@ -397,8 +397,11 @@ mod tests {
         entry
     }
 
+    /// `(model, input $/M, output $/M, cache read $/M, cache write $/M)`.
+    type OverrideFixture = (&'static str, f64, f64, Option<f64>, Option<f64>);
+
     fn override_prices(
-        entries: &[(&str, f64, f64, Option<f64>, Option<f64>)],
+        entries: &[OverrideFixture],
     ) -> IndexMap<TrimmedNonEmptyString, UsageModelPriceOverride> {
         entries
             .iter()

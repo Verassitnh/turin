@@ -379,24 +379,22 @@ impl UsageService {
             RATES_TTL_MS
         };
         let fetched_at = self.inner.state.lock().rates_fetched_at_ms;
-        if let Some(fetched_at) = fetched_at {
-            if now - fetched_at < max_age {
-                return;
-            }
+        if fetched_at.is_some_and(|fetched_at| now - fetched_at < max_age) {
+            return;
         }
 
-        if fetched_at.is_none() {
-            if let Some((disk_fetched_at, document)) = self.read_rates_cache().await {
-                let parsed = parse_rate_table(&document);
-                if !parsed.is_empty() {
-                    let mut state = self.inner.state.lock();
-                    state.rates = parsed;
-                    state.rates_fetched_at_ms = Some(disk_fetched_at);
-                    state.rates_status = UsagePricingStatus::Cached;
-                    drop(state);
-                    if now - disk_fetched_at < max_age {
-                        return;
-                    }
+        if fetched_at.is_none()
+            && let Some((disk_fetched_at, document)) = self.read_rates_cache().await
+        {
+            let parsed = parse_rate_table(&document);
+            if !parsed.is_empty() {
+                let mut state = self.inner.state.lock();
+                state.rates = parsed;
+                state.rates_fetched_at_ms = Some(disk_fetched_at);
+                state.rates_status = UsagePricingStatus::Cached;
+                drop(state);
+                if now - disk_fetched_at < max_age {
+                    return;
                 }
             }
         }
@@ -487,19 +485,19 @@ impl UsageService {
                 configured: true,
             });
         }
-        if let Ok(default_id) = ProviderInstanceId::new(driver_kind) {
-            if !settings.provider_instances.contains_key(&default_id) {
-                instances.push(ProviderUsageInstance {
-                    instance_id: default_id,
-                    config: Some(json!({})),
-                    environment: merge_provider_instance_environment(
-                        None,
-                        &self.inner.config.host_env,
-                        home,
-                    ),
-                    configured: false,
-                });
-            }
+        if let Ok(default_id) = ProviderInstanceId::new(driver_kind)
+            && !settings.provider_instances.contains_key(&default_id)
+        {
+            instances.push(ProviderUsageInstance {
+                instance_id: default_id,
+                config: Some(json!({})),
+                environment: merge_provider_instance_environment(
+                    None,
+                    &self.inner.config.host_env,
+                    home,
+                ),
+                configured: false,
+            });
         }
         instances
     }

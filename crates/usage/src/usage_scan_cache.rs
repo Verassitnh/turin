@@ -400,10 +400,12 @@ pub fn prune_scan_cache(cache: &mut ScanCache, retention_cutoff_ms: f64) -> usiz
 pub fn dedupe_within_file(records: &[UsageRecord], seen: &mut HashSet<String>) -> Vec<UsageRecord> {
     let mut kept = Vec::new();
     for record in records {
-        if let Some(key) = &record.dedupe_key {
-            if !seen.insert(key.clone()) {
-                continue;
-            }
+        if record
+            .dedupe_key
+            .as_ref()
+            .is_some_and(|key| !seen.insert(key.clone()))
+        {
+            continue;
         }
         kept.push(record.clone());
     }

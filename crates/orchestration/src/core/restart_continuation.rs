@@ -51,14 +51,16 @@ pub fn restart_continuation_blocked(
         &projection.provider_turns,
         source.active_attempt_id.as_ref(),
     );
-    if !settled && turn.is_some_and(|turn| {
-        matches!(
+    if !settled
+        && turn.is_some_and(|turn| {
+            matches!(
             turn.status,
             turin_contracts::orchestration_v2::OrchestrationV2ProviderTurnStatus::Completed
                 | turin_contracts::orchestration_v2::OrchestrationV2ProviderTurnStatus::Failed
                 | turin_contracts::orchestration_v2::OrchestrationV2ProviderTurnStatus::Interrupted
         )
-    }) {
+        })
+    {
         return true;
     }
     let waiting_request = projection.runtime_requests.iter().any(|request| {

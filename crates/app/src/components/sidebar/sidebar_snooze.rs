@@ -57,7 +57,8 @@ where
     match day_delta {
         0 => time,
         1 => format!("tomorrow {time}"),
-        2..=6 => format!("{} {time}", wake.format("%a")),
+        // Upstream `dayDelta < 7`: a wake before today is also a weekday.
+        ..=6 => format!("{} {time}", wake.format("%a")),
         _ => format!("{}, {time}", wake.format("%b %-d")),
     }
 }
@@ -177,6 +178,37 @@ mod tests {
                 TimestampFormat::Locale
             )
             .contains("Mon")
+        );
+    }
+
+    #[test]
+    fn a_wake_time_before_today_reads_as_a_weekday_like_upstream() {
+        // now: Wed 2026-04-08 10:00. Upstream's `dayDelta < 7` takes every
+        // negative delta into the weekday form, however far in the past.
+        let now = local_date(2026, 4, 8, 10, 0);
+        assert_eq!(
+            snooze_wake_description(
+                &iso(local_date(2026, 4, 7, 23, 0)),
+                &now,
+                TimestampFormat::TwentyFourHour
+            ),
+            "Tue 23:00"
+        );
+        assert_eq!(
+            snooze_wake_description(
+                &iso(local_date(2026, 4, 6, 9, 0)),
+                &now,
+                TimestampFormat::TwentyFourHour
+            ),
+            "Mon 09:00"
+        );
+        assert_eq!(
+            snooze_wake_description(
+                &iso(local_date(2026, 3, 1, 9, 0)),
+                &now,
+                TimestampFormat::TwentyFourHour
+            ),
+            "Sun 09:00"
         );
     }
 

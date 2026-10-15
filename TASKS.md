@@ -121,7 +121,21 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T00 | Foundation fixes from QC wf_6ce02f2f-38c (docs part done by PM; helpers: Codex died on auth expiry → Sonnet r2) | `crates/contracts/src/base_schemas.rs` | Codex → Sonnet | done (merged) |
 | T00c | QC low items: UtcDateTime parse bounds/leap/zone-less, private field; `forward_compatible_*::optional` | `crates/contracts/src/base_schemas.rs` | Cursor Auto | active (base: T01) |
-| T00i | Upstream coverage inventory → docs/inventory/upstream-coverage.md (KEEP/CUT/UNASSIGNED per file, % ported) | docs | Cursor Auto | active |
+| T00i | Upstream coverage inventory → docs/inventory/upstream-coverage.md | docs | Cursor Auto | done (merged): 40.4% of kept lines ported (54.9% incl. partial); 36.1% of all needed; 135 unassigned files → N1–N11 |
+| N1 | App runtime: settings + secrets, keybindings file, data dir, environment descriptor, storage cleanup | `crates/runtime` | Cursor Auto | active |
+| N2s | Project services (server): identity, favicons, scratch projects, agent-session scan/import | `crates/projects` | Cursor Auto | active |
+| N2u | Onboarding / welcome UI | `crates/app` | Sonnet | todo |
+| N3 | Text generation (titles, commit messages, PR bodies, branch names) per provider | provider crates | Cursor Auto | todo (after adapters) |
+| N4 | Usage page: service (scan, aggregate, pricing) + UI | backend + `crates/app` | Cursor Auto + Sonnet | todo |
+| N5 | Editor / Open-in: launcher, app icons, prefs, picker, file context menu | backend + `crates/app` | Cursor Auto + Sonnet | todo |
+| N6 | Git UI (branch toolbar/picker, git actions) + ReviewService | `crates/app` + backend | Sonnet + Cursor Auto | todo |
+| N7 | GitHubMediaFetch (fold into T07) | `crates/source-control` | Cursor Auto | todo |
+| N7b | App shell, routing, command palette, UI-state stores (fold into T22?) | `crates/app` | Sonnet | todo |
+| N8 | Provider update UI | `crates/app` | Sonnet | todo |
+| N9 | Native macOS shell: menu, window lifecycle, quit hold, dock badge | `crates/app` | Sonnet | todo |
+| N10 | Prompt links (keep/cut: user decision) | `crates/app` | — | decide |
+| N11 | Project content search dialog | `crates/app` | Sonnet | todo |
+| DEDUP | Collapse 28 upstream files ported in >1 crate; delete 10 ports of cut files | all | Cursor Auto | todo (after wave merges) |
 | T01 | Port all kept contracts modules | `crates/contracts` | GLM → Sonnet | done (9f37c0a, 545 tests) → QC queued |
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | done (merged; QC PASS) |
 | T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | done (merged with T02c) |
@@ -156,7 +170,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok → Cursor Auto | done (26 tests, real provider-core traits) → QC queued |
 | T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex → Sonnet → Cursor Auto | r3 active (from docs/handoff/T13a.md; ~124 tests) |
 | T13b | Orchestrator write side: EventSink/Store, outbox/worker, receipts, command policy, thread lifecycle services | `crates/orchestration/src/pipeline/**` | Codex → Sonnet → Cursor Auto | r3 active (from docs/handoff/T13b.md) |
-| T13c | Orchestrator core + provider run services (Orchestrator.ts, ProviderSessionManager, RunExecution, ingest, recovery, checkpoints, PR reactors) | `crates/orchestration/src/core/**` | Codex (high) | todo (after T13a/b + T08) |
+| T13c | Orchestrator core + provider run services (Orchestrator.ts, ProviderSessionManager, RunExecution, ingest, recovery, checkpoints, PR reactors) | `crates/orchestration/src/core/**` | Cursor Auto (Codex when back) | active (base: T13b + T13a + stage) |
 | T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus → Sonnet → Cursor Auto | r3 active (from docs/handoff/T14.md; 451 tests) |
 
 ### Wave 4: UI (after T03 + T14)

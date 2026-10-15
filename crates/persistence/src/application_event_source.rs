@@ -37,7 +37,7 @@ pub fn copy_application_event_source(conn: &Connection) -> Result<(), Persistenc
         ALTER TABLE orchestration_events
           ADD COLUMN application_event_version INTEGER NOT NULL DEFAULT 1;
         CREATE INDEX idx_orchestration_events_application_sequence
-          ON orchestration_events(application_event_version, sequence);
+        ON orchestration_events(application_event_version, sequence);
         ALTER TABLE orchestration_command_receipts
           ADD COLUMN command_type TEXT NOT NULL DEFAULT 'legacy';
         ",
@@ -267,7 +267,7 @@ fn metadata_json(event: &LegacyV2Event) -> Result<String, PersistenceError> {
 
 fn legacy_events(conn: &Connection) -> Result<Vec<LegacyV2Event>, PersistenceError> {
     let mut stmt = conn
-        .prepare(
+        .prepare_cached(
             "
             SELECT event_id, command_id, thread_id, run_id, node_id, driver,
                    provider_instance_id, raw_event_id, event_type, occurred_at, payload_json
@@ -311,7 +311,7 @@ fn project_rows(conn: &Connection) -> Result<Vec<ProjectRow>, PersistenceError> 
         return Ok(Vec::new());
     }
     let mut stmt = conn
-        .prepare(
+        .prepare_cached(
             "
             SELECT project_id, title, workspace_root, default_model_selection_json,
                    scripts_json, created_at, updated_at, deleted_at

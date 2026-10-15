@@ -3,6 +3,11 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MigrationKind {
     Sql,
+    /// Each `ALTER TABLE ... ADD COLUMN` runs only when `PRAGMA table_info` lacks that column.
+    /// Other statements in the script (indexes) always run. Matches upstream's table_info guards.
+    AddColumnIfMissing,
+    /// Each statement is attempted on its own and errors are ignored. Migration 023's `Effect.catch`.
+    CatchStatementErrors,
     PullRequests,
     OrchestrationV2,
 }
@@ -117,7 +122,7 @@ pub static MIGRATIONS: &[MigrationSpec] = &[
         id: 17,
         name: "ProjectionThreadsArchivedAt",
         sql: include_str!("../sql/017_ProjectionThreadsArchivedAt.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 18,
@@ -141,19 +146,19 @@ pub static MIGRATIONS: &[MigrationSpec] = &[
         id: 21,
         name: "AuthSessionClientMetadata",
         sql: include_str!("../sql/021_AuthSessionClientMetadata.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 22,
         name: "AuthSessionLastConnectedAt",
         sql: include_str!("../sql/022_AuthSessionLastConnectedAt.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 23,
         name: "ProjectionThreadShellSummary",
         sql: include_str!("../sql/023_ProjectionThreadShellSummary.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::CatchStatementErrors,
     },
     MigrationSpec {
         id: 24,
@@ -177,13 +182,13 @@ pub static MIGRATIONS: &[MigrationSpec] = &[
         id: 27,
         name: "ProviderSessionRuntimeInstanceId",
         sql: include_str!("../sql/027_ProviderSessionRuntimeInstanceId.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 28,
         name: "ProjectionThreadSessionInstanceId",
         sql: include_str!("../sql/028_ProjectionThreadSessionInstanceId.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 29,
@@ -207,31 +212,31 @@ pub static MIGRATIONS: &[MigrationSpec] = &[
         id: 32,
         name: "AuthPairingProofKeyThumbprint",
         sql: include_str!("../sql/032_AuthPairingProofKeyThumbprint.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 33,
         name: "ProjectionThreadsSettled",
         sql: include_str!("../sql/033_ProjectionThreadsSettled.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 34,
         name: "ProjectionThreadsSnoozed",
         sql: include_str!("../sql/034_ProjectionThreadsSnoozed.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 35,
         name: "ProjectionThreadTitleRegeneration",
         sql: include_str!("../sql/035_ProjectionThreadTitleRegeneration.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 36,
         name: "ProjectionThreadsPinned",
         sql: include_str!("../sql/036_ProjectionThreadsPinned.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 37,
@@ -243,37 +248,37 @@ pub static MIGRATIONS: &[MigrationSpec] = &[
         id: 38,
         name: "ProjectionThreadsPinOrderKey",
         sql: include_str!("../sql/038_ProjectionThreadsPinOrderKey.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 39,
         name: "ProjectionProjectsDefaultThreadEnvMode",
         sql: include_str!("../sql/039_ProjectionProjectsDefaultThreadEnvMode.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 40,
         name: "ProjectionProjectFaviconPath",
         sql: include_str!("../sql/040_ProjectionProjectFaviconPath.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 41,
         name: "AuthSessionClientConnection",
         sql: include_str!("../sql/041_AuthSessionClientConnection.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 42,
         name: "ProjectionThreadLinkedPullRequest",
         sql: include_str!("../sql/042_ProjectionThreadLinkedPullRequest.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 43,
         name: "ProjectionThreadsUnsettledAt",
         sql: include_str!("../sql/043_ProjectionThreadsUnsettledAt.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 44,
@@ -285,7 +290,7 @@ pub static MIGRATIONS: &[MigrationSpec] = &[
         id: 45,
         name: "ProjectionProjectsAutoPull",
         sql: include_str!("../sql/045_ProjectionProjectsAutoPull.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 46,
@@ -297,19 +302,19 @@ pub static MIGRATIONS: &[MigrationSpec] = &[
         id: 47,
         name: "ProjectionProjectIcon",
         sql: include_str!("../sql/047_ProjectionProjectIcon.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 48,
         name: "ProjectionThreadBranchPullRequest",
         sql: include_str!("../sql/048_ProjectionThreadBranchPullRequest.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 49,
         name: "ProjectionThreadsActiveOrderKey",
         sql: include_str!("../sql/049_ProjectionThreadsActiveOrderKey.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 50,
@@ -321,7 +326,7 @@ pub static MIGRATIONS: &[MigrationSpec] = &[
         id: 51,
         name: "ProjectionThreadMessageContext",
         sql: include_str!("../sql/051_ProjectionThreadMessageContext.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 52,
@@ -339,7 +344,7 @@ pub static MIGRATIONS: &[MigrationSpec] = &[
         id: 54,
         name: "ProjectionThreadsAutoSettleDisabledAt",
         sql: include_str!("../sql/054_ProjectionThreadsAutoSettleDisabledAt.sql"),
-        kind: MigrationKind::Sql,
+        kind: MigrationKind::AddColumnIfMissing,
     },
     MigrationSpec {
         id: 55,

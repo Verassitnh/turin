@@ -75,8 +75,10 @@ impl RequestBroker {
         let Some(waiting) = self.inner.waiting.lock().remove(&id) else {
             return false;
         };
-        if matches!(decision, Decision::Approval("acceptForSession" | "acceptAlways"))
-            && let Some(key) = waiting.allowance
+        if matches!(
+            decision,
+            Decision::Approval("acceptForSession" | "acceptAlways")
+        ) && let Some(key) = waiting.allowance
         {
             self.inner.allowances.lock().insert(key);
         }

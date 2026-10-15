@@ -7111,6 +7111,7 @@ name = "turin-provider-codex"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "futures",
  "parking_lot",
@@ -7121,6 +7122,7 @@ dependencies = [
  "tracing",
  "turin-codex-app-server",
  "turin-contracts",
+ "turin-provider-core",
 ]
 
 [[package]]

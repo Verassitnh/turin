@@ -7,7 +7,9 @@ license.workspace = true
 [dependencies]
 turin-contracts.workspace = true
 turin-codex-app-server = { path = "../codex-app-server" }
+turin-provider-core = { path = "../provider-core" }
 anyhow.workspace = true
+async-trait.workspace = true
 chrono.workspace = true
 futures.workspace = true
 parking_lot.workspace = true

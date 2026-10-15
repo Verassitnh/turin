@@ -6,8 +6,14 @@
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::{Value, json};
-use turin_contracts::orchestration_v2::OrchestrationV2ProjectedTurnItem;
+use turin_contracts::EnvironmentId;
+use turin_contracts::orchestration_v2::{
+    OrchestrationV2ProjectedTurnItem, OrchestrationV2ThreadShell,
+};
 
+use crate::projection::shared::agent_awareness::{
+    AgentAwarenessPhase, ProjectThreadAwarenessV2Input, project_thread_awareness_v2,
+};
 use crate::projection::store::ProjectionStore;
 use crate::projection::store::ThreadSnapshotWindowOptions;
 use crate::projection::store::canonical::ProjectionRecordField;
@@ -17,6 +23,20 @@ use crate::projection::store::shell::ShellSnapshotOptions;
 use crate::projection::test_support::*;
 
 /// The wire (camelCase JSON) form of a contract value, for deep equality.
+/// `projectThreadAwarenessV2(...)?.phase` for a shell row.
+fn awareness_phase(
+    shell: &OrchestrationV2ThreadShell,
+    environment: &str,
+) -> Option<AgentAwarenessPhase> {
+    let environment = EnvironmentId::new(environment).expect("environment");
+    project_thread_awareness_v2(ProjectThreadAwarenessV2Input {
+        environment_id: &environment,
+        project_title: "Project",
+        thread: shell,
+    })
+    .map(|state| state.phase)
+}
+
 fn wire<T: Serialize + ?Sized>(value: &T) -> Value {
     serde_json::to_value(value).expect("serialize")
 }
@@ -1564,9 +1584,7 @@ async fn keeps_fork_visible_items_stable_after_a_source_run_is_rolled_back() {
     );
 }
 
-/// Upstream line 5663. The `projectThreadAwarenessV2` phase assertions are
-/// omitted: the agent-awareness projection has no Turin port.
-#[ignore = "projectThreadAwarenessV2 (shared agentAwareness) has no Turin port; the phase assertions are omitted"]
+/// Upstream line 5663.
 #[tokio::test]
 async fn a_pull_request_watch_keeps_a_finished_thread_working_until_it_ends() {
     let store = memory_store().await;
@@ -1652,6 +1670,10 @@ async fn a_pull_request_watch_keeps_a_finished_thread_working_until_it_ends() {
             "kind": "monitor"
         }])
     );
+    assert_eq!(
+        awareness_phase(&shell, "environment:watched-pull-request"),
+        Some(AgentAwarenessPhase::Running)
+    );
 
     apply_all(&store, vec![sync(json!([link]))]).await;
     let shell = store
@@ -1660,11 +1682,13 @@ async fn a_pull_request_watch_keeps_a_finished_thread_working_until_it_ends() {
         .expect("shell")
         .expect("thread shell");
     assert_eq!(wire(&shell.pending_background_tasks), json!([]));
+    assert_eq!(
+        awareness_phase(&shell, "environment:watched-pull-request"),
+        Some(AgentAwarenessPhase::Completed)
+    );
 }
 
-/// Upstream line 5785. The `projectThreadAwarenessV2` phase and `updatedAt`
-/// assertions are omitted: the agent-awareness projection has no Turin port.
-#[ignore = "projectThreadAwarenessV2 (shared agentAwareness) has no Turin port; the phase and updatedAt assertions are omitted"]
+/// Upstream line 5785.
 #[tokio::test]
 async fn dates_a_completion_released_by_held_background_work_at_the_release() {
     let store = memory_store().await;
@@ -1721,6 +1745,16 @@ async fn dates_a_completion_released_by_held_background_work_at_the_release() {
     )
     .await;
 
+    let held = store
+        .get_thread_shell(&tid(thread_id))
+        .await
+        .expect("held shell")
+        .expect("thread shell");
+    assert_eq!(
+        awareness_phase(&held, "environment:held-completion"),
+        Some(AgentAwarenessPhase::Running)
+    );
+
     // The monitor ends five minutes after the run.
     apply_all(
         &store,
@@ -1735,6 +1769,25 @@ async fn dates_a_completion_released_by_held_background_work_at_the_release() {
         )],
     )
     .await;
+
+    let released = store
+        .get_thread_shell(&tid(thread_id))
+        .await
+        .expect("released shell")
+        .expect("thread shell");
+    let state = project_thread_awareness_v2(ProjectThreadAwarenessV2Input {
+        environment_id: &EnvironmentId::new("environment:held-completion").expect("environment"),
+        project_title: "Project",
+        thread: &released,
+    });
+    assert_eq!(
+        state.as_ref().map(|state| state.phase),
+        Some(AgentAwarenessPhase::Completed)
+    );
+    assert_eq!(
+        state.map(|state| state.updated_at),
+        Some(released_at.to_owned())
+    );
 
     // A later provider must not hide this owner's roster from restart recovery.
     apply_all(

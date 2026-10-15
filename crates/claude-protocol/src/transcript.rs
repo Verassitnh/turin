@@ -68,6 +68,9 @@ fn config_dir(options: &TranscriptOptions) -> PathBuf {
         })
 }
 pub fn project_key(dir: &Path) -> String {
+    encode_project_path(&absolute_source(dir))
+}
+fn absolute_source(dir: &Path) -> String {
     let absolute = std::fs::canonicalize(dir).unwrap_or_else(|_| {
         if dir.is_absolute() {
             dir.to_path_buf()
@@ -75,25 +78,23 @@ pub fn project_key(dir: &Path) -> String {
             std::env::current_dir().unwrap_or_default().join(dir)
         }
     });
-    let mut source = absolute.to_string_lossy().into_owned();
     // SDK `it`: darwin paths are NFC-normalized before encoding.
-    #[cfg(target_os = "macos")]
-    {
-        source = source.nfc().collect();
-    }
-    encode_project_path(&source)
+    normalize_text(&absolute.to_string_lossy())
 }
 
 /// `fm`: non-ASCII-alphanumerics become `-` per UTF-16 code unit. Paths longer
 /// than 200 units keep that prefix plus `abs(javaStringHash).toString(36)`.
-pub fn encode_project_path(source: &str) -> String {
-    let key: String = source
+fn dash_encode(source: &str) -> String {
+    source
         .encode_utf16()
         .map(|unit| match char::from_u32(u32::from(unit)) {
             Some(ch) if ch.is_ascii_alphanumeric() => ch,
             _ => '-',
         })
-        .collect();
+        .collect()
+}
+pub fn encode_project_path(source: &str) -> String {
+    let key = dash_encode(source);
     if key.encode_utf16().count() <= 200 {
         return key;
     }
@@ -132,33 +133,324 @@ fn to_base36(mut value: u32) -> String {
 fn projects_dir(options: &TranscriptOptions) -> PathBuf {
     config_dir(options).join("projects")
 }
+const CHUNK_BYTES: usize = 65536;
+fn project_dir_override() -> Option<String> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")?;
+    valid_project_dir_name(std::env::var("CLAUDE_CODE_PROJECT_DIR_NAME").ok()?)
+}
+fn valid_project_dir_name(name: String) -> Option<String> {
+    if !(1..=64).contains(&name.len())
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        return None;
+    }
+    let lower = name.to_ascii_lowercase();
+    let reserved = matches!(lower.as_str(), "con" | "prn" | "aux" | "nul")
+        || (lower.len() == 4
+            && (lower.starts_with("com") || lower.starts_with("lpt"))
+            && lower.as_bytes()[3].is_ascii_digit());
+    if reserved { None } else { Some(name) }
+}
+async fn nonempty_transcript(dir: &Path, id: &str) -> Option<PathBuf> {
+    let path = dir.join(format!("{id}.jsonl"));
+    let meta = fs::metadata(&path).await.ok()?;
+    (meta.len() > 0).then_some(path)
+}
+async fn candidate_project_dirs(
+    root: &Path,
+    source: &str,
+    override_name: Option<&str>,
+) -> Vec<PathBuf> {
+    let encoded = encode_project_path(source);
+    let mut dirs = Vec::new();
+    if let Some(name) = override_name {
+        dirs.push(root.join(name));
+        if encoded != dirs[0].file_name().unwrap().to_string_lossy() {
+            dirs.push(root.join(&encoded));
+        }
+        return dirs;
+    }
+    dirs.push(root.join(&encoded));
+    let dashed = dash_encode(source);
+    if dashed.encode_utf16().count() <= 200 {
+        return dirs;
+    }
+    let prefix = format!("{}-", utf16_prefix(&dashed, 200));
+    let mut entries = match fs::read_dir(root).await {
+        Ok(entries) => entries,
+        Err(_) => return dirs,
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&prefix) || name == encoded {
+            continue;
+        }
+        let path = entry.path();
+        if entry
+            .file_type()
+            .await
+            .map(|kind| kind.is_dir())
+            .unwrap_or(false)
+            && cwd_matches(&path, source).await
+        {
+            dirs.push(path);
+        }
+    }
+    dirs
+}
+async fn cwd_matches(project_dir: &Path, source: &str) -> bool {
+    let expected = dash_encode(source);
+    let mut entries = match fs::read_dir(project_dir).await {
+        Ok(entries) => entries,
+        Err(_) => return false,
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some((head, tail)) = head_tail(&path).await else {
+            continue;
+        };
+        let found = last_relocated_cwd(&tail).or_else(|| first_field(&head, "cwd"));
+        if found.is_some_and(|cwd| dash_encode(&normalize_text(&cwd)) == expected) {
+            return true;
+        }
+    }
+    false
+}
+fn normalize_text(value: &str) -> String {
+    if cfg!(target_os = "macos") {
+        value.nfc().collect()
+    } else {
+        value.to_owned()
+    }
+}
+async fn head_tail(path: &Path) -> Option<(String, String)> {
+    let bytes = fs::read(path).await.ok()?;
+    Some(windows(&bytes))
+}
+fn windows(bytes: &[u8]) -> (String, String) {
+    let head_end = bytes.len().min(CHUNK_BYTES);
+    let tail_start = bytes.len().saturating_sub(CHUNK_BYTES);
+    let head = String::from_utf8_lossy(&bytes[..head_end]).into_owned();
+    let tail = String::from_utf8_lossy(&bytes[tail_start..]).into_owned();
+    (head, tail)
+}
+/// SDK `fn`: the textually last `"key":"value"` in a raw chunk, without parsing lines.
+fn last_string_field(text: &str, key: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut best: Option<(usize, &str)> = None;
+    for pattern in [format!("\"{key}\":\""), format!("\"{key}\": \"")] {
+        let mut from = 0;
+        while let Some(found) = text.get(from..).and_then(|rest| rest.find(&pattern)) {
+            let at = from + found;
+            let start = at + pattern.len();
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != b'"' {
+                end += if bytes[end] == b'\\' { 2 } else { 1 };
+            }
+            if end >= bytes.len() {
+                break;
+            }
+            if best.is_none_or(|(position, _)| at > position) {
+                best = Some((at, &text[start..end]));
+            }
+            from = end + 1;
+        }
+    }
+    best.map(|(_, raw)| {
+        if raw.contains('\\') {
+            serde_json::from_str(&format!("\"{raw}\"")).unwrap_or_else(|_| raw.to_owned())
+        } else {
+            raw.to_owned()
+        }
+    })
+}
+fn is_control_or_format(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0001}'
+                | '\u{E0020}'..='\u{E007F}'
+        )
+}
+/// SDK `YZ`: runs of control/format characters become one space, then a 200 code point cap.
+fn sanitize_title(title: &str) -> String {
+    let mut spaced = String::new();
+    let mut in_run = false;
+    for c in title.trim().chars() {
+        if is_control_or_format(c) {
+            if !in_run {
+                spaced.push(' ');
+            }
+            in_run = true;
+        } else {
+            spaced.push(c);
+            in_run = false;
+        }
+    }
+    spaced
+        .chars()
+        .take(200)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+async fn sidecar_title(transcript: &Path, id: &str) -> Option<String> {
+    let path = transcript.parent()?.join(id).join("custom-title.json");
+    let text = fs::read_to_string(path).await.ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let title = sanitize_title(value.get("customTitle")?.as_str()?);
+    (!title.is_empty()).then_some(title)
+}
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.filter(|text| !text.is_empty())
+}
+/// SDK `Nu`/`RWe` title chain. `RWe` stops at an empty tail `customTitle`; `Nu` keeps looking.
+fn window_title(
+    head: &str,
+    tail: &str,
+    sidecar: Option<String>,
+    empty_tail_custom_stops: bool,
+) -> Option<String> {
+    let custom = match last_string_field(tail, "customTitle") {
+        Some(title) if !title.is_empty() || empty_tail_custom_stops => nonempty(Some(title)),
+        Some(_) => nonempty(last_string_field(head, "customTitle")),
+        None => nonempty(sidecar).or_else(|| nonempty(last_string_field(head, "customTitle"))),
+    };
+    custom
+        .or_else(|| nonempty(last_string_field(tail, "aiTitle")))
+        .or_else(|| nonempty(last_string_field(head, "aiTitle")))
+}
+fn first_field(chunk: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    for line in chunk.lines() {
+        if !line.contains(&needle) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(text) = value.get(key).and_then(Value::as_str) {
+            return Some(text.to_owned());
+        }
+    }
+    None
+}
+fn last_relocated_cwd(chunk: &str) -> Option<String> {
+    let mut found = None;
+    for line in chunk.lines() {
+        if !line.contains("\"relocatedCwd\"") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) == Some("relocated")
+            && let Some(text) = value.get("relocatedCwd").and_then(Value::as_str)
+        {
+            found = Some(text.to_owned());
+        }
+    }
+    found
+}
+async fn git_worktrees(dir: &Path) -> Vec<PathBuf> {
+    let output = tokio::process::Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=",
+            "worktree",
+            "list",
+            "--porcelain",
+        ])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(5), output).await
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(|path| PathBuf::from(normalize_text(path)))
+        .collect()
+}
 async fn session_path(id: &str, options: &TranscriptOptions) -> Option<PathBuf> {
+    session_path_with_override(id, options, project_dir_override().as_deref()).await
+}
+async fn session_path_with_override(
+    id: &str,
+    options: &TranscriptOptions,
+    override_name: Option<&str>,
+) -> Option<PathBuf> {
     if uuid::Uuid::parse_str(id).is_err() {
         return None;
     }
     let root = projects_dir(options);
-    if let Some(dir) = &options.dir {
-        let p = root.join(project_key(dir)).join(format!("{id}.jsonl"));
-        if fs::metadata(&p).await.is_ok() {
-            return Some(p);
+    let Some(dir) = &options.dir else {
+        let mut folders = fs::read_dir(&root).await.ok()?;
+        while let Ok(Some(folder)) = folders.next_entry().await {
+            if let Some(path) = nonempty_transcript(&folder.path(), id).await {
+                return Some(path);
+            }
         }
         return None;
+    };
+    let source = absolute_source(dir);
+    for candidate in candidate_project_dirs(&root, &source, override_name).await {
+        if let Some(path) = nonempty_transcript(&candidate, id).await {
+            return Some(path);
+        }
     }
-    let mut folders = fs::read_dir(root).await.ok()?;
-    while let Ok(Some(folder)) = folders.next_entry().await {
-        let p = folder.path().join(format!("{id}.jsonl"));
-        if fs::metadata(&p).await.is_ok() {
-            return Some(p);
+    for worktree in git_worktrees(Path::new(&source)).await {
+        let worktree_source = absolute_source(&worktree);
+        if worktree_source == source {
+            continue;
+        }
+        for candidate in candidate_project_dirs(&root, &worktree_source, override_name).await {
+            if let Some(path) = nonempty_transcript(&candidate, id).await {
+                return Some(path);
+            }
         }
     }
     None
 }
 async fn read_entries(path: &Path) -> Result<Vec<Value>> {
-    let data = fs::read_to_string(path).await?;
-    Ok(data
-        .lines()
+    Ok(parse_entries(&fs::read_to_string(path).await?))
+}
+fn parse_entries(data: &str) -> Vec<Value> {
+    data.lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .collect())
+        .collect()
 }
 fn entry_id(e: &Value) -> Option<&str> {
     e.get("uuid")?.as_str()
@@ -496,14 +788,29 @@ fn session_chain(entries: &[Value]) -> Vec<Value> {
     chain.reverse();
     insert_siblings(&by_id, &order, chain)
 }
+fn queued_command_source(entry: &Value) -> Option<&str> {
+    if entry.get("type").and_then(Value::as_str) != Some("attachment") {
+        return None;
+    }
+    let attachment = entry.get("attachment")?;
+    if attachment.get("type").and_then(Value::as_str) != Some("queued_command") {
+        return None;
+    }
+    attachment
+        .get("source_uuid")
+        .and_then(Value::as_str)
+        .filter(|source| !source.is_empty())
+}
+/// SDK `bI`: an exact uuid wins anywhere in the list before any queued-command source match.
 fn message_index(entries: &[Value], target: &str) -> Option<usize> {
-    entries.iter().position(|entry| {
-        entry_id(entry) == Some(target)
-            || entry
-                .pointer("/attachment/source_uuid")
-                .and_then(Value::as_str)
-                == Some(target)
-    })
+    entries
+        .iter()
+        .position(|entry| entry_id(entry) == Some(target))
+        .or_else(|| {
+            entries
+                .iter()
+                .position(|entry| queued_command_source(entry) == Some(target))
+        })
 }
 fn is_main_turn(entry: &Value) -> bool {
     matches!(
@@ -685,6 +992,43 @@ pub async fn get_session_messages(
         .collect();
     Ok(slice(messages, options.offset, options.limit))
 }
+fn valid_id(id: &str, allowed: impl Fn(char) -> bool) -> bool {
+    (1..=128).contains(&id.len()) && id.chars().all(allowed)
+}
+/// SDK `$We` + `zWe`: a plain parent walk from the last user/assistant entry, with no
+/// compact rewrites or sibling insertion.
+fn subagent_chain(entries: &[Value]) -> Vec<Value> {
+    let entries: Vec<&Value> = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.get("type").and_then(Value::as_str),
+                Some("user" | "assistant" | "attachment")
+            ) && entry_id(entry).is_some()
+        })
+        .collect();
+    let by_id: HashMap<&str, &Value> = entries
+        .iter()
+        .filter_map(|entry| Some((entry_id(entry)?, *entry)))
+        .collect();
+    let mut current = entries.iter().rev().copied().find(|entry| {
+        matches!(
+            entry.get("type").and_then(Value::as_str),
+            Some("user" | "assistant")
+        )
+    });
+    let mut seen = HashSet::new();
+    let mut chain = vec![];
+    while let Some(entry) = current {
+        if !seen.insert(entry_id(entry)) {
+            break;
+        }
+        chain.push(entry.clone());
+        current = parent_uuid(entry).and_then(|parent| by_id.get(parent).copied());
+    }
+    chain.reverse();
+    chain
+}
 pub async fn get_subagent_messages(
     id: &str,
     agent_id: &str,
@@ -725,12 +1069,14 @@ pub async fn get_subagent_messages(
     let tool_id = metadata
         .as_ref()
         .and_then(|v| v.get("toolUseId"))
-        .and_then(Value::as_str);
+        .and_then(Value::as_str)
+        .filter(|id| valid_id(id, |c| c.is_ascii_alphanumeric() || "_.:-".contains(c)));
     let parent_id = metadata
         .as_ref()
         .and_then(|v| v.get("parentAgentId"))
-        .and_then(Value::as_str);
-    let messages = session_chain(&entries)
+        .and_then(Value::as_str)
+        .filter(|id| valid_id(id, |c| c.is_ascii_alphanumeric() || "_-".contains(c)));
+    let messages = subagent_chain(&entries)
         .into_iter()
         .filter(|e| {
             matches!(
@@ -771,9 +1117,10 @@ pub async fn list_sessions(options: &TranscriptOptions) -> Result<Vec<SessionInf
             if uuid::Uuid::parse_str(id).is_err() {
                 continue;
             }
-            let Ok(entries) = read_entries(&path).await else {
+            let Ok(bytes) = fs::read(&path).await else {
                 continue;
             };
+            let entries = parse_entries(&String::from_utf8_lossy(&bytes));
             if entries
                 .first()
                 .and_then(|e| e.get("isSidechain"))
@@ -782,41 +1129,19 @@ pub async fn list_sessions(options: &TranscriptOptions) -> Result<Vec<SessionInf
             {
                 continue;
             }
-            let custom_only = entries
-                .iter()
-                .rev()
-                .find_map(|e| {
-                    e.get("customTitle")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                })
-                .map(str::to_owned);
-            let ai_title = entries
-                .iter()
-                .rev()
-                .find_map(|e| {
-                    e.get("aiTitle")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                })
-                .map(str::to_owned);
-            let named = custom_only.clone().or(ai_title);
-            let first_prompt = first_prompt_text(&entries);
-            let last_prompt = entries
-                .iter()
-                .rev()
-                .find_map(|e| e.get("lastPrompt").and_then(Value::as_str))
-                .map(str::to_owned);
-            let summary_hint = entries
-                .iter()
-                .rev()
-                .find_map(|e| e.get("summary").and_then(Value::as_str))
-                .map(str::to_owned);
+            let (head, tail) = windows(&bytes);
+            let sidecar = match last_string_field(&tail, "customTitle") {
+                Some(_) => None,
+                None => sidecar_title(&path, id).await,
+            };
+            let named = window_title(&head, &tail, sidecar, false);
+            let first_prompt = first_prompt(&head);
             let summary = named
                 .clone()
-                .or(last_prompt)
-                .or(summary_hint)
-                .or(first_prompt.clone());
+                .or_else(|| nonempty(last_string_field(&tail, "lastPrompt")))
+                .or_else(|| nonempty(last_string_field(&tail, "summary")))
+                .or_else(|| first_prompt.clone())
+                .or_else(|| media_hint(&head));
             let Some(summary) = summary else { continue };
             let metadata = file.metadata().await?;
             let modified = metadata
@@ -979,78 +1304,133 @@ fn remap_parent(
     }
     Value::Null
 }
-fn first_prompt_text(entries: &[Value]) -> Option<String> {
-    for entry in entries {
-        if entry.get("type").and_then(Value::as_str) != Some("user") {
-            continue;
-        }
-        if entry.get("isMeta").and_then(Value::as_bool) == Some(true)
-            || entry.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
-        {
-            continue;
-        }
-        let content = entry.pointer("/message/content")?;
-        let text = match content {
-            Value::String(text) => text.clone(),
-            Value::Array(blocks) => {
-                if blocks
-                    .iter()
-                    .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
-                {
-                    continue;
+/// SDK `Ca`: a user entry's first usable prompt line; `<command-name>` only feeds the fallback.
+fn entry_prompt(entry: &Value, command_fallback: &mut String) -> Option<String> {
+    if entry.get("type").and_then(Value::as_str) != Some("user")
+        || entry.get("isMeta").and_then(Value::as_bool) == Some(true)
+        || entry.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
+    {
+        return None;
+    }
+    let texts: Vec<&str> = match entry.pointer("/message/content")? {
+        Value::String(text) => vec![text],
+        Value::Array(blocks) => {
+            let mut texts = vec![];
+            for block in blocks.iter().filter(|block| block.is_object()) {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("tool_result") => return None,
+                    Some("text") => texts.extend(block.get("text").and_then(Value::as_str)),
+                    _ => {}
                 }
-                blocks
-                    .iter()
-                    .filter_map(|block| {
-                        (block.get("type").and_then(Value::as_str) == Some("text"))
-                            .then(|| block.get("text").and_then(Value::as_str))
-                            .flatten()
-                    })
-                    .collect::<Vec<_>>()
-                    .join("")
             }
-            _ => continue,
-        };
-        let text = text.replace('\n', " ").trim().to_owned();
+            texts
+        }
+        _ => vec![],
+    };
+    for text in texts {
+        let text = text.replace('\n', " ");
+        let text = text.trim();
         if text.is_empty() {
             continue;
         }
-        if text.chars().count() > 200 {
-            let cut: String = text.chars().take(200).collect();
-            return Some(format!("{cut}…"));
+        if let Some(name) = between(text, "<command-name>", "</command-name>") {
+            if command_fallback.is_empty() {
+                *command_fallback = name.to_owned();
+            }
+            continue;
         }
-        return Some(text);
+        if let Some(input) = between(text, "<bash-input>", "</bash-input>") {
+            return Some(format!("! {}", input.trim()));
+        }
+        if starts_with_tag_or_interrupt(text) {
+            continue;
+        }
+        if text.encode_utf16().count() > 200 {
+            let mut units = 0;
+            let cut: String = text
+                .chars()
+                .take_while(|c| {
+                    units += c.len_utf16();
+                    units <= 200
+                })
+                .collect();
+            return Some(format!("{}…", cut.trim()));
+        }
+        return Some(text.to_owned());
     }
     None
+}
+fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = text.find(open)? + open.len();
+    let end = text[start..].find(close)?;
+    Some(&text[start..start + end])
+}
+fn starts_with_tag_or_interrupt(text: &str) -> bool {
+    if let Some(rest) = text.trim_start().strip_prefix('<') {
+        let mut chars = rest.chars();
+        if !chars.next().is_some_and(|c| c.is_ascii_lowercase()) {
+            return false;
+        }
+        for c in chars {
+            if !(c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                return c.is_whitespace() || c == '>';
+            }
+        }
+        return false;
+    }
+    text.strip_prefix("[Request interrupted by user")
+        .is_some_and(|rest| rest.contains(']'))
+}
+fn is_candidate_user_line(line: &str) -> bool {
+    (line.contains("\"type\":\"user\"") || line.contains("\"type\": \"user\""))
+        && !line.contains("\"tool_result\"")
+        && !line.contains("\"isMeta\":true")
+        && !line.contains("\"isMeta\": true")
+}
+/// SDK `_S`: the first prompt in the head window, else the first slash-command name.
+fn first_prompt(head: &str) -> Option<String> {
+    let mut command_fallback = String::new();
+    for line in head.split('\n').filter(|line| is_candidate_user_line(line)) {
+        if line.contains("\"isCompactSummary\":true") || line.contains("\"isCompactSummary\": true")
+        {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(prompt) = entry_prompt(&entry, &mut command_fallback) {
+            return Some(prompt);
+        }
+    }
+    nonempty(Some(command_fallback))
+}
+/// SDK `d4`: a media label when no text prompt exists.
+fn media_hint(head: &str) -> Option<String> {
+    head.split('\n')
+        .filter(|line| is_candidate_user_line(line))
+        .find_map(|line| {
+            if line.contains("\"type\":\"image\"") || line.contains("\"type\": \"image\"") {
+                Some("Image".to_owned())
+            } else if line.contains("\"type\":\"document\"")
+                || line.contains("\"type\": \"document\"")
+            {
+                Some("Document".to_owned())
+            } else {
+                None
+            }
+        })
 }
 fn parse_millis(value: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|time| time.timestamp_millis() as u64)
 }
-fn fork_title(explicit: Option<&str>, raw: &[Value]) -> String {
+fn fork_title(explicit: Option<&str>, head: &str, tail: &str, sidecar: Option<String>) -> String {
     if let Some(title) = explicit.map(str::trim).filter(|title| !title.is_empty()) {
         return title.to_owned();
     }
-    let derived = raw
-        .iter()
-        .rev()
-        .find_map(|entry| {
-            entry
-                .get("customTitle")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-        })
-        .or_else(|| {
-            raw.iter().rev().find_map(|entry| {
-                entry
-                    .get("aiTitle")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-            })
-        })
-        .map(str::to_owned)
-        .or_else(|| first_prompt_text(raw))
+    let derived = window_title(head, tail, sidecar, true)
+        .or_else(|| first_prompt(head))
         .unwrap_or_else(|| "Forked session".into());
     format!("{derived} (fork)")
 }
@@ -1064,8 +1444,11 @@ pub async fn fork_session(
     let path = session_path(id, options)
         .await
         .context("session not found")?;
-    let raw = read_entries(&path).await?;
-    let title = fork_title(title, &raw);
+    let bytes = fs::read(&path).await?;
+    let raw = parse_entries(&String::from_utf8_lossy(&bytes));
+    let (head, tail) = windows(&bytes);
+    let sidecar = sidecar_title(&path, id).await;
+    let title = fork_title(title, &head, &tail, sidecar);
     let side = fork_side(&raw, id);
     let mut entries: Vec<_> = raw
         .into_iter()
@@ -1077,9 +1460,18 @@ pub async fn fork_session(
                 && e.get("isSidechain").and_then(Value::as_bool) != Some(true)
         })
         .collect();
-    anyhow::ensure!(!entries.is_empty(), "session has no messages to fork");
+    let no_messages = || anyhow::anyhow!("Session {id} has no messages to fork");
+    if entries.is_empty() {
+        return Err(no_messages());
+    }
     if let Some(target) = up_to_message_id {
         entries = cut_up_to(entries, target)?;
+    }
+    if entries
+        .iter()
+        .all(|entry| entry.get("type").and_then(Value::as_str) == Some("progress"))
+    {
+        return Err(no_messages());
     }
     let new_id = uuid::Uuid::new_v4().to_string();
     let ids: HashMap<_, _> = entries
@@ -1165,11 +1557,11 @@ pub async fn fork_session(
     }
     forked.push(json!({"type":"custom-title","sessionId":new_id,"customTitle":title,"uuid":uuid::Uuid::new_v4().to_string(),"timestamp":timestamp}));
     let new_path = path.with_file_name(format!("{new_id}.jsonl"));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&new_path)
-        .await?;
+    let mut open = fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    open.mode(0o600);
+    let mut file = open.open(&new_path).await?;
     for entry in forked {
         file.write_all(serde_json::to_string(&entry)?.as_bytes())
             .await?;
@@ -1243,6 +1635,15 @@ mod tests {
         assert_eq!(fork_entries.len(), 3);
         assert_eq!(fork_entries[1]["parentUuid"], fork_entries[0]["uuid"]);
         assert_eq!(fork_entries[2]["customTitle"], "Branch");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(folder.join(format!("{fork}.jsonl")))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         assert!(
             fork_entries
                 .iter()
@@ -1275,6 +1676,257 @@ mod tests {
         );
         fs::remove_dir_all(root).await.unwrap();
     }
+    async fn write_session(entries: &[Value]) -> (PathBuf, TranscriptOptions, String, PathBuf) {
+        let root = std::env::temp_dir().join(format!("turin-claude-fork-{}", uuid::Uuid::new_v4()));
+        let dir = root.join("work");
+        fs::create_dir_all(&dir).await.unwrap();
+        let options = TranscriptOptions {
+            dir: Some(dir.clone()),
+            config_dir: Some(root.join("config")),
+            ..Default::default()
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let folder = projects_dir(&options).join(project_key(&dir));
+        fs::create_dir_all(&folder).await.unwrap();
+        let body: String = entries
+            .iter()
+            .map(|entry| {
+                let mut entry = entry.clone();
+                entry["sessionId"] = json!(id);
+                format!("{}\n", serde_json::to_string(&entry).unwrap())
+            })
+            .collect();
+        fs::write(folder.join(format!("{id}.jsonl")), body)
+            .await
+            .unwrap();
+        (root, options, id, folder)
+    }
+    fn user(uuid: &str, parent: Option<&str>, text: &str) -> Value {
+        json!({"type":"user","uuid":uuid,"parentUuid":parent,"message":{"role":"user","content":text}})
+    }
+    fn assistant(uuid: &str, parent: &str) -> Value {
+        json!({"type":"assistant","uuid":uuid,"parentUuid":parent,"message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}})
+    }
+    #[tokio::test]
+    async fn fork_cut_prefers_exact_uuid_over_queued_command_source() {
+        let (root, options, id, folder) = write_session(&[
+            user("u1", None, "first"),
+            assistant("a2", "u1"),
+            json!({"type":"attachment","uuid":"A3","parentUuid":"a2","attachment":{"type":"queued_command","prompt":"later","source_uuid":"u5"}}),
+            assistant("a4", "A3"),
+            user("u5", Some("a4"), "fifth"),
+            assistant("a6", "u5"),
+        ])
+        .await;
+        let fork = fork_session(&id, &options, Some("u5"), Some("Cut"))
+            .await
+            .unwrap();
+        let forked = read_entries(&folder.join(format!("{fork}.jsonl")))
+            .await
+            .unwrap();
+        let originals: Vec<&str> = forked
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .pointer("/forkedFrom/messageUuid")
+                    .and_then(Value::as_str)
+            })
+            .collect();
+        assert_eq!(originals, ["u1", "a2", "A3", "a4", "u5"]);
+        let other =
+            json!({"type":"attachment","uuid":"x","attachment":{"type":"other","source_uuid":"t"}});
+        assert_eq!(message_index(&[other], "t"), None);
+        fs::remove_dir_all(root).await.unwrap();
+    }
+    #[tokio::test]
+    async fn fork_rejects_a_cut_that_leaves_only_progress() {
+        let (root, options, id, folder) = write_session(&[
+            json!({"type":"progress","uuid":"p1","parentUuid":null,"data":{}}),
+            user("u1", Some("p1"), "first"),
+        ])
+        .await;
+        let error = fork_session(&id, &options, Some("p1"), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("Session {id} has no messages to fork")
+        );
+        let mut files = fs::read_dir(&folder).await.unwrap();
+        let mut count = 0;
+        while files.next_entry().await.unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 1, "no fork file should be written");
+        fs::remove_dir_all(root).await.unwrap();
+
+        let (root, options, id, _) =
+            write_session(&[json!({"type":"progress","uuid":"p1","parentUuid":null,"data":{}})])
+                .await;
+        let error = fork_session(&id, &options, None, None).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("Session {id} has no messages to fork")
+        );
+        fs::remove_dir_all(root).await.unwrap();
+    }
+    #[tokio::test]
+    async fn titles_use_sdk_windows_and_the_sidecar() {
+        let (root, options, id, folder) =
+            write_session(&[user("u1", None, "one"), assistant("a2", "u1")]).await;
+        fs::create_dir_all(folder.join(&id)).await.unwrap();
+        fs::write(
+            folder.join(&id).join("custom-title.json"),
+            r#"{"customTitle":"  Sidecar\u0007\u0007Name  "}"#,
+        )
+        .await
+        .unwrap();
+        let fork = fork_session(&id, &options, None, None).await.unwrap();
+        let forked = read_entries(&folder.join(format!("{fork}.jsonl")))
+            .await
+            .unwrap();
+        assert_eq!(forked.last().unwrap()["customTitle"], "Sidecar Name (fork)");
+        let listed = list_sessions(&options).await.unwrap();
+        let source = listed.iter().find(|info| info.session_id == id).unwrap();
+        assert_eq!(source.custom_title.as_deref(), Some("Sidecar Name"));
+        fs::remove_dir_all(root).await.unwrap();
+
+        let padding = "x".repeat(CHUNK_BYTES);
+        let mut entries = vec![
+            json!({"type":"ai-title","aiTitle":"Head AI"}),
+            user("u1", None, &padding),
+            json!({"type":"custom-title","customTitle":"Middle"}),
+        ];
+        let mut parent = "u1".to_owned();
+        for index in 0..2 {
+            let uuid = format!("a{index}");
+            entries.push(json!({"type":"assistant","uuid":uuid,"parentUuid":parent,"message":{"role":"assistant","content":[{"type":"text","text":padding}]}}));
+            parent = uuid;
+        }
+        let (root, options, id, folder) = write_session(&entries).await;
+        let fork = fork_session(&id, &options, None, None).await.unwrap();
+        let forked = read_entries(&folder.join(format!("{fork}.jsonl")))
+            .await
+            .unwrap();
+        assert_eq!(forked.last().unwrap()["customTitle"], "Head AI (fork)");
+        let listed = list_sessions(&options).await.unwrap();
+        let source = listed.iter().find(|info| info.session_id == id).unwrap();
+        assert_eq!(source.custom_title.as_deref(), Some("Head AI"));
+        fs::remove_dir_all(root).await.unwrap();
+    }
+    #[tokio::test]
+    async fn subagent_messages_use_a_plain_parent_walk_and_validate_ids() {
+        let (root, options, id, folder) = write_session(&[user("u1", None, "parent")]).await;
+        let sub = folder.join(&id).join("subagents");
+        fs::create_dir_all(&sub).await.unwrap();
+        let reply = |uuid: &str, text: &str| json!({"type":"assistant","uuid":uuid,"parentUuid":"s1","sessionId":id,"message":{"id":"m1","role":"assistant","content":[{"type":"text","text":text}]}});
+        let body = [
+            json!({"type":"user","uuid":"s1","parentUuid":null,"sessionId":id,"message":{"role":"user","content":"child"}}),
+            reply("s2", "sibling"),
+            reply("s3", "kept"),
+            json!({"type":"progress","uuid":"p1","parentUuid":"s3","sessionId":id}),
+            json!({"type":"user","uuid":"s4","parentUuid":"s3","sessionId":id,"message":{"role":"user","content":"next"}}),
+        ]
+        .iter()
+        .map(|entry| format!("{entry}\n"))
+        .collect::<String>();
+        fs::write(sub.join("agent-child.jsonl"), body)
+            .await
+            .unwrap();
+        fs::write(
+            sub.join("agent-child.meta.json"),
+            r#"{"toolUseId":"bad id!","parentAgentId":"agent.with.dots"}"#,
+        )
+        .await
+        .unwrap();
+        let messages = get_subagent_messages(&id, "child", &options).await.unwrap();
+        let uuids: Vec<&str> = messages
+            .iter()
+            .map(|message| message.uuid.as_str())
+            .collect();
+        assert_eq!(uuids, ["s1", "s3", "s4"]);
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.parent_tool_use_id.is_none())
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.parent_agent_id.is_none())
+        );
+
+        fs::write(
+            sub.join("agent-child.meta.json"),
+            r#"{"toolUseId":"toolu_01:a.b-c","parentAgentId":"agent_1-x"}"#,
+        )
+        .await
+        .unwrap();
+        let messages = get_subagent_messages(&id, "child", &options).await.unwrap();
+        assert_eq!(
+            messages[0].parent_tool_use_id.as_deref(),
+            Some("toolu_01:a.b-c")
+        );
+        assert_eq!(messages[0].parent_agent_id.as_deref(), Some("agent_1-x"));
+        fs::remove_dir_all(root).await.unwrap();
+    }
+    #[test]
+    fn first_prompt_follows_sdk_prompt_rules() {
+        let lines = |entries: &[Value]| {
+            entries
+                .iter()
+                .map(|entry| serde_json::to_string(entry).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let head = lines(&[
+            json!({"type":"user","uuid":"u0"}),
+            user(
+                "u1",
+                None,
+                "<ide_opened_file>The user opened a.rs</ide_opened_file>",
+            ),
+            user("u2", None, "[Request interrupted by user for tool use]"),
+            user(
+                "u3",
+                None,
+                "<command-name>/clear</command-name> <command-args></command-args>",
+            ),
+            json!({"type":"user","message":{"content":[{"type":"text","text":"<system-reminder>x</system-reminder>"},{"type":"text","text":"real\nprompt"}]}}),
+        ]);
+        assert_eq!(first_prompt(&head).as_deref(), Some("real prompt"));
+
+        let head = lines(&[
+            user(
+                "u1",
+                None,
+                "<local-command-stdout>ok</local-command-stdout>",
+            ),
+            user("u2", None, "<command-name>/model</command-name>"),
+            user("u3", None, "<command-name>/clear</command-name>"),
+        ]);
+        assert_eq!(first_prompt(&head).as_deref(), Some("/model"));
+
+        let head = lines(&[user("u1", None, "<bash-input> ls -la </bash-input>")]);
+        assert_eq!(first_prompt(&head).as_deref(), Some("! ls -la"));
+
+        let long = format!("{} tail", "a".repeat(199));
+        let head = lines(&[user("u1", None, &long)]);
+        assert_eq!(first_prompt(&head), Some(format!("{}…", "a".repeat(199))));
+
+        let head =
+            lines(&[json!({"type":"user","message":{"content":[{"type":"image","source":{}}]}})]);
+        assert_eq!(first_prompt(&head), None);
+        assert_eq!(media_hint(&head).as_deref(), Some("Image"));
+    }
+    #[test]
+    fn last_string_field_takes_the_textually_last_match() {
+        let text = "{\"customTitle\":\"one\"}\n{\"customTitle\": \"two \\\"q\\\"\"}\n{\"customTitle\":\"three";
+        assert_eq!(
+            last_string_field(text, "customTitle").as_deref(),
+            Some("two \"q\"")
+        );
+    }
     #[test]
     fn project_key_matches_cli_path_replacement() {
         assert_eq!(project_key(Path::new("/tmp/a b")), "-tmp-a-b");
@@ -1284,5 +1936,95 @@ mod tests {
             format!("{}-feo44x", "-".to_owned() + &"a".repeat(199))
         );
         assert_eq!(encode_project_path("café /tmp"), "caf---tmp");
+    }
+    #[tokio::test]
+    async fn session_lookup_follows_worktrees_overrides_and_long_keys() {
+        let root =
+            std::env::temp_dir().join(format!("turin-claude-lookup-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).await.unwrap();
+        let config = root.join("config");
+        let main = root.join("main");
+        let worktree = root.join("wt");
+        fs::create_dir_all(&main).await.unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_AUTHOR_NAME", "Turin")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "Turin")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init"], &main);
+        git(&["commit", "--allow-empty", "-m", "init"], &main);
+        git(&["worktree", "add", worktree.to_str().unwrap()], &main);
+        let id = uuid::Uuid::new_v4().to_string();
+        let projects = config.join("projects");
+        let main_dir = projects.join(project_key(&main));
+        fs::create_dir_all(&main_dir).await.unwrap();
+        fs::write(main_dir.join(format!("{id}.jsonl")), format!("{}\n", json!({"type":"user","uuid":"u1","sessionId":id,"message":{"role":"user","content":"from-main"}}))).await.unwrap();
+        let worktree_dir = projects.join(project_key(&worktree));
+        fs::create_dir_all(&worktree_dir).await.unwrap();
+        fs::write(worktree_dir.join(format!("{id}.jsonl")), "")
+            .await
+            .unwrap();
+        let options = TranscriptOptions {
+            dir: Some(worktree.clone()),
+            config_dir: Some(config.clone()),
+            ..Default::default()
+        };
+        let messages = get_session_messages(&id, &options).await.unwrap();
+        assert_eq!(messages[0].message["content"], "from-main");
+
+        let mut deep = root.join("deep");
+        fs::create_dir_all(&deep).await.unwrap();
+        while dash_encode(&absolute_source(&deep)).encode_utf16().count() <= 200 {
+            deep.push("a".repeat(40));
+            fs::create_dir_all(&deep).await.unwrap();
+        }
+        let source = absolute_source(&deep);
+        let prefix = utf16_prefix(&dash_encode(&source), 200);
+        let alt = projects.join(format!("{prefix}-altkey"));
+        fs::create_dir_all(&alt).await.unwrap();
+        let long_id = uuid::Uuid::new_v4().to_string();
+        fs::write(alt.join(format!("{long_id}.jsonl")), format!("{}\n", json!({"type":"user","uuid":"u1","cwd":source,"sessionId":long_id,"message":{"role":"user","content":"long"}}))).await.unwrap();
+        let long_options = TranscriptOptions {
+            dir: Some(deep),
+            config_dir: Some(config.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            get_session_messages(&long_id, &long_options).await.unwrap()[0].message["content"],
+            "long"
+        );
+
+        let named = projects.join("customkey");
+        fs::create_dir_all(&named).await.unwrap();
+        let named_id = uuid::Uuid::new_v4().to_string();
+        fs::write(named.join(format!("{named_id}.jsonl")), format!("{}\n", json!({"type":"user","uuid":"u1","sessionId":named_id,"message":{"role":"user","content":"named"}}))).await.unwrap();
+        let named_options = TranscriptOptions {
+            dir: Some(main),
+            config_dir: Some(config),
+            ..Default::default()
+        };
+        assert!(
+            session_path_with_override(&named_id, &named_options, None)
+                .await
+                .is_none()
+        );
+        let found = session_path_with_override(&named_id, &named_options, Some("customkey"))
+            .await
+            .unwrap();
+        assert_eq!(found, named.join(format!("{named_id}.jsonl")));
+        assert_eq!(
+            valid_project_dir_name("custom_key-1".into()).as_deref(),
+            Some("custom_key-1")
+        );
+        assert_eq!(valid_project_dir_name("com1".into()), None);
+        assert_eq!(valid_project_dir_name("a/b".into()), None);
+        fs::remove_dir_all(root).await.unwrap();
     }
 }

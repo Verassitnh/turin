@@ -480,3 +480,114 @@ fn get_in(conn: &Connection, id: &str) -> Result<Option<Effect>, PersistenceErro
     .map(decode_effect)
     .transpose()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn effect(id: &str, command: &CommandId, thread: &ThreadId, kind: &str) -> PendingEffect {
+        PendingEffect {
+            id: id.into(),
+            command_id: command.clone(),
+            thread_id: thread.clone(),
+            request: serde_json::json!({"type":kind}),
+            available_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_blocks_later_lifecycle_effect_but_not_title_lane() {
+        let db = Db::open_in_memory().await.unwrap();
+        let outbox = EffectOutbox::new(db);
+        let command = CommandId::new("cmd:outbox").unwrap();
+        let thread = ThreadId::new("thread:outbox").unwrap();
+        outbox
+            .enqueue(vec![
+                effect("a", &command, &thread, "provider-turn.start"),
+                effect("b", &command, &thread, "provider-session.detach"),
+                effect("title", &command, &thread, "thread-title.generate"),
+            ])
+            .await
+            .unwrap();
+        let first = outbox
+            .claim_next("worker".into(), 30_000, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.id, "a");
+        let title = outbox
+            .claim_next("worker".into(), 30_000, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(title.id, "title");
+        assert!(
+            outbox
+                .claim_next("worker".into(), 30_000, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            outbox
+                .retry("a".into(), "worker".into(), "retry".into(), 5_000)
+                .await
+                .unwrap()
+        );
+        assert!(
+            outbox
+                .claim_next("worker".into(), 30_000, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            outbox
+                .succeed("title".into(), "worker".into())
+                .await
+                .unwrap()
+        );
+        assert!(
+            outbox
+                .claim_next("worker".into(), 30_000, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_reconciles_process_bound_and_replay_safe_effects() {
+        let db = Db::open_in_memory().await.unwrap();
+        let outbox = EffectOutbox::new(db);
+        let command = CommandId::new("cmd:restart").unwrap();
+        let thread = ThreadId::new("thread:restart").unwrap();
+        outbox
+            .enqueue(vec![
+                effect("interrupt", &command, &thread, "provider-turn.interrupt"),
+                effect("cleanup", &command, &thread, "attachment.cleanup"),
+            ])
+            .await
+            .unwrap();
+        let claimed = outbox
+            .claim_next("worker".into(), 30_000, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, "interrupt");
+        let result = outbox.reconcile_after_process_loss().await.unwrap();
+        assert_eq!(result.cancelled, 1);
+        assert_eq!(
+            outbox
+                .get("interrupt".into())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            EffectStatus::Cancelled
+        );
+        assert_eq!(
+            outbox.get("cleanup".into()).await.unwrap().unwrap().status,
+            EffectStatus::Pending
+        );
+    }
+}

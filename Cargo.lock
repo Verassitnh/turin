@@ -7201,6 +7201,9 @@ dependencies = [
  "tokio",
  "tracing",
  "turin-contracts",
+ "turin-persistence",
+ "turin-provider-core",
+ "turin-shared",
  "uuid",
 ]
 

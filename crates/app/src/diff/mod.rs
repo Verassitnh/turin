@@ -10,4 +10,5 @@ pub mod diff_panel_store;
 pub mod diff_rendering;
 pub mod pierre;
 pub mod review_comment_context;
+pub mod rows;
 pub mod theme;

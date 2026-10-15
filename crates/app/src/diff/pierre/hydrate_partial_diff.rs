@@ -216,10 +216,18 @@ pub fn parse_diff_from_file(
 /// jsdiff `createTwoFilesPatch` (without the `Index:` banner, which the
 /// parser ignores).
 fn create_two_files_patch(old: &FileContents, new: &FileContents, context: Option<usize>) -> String {
+    let mut out = format!("--- {}\n+++ {}\n", old.name, new.name);
+    out.push_str(&unified_hunks(&old.contents, &new.contents, context));
+    out
+}
+
+/// The `@@` hunks of a unified diff between two texts (`context: None` is
+/// jsdiff's `Infinity`).
+pub fn unified_hunks(old: &str, new: &str, context: Option<usize>) -> String {
     let diff = TextDiff::configure()
         .algorithm(Algorithm::Myers)
-        .diff_lines(old.contents.as_str(), new.contents.as_str());
-    let mut out = format!("--- {}\n+++ {}\n", old.name, new.name);
+        .diff_lines(old, new);
+    let mut out = String::new();
     let groups = match context {
         Some(context) => diff.grouped_ops(context),
         None => {

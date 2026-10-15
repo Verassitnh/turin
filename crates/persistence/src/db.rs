@@ -7,8 +7,10 @@
 //! databases run on a side connection (`checkpointWorker: true`): passive
 //! checkpoints after 1000 WAL frames, a 100ms idle flush, and the writer
 //! itself only auto-checkpoints at 10x that so a slow flush cannot stall
-//! commits. SQLite older than 3.51 has no `NOOP` checkpoint mode, so the
-//! side connection stays off and the writer keeps the default.
+//! commits. The side connection is opened and configured before the writer
+//! autocheckpoint is raised. SQLite older than 3.51 has no `NOOP` checkpoint
+//! mode, so the side connection stays off and the writer keeps the default.
+//! Bundled SQLite is 3.53, so file databases start the worker.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,9 +28,9 @@ use crate::migrations::{RunMigrationsOptions, run_migrations};
 pub const WAL_SIZE_LIMIT_BYTES: i64 = 32 * 1024 * 1024;
 
 /// SQLite's default `wal_autocheckpoint`, in WAL frames.
-const CHECKPOINT_FRAMES: i64 = 1000;
+pub(crate) const CHECKPOINT_FRAMES: i64 = 1000;
 /// While the checkpoint side connection runs, the writer still checkpoints a WAL this long.
-const WRITER_BACKSTOP_FRAMES: i64 = 10 * CHECKPOINT_FRAMES;
+pub(crate) const WRITER_BACKSTOP_FRAMES: i64 = 10 * CHECKPOINT_FRAMES;
 /// How long writes must pause before the side connection checkpoints the rest of a long WAL.
 const CHECKPOINT_IDLE: Duration = Duration::from_millis(100);
 
@@ -52,6 +54,8 @@ struct CheckpointNotify {
     cv: Condvar,
     stop: AtomicBool,
     pending: AtomicBool,
+    /// The side connection died after the writer autocheckpoint was raised.
+    failed: AtomicBool,
 }
 
 struct Checkpoint {
@@ -128,6 +132,7 @@ impl Db {
         let inner = Arc::clone(&self.inner);
         let value = AbortOnDrop::new(tokio::task::spawn_blocking(move || {
             let mut conn = inner.writer.lock();
+            restore_writer_autocheckpoint(&conn, &inner.checkpoint_notify);
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|err| PersistenceError::sql("sqlite.begin", &err))?;
@@ -141,6 +146,21 @@ impl Db {
         .map_err(join_error)??;
         self.inner.checkpoint_notify.kick();
         Ok(value)
+    }
+
+    /// Writer `wal_autocheckpoint`. File databases raise it only after the
+    /// checkpoint side connection is open.
+    #[cfg(test)]
+    pub(crate) async fn writer_autocheckpoint(&self) -> Result<i64, PersistenceError> {
+        let inner = Arc::clone(&self.inner);
+        AbortOnDrop::new(tokio::task::spawn_blocking(move || {
+            let conn = inner.writer.lock();
+            conn.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
+                .map_err(|err| PersistenceError::sql("sqlite.pragma", &err))
+        }))
+        .join()
+        .await
+        .map_err(join_error)?
     }
 
     /// Run `f` on the read-only connection when one is open, otherwise on the writer.
@@ -171,6 +191,8 @@ impl Drop for Inner {
         // `checkpoint` is dropped first by field order only if declared first.
         // Take it explicitly so its thread joins before the connections close.
         drop(self.checkpoint.lock().take());
+        let conn = self.writer.lock();
+        restore_writer_autocheckpoint(&conn, &self.checkpoint_notify);
     }
 }
 
@@ -216,6 +238,7 @@ fn open_file(path: &Path) -> Result<Db, PersistenceError> {
         cv: Condvar::new(),
         stop: AtomicBool::new(false),
         pending: AtomicBool::new(false),
+        failed: AtomicBool::new(false),
     });
     let checkpoint = start_checkpoint_worker(path, &writer, Arc::clone(&notify));
     Ok(Db {
@@ -242,6 +265,7 @@ fn open_memory() -> Result<Db, PersistenceError> {
                 cv: Condvar::new(),
                 stop: AtomicBool::new(false),
                 pending: AtomicBool::new(false),
+                failed: AtomicBool::new(false),
             }),
         }),
     })
@@ -314,38 +338,75 @@ fn start_checkpoint_worker(
     let version: String = match writer.query_row("SELECT sqlite_version()", [], |row| row.get(0)) {
         Ok(version) => version,
         Err(err) => {
-            tracing::warn!(
-                %err,
-                "SQLite checkpoint worker unavailable; checkpoints run on the main connection"
-            );
+            warn_checkpoint_unavailable(&err.to_string());
             return None;
         }
     };
     if !sqlite_supports_noop_checkpoint(&version) {
-        tracing::warn!(
-            %version,
-            "SQLite checkpoint worker unavailable; checkpoints run on the main connection"
-        );
+        warn_checkpoint_unavailable(&version);
+        return None;
+    }
+    // Open and configure the side connection before the writer stops
+    // checkpointing itself. A failure here leaves the default autocheckpoint.
+    let conn = match Connection::open(path) {
+        Ok(conn) => conn,
+        Err(err) => {
+            warn_checkpoint_unavailable(&err.to_string());
+            return None;
+        }
+    };
+    if let Err(err) = conn.execute_batch("PRAGMA checkpoint_fullfsync = ON;") {
+        warn_checkpoint_unavailable(&err.to_string());
+        return None;
+    }
+    if let Err(err) = wal_frames(&conn) {
+        warn_checkpoint_unavailable(&err.to_string());
         return None;
     }
     if let Err(err) = writer.execute_batch(&format!(
         "PRAGMA wal_autocheckpoint = {WRITER_BACKSTOP_FRAMES};"
     )) {
+        warn_checkpoint_unavailable(&err.to_string());
+        return None;
+    }
+    let thread_notify = Arc::clone(&notify);
+    let thread = match std::thread::Builder::new()
+        .name("turin-sqlite-checkpoint".into())
+        .spawn(move || checkpoint_loop(conn, thread_notify))
+    {
+        Ok(thread) => thread,
+        Err(err) => {
+            notify.failed.store(true, Ordering::SeqCst);
+            restore_writer_autocheckpoint(writer, &notify);
+            warn_checkpoint_unavailable(&err.to_string());
+            return None;
+        }
+    };
+    Some(Checkpoint {
+        thread: Some(thread),
+    })
+}
+
+fn warn_checkpoint_unavailable(reason: &str) {
+    tracing::warn!(
+        %reason,
+        "SQLite checkpoint worker unavailable; checkpoints run on the main connection"
+    );
+}
+
+fn restore_writer_autocheckpoint(conn: &Connection, notify: &CheckpointNotify) {
+    if !notify.failed.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    if let Err(err) =
+        conn.execute_batch(&format!("PRAGMA wal_autocheckpoint = {CHECKPOINT_FRAMES};"))
+    {
         tracing::warn!(
             %err,
             "SQLite checkpoint worker unavailable; checkpoints run on the main connection"
         );
-        return None;
+        notify.failed.store(true, Ordering::SeqCst);
     }
-    let path = path.to_path_buf();
-    let thread_notify = Arc::clone(&notify);
-    let thread = std::thread::Builder::new()
-        .name("turin-sqlite-checkpoint".into())
-        .spawn(move || checkpoint_loop(path, thread_notify))
-        .ok()?;
-    Some(Checkpoint {
-        thread: Some(thread),
-    })
 }
 
 fn sqlite_supports_noop_checkpoint(version: &str) -> bool {
@@ -355,50 +416,84 @@ fn sqlite_supports_noop_checkpoint(version: &str) -> bool {
     major > 3 || (major == 3 && minor >= 51)
 }
 
-fn checkpoint_loop(path: std::path::PathBuf, notify: Arc<CheckpointNotify>) {
-    let Ok(conn) = Connection::open(&path) else {
-        tracing::warn!(
-            "SQLite checkpoint worker unavailable; checkpoints run on the main connection"
-        );
-        return;
-    };
-    if conn
-        .execute_batch("PRAGMA checkpoint_fullfsync = ON;")
-        .is_err()
-    {
-        tracing::warn!(
-            "SQLite checkpoint worker unavailable; checkpoints run on the main connection"
-        );
-        return;
-    }
+fn checkpoint_loop(conn: Connection, notify: Arc<CheckpointNotify>) {
     let mut guard = match notify.lock.lock() {
         Ok(guard) => guard,
-        Err(_) => return,
+        Err(_) => {
+            mark_checkpoint_failed(&notify);
+            return;
+        }
     };
     while !notify.stop.load(Ordering::SeqCst) {
-        let signaled = notify.pending.swap(false, Ordering::SeqCst);
-        if signaled {
-            drop(guard);
-            checkpoint_if_due(&conn, false);
-            guard = match notify.lock.lock() {
+        while !notify.pending.load(Ordering::SeqCst) && !notify.stop.load(Ordering::SeqCst) {
+            guard = match notify.cv.wait(guard) {
                 Ok(guard) => guard,
-                Err(_) => return,
+                Err(_) => {
+                    mark_checkpoint_failed(&notify);
+                    return;
+                }
             };
         }
-        let (next, timeout) = notify
-            .cv
-            .wait_timeout(guard, CHECKPOINT_IDLE)
-            .unwrap_or_else(|err| err.into_inner());
-        guard = next;
-        if timeout.timed_out() {
+        if notify.stop.load(Ordering::SeqCst) {
+            break;
+        }
+        notify.pending.store(false, Ordering::SeqCst);
+        drop(guard);
+        checkpoint_if_due(&conn, false);
+        guard = match notify.lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                mark_checkpoint_failed(&notify);
+                return;
+            }
+        };
+        if notify.stop.load(Ordering::SeqCst) || notify.pending.load(Ordering::SeqCst) {
+            continue;
+        }
+        let idle_started = std::time::Instant::now();
+        let mut idle_elapsed = false;
+        while !notify.pending.load(Ordering::SeqCst) && !notify.stop.load(Ordering::SeqCst) {
+            let remaining = CHECKPOINT_IDLE.saturating_sub(idle_started.elapsed());
+            if remaining.is_zero() {
+                idle_elapsed = true;
+                break;
+            }
+            let (next, timeout) = match notify.cv.wait_timeout(guard, remaining) {
+                Ok(waited) => waited,
+                Err(err) => err.into_inner(),
+            };
+            guard = next;
+            if timeout.timed_out() {
+                idle_elapsed = true;
+                break;
+            }
+        }
+        if notify.stop.load(Ordering::SeqCst) {
+            break;
+        }
+        if notify.pending.load(Ordering::SeqCst) {
+            continue;
+        }
+        if idle_elapsed {
             drop(guard);
             checkpoint_if_due(&conn, true);
             guard = match notify.lock.lock() {
                 Ok(guard) => guard,
-                Err(_) => return,
+                Err(_) => {
+                    mark_checkpoint_failed(&notify);
+                    return;
+                }
             };
         }
     }
+}
+
+fn mark_checkpoint_failed(notify: &CheckpointNotify) {
+    if notify.stop.load(Ordering::SeqCst) {
+        return;
+    }
+    notify.failed.store(true, Ordering::SeqCst);
+    warn_checkpoint_unavailable("checkpoint thread stopped");
 }
 
 fn checkpoint_if_due(conn: &Connection, idle: bool) {
@@ -426,6 +521,7 @@ fn wal_frames(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
 
 impl CheckpointNotify {
     fn kick(&self) {
+        let _guard = self.lock.lock().unwrap_or_else(|err| err.into_inner());
         self.pending.store(true, Ordering::SeqCst);
         self.cv.notify_one();
     }

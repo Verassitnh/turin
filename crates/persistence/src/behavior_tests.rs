@@ -6,7 +6,7 @@ use std::time::Duration;
 use rusqlite::Connection;
 use turin_contracts::{CommandId, EventId, ThreadId};
 
-use crate::db::{Db, WAL_SIZE_LIMIT_BYTES};
+use crate::db::{CHECKPOINT_FRAMES, Db, WAL_SIZE_LIMIT_BYTES, WRITER_BACKSTOP_FRAMES};
 use crate::errors::PersistenceError;
 use crate::initialize_v2_database::initialize_v2_database;
 use crate::orchestration_command_receipts::{
@@ -1039,4 +1039,31 @@ async fn files_viewed_and_review_guides_round_trip() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn checkpoint_worker_starts_on_a_file_database() {
+    let memory = memory_db().await;
+    assert_eq!(
+        memory.writer_autocheckpoint().await.unwrap(),
+        CHECKPOINT_FRAMES
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path().join("turin.sqlite")).await.unwrap();
+    let version: String = db
+        .read(|conn| {
+            conn.query_row("SELECT sqlite_version()", [], |row| row.get(0))
+                .map_err(|err| PersistenceError::sql("sqlite.version", &err))
+        })
+        .await
+        .unwrap();
+    let mut parts = version.split('.');
+    let major: u32 = parts.next().unwrap().parse().unwrap();
+    let minor: u32 = parts.next().unwrap().parse().unwrap();
+    assert!(major > 3 || (major == 3 && minor >= 51), "{version}");
+    assert_eq!(
+        db.writer_autocheckpoint().await.unwrap(),
+        WRITER_BACKSTOP_FRAMES
+    );
 }

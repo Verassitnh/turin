@@ -16,6 +16,7 @@ use turin_shared::server_settings::{
     is_model_selection_provider_enabled,
 };
 
+use crate::settings_secrets::{SecretValue, map_settings_secrets};
 use crate::support::lenient_json::parse_lenient_json;
 
 type Object = Map<String, Value>;
@@ -110,6 +111,27 @@ pub fn sparse_settings_json(settings: &ServerSettings) -> serde_json::Result<Str
     let defaults = serde_json::to_value(default_server_settings())?;
     let sparse = strip_default(&current, &defaults).unwrap_or_else(|| json!({}));
     Ok(format!("{}\n", serde_json::to_string_pretty(&sparse)?))
+}
+
+/// `redactServerSettingsForClient`: clients see that a credential is set, never
+/// its value. A sensitive value becomes empty and marked redacted when one is
+/// stored. Other values pass through unchanged.
+pub fn redact_server_settings_for_client(
+    settings: &ServerSettings,
+) -> serde_json::Result<ServerSettings> {
+    map_settings_secrets(settings, |secret| {
+        if secret.sensitive {
+            SecretValue {
+                value: String::new(),
+                redacted: secret.redacted || !secret.value.is_empty(),
+            }
+        } else {
+            SecretValue {
+                value: secret.value.clone(),
+                redacted: false,
+            }
+        }
+    })
 }
 
 /// `normalizeServerSettings`: a decode round trip, the enabled-flag fold, and

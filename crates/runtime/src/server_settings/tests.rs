@@ -120,6 +120,7 @@ mod service {
     };
 
     use super::super::service::ServerSettingsService;
+    use crate::server_settings::redact_server_settings_for_client;
     use crate::settings_secrets::{SECRET_REDACTED, source_control_host_secret_name};
     use crate::support::atomic_write::write_file_string_atomically;
 
@@ -1839,5 +1840,188 @@ mod service {
                 "sensitive_last={sensitive_last}"
             );
         }
+    }
+
+    // Ports of upstream serverSettings.test.ts, lines 1480-1700 (batch 7).
+    // Adaptations: Antigravity is cut (PORTING); Codex and Claude have no
+    // secret config fields here; bitbucket and gitcafe hosts are cut. The
+    // live secrets are environment values, the GitHub token, and the usage
+    // limit managementKey, which carry the same lifecycle.
+
+    fn secret_file_count(fx: &Fixture) -> usize {
+        std::fs::read_dir(fx.dir.path().join("secrets")).map_or(0, |entries| entries.count())
+    }
+
+    #[tokio::test]
+    async fn live_secrets_follow_one_lifecycle_and_clients_never_see_them() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let saved = service
+            .update_settings(&patch(json!({
+                "providerInstances": {"codex_personal": {
+                    "driver": "codex",
+                    "environment": [
+                        {"name": "API_TOKEN", "value": "env-secret", "sensitive": true},
+                        {"name": "BASE_URL", "value": "https://example.test", "sensitive": false},
+                    ],
+                    "config": {},
+                }},
+                "sourceControlHosts": {"github": {"hosts": {}, "tokens": {"github.com": "github-secret"}}},
+                "usageLimitSources": {"hub": {
+                    "kind": "cliproxy",
+                    "url": "https://hub.example.test",
+                    "managementKey": "quota-secret",
+                    "enabled": true,
+                }},
+            })))
+            .await
+            .unwrap();
+        let values = ["env-secret", "github-secret", "quota-secret"];
+        let client = redact_server_settings_for_client(&saved).unwrap();
+        let disk = std::fs::read_to_string(&fx.path).unwrap();
+        for value in values {
+            assert!(
+                serde_json::to_string(&settings_value(&saved))
+                    .unwrap()
+                    .contains(value)
+            );
+            assert!(
+                !serde_json::to_string(&settings_value(&client))
+                    .unwrap()
+                    .contains(value)
+            );
+            assert!(
+                !disk.contains(value),
+                "{value} must not reach the settings file"
+            );
+        }
+        let client_text = serde_json::to_string(&settings_value(&client)).unwrap();
+        assert!(client_text.contains("https://example.test"));
+        assert!(client_text.contains("https://hub.example.test"));
+
+        // The client echoes its redacted view back: stored values must survive.
+        let echoed = service
+            .update_settings(&patch(json!({
+                "providerInstances": settings_value(&client)["providerInstances"],
+                "sourceControlHosts": settings_value(&client)["sourceControlHosts"],
+                "usageLimitSources": settings_value(&client)["usageLimitSources"],
+            })))
+            .await
+            .unwrap();
+        let echoed_text = serde_json::to_string(&settings_value(&echoed)).unwrap();
+        for value in values {
+            assert!(echoed_text.contains(value), "{value} lost on echo");
+        }
+
+        let stored = secret_file_count(&fx);
+        assert!(
+            stored >= 3,
+            "env, github token and quota key are stored, found {stored}"
+        );
+
+        // Clearing each secret removes it from the store, not just from the view.
+        service
+            .update_settings(&patch(json!({
+                "providerInstances": {},
+                "sourceControlHosts": {"github": {"hosts": {}, "tokens": {}}},
+                "usageLimitSources": {"hub": null},
+            })))
+            .await
+            .unwrap();
+        assert_eq!(
+            secret_file_count(&fx),
+            0,
+            "cleared secrets are removed from the store"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_inline_usage_limit_key_moves_to_the_store_when_settings_load() {
+        let fx = fixture().await;
+        write_raw_settings(
+            &fx.path,
+            &json!({"usageLimitSources": {"hub": {
+                "kind": "cliproxy",
+                "url": "https://hub.example.test",
+                "managementKey": "legacy-key",
+                "enabled": true,
+            }}})
+            .to_string(),
+        );
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let saved = service.get_settings().await.unwrap();
+        assert!(
+            serde_json::to_string(&settings_value(&saved))
+                .unwrap()
+                .contains("legacy-key")
+        );
+        assert!(
+            !std::fs::read_to_string(&fx.path)
+                .unwrap()
+                .contains("legacy-key")
+        );
+        let client = redact_server_settings_for_client(&saved).unwrap();
+        assert!(
+            !serde_json::to_string(&settings_value(&client))
+                .unwrap()
+                .contains("legacy-key")
+        );
+    }
+
+    #[tokio::test]
+    async fn sensitive_provider_environment_values_are_stored_outside_settings_json() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let instance = json!({
+            "driver": "codex",
+            "environment": [
+                {"name": "OPENROUTER_API_KEY", "value": "sk-or-secret", "sensitive": true},
+                {"name": "ANTHROPIC_BASE_URL", "value": "https://openrouter.ai/api", "sensitive": false},
+            ],
+            "config": {},
+        });
+        let next = service
+            .update_settings(&patch(
+                json!({"providerInstances": {"codex_personal": instance}}),
+            ))
+            .await
+            .unwrap();
+        let environment =
+            &settings_value(&next)["providerInstances"]["codex_personal"]["environment"];
+        assert_eq!(
+            environment,
+            &json!([
+                {"name": "OPENROUTER_API_KEY", "value": "sk-or-secret", "sensitive": true, "valueRedacted": true},
+                {"name": "ANTHROPIC_BASE_URL", "value": "https://openrouter.ai/api", "sensitive": false},
+            ])
+        );
+
+        let raw = std::fs::read_to_string(&fx.path).unwrap();
+        assert!(!raw.contains("sk-or-secret"));
+        assert_eq!(
+            read_file(&fx.path)["providerInstances"]["codex_personal"]["environment"],
+            json!([
+                {"name": "OPENROUTER_API_KEY", "value": "", "sensitive": true, "valueRedacted": true},
+                {"name": "ANTHROPIC_BASE_URL", "value": "https://openrouter.ai/api", "sensitive": false},
+            ])
+        );
+
+        let round_tripped = service
+            .update_settings(&patch(json!({"providerInstances": {"codex_personal": {
+                "driver": "codex",
+                "displayName": "Codex Personal",
+                "environment": [
+                    {"name": "OPENROUTER_API_KEY", "value": "", "sensitive": true, "valueRedacted": true},
+                    {"name": "ANTHROPIC_BASE_URL", "value": "https://openrouter.ai/api", "sensitive": false},
+                ],
+                "config": {},
+            }}})))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&round_tripped)["providerInstances"]["codex_personal"]["environment"][0]
+                ["value"],
+            json!("sk-or-secret")
+        );
     }
 }

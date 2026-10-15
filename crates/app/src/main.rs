@@ -4,6 +4,10 @@ mod assets;
 mod branding;
 mod components;
 mod hooks;
+// The view-model layer is a library until the orchestrator and views are wired
+// to it; every upstream selector is ported ahead of its callers.
+#[allow(dead_code)]
+mod state;
 mod theme;
 // The ui primitives are a library: every upstream variant and size is ported
 // ahead of its callers.

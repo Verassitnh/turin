@@ -7599,6 +7599,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "turin-review"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "turin-contracts",
+ "turin-git",
+]
+
+[[package]]
 name = "turin-shared"
 version = "0.1.0"
 dependencies = [

@@ -245,12 +245,11 @@ pub type IsoDateTime = String;
 /// non-ISO fallback forms (`Jan 2 2024`, `2024/01/02`, space separators) are
 /// not accepted.
 ///
-/// Precision is truncated to milliseconds (like a JS `Date`) by [`Self::now`],
-/// [`Self::from_datetime`], parsing and deserializing, so equality agrees with
-/// the wire form. Build values through those, not the public field, unless the
-/// `DateTime` is already millisecond-aligned.
+/// Every constructor ([`Self::now`], [`Self::from_datetime`], `From`, parsing
+/// and deserializing) truncates to milliseconds like a JS `Date`, so equality
+/// and order agree with the wire form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct UtcDateTime(pub DateTime<Utc>);
+pub struct UtcDateTime(DateTime<Utc>);
 
 fn utc_year_bounds() -> (DateTime<Utc>, DateTime<Utc>) {
     let min = chrono::NaiveDate::from_ymd_opt(0, 1, 1).expect("year 0 is valid");
@@ -275,6 +274,16 @@ impl UtcDateTime {
         let value = value.clamp(min, max);
         let sub_milli = value.timestamp_subsec_nanos() % 1_000_000;
         Self(value - chrono::Duration::nanoseconds(i64::from(sub_milli)))
+    }
+    pub fn as_datetime(&self) -> DateTime<Utc> {
+        self.0
+    }
+}
+
+impl From<DateTime<Utc>> for UtcDateTime {
+    /// Same as [`UtcDateTime::from_datetime`].
+    fn from(value: DateTime<Utc>) -> Self {
+        Self::from_datetime(value)
     }
 }
 
@@ -1268,6 +1277,20 @@ mod tests {
             let at = UtcDateTime::from_datetime(value);
             assert_eq!(at.to_string().parse::<UtcDateTime>().unwrap(), at);
         }
+    }
+
+    #[test]
+    fn utc_datetime_from_truncates_so_equality_matches_the_wire() {
+        let base: DateTime<Utc> = "2026-01-02T01:04:05.123Z".parse().unwrap();
+        let a = UtcDateTime::from(base + chrono::Duration::nanoseconds(456_789));
+        let b = UtcDateTime::from(base + chrono::Duration::nanoseconds(999_999));
+        assert_eq!(a, b);
+        assert_eq!(a.as_datetime(), base);
+        assert_eq!(a.to_string(), "2026-01-02T01:04:05.123Z");
+        assert_eq!(a.to_string().parse::<UtcDateTime>().unwrap(), a);
+        assert_eq!(UtcDateTime::from(base), UtcDateTime::from_datetime(base));
+        let later = UtcDateTime::from(a.as_datetime() + chrono::Duration::microseconds(1));
+        assert_eq!(later, a);
     }
 
     // --- tagged unions --------------------------------------------------

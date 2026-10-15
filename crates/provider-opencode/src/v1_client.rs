@@ -11,6 +11,10 @@
 //! and message documents stay `serde_json::Value` so unknown fields survive
 //! until the adapter types the ones it reads.
 
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::Stream;
@@ -29,6 +33,8 @@ pub const OPENCODE_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct V1Client {
     http: HttpClient,
     silent_timeout: Duration,
+    /// One `GET /event` at a time, shared by clones of this client.
+    event_open: Arc<AtomicBool>,
 }
 
 impl V1Client {
@@ -52,6 +58,7 @@ impl V1Client {
         Ok(Self {
             http,
             silent_timeout: SILENT_STREAM_TIMEOUT,
+            event_open: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -282,19 +289,37 @@ impl V1Client {
     /// `GET /event`. Resolves once the headers are 200. The first frame is
     /// `server.connected`. The stream does not reconnect; a 45s gap with no
     /// bytes (including heartbeat comments) yields [`crate::EventStreamError::Silent`].
+    ///
+    /// One subscription per client (and its clones), matching the SDK client
+    /// the v1 adapter keeps for a directory. Dropping the stream allows
+    /// another subscribe.
     pub async fn events(
         &self,
     ) -> Result<
-        std::pin::Pin<
-            Box<dyn Stream<Item = Result<V1Event, crate::error::EventStreamError>> + Send>,
-        >,
+        Pin<Box<dyn Stream<Item = Result<V1Event, crate::error::EventStreamError>> + Send>>,
         OpenCodeRuntimeError,
     > {
-        let frames = self
+        if self.event_open.swap(true, Ordering::AcqRel) {
+            return Err(OpenCodeRuntimeError::new(
+                "event.subscribe",
+                "An OpenCode event subscription is already open for this client.",
+            ));
+        }
+        let frames = match self
             .http
             .open_event_stream("event.subscribe", "/event", &[], self.silent_timeout)
-            .await?;
-        Ok(Box::pin(filter_frames(frames, events::decode_v1_event)))
+            .await
+        {
+            Ok(frames) => frames,
+            Err(err) => {
+                self.event_open.store(false, Ordering::Release);
+                return Err(err);
+            }
+        };
+        Ok(Box::pin(Subscribed {
+            inner: Box::pin(filter_frames(frames, events::decode_v1_event)),
+            flag: Arc::clone(&self.event_open),
+        }))
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(
@@ -380,6 +405,28 @@ pub fn permission_reply_path(request_id: &str) -> String {
 
 fn encode(value: &str) -> String {
     crate::auth::encode_uri_component(value)
+}
+
+struct Subscribed<S> {
+    inner: S,
+    flag: Arc<AtomicBool>,
+}
+
+impl<S> Drop for Subscribed<S> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
+impl<S> Stream for Subscribed<S>
+where
+    S: Stream + Unpin,
+{
+    type Item = S::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.get_mut().inner).poll_next(cx)
+    }
 }
 
 fn filter_frames<T, F>(
@@ -558,5 +605,30 @@ mod tests {
             .await
             .unwrap();
         assert!(replied);
+    }
+
+    #[tokio::test]
+    async fn one_event_subscription_per_client() {
+        let server = FakeServer::spawn(|_| {
+            FakeResponse::sse(
+                vec![
+                    b"data: {\"type\":\"server.connected\",\"properties\":{}}\n\n".to_vec(),
+                ],
+                true,
+            )
+        })
+        .await;
+        let client = V1Client::new(&server.url, "/work", None).unwrap();
+        let first = client.events().await.unwrap();
+        match client.clone().events().await {
+            Err(err) => assert!(
+                err.detail.contains("already open"),
+                "{}",
+                err.detail
+            ),
+            Ok(_) => panic!("a second subscription opened"),
+        }
+        drop(first);
+        client.events().await.expect("subscribe again after the first stream is dropped");
     }
 }

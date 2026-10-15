@@ -235,3 +235,55 @@ fn snapshot_provider(
         draft,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use turin_contracts::provider_instance::{
+        ProviderInstanceConfig, ProviderInstanceConfigMap, ProviderInstanceId,
+    };
+    use turin_provider_core::provider_instance_registry::ProviderInstanceRegistry;
+
+    fn entry(config: Value) -> ProviderInstanceConfig {
+        ProviderInstanceConfig {
+            driver: ProviderDriverKind::new("cursor").unwrap(),
+            display_name: None,
+            accent_color: None,
+            environment: None,
+            enabled: Some(true),
+            config: Some(config),
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_builds_cursor_instances_and_shadows_bad_config() {
+        let good = ProviderInstanceId::new("cursor").unwrap();
+        let bad = ProviderInstanceId::new("cursor-bad").unwrap();
+        let mut map = ProviderInstanceConfigMap::default();
+        map.insert(good.clone(), entry(json!({"enabled": true})));
+        map.insert(bad.clone(), entry(json!({"binaryPath": null})));
+        let registry = ProviderInstanceRegistry::new(
+            vec![Arc::new(CursorDriver::new()) as Arc<dyn ProviderDriver>],
+            map,
+        )
+        .await;
+
+        let instance = registry.get_instance(&good).unwrap();
+        assert_eq!(instance.driver_kind.as_str(), "cursor");
+        let adapter = &instance.orchestration_adapter;
+        assert_eq!(adapter.instance_id(), &good);
+        let capabilities = adapter.get_capabilities().await.unwrap();
+        assert!(!capabilities.threads.can_fork_thread);
+        assert!(!capabilities.turns.supports_active_steering);
+        assert_eq!(
+            instance.snapshot.get_snapshot().await.draft.supports_text_generation,
+            Some(false)
+        );
+
+        assert!(registry.get_instance(&bad).is_none());
+        let shadows = registry.list_unavailable();
+        assert_eq!(shadows.len(), 1);
+        assert_eq!(shadows[0].instance_id, bad);
+    }
+}

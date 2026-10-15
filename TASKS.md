@@ -112,7 +112,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | done (r2 routing/perms/ledger, live smoke ok) → QC pending |
 | T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok | todo |
 | T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok | done (nested Cursor shapes) → QC pending |
-| T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok | todo |
+| T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok | **merged to main** with T12d (75 tests; re-QC PASS + fixes) |
 | T13 | Orchestrator: event sink/store, projections, run execution, turn services | `crates/orchestration` | Codex (high), split into sub-tasks | todo |
 | T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus → Sonnet | r2 active (logic → Sonnet per model policy) |
 
@@ -120,12 +120,12 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T15 | Sidebar (projects, threads, status, snooze, search, drag) | `crates/app/src/components/sidebar` | Opus | r2 active (resume after Claude limit) |
-| T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/components/chat` | Opus | r2 active (resume; merging task/T16-logic) |
-| T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus | todo |
+| T15 | Sidebar (projects, threads, status, snooze, search, drag) | `crates/app/src/components/sidebar` | Opus | **merged to main** (852 tests; QC PASS + fixes) |
+| T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/components/chat` | Opus | **merged to main** (915 tests; QC PASS + T16c fixes; Sonnet look-and-feel pass pending) |
+| T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus | QC fixes done → re-merging main, then merge |
 | T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus | todo |
 | T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Opus | todo |
-| T20 | Settings + keybindings UI | `crates/app/src/settings` | Opus | todo |
+| T20 | Settings + keybindings UI | `crates/app/src/settings` | Opus | built (172 tests, 25 screenshots) → QC running wf_31fbaa39-885 |
 
 ### Wave 5: glue
 

@@ -20,12 +20,12 @@ mod thread_lifecycle;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::{StreamExt, stream::BoxStream};
+use futures::{StreamExt, future, stream::BoxStream};
 use turin_contracts::{
     RunId, ThreadId,
     orchestration_v2::{
         OrchestrationV2DomainEvent, OrchestrationV2Run, OrchestrationV2ServerCommand,
-        OrchestrationV2StoredEvent, OrchestrationV2ThreadProjection, OrchestrationV2ThreadShell,
+        OrchestrationV2ThreadProjection, OrchestrationV2ThreadShell,
         OrchestrationV2ThreadShellSnapshot,
     },
 };
@@ -220,10 +220,7 @@ impl OrchestratorPort for Orchestrator {
     /// subscriber redo its work after each boot.
     async fn stream_domain_events(
         &self,
-    ) -> Result<
-        BoxStream<'static, Result<OrchestrationV2DomainEvent, OrchestratorError>>,
-        OrchestratorError,
-    > {
+    ) -> Result<BoxStream<'static, OrchestrationV2DomainEvent>, OrchestratorError> {
         let latest = self
             .sink
             .latest_sequence(None)
@@ -237,11 +234,16 @@ impl OrchestratorPort for Orchestrator {
             })
             .await
             .map_err(Self::stream_error)?;
-        Ok(stored
-            .map(|item| {
-                item.map(|stored: OrchestrationV2StoredEvent| stored.event)
-                    .map_err(Self::stream_error)
+        // The port carries no per-item error, so a failed read ends the stream
+        // after logging. Subscribers treat the end of the stream as shutdown.
+        let events = stored
+            .take_while(|item| {
+                if let Err(error) = item {
+                    tracing::warn!(error = ?error, "domain event stream failed; ending live tail");
+                }
+                future::ready(item.is_ok())
             })
-            .boxed())
+            .filter_map(|item| future::ready(item.ok().map(|stored| stored.event)));
+        Ok(events.boxed())
     }
 }

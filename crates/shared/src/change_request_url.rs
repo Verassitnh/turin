@@ -341,16 +341,8 @@ pub fn change_request_repository_url(target_url: &str) -> Option<String> {
     let path = url.path().to_owned();
     let repository_path = (0..path.len())
         .filter(|&index| path.is_char_boundary(index))
-        .find_map(|index| {
-            let rest = path[index..].to_ascii_lowercase();
-            let after = rest.strip_prefix("/pull")?;
-            let after = after.strip_prefix('s').unwrap_or(after);
-            let digits = after.strip_prefix('/')?;
-            let digit_count = digits.bytes().take_while(u8::is_ascii_digit).count();
-            let tail = &digits[digit_count..];
-            (digit_count > 0 && (tail.is_empty() || tail.starts_with('/')))
-                .then(|| path[..index].to_owned())
-        })?;
+        .find(|&index| pull_route_matches(&path.as_bytes()[index..]))
+        .map(|index| path[..index].to_owned())?;
     if repository_path.is_empty() {
         return None;
     }
@@ -358,6 +350,30 @@ pub fn change_request_repository_url(target_url: &str) -> Option<String> {
     url.set_query(None);
     url.set_fragment(None);
     Some(url.to_string())
+}
+
+/// `/pull(s)?/<digits>` at the start of `rest`, ASCII case-insensitive and nothing allocated. The
+/// digits must end the path or be followed by `/`.
+fn pull_route_matches(rest: &[u8]) -> bool {
+    let Some(after) = rest
+        .get(..5)
+        .filter(|head| head.eq_ignore_ascii_case(b"/pull"))
+        .map(|_| &rest[5..])
+    else {
+        return false;
+    };
+    let after = match after.first() {
+        Some(b's' | b'S') => &after[1..],
+        _ => after,
+    };
+    let Some(digits) = after.strip_prefix(b"/") else {
+        return false;
+    };
+    let digit_count = digits
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    digit_count > 0 && matches!(digits.get(digit_count), None | Some(b'/'))
 }
 
 /// `siblingPullRequestUrl`: the same GitHub pull-request URL, pointed at another number.
@@ -639,5 +655,32 @@ mod tests {
                 "{input}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod qc_regressions {
+    use super::*;
+
+    #[test]
+    fn repository_scan_is_linear_for_a_long_owner_segment() {
+        // The path scan used to copy the remainder of the path at every index.
+        let owner = "a".repeat(60_000);
+        let url = format!("https://github.com/{owner}/repo/pull/7");
+        assert_eq!(
+            change_request_repository_url(&url),
+            Some(format!("https://github.com/{owner}/repo"))
+        );
+    }
+
+    #[test]
+    fn pull_route_matches_case_insensitively_on_digits_then_end_or_slash() {
+        assert!(pull_route_matches(b"/pull/7"));
+        assert!(pull_route_matches(b"/PULLS/12/files"));
+        assert!(pull_route_matches(b"/Pulls/3"));
+        assert!(!pull_route_matches(b"/pull/x"));
+        assert!(!pull_route_matches(b"/pull/3x"));
+        assert!(!pull_route_matches(b"/pull"));
+        assert!(!pull_route_matches(b"/pulls/"));
     }
 }

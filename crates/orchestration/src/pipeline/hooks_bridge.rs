@@ -173,15 +173,7 @@ impl HookEventBridge {
         let mut events = orchestrator.stream_domain_events().await?;
         let task = OwnedTask::spawn(async move {
             let mut deriver = HookEventDeriver::default();
-            while let Some(item) = events.next().await {
-                // A failed stream ends the consumer, as upstream's failed stream does.
-                let event = match item {
-                    Ok(event) => event,
-                    Err(error) => {
-                        tracing::warn!(%error, "hook: domain event stream failed");
-                        break;
-                    }
-                };
+            while let Some(event) = events.next().await {
                 let Some((thread_id, hook_event)) = deriver.derive(&event) else {
                     continue;
                 };

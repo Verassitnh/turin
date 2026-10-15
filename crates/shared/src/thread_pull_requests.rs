@@ -122,7 +122,7 @@ pub fn visible_thread_pull_requests(
 fn is_open(link: &ThreadPullRequestLink) -> bool {
     link.snapshot
         .as_ref()
-        .map_or(true, |snapshot| snapshot.state == PullRequestState::Open)
+        .is_none_or(|snapshot| snapshot.state == PullRequestState::Open)
 }
 
 /// `Date.parse`, with NaN reported as 0. Link timestamps are validated ISO strings upstream.
@@ -352,10 +352,8 @@ pub fn resolve_thread_pull_request_chains(
     };
     let mut has_child: HashSet<usize> = HashSet::new();
     for index in 0..remaining.len() {
-        if let Some(parent) = parent_of(index) {
-            if parent != index {
-                has_child.insert(parent);
-            }
+        if let Some(parent) = parent_of(index).filter(|parent| *parent != index) {
+            has_child.insert(parent);
         }
     }
     // Walk from each top (a link nothing builds on) down its base chain.
@@ -841,7 +839,11 @@ mod tests {
         foreign_repository.repository = Tne::new("acme/other").unwrap();
         for foreign in [foreign_host, foreign_repository] {
             assert_eq!(
-                legacy_linked_pull_request_of(&[foreign.clone()], &project, Some(&github)),
+                legacy_linked_pull_request_of(
+                    std::slice::from_ref(&foreign),
+                    &project,
+                    Some(&github)
+                ),
                 None
             );
             assert_eq!(

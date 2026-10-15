@@ -774,3 +774,528 @@ while (my $line = <STDIN>) {
     .unwrap();
     assert_eq!(result["userAgent"], "mock");
 }
+
+fn client_pair() -> (
+    Arc<crate::client::Client>,
+    tokio::io::DuplexStream,
+    tokio::io::DuplexStream,
+) {
+    let (client_read, peer_writer) = tokio::io::duplex(1024 * 1024);
+    let (peer_reader, client_write) = tokio::io::duplex(1024 * 1024);
+    (
+        Arc::new(crate::client::Client::from_io(client_read, client_write)),
+        peer_reader,
+        peer_writer,
+    )
+}
+
+async fn next_frame(lines: &mut tokio::io::Lines<BufReader<tokio::io::DuplexStream>>) -> Value {
+    let line = timeout(Duration::from_secs(1), lines.next_line())
+        .await
+        .expect("peer frame")
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+const TOOL_INPUT_PARAMS: &str = r#"{"isBlocking":true,"itemId":"approval-1","threadId":"thread-1","turnId":"turn-1","questions":[{"id":"approved","header":"Approve","question":"Continue?"}]}"#;
+
+#[tokio::test]
+async fn known_server_request_without_handler_is_method_not_found() {
+    let (client, peer_reader, mut peer_writer) = client_pair();
+    let unknown_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = unknown_calls.clone();
+    client.handle_unknown_server_request(Arc::new(move |_method, _params| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async { Ok(Some(json!({"answered":"by-unknown"}))) }.boxed()
+    }));
+    let mut lines = BufReader::new(peer_reader).lines();
+    write_frame(
+        &mut peer_writer,
+        json!({"id":9,"method":"item/tool/requestUserInput","params":serde_json::from_str::<Value>(TOOL_INPUT_PARAMS).unwrap()}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":9,"error":{"code":-32601,"message":"Method not found: item/tool/requestUserInput"}})
+    );
+    assert_eq!(unknown_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn handlers_registered_under_unknown_request_method_are_ignored() {
+    let (client, peer_reader, mut peer_writer) = client_pair();
+    client.handle_server_request("x/custom-request", |_params| async {
+        Ok(Some(json!({"from":"registered"})))
+    });
+    client.handle_unknown_server_request(Arc::new(move |_method, _params| {
+        async { Ok(Some(json!({"from":"unknown"}))) }.boxed()
+    }));
+    let mut lines = BufReader::new(peer_reader).lines();
+    write_frame(
+        &mut peer_writer,
+        json!({"id":3,"method":"x/custom-request","params":{"a":1}}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":3,"result":{"from":"unknown"}})
+    );
+}
+
+const DELTA_PARAMS: &str =
+    r#"{"delta":"Ready","itemId":"item-1","threadId":"thread-1","turnId":"turn-1"}"#;
+
+#[tokio::test]
+async fn known_notification_without_handler_skips_unknown_handler() {
+    let (client, _peer_reader, mut peer_writer) = client_pair();
+    let (barrier_tx, barrier_rx) = oneshot::channel::<String>();
+    let barrier_tx = std::sync::Mutex::new(Some(barrier_tx));
+    let unknown_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = unknown_seen.clone();
+    client.handle_unknown_server_notification(Arc::new(move |method, _params| {
+        seen.lock().unwrap().push(method.clone());
+        if let Some(tx) = barrier_tx.lock().unwrap().take() {
+            let _ = tx.send(method);
+        }
+        async {}.boxed()
+    }));
+    write_frame(
+        &mut peer_writer,
+        json!({"method":"item/agentMessage/delta","params":serde_json::from_str::<Value>(DELTA_PARAMS).unwrap()}),
+    )
+    .await;
+    write_frame(&mut peer_writer, json!({"method":"x/unknown","params":{}})).await;
+    // Notifications are dispatched in arrival order, so the unknown one arriving here proves the
+    // known one was already handled.
+    assert_eq!(
+        timeout(Duration::from_secs(1), barrier_rx)
+            .await
+            .unwrap()
+            .unwrap(),
+        "x/unknown"
+    );
+    assert_eq!(*unknown_seen.lock().unwrap(), vec!["x/unknown".to_string()]);
+}
+
+#[tokio::test]
+async fn handlers_registered_under_unknown_notification_method_are_ignored() {
+    let (client, _peer_reader, mut peer_writer) = client_pair();
+    let registered_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = registered_calls.clone();
+    client.handle_server_notification("x/custom-notification", move |_params| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async { Ok(()) }
+    });
+    let (barrier_tx, barrier_rx) = oneshot::channel::<()>();
+    let barrier_tx = std::sync::Mutex::new(Some(barrier_tx));
+    client.handle_unknown_server_notification(Arc::new(move |_method, _params| {
+        if let Some(tx) = barrier_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        async {}.boxed()
+    }));
+    write_frame(
+        &mut peer_writer,
+        json!({"method":"x/custom-notification","params":{"a":1}}),
+    )
+    .await;
+    timeout(Duration::from_secs(1), barrier_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        registered_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[tokio::test]
+async fn notification_handlers_stop_after_the_first_failure() {
+    let (client, _peer_reader, mut peer_writer) = client_pair();
+    let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    client.handle_server_notification("item/agentMessage/delta", |_params| async {
+        Err(AppServerError::Cancelled)
+    });
+    let counter = second_calls.clone();
+    client.handle_server_notification("item/agentMessage/delta", move |_params| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async { Ok(()) }
+    });
+    let (barrier_tx, barrier_rx) = oneshot::channel::<()>();
+    let barrier_tx = std::sync::Mutex::new(Some(barrier_tx));
+    client.handle_unknown_server_notification(Arc::new(move |_method, _params| {
+        if let Some(tx) = barrier_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        async {}.boxed()
+    }));
+    write_frame(
+        &mut peer_writer,
+        json!({"method":"item/agentMessage/delta","params":serde_json::from_str::<Value>(DELTA_PARAMS).unwrap()}),
+    )
+    .await;
+    write_frame(&mut peer_writer, json!({"method":"x/barrier","params":{}})).await;
+    timeout(Duration::from_secs(1), barrier_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn handler_failure_replies_internal_error_without_the_cause() {
+    let (client, peer_reader, mut peer_writer) = client_pair();
+    client.handle_server_request("item/tool/requestUserInput", |_params| async {
+        Err(AppServerError::Transport {
+            operation: "read-input-stream",
+            detail: "socket closed with local path /private/secret".into(),
+        })
+    });
+    let mut lines = BufReader::new(peer_reader).lines();
+    write_frame(
+        &mut peer_writer,
+        json!({"id":4,"method":"item/tool/requestUserInput","params":serde_json::from_str::<Value>(TOOL_INPUT_PARAMS).unwrap()}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":4,"error":{"code":-32603,"message":"Codex App Server request handler failed for method 'item/tool/requestUserInput'"}})
+    );
+}
+
+#[tokio::test]
+async fn handler_request_error_is_passed_through_unchanged() {
+    let (client, peer_reader, mut peer_writer) = client_pair();
+    client.handle_server_request("item/tool/requestUserInput", |_params| async {
+        Err(AppServerError::Request {
+            method: "item/tool/requestUserInput".into(),
+            request_id: "5".into(),
+            error: Box::new(ProtocolError {
+                code: -32000,
+                message: "approval expired".into(),
+                data: Some(json!({"reason":"timeout"})),
+            }),
+        })
+    });
+    let mut lines = BufReader::new(peer_reader).lines();
+    write_frame(
+        &mut peer_writer,
+        json!({"id":5,"method":"item/tool/requestUserInput","params":serde_json::from_str::<Value>(TOOL_INPUT_PARAMS).unwrap()}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":5,"error":{"code":-32000,"message":"approval expired","data":{"reason":"timeout"}}})
+    );
+}
+
+#[tokio::test]
+async fn invalid_server_request_payload_uses_the_upstream_message() {
+    let (client, peer_reader, mut peer_writer) = client_pair();
+    client.handle_server_request("item/tool/requestUserInput", |_params| async {
+        Err(AppServerError::Cancelled)
+    });
+    let mut lines = BufReader::new(peer_reader).lines();
+    write_frame(
+        &mut peer_writer,
+        json!({"id":7,"method":"item/tool/requestUserInput","params":{"threadId":5}}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":7,"error":{"code":-32602,"message":"Invalid payload for method 'item/tool/requestUserInput' during 'decode-payload'"}})
+    );
+    write_frame(
+        &mut peer_writer,
+        json!({"id":8,"method":"item/tool/requestUserInput"}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":8,"error":{"code":-32602,"message":"Invalid payload for method 'item/tool/requestUserInput' during 'decode-payload'"}})
+    );
+}
+
+#[tokio::test]
+async fn invalid_server_response_payload_uses_the_upstream_message() {
+    let (client, peer_reader, mut peer_writer) = client_pair();
+    client.handle_server_request("item/tool/requestUserInput", |_params| async {
+        Ok(Some(json!({"wrong": true})))
+    });
+    let mut lines = BufReader::new(peer_reader).lines();
+    write_frame(
+        &mut peer_writer,
+        json!({"id":10,"method":"item/tool/requestUserInput","params":serde_json::from_str::<Value>(TOOL_INPUT_PARAMS).unwrap()}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":10,"error":{"code":-32602,"message":"Invalid payload for method 'item/tool/requestUserInput' during 'encode-payload'"}})
+    );
+}
+
+#[test]
+fn payload_on_a_method_without_schema_reports_only_its_kind() {
+    let secret = "unexpected-payload-secret";
+    let error = crate::client::check_payload(
+        "initialized",
+        "decode-payload",
+        None,
+        Some(&json!({"token": secret})),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert_eq!(
+        error.message,
+        "Method 'initialized' does not accept a payload during 'decode-payload'"
+    );
+    assert_eq!(error.data, Some(json!({"payloadKind": "object"})));
+    assert!(!json!(error).to_string().contains(secret));
+}
+
+#[tokio::test]
+async fn invalid_utf8_in_a_frame_is_replaced_and_the_session_survives() {
+    let (protocol, _peer_reader, mut peer_writer) = pair();
+    peer_writer
+        .write_all(b"{\"method\":\"event\",\"params\":{\"text\":\"bad\xff\"}}\r\n")
+        .await
+        .unwrap();
+    write_frame(
+        &mut peer_writer,
+        json!({"method":"event","params":{"text":"next"}}),
+    )
+    .await;
+    assert_eq!(
+        timeout(Duration::from_secs(1), protocol.next_notification())
+            .await
+            .expect("session ended on invalid UTF-8")
+            .unwrap()
+            .params,
+        Some(json!({"text":"bad\u{fffd}"}))
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(1), protocol.next_notification())
+            .await
+            .expect("session ended on invalid UTF-8")
+            .unwrap()
+            .params,
+        Some(json!({"text":"next"}))
+    );
+}
+
+/// Spawns a shell that leaves a background descendant behind and exits, then returns the
+/// client (whose leader is already gone) and the descendant's pid.
+#[cfg(unix)]
+async fn client_whose_leader_exited_with_a_live_descendant() -> (crate::client::Client, i32) {
+    let pid_file = std::env::temp_dir().join(format!(
+        "turin-codex-descendant-{}-{}.pid",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let client = crate::client::Client::spawn(
+        "/bin/sh",
+        &[
+            "-c",
+            r#"sleep 300 & echo $! > "$1"; sleep 0.2"#,
+            "sh",
+            pid_file.to_str().unwrap(),
+        ],
+        None,
+    )
+    .unwrap();
+    let error = timeout(Duration::from_secs(2), client.raw.request("x/test", None))
+        .await
+        .expect("leader exit")
+        .unwrap_err();
+    assert!(matches!(error, AppServerError::ProcessExited(Some(0))));
+    let pid = timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("descendant pid");
+    let _ = std::fs::remove_file(&pid_file);
+    assert!(descendant_alive(pid));
+    (client, pid)
+}
+
+#[cfg(unix)]
+fn descendant_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Waits for the descendant to die, killing it if it outlives the check so a failure cannot
+/// leave a `sleep 300` behind.
+#[cfg(unix)]
+async fn assert_descendant_killed(pid: i32) {
+    let killed = timeout(Duration::from_secs(5), async {
+        while descendant_alive(pid) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    if !killed {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+    assert!(killed, "descendant {pid} survived after the leader exited");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_client_kills_descendants_after_the_leader_exited() {
+    let (client, pid) = client_whose_leader_exited_with_a_live_descendant().await;
+    drop(client);
+    assert_descendant_killed(pid).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_kills_descendants_after_the_leader_exited() {
+    let (client, pid) = client_whose_leader_exited_with_a_live_descendant().await;
+    client.shutdown().await.unwrap();
+    assert_descendant_killed(pid).await;
+}
+
+/// Port of schema.test.ts: a failed turn whose error carries a Codex error info variant.
+fn failed_thread(codex_error_info: &str) -> Value {
+    json!({
+        "cliVersion": "0.150.0",
+        "createdAt": 0,
+        "cwd": "/tmp/project",
+        "ephemeral": false,
+        "id": "thread-1",
+        "modelProvider": "openai",
+        "preview": "",
+        "projectId": null,
+        "sessionId": "session-1",
+        "source": "cli",
+        "status": {"type": "idle"},
+        "turns": [{
+            "error": {"codexErrorInfo": codex_error_info, "message": codex_error_info},
+            "id": "turn-1",
+            "items": [],
+            "status": "failed"
+        }],
+        "updatedAt": 0
+    })
+}
+
+#[test]
+fn schema_accepts_rate_limit_and_misalignment_errors_on_failed_turns() {
+    for info in ["rateLimitExceeded", "misalignmentPolicyViolation"] {
+        let thread = failed_thread(info);
+        assert!(
+            schema::validate_type("V2ThreadReadResponse", &json!({"thread": thread})).is_ok(),
+            "read {info}"
+        );
+        let resume_like = json!({
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
+            "cwd": "/tmp/project",
+            "model": "gpt-5.6-sol",
+            "modelProvider": "openai",
+            "sandbox": {"type": "dangerFullAccess"},
+            "thread": thread
+        });
+        assert!(
+            schema::validate_type("V2ThreadResumeResponse", &resume_like).is_ok(),
+            "resume {info}"
+        );
+        assert!(
+            schema::validate_type("V2ThreadForkResponse", &resume_like).is_ok(),
+            "fork {info}"
+        );
+        assert!(
+            schema::validate_type(
+                "V2TurnCompletedNotification",
+                &json!({"threadId": "thread-1", "turn": thread["turns"][0]})
+            )
+            .is_ok(),
+            "turn/completed {info}"
+        );
+    }
+}
+
+/// Port of protocol.test.ts: rate-limit reset credits and the consume request/response.
+#[test]
+fn schema_maps_rate_limit_reset_credits_and_consume_reset() {
+    assert_eq!(
+        meta::method_meta(meta::CLIENT_REQUEST_METHODS, "account/rateLimits/read")
+            .unwrap()
+            .response,
+        Some("V2GetAccountRateLimitsResponse")
+    );
+    let consume = meta::method_meta(
+        meta::CLIENT_REQUEST_METHODS,
+        "account/rateLimitResetCredit/consume",
+    )
+    .unwrap();
+    assert_eq!(
+        consume.params,
+        Some("V2ConsumeAccountRateLimitResetCreditParams")
+    );
+    assert_eq!(
+        consume.response,
+        Some("V2ConsumeAccountRateLimitResetCreditResponse")
+    );
+    let credits_response = json!({
+        "rateLimits": {},
+        "rateLimitResetCredits": {
+            "availableCount": 2,
+            "credits": [
+                {
+                    "id": "RateLimitResetCredit_1",
+                    "resetType": "codexRateLimits",
+                    "status": "available",
+                    "grantedAt": 1781654400,
+                    "expiresAt": 1784246400,
+                    "title": "Full reset",
+                    "description": "Ready to redeem"
+                },
+                {
+                    "id": "RateLimitResetCredit_2",
+                    "resetType": "unknown",
+                    "status": "unknown",
+                    "grantedAt": 1781654401,
+                    "expiresAt": null
+                }
+            ]
+        }
+    });
+    assert!(schema::validate_type("V2GetAccountRateLimitsResponse", &credits_response).is_ok());
+    assert!(
+        schema::validate_type(
+            "V2GetAccountRateLimitsResponse",
+            &json!({"rateLimits": {}, "rateLimitResetCredits": {"availableCount": 2, "credits": null}})
+        )
+        .is_ok()
+    );
+    assert!(
+        schema::validate_type(
+            "V2ConsumeAccountRateLimitResetCreditResponse",
+            &json!({"outcome": "reset"})
+        )
+        .is_ok()
+    );
+    assert!(
+        schema::validate_type(
+            "V2ConsumeAccountRateLimitResetCreditResponse",
+            &json!({"outcome": "not-an-outcome"})
+        )
+        .is_err()
+    );
+}

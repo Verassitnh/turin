@@ -51,8 +51,7 @@ pub fn mode_text<T: serde::Serialize>(mode: &T) -> String {
 /// `OrchestratorV2Error`.
 #[derive(Debug, thiserror::Error)]
 pub enum OrchestratorError {
-    /// Its text is what a rejected receipt stores, as upstream's `message` does.
-    #[error("Failed to dispatch orchestration command {command_type} ({command_id}).")]
+    #[error("Orchestration command {command_type} ({command_id}) failed.")]
     Dispatch {
         command_id: CommandId,
         command_type: String,
@@ -262,8 +261,5 @@ pub trait OrchestratorPort: Send + Sync {
     /// Every committed thread event from now on (`streamDomainEvents`).
     async fn stream_domain_events(
         &self,
-    ) -> Result<
-        futures::stream::BoxStream<'static, Result<OrchestrationV2DomainEvent, OrchestratorError>>,
-        OrchestratorError,
-    >;
+    ) -> Result<futures::stream::BoxStream<'static, OrchestrationV2DomainEvent>, OrchestratorError>;
 }

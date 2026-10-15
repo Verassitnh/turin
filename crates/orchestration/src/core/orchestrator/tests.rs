@@ -308,7 +308,8 @@ async fn an_invalid_visit_time_is_refused_and_the_refusal_is_replayed() {
         "{error:?}"
     );
 
-    // Upstream stores the dispatch error's message, not the detail behind it.
+    // The receipt stores the port's `Dispatch` text (main's T13b wording), not the
+    // detail behind it. Upstream's text differs: see the PORTING.md T13c row.
     let replay = orchestrator
         .dispatch(command)
         .await
@@ -317,7 +318,7 @@ async fn an_invalid_visit_time_is_refused_and_the_refusal_is_replayed() {
         matches!(
             replay,
             OrchestratorError::CommandPreviouslyRejected { ref detail, .. }
-                if detail == "Failed to dispatch orchestration command thread.visit (command:visit-bad)."
+                if detail == "Orchestration command thread.visit (command:visit-bad) failed."
         ),
         "{replay:?}"
     );

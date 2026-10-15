@@ -76,12 +76,20 @@ pub struct ProviderInstanceScope {
 
 impl ProviderInstanceScope {
     pub fn new() -> Arc<Self> {
+        Arc::new(Self::open())
+    }
+
+    fn open() -> Self {
+        // `watch::Sender::send` is a no-op with no receivers, and this
+        // constructor keeps none. Closing uses `send_replace`, which stores
+        // `true` regardless, so `is_cancelled()` and later `cancelled()`
+        // calls still see the close.
         let (cancel, _) = watch::channel(false);
-        Arc::new(Self {
+        Self {
             cancel,
             finalizers: parking_lot::Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
-        })
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -114,7 +122,7 @@ impl ProviderInstanceScope {
             if self.closed.swap(true, Ordering::SeqCst) {
                 return;
             }
-            let _ = self.cancel.send(true);
+            self.cancel.send_replace(true);
             std::mem::take(&mut *finalizers)
         };
         for finalizer in finalizers.into_iter().rev() {
@@ -128,7 +136,7 @@ impl Drop for ProviderInstanceScope {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
-        let _ = self.cancel.send(true);
+        self.cancel.send_replace(true);
         let finalizers = std::mem::take(&mut *self.finalizers.lock());
         if finalizers.is_empty() {
             return;
@@ -145,12 +153,51 @@ impl Drop for ProviderInstanceScope {
 
 impl Default for ProviderInstanceScope {
     fn default() -> Self {
-        let (cancel, _) = watch::channel(false);
-        Self {
-            cancel,
-            finalizers: parking_lot::Mutex::new(Vec::new()),
-            closed: AtomicBool::new(false),
-        }
+        Self::open()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn close_marks_cancelled_without_a_parked_waiter() {
+        let scope = ProviderInstanceScope::new();
+        assert!(!scope.is_cancelled());
+
+        scope.close().await;
+
+        assert!(scope.is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), scope.cancelled())
+            .await
+            .expect("cancelled() resolves after close with no waiter parked");
+    }
+
+    #[tokio::test]
+    async fn close_wakes_a_parked_waiter() {
+        let scope = ProviderInstanceScope::new();
+        let waiter = {
+            let scope = Arc::clone(&scope);
+            tokio::spawn(async move { scope.cancelled().await })
+        };
+        tokio::task::yield_now().await;
+
+        scope.close().await;
+
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("parked waiter wakes")
+            .expect("waiter task completes");
+    }
+
+    #[tokio::test]
+    async fn default_scope_cancels_on_close() {
+        let scope = Arc::new(ProviderInstanceScope::default());
+        scope.close().await;
+        assert!(scope.is_cancelled());
     }
 }
 

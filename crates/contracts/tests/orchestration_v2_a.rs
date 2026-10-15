@@ -1425,6 +1425,26 @@ fn checkpoint_ref_key_and_ordinal_bounds() {
 }
 
 #[test]
+fn user_input_question_initial_answer_keeps_absent_and_exact_text() {
+    let question = |initial: Option<&str>| {
+        let mut value = json!({
+            "id": "editor", "header": "Message", "question": "Edit message", "options": [],
+        });
+        if let Some(initial) = initial {
+            value["initialAnswer"] = json!(initial);
+        }
+        value
+    };
+    let absent = round_trip::<OrchestrationV2UserInputQuestion>(question(None));
+    assert!(absent.get("initialAnswer").is_none());
+    let long = "detail\n".repeat(500);
+    for initial in ["", "  fix(server): keep whitespace\n\n", long.as_str()] {
+        let encoded = round_trip::<OrchestrationV2UserInputQuestion>(question(Some(initial)));
+        assert_eq!(encoded["initialAnswer"], json!(initial));
+    }
+}
+
+#[test]
 fn user_input_question_optional_fields_and_whitespace_answers() {
     let question = json!({
         "id": "q", "header": "h", "question": "?",

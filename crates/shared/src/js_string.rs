@@ -7,9 +7,29 @@
 //! trimming; the helpers here cover UTF-16 indexing and searching so the ported
 //! logic keeps upstream's offsets and edge cases.
 
+use turin_contracts::base_schemas::{JS_WHITESPACE_CHARS, is_js_whitespace};
+
 /// Length of `value` in UTF-16 code units (`String.prototype.length`).
 pub fn utf16_len(value: &str) -> usize {
     value.chars().map(|c| c.len_utf16()).sum()
+}
+
+/// `.replace(/\s+/g, replacement)`: every run of JS whitespace becomes one `replacement`.
+pub fn replace_js_whitespace_runs(text: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_run = false;
+    for ch in text.chars() {
+        if is_js_whitespace(ch) {
+            if !in_run {
+                out.push_str(replacement);
+            }
+            in_run = true;
+        } else {
+            out.push(ch);
+            in_run = false;
+        }
+    }
+    out
 }
 
 /// `String.prototype.charCodeAt(index)`: the UTF-16 code unit at `index`, if any.
@@ -130,24 +150,29 @@ pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
 
     struct Key {
         primary: Vec<u32>,
-        secondary: Vec<u32>,
+        /// One accent list per base character, compared lexicographically. Folding the marks into
+        /// one integer overflowed after a few marks, so the sequence itself is the weight.
+        secondary: Vec<Vec<u32>>,
         tertiary: Vec<u8>,
     }
 
     fn key(value: &str) -> Key {
         let mut primary = Vec::new();
-        let mut secondary = Vec::new();
+        let mut secondary: Vec<Vec<u32>> = Vec::new();
         let mut tertiary = Vec::new();
         for c in value.nfd() {
             if ('\u{0300}'..='\u{036f}').contains(&c) {
                 // Accent: attach to the previous base character.
-                if let Some(last) = secondary.last_mut() {
-                    *last = *last * 1000 + (c as u32 - 0x2ff);
+                if let Some(marks) = secondary.last_mut() {
+                    marks.push(c as u32);
                 }
                 continue;
             }
             let lowered = c.to_lowercase().next().unwrap_or(c);
-            let weight = if is_js_whitespace_char(c) || c.is_control() {
+            let weight = if let Some(rank) = JS_WHITESPACE_CHARS.iter().position(|ws| *ws == c) {
+                // Above raw control code points (all < 200), below punctuation.
+                200 + rank as u32
+            } else if c.is_control() {
                 c as u32
             } else if let Some(index) = COLLATION_PUNCTUATION.find(c) {
                 1_000 + index as u32
@@ -159,7 +184,7 @@ pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
                 4_000 + lowered as u32
             };
             primary.push(weight);
-            secondary.push(0);
+            secondary.push(Vec::new());
             tertiary.push(u8::from(c != lowered));
         }
         Key {
@@ -181,29 +206,9 @@ pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
 /// `format!("[{JS_WS}]")` for `\s`, `format!("[^{JS_WS}]")` for `\S`.
 pub const JS_WS: &str = r"\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
 
-/// JS `\s` whitespace test on a `char`: WhiteSpace + LineTerminator, so U+FEFF
-/// is in and U+0085 is out (unlike Rust's `char::is_whitespace`).
-pub fn is_js_whitespace_char(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{0009}'
-            | '\u{000a}'
-            | '\u{000b}'
-            | '\u{000c}'
-            | '\u{000d}'
-            | '\u{0020}'
-            | '\u{00a0}'
-            | '\u{1680}'
-            | '\u{2000}'
-            ..='\u{200a}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202f}'
-                | '\u{205f}'
-                | '\u{3000}'
-                | '\u{feff}'
-    )
-}
+/// Body of a regex character class equal to JS `.` (no `\n`, `\r`, U+2028, U+2029). Rust `.`
+/// only excludes `\n`. Splice as `format!("{JS_DOT}")` wherever an upstream `.` appears.
+pub const JS_DOT: &str = r"[^\n\r\x{2028}\x{2029}]";
 
 /// JS `URIError`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -351,6 +356,22 @@ mod tests {
     }
 
     #[test]
+    fn locale_compare_sorts_every_whitespace_before_letters() {
+        use std::cmp::Ordering::{Greater, Less};
+        // U+2003 and U+3000 used to take their code point as weight, which put
+        // them after ASCII letters.
+        assert_eq!(locale_compare("\u{2003}x", "ax"), Less);
+        assert_eq!(locale_compare("\u{3000}x", "ax"), Less);
+        assert_eq!(locale_compare("\u{2003}x", "-x"), Less);
+        assert_eq!(locale_compare("\u{2003}x", "9x"), Less);
+        assert_eq!(locale_compare("ax", "\u{2003}x"), Greater);
+        assert_eq!(
+            locale_compare("\u{2003}", "\u{2003}"),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
     fn code_unit_cmp_orders_by_units() {
         // "invalid-a" > "invalid-B" because 'a' (0x61) > 'B' (0x42).
         assert_eq!(
@@ -362,5 +383,67 @@ mod tests {
             std::cmp::Ordering::Less
         );
         assert_eq!(code_unit_cmp("same", "same"), std::cmp::Ordering::Equal);
+    }
+}
+
+#[cfg(test)]
+mod qc_regressions {
+    use super::*;
+    use std::cmp::Ordering;
+    use turin_contracts::base_schemas::is_js_whitespace;
+
+    /// `/\s/` over the BMP in Node 22, as code points.
+    const NODE_WHITESPACE: [u32; 25] = [
+        0x9, 0xa, 0xb, 0xc, 0xd, 0x20, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004,
+        0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
+        0xfeff,
+    ];
+
+    #[test]
+    fn js_ws_and_contract_whitespace_match_js_whitespace() {
+        let class = regex::Regex::new(&format!("^[{JS_WS}]$")).unwrap();
+        for code in 0..=0xFFFF_u32 {
+            let Some(ch) = char::from_u32(code) else {
+                continue;
+            };
+            let expected = NODE_WHITESPACE.contains(&code);
+            assert_eq!(
+                class.is_match(&ch.to_string()),
+                expected,
+                "JS_WS U+{code:04X}"
+            );
+            assert_eq!(is_js_whitespace(ch), expected, "contracts U+{code:04X}");
+        }
+    }
+
+    #[test]
+    fn js_dot_excludes_only_the_js_line_terminators() {
+        // Node 22: /^.$/ fails for \n, \r, U+2028 and U+2029, and matches U+0085 and U+FEFF.
+        let dot = regex::Regex::new(&format!("^{JS_DOT}$")).unwrap();
+        for code in [0x85_u32, 0x20, 0xfeff, 0x61] {
+            let ch = char::from_u32(code).unwrap();
+            assert!(dot.is_match(&ch.to_string()), "U+{code:04X}");
+        }
+        for code in [0xa_u32, 0xd, 0x2028, 0x2029] {
+            let ch = char::from_u32(code).unwrap();
+            assert!(!dot.is_match(&ch.to_string()), "U+{code:04X}");
+        }
+    }
+
+    #[test]
+    fn locale_compare_orders_long_accent_stacks_without_overflowing() {
+        // Node 22: "á".localeCompare("a") is 1, and so is a stack of five marks against "a".
+        let five_marks = format!("a{}", "\u{301}".repeat(5));
+        assert_eq!(locale_compare(&five_marks, "a"), Ordering::Greater);
+        assert_eq!(locale_compare("a", &five_marks), Ordering::Less);
+        // Node 22: "á́".localeCompare("á") is 1.
+        assert_eq!(
+            locale_compare(
+                &format!("a{}", "\u{301}".repeat(2)),
+                &format!("a{}", "\u{301}")
+            ),
+            Ordering::Greater
+        );
+        assert_eq!(locale_compare(&five_marks, &five_marks), Ordering::Equal);
     }
 }

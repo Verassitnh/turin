@@ -12,12 +12,24 @@
 pub mod apply;
 pub mod canonical;
 #[cfg(test)]
+mod context_tests;
+pub mod contexts;
+pub mod control;
+#[cfg(test)]
+mod control_tests;
+pub mod history;
+#[cfg(test)]
+mod history_tests;
+#[cfg(test)]
 mod read_tests;
 pub mod recovery;
+pub mod runtime_recovery;
 pub mod shell;
 #[cfg(test)]
 mod shell_tests;
 pub mod unreadable;
+#[cfg(test)]
+mod upstream_tests;
 #[cfg(test)]
 mod window_tests;
 
@@ -25,10 +37,11 @@ use std::sync::Arc;
 
 use rusqlite::Connection;
 use turin_contracts::orchestration_v2::{
-    OrchestrationV2AppThread, OrchestrationV2DomainEvent, OrchestrationV2ThreadProjection,
-    OrchestrationV2TurnItem,
+    OrchestrationV2AppThread, OrchestrationV2DomainEvent, OrchestrationV2PlanArtifact,
+    OrchestrationV2RuntimeRequest, OrchestrationV2ThreadHistoryPage,
+    OrchestrationV2ThreadProjection, OrchestrationV2TurnItem,
 };
-use turin_contracts::{RunId, ThreadId, TurnItemId};
+use turin_contracts::{ProviderTurnId, RunId, ThreadId, TurnItemId};
 use turin_persistence::Db;
 
 use crate::projection::error::{ProjectionStoreError, ReadFailure, keep_or_read};
@@ -43,6 +56,9 @@ use shell::{
     ShellSnapshotOptions, ShellSnapshotRows, ThreadWorktreePath,
 };
 use turin_contracts::UtcDateTime;
+use turin_contracts::orchestration_v2::{
+    OrchestrationV2ConversationMessage, OrchestrationV2ExecutionNode,
+};
 use turin_contracts::orchestration_v2::{
     OrchestrationV2ThreadShell, OrchestrationV2ThreadShellSnapshot,
 };
@@ -178,7 +194,9 @@ impl ProjectionStore {
         thread_id: &ThreadId,
     ) -> Result<OrchestrationV2ThreadProjection, ProjectionStoreError> {
         let id = thread_id.clone();
-        self.read_for_thread(thread_id, false, move |conn| {
+        // Upstream issues these statements unwrapped; one read transaction keeps the
+        // fork-source recursion on one snapshot. See PORTING.md.
+        self.read_for_thread(thread_id, true, move |conn| {
             read_projection(conn, &id, &[], None)
         })
         .await
@@ -378,6 +396,284 @@ impl ProjectionStore {
         .await
     }
 
+    /// `getPendingNativeUserInputs`.
+    pub async fn get_pending_native_user_inputs(
+        &self,
+        thread_id: &ThreadId,
+        provider_turn_id: &ProviderTurnId,
+    ) -> Result<control::PendingNativeUserInputs, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let provider_turn_id = provider_turn_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            control::pending_native_user_inputs(conn, &thread, &provider_turn_id)
+        })
+        .await
+    }
+
+    /// `getPlan`: `None` when the plan does not exist; errors if the thread does not.
+    pub async fn get_plan(
+        &self,
+        thread_id: &ThreadId,
+        plan_id: &str,
+    ) -> Result<Option<OrchestrationV2PlanArtifact>, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let plan_id = plan_id.to_owned();
+        self.read_for_thread(thread_id, true, move |conn| {
+            control::plan(conn, &thread, &plan_id)
+        })
+        .await
+    }
+
+    /// `getRuntimeRequest`: `None` when the request does not exist; errors if the thread does not.
+    pub async fn get_runtime_request(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+    ) -> Result<Option<OrchestrationV2RuntimeRequest>, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let request_id = request_id.to_owned();
+        self.read_for_thread(thread_id, true, move |conn| {
+            control::runtime_request(conn, &thread, &request_id)
+        })
+        .await
+    }
+
+    /// `getRuntimeRecoveryProjection`: the runtime state a recovery pass reads
+    /// for one thread. Runs in one read transaction, so the ten queries agree.
+    pub async fn get_runtime_recovery_projection(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<runtime_recovery::RuntimeRecoveryState, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            runtime_recovery::runtime_recovery_state(conn, &thread)
+        })
+        .await
+    }
+
+    /// `getProviderControlContext`.
+    pub async fn get_provider_control_context(
+        &self,
+        thread_id: &ThreadId,
+        target: contexts::ProviderControlTarget,
+    ) -> Result<contexts::ProviderControlContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::provider_control_context(conn, &thread, &target)
+        })
+        .await
+    }
+
+    /// `getRunningTurnContext`.
+    pub async fn get_running_turn_context(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<contexts::RunningTurnContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::running_turn_context(conn, &thread)
+        })
+        .await
+    }
+
+    /// `getThreadProviderContext`. `target_instance_id` names a provider instance;
+    /// `None` skips the provider thread lookup.
+    pub async fn get_thread_provider_context(
+        &self,
+        thread_id: &ThreadId,
+        target_instance_id: Option<&str>,
+    ) -> Result<contexts::ThreadProviderContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let target_instance_id = target_instance_id.map(str::to_owned);
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::thread_provider_context(conn, &thread, target_instance_id.as_deref())
+        })
+        .await
+    }
+
+    /// `getRuntimeResponseContext`.
+    pub async fn get_runtime_response_context(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+    ) -> Result<contexts::RuntimeResponseContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let request_id = request_id.to_owned();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::runtime_response_context(conn, &thread, &request_id)
+        })
+        .await
+    }
+
+    /// `getCheckpointContext`.
+    pub async fn get_checkpoint_context(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<contexts::CheckpointContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::checkpoint_context(conn, &thread)
+        })
+        .await
+    }
+
+    /// `getCheckpointCaptureContext`.
+    pub async fn get_checkpoint_capture_context(
+        &self,
+        thread_id: &ThreadId,
+        run_id: &str,
+        scope_id: &str,
+    ) -> Result<contexts::CheckpointCaptureContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let run_id = run_id.to_owned();
+        let scope_id = scope_id.to_owned();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::checkpoint_capture_context(conn, &thread, &run_id, &scope_id)
+        })
+        .await
+    }
+
+    /// `getRunMessage`: `None` when the run has no opening message.
+    pub async fn get_run_message(
+        &self,
+        thread_id: &ThreadId,
+        run_id: &str,
+    ) -> Result<Option<OrchestrationV2ConversationMessage>, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let run_id = run_id.to_owned();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::run_message(conn, &thread, &run_id)
+        })
+        .await
+    }
+
+    /// `canStartQueuedRun`.
+    pub async fn can_start_queued_run(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<bool, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::can_start_queued_run(conn, &thread)
+        })
+        .await
+    }
+
+    /// `hasUnpairedRunInterruptRequest`.
+    pub async fn has_unpaired_run_interrupt_request(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+        result_id: &str,
+    ) -> Result<bool, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let request_id = request_id.to_owned();
+        let result_id = result_id.to_owned();
+        self.read_for_thread(thread_id, false, move |conn| {
+            contexts::has_unpaired_run_interrupt_request(conn, &thread, &request_id, &result_id)
+        })
+        .await
+    }
+
+    /// `isNodeStored`: whether the stored node row equals `node`.
+    pub async fn is_node_stored(
+        &self,
+        node: &OrchestrationV2ExecutionNode,
+    ) -> Result<bool, ProjectionStoreError> {
+        let node = node.clone();
+        let thread = node.thread_id.clone();
+        self.read_for_thread(&thread, false, move |conn| {
+            contexts::is_node_stored(conn, &node)
+        })
+        .await
+    }
+
+    /// `getThreadHistoryPage`. Errors with `ThreadNotFound` when the thread is deleted.
+    pub async fn get_thread_history_page(
+        &self,
+        thread_id: &ThreadId,
+        cursor: &str,
+        through_entry_id: Option<&str>,
+        conversation_only: bool,
+    ) -> Result<OrchestrationV2ThreadHistoryPage, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let cursor = cursor.to_owned();
+        let through_entry_id = through_entry_id.map(str::to_owned);
+        self.read_for_thread(thread_id, true, move |conn| {
+            history::thread_history_page(
+                conn,
+                &thread,
+                &cursor,
+                through_entry_id.as_deref(),
+                conversation_only,
+            )
+        })
+        .await
+    }
+
+    /// `getTimelinePage`.
+    pub async fn get_timeline_page(
+        &self,
+        thread_id: &ThreadId,
+        options: history::TimelinePageOptions,
+    ) -> Result<history::ProjectionTimelinePage, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            history::timeline_page(conn, &thread, &options)
+        })
+        .await
+    }
+
+    /// `getMessageCount`.
+    pub async fn get_message_count(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<u64, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, false, move |conn| {
+            history::message_count(conn, &thread)
+        })
+        .await
+    }
+
+    /// `getNextTurnItemOrdinal`.
+    pub async fn get_next_turn_item_ordinal(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<u64, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, false, move |conn| {
+            history::next_turn_item_ordinal(conn, &thread)
+        })
+        .await
+    }
+
+    /// `getThreadAttachmentIds`, message half only (see `history::message_attachment_ids`).
+    pub async fn get_thread_attachment_ids(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<String>, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, false, move |conn| {
+            history::message_attachment_ids(conn, &thread)
+        })
+        .await
+    }
+
+    /// `getTurnStartContext`: what a turn start reads for one run.
+    pub async fn get_turn_start_context(
+        &self,
+        thread_id: &ThreadId,
+        run_id: &RunId,
+    ) -> Result<contexts::TurnStartContext, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        let run_id = run_id.as_str().to_owned();
+        self.read_for_thread(thread_id, true, move |conn| {
+            contexts::turn_start_context(conn, &thread, &run_id)
+        })
+        .await
+    }
+
     /// `getRecoveryThreadIds`: threads a boot-time recovery pass of `kind` must visit.
     pub async fn get_recovery_thread_ids(
         &self,
@@ -417,7 +713,7 @@ fn shell_thread_id() -> ThreadId {
     ThreadId::new("thread:shell").expect("literal id")
 }
 
-fn read_thread(
+pub(crate) fn read_thread(
     conn: &Connection,
     thread_id: &ThreadId,
 ) -> Result<OrchestrationV2AppThread, ReadFailure> {

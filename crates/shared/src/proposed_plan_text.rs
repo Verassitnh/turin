@@ -1,7 +1,7 @@
 //! Port of upstream/packages/shared/src/proposedPlanText.ts
 
 use crate::js_string::JS_WS;
-use turin_contracts::base_schemas::js_trim;
+use turin_contracts::base_schemas::{js_trim, js_trim_end};
 
 /// JS `.` (no `s` flag) and `$`/`^` under `/m` all treat these as line terminators.
 const LINE_TERMINATORS: &str = r"\n\r\x{2028}\x{2029}";
@@ -36,11 +36,6 @@ pub fn proposed_plan_title(plan_markdown: &str) -> Option<String> {
     let heading = heading_pattern().captures(plan_markdown)?.get(1)?.as_str();
     let heading = js_trim(heading);
     (!heading.is_empty()).then(|| heading.to_owned())
-}
-
-/// JS `String.prototype.trimEnd` (same whitespace set as `trim`).
-fn js_trim_end(value: &str) -> &str {
-    (value.trim_end_matches(crate::js_string::is_js_whitespace_char)) as _
 }
 
 pub fn strip_displayed_plan_markdown(plan_markdown: &str) -> String {

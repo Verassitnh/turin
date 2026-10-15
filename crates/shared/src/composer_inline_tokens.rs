@@ -1,6 +1,7 @@
 //! Port of upstream/packages/shared/src/composerInlineTokens.ts
 
-use crate::js_string::{decode_uri_component, is_js_whitespace_char, slice_utf16, utf16_len};
+use crate::js_string::{JS_WS, decode_uri_component, slice_utf16, utf16_len};
+use turin_contracts::base_schemas::is_js_whitespace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposerInlineTokenKind {
@@ -64,14 +65,18 @@ impl CharUnits {
 
     fn starts_token_here(&self, index: usize) -> bool {
         // Upstream prefix `(^|\s)`: start of text or a JS whitespace char.
-        index == 0 || is_js_whitespace_char(self.chars[index - 1])
+        index == 0 || is_js_whitespace(self.chars[index - 1])
     }
 
-    /// `(?=\s)`: an actual JS whitespace char must follow (end of text does
-    /// not satisfy the lookahead — only the sent-prompt skill pattern allows
-    /// `$` there, and the composer uses the while-typing one).
+    /// `(?=\s)`: an actual JS whitespace char must follow. End of text does
+    /// not satisfy it, which is what keeps a half-typed token plain.
     fn followed_by_whitespace(&self, index: usize) -> bool {
-        index < self.len() && is_js_whitespace_char(self.chars[index])
+        index < self.len() && is_js_whitespace(self.chars[index])
+    }
+
+    /// `(?=\s|$)`: whitespace or end of text, for sent prompts.
+    fn followed_by_whitespace_or_end(&self, index: usize) -> bool {
+        index == self.len() || self.followed_by_whitespace(index)
     }
 }
 
@@ -96,7 +101,15 @@ fn is_skill_name_char(ch: char) -> bool {
 /// `(^|\s)\p{Sc}(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:_-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:_-]*)`
 /// plus a `(?=\s)` lookahead while typing; the Rust `regex` crate has no
 /// lookarounds, so the same acceptance rules are hand-rolled here.
-fn scan_skill_tokens(text: &str, units: &CharUnits, tokens: &mut Vec<ComposerInlineToken>) {
+///
+/// `sent_prompt` swaps the lookahead for upstream's `SKILL_MENTION_PATTERN`
+/// `(?=\s|$)`, so a name that ends the text also counts.
+fn scan_skill_tokens(
+    text: &str,
+    units: &CharUnits,
+    sent_prompt: bool,
+    tokens: &mut Vec<ComposerInlineToken>,
+) {
     let mut index = 0usize;
     while index < units.len() {
         let ch = units.chars[index];
@@ -113,10 +126,15 @@ fn scan_skill_tokens(text: &str, units: &CharUnits, tokens: &mut Vec<ComposerInl
                 cursor += 1;
             }
             // (?=\s): while typing, a token only becomes a chip once a
-            // delimiter follows it.
+            // delimiter follows it. Sent prompts also accept end of text.
             // (?!...): reject `[0-9][0-9_]*(suffix)?(\s|$)` amounts.
+            let delimited = if sent_prompt {
+                units.followed_by_whitespace_or_end(cursor)
+            } else {
+                units.followed_by_whitespace(cursor)
+            };
             let looks_like_amount = looks_like_compact_amount(units, index + 1);
-            if has_letter && units.followed_by_whitespace(cursor) && !looks_like_amount {
+            if has_letter && delimited && !looks_like_amount {
                 let start = units.unit_at(index);
                 let end = units.unit_at(cursor);
                 tokens.push(ComposerInlineToken {
@@ -159,7 +177,7 @@ fn looks_like_compact_amount(units: &CharUnits, index: usize) -> bool {
             after_suffix = exponent;
         }
     }
-    after_suffix == units.len() || is_js_whitespace_char(units.chars[after_suffix])
+    after_suffix == units.len() || is_js_whitespace(units.chars[after_suffix])
 }
 
 /// `text.replace(/\\(.)/g, "$1")`: every backslash-escaped char loses its backslash.
@@ -187,8 +205,10 @@ fn is_scoped_package_reference(value: &str) -> bool {
     static SCOPED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     SCOPED
         .get_or_init(|| {
-            regex::Regex::new(r#"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*(?:/[^\s@"]+)*$"#)
-                .expect("valid regex")
+            regex::Regex::new(&format!(
+                r#"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*(?:/[^{JS_WS}@"]+)*$"#
+            ))
+            .expect("valid regex")
         })
         .is_match(value)
 }
@@ -234,7 +254,7 @@ fn scan_mention_tokens(text: &str, units: &CharUnits, tokens: &mut Vec<ComposerI
                 // Unquoted: `[^\s@"]+`
                 let body_start = cursor;
                 while cursor < units.len()
-                    && !is_js_whitespace_char(units.chars[cursor])
+                    && !is_js_whitespace(units.chars[cursor])
                     && units.chars[cursor] != '@'
                     && units.chars[cursor] != '"'
                 {
@@ -307,14 +327,26 @@ fn scan_file_link_tokens(text: &str, units: &CharUnits, tokens: &mut Vec<Compose
         let ch = units.chars[index];
         if units.starts_token_here(index)
             && ch == '['
-            && let Some(token) = scan_file_link_at(text, units, index)
+            && let Some(FileLinkMatch { end, token }) = scan_file_link_at(text, units, index)
         {
-            index = token_end_index(units, token.end);
-            tokens.push(token);
+            // Upstream `matchAll` consumes a candidate even when it is then
+            // rejected, so a rejected link's inner brackets never form tokens.
+            index = token_end_index(units, end);
+            if let Some(token) = token {
+                tokens.push(token);
+            }
             continue;
         }
         index += 1;
     }
+}
+
+/// A file-link regex match at one `[`. `token` is `None` when the match
+/// consumed its span but failed the path/label checks.
+struct FileLinkMatch {
+    /// UTF-16 offset just past the closing `)`.
+    end: usize,
+    token: Option<ComposerInlineToken>,
 }
 
 fn token_end_index(units: &CharUnits, end_units: usize) -> usize {
@@ -322,7 +354,7 @@ fn token_end_index(units: &CharUnits, end_units: usize) -> usize {
     units.offsets.partition_point(|offset| *offset < end_units)
 }
 
-fn scan_file_link_at(text: &str, units: &CharUnits, index: usize) -> Option<ComposerInlineToken> {
+fn scan_file_link_at(text: &str, units: &CharUnits, index: usize) -> Option<FileLinkMatch> {
     // Label body: `(?:\\.|[^\]\\]){0,512}`.
     let mut cursor = index + 1;
     let mut body_units = 0usize;
@@ -362,7 +394,7 @@ fn scan_file_link_at(text: &str, units: &CharUnits, index: usize) -> Option<Comp
     let destination_start = cursor;
     while cursor < units.len()
         && units.chars[cursor] != ')'
-        && !is_js_whitespace_char(units.chars[cursor])
+        && !is_js_whitespace(units.chars[cursor])
     {
         cursor += 1;
     }
@@ -389,18 +421,32 @@ fn scan_file_link_at(text: &str, units: &CharUnits, index: usize) -> Option<Comp
         None => path.as_str(),
     };
     let has_external_scheme = has_uri_scheme(&path) && !is_windows_drive_path(&path);
+    let end = units.unit_at(cursor);
     if path.is_empty() || has_external_scheme || label != basename {
-        return None;
+        return Some(FileLinkMatch { end, token: None });
     }
     let start = units.unit_at(index);
-    let end = units.unit_at(cursor);
-    Some(ComposerInlineToken {
-        kind: ComposerInlineTokenKind::Mention,
-        value: path,
-        source: units.slice_text(text, start, end).to_owned(),
-        start,
+    Some(FileLinkMatch {
         end,
+        token: Some(ComposerInlineToken {
+            kind: ComposerInlineTokenKind::Mention,
+            value: path,
+            source: units.slice_text(text, start, end).to_owned(),
+            start,
+            end,
+        }),
     })
+}
+
+/// Upstream `SKILL_MENTION_PATTERN` over a sent prompt: `$name` skill mentions,
+/// where the name may end the text. Provider adapters use this in place of
+/// their own copies. `value` is the name without its sigil, as in upstream's
+/// group 2.
+pub fn collect_sent_prompt_skill_tokens(text: &str) -> Vec<ComposerInlineToken> {
+    let units = CharUnits::new(text);
+    let mut matches: Vec<ComposerInlineToken> = Vec::new();
+    scan_skill_tokens(text, &units, true, &mut matches);
+    matches
 }
 
 pub fn collect_composer_inline_tokens(
@@ -412,7 +458,7 @@ pub fn collect_composer_inline_tokens(
 
     scan_file_link_tokens(text, &units, &mut matches);
     scan_mention_tokens(text, &units, &mut matches);
-    scan_skill_tokens(text, &units, &mut matches);
+    scan_skill_tokens(text, &units, false, &mut matches);
 
     for token in options.preserve_trailing_from {
         if token.end == utf16_len(text)

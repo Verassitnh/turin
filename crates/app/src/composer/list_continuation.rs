@@ -83,7 +83,7 @@ pub fn next_ordered_marker_text(marker: &str) -> String {
     let number_text = &marker[..marker.len() - delimiter.len_utf8()];
     // JS `Number.isSafeInteger`: at most 2^53 - 1.
     let next = match number_text.parse::<u64>() {
-        Ok(number) if number <= (1u64 << 53) - 1 => {
+        Ok(number) if number < (1u64 << 53) => {
             let next = (number + 1).to_string();
             format!("{next:0>width$}", width = number_text.len())
         }

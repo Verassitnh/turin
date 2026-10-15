@@ -2,4 +2,6 @@
 //! it. Port of the reactor files under upstream/apps/server/src/orchestration-v2
 //! and upstream/apps/server/src/pullRequest.
 
+pub mod checkpoint_git;
+pub mod checkpoint_service;
 pub mod usage_limit_recovery_worker;

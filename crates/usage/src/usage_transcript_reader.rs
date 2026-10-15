@@ -87,7 +87,13 @@ pub async fn list_transcript_files(
 ) -> (Vec<TranscriptFile>, u64) {
     let mut candidates = Vec::new();
     let mut failed_paths = 0;
-    walk(root.to_path_buf(), file_name, &mut candidates, &mut failed_paths).await;
+    walk(
+        root.to_path_buf(),
+        file_name,
+        &mut candidates,
+        &mut failed_paths,
+    )
+    .await;
 
     let stats: Vec<(PathBuf, std::io::Result<Metadata>)> = futures::stream::iter(candidates)
         .map(|path| async move {
@@ -147,7 +153,11 @@ fn walk<'a>(
             let name = entry.file_name();
             let name = name.to_string_lossy();
             // `DirEntry::file_type` does not follow symlinks, like `Dirent.isDirectory`.
-            let is_dir = entry.file_type().await.map(|kind| kind.is_dir()).unwrap_or(false);
+            let is_dir = entry
+                .file_type()
+                .await
+                .map(|kind| kind.is_dir())
+                .unwrap_or(false);
             if is_dir {
                 walk(child, file_name, candidates, failed_paths).await;
             } else if file_name.map_or_else(|| name.ends_with(".jsonl"), |wanted| name == wanted) {
@@ -242,7 +252,10 @@ pub fn transcript_line_gate(markers: &[String]) -> impl Fn(&[u8]) -> bool + '_ {
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.is_empty() || haystack.windows(needle.len()).any(|window| window == needle)
+    needle.is_empty()
+        || haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 /// Line text as the parser sees it: a trailing CR is part of the terminator.
@@ -334,7 +347,16 @@ pub async fn read_transcript_records(
         resume_offset += read as u64;
     }
 
-    finish_tail(reader.into_inner(), format, state, resume_offset, &[], records, resumed).await
+    finish_tail(
+        reader.into_inner(),
+        format,
+        state,
+        resume_offset,
+        &[],
+        records,
+        resumed,
+    )
+    .await
 }
 
 /// Finishes a parse: the unfinished tail parses against a copy of the state
@@ -458,7 +480,10 @@ mod tests {
     }
 
     fn outputs(records: &[UsageRecord]) -> Vec<u64> {
-        records.iter().map(|record| record.totals.output_tokens).collect()
+        records
+            .iter()
+            .map(|record| record.totals.output_tokens)
+            .collect()
     }
 
     fn write(dir: &tempfile::TempDir, name: &str, contents: &str) -> PathBuf {
@@ -469,26 +494,42 @@ mod tests {
 
     fn append(path: &Path, contents: &str) {
         use std::io::Write;
-        std::fs::OpenOptions::new().append(true).open(path).unwrap().write_all(contents.as_bytes()).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(contents.as_bytes())
+            .unwrap();
     }
 
     #[tokio::test]
     async fn parses_only_appended_lines_when_resuming_a_grown_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write(&dir, "claude.jsonl", &(claude_line(1, 5) + &claude_line(2, 7)));
+        let path = write(
+            &dir,
+            "claude.jsonl",
+            &(claude_line(1, 5) + &claude_line(2, 7)),
+        );
         let format = claude_format();
         let first = read_transcript_records(&path, &format, None).await.unwrap();
         assert_eq!(first.records.len(), 2);
         assert!(!first.resumed);
 
         append(&path, &claude_line(3, 11));
-        let second = read_transcript_records(&path, &format, Some(&first.position)).await.unwrap();
+        let second = read_transcript_records(&path, &format, Some(&first.position))
+            .await
+            .unwrap();
         assert!(second.resumed);
         assert_eq!(outputs(&second.records), vec![11]);
 
         // The stitched result matches a from-scratch parse of the whole file.
         let full = read_transcript_records(&path, &format, None).await.unwrap();
-        let stitched: Vec<UsageRecord> = first.records.iter().chain(&second.records).cloned().collect();
+        let stitched: Vec<UsageRecord> = first
+            .records
+            .iter()
+            .chain(&second.records)
+            .cloned()
+            .collect();
         assert_eq!(stitched, full.records);
     }
 
@@ -498,7 +539,9 @@ mod tests {
         let path = write(
             &dir,
             "rollout.jsonl",
-            &(codex_meta_line() + &codex_model_line("gpt-5.2-codex") + &codex_tier_line("ultrafast")),
+            &(codex_meta_line()
+                + &codex_model_line("gpt-5.2-codex")
+                + &codex_tier_line("ultrafast")),
         );
         let format = codex_format();
         let first = read_transcript_records(&path, &format, None).await.unwrap();
@@ -507,7 +550,9 @@ mod tests {
         // The appended usage event has no turn_context, thread settings, or
         // session_meta of its own; model, tier, and session come from the saved state.
         append(&path, &codex_usage_line(9, 5));
-        let second = read_transcript_records(&path, &format, Some(&first.position)).await.unwrap();
+        let second = read_transcript_records(&path, &format, Some(&first.position))
+            .await
+            .unwrap();
         assert!(second.resumed);
         assert_eq!(second.records.len(), 1);
         assert_eq!(second.records[0].model, "gpt-5.2-codex");
@@ -529,13 +574,16 @@ mod tests {
 
         // The copy lands after the resume point and must still be dropped.
         append(&path, &(codex_usage_line(9, 5) + &codex_usage_line(21, 8)));
-        let second = read_transcript_records(&path, &format, Some(&first.position)).await.unwrap();
+        let second = read_transcript_records(&path, &format, Some(&first.position))
+            .await
+            .unwrap();
         assert!(second.resumed);
         assert_eq!(outputs(&second.records), vec![21]);
     }
 
     #[tokio::test]
-    async fn defers_an_unterminated_trailing_line_to_tail_records_then_consumes_it_once_terminated() {
+    async fn defers_an_unterminated_trailing_line_to_tail_records_then_consumes_it_once_terminated()
+    {
         let dir = tempfile::tempdir().unwrap();
         let unterminated = claude_line(2, 7).trim_end().to_owned();
         let path = write(&dir, "claude.jsonl", &(claude_line(1, 5) + &unterminated));
@@ -546,7 +594,9 @@ mod tests {
 
         // Completing the line and appending another re-reads from the resume point.
         append(&path, &format!("\n{}", claude_line(3, 11)));
-        let second = read_transcript_records(&path, &format, Some(&first.position)).await.unwrap();
+        let second = read_transcript_records(&path, &format, Some(&first.position))
+            .await
+            .unwrap();
         assert!(second.resumed);
         assert_eq!(outputs(&second.records), vec![7, 11]);
         assert!(second.tail_records.is_empty());
@@ -561,7 +611,9 @@ mod tests {
 
         // Same path, larger size, different content: a replaced file, not growth.
         std::fs::write(&path, claude_line(4, 13) + &claude_line(5, 17)).unwrap();
-        let second = read_transcript_records(&path, &format, Some(&first.position)).await.unwrap();
+        let second = read_transcript_records(&path, &format, Some(&first.position))
+            .await
+            .unwrap();
         assert!(!second.resumed);
         assert_eq!(outputs(&second.records), vec![13, 17]);
     }
@@ -569,12 +621,18 @@ mod tests {
     #[tokio::test]
     async fn re_parses_from_the_start_when_the_file_shrank_below_the_resume_point() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write(&dir, "claude.jsonl", &(claude_line(1, 5) + &claude_line(2, 7)));
+        let path = write(
+            &dir,
+            "claude.jsonl",
+            &(claude_line(1, 5) + &claude_line(2, 7)),
+        );
         let format = claude_format();
         let first = read_transcript_records(&path, &format, None).await.unwrap();
 
         std::fs::write(&path, claude_line(3, 11)).unwrap();
-        let second = read_transcript_records(&path, &format, Some(&first.position)).await.unwrap();
+        let second = read_transcript_records(&path, &format, Some(&first.position))
+            .await
+            .unwrap();
         assert!(!second.resumed);
         assert_eq!(outputs(&second.records), vec![11]);
     }
@@ -599,7 +657,9 @@ mod tests {
             })
         );
         let path = write(&dir, "claude.jsonl", &(big + &claude_line(2, 7)));
-        let parsed = read_transcript_records(&path, &claude_format(), None).await.unwrap();
+        let parsed = read_transcript_records(&path, &claude_format(), None)
+            .await
+            .unwrap();
         assert_eq!(outputs(&parsed.records), vec![42, 7]);
     }
 
@@ -607,9 +667,13 @@ mod tests {
     async fn strips_a_carriage_return_and_counts_its_bytes_toward_the_resume_offset() {
         let dir = tempfile::tempdir().unwrap();
         let crlf = |line: String| line.replace('\n', "\r\n");
-        let content = crlf(codex_meta_line()) + &crlf(codex_model_line("gpt-5.2-codex")) + &crlf(codex_usage_line(40, 2));
+        let content = crlf(codex_meta_line())
+            + &crlf(codex_model_line("gpt-5.2-codex"))
+            + &crlf(codex_usage_line(40, 2));
         let path = write(&dir, "rollout.jsonl", &content);
-        let result = read_transcript_records(&path, &codex_format(), None).await.unwrap();
+        let result = read_transcript_records(&path, &codex_format(), None)
+            .await
+            .unwrap();
         assert_eq!(result.records.len(), 1);
         assert_eq!(result.records[0].model, "gpt-5.2-codex");
         assert_eq!(result.records[0].session_id, "codex-session-1");
@@ -619,19 +683,28 @@ mod tests {
     #[tokio::test]
     async fn returns_none_for_an_unreadable_file() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(read_transcript_records(&dir.path().join("missing.jsonl"), &claude_format(), None).await.is_none());
+        assert!(
+            read_transcript_records(&dir.path().join("missing.jsonl"), &claude_format(), None)
+                .await
+                .is_none()
+        );
     }
 
     #[test]
     fn line_gate_passes_only_lines_containing_one_of_its_markers() {
         let one = vec!["\"usage\"".to_owned()];
-        let several: Vec<String> = ["\"token_count\"", "\"session_meta\"", "\"a.b(c)\""].map(str::to_owned).to_vec();
+        let several: Vec<String> = ["\"token_count\"", "\"session_meta\"", "\"a.b(c)\""]
+            .map(str::to_owned)
+            .to_vec();
         for markers in [one, several] {
             let gate = transcript_line_gate(&markers);
             for marker in &markers {
                 assert!(gate(format!("{{\"payload\":{{{marker}:1}}}}").as_bytes()));
                 // The same text without its quotes is not the marker.
-                assert!(!gate(format!("{{\"text\":\"see {} here\"}}", &marker[1..marker.len() - 1]).as_bytes()));
+                assert!(!gate(
+                    format!("{{\"text\":\"see {} here\"}}", &marker[1..marker.len() - 1])
+                        .as_bytes()
+                ));
             }
             assert!(!gate(b""));
         }

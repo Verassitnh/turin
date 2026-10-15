@@ -41,7 +41,10 @@ pub type RateTable = IndexMap<String, ModelRate>;
 /// Custom IDs keep their case, provider prefix, and variant suffix. Custom rates
 /// apply as entered, at every speed.
 pub fn create_override_rate_table(
-    overrides: &IndexMap<turin_contracts::base_schemas::TrimmedNonEmptyString, UsageModelPriceOverride>,
+    overrides: &IndexMap<
+        turin_contracts::base_schemas::TrimmedNonEmptyString,
+        UsageModelPriceOverride,
+    >,
 ) -> RateTable {
     overrides
         .iter()
@@ -49,18 +52,23 @@ pub fn create_override_rate_table(
             let input = prices.input_cost_per_million_tokens.get() / 1_000_000.0;
             let cache_read = prices
                 .cache_read_cost_per_million_tokens
-                .map_or(prices.input_cost_per_million_tokens.get(), |price| price.get())
+                .map_or(prices.input_cost_per_million_tokens.get(), |price| {
+                    price.get()
+                })
                 / 1_000_000.0;
             let cache_creation = prices
                 .cache_write_cost_per_million_tokens
-                .map_or(prices.input_cost_per_million_tokens.get(), |price| price.get())
+                .map_or(prices.input_cost_per_million_tokens.get(), |price| {
+                    price.get()
+                })
                 / 1_000_000.0;
             (
                 js_trim(model.as_str()).to_owned(),
                 ModelRate {
                     base: TokenRates {
                         input_cost_per_token: input,
-                        output_cost_per_token: prices.output_cost_per_million_tokens.get() / 1_000_000.0,
+                        output_cost_per_token: prices.output_cost_per_million_tokens.get()
+                            / 1_000_000.0,
                         cache_read_cost_per_token: cache_read,
                         cache_creation_cost_per_token: cache_creation,
                     },
@@ -156,7 +164,14 @@ pub fn parse_rate_table(document: &serde_json::Value) -> RateTable {
             Some(multiple) => Some(scale_token_rates(standard, multiple)),
         };
         let ultrafast = read_token_rates(entry, "_ultrafast", Some(&standard));
-        table.insert(key, ModelRate { base: standard, fast, ultrafast });
+        table.insert(
+            key,
+            ModelRate {
+                base: standard,
+                fast,
+                ultrafast,
+            },
+        );
     }
 
     // `None` marks a bare name claimed at conflicting rates: no alias for it.
@@ -293,7 +308,11 @@ fn unsplit(cost_usd: f64, cost_source: UsageCostSource) -> PricedUsage {
 ///
 /// `reasoningTokens` is intentionally not charged separately: it is already
 /// counted inside `outputTokens`.
-pub fn price_usage(table: &RateTable, record: &UsageRecord, overrides: Option<&RateTable>) -> PricedUsage {
+pub fn price_usage(
+    table: &RateTable,
+    record: &UsageRecord,
+    overrides: Option<&RateTable>,
+) -> PricedUsage {
     let override_rate = overrides.and_then(|overrides| overrides.get(js_trim(&record.model)));
     let reported = match (override_rate, record.reported_cost_usd) {
         (None, Some(cost)) if cost.is_finite() => Some(cost),
@@ -343,7 +362,11 @@ pub fn price_usage(table: &RateTable, record: &UsageRecord, overrides: Option<&R
 
 /// What the cached input would have cost at full input rates, minus what it
 /// actually cost. Drives the "cache savings" figure.
-pub fn cache_savings_usd(table: &RateTable, record: &UsageRecord, overrides: Option<&RateTable>) -> f64 {
+pub fn cache_savings_usd(
+    table: &RateTable,
+    record: &UsageRecord,
+    overrides: Option<&RateTable>,
+) -> f64 {
     let rate = overrides
         .and_then(|overrides| overrides.get(js_trim(&record.model)))
         .or_else(|| lookup_rate(table, record.rate_model.as_deref().unwrap_or(&record.model)));
@@ -438,12 +461,20 @@ mod tests {
         )]));
 
         for reported in [None, Some(99.0)] {
-            let priced = price_usage(&table, &record("example-model", reported, UsageSpeed::Standard), Some(&overrides));
+            let priced = price_usage(
+                &table,
+                &record("example-model", reported, UsageSpeed::Standard),
+                Some(&overrides),
+            );
             close(priced.cost_usd, 13.5);
             assert_eq!(priced.cost_source, UsageCostSource::ModelPriced);
         }
         close(
-            cache_savings_usd(&table, &record("example-model", None, UsageSpeed::Standard), Some(&overrides)),
+            cache_savings_usd(
+                &table,
+                &record("example-model", None, UsageSpeed::Standard),
+                Some(&overrides),
+            ),
             1.5,
         );
     }
@@ -459,11 +490,19 @@ mod tests {
             None,
         )]));
 
-        let priced = price_usage(&table, &record("example-model", None, UsageSpeed::Standard), Some(&overrides));
+        let priced = price_usage(
+            &table,
+            &record("example-model", None, UsageSpeed::Standard),
+            Some(&overrides),
+        );
         close(priced.cost_usd, 14.0);
         assert_eq!(priced.cost_source, UsageCostSource::ModelPriced);
         assert_eq!(
-            cache_savings_usd(&table, &record("example-model", None, UsageSpeed::Standard), Some(&overrides)),
+            cache_savings_usd(
+                &table,
+                &record("example-model", None, UsageSpeed::Standard),
+                Some(&overrides)
+            ),
             0.0
         );
     }
@@ -480,7 +519,11 @@ mod tests {
         )]));
         let priced = price_usage(
             &table,
-            &record(" vendor/example-model[1m] ", Some(99.0), UsageSpeed::Standard),
+            &record(
+                " vendor/example-model[1m] ",
+                Some(99.0),
+                UsageSpeed::Standard,
+            ),
             Some(&overrides),
         );
         close(priced.cost_usd, 0.0);
@@ -493,11 +536,20 @@ mod tests {
             "other/example-model[1m]",
         ] {
             assert_eq!(
-                price_usage(&table, &record(model, None, UsageSpeed::Standard), Some(&overrides)).cost_source,
+                price_usage(
+                    &table,
+                    &record(model, None, UsageSpeed::Standard),
+                    Some(&overrides)
+                )
+                .cost_source,
                 UsageCostSource::Unpriced
             );
             assert_eq!(
-                price_usage(&table, &record(model, Some(99.0), UsageSpeed::Standard), Some(&overrides)),
+                price_usage(
+                    &table,
+                    &record(model, Some(99.0), UsageSpeed::Standard),
+                    Some(&overrides)
+                ),
                 PricedUsage {
                     cost_usd: 99.0,
                     cost_source: UsageCostSource::ProviderReported,
@@ -540,8 +592,16 @@ mod tests {
             2.0 * cost("claude-opus-5-5", UsageSpeed::Standard, None),
         );
         close(
-            cache_savings_usd(&table, &record("claude-opus-5-5", None, UsageSpeed::Fast), None),
-            2.0 * cache_savings_usd(&table, &record("claude-opus-5-5", None, UsageSpeed::Standard), None),
+            cache_savings_usd(
+                &table,
+                &record("claude-opus-5-5", None, UsageSpeed::Fast),
+                None,
+            ),
+            2.0 * cache_savings_usd(
+                &table,
+                &record("claude-opus-5-5", None, UsageSpeed::Standard),
+                None,
+            ),
         );
         // No published fast tier, and custom prices, both stay at the standard rate.
         assert_eq!(
@@ -565,12 +625,13 @@ mod tests {
                 "provider_specific_entry": { "fast": 2 },
             },
         }));
-        let split = |input: f64, cache_read: f64, cache_write: f64, output: f64| UsageCategoryCost {
-            input,
-            cache_read,
-            cache_write,
-            output,
-        };
+        let split =
+            |input: f64, cache_read: f64, cache_write: f64, output: f64| UsageCategoryCost {
+                input,
+                cache_read,
+                cache_write,
+                output,
+            };
         let assert_split = |actual: Option<UsageCategoryCost>, expected: UsageCategoryCost| {
             let actual = actual.expect("category split");
             close(actual.input, expected.input);
@@ -579,21 +640,33 @@ mod tests {
             close(actual.output, expected.output);
         };
 
-        let fast = price_usage(&table, &record("claude-opus-5-5", None, UsageSpeed::Fast), None);
+        let fast = price_usage(
+            &table,
+            &record("claude-opus-5-5", None, UsageSpeed::Fast),
+            None,
+        );
         close(fast.cost_usd, 58.8);
         assert_eq!(fast.cost_source, UsageCostSource::ModelPriced);
         assert_split(fast.category_cost_usd, split(8.0, 0.8, 10.0, 40.0));
         close(fast.speed_premium_usd, 29.4);
 
         // A reported cost keeps its total and splits in proportion to list rates.
-        let reported = price_usage(&table, &record("claude-opus-5-5", Some(29.4), UsageSpeed::Fast), None);
+        let reported = price_usage(
+            &table,
+            &record("claude-opus-5-5", Some(29.4), UsageSpeed::Fast),
+            None,
+        );
         close(reported.cost_usd, 29.4);
         assert_eq!(reported.cost_source, UsageCostSource::ProviderReported);
         assert_split(reported.category_cost_usd, split(4.0, 0.4, 5.0, 20.0));
         close(reported.speed_premium_usd, 14.7);
 
         // Without rates there is nothing to split it by.
-        let unknown = price_usage(&table, &record("unknown-model", Some(29.4), UsageSpeed::Fast), None);
+        let unknown = price_usage(
+            &table,
+            &record("unknown-model", Some(29.4), UsageSpeed::Fast),
+            None,
+        );
         close(unknown.cost_usd, 29.4);
         assert_eq!(unknown.category_cost_usd, None);
         assert_eq!(unknown.speed_premium_usd, 0.0);
@@ -627,8 +700,16 @@ mod tests {
         close(cost("gpt-6-astra", UsageSpeed::Fast), 2.0 * standard);
         close(cost("gpt-6-astra", UsageSpeed::Ultrafast), 6.0 * standard);
         close(
-            cache_savings_usd(&table, &record("gpt-6-astra", None, UsageSpeed::Ultrafast), None),
-            6.0 * cache_savings_usd(&table, &record("gpt-6-astra", None, UsageSpeed::Standard), None),
+            cache_savings_usd(
+                &table,
+                &record("gpt-6-astra", None, UsageSpeed::Ultrafast),
+                None,
+            ),
+            6.0 * cache_savings_usd(
+                &table,
+                &record("gpt-6-astra", None, UsageSpeed::Standard),
+                None,
+            ),
         );
         // A tier the model does not publish bills at the standard rate.
         assert_eq!(
@@ -642,14 +723,28 @@ mod tests {
         let canonical = ("claude-fable-5", rate(1e-5, Some(1e-6)));
         let deep_infra = ("deepinfra/anthropic/claude-fable-5", rate(1e-5, None));
 
-        for entries in [[canonical.clone(), deep_infra.clone()], [deep_infra.clone(), canonical.clone()]] {
-            let document: serde_json::Map<String, Value> =
-                entries.into_iter().map(|(name, value)| (name.to_owned(), value)).collect();
+        for entries in [
+            [canonical.clone(), deep_infra.clone()],
+            [deep_infra.clone(), canonical.clone()],
+        ] {
+            let document: serde_json::Map<String, Value> = entries
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value))
+                .collect();
             let table = parse_rate_table(&Value::Object(document));
 
-            assert_eq!(lookup_rate(&table, "claude-fable-5").unwrap().base.cache_read_cost_per_token, 1e-6);
             assert_eq!(
-                lookup_rate(&table, "deepinfra/anthropic/claude-fable-5").unwrap().base.cache_read_cost_per_token,
+                lookup_rate(&table, "claude-fable-5")
+                    .unwrap()
+                    .base
+                    .cache_read_cost_per_token,
+                1e-6
+            );
+            assert_eq!(
+                lookup_rate(&table, "deepinfra/anthropic/claude-fable-5")
+                    .unwrap()
+                    .base
+                    .cache_read_cost_per_token,
                 1e-5
             );
             assert!(lookup_rate(&table, "other/claude-fable-5").is_none());
@@ -687,8 +782,20 @@ mod tests {
             "provider-b/example-model": rate(3.0, None),
         }));
 
-        assert_eq!(lookup_rate(&table, "provider-a/example-model").unwrap().base.input_cost_per_token, 1.0);
-        assert_eq!(lookup_rate(&table, "provider-b/example-model").unwrap().base.input_cost_per_token, 3.0);
+        assert_eq!(
+            lookup_rate(&table, "provider-a/example-model")
+                .unwrap()
+                .base
+                .input_cost_per_token,
+            1.0
+        );
+        assert_eq!(
+            lookup_rate(&table, "provider-b/example-model")
+                .unwrap()
+                .base
+                .input_cost_per_token,
+            3.0
+        );
         assert!(lookup_rate(&table, "example-model").is_none());
     }
 }

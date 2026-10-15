@@ -13,12 +13,20 @@ use turin_provider_core::usage::{
     TranscriptUsageFormat, TranscriptUsageState, UsageRecord, UsageSpeed, empty_totals,
 };
 
+/// The line's `timestamp` as epoch milliseconds, or 0 when absent.
+fn timestamp_ms(line: &Value) -> f64 {
+    line["timestamp"]
+        .as_str()
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .map_or(0.0, |parsed| parsed.timestamp_millis() as f64)
+}
+
 fn claude_record(line: &Value) -> Option<UsageRecord> {
     let usage = line.get("message")?.get("usage")?;
     let output = usage.get("output_tokens")?.as_u64()?;
     Some(UsageRecord {
         provider: UsageProviderKind::Claude,
-        timestamp_ms: 0.0,
+        timestamp_ms: timestamp_ms(line),
         model: line["message"]["model"].as_str()?.to_owned(),
         rate_model: None,
         session_id: line["sessionId"].as_str().unwrap_or_default().to_owned(),
@@ -97,11 +105,14 @@ pub fn codex_format() -> TranscriptUsageFormat {
                     };
                     vec![UsageRecord {
                         provider: UsageProviderKind::Codex,
-                        timestamp_ms: 0.0,
+                        timestamp_ms: timestamp_ms(&line),
                         model: state["model"].as_str().unwrap_or_default().to_owned(),
                         rate_model: None,
                         session_id: state["session"].as_str().unwrap_or_default().to_owned(),
-                        totals: UsageTokenTotals { output_tokens: output, ..empty_totals() },
+                        totals: UsageTokenTotals {
+                            output_tokens: output,
+                            ..empty_totals()
+                        },
                         reported_cost_usd: None,
                         speed,
                         dedupe_key: None,

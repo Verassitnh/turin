@@ -42,7 +42,11 @@ pub const SCAN_CACHE_FILE_NAME: &str = "usage-scan-cache-v5.json";
 pub const LEGACY_SCAN_CACHE_FILE_NAME: &str = "usage-scan-cache.json";
 
 /// Serialised as the index into this list.
-const SPEEDS: [UsageSpeed; 3] = [UsageSpeed::Standard, UsageSpeed::Fast, UsageSpeed::Ultrafast];
+const SPEEDS: [UsageSpeed; 3] = [
+    UsageSpeed::Standard,
+    UsageSpeed::Fast,
+    UsageSpeed::Ultrafast,
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CachedFile {
@@ -93,7 +97,10 @@ fn intern(table: &mut Vec<String>, index: &mut HashMap<String, usize>, value: &s
 }
 
 fn speed_index(speed: UsageSpeed) -> u64 {
-    SPEEDS.iter().position(|candidate| *candidate == speed).unwrap_or(0) as u64
+    SPEEDS
+        .iter()
+        .position(|candidate| *candidate == speed)
+        .unwrap_or(0) as u64
 }
 
 fn serialize_record(record: &UsageRecord, tables: &mut InternTables) -> Value {
@@ -175,11 +182,11 @@ fn safe_integer(value: &Value) -> Option<u64> {
 ///
 /// Anything malformed yields an empty cache rather than an error: a corrupt
 /// cache should cost one cold scan, never a broken page. Entries of a provider
-/// without a transcript format in `formats` are dropped.
-pub fn decode_scan_cache(
-    document: &Value,
-    formats: &HashMap<UsageProviderKind, TranscriptUsageFormat>,
-) -> ScanCache {
+/// without a transcript format (`format_for` returns `None`) are dropped.
+pub fn decode_scan_cache<'a, F>(document: &Value, format_for: F) -> ScanCache
+where
+    F: Fn(UsageProviderKind) -> Option<&'a TranscriptUsageFormat>,
+{
     let mut cache = ScanCache::new();
     let Some(root) = document.as_object() else {
         return cache;
@@ -223,7 +230,7 @@ pub fn decode_scan_cache(
         else {
             continue;
         };
-        let Some(format) = formats.get(&provider) else {
+        let Some(format) = format_for(provider) else {
             continue;
         };
         let (Some(records_raw), Some(tail_raw)) = (
@@ -358,7 +365,9 @@ fn decode_record(
     };
     let dedupe_key = row[8].as_str().map(str::to_owned);
     let reported_cost_usd = row[9].as_f64();
-    let speed = row[10].as_u64().and_then(|index| SPEEDS.get(index as usize).copied())?;
+    let speed = row[10]
+        .as_u64()
+        .and_then(|index| SPEEDS.get(index as usize).copied())?;
     let rate_model = match row.get(11) {
         None | Some(Value::Null) => None,
         Some(index) => Some(models.get(safe_integer(index)? as usize)?.clone()),
@@ -463,9 +472,14 @@ mod tests {
             .collect()
     }
 
+    fn decode(document: &Value) -> ScanCache {
+        let formats = test_format_map();
+        decode_scan_cache(document, |provider| formats.get(&provider))
+    }
+
     fn roundtrip(cache: &ScanCache) -> ScanCache {
         let encoded = serde_json::to_string(&encode_scan_cache(cache)).unwrap();
-        decode_scan_cache(&serde_json::from_str(&encoded).unwrap(), &test_format_map())
+        decode(&serde_json::from_str(&encoded).unwrap())
     }
 
     fn file_mut<'a>(document: &'a mut Value, path: &str) -> &'a mut Value {
@@ -532,20 +546,22 @@ mod tests {
     fn drops_an_entry_whose_persisted_parse_state_is_corrupt() {
         // Resuming with a bad reducer state would attach appended usage to the
         // wrong model or replay fork-copied history; that entry must cold parse.
-        let mut encoded = encode_scan_cache(&cache_with(vec![("/a.jsonl", 100.0, vec![plain_record()])]));
+        let mut encoded =
+            encode_scan_cache(&cache_with(vec![("/a.jsonl", 100.0, vec![plain_record()])]));
         file_mut(&mut encoded, "/a.jsonl")["cs"] = json!({ "model": 42 });
 
-        assert!(!decode_scan_cache(&encoded, &test_format_map()).contains_key("/a.jsonl"));
+        assert!(!decode(&encoded).contains_key("/a.jsonl"));
     }
 
     #[test]
     fn drops_an_entry_whose_guard_length_is_outside_the_supported_range() {
         // The guard length sizes a buffer in the reader; a bogus value would make
         // every parse of that file fail and silently drop its usage.
-        let mut encoded = encode_scan_cache(&cache_with(vec![("/a.jsonl", 100.0, vec![plain_record()])]));
+        let mut encoded =
+            encode_scan_cache(&cache_with(vec![("/a.jsonl", 100.0, vec![plain_record()])]));
         file_mut(&mut encoded, "/a.jsonl")["gl"] = json!(1e20);
 
-        assert!(!decode_scan_cache(&encoded, &test_format_map()).contains_key("/a.jsonl"));
+        assert!(!decode(&encoded).contains_key("/a.jsonl"));
     }
 
     #[test]
@@ -557,30 +573,38 @@ mod tests {
         )]));
         file_mut(&mut encoded, "/a.jsonl")["r"][0][10] = json!(true);
 
-        assert!(!decode_scan_cache(&encoded, &test_format_map()).contains_key("/a.jsonl"));
+        assert!(!decode(&encoded).contains_key("/a.jsonl"));
     }
 
     #[test]
     fn rejects_a_document_from_before_records_carried_a_speed() {
-        let mut encoded = encode_scan_cache(&cache_with(vec![("/a.jsonl", 100.0, vec![plain_record()])]));
+        let mut encoded =
+            encode_scan_cache(&cache_with(vec![("/a.jsonl", 100.0, vec![plain_record()])]));
         encoded["version"] = json!(3);
 
-        assert!(decode_scan_cache(&encoded, &test_format_map()).is_empty());
+        assert!(decode(&encoded).is_empty());
     }
 
     #[test]
     fn writes_the_whole_cache_with_its_extra_keys_and_restores_it() {
         let cache = cache_with(vec![
             ("/a.jsonl", 100.0, vec![plain_record()]),
-            ("/b.jsonl", 200.0, vec![record(|record| record.session_id = "session-b".to_owned())]),
+            (
+                "/b.jsonl",
+                200.0,
+                vec![record(|record| record.session_id = "session-b".to_owned())],
+            ),
         ]);
         let mut extra = Map::new();
-        extra.insert("sources".to_owned(), json!({ "claude\u{0}/projects": { "dir": "/projects", "volumeId": "1:2" } }));
+        extra.insert(
+            "sources".to_owned(),
+            json!({ "claude\u{0}/projects": { "dir": "/projects", "volumeId": "1:2" } }),
+        );
 
         let text = write_scan_cache(&cache, &extra);
         let document: Value = serde_json::from_str(&text).unwrap();
 
-        assert_eq!(decode_scan_cache(&document, &test_format_map()), cache);
+        assert_eq!(decode(&document), cache);
         assert_eq!(document["sources"], extra["sources"]);
     }
 
@@ -589,7 +613,11 @@ mod tests {
         let encoded = encode_scan_cache(&cache_with(vec![(
             "/a.jsonl",
             100.0,
-            vec![plain_record(), record(|record| record.dedupe_key = Some("msg_2:".to_owned())), plain_record()],
+            vec![
+                plain_record(),
+                record(|record| record.dedupe_key = Some("msg_2:".to_owned())),
+                plain_record(),
+            ],
         )]));
 
         assert_eq!(encoded["models"], json!(["claude-fable-5"]));
@@ -599,28 +627,35 @@ mod tests {
     #[test]
     fn treats_a_corrupt_or_foreign_document_as_an_empty_cache() {
         // A bad cache should cost one cold scan, never a broken page.
-        let formats = test_format_map();
-        assert!(decode_scan_cache(&Value::Null, &formats).is_empty());
-        assert!(decode_scan_cache(&json!("nonsense"), &formats).is_empty());
-        assert!(decode_scan_cache(&json!({ "version": 999, "models": [], "sessions": [], "files": {} }), &formats).is_empty());
+        assert!(decode(&Value::Null).is_empty());
+        assert!(decode(&json!("nonsense")).is_empty());
+        assert!(
+            decode(&json!({ "version": 999, "models": [], "sessions": [], "files": {} }))
+                .is_empty()
+        );
     }
 
     #[test]
     fn skips_malformed_file_entries_but_keeps_good_ones() {
-        let mut encoded = encode_scan_cache(&cache_with(vec![("/good.jsonl", 100.0, vec![plain_record()])]));
+        let mut encoded = encode_scan_cache(&cache_with(vec![(
+            "/good.jsonl",
+            100.0,
+            vec![plain_record()],
+        )]));
         encoded["files"]["/bad.jsonl"] = json!({ "s": "nope", "m": 1, "p": "claude", "r": [] });
 
-        let restored = decode_scan_cache(&encoded, &test_format_map());
+        let restored = decode(&encoded);
         assert_eq!(restored.keys().collect::<Vec<_>>(), vec!["/good.jsonl"]);
     }
 
     #[test]
     fn rejects_the_whole_cache_when_an_intern_table_holds_a_non_string() {
         // A numeric model would reach aggregation and break pricing there.
-        let mut encoded = encode_scan_cache(&cache_with(vec![("/a.jsonl", 100.0, vec![plain_record()])]));
+        let mut encoded =
+            encode_scan_cache(&cache_with(vec![("/a.jsonl", 100.0, vec![plain_record()])]));
         encoded["models"] = json!([1]);
 
-        assert!(decode_scan_cache(&encoded, &test_format_map()).is_empty());
+        assert!(decode(&encoded).is_empty());
     }
 
     #[test]
@@ -630,11 +665,14 @@ mod tests {
         let mut encoded = encode_scan_cache(&cache_with(vec![(
             "/a.jsonl",
             100.0,
-            vec![plain_record(), record(|record| record.dedupe_key = Some("msg_2:".to_owned()))],
+            vec![
+                plain_record(),
+                record(|record| record.dedupe_key = Some("msg_2:".to_owned())),
+            ],
         )]));
         file_mut(&mut encoded, "/a.jsonl")["r"][1][3] = json!("not-a-number");
 
-        assert!(!decode_scan_cache(&encoded, &test_format_map()).contains_key("/a.jsonl"));
+        assert!(!decode(&encoded).contains_key("/a.jsonl"));
     }
 
     #[test]
@@ -663,6 +701,9 @@ mod tests {
     #[test]
     fn dedupe_within_file_keeps_every_record_without_a_dedupe_key() {
         let keyless = record(|record| record.dedupe_key = None);
-        assert_eq!(dedupe_within_file(&[keyless.clone(), keyless], &mut HashSet::new()).len(), 2);
+        assert_eq!(
+            dedupe_within_file(&[keyless.clone(), keyless], &mut HashSet::new()).len(),
+            2
+        );
     }
 }

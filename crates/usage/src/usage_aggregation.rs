@@ -48,7 +48,11 @@ fn parse_fixed_offset(name: &str) -> Option<FixedOffset> {
         return None;
     }
     let hours: i32 = digits[..2].parse().ok()?;
-    let minutes: i32 = if digits.len() == 4 { digits[2..].parse().ok()? } else { 0 };
+    let minutes: i32 = if digits.len() == 4 {
+        digits[2..].parse().ok()?
+    } else {
+        0
+    };
     if hours > 23 || minutes > 59 {
         return None;
     }
@@ -260,7 +264,11 @@ impl UsageAggregator {
         };
         let bucket = self.buckets.entry(key).or_insert_with(MutableBucket::new);
 
-        let priced = price_usage(&self.options.rates, record, self.options.price_overrides.as_ref());
+        let priced = price_usage(
+            &self.options.rates,
+            record,
+            self.options.price_overrides.as_ref(),
+        );
         let totals = &mut bucket.totals;
         totals.uncached_input_tokens += record.totals.uncached_input_tokens;
         totals.cached_input_tokens += record.totals.cached_input_tokens;
@@ -376,7 +384,7 @@ fn non_empty(value: &str) -> Option<TrimmedNonEmptyString> {
 }
 
 /// The wire name of a provider, for sorting in the same order as the TS server.
-fn provider_name(provider: UsageProviderKind) -> &'static str {
+pub(crate) fn provider_name(provider: UsageProviderKind) -> &'static str {
     match provider {
         UsageProviderKind::Claude => "claude",
         UsageProviderKind::Codex => "codex",
@@ -430,7 +438,9 @@ mod tests {
     }
 
     fn ms(text: &str) -> f64 {
-        DateTime::parse_from_rfc3339(text).unwrap().timestamp_millis() as f64
+        DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .timestamp_millis() as f64
     }
 
     fn record() -> UsageRecord {
@@ -469,7 +479,11 @@ mod tests {
         }
     }
 
-    fn aggregate(records: &[UsageRecord], time_zone: &str, resolution: UsageResolution) -> AggregateResult {
+    fn aggregate(
+        records: &[UsageRecord],
+        time_zone: &str,
+        resolution: UsageResolution,
+    ) -> AggregateResult {
         let mut aggregator = UsageAggregator::new(options(time_zone, resolution)).unwrap();
         for item in records {
             aggregator.add(item, "");
@@ -478,7 +492,10 @@ mod tests {
     }
 
     fn close(actual: f64, expected: f64) {
-        assert!((actual - expected).abs() <= 1e-9 * expected.abs().max(1.0), "{actual} != {expected}");
+        assert!(
+            (actual - expected).abs() <= 1e-9 * expected.abs().max(1.0),
+            "{actual} != {expected}"
+        );
     }
 
     #[test]
@@ -514,7 +531,11 @@ mod tests {
     fn keeps_only_the_first_record_for_a_repeated_dedupe_key() {
         let mut duplicate = record();
         duplicate.dedupe_key = Some("msg_1:".to_owned());
-        let result = aggregate(&[duplicate.clone(), duplicate.clone(), duplicate], "UTC", UsageResolution::Day);
+        let result = aggregate(
+            &[duplicate.clone(), duplicate.clone(), duplicate],
+            "UTC",
+            UsageResolution::Day,
+        );
 
         assert_eq!(result.duplicates_dropped, 2);
         assert_eq!(result.buckets.len(), 1);
@@ -551,12 +572,22 @@ mod tests {
         midnight.timestamp_ms = ms("2026-08-01T18:15:00.000Z");
         let mut after = record();
         after.timestamp_ms = ms("2026-08-01T18:16:00.000Z");
-        let result = aggregate(&[at, midnight.clone(), other_model, after], "Asia/Kathmandu", UsageResolution::Day);
+        let result = aggregate(
+            &[at, midnight.clone(), other_model, after],
+            "Asia/Kathmandu",
+            UsageResolution::Day,
+        );
 
         let got: Vec<(String, String, u64)> = result
             .buckets
             .iter()
-            .map(|bucket| (bucket.day.as_str().to_owned(), bucket.model.as_str().to_owned(), bucket.records))
+            .map(|bucket| {
+                (
+                    bucket.day.as_str().to_owned(),
+                    bucket.model.as_str().to_owned(),
+                    bucket.records,
+                )
+            })
             .collect();
         assert_eq!(
             got,
@@ -582,7 +613,10 @@ mod tests {
             .iter()
             .map(|bucket| (bucket.day.as_str().to_owned(), bucket.records))
             .collect();
-        assert_eq!(got, vec![("2026-08-01".to_owned(), 1), ("2026-08-02".to_owned(), 1)]);
+        assert_eq!(
+            got,
+            vec![("2026-08-01".to_owned(), 1), ("2026-08-02".to_owned(), 1)]
+        );
     }
 
     #[test]
@@ -591,18 +625,33 @@ mod tests {
         first.timestamp_ms = ms("2026-08-07T02:40:13.944Z");
         let mut second = record();
         second.timestamp_ms = ms("2026-08-07T03:40:13.944Z");
-        let result = aggregate(&[first, second], "America/Los_Angeles", UsageResolution::Hour);
+        let result = aggregate(
+            &[first, second],
+            "America/Los_Angeles",
+            UsageResolution::Hour,
+        );
 
         let got: Vec<(String, Option<String>)> = result
             .buckets
             .iter()
-            .map(|bucket| (bucket.day.as_str().to_owned(), bucket.hour_start.as_ref().map(|h| h.as_str().to_owned())))
+            .map(|bucket| {
+                (
+                    bucket.day.as_str().to_owned(),
+                    bucket.hour_start.as_ref().map(|h| h.as_str().to_owned()),
+                )
+            })
             .collect();
         assert_eq!(
             got,
             vec![
-                ("2026-08-06".to_owned(), Some("2026-08-07T02:37:00.000Z".to_owned())),
-                ("2026-08-06".to_owned(), Some("2026-08-07T03:37:00.000Z".to_owned())),
+                (
+                    "2026-08-06".to_owned(),
+                    Some("2026-08-07T02:37:00.000Z".to_owned())
+                ),
+                (
+                    "2026-08-06".to_owned(),
+                    Some("2026-08-07T03:37:00.000Z".to_owned())
+                ),
             ]
         );
     }
@@ -631,7 +680,10 @@ mod tests {
             .iter()
             .map(|bucket| bucket.hour_start.as_ref().unwrap().as_str().to_owned())
             .collect();
-        assert_eq!(hours, vec!["2026-08-06T04:37:00.000Z", "2026-08-07T03:37:00.000Z"]);
+        assert_eq!(
+            hours,
+            vec!["2026-08-06T04:37:00.000Z", "2026-08-07T03:37:00.000Z"]
+        );
     }
 
     #[test]
@@ -673,7 +725,10 @@ mod tests {
         let result = aggregate(&[reported], "UTC", UsageResolution::Day);
 
         assert_eq!(result.buckets[0].cost_usd, 1.25);
-        assert_eq!(result.buckets[0].cost_source, UsageCostSource::ProviderReported);
+        assert_eq!(
+            result.buckets[0].cost_source,
+            UsageCostSource::ProviderReported
+        );
     }
 
     #[test]

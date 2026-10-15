@@ -109,3 +109,9 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T21 | Hooks crate + orchestrator wiring (UI parts → Opus) | `crates/hooks` | GLM | todo |
 | T22 | App wiring: runtime bridge, end-to-end smoke with each provider | `crates/app` | Opus | todo |
 | T23 | T3 database import | `crates/persistence` | Grok | todo |
+
+### Brand
+
+| ID | Task | Owns | Agent | Status |
+|---|---|---|---|---|
+| T24 | Turin app icon: T3 Code icon with a single T | `assets/**` | Opus | active |

@@ -307,8 +307,9 @@ pub fn make_provider_failure(input: ProviderFailureInput<'_>) -> OrchestrationV2
     } else {
         message
     };
-    let raw_code = match input.code {
-        Some(code) => code.map(str::to_owned),
+    // Upstream `input.code ?? cause.code`: an explicit null falls through too.
+    let raw_code = match input.code.flatten() {
+        Some(code) => Some(code.to_owned()),
         None => input.cause.and_then(cause_code),
     };
     let code = raw_code.as_deref().and_then(failure_code);
@@ -529,6 +530,28 @@ mod tests {
             redact_provider_failure_text("(https://user:pass@example.test/p?q=1#f)"),
             "(https://example.test/p)"
         );
+    }
+
+    #[test]
+    fn explicit_null_code_falls_through_to_the_cause_code() {
+        let cause =
+            ProviderFailureCause::tagged("ProviderAdapterTurnStartError").with_code("cause_code");
+        let code_of = |code: Option<Option<&str>>| {
+            make_provider_failure(ProviderFailureInput {
+                cause: Some(&cause),
+                message: None,
+                code,
+                class: None,
+                retryable: None,
+                reset_at: None,
+            })
+            .code
+            .map(|code| code.as_str().to_owned())
+        };
+
+        assert_eq!(code_of(Some(None)).as_deref(), Some("cause_code"));
+        assert_eq!(code_of(None).as_deref(), Some("cause_code"));
+        assert_eq!(code_of(Some(Some("own_code"))).as_deref(), Some("own_code"));
     }
 
     #[test]

@@ -246,3 +246,58 @@ fn does_not_revive_separated_historical_task_progress() {
 
     assert_eq!(live_entry_ids(&rows), vec!["running-command"]);
 }
+
+#[test]
+fn respects_the_lifecycle_of_trailing_task_progress() {
+    // (lifecycle, expected live state): `None` means no live row, only the
+    // shared thinking row.
+    let cases: [(Option<ToolLifecycleStatus>, Option<bool>); 6] = [
+        (None, Some(true)),
+        (Some(ToolLifecycleStatus::InProgress), Some(true)),
+        (Some(ToolLifecycleStatus::Completed), Some(false)),
+        (Some(ToolLifecycleStatus::Failed), None),
+        (Some(ToolLifecycleStatus::Declined), Some(false)),
+        (Some(ToolLifecycleStatus::Stopped), Some(false)),
+    ];
+    for (lifecycle, active) in cases {
+        let rows = derive(&running_turn(vec![work_entry(
+            "task-progress-entry",
+            "2026-01-01T00:00:05Z",
+            WorkLogEntry {
+                source_activity_kind: Some("task.progress".into()),
+                tool_lifecycle_status: lifecycle,
+                ..work_log(
+                    "task-progress",
+                    "2026-01-01T00:00:05Z",
+                    Some("turn-1"),
+                    "Task progress",
+                    WorkTone::Thinking,
+                )
+            },
+        )]));
+
+        match (find_kind(&rows, MessagesTimelineRowKind::WorkLive), active) {
+            (None, None) => {
+                assert_eq!(
+                    rows.last().map(|row| row.id()),
+                    Some("live-activity-row"),
+                    "{lifecycle:?}"
+                );
+                assert_eq!(
+                    rows.last().map(|row| row.kind()),
+                    Some(MessagesTimelineRowKind::Thinking),
+                    "{lifecycle:?}"
+                );
+            }
+            (
+                Some(Row::WorkLive {
+                    active: row_active, ..
+                }),
+                Some(expected),
+            ) => {
+                assert_eq!(*row_active, expected, "{lifecycle:?}");
+            }
+            (row, expected) => panic!("{lifecycle:?}: got {row:?}, expected {expected:?}"),
+        }
+    }
+}

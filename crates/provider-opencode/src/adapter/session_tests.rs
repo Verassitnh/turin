@@ -1836,3 +1836,129 @@ async fn v2_continuation_replays_the_parked_execution_without_a_prompt() {
     }
     session.close().await;
 }
+
+fn task_part(state: Value) -> String {
+    json!({"type":"message.part.updated","properties":{"part":{"id":"t_child","sessionID":"ses_1","messageID":"msg_a","type":"tool","callID":"c_child","tool":"task","state":state}}}).to_string()
+}
+
+#[tokio::test]
+async fn v1_child_session_gets_a_thread_and_one_subagent_record_keyed_on_the_task() {
+    let (script, session, mut events) = v1_session_with_turn().await;
+    // The link arrives first. Ownership only: it must not name a subagent record of its own.
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"session.created","properties":{"info":{"id":"ses_child","parentID":"ses_1"}}}).to_string(),
+        )))
+        .unwrap();
+    script
+        .frames
+        .send(Some(sse(&task_part(json!({
+            "status":"running","input":{"prompt":"explore the repo"},"title":"explore",
+            "metadata":{"sessionId":"ses_child"},"time":{"start":1760500000000i64}
+        })))))
+        .unwrap();
+    let seen = events_until(&mut events, |value| value["type"] == "subagent.updated").await;
+    let record = of_type(&seen, "subagent.updated")
+        .into_iter()
+        .next()
+        .expect("subagent record")
+        .clone();
+    assert_eq!(
+        record["subagent"]["id"],
+        json!(derive_node("t_child")),
+        "{seen:#?}"
+    );
+    let child_thread = derive_thread("ses_child");
+    assert_eq!(record["subagent"]["childThreadId"], json!(child_thread));
+    let created = of_type(&seen, "app_thread.created");
+    assert_eq!(created.len(), 1, "{seen:#?}");
+    assert_eq!(created[0]["app_thread"]["id"], json!(child_thread));
+    assert_eq!(
+        created[0]["app_thread"]["lineage"]["parentThreadId"],
+        "thread_1"
+    );
+    session.close().await;
+}
+
+#[tokio::test]
+async fn v1_child_turn_runs_under_a_root_turn_node_and_projects_its_prompt() {
+    let (script, session, mut events) = v1_session_with_turn().await;
+    script
+        .frames
+        .send(Some(sse(&task_part(json!({
+            "status":"running","input":{"prompt":"explore the repo"},"metadata":{"sessionId":"ses_child"}
+        })))))
+        .unwrap();
+    events_until(&mut events, |value| value["type"] == "subagent.updated").await;
+
+    // The child's user message opens its turn; its text projects as the prompt.
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"message.updated","properties":{"info":{"id":"msg_c","sessionID":"ses_child","role":"user"}}}).to_string(),
+        )))
+        .unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"message.part.updated","properties":{"part":{"id":"p_c","sessionID":"ses_child","messageID":"msg_c","type":"text","text":"explore the repo"}}}).to_string(),
+        )))
+        .unwrap();
+    let running = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated" && value["turn_item"]["type"] == "user_message"
+    })
+    .await;
+    let root = of_type(&running, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["kind"] == "root_turn")
+        .expect("root_turn node");
+    assert_eq!(
+        root["node"]["id"],
+        json!(derive_node("ses_child:root:msg_c"))
+    );
+    assert_eq!(root["node"]["status"], "running");
+    assert_eq!(root["node"]["threadId"], json!(derive_thread("ses_child")));
+    assert!(root["node"]["parentNodeId"].is_null());
+    let prompt = of_type(&running, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["type"] == "user_message")
+        .expect("projected prompt");
+    assert_eq!(prompt["turn_item"]["text"], "explore the repo");
+    assert_eq!(
+        prompt["turn_item"]["threadId"],
+        json!(derive_thread("ses_child"))
+    );
+    assert_eq!(prompt["turn_item"]["nodeId"], root["node"]["id"]);
+
+    // The child's session goes idle: its root node and provider turn complete.
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"session.idle","properties":{"sessionID":"ses_child"}}).to_string(),
+        )))
+        .unwrap();
+    // The provider turn is the last of the pair (node, then turn).
+    let done = events_until(&mut events, |value| {
+        value["type"] == "provider_turn.updated" && value["provider_turn"]["status"] == "completed"
+    })
+    .await;
+    assert!(
+        of_type(&done, "node.updated")
+            .iter()
+            .any(|event| event["node"]["kind"] == "root_turn"
+                && event["node"]["status"] == "completed"),
+        "{done:#?}"
+    );
+    session.close().await;
+}
+
+fn derive_thread(native: &str) -> String {
+    turin_provider_core::id_allocator::derive::thread_from_provider_thread(
+        &crate::adapter::logic::opencode_driver(),
+        Some(&ProviderInstanceId::new("opencode").unwrap()),
+        native,
+    )
+    .as_str()
+    .to_owned()
+}

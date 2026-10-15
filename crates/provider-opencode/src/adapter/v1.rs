@@ -18,9 +18,11 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use turin_contracts::{
-    PlanId, PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId, UtcDateTime,
+    NodeId, PlanId, PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId,
+    TrimmedNonEmptyString, UtcDateTime,
+    model_selection::ModelSelection,
     orchestration_v2::{
-        OrchestrationV2Actor, OrchestrationV2ConversationMessage,
+        OrchestrationV2Actor, OrchestrationV2AppThread, OrchestrationV2ConversationMessage,
         OrchestrationV2ConversationMessageRole, OrchestrationV2CreationSource,
         OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeKind,
         OrchestrationV2ExecutionNodeStatus, OrchestrationV2ProviderFailureClass,
@@ -29,22 +31,26 @@ use turin_contracts::{
         OrchestrationV2ProviderThreadStatus, OrchestrationV2ProviderTurn,
         OrchestrationV2ProviderTurnStatus, OrchestrationV2ResponseCapability,
         OrchestrationV2RuntimeRequest, OrchestrationV2RuntimeRequestKind,
-        OrchestrationV2RuntimeRequestStatus, OrchestrationV2Subagent,
-        OrchestrationV2SubagentOrigin, OrchestrationV2SubagentStatus, OrchestrationV2TurnItem,
+        OrchestrationV2RuntimeRequestStatus, OrchestrationV2TurnItem,
         OrchestrationV2TurnItemStatus,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
     provider_policy::ProviderRequestKind,
 };
 use turin_provider_core::id_allocator::{IdAllocator, derive};
+use turin_provider_core::subagent_projection::{
+    SubagentChildThreadInput, SubagentConversationArtifactsInput, make_subagent_child_thread,
+    make_subagent_conversation_artifacts, subagent_thread_title,
+};
 
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
 use crate::adapter::records::{
     Compaction, NodeOf, NodeTiming, RequestBody, SubagentCall, TextBlock, assistant_message,
     compaction_turn_item, epoch_ms_or, execution_node, next_ordinal, open_code_question_id,
-    request_node, request_turn_item, settle_request_item, settle_request_node, subagent_records,
-    text_turn_item, todo_native_id, todo_plan, todo_steps, todos_complete, user_input_questions,
+    request_node, request_turn_item, root_turn_node, settle_request_item, settle_request_node,
+    subagent_records, text_turn_item, todo_native_id, todo_plan, todo_steps, todos_complete,
+    user_input_questions,
 };
 use crate::events::V1Event;
 use crate::v1_client::{PermissionReply, QuestionReply, V1Client};
@@ -67,6 +73,8 @@ struct V1Turn {
     interrupted: bool,
     finalized: bool,
     usage: UsageAccum,
+    /// The app thread the turn runs for: a child thread's parent.
+    app_thread: OrchestrationV2AppThread,
     /// Ordinals are per native item, assigned on first sight, as upstream's `itemOrdinal`.
     item_ordinals: HashMap<String, u64>,
     next_item_ordinal: u64,
@@ -111,7 +119,21 @@ struct V1Inner {
     pending: HashMap<String, Pending>,
     busy: HashSet<String>,
     children: HashMap<String, String>,
+    /// Child sessions a `task` call revealed, by child session id.
+    subagents: HashMap<String, V1Child>,
     stream_dead: Option<String>,
+}
+
+/// A child session a `task` call started (upstream's child `OpenCodeThreadState`): its thread,
+/// its provider thread, and the turn its execution runs.
+struct V1Child {
+    session_id: String,
+    thread: OrchestrationV2AppThread,
+    provider_thread: OrchestrationV2ProviderThread,
+    /// Message roles in the child session, so a user's echoed prompt is not a result.
+    roles: HashMap<String, String>,
+    turn: Option<V1Turn>,
+    next_turn_ordinal: u64,
 }
 
 pub struct OpenCodeV1Session {
@@ -192,6 +214,7 @@ impl OpenCodeV1Session {
             client,
             inner: Mutex::new(V1Inner {
                 threads: HashMap::new(),
+                subagents: HashMap::new(),
                 pending: HashMap::new(),
                 busy: HashSet::new(),
                 children: HashMap::new(),
@@ -317,30 +340,12 @@ impl OpenCodeV1Session {
                     .get("parentID")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
+                // Ownership only: the subagent record comes from the task that names the child
+                // (upstream `relatedSessionOwners`), so the link and the task key one record.
                 if let (Some(id), Some(parent)) = (id, parent)
                     && guard.threads.contains_key(&parent)
                 {
-                    guard.children.insert(id.clone(), parent.clone());
-                    if let Some(thread) = guard.threads.get(&parent)
-                        && let Some(turn) = thread.active.as_ref()
-                    {
-                        let subagent = subagent_for(
-                            &self.instance_id,
-                            &thread.provider_thread,
-                            &turn.thread_id,
-                            turn.provider_turn
-                                .run_attempt_id
-                                .as_ref()
-                                .map(|_| turn.provider_turn.node_id.clone()),
-                            &id,
-                            &turn.provider_turn,
-                        );
-                        drop(guard);
-                        self.emit(ProviderAdapterV2Event::SubagentUpdated {
-                            driver: self.driver.clone(),
-                            subagent,
-                        });
-                    }
+                    guard.children.insert(id, parent);
                 }
             }
             "session.status" | "session.idle" => {
@@ -355,6 +360,11 @@ impl OpenCodeV1Session {
                         ""
                     });
                 if let Some(session_id) = session_id {
+                    if status_type == "idle"
+                        && let Some(child) = guard.subagents.get_mut(&session_id)
+                    {
+                        self.finish_child_turn(child);
+                    }
                     if status_type == "idle" {
                         guard.busy.remove(&session_id);
                     } else if status_type == "busy" || status_type == "retry" {
@@ -401,6 +411,11 @@ impl OpenCodeV1Session {
                 let session_id = str_field(&info, "sessionID");
                 let role = info.get("role").and_then(Value::as_str);
                 let message_id = str_field(&info, "id");
+                if let (Some(session), Some(message)) = (session_id.as_ref(), message_id.as_ref())
+                    && let Some(child) = guard.subagents.get_mut(session)
+                {
+                    self.on_child_message(child, &info, message);
+                }
                 if let (Some(session), Some(message), Some(role)) =
                     (session_id.as_ref(), message_id.as_ref(), role)
                     && let Some(thread) = guard.threads.get_mut(session)
@@ -617,37 +632,94 @@ impl OpenCodeV1Session {
 
     fn on_part(&self, guard: &mut V1Inner, props: &Value) {
         let part = props.get("part").cloned().unwrap_or(Value::Null);
-        let session_id = str_field(&part, "sessionID").or_else(|| str_field(props, "sessionID"));
-        let Some(session_id) = session_id else { return };
-        let Some(thread) = guard.threads.get_mut(&session_id) else {
+        let Some(session_id) =
+            str_field(&part, "sessionID").or_else(|| str_field(props, "sessionID"))
+        else {
             return;
         };
-        let Some(turn) = thread.active.as_mut() else {
-            return;
-        };
-        if turn.finalized {
-            return;
-        }
-        let part_type = part.get("type").and_then(Value::as_str).unwrap_or("");
+        let part_type = part
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
         let part_id = str_field(&part, "id")
             .or_else(|| str_field(props, "partID"))
             .unwrap_or_else(|| "part".to_owned());
         let message_id = str_field(&part, "messageID").unwrap_or_default();
         if part_type == "step-finish" || part.get("tokens").is_some() {
-            if let Some(tokens) = parse_step_tokens(&part) {
+            if let Some(turn) = guard
+                .threads
+                .get_mut(&session_id)
+                .and_then(|thread| thread.active.as_mut())
+                && !turn.finalized
+                && let Some(tokens) = parse_step_tokens(&part)
+            {
                 turn.usage.add_step(&part_id, tokens);
             }
             return;
         }
-        // The user's own text is the prompt, which the turn already carries.
-        if part_type == "text"
-            && thread.message_roles.get(&message_id).map(String::as_str) == Some("user")
-        {
+        // A child session's parts belong to its child turn. Its user text is the prompt, which
+        // projects as a conversation message on that turn.
+        if let Some(child) = guard.subagents.get_mut(&session_id) {
+            let user = child.roles.get(&message_id).map(String::as_str) == Some("user");
+            let Some(turn) = child.turn.as_mut() else {
+                return;
+            };
+            if part_type == "text" && user {
+                self.project_child_user_part(turn, &part, &message_id);
+                return;
+            }
+            self.dispatch_part(
+                turn,
+                &mut HashMap::new(),
+                None,
+                &session_id,
+                &part,
+                &part_id,
+                &message_id,
+                &part_type,
+            );
             return;
         }
+        let Some(thread) = guard.threads.get_mut(&session_id) else {
+            return;
+        };
+        let user = thread.message_roles.get(&message_id).map(String::as_str) == Some("user");
+        let Some(turn) = thread.active.as_mut() else {
+            return;
+        };
+        if turn.finalized || (part_type == "text" && user) {
+            return;
+        }
+        self.dispatch_part(
+            turn,
+            &mut guard.children,
+            Some(&mut guard.subagents),
+            &session_id,
+            &part,
+            &part_id,
+            &message_id,
+            &part_type,
+        );
+    }
+
+    /// The text, reasoning and tool handling shared by root and child turns. `subagents` is
+    /// `None` inside a child turn: its nested tasks are projected without a child thread.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_part(
+        &self,
+        turn: &mut V1Turn,
+        children: &mut HashMap<String, String>,
+        subagents: Option<&mut HashMap<String, V1Child>>,
+        session_id: &str,
+        part: &Value,
+        part_id: &str,
+        message_id: &str,
+        part_type: &str,
+    ) {
         if part_type == "text" || part_type == "reasoning" {
             let record = PartRecord {
-                message_id,
+                message_id: message_id.to_owned(),
                 reasoning: part_type == "reasoning",
                 text: part
                     .get("text")
@@ -659,12 +731,10 @@ impl OpenCodeV1Session {
                 start: part.pointer("/time/start").and_then(Value::as_i64),
                 end: part.pointer("/time/end").and_then(Value::as_i64),
             };
-            turn.parts.insert(part_id.clone(), record);
-            self.emit_text_part(turn, &part_id, false);
-            return;
-        }
-        if part_type == "tool" {
-            self.on_tool_part(turn, &mut guard.children, &session_id, &part, &part_id);
+            turn.parts.insert(part_id.to_owned(), record);
+            self.emit_text_part(turn, part_id, false);
+        } else if part_type == "tool" {
+            self.on_tool_part(turn, children, subagents, session_id, part, part_id);
         }
     }
 
@@ -790,6 +860,7 @@ impl OpenCodeV1Session {
         &self,
         turn: &mut V1Turn,
         children: &mut HashMap<String, String>,
+        subagents: Option<&mut HashMap<String, V1Child>>,
         session_id: &str,
         part: &Value,
         part_id: &str,
@@ -855,7 +926,8 @@ impl OpenCodeV1Session {
             weak_ref: false,
         };
         if name == "task" {
-            // `emitSubagent`: a task call is a subagent, not a tool call.
+            // `emitSubagent`: a task call is a subagent, not a tool call. The child thread exists
+            // from the first task update that names the child session; the record names it.
             let prompt = input
                 .get("prompt")
                 .and_then(Value::as_str)
@@ -869,11 +941,27 @@ impl OpenCodeV1Session {
                 .pointer("/metadata/sessionId")
                 .or_else(|| state.pointer("/metadata/sessionID"))
                 .and_then(Value::as_str);
+            let subagent_node = derive::node_from_provider_item(&self.driver, part_id);
+            let mut child = None;
+            if let (Some(child_session), Some(subagents)) = (child_session, subagents) {
+                self.ensure_child(
+                    subagents,
+                    turn,
+                    child_session,
+                    &prompt,
+                    title,
+                    &subagent_node,
+                );
+                child = subagents
+                    .get(child_session)
+                    .map(|child| (child.thread.id.clone(), child.provider_thread.id.clone()));
+            }
             let ordinal = item_ordinal(turn, part_id);
             let records = subagent_records(
                 &self.driver,
                 SubagentCall {
                     instance_id: &self.instance_id,
+                    child,
                     of: NodeOf {
                         thread_id: &thread_id,
                         root_node_id: &root_node_id,
@@ -933,6 +1021,229 @@ impl OpenCodeV1Session {
         self.emit(ProviderAdapterV2Event::TurnItemUpdated {
             driver: self.driver.clone(),
             turn_item: item,
+        });
+    }
+
+    /// `emitSubagent`'s child thread: created the first time a task reveals its child session.
+    /// The child app thread is made from the parent's, and it runs on its own provider thread.
+    fn ensure_child(
+        &self,
+        subagents: &mut HashMap<String, V1Child>,
+        parent: &V1Turn,
+        child_session: &str,
+        prompt: &str,
+        title: Option<&str>,
+        subagent_node: &NodeId,
+    ) {
+        if subagents.contains_key(child_session) {
+            return;
+        }
+        let now = UtcDateTime::now();
+        let ordinal = subagents.len() as u64 + 1;
+        let thread_id = derive::thread_from_provider_thread(
+            &self.driver,
+            Some(&self.instance_id),
+            child_session,
+        );
+        let mut provider_thread = make_thread(
+            &self.instance_id,
+            &self.provider_session_id,
+            &thread_id,
+            child_session,
+            None,
+            now,
+        );
+        provider_thread.owner_node_id = Some(subagent_node.clone());
+        let child_title =
+            subagent_thread_title(parent.app_thread.title.as_str(), title, prompt, ordinal);
+        let thread = make_subagent_child_thread(SubagentChildThreadInput {
+            parent_thread: &parent.app_thread,
+            child_thread_id: thread_id.clone(),
+            parent_node_id: subagent_node.clone(),
+            active_provider_thread_id: Some(provider_thread.id.clone()),
+            provider_instance_id: self.instance_id.clone(),
+            model_selection: ModelSelection {
+                instance_id: self.instance_id.clone(),
+                model: parent.app_thread.model_selection.model.clone(),
+                options: None,
+            },
+            title: TrimmedNonEmptyString::new(child_title)
+                .unwrap_or_else(|_| TrimmedNonEmptyString::new("Subagent").expect("literal")),
+            now,
+            created_by: OrchestrationV2Actor::Agent,
+            creation_source: OrchestrationV2CreationSource::Provider,
+        });
+        self.emit(ProviderAdapterV2Event::AppThreadCreated {
+            driver: self.driver.clone(),
+            app_thread: thread.clone(),
+        });
+        self.emit(ProviderAdapterV2Event::ProviderThreadUpdated {
+            driver: self.driver.clone(),
+            provider_thread: provider_thread.clone(),
+            retained_native_turn_ids: None,
+        });
+        subagents.insert(
+            child_session.to_owned(),
+            V1Child {
+                session_id: child_session.to_owned(),
+                thread,
+                provider_thread,
+                roles: HashMap::new(),
+                turn: None,
+                next_turn_ordinal: 1,
+            },
+        );
+    }
+
+    /// `createChildTurn`: a child session's user message starts its turn, under a `root_turn`.
+    fn start_child_turn(&self, child: &mut V1Child, message_id: &str, now: UtcDateTime) {
+        if child.turn.is_some() {
+            return;
+        }
+        let ordinal = child.next_turn_ordinal;
+        child.next_turn_ordinal += 1;
+        let root = derive::node_from_provider_item(
+            &self.driver,
+            &format!("{}:root:{message_id}", child.session_id),
+        );
+        let provider_turn_id = derive::provider_turn(&self.driver, message_id);
+        let provider_turn = OrchestrationV2ProviderTurn {
+            id: provider_turn_id.clone(),
+            provider_thread_id: child.provider_thread.id.clone(),
+            node_id: root.clone(),
+            run_attempt_id: None,
+            native_turn_ref: Some(native_ref(message_id, true)),
+            ordinal: PositiveInt::new(ordinal).expect("child turn ordinals start at one"),
+            status: OrchestrationV2ProviderTurnStatus::Running,
+            started_at: Some(now),
+            completed_at: None,
+            token_usage: None,
+            turn_token_usage: None,
+        };
+        let node = root_turn_node(
+            &child.thread.id,
+            &root,
+            &child.provider_thread.id,
+            &provider_turn_id,
+            provider_turn.native_turn_ref.clone(),
+            OrchestrationV2ExecutionNodeStatus::Running,
+            now,
+            None,
+        );
+        child.turn = Some(V1Turn {
+            provider_turn: provider_turn.clone(),
+            thread_id: child.thread.id.clone(),
+            run_ordinal: 0,
+            admission: AdmissionFlags::default(),
+            interrupted: false,
+            finalized: false,
+            usage: UsageAccum::new(),
+            app_thread: child.thread.clone(),
+            item_ordinals: HashMap::new(),
+            next_item_ordinal: 1,
+            plan_id: None,
+            parts: HashMap::new(),
+        });
+        self.emit(ProviderAdapterV2Event::NodeUpdated {
+            driver: self.driver.clone(),
+            node,
+        });
+        self.emit(ProviderAdapterV2Event::ProviderTurnUpdated {
+            driver: self.driver.clone(),
+            thread_id: Some(child.thread.id.clone()),
+            provider_turn,
+        });
+    }
+
+    /// The child's turn settles when its session goes idle: its streamed text is final, its
+    /// root node completes, and its provider turn completes.
+    fn finish_child_turn(&self, child: &mut V1Child) {
+        let Some(mut turn) = child.turn.take() else {
+            return;
+        };
+        let open: Vec<String> = turn.parts.keys().cloned().collect();
+        for part_id in open {
+            self.emit_text_part(&mut turn, &part_id, true);
+        }
+        let now = UtcDateTime::now();
+        turn.provider_turn.status = OrchestrationV2ProviderTurnStatus::Completed;
+        turn.provider_turn.completed_at = Some(now);
+        let node = root_turn_node(
+            &child.thread.id,
+            &turn.provider_turn.node_id,
+            &child.provider_thread.id,
+            &turn.provider_turn.id,
+            turn.provider_turn.native_turn_ref.clone(),
+            OrchestrationV2ExecutionNodeStatus::Completed,
+            turn.provider_turn.started_at.unwrap_or(now),
+            Some(now),
+        );
+        self.emit(ProviderAdapterV2Event::NodeUpdated {
+            driver: self.driver.clone(),
+            node,
+        });
+        self.emit(ProviderAdapterV2Event::ProviderTurnUpdated {
+            driver: self.driver.clone(),
+            thread_id: Some(child.thread.id.clone()),
+            provider_turn: turn.provider_turn,
+        });
+    }
+
+    /// A message in a child session: its role is kept, a user's message starts the turn, and
+    /// a finished assistant message settles the text it carried.
+    fn on_child_message(&self, child: &mut V1Child, info: &Value, message_id: &str) {
+        let role = info.get("role").and_then(Value::as_str);
+        if let Some(role) = role {
+            child.roles.insert(message_id.to_owned(), role.to_owned());
+        }
+        match role {
+            Some("user") => self.start_child_turn(child, message_id, UtcDateTime::now()),
+            Some("assistant") if info.pointer("/time/completed").is_some() => {
+                if let Some(turn) = child.turn.as_mut() {
+                    let owned: Vec<String> = turn
+                        .parts
+                        .iter()
+                        .filter(|(_, record)| record.message_id == message_id)
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    for part_id in owned {
+                        self.emit_text_part(turn, &part_id, true);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `projectChildUserPart`: the child's prompt, as a user message on its turn's root.
+    fn project_child_user_part(&self, turn: &mut V1Turn, part: &Value, message_id: &str) {
+        let text = part.get("text").and_then(Value::as_str).unwrap_or("");
+        if text.is_empty() {
+            return;
+        }
+        let now = UtcDateTime::now();
+        let ordinal = item_ordinal(turn, message_id);
+        let artifacts = make_subagent_conversation_artifacts(SubagentConversationArtifactsInput {
+            message_id: derive::message_from_provider_item(&self.driver, message_id),
+            sender_thread_id: None,
+            turn_item_id: derive::turn_item_from_provider_item(&self.driver, message_id),
+            thread_id: turn.thread_id.clone(),
+            root_node_id: turn.provider_turn.node_id.clone(),
+            provider_thread_id: Some(turn.provider_turn.provider_thread_id.clone()),
+            provider_turn_id: Some(turn.provider_turn.id.clone()),
+            native_item_ref: Some(native_ref(message_id, false)),
+            role: OrchestrationV2ConversationMessageRole::User,
+            text: text.to_owned(),
+            ordinal,
+            now,
+        });
+        self.emit(ProviderAdapterV2Event::MessageUpdated {
+            driver: self.driver.clone(),
+            message: artifacts.message,
+        });
+        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: self.driver.clone(),
+            turn_item: artifacts.turn_item,
         });
     }
 
@@ -1471,6 +1782,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
                 interrupted: false,
                 finalized: false,
                 usage: UsageAccum::new(),
+                app_thread: input.app_thread.clone(),
                 next_item_ordinal: input.provider_turn_ordinal.max(0) as u64 * 100 + 1,
                 item_ordinals: HashMap::new(),
                 plan_id: None,
@@ -1999,44 +2311,6 @@ fn tool_base(
         started_at: Some(started_at),
         completed_at,
         updated_at: UtcDateTime::now(),
-    }
-}
-
-fn subagent_for(
-    instance_id: &ProviderInstanceId,
-    thread: &OrchestrationV2ProviderThread,
-    thread_id: &ThreadId,
-    parent_node: Option<turin_contracts::NodeId>,
-    child_session: &str,
-    turn: &OrchestrationV2ProviderTurn,
-) -> OrchestrationV2Subagent {
-    let now = UtcDateTime::now();
-    OrchestrationV2Subagent {
-        id: parent_node
-            .unwrap_or_else(|| derive::node_from_provider_item(&opencode_driver(), child_session)),
-        thread_id: thread_id.clone(),
-        run_id: None,
-        parent_node_id: turn.node_id.clone(),
-        origin: OrchestrationV2SubagentOrigin::ProviderNative,
-        created_by: OrchestrationV2Actor::Agent,
-        driver: opencode_driver(),
-        provider_instance_id: instance_id.clone(),
-        provider_thread_id: Some(thread.id.clone()),
-        child_thread_id: None,
-        native_task_ref: Some(native_ref(child_session, false)),
-        prompt: String::new(),
-        title: None,
-        model: None,
-        model_selection: None,
-        completion_wake: None,
-        completion_delivery: None,
-        status: OrchestrationV2SubagentStatus::Running,
-        progress: None,
-        workflow: None,
-        result: None,
-        started_at: Some(now),
-        completed_at: None,
-        updated_at: now,
     }
 }
 

@@ -816,6 +816,7 @@ impl OpenCodeV2Session {
                     &self.driver,
                     SubagentCall {
                         instance_id: &self.instance_id,
+                        child: None,
                         of,
                         ordinal,
                         prompt: &prompt,

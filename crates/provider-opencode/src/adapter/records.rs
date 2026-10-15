@@ -4,7 +4,8 @@
 //! todo list. Both generations build them here, so the field mapping lives in one place.
 
 use turin_contracts::orchestration_v2::{
-    OrchestrationV2Subagent, OrchestrationV2SubagentOrigin, OrchestrationV2SubagentStatus,
+    OrchestrationV2ProviderRef, OrchestrationV2Subagent, OrchestrationV2SubagentOrigin,
+    OrchestrationV2SubagentStatus,
 };
 use turin_contracts::{
     NodeId, PlanId, ProviderThreadId, ProviderTurnId, RuntimeRequestId, ThreadId,
@@ -578,6 +579,8 @@ pub struct SubagentCall<'a> {
     pub result: Option<String>,
     /// The child session the call started, when OpenCode has named it.
     pub child_session: Option<&'a str>,
+    /// The child's thread and provider thread, once its child thread exists.
+    pub child: Option<(ThreadId, ProviderThreadId)>,
     pub now: UtcDateTime,
 }
 
@@ -614,8 +617,11 @@ pub fn subagent_records(driver: &ProviderDriverKind, call: SubagentCall<'_>) -> 
         created_by: OrchestrationV2Actor::Agent,
         driver: driver.clone(),
         provider_instance_id: call.instance_id.clone(),
-        provider_thread_id: Some(call.of.provider_thread_id.clone()),
-        child_thread_id: None,
+        provider_thread_id: Some(call.child.as_ref().map_or_else(
+            || call.of.provider_thread_id.clone(),
+            |child| child.1.clone(),
+        )),
+        child_thread_id: call.child.as_ref().map(|child| child.0.clone()),
         native_task_ref: call.child_session.map(|child| native_ref(child, false)),
         prompt: call.prompt.to_owned(),
         title: call.title.map(str::to_owned),
@@ -640,7 +646,10 @@ pub fn subagent_records(driver: &ProviderDriverKind, call: SubagentCall<'_>) -> 
         thread_id: call.of.thread_id.clone(),
         run_id: None,
         node_id: Some(subagent_id.clone()),
-        provider_thread_id: Some(call.of.provider_thread_id.clone()),
+        provider_thread_id: Some(call.child.as_ref().map_or_else(
+            || call.of.provider_thread_id.clone(),
+            |child| child.1.clone(),
+        )),
         provider_turn_id: Some(call.of.provider_turn_id.clone()),
         native_item_ref: Some(native_ref(call.of.native_item_id, false)),
         parent_item_id: None,
@@ -654,7 +663,7 @@ pub fn subagent_records(driver: &ProviderDriverKind, call: SubagentCall<'_>) -> 
         origin: OrchestrationV2SubagentOrigin::ProviderNative,
         driver: driver.clone(),
         provider_instance_id: call.instance_id.clone(),
-        child_thread_id: None,
+        child_thread_id: call.child.as_ref().map(|child| child.0.clone()),
         prompt: call.prompt.to_owned(),
         progress: None,
         result: call.result,
@@ -663,5 +672,37 @@ pub fn subagent_records(driver: &ProviderDriverKind, call: SubagentCall<'_>) -> 
         node,
         subagent,
         item,
+    }
+}
+
+/// The root node of a child turn (`createChildTurn`): a `root_turn` the child's execution runs
+/// under. It has no parent: the subagent node that started it lives on the parent thread.
+#[allow(clippy::too_many_arguments)]
+pub fn root_turn_node(
+    thread_id: &ThreadId,
+    node_id: &NodeId,
+    provider_thread_id: &ProviderThreadId,
+    provider_turn_id: &ProviderTurnId,
+    native_item_ref: Option<OrchestrationV2ProviderRef>,
+    status: OrchestrationV2ExecutionNodeStatus,
+    started_at: UtcDateTime,
+    completed_at: Option<UtcDateTime>,
+) -> OrchestrationV2ExecutionNode {
+    OrchestrationV2ExecutionNode {
+        id: node_id.clone(),
+        thread_id: thread_id.clone(),
+        run_id: None,
+        parent_node_id: None,
+        root_node_id: node_id.clone(),
+        kind: OrchestrationV2ExecutionNodeKind::RootTurn,
+        status,
+        counts_for_run: false,
+        provider_thread_id: Some(provider_thread_id.clone()),
+        provider_turn_id: Some(provider_turn_id.clone()),
+        native_item_ref,
+        runtime_request_id: None,
+        checkpoint_scope_id: None,
+        started_at: Some(started_at),
+        completed_at,
     }
 }

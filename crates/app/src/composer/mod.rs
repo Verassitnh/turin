@@ -6,7 +6,9 @@
 //! into: the composer renders a [`view_model::ComposerViewModel`] and reports
 //! user intent through [`view_model::ComposerCallbacks`].
 
+pub mod code_block;
 pub mod code_languages;
+pub mod editor_state;
 pub mod editor_mentions;
 pub mod inline_tokens;
 pub mod js_string;

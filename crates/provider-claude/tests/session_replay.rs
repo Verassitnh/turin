@@ -203,6 +203,7 @@ impl Harness {
             Some(env),
             None,
             String::new(),
+            String::new(),
         )
         .with_continuation_requests(Arc::clone(&requests));
         Self {

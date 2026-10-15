@@ -4,7 +4,7 @@ use crate::{
     launch::LaunchOptions,
 };
 use anyhow::{Context, Result};
-use futures::{FutureExt, StreamExt};
+use futures::FutureExt;
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
@@ -15,12 +15,11 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
     process::Command,
     sync::{Notify, mpsc, oneshot},
     task::JoinSet,
 };
-use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::sync::CancellationToken;
 
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<Option<Value>>> + Send>>;
@@ -174,7 +173,6 @@ struct Shared {
 }
 pub struct ClaudeSession {
     state: Arc<Shared>,
-    pid: Option<u32>,
     events: mpsc::UnboundedReceiver<SessionEvent>,
     tasks: JoinSet<()>,
     initialization: Value,
@@ -227,7 +225,6 @@ impl ClaudeSession {
         tasks.spawn(stderr_loop(stderr, state.clone()));
         let mut session = Self {
             state,
-            pid,
             events,
             tasks,
             initialization: Value::Null,
@@ -309,29 +306,32 @@ impl ClaudeSession {
         parse_control_response(response, &subtype)
     }
     pub async fn await_control_response(&self, request_id: &str) -> Result<Value> {
+        let (sender, receiver) = oneshot::channel();
+        // Check `unmatched` and register in `pending` under one guard pair, in the same order as
+        // `route_control_response`. Otherwise a response could be buffered between the two steps
+        // and never be looked at again, and this await would wait forever.
         let early = {
+            let mut pending = self.state.pending.lock().unwrap();
             let mut unmatched = self.state.unmatched.lock().unwrap();
-            unmatched
-                .iter()
-                .position(|(id, _)| id == request_id)
-                .map(|index| unmatched.remove(index).unwrap().1)
+            match unmatched.iter().position(|(id, _)| id == request_id) {
+                Some(index) => Some(unmatched.remove(index).unwrap().1),
+                None => {
+                    if pending.closed {
+                        anyhow::bail!("claude process closed");
+                    }
+                    pending.requests.insert(
+                        request_id.into(),
+                        Pending {
+                            sender,
+                            subtype: "await_control_response".into(),
+                        },
+                    );
+                    None
+                }
+            }
         };
         if let Some(response) = early {
             return parse_control_response(response, "await_control_response");
-        }
-        let (sender, receiver) = oneshot::channel();
-        {
-            let mut pending = self.state.pending.lock().unwrap();
-            if pending.closed {
-                anyhow::bail!("claude process closed");
-            }
-            pending.requests.insert(
-                request_id.into(),
-                Pending {
-                    sender,
-                    subtype: "await_control_response".into(),
-                },
-            );
         }
         let response = receiver
             .await
@@ -391,7 +391,6 @@ impl ClaudeSession {
     pub async fn shutdown(mut self) -> Result<ProcessExit> {
         let _ = self.state.writer.send(WriteCommand::Close);
         let exit = self.wait_for_exit_with_signals().await;
-        self.pid = None;
         self.tasks.abort_all();
         while self.tasks.join_next().await.is_some() {}
         Ok(exit)
@@ -421,12 +420,12 @@ impl ClaudeSession {
             .await
             .is_err()
         {
-            signal_group(self.pid, term_signal());
+            signal_session_group(&self.state, term_signal());
             if tokio::time::timeout(Duration::from_secs(5), &mut wait)
                 .await
                 .is_err()
             {
-                signal_group(self.pid, kill_signal());
+                signal_session_group(&self.state, kill_signal());
                 let _ = tokio::time::timeout(Duration::from_secs(1), &mut wait).await;
             }
         }
@@ -451,9 +450,16 @@ fn parse_control_response(response: Value, subtype: &str) -> Result<Value> {
 }
 impl Drop for ClaudeSession {
     fn drop(&mut self) {
-        signal_group(self.pid, kill_signal());
+        signal_session_group(&self.state, kill_signal());
         self.tasks.abort_all();
     }
+}
+/// Signals the session's process group while the reaper has not taken it yet. Once the leader is
+/// reaped its pid can be reused by an unrelated process group, so the reaper's `take` is the only
+/// point after which the group is no longer ours to signal.
+fn signal_session_group(state: &Shared, signal: i32) {
+    let pgid = *state.pgid.lock().unwrap();
+    signal_group(pgid, signal);
 }
 #[cfg(unix)]
 fn term_signal() -> i32 {
@@ -504,13 +510,12 @@ fn process_exit(status: Option<std::process::ExitStatus>) -> ProcessExit {
     }
 }
 fn exit_error(exit: &ProcessExit, tail: &str) -> String {
-    let mut message = if let Some(signal) = exit.signal {
-        format!("Claude Code process exited with signal {signal}")
-    } else {
-        format!(
-            "Claude Code process exited with code {}",
-            exit.code.unwrap_or(0)
-        )
+    let mut message = match (exit.signal, exit.code) {
+        (Some(signal), _) => format!("Claude Code process exited with signal {signal}"),
+        (None, Some(code)) => format!("Claude Code process exited with code {code}"),
+        // The reaper has not reported a status (or wait() failed), so the child may still be
+        // running. Report what we know instead of inventing a code.
+        (None, None) => "Claude Code process closed stdout without reporting an exit status".into(),
     };
     let tail = tail.trim();
     if !tail.is_empty() {
@@ -572,92 +577,116 @@ async fn write_loop(
 const MAX_STDOUT_LINE: usize = 32 * 1024 * 1024;
 
 async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
-    let mut lines = FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_STDOUT_LINE));
+    // Raw bytes, not `LinesCodec`: that codec fails the whole stream on the first non-UTF-8 line
+    // while the CLI is still alive. Upstream reads with readline, which decodes lossily, so a bad
+    // line becomes a parse error below and reading goes on.
+    let mut reader = tokio::io::BufReader::new(stdout);
     let mut handlers = JoinSet::new();
+    let mut line = Vec::new();
     loop {
         while handlers.try_join_next().is_some() {}
-        match lines.next().await {
-            Some(Ok(line)) => {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let value: Value = match serde_json::from_str(&line) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let _ = state
-                            .events
-                            .send(SessionEvent::Error(format!("stdout JSON: {e}")));
-                        continue;
-                    }
-                };
-                match value.get("type").and_then(Value::as_str) {
-                    Some("control_response") => {
-                        let response = value.get("response").cloned().unwrap_or(Value::Null);
-                        if let Some(id) = response.get("request_id").and_then(Value::as_str) {
-                            if let Some(pending) = state.pending.lock().unwrap().requests.remove(id)
-                            {
-                                if pending.subtype == "initialize"
-                                    && response.get("subtype").and_then(Value::as_str)
-                                        == Some("success")
-                                {
-                                    replay_pending(&response, &state, &mut handlers);
-                                }
-                                let _ = pending.sender.send(response);
-                            } else {
-                                let mut unmatched = state.unmatched.lock().unwrap();
-                                if unmatched.len() >= 1024 {
-                                    unmatched.pop_front();
-                                }
-                                unmatched.push_back((id.into(), response));
-                            }
-                        }
-                    }
-                    Some("control_request") => dispatch(value, &state, &mut handlers),
-                    Some("control_cancel_request") => {
-                        if let Some(id) = value.get("request_id").and_then(Value::as_str)
-                            && let Some(token) = state.inbound.lock().unwrap().remove(id)
-                        {
-                            token.cancel();
-                        }
-                    }
-                    Some("keep_alive" | "transcript_mirror") => {}
-                    _ => match Frame::decode(value) {
-                        Ok(frame) => {
-                            let _ = state.events.send(SessionEvent::Frame(frame));
-                        }
-                        Err(e) => {
-                            let _ = state
-                                .events
-                                .send(SessionEvent::Error(format!("invalid known frame: {e}")));
-                            break;
-                        }
-                    },
-                }
+        line.clear();
+        // `take` caps a single line. A line longer than the cap is the only reader-fatal case.
+        match (&mut reader)
+            .take(MAX_STDOUT_LINE as u64)
+            .read_until(b'\n', &mut line)
+            .await
+        {
+            Ok(0) => break,
+            Ok(_) if line.len() == MAX_STDOUT_LINE && line.last() != Some(&b'\n') => {
+                let _ = state.events.send(SessionEvent::Error(format!(
+                    "stdout: line exceeds {MAX_STDOUT_LINE} bytes"
+                )));
+                break;
             }
-            Some(Err(e)) => {
+            Ok(_) => {}
+            Err(e) => {
                 let _ = state
                     .events
                     .send(SessionEvent::Error(format!("stdout: {e}")));
                 break;
             }
-            None => break,
+        }
+        let text = String::from_utf8_lossy(&line);
+        let text = text.trim_end_matches(['\n', '\r']);
+        if text.trim().is_empty() {
+            continue;
+        }
+        let value: Value = match serde_json::from_str(text) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = state
+                    .events
+                    .send(SessionEvent::Error(format!("stdout JSON: {e}")));
+                continue;
+            }
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("control_response") => {
+                let response = value.get("response").cloned().unwrap_or(Value::Null);
+                route_control_response(&state, response, &mut handlers);
+            }
+            Some("control_request") => dispatch(value, &state, &mut handlers),
+            Some("control_cancel_request") => {
+                if let Some(id) = value.get("request_id").and_then(Value::as_str)
+                    && let Some(token) = state.inbound.lock().unwrap().remove(id)
+                {
+                    token.cancel();
+                }
+            }
+            Some("keep_alive" | "transcript_mirror") => {}
+            _ => match Frame::decode(value) {
+                Ok(frame) => {
+                    let _ = state.events.send(SessionEvent::Frame(frame));
+                }
+                Err(e) => {
+                    let _ = state
+                        .events
+                        .send(SessionEvent::Error(format!("invalid known frame: {e}")));
+                    break;
+                }
+            },
         }
     }
     handlers.abort_all();
     state.pending.lock().unwrap().fail_all();
     let _ = state.events.send(SessionEvent::Eof);
 }
+/// Delivers a control response to its waiter, or buffers it for a waiter that has not registered yet.
+/// The `pending` guard stays held while buffering: `await_control_response` checks `unmatched` and
+/// registers in `pending` under the same guards, so a response cannot fall between those two steps.
+fn route_control_response(state: &Arc<Shared>, response: Value, tasks: &mut JoinSet<()>) {
+    let Some(id) = response.get("request_id").and_then(Value::as_str) else {
+        return;
+    };
+    let mut pending = state.pending.lock().unwrap();
+    let Some(entry) = pending.requests.remove(id) else {
+        let mut unmatched = state.unmatched.lock().unwrap();
+        if unmatched.len() >= 1024 {
+            unmatched.pop_front();
+        }
+        unmatched.push_back((id.into(), response));
+        return;
+    };
+    drop(pending);
+    if entry.subtype == "initialize"
+        && response.get("subtype").and_then(Value::as_str) == Some("success")
+    {
+        replay_pending(&response, state, tasks);
+    }
+    let _ = entry.sender.send(response);
+}
+/// Each pending list carries one subtype, as in sdk.mjs `processPendingPermissionRequests` (only
+/// `can_use_tool`) and `processPendingUserDialogRequests` (only `request_user_dialog`). An item in
+/// the wrong list is not dispatched.
 fn replay_pending(response: &Value, state: &Arc<Shared>, tasks: &mut JoinSet<()>) {
-    for name in [
-        "pending_permission_requests",
-        "pending_user_dialog_requests",
+    for (name, subtype) in [
+        ("pending_permission_requests", "can_use_tool"),
+        ("pending_user_dialog_requests", "request_user_dialog"),
     ] {
         if let Some(items) = response.get(name).and_then(Value::as_array) {
             for item in items {
-                if matches!(
-                    item.pointer("/request/subtype").and_then(Value::as_str),
-                    Some("can_use_tool" | "request_user_dialog")
-                ) {
+                if item.pointer("/request/subtype").and_then(Value::as_str) == Some(subtype) {
                     dispatch(item.clone(), state, tasks);
                 }
             }
@@ -1167,6 +1196,149 @@ for line in sys.stdin:
         session.shutdown().await.unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
+    /// A non-UTF-8 stdout line is a bad line, like bad JSON: it becomes one Error event and the
+    /// reader keeps going, so later frames and control replies still arrive.
+    #[tokio::test]
+    async fn non_utf8_stdout_line_is_an_error_and_reading_continues() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-utf8-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")!="control_request":
+        continue
+    if value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        sys.stdout.buffer.write(b"\xff\n")
+        sys.stdout.buffer.flush()
+        print(json.dumps({"type":"system","subtype":"status","status":"after-invalid"}),flush=True)
+    else:
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{}}}),flush=True)
+"#,
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        let mut errors = vec![];
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                SessionEvent::Frame(frame) if frame.raw["status"] == "after-invalid" => break,
+                SessionEvent::Error(error) => errors.push(error),
+                SessionEvent::Eof => panic!("reader stopped after a non-UTF-8 line"),
+                _ => {}
+            }
+        }
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("stdout JSON"), "{errors:?}");
+        let reply = tokio::time::timeout(Duration::from_secs(2), session.get_mcp_status())
+            .await
+            .expect("request hung after a non-UTF-8 line")
+            .unwrap();
+        assert_eq!(reply, json!({}));
+        session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    struct Recorder(mpsc::UnboundedSender<String>);
+    impl ControlHandler for Recorder {
+        fn handle(&self, request: ControlRequest, _: CancellationToken) -> HandlerFuture {
+            let _ = self.0.send(request.request_id);
+            Box::pin(async { Ok(Some(json!({}))) })
+        }
+    }
+    /// The initialize reply lists a request under each pending list, with one misfiled item per list.
+    /// Only the items whose subtype matches their list may reach the handler.
+    #[tokio::test]
+    async fn replay_dispatches_each_pending_list_only_for_its_own_subtype() {
+        let dir =
+            std::env::temp_dir().join(format!("turin-claude-replay-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]},
+            "pending_permission_requests":[
+                {"type":"control_request","request_id":"perm-ok","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{},"tool_use_id":"t1"}},
+                {"type":"control_request","request_id":"perm-misfiled","request":{"subtype":"request_user_dialog","dialog_kind":"x","payload":{}}}],
+            "pending_user_dialog_requests":[
+                {"type":"control_request","request_id":"dialog-ok","request":{"subtype":"request_user_dialog","dialog_kind":"x","payload":{}}},
+                {"type":"control_request","request_id":"dialog-misfiled","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{},"tool_use_id":"t2"}}]
+        }}),flush=True)
+"#,
+        );
+        let (tx, mut dispatched) = mpsc::unbounded_channel();
+        let session = ClaudeSession::spawn(options, Arc::new(Recorder(tx)))
+            .await
+            .unwrap();
+        let mut seen = vec![];
+        while let Ok(Some(id)) =
+            tokio::time::timeout(Duration::from_millis(500), dispatched.recv()).await
+        {
+            seen.push(id);
+        }
+        seen.sort();
+        assert_eq!(seen, ["dialog-ok", "perm-ok"]);
+        session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    /// Once the CLI exits on its own the reaper has reaped the leader and released the group id.
+    /// Cleanup must signal only the group the session still owns. The old pid can name an unrelated
+    /// process group by then, so a bystander in its own group must survive.
+    #[tokio::test]
+    async fn exited_session_does_not_signal_a_group_it_no_longer_owns() {
+        use std::os::unix::process::CommandExt;
+        let dir = std::env::temp_dir().join(format!("turin-claude-pgid-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        raise SystemExit(0)
+"#,
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                SessionEvent::Exit(_) => break,
+                SessionEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        assert!(session.state.pgid.lock().unwrap().is_none());
+        let mut bystander = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        signal_session_group(&session.state, kill_signal());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let alive = bystander.try_wait().unwrap().is_none();
+        bystander.kill().unwrap();
+        bystander.wait().unwrap();
+        assert!(alive, "session signaled a process group it does not own");
+        drop(session);
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[tokio::test]
     async fn spawn_reports_exit_code_when_the_cli_dies_before_initialize() {
         let dir = std::env::temp_dir().join(format!("turin-claude-exit-{}", uuid::Uuid::new_v4()));
@@ -1185,6 +1357,34 @@ for line in sys.stdin:
             "{text}"
         );
         assert!(text.contains("Error: not logged in"), "{text}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    /// Closes stdout without answering initialize and keeps running past the 2s exit wait. The child
+    /// is alive, so the spawn error must not claim it exited with code 0.
+    #[tokio::test]
+    async fn spawn_does_not_invent_an_exit_code_while_the_cli_is_still_running() {
+        let dir =
+            std::env::temp_dir().join(format!("turin-claude-unknown-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import os,sys,time
+sys.stdin.readline()
+os.close(1)
+time.sleep(3)
+"#,
+        );
+        let error = match ClaudeSession::spawn(options, Arc::new(Accept)).await {
+            Err(error) => error,
+            Ok(_) => panic!("spawn succeeded"),
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("closed stdout without reporting an exit status"),
+            "{text}"
+        );
+        assert!(!text.contains("code 0"), "{text}");
         fs::remove_dir_all(dir).unwrap();
     }
     #[tokio::test]
@@ -1290,6 +1490,56 @@ for line in sys.stdin:
         })
         .await
         .unwrap_or_else(|_| panic!("grandchild {pid} still alive"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+    /// Races `await_control_response` against `route_control_response` on a multi-thread runtime.
+    /// Before the shared lock order, a response landing between the waiter's unmatched check and its
+    /// pending insert was buffered and never delivered, so the waiter hung. Each round must finish.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn await_control_response_never_misses_a_racing_response() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-race-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+"#,
+        );
+        let session = Arc::new(
+            ClaudeSession::spawn(options, Arc::new(Accept))
+                .await
+                .unwrap(),
+        );
+        for round in 0..2000 {
+            let id = format!("race-{round}");
+            let waiter = tokio::spawn({
+                let session = session.clone();
+                let id = id.clone();
+                async move { session.await_control_response(&id).await }
+            });
+            let router = tokio::task::spawn_blocking({
+                let state = session.state.clone();
+                let id = id.clone();
+                move || {
+                    let mut tasks = JoinSet::new();
+                    let response =
+                        json!({"subtype":"success","request_id":id,"response":{"round":round}});
+                    route_control_response(&state, response, &mut tasks);
+                }
+            });
+            router.await.unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(2), waiter)
+                .await
+                .unwrap_or_else(|_| panic!("response {id} was lost in round {round}"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(response["round"], round);
+        }
+        drop(session);
         fs::remove_dir_all(dir).unwrap();
     }
 }

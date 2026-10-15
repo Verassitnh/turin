@@ -28,7 +28,11 @@ use crate::{
         reasoning_item, streaming_reasoning_item, tool_call_artifacts,
     },
     claude_turn_token_usage::normalize_claude_turn_token_usage,
+    claude_usage_limits::ClaudeUsageLimitHooks,
     claude_workflow_progress::parse_claude_workflow_run_handles,
+};
+use crate::{
+    claude_skill_dispatch::dispatch_content_blocks, claude_skills::user_invocable_skill_names,
 };
 use async_trait::async_trait;
 use futures::stream;
@@ -308,8 +312,17 @@ pub struct ClaudeProviderAdapter {
     environment: Option<std::collections::BTreeMap<String, String>>,
     attachments_dir: Option<PathBuf>,
     runtime_instructions: String,
+    /// `$HOME` for the skill config dir fallback (`~/.claude`).
+    home_directory: String,
+    usage_limit_hooks: Option<ClaudeUsageLimitHooks>,
 }
 impl ClaudeProviderAdapter {
+    /// Reports `rate_limit_event` frames through `hooks` (upstream `onUsageLimits`).
+    pub fn with_usage_limit_hooks(mut self, hooks: ClaudeUsageLimitHooks) -> Self {
+        self.usage_limit_hooks = Some(hooks);
+        self
+    }
+
     pub fn new(
         instance_id: ProviderInstanceId,
         settings: ClaudeSettings,
@@ -317,6 +330,7 @@ impl ClaudeProviderAdapter {
         environment: Option<std::collections::BTreeMap<String, String>>,
         attachments_dir: Option<PathBuf>,
         runtime_instructions: String,
+        home_directory: String,
     ) -> Self {
         Self {
             continuation_requests: Arc::new(ProviderContinuationRequests::dropping()),
@@ -327,6 +341,8 @@ impl ClaudeProviderAdapter {
             environment,
             attachments_dir,
             runtime_instructions,
+            home_directory,
+            usage_limit_hooks: None,
         }
     }
 }
@@ -394,6 +410,8 @@ impl ProviderAdapterV2 for ClaudeProviderAdapter {
             environment: self.environment.clone(),
             attachments_dir: self.attachments_dir.clone(),
             runtime_instructions: self.runtime_instructions.clone(),
+            home_directory: self.home_directory.clone(),
+            usage_limit_hooks: self.usage_limit_hooks.clone(),
             selection: input.model_selection,
             claude: None,
             host_requests: None,
@@ -722,6 +740,8 @@ struct ClaudeActor {
     environment: Option<std::collections::BTreeMap<String, String>>,
     attachments_dir: Option<PathBuf>,
     runtime_instructions: String,
+    home_directory: String,
+    usage_limit_hooks: Option<ClaudeUsageLimitHooks>,
     selection: ModelSelection,
     claude: Option<ClaudeAdapterV2>,
     host_requests: Option<mpsc::UnboundedReceiver<ClaudeHostRequest>>,
@@ -971,11 +991,36 @@ impl ClaudeActor {
                 &input.message.text,
                 compiled.prompt_effort.as_deref(),
             );
-            self.claude
+            // A `$skill` mention becomes the trailing `/skill` block Claude Code expands.
+            let skill_names = user_invocable_skill_names(
+                &self.settings,
+                input
+                    .runtime_policy
+                    .cwd
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .as_deref(),
+                &self
+                    .environment
+                    .as_ref()
+                    .map(|environment| {
+                        environment
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                &self.home_directory,
+            );
+            let session = self
+                .claude
                 .as_mut()
-                .ok_or_else(|| protocol_error("Claude session is not running"))?
-                .send_prompt(text, Some(prompt_uuid.clone()), None)
-                .map_err(|e| protocol_error(e.to_string()))?;
+                .ok_or_else(|| protocol_error("Claude session is not running"))?;
+            match dispatch_content_blocks(&text, &skill_names) {
+                Some(blocks) => session.send_blocks(blocks, Some(prompt_uuid.clone()), None),
+                None => session.send_prompt(text, Some(prompt_uuid.clone()), None),
+            }
+            .map_err(|e| protocol_error(e.to_string()))?;
             Some(prompt_uuid)
         };
         let scope = TurnScope {
@@ -1434,7 +1479,12 @@ impl ClaudeActor {
             ClaudeAdapterEvent::Background(frame) => self.background(frame),
             ClaudeAdapterEvent::Stream(frame) => self.stream(frame),
             ClaudeAdapterEvent::Result(frame) => self.result(frame),
-            ClaudeAdapterEvent::RateLimit(frame) => self.rate_limit(frame),
+            ClaudeAdapterEvent::RateLimit(frame) => {
+                if let Some(hooks) = &self.usage_limit_hooks {
+                    hooks.emit_rate_limit_event(&frame.raw);
+                }
+                self.rate_limit(frame);
+            }
             ClaudeAdapterEvent::Init { frame, .. } => self.init(frame),
             ClaudeAdapterEvent::Error(error) => self.fail_active(&error),
             ClaudeAdapterEvent::Eof => {

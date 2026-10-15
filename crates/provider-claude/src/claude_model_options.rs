@@ -69,7 +69,8 @@ pub fn compile_claude_model_selection(
     catalog: &ClaudeModelCatalog,
 ) -> CompiledClaudeModelSelection {
     let model = selection.model.as_str();
-    let caps = get_claude_catalog_model_capabilities(catalog, Some(model));
+    let caps = serde_json::to_value(get_claude_catalog_model_capabilities(catalog, Some(model)))
+        .unwrap_or_else(|_| json!({}));
     let raw_effort = option(selection, "effort").and_then(|v| v.as_str().map(str::to_owned));
     let resolved_effort = select_value(&caps, "effort", raw_effort.as_deref());
     let effort = normalize_claude_catalog_effort(catalog, resolved_effort.as_deref(), Some(model));
@@ -115,23 +116,7 @@ pub fn compile_claude_model_selection(
     if resolved_effort.as_deref() == Some("ultracode") {
         settings.insert("ultracode".into(), json!(true));
     }
-    let options = Value::Object(
-        selection
-            .options
-            .as_ref()
-            .map(|options| {
-                options
-                    .iter()
-                    .filter_map(|o| {
-                        serde_json::to_value(&o.value)
-                            .ok()
-                            .map(|v| (o.id.as_str().to_owned(), v))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-    );
-    let api_model_id = resolve_claude_catalog_api_model_id(catalog, model, &options);
+    let api_model_id = resolve_claude_catalog_api_model_id(catalog, selection);
     let settings = Value::Object(settings);
     let query_identity = format!(
         "{{\"apiModelId\":{},\"effort\":{},\"settings\":{}}}",
@@ -166,13 +151,28 @@ pub fn apply_claude_prompt_effort_prefix(text: &str, effort: Option<&str>) -> St
 mod tests {
     use super::*;
     use crate::claude_model_catalog::ClaudeCatalogModel;
+    use crate::claude_model_manifest::ClaudeCodeCompatibility;
     #[test]
     fn compiles_selection_defaults_and_prompt_effort() {
         let catalog = ClaudeModelCatalog {
             models: vec![ClaudeCatalogModel {
-                model: json!({"slug":"sonnet","capabilities":{"optionDescriptors":[{"id":"effort","type":"select","options":[{"id":"default","isDefault":true},{"id":"ultrathink"}],"promptInjectedValues":["ultrathink"]},{"id":"fastMode","type":"boolean"}]}}),
-                runtime: json!({}),
-                compatibility: json!({}),
+                model: serde_json::from_value(json!({
+                    "slug": "sonnet",
+                    "name": "Sonnet",
+                    "isCustom": false,
+                    "capabilities": {"optionDescriptors": [
+                        {"id": "effort", "label": "Reasoning", "type": "select",
+                         "options": [
+                            {"id": "default", "label": "Default", "isDefault": true},
+                            {"id": "ultrathink", "label": "Ultrathink"}
+                         ],
+                         "promptInjectedValues": ["ultrathink"]},
+                        {"id": "fastMode", "label": "Fast Mode", "type": "boolean"}
+                    ]}
+                }))
+                .unwrap(),
+                runtime: Default::default(),
+                compatibility: ClaudeCodeCompatibility::default(),
             }],
         };
         let selection: ModelSelection = serde_json::from_value(json!({"instanceId":"claudeAgent","model":"sonnet","options":[{"id":"effort","value":"ultrathink"}]})).unwrap();

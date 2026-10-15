@@ -1,6 +1,6 @@
 //! Port of upstream/packages/shared/src/composerInlineTokens.ts
 
-use crate::js_string::{decode_uri_component, slice_utf16, utf16_len};
+use crate::js_string::{JS_WS, decode_uri_component, slice_utf16, utf16_len};
 use turin_contracts::base_schemas::is_js_whitespace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,8 +205,10 @@ fn is_scoped_package_reference(value: &str) -> bool {
     static SCOPED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     SCOPED
         .get_or_init(|| {
-            regex::Regex::new(r#"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*(?:/[^\s@"]+)*$"#)
-                .expect("valid regex")
+            regex::Regex::new(&format!(
+                r#"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*(?:/[^{JS_WS}@"]+)*$"#
+            ))
+            .expect("valid regex")
         })
         .is_match(value)
 }

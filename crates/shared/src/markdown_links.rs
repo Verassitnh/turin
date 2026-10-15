@@ -536,12 +536,12 @@ fn markdown_link_tail_scanner(markdown: &str) -> impl FnMut(usize) -> Option<usi
     }
 }
 
+/// The character starting at `byte_index`, or `None` past the end or inside a multi-byte
+/// character. `get` keeps a stray index from panicking the slice.
 fn char_at(markdown: &str, byte_index: usize) -> Option<char> {
-    if byte_index >= markdown.len() {
-        return None;
-    }
-    // Callers only inspect delimiter bytes at ASCII boundaries.
-    markdown[byte_index..].chars().next()
+    markdown
+        .get(byte_index..)
+        .and_then(|rest| rest.chars().next())
 }
 
 struct LinkDestinationSpan {
@@ -650,3 +650,16 @@ pub fn is_windows_drive_path_href(href: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod qc_regressions {
+    use super::*;
+
+    #[test]
+    fn char_at_reads_no_character_inside_a_multibyte_character() {
+        // A byte index inside a character used to slice mid-character and panic.
+        assert_eq!(char_at("é", 0), Some('é'));
+        assert_eq!(char_at("é", 1), None);
+        assert_eq!(char_at("é", 2), None);
+    }
+}

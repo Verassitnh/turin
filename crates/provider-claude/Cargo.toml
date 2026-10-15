@@ -20,7 +20,14 @@ url.workspace = true
 tokio-util.workspace = true
 indexmap.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
+regex.workspace = true
+fancy-regex.workspace = true
+yaml-rust2 = "0.13"
+reqwest.workspace = true
 parking_lot.workspace = true
 tokio-stream.workspace = true
 futures.workspace = true
-regex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -5,5 +5,27 @@
 
 #![allow(dead_code)]
 
+pub mod dropdown;
 pub mod fixtures;
+pub mod link_pull_request_dialog_logic;
+pub mod mock_source;
+pub mod presentation_view;
+pub mod pull_request_detail_logic;
+pub mod pull_request_diff_logic;
+pub mod pull_request_editing_logic;
+pub mod pull_request_file_order_logic;
+pub mod pull_request_files_viewed_logic;
+pub mod pull_request_list_lines;
 pub mod pull_request_list_logic;
+pub mod pull_request_list_preferences;
+pub mod pull_request_markdown_logic;
+pub mod pull_request_presentation;
+pub mod pull_request_project_assignment_logic;
+pub mod pull_request_project_filter_logic;
+pub mod pull_request_reactions_logic;
+pub mod pull_request_review_store;
+pub mod pull_request_stack_snapshot;
+pub mod pull_request_summary_scroll_logic;
+pub mod pull_requests_route_search;
+pub mod relative_time;
+pub mod view_model;

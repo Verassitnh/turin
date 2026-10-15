@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use turin_contracts::pull_request::{
     PullRequestChecks, PullRequestDetailView, PullRequestDiffResult, PullRequestFilesViewedResult,
-    PullRequestLinkedThreadsResult, PullRequestListEntry, PullRequestStack,
+    PullRequestLinkedThreadsResult, PullRequestListEntry, PullRequestListResult, PullRequestStack,
 };
 use turin_contracts::pull_request_review_guide::PullRequestReviewGuideResult;
 use turin_contracts::thread_pull_request::ThreadPullRequestLink;
@@ -246,6 +246,85 @@ pub fn list_entries() -> Vec<PullRequestListEntry> {
         ),
     ];
     rows.into_iter().map(decode).collect()
+}
+
+/// What `pullRequests.list` answers: the rows plus the host summary and the signed-in account.
+pub fn list_result() -> PullRequestListResult {
+    let entries: Vec<Value> = list_entries()
+        .iter()
+        .map(|entry| serde_json::to_value(entry).expect("entries encode"))
+        .collect();
+    decode(json!({
+        "viewers": { DEMO_HOST: DEMO_VIEWER },
+        "providers": [{
+            "host": DEMO_HOST,
+            "kind": "github",
+            "searchesOnHost": true,
+            "actions": ["merge", "ready", "draft", "close", "reopen"],
+            "projectCount": 1,
+            "configured": true,
+            "detail": null,
+        }],
+        "entries": entries,
+        "errors": [],
+        "truncated": false,
+        "nextCursors": {},
+    }))
+}
+
+/// A detail for any listed row: the demo detail re-labelled with the row's own fields and no
+/// activity, so every row opens to something that agrees with the list.
+pub fn detail_view_for(entry: &PullRequestListEntry) -> PullRequestDetailView {
+    if entry.number.get() == DEMO_DETAIL_NUMBER {
+        return detail_view();
+    }
+    let mut value = serde_json::to_value(detail_view()).expect("detail encodes");
+    let row = serde_json::to_value(entry).expect("entry encodes");
+    for key in [
+        "title", "url", "author", "state", "isDraft", "mergeability", "additions", "deletions",
+        "headBranch", "baseBranch", "createdAt", "updatedAt", "labels", "number",
+    ] {
+        value[key] = row[key].clone();
+    }
+    value["body"] = json!(format!("Automated description for {}.", entry.title.as_str()));
+    value["changedFiles"] = json!(3);
+    value["comments"] = json!([]);
+    value["commentCount"] = json!(0);
+    value["reviewThreads"] = json!([]);
+    value["commits"] = json!([]);
+    value["reactions"] = json!([]);
+    value["checks"] = json!([]);
+    value["reviewers"] = json!([]);
+    if let Some(object) = value.as_object_mut() {
+        object.remove("headSha");
+    }
+    if entry.state != turin_contracts::pull_request::PullRequestState::Open {
+        value["mergedAt"] = if entry.state == turin_contracts::pull_request::PullRequestState::Merged {
+            json!(ago(2 * DAY))
+        } else {
+            Value::Null
+        };
+        value["closedAt"] = json!(ago(2 * DAY));
+    }
+    decode(value)
+}
+
+/// A freshly posted review-thread reply by the viewer.
+pub fn new_thread_comment(id: &str, body: &str) -> turin_contracts::pull_request::PullRequestThreadComment {
+    decode(json!({
+        "id": id, "author": actor(DEMO_VIEWER, "Jackson Wells"),
+        "body": body, "createdAt": ago(0), "url": null, "canEdit": true,
+    }))
+}
+
+/// A freshly posted comment by the viewer.
+pub fn new_comment(id: &str, body: &str) -> turin_contracts::pull_request::PullRequestComment {
+    decode(json!({
+        "id": id, "kind": "issue-comment",
+        "author": actor(DEMO_VIEWER, "Jackson Wells"),
+        "body": body, "createdAt": ago(0), "url": null, "path": null, "reviewState": null,
+        "canEdit": true,
+    }))
 }
 
 fn demo_reviewers() -> Value {

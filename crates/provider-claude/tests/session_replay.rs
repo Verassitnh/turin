@@ -441,10 +441,9 @@ async fn exit_before_result_fails_the_turn() {
         _ => None,
     });
     let text = format!("{failure:?}");
-    assert!(
-        text.contains("Claude Code process exited before turn result"),
-        "{text}"
-    );
+    // The session reports end of stream and the exit status as two events. Which one
+    // lands first decides the message, and both name the exit.
+    assert!(text.contains("Claude Code process exited"), "{text}");
 }
 
 #[tokio::test]

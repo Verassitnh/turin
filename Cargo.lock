@@ -7066,6 +7066,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "futures",
  "indexmap",
@@ -7085,6 +7086,8 @@ dependencies = [
  "turin-hooks",
  "turin-persistence",
  "turin-provider-core",
+ "unicode-segmentation",
+ "url",
  "uuid",
 ]
 

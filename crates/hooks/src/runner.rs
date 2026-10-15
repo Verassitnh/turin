@@ -56,6 +56,74 @@ pub struct HookDispatchContext {
     pub thread_cwd: Option<PathBuf>,
 }
 
+/// What a blocking `thread.created` hook reports back through the return
+/// protocol: its last non-blank stdout line, a JSON object
+/// `{"worktreePath": "...", "branch": "..."}` (both optional). The
+/// orchestrator binds the new thread to this workspace.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookReturn {
+    /// Existing directory the thread should run in. A relative path in the
+    /// hook's output is resolved against the directory the hook ran in.
+    #[serde(default)]
+    pub worktree_path: Option<PathBuf>,
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+/// Parses the return protocol from a hook's stdout. Malformed or absent
+/// output is `None` (no change), never an error. A `worktreePath` that does
+/// not name an existing directory is dropped.
+pub fn parse_hook_return(stdout: &str, hook_cwd: &Path) -> Option<HookReturn> {
+    let line = stdout.lines().rev().find(|line| !line.trim().is_empty())?;
+    let line = line.trim();
+    if !line.starts_with('{') {
+        return None;
+    }
+    let raw: HookReturn = serde_json::from_str(line).ok()?;
+    let branch = raw
+        .branch
+        .map(|branch| branch.trim().to_owned())
+        .filter(|branch| !branch.is_empty());
+    let worktree_path = raw
+        .worktree_path
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| normalize_lexically(&hook_cwd.join(path)))
+        .filter(|path| {
+            let exists = path.is_dir();
+            if !exists {
+                tracing::warn!(path = %path.display(), "hook returned a worktreePath that is not an existing directory; ignoring it");
+            }
+            exists
+        });
+    if worktree_path.is_none() && branch.is_none() {
+        return None;
+    }
+    Some(HookReturn {
+        worktree_path,
+        branch,
+    })
+}
+
+/// Resolves `.` and `..` without touching the filesystem (the path may be a
+/// symlink the user wants kept as written).
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(component);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Outcome of a single hook run, in upstream `ProcessRunOutput` shape plus
 /// hook attribution. On timeout the output fields are empty (upstream
 /// `timeoutBehavior: "timedOutResult"` also discards partials).
@@ -82,6 +150,9 @@ pub struct HookRunResult {
     pub stderr_invalid_utf8: bool,
     /// Spawn or wait failure, when the command never produced an exit code.
     pub error: Option<String>,
+    /// Workspace the hook reported through the return protocol. Only parsed
+    /// for blocking `thread.created` hooks that exited 0.
+    pub returned: Option<HookReturn>,
 }
 
 /// Everything the results channel carries.
@@ -114,6 +185,10 @@ pub struct DispatchSummary {
     /// Set when untrusted/changed project hooks subscribe to this event and
     /// were therefore skipped.
     pub project_hooks_pending: Option<PendingProjectHooks>,
+    /// Workspace reported by blocking `thread.created` hooks (return
+    /// protocol). Later hooks override earlier ones field by field. `None`
+    /// when no hook reported anything: the thread keeps its workspace.
+    pub thread_workspace: Option<HookReturn>,
 }
 
 /// Resolves a hook's working directory. `cwd = "thread"` with no thread cwd
@@ -208,6 +283,10 @@ pub async fn dispatch(
 ) -> DispatchSummary {
     let config = runner.config();
     let mut summary = DispatchSummary::default();
+    // Hooks later in this dispatch see the workspace an earlier blocking hook
+    // returned, so `cwd = "thread"` and TURIN_WORKTREE_PATH follow it.
+    let mut context = context.clone();
+    let context = &mut context;
 
     if let Some(pending) = config.pending_project_hooks()
         && pending.hooks.iter().any(|hook| hook.event == event.kind)
@@ -261,6 +340,18 @@ pub async fn dispatch(
                 .inner
                 .results
                 .send(HookUpdate::Run(Box::new(result.clone())));
+            if let Some(returned) = &result.returned {
+                let merged = summary
+                    .thread_workspace
+                    .get_or_insert_with(Default::default);
+                if let Some(path) = &returned.worktree_path {
+                    merged.worktree_path = Some(path.clone());
+                    context.thread_cwd = Some(path.clone());
+                }
+                if returned.branch.is_some() {
+                    merged.branch = returned.branch.clone();
+                }
+            }
             summary.blocking.push(result);
         } else {
             let results = runner.inner.results.clone();
@@ -313,6 +404,7 @@ async fn run_hook(plan: &HookRunPlan) -> HookRunResult {
         stdout_invalid_utf8: false,
         stderr_invalid_utf8: false,
         error: None,
+        returned: None,
     };
 
     let mut command = Command::new("/bin/sh");
@@ -387,6 +479,14 @@ async fn run_hook(plan: &HookRunPlan) -> HookRunResult {
         }
     }
     result.duration_ms = started.elapsed().as_millis() as u64;
+    if plan.blocking
+        && plan.spec.event == HookEventKind::ThreadCreated
+        && result.exit_code == Some(0)
+        && !result.timed_out
+        && !result.stdout_truncated
+    {
+        result.returned = parse_hook_return(&result.stdout, &plan.cwd);
+    }
     result
 }
 
@@ -1945,5 +2045,126 @@ blocking = false
         assert!(!env_text.contains("TURIN_QC_SECRET"), "{env_text}");
         assert!(!env_text.contains("stale-thread"), "{env_text}");
         assert!(env_text.contains("TURIN_EVENT=turn.failed"), "{env_text}");
+    }
+
+    #[test]
+    fn parse_hook_return_reads_the_last_json_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(dir.path()).unwrap();
+        let wt = cwd.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let line = format!(
+            "creating worktree...\n{{\"worktreePath\": {:?}, \"branch\": \"turin/x\"}}\n\n",
+            wt.display().to_string()
+        );
+        assert_eq!(
+            parse_hook_return(&line, &cwd),
+            Some(HookReturn {
+                worktree_path: Some(wt.clone()),
+                branch: Some("turin/x".into()),
+            })
+        );
+        // Both fields are optional.
+        assert_eq!(
+            parse_hook_return("{\"branch\":\"b\"}", &cwd),
+            Some(HookReturn {
+                worktree_path: None,
+                branch: Some("b".into())
+            })
+        );
+        // Relative paths resolve against the hook's cwd, `..` included.
+        assert_eq!(
+            parse_hook_return("{\"worktreePath\":\"../wt/../wt\"}", &wt)
+                .and_then(|r| r.worktree_path),
+            Some(wt.clone())
+        );
+    }
+
+    #[test]
+    fn parse_hook_return_treats_bad_output_as_no_change() {
+        let cwd = Path::new("/");
+        for stdout in [
+            "",
+            "   \n\n",
+            "just text",
+            "{not json",
+            "[1,2]",
+            "{\"worktreePath\": 5}",
+            "{}",
+            "{\"worktreePath\": \"\", \"branch\": \"  \"}",
+            // JSON that is not the last line does not count.
+            "{\"branch\":\"b\"}\ndone",
+            // A path that is not an existing directory is dropped.
+            "{\"worktreePath\": \"/definitely/not/a/real/dir\"}",
+        ] {
+            assert_eq!(parse_hook_return(stdout, cwd), None, "{stdout:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn blocking_thread_created_hook_reports_a_worktree() {
+        let (_dir, project, config_path) = project_with_config(
+            r#"
+[[hook]]
+event = "thread.created"
+command = "mkdir -p wt-new && echo 'making worktree' && printf '{\"worktreePath\":\"%s\",\"branch\":\"turin/t\"}\n' \"$PWD/wt-new\""
+blocking = true
+
+[[hook]]
+event = "thread.created"
+command = "pwd > where.txt; echo $TURIN_WORKTREE_PATH > env-path.txt"
+cwd = "thread"
+blocking = true
+"#,
+        );
+        let runner = runner(&config_path);
+        let summary = runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        let wt = project.join("wt-new");
+        assert_eq!(
+            summary.thread_workspace,
+            Some(HookReturn {
+                worktree_path: Some(wt.clone()),
+                branch: Some("turin/t".into()),
+            })
+        );
+        assert_eq!(summary.blocking[0].returned, summary.thread_workspace);
+        assert_eq!(summary.blocking[1].returned, None);
+        // The next hook with cwd = "thread" already runs in the new worktree.
+        assert_eq!(summary.blocking[1].cwd, wt);
+        let where_txt = std::fs::read_to_string(wt.join("where.txt")).unwrap();
+        assert_eq!(where_txt.trim(), wt.display().to_string());
+        let env_path = std::fs::read_to_string(wt.join("env-path.txt")).unwrap();
+        assert_eq!(env_path.trim(), wt.display().to_string());
+    }
+
+    #[tokio::test]
+    async fn failed_or_non_blocking_hooks_do_not_return_a_workspace() {
+        let (_dir, project, config_path) = project_with_config(
+            r#"
+[[hook]]
+event = "thread.created"
+command = "mkdir -p wt && printf '{\"branch\":\"b\"}\n'; exit 3"
+blocking = true
+
+[[hook]]
+event = "thread.created"
+command = "printf '{\"branch\":\"b\"}\n'"
+"#,
+        );
+        let runner = runner(&config_path);
+        let summary = runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        assert_eq!(summary.blocking[0].exit_code, Some(3));
+        assert_eq!(summary.thread_workspace, None);
+        assert_eq!(summary.non_blocking_spawned, 1);
     }
 }

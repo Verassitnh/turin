@@ -16,7 +16,8 @@
 //!   changed project hooks show up as [`HookUpdate::ProjectHooksPending`].
 //! - [`HookRunner::dispatch`] runs matching hooks as `/bin/sh -c <command>`
 //!   in their own process group with the event JSON on stdin and `TURIN_*`
-//!   env vars. Timeout kills the whole group. Blocking hooks are awaited
+//!   env vars. Timeout kills the whole group. A blocking `thread.created`
+//!   hook can report a worktree back ([`HookReturn`], the last stdout line). Blocking hooks are awaited
 //!   (thread.created only); everything else runs in a background `JoinSet`.
 //!   Results (and pending-trust notices) are published on a broadcast
 //!   channel for the UI.
@@ -36,7 +37,8 @@ pub use config::{
 };
 pub use event::{HookEvent, HookEventKind, UnknownHookEventError};
 pub use runner::{
-    DispatchSummary, HookDispatchContext, HookRunResult, HookRunner, HookUpdate, MAX_OUTPUT_BYTES,
-    TRUNCATED_MARKER, dispatch, hook_env_vars, hook_stdin_json, resolve_blocking, resolve_hook_cwd,
+    DispatchSummary, HookDispatchContext, HookReturn, HookRunResult, HookRunner, HookUpdate,
+    MAX_OUTPUT_BYTES, TRUNCATED_MARKER, dispatch, hook_env_vars, hook_stdin_json,
+    parse_hook_return, resolve_blocking, resolve_hook_cwd,
 };
 pub use trust::{TrustError, TrustStore, default_trust_store_path, sha256_hex};

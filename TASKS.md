@@ -173,7 +173,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T09a | Codex app-server protocol: codegen types from JSON schema + stdio JSON-RPC client | `crates/codex-app-server` | Codex → Grok | done → QC pending |
+| T09a | Codex app-server protocol: codegen types from JSON schema + stdio JSON-RPC client | `crates/codex-app-server` | Codex → Grok | **merged to main** (33 tests; QC PASS wf_d1ca0d2b-4c4, fixes T09ac) |
 | T09 | Codex provider: CodexAdapterV2 + provider/Codex* | `crates/provider-codex` | Codex | r3 active (Codex re-auth) |
 | T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok → Cursor Auto | r3 fixes done (16 items, 31 tests) → re-QC queued (Haiku) |
 | T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex | r3 active (Codex re-auth) |

@@ -33,3 +33,11 @@ TASKS.md is the PM's board; don't edit it.
   override them. Throwaway crates/builds go under `/tmp/turin-scratch-<task>/`
   and must reuse `CARGO_TARGET_DIR=/tmp/turin-scratch-target` (shared); delete
   your scratch dir when done. Never copy user databases anywhere.
+
+- **CPU (user rule): never pin the machine.** Every rustc goes through
+  `../.cargo/rustc-throttle` (global cap of 5 compilers, nice 10; set in
+  `../.cargo/config.toml`, mirrored in `/tmp/.cargo/config.toml` for scratch
+  crates). Don't override `RUSTC_WRAPPER`, `CARGO_BUILD_JOBS` or `build.jobs`;
+  run one cargo command at a time; a build that waits for a slot is normal —
+  don't kill or retry it. `target/` is a symlink into `../turin-targets.noindex/`:
+  never `rm -rf target` (use `cargo clean -p <crate>`).

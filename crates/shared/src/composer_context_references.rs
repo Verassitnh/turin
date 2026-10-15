@@ -19,7 +19,8 @@ use turin_contracts::composer_context::{
     KnownComposerContextRecord, OrchestrationMessageContext,
 };
 
-use crate::js_string::{JS_WS, is_js_whitespace_char, replace_js_whitespace_runs, slice_utf16};
+use crate::js_string::{JS_WS, replace_js_whitespace_runs, slice_utf16};
+use turin_contracts::base_schemas::is_js_whitespace;
 
 const COMPOSER_CONTEXT_HREF_PREFIX: &str = "t3-context://v1/";
 const MAX_LINK_LABEL_LENGTH: usize = 512;
@@ -261,7 +262,7 @@ fn escape_composer_context_payload_text(text: &str) -> String {
     out
 }
 
-fn escape_attribute(value: &str) -> String {
+pub(crate) fn escape_attribute(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('"', "&quot;")
@@ -326,7 +327,7 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.is_empty())
 }
 
-fn element_details(record: &ElementContextRecord) -> ElementContextDetails {
+pub(crate) fn element_details(record: &ElementContextRecord) -> ElementContextDetails {
     ElementContextDetails {
         page_url: record.page_url.clone(),
         page_title: record.page_title.clone(),
@@ -408,7 +409,7 @@ fn format_provider_payload(record: &KnownComposerContextRecord) -> String {
                 lines.push("comment:".to_owned());
                 lines.push(indent(text));
             }
-            let diff = r.diff.trim_end_matches(is_js_whitespace_char);
+            let diff = r.diff.trim_end_matches(is_js_whitespace);
             if !js_trim(&r.diff).is_empty() {
                 lines.push(format!(
                     "{}:",

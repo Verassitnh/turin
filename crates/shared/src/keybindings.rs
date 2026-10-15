@@ -18,7 +18,7 @@ use turin_contracts::keybindings::{
     THREAD_JUMP_KEYBINDING_COMMANDS,
 };
 
-use crate::js_string::is_js_whitespace_char;
+use turin_contracts::base_schemas::is_js_whitespace;
 
 /// The key of a parsed shortcut. Holds any non-empty text, including `" "` for `space`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -290,7 +290,7 @@ fn tokenize_when_expression(expression: &str) -> Option<Vec<WhenToken>> {
     while index < expression.len() {
         let rest = &expression[index..];
         let current = rest.chars().next()?;
-        if is_js_whitespace_char(current) {
+        if is_js_whitespace(current) {
             index += current.len_utf8();
             continue;
         }

@@ -1,18 +1,15 @@
 //! Port of upstream/packages/contracts/src/threadSearch.ts
 
-use crate::base_schemas::{IsoDateTime, ProjectId, ThreadId, TrimmedNonEmptyString, TrimmedString};
+use crate::base_schemas::{
+    IsoDateTime, ProjectId, ThreadId, TrimmedNonEmptyString, TrimmedString, js_len,
+};
 use serde::{Deserialize, Deserializer, Serialize};
-
-/// Length as `Schema.isMinLength`/`isMaxLength` count it: UTF-16 code units.
-fn utf16_len(value: &str) -> usize {
-    value.encode_utf16().count()
-}
 
 /// `TrimmedString.check(isMinLength(2), isMaxLength(200))`: the checks run
 /// on the trimmed value.
 fn de_query<'de, D: Deserializer<'de>>(d: D) -> Result<TrimmedString, D::Error> {
     let query = TrimmedString::deserialize(d)?;
-    match utf16_len(query.as_str()) {
+    match js_len(query.as_str()) {
         2..=200 => Ok(query),
         _ => Err(serde::de::Error::custom(
             "query must be between 2 and 200 characters after trimming",
@@ -33,7 +30,7 @@ fn de_limit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
 /// `Schema.String.check(isMaxLength(240))`.
 fn de_snippet<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     let snippet = String::deserialize(d)?;
-    if utf16_len(&snippet) > 240 {
+    if js_len(&snippet) > 240 {
         return Err(serde::de::Error::custom(
             "snippet must be at most 240 characters",
         ));

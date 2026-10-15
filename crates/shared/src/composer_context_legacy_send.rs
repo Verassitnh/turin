@@ -10,12 +10,15 @@
 use std::collections::{HashMap, HashSet};
 
 use turin_contracts::composer_context::{
-    ComposerContextRecord, ElementContextDetails, ElementContextRecord, KnownComposerContextRecord,
+    ComposerContextRecord, ElementContextDetails, KnownComposerContextRecord,
     PreviewAnnotationContextRecord, ReviewCommentContextRecord, TerminalContextRecord,
 };
 
-use crate::composer_context_references::{collect_composer_context_references, record_label};
-use crate::js_string::{js_trim_end, replace_js_whitespace_runs};
+use crate::composer_context_references::{
+    collect_composer_context_references, element_details, escape_attribute, record_label,
+};
+use crate::js_string::replace_js_whitespace_runs;
+use turin_contracts::base_schemas::js_trim_end;
 
 pub fn serialize_legacy_context_message(text: &str, records: &[ComposerContextRecord]) -> String {
     // A later record with the same id wins, as a JS `Map` built from entries does.
@@ -168,19 +171,6 @@ fn render_terminal_entry(record: &TerminalContextRecord) -> String {
     )
 }
 
-fn element_details(record: &ElementContextRecord) -> ElementContextDetails {
-    ElementContextDetails {
-        page_url: record.page_url.clone(),
-        page_title: record.page_title.clone(),
-        tag_name: record.tag_name.clone(),
-        selector: record.selector.clone(),
-        html_preview: record.html_preview.clone(),
-        component_name: record.component_name.clone(),
-        source: record.source.clone(),
-        styles: record.styles.clone(),
-    }
-}
-
 fn render_element_details_entry(record: &ElementContextDetails) -> String {
     let mut lines: Vec<String> = Vec::new();
     if !record.page_url.is_empty() {
@@ -258,14 +248,6 @@ fn render_preview_body(record: &PreviewAnnotationContextRecord) -> String {
         lines.push("</element_context>".to_owned());
     }
     lines.join("\n")
-}
-
-fn escape_attribute(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 /// Longest run of consecutive backticks in `text`.

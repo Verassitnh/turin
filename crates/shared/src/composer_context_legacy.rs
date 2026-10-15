@@ -21,8 +21,11 @@ use turin_contracts::composer_context::{
     ReviewCommentContextRecord, TerminalContextRecord,
 };
 
-use crate::composer_context_references::format_composer_context_record_reference;
-use crate::js_string::{JS_WS, js_trim_end, replace_js_whitespace_runs};
+use crate::composer_context_references::{
+    element_details, format_composer_context_record_reference,
+};
+use crate::js_string::{JS_WS, replace_js_whitespace_runs};
+use turin_contracts::base_schemas::js_trim_end;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpgradedLegacyContext {
@@ -390,19 +393,6 @@ fn preview_record(body: &str, index: usize) -> Option<PreviewAnnotationContextRe
         value["elements"] = serde_json::to_value(&elements).ok()?;
     }
     serde_json::from_value(value).ok()
-}
-
-fn element_details(record: &ElementContextRecord) -> ElementContextDetails {
-    ElementContextDetails {
-        page_url: record.page_url.clone(),
-        page_title: record.page_title.clone(),
-        tag_name: record.tag_name.clone(),
-        selector: record.selector.clone(),
-        html_preview: record.html_preview.clone(),
-        component_name: record.component_name.clone(),
-        source: record.source.clone(),
-        styles: record.styles.clone(),
-    }
 }
 
 fn unescape_attribute(value: &str) -> String {

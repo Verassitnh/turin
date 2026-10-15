@@ -11,7 +11,7 @@ use regex::Regex;
 
 use turin_contracts::base_schemas::js_trim;
 
-use crate::js_string::is_js_whitespace_char;
+use turin_contracts::base_schemas::is_js_whitespace;
 
 /// `Pick<ServerProviderSkill, "name" | "displayName">`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +23,7 @@ pub struct InlineSkill {
 /// `js_trim`-style title case: words split on whitespace, `:`, `_` and `-`.
 fn title_case_words(value: &str) -> String {
     value
-        .split(|ch: char| is_js_whitespace_char(ch) || matches!(ch, ':' | '_' | '-'))
+        .split(|ch: char| is_js_whitespace(ch) || matches!(ch, ':' | '_' | '-'))
         .filter(|segment| !segment.is_empty())
         .map(|segment| {
             let mut chars = segment.chars();
@@ -76,7 +76,7 @@ fn char_at(text: &str, at: usize) -> Option<char> {
 
 /// `\s|$`, the lookahead that closes a token or an amount.
 fn ends_word(text: &str, at: usize) -> bool {
-    at == text.len() || char_at(text, at).is_some_and(is_js_whitespace_char)
+    at == text.len() || char_at(text, at).is_some_and(is_js_whitespace)
 }
 
 /// `[0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$)` starting at `at`: an amount such as `12`,
@@ -119,7 +119,7 @@ fn token_at(text: &str, start: usize) -> Option<(usize, &str)> {
     if start == 0 {
         candidates.push(0);
     }
-    if let Some(ch) = char_at(text, start).filter(|ch| is_js_whitespace_char(*ch)) {
+    if let Some(ch) = char_at(text, start).filter(|ch| is_js_whitespace(*ch)) {
         candidates.push(start + ch.len_utf8());
     }
     candidates.into_iter().find_map(|currency_at| {

@@ -33,6 +33,7 @@ mod derive_rows;
 mod derive_rows_attempts;
 mod derive_rows_compaction;
 mod derive_rows_folds;
+mod derive_rows_linked;
 mod derive_rows_live;
 mod derive_rows_messages;
 mod derive_rows_metadata;

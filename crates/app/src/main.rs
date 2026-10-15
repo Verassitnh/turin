@@ -4,6 +4,10 @@
 // token or primitive has a caller yet.
 #[allow(dead_code)]
 mod theme;
+#[allow(dead_code)]
+mod ui;
+
+mod assets;
 
 use gpui_kit::*;
 use theme::ActiveAppTheme;
@@ -26,10 +30,12 @@ impl Render for Root {
 
 fn main() {
     tracing_subscriber::fmt::init();
-    gpui_kit::application().run(move |cx| {
-        gpui_kit::init(cx);
-        theme::init(cx);
-        gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| cx.new(|_| Root))
-            .expect("failed to open window");
-    });
+    gpui_kit::application()
+        .with_assets(assets::AppAssets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            theme::init(cx);
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| cx.new(|_| Root))
+                .expect("failed to open window");
+        });
 }

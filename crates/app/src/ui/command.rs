@@ -24,9 +24,11 @@ pub fn dialog_backdrop(theme: &AppTheme) -> Hsla {
     with_alpha(theme.background, if theme.is_dark() { 0.64 } else { 0.60 }).into()
 }
 
-/// `dialog-glass`: `--background` at `--glass-opacity` (80%).
+/// `dialog-glass`: `--background` at `--glass-opacity` (80%) over a 12px
+/// backdrop blur. GPUI has no blur, so unblurred content behind an 80% fill
+/// stays legible and fights the text; the fill is raised to 94% instead.
 pub fn dialog_glass_background(theme: &AppTheme) -> Hsla {
-    with_alpha(theme.background, 0.8).into()
+    with_alpha(theme.background, 0.94).into()
 }
 
 /// `dialog-glass` border: `--contrast-foreground` at 10%, white at 8% in dark.

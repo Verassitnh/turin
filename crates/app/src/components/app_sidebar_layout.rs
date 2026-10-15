@@ -24,6 +24,13 @@ use gpui_kit::{
 
 use super::chat::panel_layout_controls::PanelLayoutControls;
 use super::chat_view::ChatView;
+use super::command_palette::command_palette_logic::SearchOverlayMode;
+use super::command_palette::mock_source::MockPaletteBackend;
+use super::command_palette::palette_source::PaletteContext;
+use super::command_palette::{
+    self, CommandPalette, CommandPaletteEvent, CommandPaletteOpenDetail, CycleAppearance,
+    SelectTheme, ToggleCommandPalette, ToggleFilePicker, ToggleProjectSearch,
+};
 use super::right_panel_tabs::RightPanelTabs;
 use super::sidebar::mock_source::mock_sidebar;
 use super::sidebar::view_model::SidebarStore;
@@ -67,6 +74,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, Some(KEY_CONTEXT)),
     ]);
     thread_sidebar::bind_keys(cx, KEY_CONTEXT);
+    command_palette::bind_keys(cx, KEY_CONTEXT);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,8 +110,10 @@ pub struct AppSidebarLayout {
     last_drag_moved: bool,
     sidebar: Entity<Sidebar>,
     store: Entity<SidebarStore>,
+    palette: Entity<CommandPalette>,
     _appearance: Subscription,
     _sidebar_events: Subscription,
+    _palette_events: Subscription,
 }
 
 impl AppSidebarLayout {
@@ -117,9 +127,16 @@ impl AppSidebarLayout {
         let viewport_width = f32::from(window.viewport_size().width);
         // T14 replaces the mock store/backend with the client view model.
         let (store, backend) = mock_sidebar(cx);
+        let palette_backend =
+            std::rc::Rc::new(MockPaletteBackend::new(store.clone(), backend.clone()));
         let sidebar = cx.new(|cx| Sidebar::new(store.clone(), backend, window, cx));
         let sidebar_events = cx.subscribe_in(&sidebar, window, Self::on_sidebar_event);
+        let palette = cx.new(|cx| CommandPalette::new(palette_backend, window, cx));
+        let palette_events = cx.subscribe_in(&palette, window, Self::on_palette_event);
         sidebar.update(cx, |sidebar, cx| sidebar.apply_dev_overrides(window, cx));
+        if let Ok(spec) = std::env::var("TURIN_PALETTE") {
+            palette.update(cx, |palette, cx| palette.run_demo_steps(spec, window, cx));
+        }
         Self {
             focus_handle,
             sidebar_open: true,
@@ -131,9 +148,108 @@ impl AppSidebarLayout {
             last_drag_moved: false,
             sidebar,
             store,
+            palette,
             _appearance: appearance,
             _sidebar_events: sidebar_events,
+            _palette_events: palette_events,
         }
+    }
+
+    /// Hands the palette the routed thread so its contextual items target it.
+    fn sync_palette_context(&mut self, cx: &mut Context<Self>) {
+        let active_thread_key = match self.sidebar.read(cx).route() {
+            Some(SidebarRoute::Thread(key)) => Some(key.clone()),
+            _ => None,
+        };
+        self.palette.update(cx, |palette, cx| {
+            palette.set_context(
+                PaletteContext {
+                    active_thread_key,
+                    active_draft_project_key: None,
+                },
+                cx,
+            )
+        });
+    }
+
+    /// The shell side of the palette's requests, handled like `SidebarEvent`s:
+    /// navigation that has a screen goes there; the rest wait for their tasks.
+    fn on_palette_event(
+        &mut self,
+        _: &Entity<CommandPalette>,
+        event: &CommandPaletteEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let unavailable = |label: &str, window: &mut Window, cx: &mut Context<Self>| {
+            window.push_notification(
+                Notification::info(format!("{label} is not available yet.")),
+                cx,
+            );
+        };
+        match event {
+            CommandPaletteEvent::Closed => window.focus(&self.focus_handle, cx),
+            CommandPaletteEvent::OpenThread(thread) => {
+                let key = thread.key();
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.navigate_to_thread(&key, cx));
+                self.sync_palette_context(cx);
+                cx.notify();
+            }
+            CommandPaletteEvent::OpenProject { project_key } => {
+                // The project's most recent thread, else a new one.
+                let snapshot = self.store.read(cx).snapshot().clone();
+                let latest = snapshot
+                    .threads
+                    .iter()
+                    .filter(|thread| {
+                        thread.archived_at.is_none() && thread.project_key() == *project_key
+                    })
+                    .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+                    .map(|thread| thread.key());
+                match latest {
+                    Some(key) => {
+                        self.sidebar
+                            .update(cx, |sidebar, cx| sidebar.navigate_to_thread(&key, cx));
+                        self.sync_palette_context(cx);
+                        cx.notify();
+                    }
+                    None => unavailable("New thread", window, cx),
+                }
+            }
+            CommandPaletteEvent::NewThreadInProject { .. }
+            | CommandPaletteEvent::NewThreadFromContext => unavailable("New thread", window, cx),
+            CommandPaletteEvent::NewThreadWithoutProject => {
+                unavailable("New thread without a project", window, cx)
+            }
+            CommandPaletteEvent::FindInCurrentThread => unavailable("Find in thread", window, cx),
+            CommandPaletteEvent::LinkPullRequest => unavailable("Link pull request", window, cx),
+            CommandPaletteEvent::ShowLinkedPullRequests => {
+                self.right_panel_open = true;
+                cx.notify();
+            }
+            CommandPaletteEvent::OpenPullRequests => unavailable("Pull requests", window, cx),
+            CommandPaletteEvent::OpenUsage => unavailable("Usage", window, cx),
+            CommandPaletteEvent::OpenSettings | CommandPaletteEvent::OpenSetting { .. } => {
+                unavailable("Settings", window, cx)
+            }
+            CommandPaletteEvent::OpenProjectSettings { .. } => {
+                unavailable("Project settings", window, cx)
+            }
+            CommandPaletteEvent::ToggleThemeEditor => unavailable("Theme editor", window, cx),
+        }
+    }
+
+    /// `openCommandPalette(detail)` for the rest of the app.
+    pub fn open_command_palette(
+        &mut self,
+        detail: CommandPaletteOpenDetail,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_palette_context(cx);
+        self.palette
+            .update(cx, |palette, cx| palette.open_with(detail, window, cx));
     }
 
     fn on_sidebar_event(
@@ -144,7 +260,10 @@ impl AppSidebarLayout {
         cx: &mut Context<Self>,
     ) {
         match event {
-            SidebarEvent::Navigate(_) => cx.notify(),
+            SidebarEvent::Navigate(_) => {
+                self.sync_palette_context(cx);
+                cx.notify();
+            }
             SidebarEvent::OpenPullRequests(_) => {
                 self.right_panel_open = true;
                 cx.notify();
@@ -188,6 +307,56 @@ impl AppSidebarLayout {
     /// Opens the right panel; used by the screenshot harness (`TURIN_SHELL_RIGHT_PANEL`).
     pub fn set_right_panel_open(&mut self, open: bool) {
         self.right_panel_open = open;
+    }
+
+    fn toggle_command_palette(
+        &mut self,
+        _: &ToggleCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_palette_context(cx);
+        self.palette.update(cx, |palette, cx| {
+            palette.toggle_mode(SearchOverlayMode::Command, window, cx)
+        });
+    }
+
+    fn toggle_file_picker(
+        &mut self,
+        _: &ToggleFilePicker,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.palette.update(cx, |palette, cx| {
+            palette.toggle_mode(SearchOverlayMode::Files, window, cx)
+        });
+    }
+
+    fn toggle_project_search(
+        &mut self,
+        _: &ToggleProjectSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.palette.update(cx, |palette, cx| {
+            palette.toggle_mode(SearchOverlayMode::Content, window, cx)
+        });
+    }
+
+    fn select_theme(&mut self, _: &SelectTheme, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_palette_context(cx);
+        self.palette
+            .update(cx, |palette, cx| palette.open_change_theme(window, cx));
+    }
+
+    fn cycle_appearance(
+        &mut self,
+        _: &CycleAppearance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.palette
+            .update(cx, |palette, cx| palette.cycle_appearance(window, cx));
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -397,6 +566,11 @@ impl Render for AppSidebarLayout {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_right_panel))
+            .on_action(cx.listener(Self::toggle_command_palette))
+            .on_action(cx.listener(Self::toggle_file_picker))
+            .on_action(cx.listener(Self::toggle_project_search))
+            .on_action(cx.listener(Self::select_theme))
+            .on_action(cx.listener(Self::cycle_appearance))
             .on_modifiers_changed(cx.listener(
                 |this, event: &gpui_kit::ModifiersChangedEvent, _, cx| {
                     let modifiers = event.modifiers;
@@ -471,6 +645,8 @@ impl Render for AppSidebarLayout {
             })
             .child(sidebar_toggle)
             .child(layout_controls)
+            // The ⌘K overlay renders last so it covers the whole window.
+            .child(self.palette.clone())
     }
 }
 

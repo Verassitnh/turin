@@ -7,8 +7,7 @@
 //! text is not selectable, so the full value is only the tooltip.
 
 use gpui_kit::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Styled as _, Window, div,
+    App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div,
 };
 
 const DEFAULT_TAIL: usize = 10;

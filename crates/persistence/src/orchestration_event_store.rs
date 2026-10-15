@@ -8,6 +8,8 @@
 //! `publish_committed` is in-memory and must run after `Db::write` returns.
 
 use std::collections::{HashMap, VecDeque};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, params_from_iter};
@@ -311,8 +313,21 @@ impl OrchestrationEventStore {
             id: sub.id,
             hub: Arc::clone(&hub),
         };
+        #[cfg(test)]
+        let replay_pages = Arc::new(ReplayPages::default());
+        #[cfg(test)]
+        let replay_pages_task = Arc::clone(&replay_pages);
         let task = AbortOnDrop::new(tokio::spawn(async move {
-            if let Err(err) = drive_stream(db, sub, after_sequence, tx.clone()).await {
+            if let Err(err) = drive_stream(
+                db,
+                sub,
+                after_sequence,
+                tx.clone(),
+                #[cfg(test)]
+                replay_pages_task,
+            )
+            .await
+            {
                 let _ = tx.send(Err(err)).await;
             }
         }));
@@ -320,6 +335,8 @@ impl OrchestrationEventStore {
             rx,
             _unregister: unregister,
             _task: task,
+            #[cfg(test)]
+            replay_pages,
         }
     }
 }
@@ -329,6 +346,52 @@ pub struct EventSubscription {
     /// Dropped before the drive task so a closed stream leaves the hub immediately.
     _unregister: Unregister,
     _task: AbortOnDrop<()>,
+    #[cfg(test)]
+    replay_pages: Arc<ReplayPages>,
+}
+
+#[cfg(test)]
+impl EventSubscription {
+    /// `(max pages alive at once, max events in one page, page fetches)`.
+    pub fn replay_page_stats(&self) -> (usize, usize, usize) {
+        (
+            self.replay_pages.max_live.load(Ordering::SeqCst),
+            self.replay_pages.max_len.load(Ordering::SeqCst),
+            self.replay_pages.fetches.load(Ordering::SeqCst),
+        )
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ReplayPages {
+    live: AtomicUsize,
+    max_live: AtomicUsize,
+    max_len: AtomicUsize,
+    fetches: AtomicUsize,
+}
+
+#[cfg(test)]
+struct ReplayPageGuard<'a> {
+    pages: &'a ReplayPages,
+}
+
+#[cfg(test)]
+impl ReplayPages {
+    fn enter(&self, len: usize) -> ReplayPageGuard<'_> {
+        self.fetches.fetch_add(1, Ordering::SeqCst);
+        self.max_len.fetch_max(len, Ordering::SeqCst);
+        let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_live.fetch_max(live, Ordering::SeqCst);
+        ReplayPageGuard { pages: self }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ReplayPageGuard<'_> {
+    fn drop(&mut self) {
+        self.pages.live.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 struct Unregister {
@@ -347,25 +410,33 @@ async fn drive_stream(
     sub: LiveSub,
     after_sequence: i64,
     tx: mpsc::Sender<Result<ApplicationStoredEvent, PersistenceError>>,
+    #[cfg(test)] replay_pages: Arc<ReplayPages>,
 ) -> Result<(), PersistenceError> {
     let high = db.read(latest_application_sequence).await?;
     sub.fail_if_over_budget()?;
-    let replay = db
-        .read(move |conn| {
-            read_application_events(
-                conn,
-                &ReadApplicationEvents {
-                    after_sequence,
-                    through_sequence: high,
-                    skip_unknown_event_types: false,
-                },
-            )
-        })
-        .await?;
-    for event in replay {
-        tx.send(Ok(event))
-            .await
-            .map_err(|_| PersistenceError::Closed)?;
+    let mut cursor = after_sequence;
+    loop {
+        let page_after = cursor;
+        let page = db
+            .read(move |conn| read_application_page(conn, page_after, high, false))
+            .await?;
+        let Some(last) = page.last_sequence else {
+            break;
+        };
+        let done = page.raw_len < READ_PAGE_SIZE || last >= high;
+        {
+            #[cfg(test)]
+            let _guard = replay_pages.enter(page.events.len());
+            for event in page.events {
+                tx.send(Ok(event))
+                    .await
+                    .map_err(|_| PersistenceError::Closed)?;
+            }
+        }
+        if done {
+            break;
+        }
+        cursor = last;
     }
     loop {
         sub.fail_if_over_budget()?;
@@ -713,6 +784,46 @@ pub fn read_agent_events(
         cursor = last;
     }
     Ok(out)
+}
+
+struct ApplicationPage {
+    events: Vec<ApplicationStoredEvent>,
+    last_sequence: Option<i64>,
+    raw_len: i64,
+}
+
+fn read_application_page(
+    conn: &Connection,
+    after_sequence: i64,
+    through_sequence: i64,
+    skip_unknown_event_types: bool,
+) -> Result<ApplicationPage, PersistenceError> {
+    let rows = query_rows(
+        conn,
+        "OrchestrationEventStore.readApplicationEvents:query",
+        RowFilter {
+            after: after_sequence,
+            through: Some(through_sequence),
+            thread_id: None,
+            command_id: None,
+            event_type: None,
+            only_agent: false,
+            limit: READ_PAGE_SIZE,
+        },
+    )?;
+    let raw_len = rows.len() as i64;
+    let last_sequence = rows.last().map(|row| row.sequence);
+    let mut events = Vec::with_capacity(rows.len());
+    for row in rows {
+        if keep_row(&row, skip_unknown_event_types)? {
+            events.push(row_to_application(&row)?);
+        }
+    }
+    Ok(ApplicationPage {
+        events,
+        last_sequence,
+        raw_len,
+    })
 }
 
 pub fn read_application_events(

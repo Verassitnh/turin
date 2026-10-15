@@ -724,6 +724,53 @@ async fn high_water_and_command_reads_use_their_indexes() {
 }
 
 #[tokio::test]
+async fn releases_consumed_application_replay_pages() {
+    let store = memory_store().await;
+    store
+        .db()
+        .write(|tx| {
+            for index in 0..1501 {
+                crate::orchestration_event_store::append_project_event(
+                    tx,
+                    &ProjectEventInput {
+                        event_id: format!("retention-{index}"),
+                        aggregate_id: format!("retention-{index}"),
+                        event_type: "project.created".into(),
+                        occurred_at: NOW.into(),
+                        command_id: None,
+                        causation_event_id: None,
+                        correlation_id: None,
+                        payload: serde_json::json!({
+                            "projectId": format!("retention-{index}"),
+                            "title": "Replay",
+                        }),
+                        metadata: serde_json::json!({}),
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut subscription = store.stream_application_events(0);
+    let mut count = 0;
+    while count < 1501 {
+        let event = tokio::time::timeout(Duration::from_secs(5), subscription.rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(event.sequence() > 0);
+        count += 1;
+    }
+    assert_eq!(count, 1501);
+    let (max_live, max_len, fetches) = subscription.replay_page_stats();
+    assert!(max_live <= 1, "retained {max_live} replay pages");
+    assert!(max_len <= 500, "page held {max_len} events");
+    assert!(fetches >= 4, "fetched {fetches} pages");
+}
+
+#[tokio::test]
 async fn live_buffer_counts_the_full_agent_event() {
     let store = memory_store().await;
     let mut subscription = store.stream_application_events(0);

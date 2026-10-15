@@ -6,6 +6,7 @@
 //! does not implement it. Idle eviction runs on the next lookup instead of an
 //! Effect LayerMap timer.
 
+use crate::locale_compare::locale_compare;
 use std::collections::HashMap;
 use std::sync::{
     Arc, LazyLock,
@@ -368,7 +369,7 @@ impl WorkspaceSearchIndex {
         })?;
         let mapped = map_mixed_search_result(&result, WORKSPACE_INDEX_MAX_ENTRIES);
         let mut sorted = with_directory_ancestors(&mapped.entries);
-        sorted.sort_by(|left, right| left.path.as_str().cmp(right.path.as_str()));
+        sorted.sort_by(|left, right| locale_compare(left.path.as_str(), right.path.as_str()));
         let entries: Vec<ProjectEntry> = sorted
             .iter()
             .take(WORKSPACE_INDEX_MAX_ENTRIES as usize)

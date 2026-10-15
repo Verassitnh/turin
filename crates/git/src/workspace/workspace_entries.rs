@@ -18,6 +18,7 @@ use turin_contracts::project::{
     ProjectSearchEntriesResult,
 };
 
+use crate::locale_compare::locale_compare;
 use crate::vcs_process::{VcsProcess, VcsProcessInput};
 
 use super::workspace_paths::{
@@ -216,7 +217,7 @@ impl WorkspaceEntries {
                 entries.push(FilesystemBrowseEntry { name, full_path });
             }
         }
-        entries.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
+        entries.sort_by(|left, right| locale_compare(left.name.as_str(), right.name.as_str()));
         let parent_path = TrimmedNonEmptyString::new(&parent_path).map_err(|_| {
             WorkspaceEntriesReadDirectoryError {
                 cwd: input.cwd.as_ref().map(|cwd| cwd.as_str().to_owned()),

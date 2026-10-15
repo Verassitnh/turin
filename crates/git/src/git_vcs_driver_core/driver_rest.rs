@@ -785,7 +785,7 @@ impl GitVcsDriverCore {
                 right
                     .1
                     .cmp(&left.1)
-                    .then_with(|| left.0.name.as_str().cmp(right.0.name.as_str()))
+                    .then_with(|| locale_compare(left.0.name.as_str(), right.0.name.as_str()))
             });
             refs.into_iter().map(|(reference, _)| reference).collect()
         };

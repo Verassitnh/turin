@@ -39,6 +39,7 @@ use super::{
     parse_upstream_ref_with_remote_names, parse_worktree_branch_paths, sanitize_remote_name,
     split_null_separated_paths,
 };
+use crate::locale_compare::locale_compare;
 use crate::remote_refs::{
     parse_remote_names, parse_remote_names_in_git_order, parse_remote_ref_with_remote_names,
 };

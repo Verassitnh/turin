@@ -53,6 +53,22 @@ pub type NotificationCallback =
 #[derive(Clone)]
 pub struct Connection {
     inner: Arc<ConnectionInner>,
+    // The tasks hold only `ConnectionInner`, never this owner, so dropping the
+    // last `Connection` clone aborts them. That closes the child's stdin and
+    // releases the task state. Owning the handles inside `ConnectionInner`
+    // would form a cycle that never drops.
+    _tasks: Arc<TaskSet>,
+}
+
+/// Aborts the connection tasks when the last `Connection` clone drops.
+struct TaskSet(Vec<JoinHandle<()>>);
+
+impl Drop for TaskSet {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
 }
 
 struct ConnectionInner {
@@ -63,7 +79,6 @@ struct ConnectionInner {
     on_request: RequestCallback,
     on_notification: NotificationCallback,
     on_termination: Arc<dyn Fn(&AcpError) + Send + Sync>,
-    _tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 struct State {
@@ -124,7 +139,6 @@ impl Connection {
             on_request: config.on_request,
             on_notification: config.on_notification,
             on_termination: config.on_termination,
-            _tasks: Mutex::new(Vec::new()),
         });
         let writer = tokio::spawn(writer_loop(write, write_rx, Arc::clone(&inner)));
         let reader = tokio::spawn(reader_loop(
@@ -135,8 +149,10 @@ impl Connection {
             config.transform_session_update,
         ));
         let handlers = tokio::spawn(handler_loop(handler_rx, Arc::clone(&inner)));
-        inner._tasks.lock().extend([writer, reader, handlers]);
-        Self { inner }
+        Self {
+            inner,
+            _tasks: Arc::new(TaskSet(vec![writer, reader, handlers])),
+        }
     }
 
     pub async fn ext_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
@@ -610,19 +626,20 @@ async fn handler_loop(
         let method = request.method.clone();
         let params = request.params.clone();
         let context = request.context.clone();
-        let joined = tokio::spawn(async move { callback(method, params, context).await }).await;
+        // Run in place with catch_unwind rather than a detached spawn: a
+        // handler can no longer outlive the connection that owns it.
+        let joined = AssertUnwindSafe(async move { callback(method, params, context).await })
+            .catch_unwind()
+            .await;
         let extension = !crate::meta::is_client_core_method(&request.method)
             && !crate::meta::is_agent_core_method(&request.method);
         let result = match joined {
             Ok(result) => result,
-            Err(join_error) if join_error.is_panic() => {
-                Err(AcpError::from(AcpRequestError::from_handler(
-                    AcpError::transport("handler panicked"),
-                    &request.method,
-                    extension,
-                )))
-            }
-            Err(_) => return,
+            Err(_) => Err(AcpError::from(AcpRequestError::from_handler(
+                AcpError::transport("handler panicked"),
+                &request.method,
+                extension,
+            ))),
         };
         let error_for_body = match &result {
             Err(AcpError::Request(error)) => error.to_protocol_error(),
@@ -675,14 +692,6 @@ fn plain_error(error: &Value) -> Option<(i64, String, Option<Value>)> {
     let message = error.get("message")?.as_str()?.to_owned();
     let data = error.get("data").filter(|data| !data.is_array()).cloned();
     Some((code, message, data))
-}
-
-impl Drop for ConnectionInner {
-    fn drop(&mut self) {
-        for task in self._tasks.get_mut().drain(..) {
-            task.abort();
-        }
-    }
 }
 
 #[cfg(test)]
@@ -980,6 +989,25 @@ mod tests {
         let text = error.to_string();
         assert!(!text.contains(secret));
         assert!(text.contains("decode-notification-payload"));
+    }
+
+    #[tokio::test]
+    async fn dropping_the_connection_closes_the_outbound_stream() {
+        use tokio::io::AsyncReadExt;
+        let (connection, mut read, _write) = start_pair(noop_request(), noop_notification());
+        connection
+            .notify("session/cancel", json!({"sessionId": "s"}))
+            .await
+            .unwrap();
+        let _ = read_value(&mut read).await;
+        drop(connection);
+        // Before the owner split, the writer kept the stream open forever.
+        let mut buf = [0_u8; 16];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), read.read(&mut buf))
+            .await
+            .expect("writer task still holds the outbound stream after drop")
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     fn session_update_frame() -> Value {

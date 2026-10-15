@@ -433,7 +433,7 @@ def scale_options_sheet(tool: str, scales: list[float], out: Path) -> None:
         for scale in scales:
             out_dir = tmp / f"scale-{scale}"
             export(tool, out_dir, scale, keep_macos_png=False, quiet=True)
-            columns.append((f"Turin, T at {scale:g}x" + (" (committed)" if scale == DEFAULT_T_SCALE else ""), {
+            columns.append((f"Turin, T at {scale:g}x" + (" (chosen)" if scale == DEFAULT_T_SCALE else ""), {
                 "macos": to_srgb8((out_dir / OUTPUTS["macos"]).read_bytes()),
                 180: to_srgb8((out_dir / OUTPUTS["apple_touch"]).read_bytes()),
                 32: to_srgb8((out_dir / OUTPUTS["favicon32"]).read_bytes()),

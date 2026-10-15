@@ -5,6 +5,8 @@
 //! is the first-run check: Turin does not replace a database it may already
 //! be writing.
 
+use std::fs::DirBuilder;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 use super::T3ImportError;
@@ -65,7 +67,9 @@ impl WorkDir {
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
         let path = parent.join(format!(".t3-import-{nanos}"));
-        std::fs::create_dir(&path)
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
             .map_err(|err| T3ImportError::io("create t3 import work directory", err))?;
         Ok(Self(path))
     }

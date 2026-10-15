@@ -2,6 +2,8 @@
 //! finished copy. `Busy` and `Locked` wait and retry the same step. Any error
 //! deletes the destination file, so a partial copy is never returned.
 
+use std::fs::{OpenOptions, Permissions};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -53,11 +55,23 @@ impl T3Snapshot {
 }
 
 pub(crate) fn snapshot(src: &Path) -> Result<T3Snapshot, T3ImportError> {
-    let dir = tempfile::TempDir::with_prefix_in("turin-t3-import-", SNAPSHOT_DIR)
-        .map_err(|err| T3ImportError::io("create t3 import snapshot directory", err))?;
+    let dir = private_tempdir("turin-t3-import-", Path::new(SNAPSHOT_DIR))?;
     let path = dir.path().join("statev2.sqlite");
     backup_to(src, &path)?;
     Ok(T3Snapshot { path, _dir: dir })
+}
+
+/// A temporary directory only the owner can enter. It holds a full copy of
+/// the T3 database, so it must not depend on the process umask (0755 at 022).
+pub(crate) fn private_tempdir(
+    prefix: &str,
+    parent: &Path,
+) -> Result<tempfile::TempDir, T3ImportError> {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .permissions(Permissions::from_mode(0o700))
+        .tempdir_in(parent)
+        .map_err(|err| T3ImportError::io("create t3 import directory", err))
 }
 
 pub(crate) fn backup_to(src: &Path, dest: &Path) -> Result<(), T3ImportError> {
@@ -75,8 +89,9 @@ pub(super) fn backup_with_limits(
         std::fs::create_dir_all(parent)
             .map_err(|err| T3ImportError::io("create t3 import destination", err))?;
     }
-    // Armed only once the source is open, immediately before creating `dest`.
-    // A failure to open the source must not delete a file the caller already had.
+    // Armed only once the source is open and `dest` exists. A failure to open
+    // the source, or a `dest` that already exists, must not delete a file the
+    // caller already had.
     let mut partial = PartialCopy::new(dest);
     let source = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|err| crate::errors::PersistenceError::sql("t3Import.snapshot.open", &err))?;
@@ -89,6 +104,14 @@ pub(super) fn backup_with_limits(
         .execute_batch("PRAGMA query_only = ON;")
         .map_err(|err| crate::errors::PersistenceError::sql("t3Import.snapshot.queryOnly", &err))?;
 
+    // Created 0600 before SQLite writes a byte, so the copy is never readable by
+    // another user. `create_new` refuses an existing file rather than replacing it.
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dest)
+        .map_err(|err| T3ImportError::io("create t3 import copy", err))?;
     partial.arm();
     let mut copied = Connection::open(dest)
         .map_err(|err| crate::errors::PersistenceError::sql("t3Import.snapshot.create", &err))?;

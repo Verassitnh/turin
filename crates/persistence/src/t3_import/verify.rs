@@ -139,8 +139,7 @@ fn names(rows: &[(i64, String)]) -> String {
 }
 
 fn fresh_schema() -> Result<Vec<SchemaObject>, T3ImportError> {
-    let dir = tempfile::TempDir::with_prefix("turin-t3-fresh-")
-        .map_err(|err| T3ImportError::io("create fresh schema database", err))?;
+    let dir = super::snapshot::private_tempdir("turin-t3-fresh-", &std::env::temp_dir())?;
     let conn = super::snapshot::open_snapshot(&dir.path().join("fresh.sqlite"))?;
     run_migrations(&conn, RunMigrationsOptions::default())?;
     schema_objects(&conn)

@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,6 +24,10 @@ fn file_db(dir: &Path, name: &str, through: Option<i64>) -> PathBuf {
     )
     .unwrap();
     path
+}
+
+fn mode(path: &Path) -> u32 {
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
 fn checksum(path: &Path) -> u64 {
@@ -284,6 +289,7 @@ fn import_into_links_the_copy_and_refuses_to_replace_it() {
     assert!(report.applied.is_empty());
     let dest = turin.path().join(TURIN_DATABASE_FILE);
     assert!(dest.is_file());
+    assert_eq!(mode(&dest), 0o600);
     assert_eq!(checksum(&src), before);
     let leftovers: Vec<_> = std::fs::read_dir(turin.path())
         .unwrap()
@@ -431,4 +437,29 @@ fn the_read_only_open_refuses_writes_and_leaves_the_file_alone() {
     assert!(err.to_string().contains("readonly"), "{err}");
     drop(conn);
     assert_eq!(checksum(&path), before);
+}
+
+#[test]
+fn copies_and_their_directories_are_private_from_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = file_db(dir.path(), "source.sqlite", None);
+
+    let snapshot = T3Import::snapshot(&src).unwrap();
+    assert_eq!(mode(snapshot.path().parent().unwrap()), 0o700);
+    assert_eq!(mode(snapshot.path()), 0o600);
+
+    let dest = dir.path().join("direct.sqlite");
+    super::snapshot::backup_to(&src, &dest).unwrap();
+    assert_eq!(mode(&dest), 0o600);
+}
+
+#[test]
+fn the_copy_is_never_created_over_an_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = file_db(dir.path(), "source.sqlite", None);
+    let dest = dir.path().join("statev2.sqlite");
+    std::fs::write(&dest, b"keep me").unwrap();
+    let err = super::snapshot::backup_to(&src, &dest).unwrap_err();
+    assert!(err.to_string().contains("create t3 import copy"), "{err}");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"keep me");
 }

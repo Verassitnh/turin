@@ -51,6 +51,15 @@ impl<K: Hash + Eq + Clone, V: Clone> TtlCache<K, V> {
         Some(value)
     }
 
+    /// Whether a live entry exists. Unlike `get`, leaves LRU order alone.
+    pub fn contains(&self, key: &K) -> bool {
+        let now = (self.clock)();
+        self.entries
+            .lock()
+            .get(key)
+            .is_some_and(|entry| now < entry.expires_at)
+    }
+
     /// A zero TTL stores nothing, matching upstream `timeToLive` returning
     /// `Duration.zero` for failed lookups.
     pub fn insert(&self, key: K, value: V, ttl: Duration) {

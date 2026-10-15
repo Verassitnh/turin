@@ -112,7 +112,8 @@ tokio runtime at startup and bridges results into entities via channels.
 | `git` | `apps/server/src/{git,vcs,checkpointing}`, `apps/server/src/workspace` |
 | `source-control` | `packages/source-control-{core,github}`, `apps/server/src/{sourceControl,pullRequest}` |
 | `provider-core` | `packages/provider-core`, `apps/server/src/provider` (registry, catalog, auth for kept providers) |
-| `provider-codex` | `packages/effect-codex-app-server`, `orchestration-v2/Adapters/CodexAdapterV2.ts`, `provider/Codex*` |
+| `codex-app-server` | `packages/effect-codex-app-server` (generated protocol types + stdio JSON-RPC client) |
+| `provider-codex` | `orchestration-v2/Adapters/CodexAdapterV2.ts`, `provider/Codex*` |
 | `provider-claude` | `orchestration-v2/Adapters/ClaudeAdapterV2.ts`, `provider/Claude*`; the TS Agent SDK is replaced by speaking the `claude` CLI stream-json control protocol directly (same protocol the SDK uses) |
 | `provider-opencode` | `packages/provider-opencode` (HTTP+SSE to `opencode serve`) |
 | `provider-cursor` | `packages/provider-cursor` |

@@ -1,8 +1,7 @@
 //! Port of upstream/packages/shared/src/cliArgs.ts
 
-use crate::js_string::is_js_whitespace_char;
 use indexmap::IndexMap;
-use turin_contracts::base_schemas::js_trim;
+use turin_contracts::base_schemas::{is_js_whitespace, js_trim};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ParsedCliArgs {
@@ -58,14 +57,14 @@ pub fn tokenize_cli_args(args: Option<&str>) -> Vec<String> {
         if ch == '\'' || ch == '"' {
             quote = Some(ch);
             quoted = true;
-        } else if is_js_whitespace_char(ch) {
+        } else if is_js_whitespace(ch) {
             if !current.is_empty() || quoted {
                 tokens.push(std::mem::take(&mut current));
                 quoted = false;
             }
         } else if ch == '\\' {
             match chars.get(index + 1) {
-                Some(&next) if is_js_whitespace_char(next) => {
+                Some(&next) if is_js_whitespace(next) => {
                     current.push(next);
                     index += 1;
                 }

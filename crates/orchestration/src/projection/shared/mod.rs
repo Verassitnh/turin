@@ -3,6 +3,7 @@
 //! `turin-shared` (task T05b) has not picked them up yet, so they live next to
 //! their only caller. Move them there when T05b lands; the logic is identical.
 
+pub mod agent_awareness;
 pub mod pending_background_work;
 pub mod thread_error;
 pub mod thread_pull_requests;

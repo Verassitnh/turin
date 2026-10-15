@@ -1,7 +1,7 @@
 //! Port of upstream/packages/contracts/src/environment.ts (local fields only;
 //! the HTTP/relay surfaces live in the cut `environmentHttp` module).
 
-use crate::base_schemas::{EnvironmentId, ProjectId, ThreadId, TrimmedNonEmptyString};
+use crate::base_schemas::{EnvironmentId, PositiveInt, ProjectId, ThreadId, TrimmedNonEmptyString};
 use serde::{Deserialize, Serialize};
 
 /// Wire version for orchestration snapshots, streams, commands, and RPC payloads.
@@ -143,7 +143,7 @@ fn default_false() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileAttachmentCapability {
-    pub max_upload_bytes: i64,
+    pub max_upload_bytes: PositiveInt,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -428,4 +428,158 @@ pub struct ScopedProjectRef {
 pub struct ScopedThreadRef {
     pub environment_id: EnvironmentId,
     pub thread_id: ThreadId,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn descriptor(capabilities: Value) -> Value {
+        json!({
+            "environmentId": "environment-1",
+            "label": "Local",
+            "platform": { "os": "darwin", "arch": "arm64" },
+            "serverVersion": "0.0.32",
+            "capabilities": capabilities,
+        })
+    }
+
+    fn decode(capabilities: Value) -> ExecutionEnvironmentDescriptor {
+        serde_json::from_value(descriptor(capabilities)).unwrap()
+    }
+
+    #[test]
+    fn manual_installation_descriptors_old_recognized_and_future() {
+        assert_eq!(
+            decode(json!({ "repositoryIdentity": true }))
+                .capabilities
+                .server_installation,
+            None
+        );
+        for installation in [
+            json!({ "kind": "npx" }),
+            json!({ "kind": "npm-global", "prefix": "/opt/node" }),
+        ] {
+            let decoded =
+                decode(json!({ "repositoryIdentity": true, "serverInstallation": installation }));
+            let encoded =
+                serde_json::to_value(decoded.capabilities.server_installation.unwrap()).unwrap();
+            assert_eq!(encoded, installation);
+        }
+        for installation in [
+            json!({ "kind": "future-manager" }),
+            json!({ "kind": "npm-global" }),
+        ] {
+            let decoded =
+                decode(json!({ "repositoryIdentity": true, "serverInstallation": installation }));
+            assert_eq!(decoded.capabilities.server_installation, None);
+        }
+    }
+
+    #[test]
+    fn optional_capabilities_are_unsupported_when_missing_and_preserved_when_advertised() {
+        let bare = decode(json!({ "repositoryIdentity": true })).capabilities;
+        assert_eq!(bare.required_worktree_bootstrap, None);
+        assert_eq!(bare.pull_requests, None);
+        assert_eq!(bare.attachment_uploads, None);
+        assert_eq!(bare.server_resolved_command_context, None);
+        let advertised = decode(json!({
+            "repositoryIdentity": true, "requiredWorktreeBootstrap": true, "pullRequests": true,
+            "attachmentUploads": true, "serverResolvedCommandContext": true,
+            "fileAttachments": { "maxUploadBytes": 50 * 1024 * 1024 },
+        }))
+        .capabilities;
+        assert_eq!(advertised.required_worktree_bootstrap, Some(true));
+        assert_eq!(advertised.pull_requests, Some(true));
+        assert_eq!(advertised.attachment_uploads, Some(true));
+        assert_eq!(advertised.server_resolved_command_context, Some(true));
+        assert_eq!(
+            advertised.file_attachments.unwrap().max_upload_bytes.get(),
+            50 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn repository_identity_defaults_to_false_and_is_always_encoded() {
+        let capabilities = decode(json!({})).capabilities;
+        assert!(!capabilities.repository_identity);
+        assert_eq!(
+            serde_json::to_value(&capabilities).unwrap(),
+            json!({ "repositoryIdentity": false })
+        );
+        assert!(
+            serde_json::from_value::<ExecutionEnvironmentCapabilities>(
+                json!({ "fileAttachments": { "maxUploadBytes": 0 } })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn machine_kind_is_forward_compatible_optional() {
+        let known: ExecutionEnvironmentPlatform =
+            serde_json::from_value(json!({ "os": "linux", "arch": "x64", "machine": "mac-mini" }))
+                .unwrap();
+        assert_eq!(known.machine, Some(EnvironmentMachineKind::MacMini));
+        let future: ExecutionEnvironmentPlatform =
+            serde_json::from_value(json!({ "os": "linux", "arch": "x64", "machine": "quantum" }))
+                .unwrap();
+        assert_eq!(future.machine, None);
+        assert_eq!(
+            serde_json::to_value(future).unwrap(),
+            json!({ "os": "linux", "arch": "x64" })
+        );
+        assert!(
+            ENVIRONMENT_MACHINE_KINDS
+                .iter()
+                .all(|kind| is_environment_machine_kind(kind))
+        );
+        for kind in ENVIRONMENT_MACHINE_KINDS {
+            let parsed: EnvironmentMachineKind = serde_json::from_value(json!(kind)).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), json!(kind));
+        }
+    }
+
+    #[test]
+    fn repository_identity_helpers() {
+        let identity: RepositoryIdentity = serde_json::from_value(json!({
+            "canonicalKey": "github.com/a/b",
+            "locator": { "source": "git-remote", "remoteName": "origin", "remoteUrl": "git@github.com:a/b.git" },
+            "displayName": "a/b",
+            "origin": { "canonicalKey": "github.com/me/b" },
+        }))
+        .unwrap();
+        assert_eq!(repository_grouping_key_of(&identity), "github.com/me/b");
+        assert_eq!(
+            repository_grouping_display_name_of(&identity),
+            Some("github.com/me/b")
+        );
+        let plain: RepositoryIdentity = serde_json::from_value(json!({
+            "canonicalKey": "github.com/a/b",
+            "locator": { "source": "git-remote", "remoteName": "origin", "remoteUrl": "u" },
+        }))
+        .unwrap();
+        assert_eq!(repository_grouping_key_of(&plain), "github.com/a/b");
+        assert_eq!(repository_grouping_display_name_of(&plain), None);
+    }
+
+    #[test]
+    fn submodule_and_env_mode_literals() {
+        for (mode, wire) in [
+            (WorktreeSubmodules::Recursive, "recursive"),
+            (WorktreeSubmodules::TopLevel, "top-level"),
+            (WorktreeSubmodules::None, "none"),
+        ] {
+            assert_eq!(serde_json::to_value(mode).unwrap(), json!(wire));
+        }
+        assert_eq!(
+            serde_json::to_value(ThreadEnvMode::Worktree).unwrap(),
+            json!("worktree")
+        );
+        assert_eq!(
+            serde_json::to_value(ServerSelfUpdateCapability::DesktopManaged).unwrap(),
+            json!("desktop-managed")
+        );
+    }
 }

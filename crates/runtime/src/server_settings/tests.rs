@@ -931,4 +931,222 @@ mod service {
             .map(|value| value.to_string());
         assert_eq!(name.as_deref(), Some("Kilo"));
     }
+
+    // Ports of upstream serverSettings.test.ts, lines 567-800 (batch 3).
+
+    #[tokio::test]
+    async fn a_subscriber_receives_changes_made_before_it_reads() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let mut changes = service.subscribe();
+        service
+            .update_settings(&patch(json!({"addProjectBaseDirectory": "~/next"})))
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(1), changes.recv())
+            .await
+            .expect("a buffered change")
+            .expect("open");
+        assert_eq!(
+            settings_value(&first)["addProjectBaseDirectory"],
+            json!("~/next")
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_usage_prices_persist_and_are_removed_on_null() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let prices = json!({
+            "inputCostPerMillionTokens": 2,
+            "outputCostPerMillionTokens": 8,
+            "cacheReadCostPerMillionTokens": 0,
+        });
+        service
+            .update_settings(&patch(
+                json!({"usagePriceOverrides": {"example-model": prices}}),
+            ))
+            .await
+            .unwrap();
+        let persisted =
+            settings_value(&serde_json::from_value::<ServerSettings>(read_file(&fx.path)).unwrap());
+        let saved = &persisted["usagePriceOverrides"]["example-model"];
+        assert_eq!(saved["inputCostPerMillionTokens"].as_f64(), Some(2.0));
+        assert_eq!(saved["outputCostPerMillionTokens"].as_f64(), Some(8.0));
+        assert_eq!(saved["cacheReadCostPerMillionTokens"].as_f64(), Some(0.0));
+
+        service
+            .update_settings(&patch(
+                json!({"usagePriceOverrides": {"example-model": null}}),
+            ))
+            .await
+            .unwrap();
+        let restored =
+            settings_value(&serde_json::from_value::<ServerSettings>(read_file(&fx.path)).unwrap());
+        assert_eq!(restored["usagePriceOverrides"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn thread_settlement_settings_persist_and_broadcast_including_null() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let mut changes = service.subscribe();
+        let next = service
+            .update_settings(&patch(json!({
+                "sidebarAutoSettleAfterDays": null,
+                "sidebarAutoSettleOnMerge": false,
+            })))
+            .await
+            .unwrap();
+        let change = tokio::time::timeout(Duration::from_secs(5), changes.recv())
+            .await
+            .expect("a change")
+            .expect("open");
+        // The raw file, before any decode can apply defaults.
+        let raw: Value = read_file(&fx.path);
+        for value in [settings_value(&next), settings_value(&change), raw] {
+            assert!(value["sidebarAutoSettleAfterDays"].is_null());
+            assert_eq!(value["sidebarAutoSettleOnMerge"], json!(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_text_generation_switch_between_providers_keeps_the_new_options() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        service
+            .update_settings(&patch(json!({"textGenerationModelSelection": {
+                "instanceId": "claudeAgent",
+                "model": "claude-sonnet-4-6",
+                "options": [{"id": "effort", "value": "high"}],
+            }})))
+            .await
+            .unwrap();
+        // The stale Claude option must not make the switch lose the selected model.
+        let next = service
+            .update_settings(&patch(json!({"textGenerationModelSelection": {
+                "instanceId": "codex",
+                "model": "gpt-5.4",
+                "options": [{"id": "reasoningEffort", "value": "high"}],
+            }})))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&next)["textGenerationModelSelection"],
+            json!({
+                "instanceId": "codex",
+                "model": "gpt-5.4",
+                "options": [{"id": "reasoningEffort", "value": "high"}],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_custom_instance_text_generation_selection_is_preserved() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let next = service
+            .update_settings(&patch(json!({
+                "providerInstances": {
+                    "claude_openrouter": {
+                        "driver": "claudeAgent",
+                        "enabled": true,
+                        "config": {"customModels": ["openai/gpt-5.5"]},
+                    },
+                },
+                "textGenerationModelSelection": {"instanceId": "claude_openrouter", "model": "openai/gpt-5.5"},
+            })))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&next)["textGenerationModelSelection"],
+            json!({"instanceId": "claude_openrouter", "model": "openai/gpt-5.5"})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_custom_instance_selection_survives_its_drivers_default_being_disabled() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let next = service
+            .update_settings(&patch(json!({
+                "providerInstances": {
+                    "claudeAgent": {"driver": "claudeAgent", "enabled": false},
+                    "claude_openrouter": {
+                        "driver": "claudeAgent",
+                        "enabled": true,
+                        "config": {"customModels": ["openai/gpt-5.5"]},
+                    },
+                },
+                "textGenerationModelSelection": {"instanceId": "claude_openrouter", "model": "openai/gpt-5.5"},
+            })))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&next)["textGenerationModelSelection"],
+            json!({"instanceId": "claude_openrouter", "model": "openai/gpt-5.5"})
+        );
+    }
+
+    #[tokio::test]
+    async fn disabling_the_writer_falls_back_to_an_enabled_driver_instance_and_restores() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let providers = json!({
+            "claudeAgent": {"driver": "claudeAgent", "enabled": false},
+            "codex": {"driver": "codex", "enabled": true, "config": {}},
+            "writer": {"driver": "claudeAgent", "enabled": true, "config": {}},
+        });
+        let selection = json!({"instanceId": "writer", "model": "claude-sonnet-4-6"});
+        service
+            .update_settings(&patch(json!({
+                "providerInstances": providers,
+                "textGenerationModelSelection": selection,
+            })))
+            .await
+            .unwrap();
+        let mut changes = service.subscribe();
+
+        let mut disabled = providers.clone();
+        disabled["writer"]["enabled"] = json!(false);
+        let next = service
+            .update_settings(&patch(json!({"providerInstances": disabled})))
+            .await
+            .unwrap();
+        let model = default_server_settings()
+            .text_generation_model_selection
+            .model
+            .to_string();
+        let fallback = json!({"instanceId": "codex", "model": model});
+        assert_eq!(
+            settings_value(&next)["textGenerationModelSelection"],
+            fallback
+        );
+        assert_eq!(
+            settings_value(&service.get_settings().await.unwrap())["textGenerationModelSelection"],
+            fallback
+        );
+        let change = tokio::time::timeout(Duration::from_secs(5), changes.recv())
+            .await
+            .expect("a change")
+            .expect("open");
+        assert_eq!(
+            settings_value(&change)["textGenerationModelSelection"],
+            fallback
+        );
+
+        // The file keeps the user's choice; only the returned view falls back.
+        let persisted =
+            settings_value(&serde_json::from_value::<ServerSettings>(read_file(&fx.path)).unwrap());
+        assert_eq!(persisted["textGenerationModelSelection"], selection);
+
+        let restored = service
+            .update_settings(&patch(json!({"providerInstances": providers})))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&restored)["textGenerationModelSelection"],
+            selection
+        );
+    }
 }

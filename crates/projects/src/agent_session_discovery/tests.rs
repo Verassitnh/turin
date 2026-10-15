@@ -903,3 +903,130 @@ async fn honors_provider_instance_home_directory_environment_variables() {
     );
 }
 
+#[tokio::test]
+async fn ignores_invalid_provider_instances_while_scanning_the_remaining_providers() {
+    let mut fixture = Fixture::new();
+    let workspace = fixture.workspace("t3code-workspace-");
+    write_transcript(
+        &fixture.claude_transcript("-actual", "session.jsonl"),
+        &claude_session_line(workspace.path()),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+    fixture.configure("codex", instance("codex", json!({"homePath": 123})));
+
+    let result = fixture.scan().await;
+
+    assert_eq!(paths(&result), vec![workspace.path().to_string_lossy().into_owned()]);
+}
+
+#[tokio::test]
+async fn does_not_scan_provider_instances_disabled_by_the_envelope_or_config() {
+    let mut fixture = Fixture::new();
+    let envelope_home = temp_dir("t3code-codex-disabled-envelope-");
+    let config_home = temp_dir("t3code-codex-disabled-config-");
+    let envelope_workspace = fixture.workspace("t3code-workspace-disabled-envelope-");
+    let config_workspace = fixture.workspace("t3code-workspace-disabled-config-");
+    for (home, workspace, session) in [
+        (envelope_home.path(), envelope_workspace.path(), "envelope-disabled"),
+        (config_home.path(), config_workspace.path(), "config-disabled"),
+    ] {
+        write_transcript(
+            &home
+                .join("sessions")
+                .join("2026")
+                .join("08")
+                .join("24")
+                .join(format!("rollout-{session}.jsonl")),
+            &codex_rollout_line(workspace),
+            ms("2026-08-24T12:00:00.000Z"),
+        );
+    }
+    fixture.configure(
+        "codex-envelope-disabled",
+        ProviderInstanceConfig {
+            enabled: Some(false),
+            ..instance("codex", json!({"homePath": envelope_home.path()}))
+        },
+    );
+    fixture.configure(
+        "codex-config-disabled",
+        instance("codex", json!({"enabled": false, "homePath": config_home.path()})),
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(summarize(&result), Vec::new());
+}
+
+#[tokio::test]
+async fn ignores_relative_working_directories_from_malformed_transcripts() {
+    let fixture = Fixture::new();
+    let workspace = fixture.workspace("t3code-workspace-");
+    let relative = pathdiff_relative(workspace.path());
+    write_transcript(
+        &fixture.claude_transcript("-relative", "session.jsonl"),
+        &claude_session_line(Path::new(&relative)),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(summarize(&result), Vec::new());
+}
+
+/// A cwd spelled relative to the process cwd, as a malformed transcript might record it.
+fn pathdiff_relative(target: &Path) -> String {
+    let cwd = std::env::current_dir().expect("cwd");
+    let mut relative = PathBuf::new();
+    let mut common = 0;
+    let target_parts: Vec<_> = target.components().collect();
+    let cwd_parts: Vec<_> = cwd.components().collect();
+    while common < target_parts.len().min(cwd_parts.len()) && target_parts[common] == cwd_parts[common] {
+        common += 1;
+    }
+    for _ in common..cwd_parts.len() {
+        relative.push("..");
+    }
+    for part in &target_parts[common..] {
+        relative.push(part.as_os_str());
+    }
+    relative.to_string_lossy().into_owned()
+}
+
+#[tokio::test]
+async fn drops_candidates_whose_directory_no_longer_exists() {
+    let fixture = Fixture::new();
+    write_transcript(
+        &fixture.claude_transcript("-slug", "a.jsonl"),
+        &claude_session_line(&fixture.claude_home.join("does-not-exist")),
+        ms("2026-01-01T00:00:00.000Z"),
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(summarize(&result), Vec::new());
+}
+
+#[tokio::test]
+async fn excludes_the_home_directory_temporary_root_and_t3_data_directory() {
+    let fixture = Fixture::new();
+    let workspace = fixture.workspace("t3code-workspace-");
+    let cwds = [
+        fixture.home_dir.clone(),
+        std::env::temp_dir(),
+        fixture.base_dir.clone(),
+        workspace.path().to_path_buf(),
+    ];
+    for (index, cwd) in cwds.iter().enumerate() {
+        write_transcript(
+            &fixture.claude_transcript(&format!("-slug-{index}"), "session.jsonl"),
+            &claude_session_line(cwd),
+            ms("2026-01-01T00:00:00.000Z") + index as f64,
+        );
+    }
+
+    let result = fixture.scan().await;
+
+    assert_eq!(paths(&result), vec![workspace.path().to_string_lossy().into_owned()]);
+}
+

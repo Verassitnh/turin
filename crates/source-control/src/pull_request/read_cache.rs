@@ -368,13 +368,28 @@ impl Inner {
             // An entry that no longer decodes is a miss and is overwritten below.
             if let Ok(entry) = serde_json::from_str::<Entry>(&raw) {
                 if entry.expires_at > self.now() {
-                    self.memory_insert(request.read_key(), entry.clone());
+                    self.remember(&request, entry.clone());
                     return Ok(entry);
                 }
                 // The persisted cache drops an expired entry only when it is read again.
                 self.store.remove(&store_key).await?;
             }
         }
+        self.fetch_and_store(request).await
+    }
+
+    /// Keeps a loaded entry in memory only while its revision still matches the request. A read
+    /// that loaded the store before an invalidation holds a revision the scope has moved off, and
+    /// must not be found under the new key.
+    fn remember(&self, request: &ReadRequest, entry: Entry) {
+        if request.matches_revision(entry.revision.as_deref()) {
+            self.memory_insert(request.read_key(), entry);
+        }
+    }
+
+    /// Runs the lookup and stores what it returns under the request's revision.
+    async fn fetch_and_store(&self, request: ReadRequest) -> Result<Entry, GetFailure> {
+        let store_key = request.store_key();
         let payload = request.lookup.clone().await.map_err(GetFailure::Read)?;
         let entry = Entry {
             payload,
@@ -388,10 +403,12 @@ impl Inner {
         Ok(entry)
     }
 
-    /// `PersistedCache.invalidate`.
+    /// `PersistedCache.invalidate`: the store first, then memory. A read that misses the store
+    /// after the removal looks up again rather than finding an entry the store no longer holds.
     async fn cache_invalidate(&self, request: &ReadRequest) -> Result<(), GetFailure> {
+        let removed = self.store.remove(&request.store_key()).await;
         self.memory.lock().shift_remove(&request.read_key());
-        self.store.remove(&request.store_key()).await?;
+        removed?;
         Ok(())
     }
 
@@ -407,7 +424,13 @@ impl Inner {
                         return Ok(stored);
                     }
                     inner.cache_invalidate(&request).await?;
-                    inner.cache_get(request).await
+                    let fresh = inner.cache_get(request.clone()).await?;
+                    if request.matches_revision(fresh.revision.as_deref()) {
+                        return Ok(fresh);
+                    }
+                    // A read that loaded the store before the removal wrote its stale entry back.
+                    // Take a new lookup rather than serve that entry.
+                    inner.fetch_and_store(request).await
                 }
                 .boxed()
             })
@@ -640,6 +663,7 @@ fn spawn_prune_loop(directory: PathBuf, clock: Arc<dyn Clock>, interval: Duratio
 mod tests {
     use super::*;
     use crate::source_control_core::clock::ManualClock;
+    use async_trait::async_trait;
     use pretty_assertions::assert_eq;
     use std::sync::atomic::AtomicUsize;
     use std::time::SystemTime;
@@ -691,6 +715,134 @@ mod tests {
                 .set_modified(mtime)
                 .unwrap();
         }
+    }
+
+    /// A store whose first `remove` of one key stops, before or after the removal, until the test
+    /// releases it. Lets a test run other reads while an invalidation is half done.
+    struct PausingStore {
+        inner: MemoryKeyValueStore,
+        key: String,
+        pause_after: bool,
+        armed: AtomicBool,
+        reached: Notify,
+        release: Notify,
+    }
+
+    impl PausingStore {
+        fn new(key: String, pause_after: bool) -> Self {
+            Self {
+                inner: MemoryKeyValueStore::new(),
+                key,
+                pause_after,
+                armed: AtomicBool::new(true),
+                reached: Notify::new(),
+                release: Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl KeyValueStore for PausingStore {
+        async fn get(&self, key: &str) -> Result<Option<String>, KeyValueStoreError> {
+            self.inner.get(key).await
+        }
+        async fn set(&self, key: &str, value: &str) -> Result<(), KeyValueStoreError> {
+            self.inner.set(key, value).await
+        }
+        async fn remove(&self, key: &str) -> Result<(), KeyValueStoreError> {
+            if key != self.key || !self.armed.swap(false, Ordering::SeqCst) {
+                return self.inner.remove(key).await;
+            }
+            if self.pause_after {
+                let removed = self.inner.remove(key).await;
+                self.reached.notify_one();
+                self.release.notified().await;
+                removed
+            } else {
+                self.reached.notify_one();
+                self.release.notified().await;
+                self.inner.remove(key).await
+            }
+        }
+    }
+
+    /// The store key the cache writes a request's entry under.
+    fn store_key_of(key: &str) -> String {
+        format!("{STORE_ID}{}", digest(key))
+    }
+
+    /// A stored entry at the scope's empty revision, then a scope write that moves the scope on:
+    /// the state every stale-read race starts from. Returns the cache and the scope's new revision.
+    async fn stale_entry_behind_a_scope_write(
+        store: Arc<PausingStore>,
+        clock: &Arc<ManualClock>,
+    ) -> (Arc<PullRequestReadCache>, String) {
+        let cache = Arc::new(PullRequestReadCache::new(store, clock.clone()));
+        assert_eq!(
+            cache
+                .get("first", lookup_ok("1"), &scopes(&["pr"]))
+                .await
+                .unwrap(),
+            "1"
+        );
+        cache.invalidate("pr").await;
+        let revision = cache.inner.revisions().await.unwrap()["pr"]
+            .revision
+            .clone();
+        (cache, revision)
+    }
+
+    #[tokio::test]
+    async fn a_read_that_loaded_the_store_before_an_invalidation_is_not_kept_under_the_new_revision()
+     {
+        // Deterministic interleaving: the refresh stops before it removes the stale entry, and a
+        // load runs in that window. The load sees the stale entry; memory must not keep it under the
+        // scope's new revision, where the refresh's final read would find it.
+        let clock = ManualClock::new(START);
+        let store = Arc::new(PausingStore::new(store_key_of("first"), false));
+        let (cache, revision) = stale_entry_behind_a_scope_write(store.clone(), &clock).await;
+        let refresh = tokio::spawn({
+            let cache = cache.clone();
+            async move { cache.get("first", lookup_ok("4"), &scopes(&["pr"])).await }
+        });
+        store.reached.notified().await;
+
+        let request = ReadRequest {
+            key: digest("first"),
+            revision,
+            lookup: lookup_ok("4").shared(),
+        };
+        let loaded = cache.inner.load_or_lookup(request.clone()).await.unwrap();
+        assert_eq!(loaded.payload, "1");
+        assert!(cache.inner.memory_get(&request.read_key()).is_none());
+
+        store.release.notify_one();
+        assert_eq!(refresh.await.unwrap().unwrap(), "4");
+    }
+
+    #[tokio::test]
+    async fn a_stale_entry_written_back_during_an_invalidation_is_not_served() {
+        // Deterministic interleaving: the removal completes, then a late reader writes the stale
+        // entry back to the store before the refresh's final read. The final read must not serve it.
+        let clock = ManualClock::new(START);
+        let store = Arc::new(PausingStore::new(store_key_of("first"), true));
+        let (cache, _) = stale_entry_behind_a_scope_write(store.clone(), &clock).await;
+        let refresh = tokio::spawn({
+            let cache = cache.clone();
+            async move { cache.get("first", lookup_ok("4"), &scopes(&["pr"])).await }
+        });
+        store.reached.notified().await;
+
+        let stale = serde_json::to_string(&Entry {
+            payload: "1".to_owned(),
+            expires_at: START + ENTRY_TTL_MILLIS,
+            revision: Some(String::new()),
+        })
+        .unwrap();
+        store.set(&store_key_of("first"), &stale).await.unwrap();
+
+        store.release.notify_one();
+        assert_eq!(refresh.await.unwrap().unwrap(), "4");
     }
 
     #[tokio::test]

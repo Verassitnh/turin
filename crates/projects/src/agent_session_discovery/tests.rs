@@ -207,6 +207,8 @@ struct Fixture {
     instances: BTreeMap<String, ProviderInstanceConfig>,
     imported_roots: Vec<PathBuf>,
     host_environment: HashMap<String, String>,
+    /// Pins `now` (epoch ms) for the window and `scannedAt`. `None` is the wall clock.
+    now_ms: Option<f64>,
 }
 
 impl Fixture {
@@ -231,6 +233,7 @@ impl Fixture {
             instances: BTreeMap::new(),
             imported_roots: Vec::new(),
             host_environment: HashMap::new(),
+            now_ms: None,
         };
         fixture.instances.insert(
             "claudeAgent".to_owned(),
@@ -280,7 +283,7 @@ impl Fixture {
                 )
             })
             .collect::<ProviderInstanceConfigMap>();
-        AgentSessionDiscovery::new(
+        let discovery = AgentSessionDiscovery::new(
             self.host(),
             fs,
             Arc::new(Settings(settings)),
@@ -290,7 +293,11 @@ impl Fixture {
                     .map(|root| project_shell(root))
                     .collect(),
             )),
-        )
+        );
+        match self.now_ms {
+            Some(now) => discovery.with_clock(move || now),
+            None => discovery,
+        }
     }
 
     fn scanner(&self) -> AgentSessionDiscovery {
@@ -1492,4 +1499,155 @@ async fn reports_unfinished_directory_work_for_19_999_and_20_000_project_directo
         assert_eq!(summarize(&result), Vec::new(), "{count}");
         assert_eq!(result.truncated, (count == 20_000).then_some(true), "{count}");
     }
+}
+
+#[tokio::test]
+async fn skips_malformed_transcripts_without_failing_the_scan() {
+    let fixture = Fixture::new();
+    let workspace = fixture.workspace("t3code-workspace-");
+    write_transcript(
+        &fixture.claude_transcript("-broken", "a.jsonl"),
+        "not json at all\n",
+        ms("2026-05-01T00:00:00.000Z"),
+    );
+    // Valid JSON, but no cwd anywhere in the record.
+    write_transcript(
+        &fixture.claude_transcript("-no-cwd", "a.jsonl"),
+        "{\"type\":\"summary\"}\n",
+        ms("2026-05-02T00:00:00.000Z"),
+    );
+    write_transcript(
+        &fixture.claude_transcript("-good", "a.jsonl"),
+        &claude_session_line(workspace.path()),
+        ms("2026-05-03T00:00:00.000Z"),
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(
+        summarize(&result),
+        vec![summary(
+            &workspace.path().to_string_lossy(),
+            &base_name(workspace.path()),
+            &["claudeAgent"],
+            1,
+            Some("2026-05-03T00:00:00.000Z"),
+        )]
+    );
+}
+
+#[tokio::test]
+async fn returns_an_empty_result_when_neither_home_directory_exists() {
+    let mut fixture = Fixture::new();
+    fixture.claude_home = fixture.home_dir.join("no-claude");
+    fixture.codex_home = fixture.home_dir.join("no-codex");
+    fixture.configure(
+        "claudeAgent",
+        instance("claudeAgent", json!({"homePath": fixture.claude_home})),
+    );
+    fixture.configure(
+        "codex",
+        instance("codex", json!({"homePath": fixture.codex_home})),
+    );
+
+    let result = fixture.scan().await;
+
+    assert_eq!(summarize(&result), Vec::new());
+    assert!(
+        result.scanned_at.len() > 10 && result.scanned_at.as_bytes()[4] == b'-',
+        "scannedAt {}",
+        result.scanned_at
+    );
+}
+
+#[tokio::test]
+async fn counts_terminal_newlines_correctly_with_record_overflow() {
+    for overflow in [false, true] {
+        let mut fixture = Fixture::new();
+        let now = ms("2026-08-24T12:00:00.000Z");
+        fixture.now_ms = Some(now);
+        let workspace = fixture.workspace("t3code-record-limit-project-");
+        let directory = fixture.codex_home.join("sessions").join("2026").join("08").join("24");
+        write_transcript(
+            &directory.join("rollout-records.jsonl"),
+            &make_record_limit_transcript(workspace.path(), overflow),
+            now,
+        );
+        write_transcript(
+            &directory.join("rollout-older.jsonl"),
+            &[
+                json!({
+                    "type": "session_meta",
+                    "payload": {"id": "older-session", "cwd": workspace.path()},
+                })
+                .to_string(),
+                json!({
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "Older prompt"},
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+            now - 1_000.0,
+        );
+
+        let outcomes = fixture
+            .outcomes(workspace.path())
+            .await;
+
+        let tags: Vec<&str> = outcomes.iter().map(outcome_tag).collect();
+        assert_eq!(
+            tags,
+            if overflow {
+                vec!["Skipped", "Importable"]
+            } else {
+                vec!["Importable", "Skipped"]
+            },
+            "overflow={overflow}"
+        );
+        let messages: Vec<String> = outcomes
+            .iter()
+            .flat_map(|outcome| match outcome {
+                AgentSessionRecentThread::Importable { thread, .. } => thread
+                    .messages
+                    .iter()
+                    .map(|message| message.text.clone())
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(
+            messages,
+            vec![if overflow { "Older prompt" } else { "First prompt" }.to_owned()],
+            "overflow={overflow}"
+        );
+    }
+}
+
+fn outcome_tag(outcome: &AgentSessionRecentThread) -> &'static str {
+    match outcome {
+        AgentSessionRecentThread::Importable { .. } => "Importable",
+        AgentSessionRecentThread::AlreadyImported { .. } => "AlreadyImported",
+        AgentSessionRecentThread::Duplicate { .. } => "Duplicate",
+        AgentSessionRecentThread::Skipped => "Skipped",
+    }
+}
+
+/// `MAX_IMPORT_RECORDS` newline-terminated records, with one more when `overflow`.
+fn make_record_limit_transcript(cwd: &Path, overflow: bool) -> String {
+    let head = [
+        json!({"type": "session_meta", "payload": {"id": "record-limit-session", "cwd": cwd}})
+            .to_string(),
+        json!({"type": "event_msg", "payload": {"type": "user_message", "message": "First prompt"}})
+            .to_string(),
+    ]
+    .join("\n");
+    let mut transcript = format!("{head}\n{}", "{}\n".repeat(99_998));
+    if overflow {
+        transcript.push_str(&format!(
+            "\n{}\n",
+            json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Overflow prompt"}})
+        ));
+    }
+    transcript
 }

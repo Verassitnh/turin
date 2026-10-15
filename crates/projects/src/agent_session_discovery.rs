@@ -249,6 +249,8 @@ pub struct AgentSessionDiscovery {
     import_read_lock: Semaphore,
     /// Upstream `cachedCandidates`, set by `scan` and reused by `recentThreads`.
     cached_candidates: Mutex<Option<Arc<Vec<RawCandidate>>>>,
+    /// Upstream `DateTime.now`, epoch milliseconds.
+    now_ms: Box<dyn Fn() -> f64 + Send + Sync>,
     excluded_roots: HashSet<String>,
     excluded_ancestors: Vec<String>,
 }
@@ -452,9 +454,16 @@ impl AgentSessionDiscovery {
             projects,
             import_read_lock: Semaphore::new(1),
             cached_candidates: Mutex::new(None),
+            now_ms: Box::new(|| Utc::now().timestamp_millis() as f64),
             excluded_roots,
             excluded_ancestors,
         }
+    }
+
+    /// Replaces the wall clock. Used by the window cutoff and `scannedAt`.
+    pub fn with_clock(mut self, now_ms: impl Fn() -> f64 + Send + Sync + 'static) -> Self {
+        self.now_ms = Box::new(now_ms);
+        self
     }
 
     /// Host filesystem and the given settings and project reads.
@@ -1152,7 +1161,8 @@ impl AgentSessionDiscovery {
 
         Ok(AgentSessionScanResult {
             candidates,
-            scanned_at: UtcDateTime::now().to_string(),
+            scanned_at: iso_from_millis((self.now_ms)())
+                .unwrap_or_else(|| UtcDateTime::now().to_string()),
             truncated: truncated.then_some(true),
         })
     }
@@ -1175,7 +1185,7 @@ impl AgentSessionDiscovery {
             return Ok(RecentState::empty());
         }
         let root_identity = self.directory_identity(&root, None).await;
-        let now_ms = Utc::now().timestamp_millis() as f64;
+        let now_ms = (self.now_ms)();
         let cutoff_ms = now_ms - RECENT_THREAD_WINDOW_MS;
 
         let candidates = self.recent_candidates().await?;

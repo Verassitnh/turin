@@ -273,18 +273,20 @@ async fn probe_one(
         if let Some(authorization) = authorization {
             builder = builder.header("authorization", authorization);
         }
-        let response = builder.send().await.map_err(|_| {
-            OpenCodeRuntimeError::new("probeOpenCodeServer", "Couldn't reach the OpenCode server.")
-        })?;
+        let response = builder
+            .send()
+            .await
+            .map_err(|err| crate::http_client::unreachable("probeOpenCodeServer", err))?;
         let status = response.status().as_u16();
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let body = response.text().await.map_err(|_| {
-            OpenCodeRuntimeError::new("probeOpenCodeServer", "Couldn't reach the OpenCode server.")
-        })?;
+        let body = response
+            .text()
+            .await
+            .map_err(|err| crate::http_client::unreachable("probeOpenCodeServer", err))?;
         Ok::<_, OpenCodeRuntimeError>((status, content_type, body))
     };
     let (status, content_type, body) =

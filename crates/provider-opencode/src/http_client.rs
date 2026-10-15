@@ -144,10 +144,10 @@ impl HttpClient {
         if let Some(directory) = &self.directory {
             builder = builder.header("x-opencode-directory", encode_uri_component(directory));
         }
-        let response = builder.send().await.map_err(|err| {
-            OpenCodeRuntimeError::new(operation, "Couldn't reach the OpenCode server.")
-                .with_cause(err)
-        })?;
+        let response = builder
+            .send()
+            .await
+            .map_err(|err| unreachable(operation, err))?;
         let status = response.status().as_u16();
         let content_type = header_str(response.headers(), reqwest::header::CONTENT_TYPE);
         if content_type.as_deref() == Some("text/html") {
@@ -188,10 +188,10 @@ impl HttpClient {
         if let Some(body) = body {
             builder = builder.json(body);
         }
-        builder.send().await.map_err(|err| {
-            OpenCodeRuntimeError::new(operation, "Couldn't reach the OpenCode server.")
-                .with_cause(err)
-        })
+        builder
+            .send()
+            .await
+            .map_err(|err| unreachable(operation, err))
     }
 
     fn url(
@@ -300,6 +300,29 @@ pub fn shared_http() -> reqwest::Client {
         .no_proxy()
         .build()
         .expect("reqwest client")
+}
+
+/// Transport failure with the tokens upstream's status classifier matches
+/// (`fetch failed`, `ECONNREFUSED`). reqwest's own Display includes the URL,
+/// which must not reach a detail, so the text is written here.
+pub fn unreachable(operation: &str, err: reqwest::Error) -> OpenCodeRuntimeError {
+    let detail = if connection_refused(&err) {
+        "Couldn't reach the OpenCode server (fetch failed: ECONNREFUSED)."
+    } else {
+        "Couldn't reach the OpenCode server (fetch failed)."
+    };
+    OpenCodeRuntimeError::new(operation, detail).with_cause(err)
+}
+
+fn connection_refused(err: &reqwest::Error) -> bool {
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return io.kind() == std::io::ErrorKind::ConnectionRefused;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 pub fn decode_json<T: serde::de::DeserializeOwned>(

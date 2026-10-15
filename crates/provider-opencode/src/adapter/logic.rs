@@ -1981,3 +1981,56 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod transport_classification_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_refused_external_server_is_named_as_unreachable() {
+        // Bind and drop so nothing listens on the port: the connect is refused.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let url = format!("http://127.0.0.1:{port}");
+        let client = crate::v1_client::V1Client::new(&url, "/work", None).unwrap();
+        let err = client.health().await.unwrap_err();
+        assert!(!err.detail.contains(&url), "the URL leaked: {}", err.detail);
+        let (installed, message) = format_probe_error(Some(&err.detail), true, "version", &url);
+        assert!(installed);
+        assert_eq!(
+            message,
+            format!(
+                "Couldn't reach the configured OpenCode server at {url}. Check that the server is running and the URL is correct."
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_binary_is_reported_as_not_installed() {
+        let err = crate::runtime::start_open_code_server_process(
+            crate::runtime::StartOpenCodeServer {
+                binary_path: "/nonexistent/opencode-turin".into(),
+                directory: "/work".into(),
+                server_password: None,
+                environment: None,
+                hostname: None,
+                port: Some(9),
+                timeout: None,
+                shutdown_grace: None,
+                ledger: None,
+            },
+            crate::runtime::default_v1_verify(),
+        )
+        .await
+        .unwrap_err();
+        let (installed, message) = format_probe_error(Some(&err.detail), false, "version", "");
+        assert!(!installed);
+        assert_eq!(
+            message,
+            "OpenCode CLI (`opencode`) is not installed or not on PATH."
+        );
+    }
+}

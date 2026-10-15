@@ -257,7 +257,7 @@ fn describe_info_failure(err: OpenCodeRuntimeError) -> OpenCodeRuntimeError {
         )
         .with_cause(err);
     }
-    if err.detail == "Couldn't reach the OpenCode server." {
+    if err.detail.starts_with("Couldn't reach the OpenCode server") {
         return OpenCodeRuntimeError::new("server.info", "Could not reach the OpenCode server.")
             .with_cause(err);
     }

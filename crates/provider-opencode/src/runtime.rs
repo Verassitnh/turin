@@ -329,10 +329,16 @@ pub async fn start_open_code_server_process(
     command.env("OPENCODE_CONFIG_CONTENT", &config);
 
     let mut child = command.spawn().map_err(|err| {
-        OpenCodeRuntimeError::new(
-            "startOpenCodeServerProcess",
-            format!("Failed to spawn OpenCode server process: {err}"),
-        )
+        // Upstream's status classifier looks for ENOENT, so a missing binary says so.
+        let detail = if err.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "Failed to spawn OpenCode server process: spawn {} ENOENT ({err})",
+                input.binary_path
+            )
+        } else {
+            format!("Failed to spawn OpenCode server process: {err}")
+        };
+        OpenCodeRuntimeError::new("startOpenCodeServerProcess", detail)
     })?;
     let pid = child.id().unwrap_or(0);
     let serve_args = vec![

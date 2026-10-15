@@ -35,6 +35,8 @@ pub enum Dialog {
     ScriptEditor,
     /// `BackgroundActivityAdvancedDialog`.
     BackgroundActivity,
+    /// The Add provider wizard.
+    AddProvider,
 }
 
 /// `DialogPopup` chrome around `children` (header / panel / footer).
@@ -148,6 +150,9 @@ impl SettingsView {
         let theme = cx.app_theme().clone();
         if matches!(self.dialog, Some(Dialog::AddHub)) {
             return Some(self.render_add_hub_dialog(window, cx));
+        }
+        if matches!(self.dialog, Some(Dialog::AddProvider)) {
+            return Some(self.render_add_provider_dialog(window, cx));
         }
         if matches!(self.dialog, Some(Dialog::BackgroundActivity)) {
             return Some(self.render_background_activity_dialog(window, cx));

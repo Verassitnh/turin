@@ -2,6 +2,7 @@
 //! the page's sections; [`SettingsView::render_page`] routes and frames them
 //! (`SettingsPageContainer`).
 
+mod add_provider;
 mod appearance;
 mod background_activity;
 mod archived;

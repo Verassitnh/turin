@@ -69,7 +69,7 @@ pub struct ProvidersState {
     pub model_input: String,
     pub model_error: Option<String>,
     pub editing_model: Option<String>,
-    pub adding_provider: bool,
+    pub wizard: super::add_provider::AddProviderState,
     pub env_drafts: std::collections::HashMap<String, Vec<super::super::provider_form::EnvironmentVariable>>,
 }
 
@@ -103,7 +103,7 @@ enum ProviderStatus {
     Warning,
 }
 
-fn provider_brand_icon(driver: &str, size: gpui_kit::Rems, tint: Hsla) -> AnyElement {
+pub(super) fn provider_brand_icon(driver: &str, size: gpui_kit::Rems, tint: Hsla) -> AnyElement {
     match super::super::icons::provider_icon_path(driver) {
         Some(path) => Icon::path(path).size(size).color(tint).into_any_element(),
         None => Icon::new(IconName::Bot).size(size).color(tint).into_any_element(),
@@ -178,7 +178,7 @@ impl SettingsView {
 
     /// Writes one instance (or removes it) with the `providerInstances` map
     /// replacement the settings service expects.
-    fn write_provider_instance(
+    pub(super) fn write_provider_instance(
         &mut self,
         id: &str,
         next: Option<Value>,
@@ -274,8 +274,7 @@ impl SettingsView {
             .icon(IconName::Plus)
             .tooltip(Tooltip::new("Add provider"))
             .on_click(cx.listener(|this, _, _, cx| {
-                this.panels.providers.adding_provider = true;
-                cx.notify();
+                this.open_add_provider(cx);
             }));
 
         // List column.
@@ -304,8 +303,7 @@ impl SettingsView {
                 .cursor(CursorStyle::PointingHand)
                 .hover(|style| style.bg(with_alpha(theme.muted, 0.25)).text_color(theme.foreground))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.panels.providers.adding_provider = true;
-                    cx.notify();
+                    this.open_add_provider(cx);
                 }))
                 .child(Icon::new(IconName::Plus).size(rems(1.)).color(theme.muted_foreground))
                 .child("Add provider"),

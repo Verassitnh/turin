@@ -1,7 +1,10 @@
 //! Port of upstream/packages/contracts/src (kept modules only; see PORTING.md).
+#![allow(clippy::large_enum_variant)] // Wire unions mirror upstream shapes; boxing would leak into every consumer.
 
 #[macro_use]
 pub mod base_schemas;
+#[macro_use]
+pub mod macros;
 pub mod agent_sessions;
 pub mod assistant_citations;
 pub mod chat_attachment;

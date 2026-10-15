@@ -34,3 +34,5 @@ pub mod provider_state;
 pub mod model_display;
 pub mod model_picker_keys;
 pub mod model_picker_search;
+pub mod catalog;
+pub mod model_picker;

@@ -11,6 +11,7 @@ pub mod provider_event_ingestor;
 pub mod provider_session_manager;
 pub mod provider_session_transition_policy;
 pub mod provider_switch_service;
+pub mod provider_turn_control_service;
 pub mod restart_background_note;
 pub mod restart_continuation;
 pub mod run_finalization_service;

@@ -37,6 +37,57 @@ pub fn js_trim(value: &str) -> &str {
     value.trim_matches(is_js_whitespace)
 }
 
+/// JS `string.length` (UTF-16 code units). `Schema.isMaxLength` and friends
+/// count this, not bytes or `char`s.
+pub fn js_len(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+
+/// Largest integer a JS number holds exactly (`Number.MAX_SAFE_INTEGER`).
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// Writes a `Schema.Number` the way `JSON.stringify` does: a whole number has
+/// no fractional part (`2`, not `2.0`), so re-saved JSON stays byte-identical
+/// to what the TS server writes.
+pub fn serialize_js_number<S: Serializer>(value: f64, s: S) -> Result<S::Ok, S::Error> {
+    if value.is_finite() && value.fract() == 0.0 && value.abs() <= MAX_SAFE_INTEGER {
+        s.serialize_i64(value as i64)
+    } else {
+        s.serialize_f64(value)
+    }
+}
+
+/// `Schema.Number` field codec (`#[serde(with = "js_number")] f64`); decodes
+/// any JSON number, encodes whole numbers without a fraction.
+pub mod js_number {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &f64, s: S) -> Result<S::Ok, S::Error> {
+        super::serialize_js_number(*value, s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        f64::deserialize(d)
+    }
+}
+
+/// `Option<f64>` counterpart of [`js_number`]: `NullOr(Schema.Number)` (encodes
+/// `null`) or, with `skip_serializing_if`, `optional(Schema.Number)`.
+pub mod js_number_nullable {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(value) => super::serialize_js_number(*value, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+        Option::<f64>::deserialize(d)
+    }
+}
+
 #[doc(hidden)]
 pub mod __private {
     pub use serde;
@@ -64,6 +115,12 @@ impl TrimmedString {
     }
     pub fn into_inner(self) -> String {
         self.0
+    }
+}
+
+impl AsRef<str> for TrimmedString {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 
@@ -103,6 +160,12 @@ impl TrimmedNonEmptyString {
     }
     pub fn into_inner(self) -> String {
         self.0
+    }
+}
+
+impl AsRef<str> for TrimmedNonEmptyString {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 
@@ -634,6 +697,53 @@ pub mod omitted_when_null {
         d: D,
     ) -> Result<Option<T>, D::Error> {
         decode_lenient(d)
+    }
+}
+
+/// Wire form of upstream `Schema.Option(X)`: `Some` encodes as
+/// `{"_tag":"Some","value":…}`, `None` as `{"_tag":"None"}`.
+///
+/// T01-local: upstream `baseSchemas.ts` carries `Schema.Option` (a plain
+/// codec, unlike the forward-compat helpers above); it appears inside struct
+/// fields of `sourceControl.ts` and `vcs.ts` only. Distinct from
+/// `Option<T>` (which maps `Schema.optionalKey` / `Schema.NullOr`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "_tag")]
+#[derive(Default)]
+pub enum EffectOption<T> {
+    #[serde(rename = "Some")]
+    Some { value: Box<T> },
+    #[serde(rename = "None")]
+    #[default]
+    None,
+}
+
+impl<T> EffectOption<T> {
+    pub fn some(value: T) -> Self {
+        Self::Some {
+            value: Box::new(value),
+        }
+    }
+    pub fn as_ref_option(&self) -> Option<&T> {
+        match self {
+            Self::Some { value } => Some(value),
+            Self::None => None,
+        }
+    }
+    pub fn into_option(self) -> Option<T> {
+        match self {
+            Self::Some { value } => Some(*value),
+            Self::None => None,
+        }
+    }
+}
+
+impl<T> From<Option<T>> for EffectOption<T> {
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(value) => Self::some(value),
+            None => Self::None,
+        }
     }
 }
 

@@ -37,6 +37,9 @@ mod part_q;
 mod part_r;
 mod part_s;
 mod part_t;
+mod part_u;
+mod part_v;
+mod part_w;
 
 pub(super) fn counter() -> Arc<AtomicUsize> {
     Arc::new(AtomicUsize::new(0))

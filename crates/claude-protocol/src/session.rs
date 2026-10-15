@@ -132,10 +132,26 @@ struct Pending {
     sender: oneshot::Sender<Value>,
     subtype: String,
 }
+struct PendingTable {
+    closed: bool,
+    requests: HashMap<String, Pending>,
+}
+impl PendingTable {
+    fn fail_all(&mut self) {
+        self.closed = true;
+        for (id, pending) in self.requests.drain() {
+            let _ = pending.sender.send(json!({
+                "subtype": "error",
+                "request_id": id,
+                "error": "claude process closed"
+            }));
+        }
+    }
+}
 struct Shared {
     writer: mpsc::UnboundedSender<WriteCommand>,
     events: mpsc::UnboundedSender<SessionEvent>,
-    pending: Mutex<HashMap<String, Pending>>,
+    pending: Mutex<PendingTable>,
     unmatched: Mutex<VecDeque<(String, Value)>>,
     inbound: Mutex<HashMap<String, CancellationToken>>,
     handler: Arc<dyn ControlHandler>,
@@ -177,13 +193,16 @@ impl ClaudeSession {
         let state = Arc::new(Shared {
             writer,
             events: event_tx,
-            pending: Mutex::new(HashMap::new()),
+            pending: Mutex::new(PendingTable {
+                closed: false,
+                requests: HashMap::new(),
+            }),
             unmatched: Mutex::new(VecDeque::new()),
             inbound: Mutex::new(HashMap::new()),
             handler,
         });
         let mut tasks = JoinSet::new();
-        tasks.spawn(write_loop(stdin, writes, state.events.clone()));
+        tasks.spawn(write_loop(stdin, writes, state.clone()));
         tasks.spawn(read_loop(stdout, state.clone()));
         tasks.spawn(stderr_loop(stderr, state.events.clone()));
         let mut session = Self {
@@ -230,7 +249,11 @@ impl ClaudeSession {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         {
-            self.state.pending.lock().unwrap().insert(
+            let mut pending = self.state.pending.lock().unwrap();
+            if pending.closed {
+                anyhow::bail!("claude process closed");
+            }
+            pending.requests.insert(
                 id.clone(),
                 Pending {
                     sender: tx,
@@ -242,7 +265,7 @@ impl ClaudeSession {
         let response = if let Some(token) = cancel {
             tokio::select! {
                 value = rx => value.context("claude control response channel closed")?,
-                _ = token.cancelled() => { self.state.pending.lock().unwrap().remove(&id); self.send_raw(json!({"type":"control_cancel_request", "request_id":id}))?; anyhow::bail!("control request cancelled"); }
+                _ = token.cancelled() => { self.state.pending.lock().unwrap().requests.remove(&id); self.send_raw(json!({"type":"control_cancel_request", "request_id":id}))?; anyhow::bail!("control request cancelled"); }
             }
         } else {
             rx.await.context("claude control response channel closed")?
@@ -261,13 +284,19 @@ impl ClaudeSession {
             return parse_control_response(response, "await_control_response");
         }
         let (sender, receiver) = oneshot::channel();
-        self.state.pending.lock().unwrap().insert(
-            request_id.into(),
-            Pending {
-                sender,
-                subtype: "await_control_response".into(),
-            },
-        );
+        {
+            let mut pending = self.state.pending.lock().unwrap();
+            if pending.closed {
+                anyhow::bail!("claude process closed");
+            }
+            pending.requests.insert(
+                request_id.into(),
+                Pending {
+                    sender,
+                    subtype: "await_control_response".into(),
+                },
+            );
+        }
         let response = receiver
             .await
             .context("claude control response channel closed")?;
@@ -396,7 +425,7 @@ fn signal_group(_: Option<u32>, _: i32) {}
 async fn write_loop(
     mut stdin: tokio::process::ChildStdin,
     mut writes: mpsc::UnboundedReceiver<WriteCommand>,
-    events: mpsc::UnboundedSender<SessionEvent>,
+    state: Arc<Shared>,
 ) {
     while let Some(command) = writes.recv().await {
         match command {
@@ -404,12 +433,17 @@ async fn write_loop(
                 Ok(mut bytes) => {
                     bytes.push(b'\n');
                     if let Err(e) = stdin.write_all(&bytes).await {
-                        let _ = events.send(SessionEvent::Error(format!("stdin: {e}")));
+                        let _ = state
+                            .events
+                            .send(SessionEvent::Error(format!("stdin: {e}")));
+                        state.pending.lock().unwrap().fail_all();
                         break;
                     }
                 }
                 Err(e) => {
-                    let _ = events.send(SessionEvent::Error(format!("serialize: {e}")));
+                    let _ = state
+                        .events
+                        .send(SessionEvent::Error(format!("serialize: {e}")));
                 }
             },
             WriteCommand::Close => break,
@@ -438,7 +472,8 @@ async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
                     Some("control_response") => {
                         let response = value.get("response").cloned().unwrap_or(Value::Null);
                         if let Some(id) = response.get("request_id").and_then(Value::as_str) {
-                            if let Some(pending) = state.pending.lock().unwrap().remove(id) {
+                            if let Some(pending) = state.pending.lock().unwrap().requests.remove(id)
+                            {
                                 if pending.subtype == "initialize"
                                     && response.get("subtype").and_then(Value::as_str)
                                         == Some("success")
@@ -487,9 +522,7 @@ async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
         }
     }
     handlers.abort_all();
-    for (_, pending) in state.pending.lock().unwrap().drain() {
-        drop(pending.sender);
-    }
+    state.pending.lock().unwrap().fail_all();
     let _ = state.events.send(SessionEvent::Eof);
 }
 fn replay_pending(response: &Value, state: &Arc<Shared>, tasks: &mut JoinSet<()>) {
@@ -664,6 +697,117 @@ for line in sys.stdin:
             serde_json::from_str(recorded.lines().last().unwrap()).unwrap();
         assert_eq!(reply["response"]["request_id"], "approval-1");
         assert_eq!(reply["response"]["response"]["toolUseID"], "toolu_1");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    fn script(dir: &std::path::Path, body: &str) -> LaunchOptions {
+        let path = dir.join("fake-claude");
+        fs::write(&path, body).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&path, permissions).unwrap();
+        let mut env = BTreeMap::new();
+        if let Some(path_env) = std::env::var_os("PATH") {
+            env.insert("PATH".into(), path_env.to_string_lossy().into_owned());
+        }
+        LaunchOptions {
+            binary: path,
+            env: Some(env),
+            ..Default::default()
+        }
+    }
+    struct Accept;
+    impl ControlHandler for Accept {
+        fn handle(&self, _: ControlRequest, _: CancellationToken) -> HandlerFuture {
+            Box::pin(async { Ok(Some(json!({}))) })
+        }
+    }
+    #[tokio::test]
+    async fn control_request_after_stdout_eof_fails_instead_of_hanging() {
+        let dir =
+            std::env::temp_dir().join(format!("turin-claude-closed-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,os,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        os.close(1)
+        sys.stdin.read()
+"#,
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                SessionEvent::Eof => break,
+                SessionEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        let error = tokio::time::timeout(Duration::from_secs(2), session.interrupt(false))
+            .await
+            .expect("interrupt hung after stdout eof")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("claude process closed"),
+            "{error}"
+        );
+        let error = session.get_mcp_status().await.unwrap_err();
+        assert!(
+            error.to_string().contains("claude process closed"),
+            "{error}"
+        );
+        session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn stdin_write_failure_fails_pending_control_requests() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-stdin-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,os,sys,time
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        print(json.dumps({"type":"system","subtype":"status","status":"stdin-closed"}),flush=True)
+        os.close(0)
+        time.sleep(30)
+"#,
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                SessionEvent::Frame(frame) if frame.raw["status"] == "stdin-closed" => break,
+                SessionEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        let error = tokio::time::timeout(Duration::from_secs(2), session.get_mcp_status())
+            .await
+            .expect("request hung after stdin closed")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("claude process closed"),
+            "{error}"
+        );
+        session.shutdown().await.unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
 }

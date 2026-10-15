@@ -55,12 +55,11 @@ impl ProviderLatestVersions {
         // `now` is read before the lookup, as upstream does, so the TTL
         // counts from when the lookup started.
         let now = Instant::now();
-        if !fresh {
-            if let Some(entry) = self.entries.lock().get(key) {
-                if entry.expires_at.is_none_or(|at| at > now) {
-                    return Ok(entry.version.clone());
-                }
-            }
+        if !fresh
+            && let Some(entry) = self.entries.lock().get(key)
+            && entry.expires_at.is_none_or(|at| at > now)
+        {
+            return Ok(entry.version.clone());
         }
         let version = lookup().await?;
         let ttl = if version.is_some() {

@@ -32,16 +32,20 @@ struct ProjectRow {
 }
 
 pub fn copy_application_event_source(conn: &Connection) -> Result<(), PersistenceError> {
-    conn.execute_batch(
+    // SQLite stores CREATE text verbatim, so the `ON` line's 4-space indent is
+    // part of the schema (upstream ApplicationEventSource.ts:42-43). It is
+    // spelled out here so source indentation cannot change it.
+    conn.execute_batch(concat!(
         "
         ALTER TABLE orchestration_events
           ADD COLUMN application_event_version INTEGER NOT NULL DEFAULT 1;
-        CREATE INDEX idx_orchestration_events_application_sequence
-        ON orchestration_events(application_event_version, sequence);
+        CREATE INDEX idx_orchestration_events_application_sequence",
+        "
+    ON orchestration_events(application_event_version, sequence);
         ALTER TABLE orchestration_command_receipts
           ADD COLUMN command_type TEXT NOT NULL DEFAULT 'legacy';
         ",
-    )
+    ))
     .map_err(|err| PersistenceError::sql("ApplicationEventSource.schema", &err))?;
 
     let events = legacy_events(conn)?;
@@ -336,4 +340,37 @@ fn project_rows(conn: &Connection) -> Result<Vec<ProjectRow>, PersistenceError> 
         .map_err(|err| PersistenceError::sql("ApplicationEventSource.projects", &err))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|err| PersistenceError::sql("ApplicationEventSource.projects", &err))
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    use crate::migrations::{RunMigrationsOptions, run_migrations};
+
+    #[test]
+    fn application_sequence_index_sql_matches_upstream() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(
+            &conn,
+            RunMigrationsOptions {
+                to_migration_inclusive: None,
+            },
+        )
+        .unwrap();
+        let sql: String = conn
+            .query_row(
+                "
+                SELECT sql FROM sqlite_master
+                WHERE type = 'index' AND name = 'idx_orchestration_events_application_sequence'
+                ",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            sql,
+            "CREATE INDEX idx_orchestration_events_application_sequence\n    ON orchestration_events(application_event_version, sequence)"
+        );
+    }
 }

@@ -17,6 +17,8 @@ mod permissions;
 mod probe;
 mod session;
 mod settings;
+mod sign_in;
+mod status;
 
 pub use account_usage::{
     AccountUsageRead, CredentialSource, DashboardClient, DashboardRequest, DashboardResponse,

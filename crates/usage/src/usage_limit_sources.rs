@@ -53,6 +53,9 @@ struct Shared {
     /// One refresh at a time: a slow hub read started before a settings change must
     /// not publish after the change's own refresh and resurrect a removed source.
     refresh_lock: AsyncMutex<()>,
+    /// Completed refresh calls, for tests that count ticks and startup reads.
+    #[cfg(test)]
+    refreshes: std::sync::atomic::AtomicUsize,
 }
 
 /// Cheap to clone; the background poll stops when the last clone drops.
@@ -111,6 +114,9 @@ impl Shared {
 
     /// Re-reads every enabled source now. Never fails; failures land on the snapshot.
     pub async fn refresh(&self) {
+        #[cfg(test)]
+        self.refreshes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _guard = self.refresh_lock.lock().await;
         let settings = self.settings.borrow().clone();
         let entries: Vec<(UsageLimitSourceId, UsageLimitSourceConfig)> = settings
@@ -222,6 +228,8 @@ impl UsageLimitSources {
             settings: settings.clone(),
             snapshots,
             refresh_lock: AsyncMutex::new(()),
+            #[cfg(test)]
+            refreshes: std::sync::atomic::AtomicUsize::new(0),
         });
         let background = tokio::spawn(run_background(shared.clone(), settings));
         Self {
@@ -255,19 +263,29 @@ impl UsageLimitSources {
     }
 }
 
-/// Refreshes on every settings change to the sources and on each health-check tick.
+/// Refreshes once at startup, on each settings change to the sources, and on each
+/// health-check tick. The tick is its own timer, as upstream runs the interval in a
+/// fiber of its own: a settings edit neither restarts it, nor stops it when the
+/// settings stream ends.
 async fn run_background(service: Arc<Shared>, mut settings: watch::Receiver<ServerSettings>) {
     service.refresh().await;
     let mut last_sources: IndexMap<UsageLimitSourceId, UsageLimitSourceConfig> =
         settings.borrow().usage_limit_sources.clone();
+    let tick = tokio::time::sleep(DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL);
+    tokio::pin!(tick);
+    let mut settings_open = true;
     loop {
         tokio::select! {
-            _ = tokio::time::sleep(DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL) => {
+            () = &mut tick => {
                 service.refresh().await;
+                // Re-armed only after the refresh, as upstream sleeps, then refreshes.
+                tick.as_mut().reset(tokio::time::Instant::now() + DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL);
             }
-            changed = settings.changed() => {
+            changed = settings.changed(), if settings_open => {
                 if changed.is_err() {
-                    break;
+                    // The sender is gone: stop listening, keep the health timer.
+                    settings_open = false;
+                    continue;
                 }
                 let next = settings.borrow().usage_limit_sources.clone();
                 // Settings edits re-read straight away so a new hub shows up without
@@ -286,6 +304,7 @@ mod tests {
     use super::*;
     use crate::cliproxy_api::{ClaudeLimitsInput, CodexLimitsInput};
     use serde_json::json;
+    use std::time::Duration;
     use turin_contracts::provider_usage_limits::ServerProviderUsageLimits;
     use turin_provider_core::usage_limits::make_usage_limits;
 
@@ -372,5 +391,74 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// Settings with one enabled source and no management key, so refreshes read nothing.
+    fn keyless_settings(unrelated_price: f64) -> ServerSettings {
+        serde_json::from_value(json!({
+            "usageLimitSources": {
+                "hub": { "kind": "cliproxy", "url": "https://hub.test:8317", "managementKey": "", "enabled": true },
+            },
+            "usagePriceOverrides": {
+                "example-model": { "inputCostPerMillionTokens": unrelated_price, "outputCostPerMillionTokens": 1 },
+            },
+        }))
+        .expect("settings decode")
+    }
+
+    /// Lets the background task run until it waits on a timer or a channel.
+    async fn settle() {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn refreshes(sources: &UsageLimitSources) -> usize {
+        sources
+            .shared
+            .refreshes
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refreshes_once_at_startup() {
+        let (_sender, receiver) = watch::channel(keyless_settings(1.0));
+        let sources = UsageLimitSources::start(receiver, Arc::new(StubMappers));
+        settle().await;
+        assert_eq!(refreshes(&sources), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_settings_edit_that_leaves_the_sources_alone_does_not_restart_the_health_timer() {
+        let (sender, receiver) = watch::channel(keyless_settings(1.0));
+        let sources = UsageLimitSources::start(receiver, Arc::new(StubMappers));
+        settle().await;
+        assert_eq!(refreshes(&sources), 1);
+
+        tokio::time::advance(Duration::from_secs(4 * 60)).await;
+        sender.send_replace(keyless_settings(2.0));
+        settle().await;
+        // The edit did not touch the sources, so it does not refresh.
+        assert_eq!(refreshes(&sources), 1);
+
+        // The tick still lands at five minutes from startup, not from the edit.
+        tokio::time::advance(Duration::from_secs(60) + Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(refreshes(&sources), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_health_timer_keeps_running_after_the_settings_sender_closes() {
+        let (sender, receiver) = watch::channel(keyless_settings(1.0));
+        let sources = UsageLimitSources::start(receiver, Arc::new(StubMappers));
+        settle().await;
+        drop(sender);
+        settle().await;
+        assert_eq!(refreshes(&sources), 1);
+
+        tokio::time::advance(DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL + Duration::from_millis(1))
+            .await;
+        settle().await;
+        assert_eq!(refreshes(&sources), 2);
     }
 }

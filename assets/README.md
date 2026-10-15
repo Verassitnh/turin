@@ -73,8 +73,10 @@ Checks:
   its actool render by 3.8 levels.
 
 For a fully native PNG, open `prod/app-icon.icon` in Icon Composer. Export with Platform
-`macOS pre-Tahoe`, Appearance `Default`, Size `1024pt`, Scale `1×` to `prod/black-macos-1024.png`,
-then re-run only the icns step (or the whole script, then restore the PNG).
+`macOS pre-Tahoe`, Appearance `Default`, Size `1024pt`, Scale `1×` to `prod/black-macos-1024.png`.
+Then run `uv run assets/export-icons.py --keep-macos-png`, which leaves that PNG untouched. The
+icns and the compare sheet are rebuilt from it. Once a native PNG is committed, always pass
+`--keep-macos-png`. Without the flag, the script overwrites it with the derived PNG.
 
 ## Shipping on macOS 26+
 

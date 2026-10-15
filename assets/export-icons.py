@@ -21,6 +21,7 @@ Run from the repository root:  uv run assets/export-icons.py
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
@@ -353,6 +354,12 @@ def compare_sheet(out: Path) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--keep-macos-png", action="store_true",
+                        help="leave prod/black-macos-1024.png untouched (e.g. a native Icon Composer "
+                             "pre-Tahoe export) and build the icns and compare sheet from it")
+    args = parser.parse_args()
+
     tool, version = find_ictool()
     print(f"ictool {version}: {tool}")
 
@@ -374,14 +381,18 @@ def main() -> None:
         (PROD / OUTPUTS["favicon_ico"]).write_bytes(ico)
         (PROD / OUTPUTS["windows_ico"]).write_bytes(ico)
 
-        mac = macos_pre_tahoe(UPSTREAM_PROD / "black-macos-1024.png", upstream_mark, upstream_t, turin_t)
-        (PROD / OUTPUTS["macos"]).write_bytes(srgb_png(mac))
+        if args.keep_macos_png:
+            print("kept", (PROD / OUTPUTS["macos"]).relative_to(ROOT))
+        else:
+            mac = macos_pre_tahoe(UPSTREAM_PROD / "black-macos-1024.png", upstream_mark, upstream_t, turin_t)
+            (PROD / OUTPUTS["macos"]).write_bytes(srgb_png(mac))
 
         build_icns(PROD / OUTPUTS["macos"], PROD / OUTPUTS["icns"], tmp)
 
     compare_sheet(PROD / OUTPUTS["compare"])
-    for name in OUTPUTS.values():
-        print("wrote", (PROD / name).relative_to(ROOT))
+    for key, name in OUTPUTS.items():
+        if not (key == "macos" and args.keep_macos_png):
+            print("wrote", (PROD / name).relative_to(ROOT))
 
 
 if __name__ == "__main__":

@@ -578,7 +578,7 @@ impl GitVcsDriverCore {
                 ),
             ));
         }
-        let real_root = std::fs::canonicalize(root).map_err(|error| {
+        let real_root = tokio::fs::canonicalize(root).await.map_err(|error| {
             plain_error(
                 "GitVcsDriver.getReviewDiffFileContents.workingTree.fs.realPath",
                 input.cwd.as_str(),
@@ -587,7 +587,7 @@ impl GitVcsDriverCore {
             )
             .with_cause(error.to_string())
         })?;
-        let real_target = std::fs::canonicalize(&requested).map_err(|error| {
+        let real_target = tokio::fs::canonicalize(&requested).await.map_err(|error| {
             plain_error(
                 "GitVcsDriver.getReviewDiffFileContents.workingTree.fs.realPath",
                 input.cwd.as_str(),
@@ -607,7 +607,7 @@ impl GitVcsDriverCore {
                 ),
             ));
         }
-        let info = std::fs::metadata(&real_target).map_err(|error| {
+        let info = tokio::fs::metadata(&real_target).await.map_err(|error| {
             plain_error(
                 "GitVcsDriver.getReviewDiffFileContents.workingTree.fs.stat",
                 input.cwd.as_str(),
@@ -635,7 +635,7 @@ impl GitVcsDriverCore {
                 ),
             ));
         }
-        let bytes = std::fs::read(&real_target).map_err(|error| {
+        let bytes = tokio::fs::read(&real_target).await.map_err(|error| {
             plain_error(
                 "GitVcsDriver.getReviewDiffFileContents.workingTree.fs.readFile",
                 input.cwd.as_str(),

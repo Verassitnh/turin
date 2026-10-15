@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::task::JoinSet;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::process_group::{SIGKILL, SIGTERM, process_group_exists, signal_process_group};
 
@@ -27,8 +29,9 @@ struct Identity {
     start_time: String,
 }
 
+/// Unknown keys are ignored, as upstream's `Schema.Struct` decode does. A newer
+/// build's entry must still be stopped, not deleted with its group running.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Entry {
     version: u64,
     pgid: i64,
@@ -56,6 +59,10 @@ struct Inner {
     directory: PathBuf,
     owner: Option<Identity>,
     recordable: bool,
+    /// The background sweep started by [`OpenCodeServerLedger::start`]. Held
+    /// here so it is never detached. The sweep keeps a clone of the ledger, so
+    /// the abort runs when the last reference drops, which is after the sweep.
+    reap: parking_lot::Mutex<Option<AbortOnDropHandle<()>>>,
 }
 
 #[derive(Clone)]
@@ -108,6 +115,7 @@ impl OpenCodeServerLedger {
                 directory,
                 owner,
                 recordable,
+                reap: parking_lot::Mutex::new(None),
             }),
         }
     }
@@ -117,9 +125,10 @@ impl OpenCodeServerLedger {
     pub async fn start(state_dir: impl Into<PathBuf>) -> Self {
         let ledger = Self::make(state_dir).await;
         let background = ledger.clone();
-        tokio::spawn(async move {
+        let sweep = tokio::spawn(async move {
             background.reap_orphans().await;
         });
+        *ledger.inner.reap.lock() = Some(AbortOnDropHandle::new(sweep));
         ledger
     }
 
@@ -216,16 +225,16 @@ impl OpenCodeServerLedger {
                 files.push(entry.path());
             }
         }
-        let mut joins = Vec::new();
+        // A JoinSet aborts its tasks when dropped, so cancelling the sweep also
+        // cancels every entry it started.
+        let mut joins = JoinSet::new();
         for path in files {
             let ledger = self.clone();
-            joins.push(tokio::spawn(async move {
+            joins.spawn(async move {
                 ledger.reap_entry(&path).await;
-            }));
+            });
         }
-        for join in joins {
-            let _ = join.await;
-        }
+        while joins.join_next().await.is_some() {}
     }
 
     async fn reap_entry(&self, path: &Path) {
@@ -616,6 +625,32 @@ mod tests {
             assert_eq!(status.signal(), Some(SIGTERM));
             assert!(!process_group_exists(orphan.pid));
             assert_eq!(std::fs::read_dir(entry_dir(&state_dir)).unwrap().count(), 0);
+            let _ = std::fs::remove_dir_all(&state_dir);
+        }
+
+        #[tokio::test]
+        async fn an_entry_with_extra_keys_is_still_stopped() {
+            let state_dir = std::env::temp_dir().join(format!(
+                "t3-opencode-ledger-{}-{}",
+                std::process::id(),
+                unique()
+            ));
+            let orphan = spawn_group("sleep 600 & wait", SERVE_ARGS);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            record_from_dead_server(&state_dir, orphan.pid).await;
+            let entry_path = entry_dir(&state_dir).join(format!("{}.json", orphan.pid));
+            let mut value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&entry_path).unwrap()).unwrap();
+            value["writtenByNewerBuild"] = serde_json::Value::Bool(true);
+            std::fs::write(&entry_path, value.to_string()).unwrap();
+
+            let restarted = OpenCodeServerLedger::make(&state_dir).await;
+            restarted.reap_orphans().await;
+
+            let status = orphan.wait();
+            assert_eq!(status.signal(), Some(SIGTERM));
+            assert!(!process_group_exists(orphan.pid));
+            assert!(!entry_path.exists());
             let _ = std::fs::remove_dir_all(&state_dir);
         }
 

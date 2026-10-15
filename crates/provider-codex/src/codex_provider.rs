@@ -9,6 +9,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::{sleep, timeout};
+
+use crate::codex_usage_limits::codex_rate_limits_failure_message;
+
+/// `RATE_LIMITS_PROBE_TIMEOUT_MS`.
+const RATE_LIMITS_PROBE_TIMEOUT_SECS: u64 = 3;
 use turin_codex_app_server::{
     client::Client, errors::AppServerError, extensions::provider_probe_returns_early,
 };
@@ -17,9 +22,11 @@ use turin_codex_app_server::{
 pub struct ProbeSnapshot {
     pub account: Value,
     pub models: Vec<Value>,
-    pub skills: Vec<Value>,
-    /// Usage failure degrades the probe, as upstream does.
-    pub rate_limits: Option<Value>,
+    /// The raw `skills/list` response; `codex_skills` maps it for the cwd.
+    pub skills: Value,
+    /// `None` when the native usage read is skipped. `Err` carries the
+    /// client-safe failure message. Usage failure degrades the probe, as upstream does.
+    pub rate_limits: Option<Result<Value, String>>,
     pub version: Option<String>,
 }
 
@@ -119,7 +126,7 @@ pub async fn probe(
         return Ok(ProbeSnapshot {
             account,
             models: vec![],
-            skills: vec![],
+            skills: json!({"data": []}),
             rate_limits: None,
             version: session.version.clone(),
         });
@@ -133,66 +140,31 @@ pub async fn probe(
         all_models(client).await
     };
     let skills = client.request("skills/list", Some(json!({"cwds":[cwd]})));
+    // Usage is an enrichment: a failure or a slow answer degrades to "no usage
+    // this probe" rather than costing the account and models.
     let usage = async {
         if skip_native_usage {
             return None;
         }
-        timeout(
-            Duration::from_secs(3),
-            client.request("account/rateLimits/read", Some(Value::Null)),
+        Some(
+            match timeout(
+                Duration::from_secs(RATE_LIMITS_PROBE_TIMEOUT_SECS),
+                client.request("account/rateLimits/read", Some(Value::Null)),
+            )
+            .await
+            {
+                Err(_) => Err("Codex did not answer the usage request.".to_owned()),
+                Ok(Err(error)) => Err(codex_rate_limits_failure_message(&error)),
+                Ok(Ok(None)) => Err("Codex did not answer the usage request.".to_owned()),
+                Ok(Ok(Some(response))) => Ok(response),
+            },
         )
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .flatten()
     };
     let (skills, models, rate_limits) = tokio::join!(skills, models, usage);
-    let skills = payload(skills?, "skills/list")?;
-    let entries = skills
-        .get("data")
-        .and_then(Value::as_array)
-        .ok_or_else(|| AppServerError::InvalidPayload {
-            method: "skills/list".into(),
-            detail: "missing data".into(),
-        })?;
-    let matching = entries
-        .iter()
-        .find(|entry| entry.get("cwd").and_then(Value::as_str) == Some(cwd));
-    let skills = matching
-        .into_iter()
-        .flat_map(|entry| {
-            entry
-                .get("skills")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-        })
-        .chain(
-            if matching.is_none() {
-                Some(
-                    entries
-                        .iter()
-                        .flat_map(|entry| {
-                            entry
-                                .get("skills")
-                                .and_then(Value::as_array)
-                                .into_iter()
-                                .flatten()
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                None
-            }
-            .into_iter()
-            .flatten(),
-        )
-        .cloned()
-        .collect();
     Ok(ProbeSnapshot {
         account,
         models: models?,
-        skills,
+        skills: payload(skills?, "skills/list")?,
         rate_limits,
         version: session.version.clone(),
     })

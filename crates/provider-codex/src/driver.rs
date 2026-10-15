@@ -8,7 +8,7 @@
 //! skills, slash commands, and text generation are not ported yet (PORTING.md).
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -23,7 +23,9 @@ use turin_contracts::UtcDateTime;
 use turin_contracts::git::TextGenerationError;
 use turin_contracts::model::CustomModelSetting;
 use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceId};
-use turin_contracts::provider_usage_limits::ProviderUsageLimitsUpdate;
+use turin_contracts::provider_usage_limits::{
+    ProviderUsageLimitsUpdate, ServerProviderUsageLimits, ServerProviderUsageUnavailableReason,
+};
 use turin_contracts::settings::CodexSettings;
 use turin_provider_core::driver::{
     ProviderDriver, ProviderDriverCreateInput, ProviderDriverMetadata, ProviderInstance,
@@ -35,7 +37,7 @@ use turin_provider_core::maintenance_resolver::make_manual_only_provider_mainten
 use turin_provider_core::rt::BoxStream;
 use turin_provider_core::server_provider::{
     ServerProvider, ServerProviderAuth, ServerProviderAuthStatus, ServerProviderModel,
-    ServerProviderState,
+    ServerProviderSkill, ServerProviderState,
 };
 use turin_provider_core::snapshot::ManagedServerProvider;
 use turin_provider_core::snapshot_probe::{
@@ -48,6 +50,7 @@ use turin_provider_core::text_generation::{
     ProviderTextGeneration, ReviewGuideGenerationInput, ReviewGuideGenerationResult,
     ThreadTitleGenerationInput, ThreadTitleGenerationResult,
 };
+use turin_provider_core::usage_limits::make_unavailable_usage_limits;
 
 use crate::{
     cli_args::tokenize_cli_args,
@@ -56,6 +59,11 @@ use crate::{
         append_custom_codex_models, apply_preferred_codex_default_model, parse_codex_model,
     },
     codex_provider::{now_ms, probe},
+    codex_skills::parse_codex_skills_list_response,
+    codex_usage_limits::{
+        CodexRateLimitSnapshot, CodexResetCreditsSummary, codex_rate_limits_to_limits,
+        codex_usage_probe_failed_limits,
+    },
     orchestration_adapter::CodexProviderAdapter,
     runtime::CodexRuntimeConfig,
 };
@@ -214,6 +222,7 @@ fn provider_with(
     instance_id: &ProviderInstanceId,
     enabled: bool,
     models: Vec<ServerProviderModel>,
+    skills: Vec<ServerProviderSkill>,
     probe: ProviderProbeResult,
 ) -> ServerProvider {
     let mut draft = build_server_provider(BuildServerProviderInput {
@@ -224,7 +233,7 @@ fn provider_with(
         models,
         update_required_models: Vec::new(),
         slash_commands: Vec::new(),
-        skills: Vec::new(),
+        skills,
         probe,
         maintenance: None,
     });
@@ -254,6 +263,7 @@ fn pending_provider(
         instance_id,
         enabled,
         append_custom_codex_models(&[], custom_models),
+        Vec::new(),
         ProviderProbeResult {
             installed: false,
             version: None,
@@ -298,8 +308,7 @@ impl CodexSnapshot {
             Err(error) => return self.spawn_or_probe_failure(&error),
         };
         let cwd = self.config.cwd.to_string_lossy().into_owned();
-        // Usage is not ported yet, so skip the native rate-limit read.
-        let snapshot = probe(&session, &cwd, true, now_ms()).await;
+        let snapshot = probe(&session, &cwd, false, now_ms()).await;
         let version = session.version.clone();
         let _ = session.shutdown().await;
         let snapshot = match snapshot {
@@ -314,19 +323,30 @@ impl CodexSnapshot {
                 .collect::<Vec<_>>(),
             &self.custom_models,
         ));
-        let account = account_probe(&snapshot.account);
+        let skills = parse_codex_skills_list_response(&snapshot.skills, &cwd);
+        let checked_at = UtcDateTime::now().to_string();
+        let usage = usage_limits_for_probe(
+            &snapshot.account,
+            snapshot.rate_limits.as_ref(),
+            &checked_at,
+        );
+        let account = account_probe(
+            &snapshot.account,
+            workspace_id(snapshot.rate_limits.as_ref()),
+        );
         provider_with(
             &self.kind,
             &self.instance_id,
             self.enabled,
             models,
+            skills,
             ProviderProbeResult {
                 installed: true,
                 version: version.or(snapshot.version),
                 status: account.status,
                 auth: account.auth,
                 message: account.message,
-                usage_limits: None,
+                usage_limits: usage,
             },
         )
     }
@@ -358,6 +378,7 @@ impl CodexSnapshot {
             &self.instance_id,
             self.enabled,
             append_custom_codex_models(&[], &self.custom_models),
+            Vec::new(),
             ProviderProbeResult {
                 installed,
                 version: None,
@@ -378,7 +399,7 @@ struct AccountStatus {
 
 /// `accountProbeStatus`: signed-in accounts are ready; a missing account that
 /// requires OpenAI auth is an error; anything else stays ready with unknown auth.
-fn account_probe(response: &Value) -> AccountStatus {
+fn account_probe(response: &Value, workspace_id: Option<&str>) -> AccountStatus {
     let account = response.get("account").filter(|value| !value.is_null());
     let Some(account) = account else {
         if response
@@ -408,11 +429,65 @@ fn account_probe(response: &Value) -> AccountStatus {
         .then(|| account.get("email").and_then(Value::as_str))
         .flatten()
         .and_then(tne);
+    auth.workspace_id = workspace_id.and_then(|id| tne(id.trim()));
     AccountStatus {
         status: ServerProviderState::Ready,
         auth,
         message: None,
     }
+}
+
+/// The ChatGPT workspace the usage read names, when it names one.
+fn workspace_id(rate_limits: Option<&Result<Value, String>>) -> Option<&str> {
+    rate_limits?
+        .as_ref()
+        .ok()?
+        .get("accountId")
+        .and_then(Value::as_str)
+}
+
+/// `checkCodexProviderStatus` usage: API-key accounts have no subscription
+/// windows; a skipped or failed read reports why.
+fn usage_limits_for_probe(
+    account: &Value,
+    rate_limits: Option<&Result<Value, String>>,
+    checked_at: &str,
+) -> Option<ServerProviderUsageLimits> {
+    if account.pointer("/account/type").and_then(Value::as_str) == Some("apiKey") {
+        return Some(make_unavailable_usage_limits(
+            checked_at.to_owned(),
+            ServerProviderUsageUnavailableReason::Unsupported,
+            None,
+        ));
+    }
+    let response = match rate_limits {
+        None => return Some(codex_usage_probe_failed_limits(checked_at, None)),
+        Some(Err(message)) => {
+            return Some(codex_usage_probe_failed_limits(checked_at, Some(message)));
+        }
+        Some(Ok(response)) => response,
+    };
+    let Some(snapshot) = response
+        .get("rateLimits")
+        .and_then(|value| serde_json::from_value::<CodexRateLimitSnapshot>(value.clone()).ok())
+    else {
+        return Some(codex_usage_probe_failed_limits(
+            checked_at,
+            Some("Codex did not answer the usage request."),
+        ));
+    };
+    let by_limit_id: Option<HashMap<String, CodexRateLimitSnapshot>> = response
+        .get("rateLimitsByLimitId")
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
+    let reset_credits: Option<CodexResetCreditsSummary> = response
+        .get("rateLimitResetCredits")
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
+    Some(codex_rate_limits_to_limits(
+        &snapshot,
+        by_limit_id.as_ref(),
+        reset_credits.as_ref(),
+        checked_at,
+    ))
 }
 
 fn auth_label(account: &Value) -> Option<&'static str> {
@@ -540,10 +615,17 @@ mod tests {
 
     #[test]
     fn account_status_matches_probe_rules() {
-        let signed_in = account_probe(&json!({
-            "account": {"type": "chatgpt", "email": "a@b.c", "planType": "pro"},
-            "requiresOpenaiAuth": true
-        }));
+        let signed_in = account_probe(
+            &json!({
+                "account": {"type": "chatgpt", "email": "a@b.c", "planType": "pro"},
+                "requiresOpenaiAuth": true
+            }),
+            Some(" ws-1 "),
+        );
+        assert_eq!(
+            signed_in.auth.workspace_id.as_ref().map(|id| id.as_str()),
+            Some("ws-1")
+        );
         assert_eq!(signed_in.status, ServerProviderState::Ready);
         assert_eq!(
             signed_in.auth.status,
@@ -558,14 +640,14 @@ mod tests {
             Some("a@b.c")
         );
 
-        let missing = account_probe(&json!({"account": null, "requiresOpenaiAuth": true}));
+        let missing = account_probe(&json!({"account": null, "requiresOpenaiAuth": true}), None);
         assert_eq!(missing.status, ServerProviderState::Error);
         assert_eq!(
             missing.auth.status,
             ServerProviderAuthStatus::Unauthenticated
         );
 
-        let open = account_probe(&json!({"account": null, "requiresOpenaiAuth": false}));
+        let open = account_probe(&json!({"account": null, "requiresOpenaiAuth": false}), None);
         assert_eq!(open.status, ServerProviderState::Ready);
         assert_eq!(open.auth.status, ServerProviderAuthStatus::Unknown);
     }

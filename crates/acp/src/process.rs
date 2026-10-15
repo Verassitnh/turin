@@ -5,6 +5,7 @@
 //! group. ACP does not exit on stdin EOF after `session/new`.
 
 use std::path::Path;
+use std::process::ExitStatus;
 use std::sync::{Arc, Weak};
 
 use tokio::io::AsyncReadExt;
@@ -65,7 +66,10 @@ pub async fn spawn(command: SpawnCommand<'_>) -> Result<AcpClient, AcpError> {
     });
     let guard = Arc::new(ProcessGuard {
         pid,
-        child: Mutex::new(Some(child)),
+        state: Mutex::new(ProcessState {
+            child: Some(child),
+            status: None,
+        }),
         stderr_task: Mutex::new(stderr_task),
     });
     let eof_guard = Arc::downgrade(&guard);
@@ -102,36 +106,54 @@ fn missing_pipe(program: &str, stream: &str) -> AcpError {
 
 struct ProcessGuard {
     pid: u32,
-    child: Mutex<Option<Child>>,
+    state: Mutex<ProcessState>,
     stderr_task: Mutex<Option<JoinHandle<()>>>,
 }
 
+struct ProcessState {
+    child: Option<Child>,
+    /// Set once the leader is reaped. From then on the pid, and with it the
+    /// pgid, may be reused, so no further group signal is sent.
+    status: Option<ExitStatus>,
+}
+
 impl ProcessGuard {
+    /// Reports the child's exit. The first call signals the process group and
+    /// then reaps the leader. Later calls return the same status.
     async fn exit_error(&self) -> AcpError {
-        let mut slot = self.child.lock().await;
-        let Some(child) = slot.as_mut() else {
-            return AcpError::from(AcpProcessExitedError {
-                code: None,
-                pid: Some(i64::from(self.pid)),
-                stderr: None,
-                cause: None,
-            });
-        };
-        match child.wait().await {
-            Ok(status) => AcpError::from(AcpProcessExitedError {
-                code: status.code(),
-                pid: Some(i64::from(self.pid)),
-                stderr: None,
-                cause: None,
-            }),
-            Err(error) => AcpError::from(AcpTransportError {
-                operation: Some(TransportOperation::ReadProcessExitStatus),
-                method: None,
-                detail: None,
-                pid: Some(i64::from(self.pid)),
-                cause: Some(error.to_string()),
-            }),
+        let mut state = self.state.lock().await;
+        if state.status.is_none() {
+            let Some(child) = state.child.as_mut() else {
+                return AcpError::from(AcpProcessExitedError {
+                    code: None,
+                    pid: Some(i64::from(self.pid)),
+                    stderr: None,
+                    cause: None,
+                });
+            };
+            // The leader is still unreaped, so its pid and pgid stay reserved.
+            // Signal the group before reaping, so surviving helpers die without
+            // a risk of hitting a recycled pgid.
+            signal_group(self.pid);
+            match child.wait().await {
+                Ok(status) => state.status = Some(status),
+                Err(error) => {
+                    return AcpError::from(AcpTransportError {
+                        operation: Some(TransportOperation::ReadProcessExitStatus),
+                        method: None,
+                        detail: None,
+                        pid: Some(i64::from(self.pid)),
+                        cause: Some(error.to_string()),
+                    });
+                }
+            }
         }
+        AcpError::from(AcpProcessExitedError {
+            code: state.status.and_then(|status| status.code()),
+            pid: Some(i64::from(self.pid)),
+            stderr: None,
+            cause: None,
+        })
     }
 }
 
@@ -140,20 +162,29 @@ impl Drop for ProcessGuard {
         if let Some(task) = self.stderr_task.get_mut().take() {
             task.abort();
         }
-        let pid = self.pid as i32;
-        #[cfg(unix)]
-        if pid > 0 {
-            unsafe {
-                libc::kill(-pid, libc::SIGKILL);
-                libc::waitpid(pid, std::ptr::null_mut(), 0);
-            }
-        }
-        // The process is already reaped. Dropping the tokio child would try to
-        // wait again from whatever thread is dropping the client.
-        if let Some(child) = self.child.get_mut().take() {
-            std::mem::forget(child);
+        // An unreaped leader keeps the pgid reserved, so the group signal is
+        // safe. Once reaped it is not, and the signal is skipped. Dropping the
+        // child lets kill_on_drop SIGKILL the leader if it is still running,
+        // and tokio reaps it in the background. Nothing here blocks.
+        if self.state.get_mut().status.is_none() {
+            signal_group(self.pid);
         }
     }
+}
+
+/// SIGKILLs the child's process group. Only valid while the leader is unreaped.
+fn signal_group(pid: u32) {
+    #[cfg(unix)]
+    if let Ok(pid) = i32::try_from(pid)
+        && pid > 0
+    {
+        // A failed kill means the group is already gone, which is fine.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 #[cfg(test)]
@@ -203,6 +234,58 @@ mod tests {
             gone,
             "sleep {pid} was still running after the client was dropped"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exit_signals_surviving_helpers_before_reaping_and_reports_the_same_status_twice() {
+        let dir = std::env::temp_dir().join(format!("turin-acp-helper-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("helper.pid");
+        let script = format!("sleep 30 & echo $! > '{}'; exit 4", pid_file.display());
+        let client = spawn(SpawnCommand {
+            program: "/bin/sh",
+            args: &["-c", &script],
+            cwd: None,
+        })
+        .await
+        .unwrap();
+        let guard = client
+            .shutdown_guard()
+            .and_then(|guard| guard.downcast_ref::<ProcessGuard>())
+            .expect("spawn stores a ProcessGuard");
+        let helper: i32 = {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = text.trim().parse()
+                {
+                    break pid;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "helper never started"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        for _ in 0..2 {
+            let AcpError::ProcessExited(error) = guard.exit_error().await else {
+                panic!("expected a process-exited error");
+            };
+            assert_eq!(error.code, Some(4));
+        }
+        let mut gone = false;
+        for _ in 0..150 {
+            // SAFETY: signal 0 only probes the pid.
+            if unsafe { libc::kill(helper, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(gone, "helper {helper} survived the leader's exit");
     }
 
     fn client_pid(client: &AcpClient) -> u32 {

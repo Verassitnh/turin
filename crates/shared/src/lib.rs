@@ -8,6 +8,7 @@ pub mod chat_list;
 pub mod claude_compaction;
 pub mod cli_args;
 pub mod codex_artifact_templates;
+pub mod codex_auth_handoff;
 pub mod codex_file_citations;
 //TODO pub mod codex_markdown_directives;
 pub mod composer_context_clipboard;

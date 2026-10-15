@@ -576,6 +576,17 @@ impl ClaudeActor {
                 .map_err(|e| protocol_error(e.to_string()))?;
             self.host_requests = claude.take_requests();
             self.claude = Some(claude);
+            self.selection = input.model_selection.clone();
+        } else if self.selection != input.model_selection {
+            // Upstream applies a changed selection to the live query.
+            let compiled = compile_claude_model_selection(&input.model_selection, &self.catalog);
+            self.claude
+                .as_ref()
+                .ok_or_else(|| protocol_error("Claude session is not running"))?
+                .set_model(Some(&compiled.api_model_id))
+                .await
+                .map_err(|e| protocol_error(e.to_string()))?;
+            self.selection = input.model_selection.clone();
         }
         let native_turn_id = format!("turn:{}", input.attempt_id);
         let now = UtcDateTime::now();

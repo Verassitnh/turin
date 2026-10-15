@@ -7103,6 +7103,8 @@ dependencies = [
  "futures",
  "indexmap",
  "parking_lot",
+ "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

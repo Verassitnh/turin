@@ -101,7 +101,8 @@ runs. Never keep copies of user databases.
 | wf_9dc37bfd-861 | T04b protocol docs fix round | FAIL: 5 high, 13 medium, 6 low. docs/qc/wf_9dc37bfd-861-T04b-protocols.md |
 | wf_342ba162-dd7 | T24 icon fix rounds | PASS: 1 low (fixed, merged) |
 | wf_4a9d9be1-c7c | T03 fix round re-QC | aborted: Claude session limit → rerun as wf_5a0d0e56-76b |
-| wf_1f8bff22-abb | T16 thread view (Haiku-only: logic fidelity, look-and-feel) | running |
+| wf_68b8231e-e69 | T15 sidebar (Haiku-only: logic, look-and-feel) | running |
+| wf_1f8bff22-abb | T16 thread view (Haiku-only) | PASS: 1 medium (62 timeline tests unported), 2 low (markdown) → T16c (Haiku). Look-and-feel reviewer returned nothing. docs/qc/wf_1f8bff22-abb-T16-thread-view.md |
 | wf_0fd743c1-ca2 | T01 contracts (Haiku-only: wire fidelity, tests/rules) | running |
 | wf_5bf4fe41-dd5 | T12a ACP crate | see docs/qc/wf_5bf4fe41-dd5-T12a-acp.md → T12a r3 fixes |
 | wf_118a9a5d-526 | T11a OpenCode transport | see docs/qc/wf_118a9a5d-526-T11a-opencode-runtime.md → fixes in T11 r4 |
@@ -184,7 +185,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
 | T15 | Sidebar (projects, threads, status, snooze, search, drag) | `crates/app/src/components/sidebar` | Opus | done (286 tests) → QC queued |
-| T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/components/chat` | Opus | done (294 tests) → QC queued |
+| T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/components/chat` | Opus → Haiku (T16c fixes) | QC PASS → T16c fix round active |
 | T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus → Sonnet | active (base: T16) |
 | T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus → Sonnet | active (base: T16) |
 | T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Sonnet | paused (Claude budget; next Sonnet UI slot) |

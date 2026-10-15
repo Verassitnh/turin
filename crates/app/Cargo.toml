@@ -25,6 +25,7 @@ url.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+turin-shared.workspace = true
 gpui-kit = { workspace = true, features = [
     # Code block highlighting (ChatMarkdown). Not `tree-sitter-languages`:
     # its SQL grammar pins `cc ~1.2`, which conflicts with rusqlite.
@@ -58,7 +59,9 @@ gpui-kit = { workspace = true, features = [
     "tree-sitter-yaml",
     "tree-sitter-zig",
 ] }
-markdown = "1"
+percent-encoding.workspace = true
+markdown.workspace = true
+similar = "2"
 
 [dev-dependencies]
 pretty_assertions.workspace = true

@@ -6,7 +6,7 @@ use turin_contracts::ThreadId;
 use turin_contracts::orchestration_v2::OrchestrationV2TurnItem;
 
 use crate::projection::store::ProjectionStore;
-use crate::projection::test_support::{apply_all, event, file_store, thread, turn_item};
+use crate::projection::test_support::{apply_all, event, file_store, run, thread, turn_item};
 
 const T0: &str = "2026-01-01T00:00:01.000Z";
 
@@ -257,6 +257,73 @@ async fn plan_reads_one_plan_and_reports_a_missing_thread() {
     assert!(missing.is_none());
     assert!(matches!(
         no_thread,
+        Err(crate::projection::error::ProjectionStoreError::ThreadNotFound { .. })
+    ));
+}
+
+#[tokio::test]
+async fn runtime_recovery_projection_collects_active_runs_and_pending_requests() {
+    let (store, _dir) = file_store().await;
+    create_thread(&store, "thread:recovery-state").await;
+    apply_all(
+        &store,
+        vec![
+            event(
+                "run.created",
+                "thread:recovery-state",
+                T0,
+                run("thread:recovery-state", "run:active", 1, "running"),
+            ),
+            event(
+                "runtime-request.updated",
+                "thread:recovery-state",
+                T0,
+                runtime_request(
+                    "thread:recovery-state",
+                    "request:pending",
+                    "node:recovery-state",
+                    "turn:recovery-state",
+                    json!({ "type": "message" }),
+                ),
+            ),
+        ],
+    )
+    .await;
+
+    let state = store
+        .get_runtime_recovery_projection(&ThreadId::new("thread:recovery-state").unwrap())
+        .await
+        .expect("read recovery state");
+
+    assert_eq!(state.thread.id.as_str(), "thread:recovery-state");
+    assert_eq!(
+        state
+            .runs
+            .iter()
+            .map(|run| run.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["run:active"]
+    );
+    assert_eq!(
+        state
+            .runtime_requests
+            .iter()
+            .map(|request| request.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["request:pending"]
+    );
+}
+
+#[tokio::test]
+async fn runtime_recovery_projection_reports_a_missing_thread() {
+    let (store, _dir) = file_store().await;
+
+    let missing = store
+        .get_runtime_recovery_projection(&ThreadId::new("thread:absent-recovery").unwrap())
+        .await;
+
+    assert!(matches!(
+        missing,
         Err(crate::projection::error::ProjectionStoreError::ThreadNotFound { .. })
     ));
 }

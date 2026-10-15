@@ -17,6 +17,7 @@ mod control_tests;
 #[cfg(test)]
 mod read_tests;
 pub mod recovery;
+pub mod runtime_recovery;
 pub mod shell;
 #[cfg(test)]
 mod shell_tests;
@@ -419,6 +420,19 @@ impl ProjectionStore {
         let request_id = request_id.to_owned();
         self.read_for_thread(thread_id, true, move |conn| {
             control::runtime_request(conn, &thread, &request_id)
+        })
+        .await
+    }
+
+    /// `getRuntimeRecoveryProjection`: the runtime state a recovery pass reads
+    /// for one thread. Runs in one read transaction, so the ten queries agree.
+    pub async fn get_runtime_recovery_projection(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<runtime_recovery::RuntimeRecoveryState, ProjectionStoreError> {
+        let thread = thread_id.clone();
+        self.read_for_thread(thread_id, true, move |conn| {
+            runtime_recovery::runtime_recovery_state(conn, &thread)
         })
         .await
     }

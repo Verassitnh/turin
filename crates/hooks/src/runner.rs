@@ -29,7 +29,8 @@ use crate::config::{
     ProjectHooksStatus,
 };
 use crate::event::{HookEvent, HookEventKind};
-use crate::trust::{TrustError, TrustStore, sha256_hex};
+use crate::references::normalize_lexically;
+use crate::trust::{TrustError, TrustStore, hash_config_tree};
 
 /// Per-stream output capture limit, mirroring upstream's bounded capture.
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -103,25 +104,6 @@ pub fn parse_hook_return(stdout: &str, hook_cwd: &Path) -> Option<HookReturn> {
         worktree_path,
         branch,
     })
-}
-
-/// Resolves `.` and `..` without touching the filesystem (the path may be a
-/// symlink the user wants kept as written).
-fn normalize_lexically(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    out.push(component);
-                }
-            }
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 /// Outcome of a single hook run, in upstream `ProcessRunOutput` shape plus
@@ -281,7 +263,9 @@ pub async fn dispatch(
     event: HookEvent,
     context: &HookDispatchContext,
 ) -> DispatchSummary {
-    let config = runner.config();
+    // Re-check the trust hash against the files on disk right now, not only
+    // on watcher events: the watcher can lag or miss an edit.
+    let config = runner.config_checked().await;
     let mut summary = DispatchSummary::default();
     // Hooks later in this dispatch see the workspace an earlier blocking hook
     // returned, so `cwd = "thread"` and TURIN_WORKTREE_PATH follow it.
@@ -796,45 +780,64 @@ impl HookRunner {
         self.inner.reload_config()
     }
 
-    /// Approves the project's current `.turin/hooks.toml` and reloads so its
-    /// hooks run from the next event on. `reviewed_hash` is the
-    /// [`PendingProjectHooks::hash`] the user was shown; if the file changed
-    /// since, nothing is approved ([`TrustError::HashMismatch`]) and the UI
-    /// should present the new contents. Approval is keyed on the canonical
-    /// project root and bound to the exact file bytes.
-    pub fn trust_project_hooks(&self, reviewed_hash: &str) -> Result<Arc<HooksConfig>, TrustError> {
-        let paths = &self.inner.paths;
-        let (Some(file), Some(root), Some(store)) = (
-            paths.project.as_deref(),
-            paths.canonical_project_root(),
-            paths.trust_store.as_deref(),
-        ) else {
-            return Err(TrustError::Unavailable);
-        };
-        let bytes =
-            std::fs::read(file).map_err(|_| TrustError::NoProjectHooks(file.to_path_buf()))?;
-        let actual = sha256_hex(&bytes);
-        if actual != reviewed_hash {
-            return Err(TrustError::HashMismatch {
-                expected: reviewed_hash.to_owned(),
-                actual,
-            });
-        }
-        TrustStore::new(store).approve(&root, &actual)?;
-        Ok(self.reload())
+    /// Approves the project's current `.turin/` tree (`hooks.toml` and every
+    /// file under it) and reloads so its hooks run from the next event on.
+    /// `reviewed_hash` is the [`PendingProjectHooks::hash`] the user was
+    /// shown; if anything changed since, nothing is approved
+    /// ([`TrustError::HashMismatch`]) and the UI should present the new
+    /// contents. A tree that cannot be approved (symlink leaving `.turin/`)
+    /// yields [`TrustError::Untrustable`]. Approval is keyed on the canonical
+    /// project root. Hashing runs on the blocking pool.
+    pub async fn trust_project_hooks(
+        &self,
+        reviewed_hash: &str,
+    ) -> Result<Arc<HooksConfig>, TrustError> {
+        let inner = self.inner.clone();
+        let reviewed_hash = reviewed_hash.to_owned();
+        tokio::task::spawn_blocking(move || inner.trust_project_hooks(&reviewed_hash))
+            .await
+            .expect("trust task does not panic")
     }
 
     /// Withdraws the approval for this project's hooks and reloads; they go
     /// back to pending.
-    pub fn revoke_project_hooks_trust(&self) -> Result<Arc<HooksConfig>, TrustError> {
-        let paths = &self.inner.paths;
-        let (Some(root), Some(store)) =
-            (paths.canonical_project_root(), paths.trust_store.as_deref())
-        else {
-            return Err(TrustError::Unavailable);
+    pub async fn revoke_project_hooks_trust(&self) -> Result<Arc<HooksConfig>, TrustError> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.revoke_project_hooks_trust())
+            .await
+            .expect("trust task does not panic")
+    }
+
+    /// The config snapshot, reloaded first if the project config tree no
+    /// longer matches what the snapshot trusted (or a project config
+    /// appeared that the snapshot does not know about).
+    async fn config_checked(&self) -> Arc<HooksConfig> {
+        let config = self.config();
+        let stale = match config.project_status() {
+            ProjectHooksStatus::Trusted { hash } => {
+                let inner = self.inner.clone();
+                let hash = hash.clone();
+                tokio::task::spawn_blocking(move || {
+                    inner.paths.current_project_hash().as_deref() != Some(hash.as_str())
+                })
+                .await
+                .unwrap_or(true)
+            }
+            ProjectHooksStatus::Absent => self
+                .inner
+                .paths
+                .project
+                .as_deref()
+                .is_some_and(|file| file.is_file()),
+            ProjectHooksStatus::Pending(_) => false,
         };
-        TrustStore::new(store).revoke(&root)?;
-        Ok(self.reload())
+        if !stale {
+            return config;
+        }
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.reload_config())
+            .await
+            .unwrap_or(config)
     }
 
     /// Runs matching hooks. See [`dispatch`].
@@ -946,7 +949,8 @@ impl HookRunner {
                         // replaced), then read: anything written before the
                         // new watch existed is picked up by this reload.
                         inner.rearm_watches();
-                        inner.reload_config();
+                        // Hashing the config tree is blocking filesystem work.
+                        let _ = tokio::task::spawn_blocking(move || inner.reload_config()).await;
                     }
                     Some(Err(err)) => {
                         tracing::warn!(%err, "hooks hot reload: filesystem watcher error")
@@ -961,6 +965,42 @@ impl HookRunner {
 }
 
 impl HookRunnerInner {
+    fn trust_project_hooks(&self, reviewed_hash: &str) -> Result<Arc<HooksConfig>, TrustError> {
+        let paths = &self.paths;
+        let (Some(file), Some(root), Some(store)) = (
+            paths.project.as_deref(),
+            paths.canonical_project_root(),
+            paths.trust_store.as_deref(),
+        ) else {
+            return Err(TrustError::Unavailable);
+        };
+        if !file.is_file() {
+            return Err(TrustError::NoProjectHooks(file.to_path_buf()));
+        }
+        let config_dir = file.parent().ok_or(TrustError::Unavailable)?;
+        let snapshot =
+            hash_config_tree(config_dir, file, Some(&root)).map_err(TrustError::Untrustable)?;
+        if snapshot.hash != reviewed_hash {
+            return Err(TrustError::HashMismatch {
+                expected: reviewed_hash.to_owned(),
+                actual: snapshot.hash,
+            });
+        }
+        TrustStore::new(store).approve(&root, &snapshot.hash)?;
+        Ok(self.reload_config())
+    }
+
+    fn revoke_project_hooks_trust(&self) -> Result<Arc<HooksConfig>, TrustError> {
+        let (Some(root), Some(store)) = (
+            self.paths.canonical_project_root(),
+            self.paths.trust_store.as_deref(),
+        ) else {
+            return Err(TrustError::Unavailable);
+        };
+        TrustStore::new(store).revoke(&root)?;
+        Ok(self.reload_config())
+    }
+
     fn reload_config(&self) -> Arc<HooksConfig> {
         let fresh = Arc::new(HooksConfig::load(&self.paths));
         log_config(&fresh);
@@ -1092,10 +1132,10 @@ mod tests {
 
     /// Records the file's current bytes as approved, as the UI would.
     fn approve_file(project_config: &Path) {
-        let bytes = std::fs::read(project_config).unwrap();
         let root = std::fs::canonicalize(project_root_of(project_config)).unwrap();
+        let paths = paths_for(project_config);
         TrustStore::new(&trust_store_for(project_config))
-            .approve(&root, &sha256_hex(&bytes))
+            .approve(&root, &paths.current_project_hash().unwrap())
             .unwrap();
     }
 
@@ -1643,7 +1683,7 @@ blocking = true
             .unwrap()
             .hash
             .clone();
-        runner.trust_project_hooks(&hash).unwrap();
+        runner.trust_project_hooks(&hash).await.unwrap();
         assert_eq!(turn_completed_hooks(&runner), 3);
     }
 
@@ -1731,12 +1771,12 @@ blocking = true
             .clone();
         // A stale hash (the file changed after review) approves nothing.
         assert!(matches!(
-            runner.trust_project_hooks("0000"),
+            runner.trust_project_hooks("0000").await,
             Err(TrustError::HashMismatch { .. })
         ));
         assert!(runner.config().pending_project_hooks().is_some());
 
-        let config = runner.trust_project_hooks(&hash).unwrap();
+        let config = runner.trust_project_hooks(&hash).await.unwrap();
         assert!(config.pending_project_hooks().is_none());
         let summary = runner
             .dispatch(
@@ -1753,7 +1793,7 @@ blocking = true
         assert_eq!(again.config().all_hooks().len(), 1);
 
         // And can be withdrawn.
-        let config = runner.revoke_project_hooks_trust().unwrap();
+        let config = runner.revoke_project_hooks_trust().await.unwrap();
         assert!(config.all_hooks().is_empty());
         assert!(config.pending_project_hooks().is_some());
     }
@@ -2166,5 +2206,155 @@ command = "printf '{\"branch\":\"b\"}\n'"
         assert_eq!(summary.blocking[0].exit_code, Some(3));
         assert_eq!(summary.thread_workspace, None);
         assert_eq!(summary.non_blocking_spawned, 1);
+    }
+
+    #[tokio::test]
+    async fn script_edit_under_turin_is_caught_on_dispatch_without_a_reload() {
+        let (_dir, project, config_path) = project_with_config(
+            "[[hook]]\nevent = \"thread.created\"\ncommand = \"sh .turin/hooks/setup.sh\"\nblocking = true\n",
+        );
+        let script = project.join(".turin/hooks/setup.sh");
+        write_config(&script, "touch out/approved.txt\n");
+        let runner = runner(&config_path);
+        let summary = runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        assert_eq!(summary.blocking[0].exit_code, Some(0));
+        assert!(project.join("out/approved.txt").exists());
+
+        // An agent or `git pull` rewrites only the script. Dispatch re-hashes
+        // the tree itself, so it does not matter whether the watcher has fired.
+        std::fs::write(&script, "touch out/pwned.txt\n").unwrap();
+        let summary = runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        assert!(summary.blocking.is_empty());
+        assert!(!project.join("out/pwned.txt").exists());
+        let pending = summary.project_hooks_pending.expect("re-approval needed");
+        assert_eq!(pending.reason, crate::PendingReason::Changed);
+
+        // Re-approving the reviewed hash restores it, with the new script.
+        runner.trust_project_hooks(&pending.hash).await.unwrap();
+        runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        assert!(project.join("out/pwned.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn dispatch_notices_a_project_config_the_watcher_missed() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = std::fs::canonicalize(dir.path()).unwrap();
+        let config_path = project.join(".turin/hooks.toml");
+        let runner = untrusted_runner(&config_path);
+        assert_eq!(
+            *runner.config().project_status(),
+            ProjectHooksStatus::Absent
+        );
+        write_config(
+            &config_path,
+            "[[hook]]\nevent = \"thread.created\"\ncommand = \"true\"\n",
+        );
+        let summary = runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        assert!(summary.project_hooks_pending.is_some());
+    }
+
+    #[tokio::test]
+    async fn untrustable_project_hooks_cannot_be_approved() {
+        let (_dir, project, config_path) = project_with_config(
+            "[[hook]]\nevent = \"thread.created\"\ncommand = \"true\"\nblocking = true\n",
+        );
+        std::fs::write(project.join("evil.sh"), "touch out/pwned.txt").unwrap();
+        std::os::unix::fs::symlink(project.join("evil.sh"), project.join(".turin/setup.sh"))
+            .unwrap();
+        let runner = untrusted_runner(&config_path);
+        let pending = runner.config().pending_project_hooks().unwrap().clone();
+        assert_eq!(pending.reason, crate::PendingReason::Untrustable);
+        assert!(matches!(
+            runner.trust_project_hooks(&pending.hash).await,
+            Err(TrustError::Untrustable(_))
+        ));
+        let summary = runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        assert!(summary.blocking.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pipe_holder_kills_the_whole_group_including_detached_jobs() {
+        // Mixed case: one job redirects its output away, a sibling still
+        // holds stdout. After the drain the entire group is killed.
+        let (_dir, project, config_path) = project_with_config(
+            r#"
+[[hook]]
+event = "thread.created"
+command = "sleep 600 >/dev/null 2>&1 & echo $! > out/detached.pid; sleep 601 & echo $! > out/holder.pid; exit 0"
+blocking = true
+"#,
+        );
+        let runner = runner(&config_path);
+        let summary = runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        assert_eq!(summary.blocking[0].exit_code, Some(0));
+        assert!(!summary.blocking[0].timed_out);
+        for name in ["detached", "holder"] {
+            let pid = read_pid(&project.join(format!("out/{name}.pid")));
+            assert!(wait_for_pid_gone(pid), "{name} job {pid} survived");
+        }
+    }
+
+    #[tokio::test]
+    async fn job_started_in_its_own_session_survives_the_group_kill() {
+        // The documented way to leave a daemon running: leave the group.
+        // (`perl` is how the docs spell setsid on macOS.)
+        if std::process::Command::new("perl")
+            .arg("-v")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let (_dir, project, config_path) = project_with_config(
+            r#"
+[[hook]]
+event = "thread.created"
+command = "perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' sleep 600 >/dev/null 2>&1 & echo $! > out/daemon.pid; sleep 601 & echo $! > out/holder.pid; exit 0"
+blocking = true
+"#,
+        );
+        let runner = runner(&config_path);
+        runner
+            .dispatch(
+                HookEvent::thread_created(serde_json::json!({})),
+                &context(&project, None),
+            )
+            .await;
+        let holder = read_pid(&project.join("out/holder.pid"));
+        assert!(wait_for_pid_gone(holder), "pipe holder {holder} survived");
+        let daemon = read_pid(&project.join("out/daemon.pid"));
+        let alive = pid_alive(daemon);
+        unsafe { libc::kill(daemon, libc::SIGKILL) };
+        assert!(alive, "setsid job {daemon} should have left the group");
     }
 }

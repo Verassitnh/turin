@@ -15,7 +15,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::event::HookEventKind;
-use crate::trust::{TrustStore, sha256_hex};
+use crate::references::{UnhashedReference, unhashed_references};
+use crate::trust::{TreeError, TrustStore, hash_config_tree};
 
 /// `timeout_secs` for a hook that does not set one.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
@@ -106,9 +107,13 @@ pub struct HooksConfig {
 pub enum PendingReason {
     /// The user never approved this project's hooks.
     Untrusted,
-    /// They were approved, but the file's bytes changed since (git pull,
-    /// branch switch, an agent edit): re-approval required.
+    /// They were approved, but something under `.turin/` changed since (git
+    /// pull, branch switch, an agent edit): re-approval required.
     Changed,
+    /// The config tree cannot be approved as it is (a symlink leaves
+    /// `.turin/`, it is too large, or unreadable); see
+    /// [`PendingProjectHooks::problem`].
+    Untrustable,
 }
 
 /// A project hooks file that is not trusted. Nothing in it runs. The UI
@@ -120,14 +125,21 @@ pub struct PendingProjectHooks {
     /// Canonical project root: the key the approval is stored under.
     pub project_root: PathBuf,
     pub file: PathBuf,
-    /// SHA-256 (hex) of the exact file bytes `hooks` were parsed from.
+    /// SHA-256 (hex) of the whole `.turin/` tree (`hooks.toml` and every
+    /// other file under it, see [`crate::hash_config_tree`]). Empty when
+    /// `reason` is [`PendingReason::Untrustable`].
     pub hash: String,
     pub reason: PendingReason,
+    /// Why the tree cannot be approved (`reason == Untrustable`).
+    pub problem: Option<TreeError>,
     /// The valid entries in the file, for review. Never executed.
     pub hooks: Vec<HookSpec>,
+    /// Repo files outside `.turin/` that the commands appear to run. They are
+    /// not covered by the approval; the UI should warn about them.
+    pub unhashed_references: Vec<UnhashedReference>,
 }
 
-/// Trust state of `<project>/.turin/hooks.toml`.
+/// Trust state of `<project>/.turin/` (`hooks.toml` plus its scripts).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum ProjectHooksStatus {
@@ -174,56 +186,10 @@ impl HooksConfig {
         if let Some(path) = paths.project.as_deref()
             && path.is_file()
         {
-            // Hash and parse the same bytes: the hash that gates execution
-            // must describe exactly what runs.
-            match std::fs::read(path) {
-                Ok(bytes) => {
-                    let hash = sha256_hex(&bytes);
-                    let (file_hooks, file_errors) = match String::from_utf8(bytes) {
-                        Ok(text) => parse_text(path, &text, HookConfigSource::Project),
-                        Err(_) => (
-                            Vec::new(),
-                            vec![HookConfigError {
-                                file: path.to_path_buf(),
-                                hook_index: None,
-                                message: "hooks config is not valid UTF-8".to_owned(),
-                            }],
-                        ),
-                    };
-                    errors.extend(file_errors);
-                    let root = paths.canonical_project_root();
-                    let approved = root.as_deref().and_then(|root| {
-                        paths
-                            .trust_store
-                            .as_deref()
-                            .and_then(|store| TrustStore::new(store).lookup(root))
-                    });
-                    match approved {
-                        Some(approved) if approved == hash => {
-                            hooks.extend(file_hooks);
-                            project = ProjectHooksStatus::Trusted { hash };
-                        }
-                        other => {
-                            project = ProjectHooksStatus::Pending(Box::new(PendingProjectHooks {
-                                project_root: root.unwrap_or_default(),
-                                file: path.to_path_buf(),
-                                hash,
-                                reason: if other.is_some() {
-                                    PendingReason::Changed
-                                } else {
-                                    PendingReason::Untrusted
-                                },
-                                hooks: file_hooks,
-                            }));
-                        }
-                    }
-                }
-                Err(err) => errors.push(HookConfigError {
-                    file: path.to_path_buf(),
-                    hook_index: None,
-                    message: format!("cannot read hooks config: {err}"),
-                }),
-            }
+            let (status, project_hooks, project_errors) = load_project(paths, path);
+            errors.extend(project_errors);
+            hooks.extend(project_hooks);
+            project = status;
         }
         Self {
             hooks,
@@ -267,6 +233,86 @@ impl HooksConfig {
     pub fn is_empty(&self) -> bool {
         self.hooks.is_empty()
     }
+}
+
+/// Evaluates the trust of the project config tree and loads its hooks only
+/// when the approved hash matches. Returns the status, the hooks that may
+/// run (empty unless trusted), and config errors.
+fn load_project(
+    paths: &HookPaths,
+    file: &Path,
+) -> (ProjectHooksStatus, Vec<HookSpec>, Vec<HookConfigError>) {
+    let file_error = |message: String| HookConfigError {
+        file: file.to_path_buf(),
+        hook_index: None,
+        message,
+    };
+    let root = paths.canonical_project_root();
+    let config_dir = file.parent().unwrap_or(Path::new("."));
+    // Hash and parse the same bytes: the hash that gates execution must
+    // describe exactly what runs.
+    let snapshot = hash_config_tree(config_dir, file, root.as_deref());
+    let (hash, config_bytes, problem) = match snapshot {
+        Ok(snapshot) => (snapshot.hash, Some(snapshot.config_bytes), None),
+        // Not approvable. Still read hooks.toml for display when it is a
+        // plain file, so the user sees what is being refused.
+        Err(problem) => (
+            String::new(),
+            std::fs::symlink_metadata(file)
+                .ok()
+                .filter(|meta| meta.file_type().is_file())
+                .and_then(|_| std::fs::read(file).ok()),
+            Some(problem),
+        ),
+    };
+    let mut errors = Vec::new();
+    let file_hooks = match config_bytes.map(String::from_utf8) {
+        Some(Ok(text)) => {
+            let (hooks, parse_errors) = parse_text(file, &text, HookConfigSource::Project);
+            errors.extend(parse_errors);
+            hooks
+        }
+        Some(Err(_)) => {
+            errors.push(file_error("hooks config is not valid UTF-8".to_owned()));
+            Vec::new()
+        }
+        None => Vec::new(),
+    };
+
+    let approved = root.as_deref().and_then(|root| {
+        paths
+            .trust_store
+            .as_deref()
+            .and_then(|store| TrustStore::new(store).lookup(root))
+    });
+    if problem.is_none() && approved.as_deref() == Some(hash.as_str()) {
+        return (ProjectHooksStatus::Trusted { hash }, file_hooks, errors);
+    }
+    let reason = if problem.is_some() {
+        PendingReason::Untrustable
+    } else if approved.is_some() {
+        PendingReason::Changed
+    } else {
+        PendingReason::Untrusted
+    };
+    let unhashed_references = match (&root, std::fs::canonicalize(config_dir)) {
+        (Some(root), Ok(config_dir)) => unhashed_references(&file_hooks, root, &config_dir),
+        _ => Vec::new(),
+    };
+    let pending = PendingProjectHooks {
+        project_root: root.unwrap_or_default(),
+        file: file.to_path_buf(),
+        hash,
+        reason,
+        problem,
+        hooks: file_hooks,
+        unhashed_references,
+    };
+    (
+        ProjectHooksStatus::Pending(Box::new(pending)),
+        Vec::new(),
+        errors,
+    )
 }
 
 /// Raw `[[hook]]` table as written by the user. `deny_unknown_fields` turns
@@ -391,6 +437,16 @@ impl HookPaths {
         Some(std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()))
     }
 
+    /// The current tree hash of the project config dir, `None` when there is
+    /// no project config or it cannot be hashed. Blocking filesystem work.
+    pub(crate) fn current_project_hash(&self) -> Option<String> {
+        let file = self.project.as_deref()?;
+        let config_dir = file.parent()?;
+        hash_config_tree(config_dir, file, self.canonical_project_root().as_deref())
+            .ok()
+            .map(|snapshot| snapshot.hash)
+    }
+
     /// Whether a filesystem event at `path` can change what the config
     /// files say: the files themselves or any directory above them (a
     /// `.turin/` that appears or disappears). Paths are compared both as
@@ -463,21 +519,23 @@ mod tests {
 
     fn trusted_paths(global: Option<&Path>, project: Option<&Path>) -> HookPaths {
         let root = project.map(|file| file.parent().unwrap().to_path_buf());
-        let store = root.as_ref().map(|root| root.join("trusted-hooks.json"));
-        if let (Some(file), Some(root), Some(store)) = (project, &root, &store)
-            && file.is_file()
-        {
-            let bytes = std::fs::read(file).unwrap();
-            TrustStore::new(store)
-                .approve(&std::fs::canonicalize(root).unwrap(), &sha256_hex(&bytes))
-                .unwrap();
-        }
-        HookPaths {
+        // Outside the config tree, which the approval hashes.
+        let store = root.as_ref().map(|_| {
+            tempfile::tempdir()
+                .unwrap()
+                .keep()
+                .join("trusted-hooks.json")
+        });
+        let paths = HookPaths {
             global: global.map(Path::to_path_buf),
             project: project.map(Path::to_path_buf),
             project_root: root,
             trust_store: store,
+        };
+        if project.is_some_and(Path::is_file) {
+            approve(&paths);
         }
+        paths
     }
 
     fn pending_reason(config: &HooksConfig) -> Option<PendingReason> {
@@ -501,11 +559,10 @@ mod tests {
     }
 
     fn approve(paths: &HookPaths) {
-        let bytes = std::fs::read(paths.project.as_ref().unwrap()).unwrap();
         TrustStore::new(paths.trust_store.as_ref().unwrap())
             .approve(
                 &paths.canonical_project_root().unwrap(),
-                &sha256_hex(&bytes),
+                &paths.current_project_hash().unwrap(),
             )
             .unwrap();
     }
@@ -520,7 +577,7 @@ mod tests {
         let pending = config.pending_project_hooks().unwrap();
         assert_eq!(pending.hooks.len(), 1, "parsed for review only");
         assert_eq!(pending.hooks[0].command, "project-cmd");
-        assert_eq!(pending.hash, sha256_hex(PROJECT_HOOK.as_bytes()));
+        assert_eq!(pending.hash, paths.current_project_hash().unwrap());
         assert_eq!(pending.file, *paths.project.as_ref().unwrap());
         assert_eq!(
             pending.project_root,
@@ -538,7 +595,7 @@ mod tests {
         assert_eq!(
             config.project_status(),
             &ProjectHooksStatus::Trusted {
-                hash: sha256_hex(PROJECT_HOOK.as_bytes())
+                hash: paths.current_project_hash().unwrap()
             }
         );
     }
@@ -926,5 +983,90 @@ command = "third"
         assert_eq!(config.errors().len(), 1);
         assert_eq!(config.errors()[0].hook_index, Some(1));
         assert_eq!(config.all_hooks()[1].index, 2);
+    }
+
+    #[test]
+    fn script_edit_under_turin_re_pends_the_project_hooks() {
+        let (_dir, paths) = project_fixture();
+        let script = paths
+            .project
+            .as_ref()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("hooks")
+            .join("setup.sh");
+        write_config(&script, "echo approved\n");
+        approve(&paths);
+        assert_eq!(HooksConfig::load(&paths).all_hooks().len(), 1);
+
+        // hooks.toml is byte-identical; only the script changed.
+        std::fs::write(&script, "touch pwned\n").unwrap();
+        let config = HooksConfig::load(&paths);
+        assert!(config.all_hooks().is_empty());
+        assert_eq!(pending_reason(&config), Some(PendingReason::Changed));
+    }
+
+    #[test]
+    fn commands_referencing_repo_files_outside_turin_are_flagged() {
+        let (dir, paths) = project_fixture();
+        let file = paths.project.as_ref().unwrap();
+        std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
+        std::fs::write(dir.path().join("scripts/new.sh"), "true").unwrap();
+        std::fs::write(
+            file,
+            "[[hook]]\nevent = \"turn.started\"\ncommand = \"./scripts/new.sh\"\n\n\
+             [[hook]]\nevent = \"turn.started\"\ncommand = \"sh .turin/hooks/ok.sh\"\n",
+        )
+        .unwrap();
+        write_config(&file.parent().unwrap().join("hooks/ok.sh"), "true");
+        let config = HooksConfig::load(&paths);
+        let pending = config.pending_project_hooks().unwrap();
+        let flagged: Vec<(usize, PathBuf)> = pending
+            .unhashed_references
+            .iter()
+            .map(|r| (r.hook_index, r.path.clone()))
+            .collect();
+        assert_eq!(
+            flagged,
+            [(
+                0,
+                std::fs::canonicalize(dir.path())
+                    .unwrap()
+                    .join("scripts/new.sh")
+            )]
+        );
+    }
+
+    #[test]
+    fn symlink_escaping_turin_makes_project_hooks_untrustable() {
+        let (dir, paths) = project_fixture();
+        let config_dir = paths
+            .project
+            .as_ref()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::write(dir.path().join("evil.sh"), "touch pwned").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("evil.sh"), config_dir.join("setup.sh"))
+            .unwrap();
+        // Even a recorded approval cannot make it trusted.
+        TrustStore::new(paths.trust_store.as_ref().unwrap())
+            .approve(&paths.canonical_project_root().unwrap(), "")
+            .unwrap();
+        let config = HooksConfig::load(&paths);
+        assert!(config.all_hooks().is_empty());
+        assert_eq!(pending_reason(&config), Some(PendingReason::Untrustable));
+        let pending = config.pending_project_hooks().unwrap();
+        assert!(pending.hash.is_empty());
+        assert!(matches!(
+            pending.problem,
+            Some(TreeError::SymlinkEscapes { .. })
+        ));
+        assert_eq!(pending.hooks.len(), 1, "still listed for review");
+        let reason = pending.problem.as_ref().unwrap().to_string();
+        assert!(reason.contains("setup.sh"), "{reason}");
+        assert!(reason.contains("outside .turin/"), "{reason}");
     }
 }

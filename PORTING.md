@@ -92,7 +92,7 @@ Revised after QC `wf_6ce02f2f-38c` (docs/qc/). Helpers live in
 | `Stream` | `futures::Stream` |
 | `Fiber` / `forkScoped` / `forkDaemon` | task owned by a `JoinSet` or `tokio_util::task::AbortOnDropHandle` tied to its owner, plus `CancellationToken` for cooperative stop. **Never drop a bare `JoinHandle`** (it detaches, unlike Effect's scoped interruption) |
 | `Effect.timeout` | `tokio::time::timeout`; on timeout the underlying work must actually stop (abort task / kill process) |
-| child processes | `tokio::process::Command` with `kill_on_drop(true)`; long-lived CLIs (providers, hooks) run in their own process group and the group is killed on timeout/shutdown |
+| child processes | `tokio::process::Command` with `kill_on_drop(true)`; long-lived CLIs (providers, hooks) run in their own process group and the group is killed on timeout/shutdown. Hooks, on normal exit: after the shell exits plus a 250 ms drain, the group is killed only if something still holds the stdout/stderr pipes |
 | `Schedule` / retries | explicit loop with the same delays and caps |
 | `@effect/sql` SQLite | `turin_persistence::Db`: one writer connection (upstream: single writer behind `Semaphore(1)`) + a read-only reader connection, upstream PRAGMAs verbatim. `db.write(|tx| …)` runs a whole transaction in one blocking call; stores take `&Transaction`/`&Connection` so several compose in one transaction (upstream `sql.withTransaction`). Async work (publishing) happens after commit |
 
@@ -194,13 +194,21 @@ Hooks get event JSON on stdin and `TURIN_*` env vars (`TURIN_EVENT`,
 `TURIN_PROJECT_ID`, `TURIN_THREAD_ID`, `TURIN_CWD`, …); inherited `TURIN_*`
 vars are scrubbed first.
 
-**Trust (QC wf_e8a1a7c1-d53).** Global `~/.turin/hooks.toml` is trusted.
-Project `.turin/hooks.toml` never runs until the user approves it: approval is
-stored outside the repo (`~/.turin/trusted-hooks.json`: canonical project root
-→ SHA-256 of the exact file bytes). Any change (git pull, branch switch, an
-agent editing the file) invalidates it; hot reload re-checks the hash and drops
-untrusted project hooks while keeping global ones. Untrusted/changed project
-hooks surface as a pending status the UI shows with an "Approve" action.
+**Trust (QC wf_e8a1a7c1-d53, T21c).** Global `~/.turin/hooks.toml` is trusted.
+Project hooks never run until the user approves them. Approval covers the
+**whole `<project>/.turin/` tree** (`hooks.toml` plus scripts such as
+`.turin/hooks/*.sh`, nothing skipped): `~/.turin/trusted-hooks.json` maps the
+canonical project root → one SHA-256 over sorted relative paths + file bytes.
+Any change to any file there (git pull, branch switch, an agent edit)
+invalidates it; the hash is re-checked on every reload **and on every
+dispatch**, dropping project hooks while keeping global ones. A symlink that
+resolves outside `.turin/` makes the project hooks *untrustable* (inert, Approve
+refused, reason surfaced). Commands that run repo files *outside* `.turin/`
+(`./scripts/x.sh`) are allowed but not covered: they are listed in
+`PendingProjectHooks::unhashed_references` so the UI warns, and the docs steer
+authors to keep scripts in `.turin/hooks/` (and to use
+`$TURIN_PROJECT_ROOT/.turin/…` under `cwd = "thread"`). Untrusted/changed hooks
+surface as a pending status the UI shows with an "Approve" action.
 Rationale: upstream never auto-runs repo-supplied commands (`t3.json` scripts
 are import-only).
 
@@ -242,6 +250,7 @@ at app startup (T05b/T22), not per hook.
 | `apps/server/src/persistence/Migrations/006_*.ts` | Binds `DEFAULT_RUNTIME_MODE` (`full-access`) as a parameter. | The literal `'full-access'` is in the SQL file. | The extracted script has no parameter slot. The written value is the same. |
 | `apps/server/src/persistence/Migrations/055_OrchestrationV2.ts` | `ApplicationEventSource` runs between thread-launch workflows and effect-cancellation, including a procedural copy. | The generated SQL has `-- TURIN_APPLICATION_EVENT_SOURCE --`. The runner executes the copy in Rust at that point. | Concatenating the TypeScript module would run its static receipt insert before the events it depends on exist. |
 | `apps/server/src/persistence/*` timestamps | `*_at` values are UTC text `YYYY-MM-DDTHH:MM:SS.sssZ`. | Caller-supplied strings are stored as given. Values this crate generates use `chrono` `to_rfc3339_opts(SecondsFormat::Millis, true)`. SQL `strftime` expressions are unchanged. | `turin_contracts::UtcDateTime` is not on this branch yet. |
-| `hooks` project `.turin/hooks.toml` | Upstream never runs commands from repo files; `t3.json` scripts are import-only (`resolveProjectScripts` reads settings only). | Project hooks are inert until the user approves the file: `~/.turin/trusted-hooks.json` maps canonical project root → SHA-256 of the exact bytes; checked on every reload. Pending/changed hooks surface as `HookUpdate::ProjectHooksPending`; `HookRunner::trust_project_hooks(reviewed_hash)` approves. Global `~/.turin/hooks.toml` is trusted. | New hot-reloaded repo-controlled shell execution would otherwise run on clone/pull/agent edit. QC wf_e8a1a7c1-d53 item 1. |
+| `hooks` project `.turin/` | Upstream never runs commands from repo files; `t3.json` scripts are import-only (`resolveProjectScripts` reads settings only). | Project hooks are inert until the user approves the **whole `.turin/` tree**: `~/.turin/trusted-hooks.json` maps canonical project root → SHA-256 over sorted relative paths + bytes of every file under `.turin/`; re-checked on reload and on every dispatch. Symlinks leaving `.turin/` are untrustable. Commands running repo files outside `.turin/` are allowed but reported as `unhashed_references` (best-effort text scan; those files are not covered). Pending/changed hooks surface as `HookUpdate::ProjectHooksPending`; `HookRunner::trust_project_hooks(reviewed_hash)` approves. Global `~/.turin/hooks.toml` is trusted. | Hot-reloaded repo-controlled shell execution would otherwise run on clone/pull/agent edit. Residual: scripts outside `.turin/` can change without re-approval (same limit as direnv); the UI warns. QC wf_e8a1a7c1-d53 item 1, wf_44e1924e-b5c item 1. |
 | `hooks` environment | `fixPath` / `readEnvironmentFromLoginShell` / `mergePathEntries` (+ launchctl fallback) hydrate `process.env.PATH` once at server startup (`os-jank.ts`). | `turin-hooks` inherits the app env and does no per-hook hydration. **Tracked:** port that hydration into `turin-shared` and call it once at app startup (T05b/T22). | Until then a Finder-launched app gives hooks `/usr/bin:/bin` (`gh`, `npm`, `bun` → exit 127). QC item 5. |
 | `hooks` thread launch | `ThreadLaunchService` creates the worktree and binds the thread. | A blocking `thread.created` hook prints `{"worktreePath","branch"}` as its last stdout line; `DispatchSummary.thread_workspace` carries it and the orchestrator binds the thread. | Hooks replace launch-into-worktree (return protocol above). QC item 7. |
+| `hooks` process exit | `processRunner.ts` waits for stdout/stderr EOF and never kills the group on normal exit (a background job holding the pipes stalls the run until timeout). | The run ends when the shell exits plus a 250 ms drain; if anything still holds the pipes, the whole group is killed (including output-redirected jobs). Daemons must leave the group (`setsid`). Timeout/shutdown always kill the group, using the pgid recorded at spawn. | A hook must not hang `thread.created` for the full timeout because of a stray `cmd &`; the early kill is the safe failure direction. QC wf_44e1924e-b5c item 2. |

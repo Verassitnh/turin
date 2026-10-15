@@ -1641,6 +1641,7 @@ fn assistant_events(
                     input: &input,
                     presentation: &presentation,
                     output: None,
+                    output_fallback: None,
                     status: "running",
                     ordinal,
                     started_at: now,
@@ -1719,14 +1720,16 @@ fn tool_result_events(
             .get("is_error")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let output = block.get("content").cloned().unwrap_or(Value::Null);
-        let task_output = structured.cloned().unwrap_or_else(|| output.clone());
+        let content = block.get("content").cloned().unwrap_or(Value::Null);
+        // Upstream reads the structured result as the native output when the message has one.
+        let output = structured.cloned().unwrap_or_else(|| content.clone());
         let call = ToolCall {
             native_item_id: native,
             tool_name: &tracked.name,
             input: &tracked.input,
             presentation: &tracked.presentation,
             output: Some(&output),
+            output_fallback: structured.map(|_| &content),
             status: if failed { "failed" } else { "completed" },
             ordinal: tracked.ordinal,
             started_at: tracked.started_at,
@@ -1744,7 +1747,7 @@ fn tool_result_events(
         if let Some(native_thread) = native_thread.as_deref().filter(|_| !failed) {
             let current = plans.task_list(native_thread);
             if let Some(tasks) =
-                apply_task_tool(&current, call.tool_name, call.input, Some(&task_output))
+                apply_task_tool(&current, call.tool_name, call.input, Some(&output))
             {
                 plans.set_task_list(native_thread, tasks.clone());
                 // One list per turn, updated in place; a later turn supersedes it.
@@ -1789,6 +1792,7 @@ fn finish_running_tools(
             input: &tracked.input,
             presentation: &tracked.presentation,
             output: None,
+            output_fallback: None,
             status,
             ordinal: tracked.ordinal,
             started_at: tracked.started_at,

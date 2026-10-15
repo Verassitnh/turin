@@ -134,19 +134,50 @@ pub fn classify_tool(tool_name: &str) -> ToolItemType {
     }
 }
 
-/// Text of a `tool_result` content value: a string, or the joined text blocks.
-pub fn tool_output_text(content: &Value) -> Option<String> {
-    match content {
-        Value::String(text) => Some(text.clone()),
-        Value::Array(blocks) => {
-            let text: String = blocks
-                .iter()
-                .filter_map(|block| block.get("text").and_then(Value::as_str))
-                .collect();
-            (!text.is_empty()).then_some(text)
-        }
-        _ => None,
+/// Upstream `claudeNativeToolOutputText`: a string as it is, anything else as JSON.
+pub fn native_output_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
     }
+}
+
+/// Upstream `claudeSubagentResultText` for a `tool_result` content value: its
+/// text blocks, one per line. Anything else falls back to `native_output_text`.
+fn content_text(content: &Value) -> String {
+    if let Value::Array(parts) = content {
+        let text = parts
+            .iter()
+            .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            return text;
+        }
+    }
+    native_output_text(content)
+}
+
+/// Upstream `claudeCommandOutputText`. A Bash result's structured `stdout` and
+/// `stderr` are its text. A background run has empty streams, so its content
+/// acknowledgement is kept instead.
+pub fn command_output_text(value: &Value, fallback: Option<&Value>) -> String {
+    let stdout = value.get("stdout").and_then(Value::as_str);
+    let stderr = value.get("stderr").and_then(Value::as_str);
+    if stdout.is_none() && stderr.is_none() {
+        return native_output_text(value);
+    }
+    let text = [stdout, stderr]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !text.is_empty() {
+        return text;
+    }
+    fallback.map(content_text).unwrap_or_default()
 }
 
 /// Upstream `reasoning` turn item for one completed thinking block, titled
@@ -225,8 +256,12 @@ pub struct ToolCall<'a> {
     pub tool_name: &'a str,
     pub input: &'a Value,
     pub presentation: &'a ToolPresentation,
-    /// The `tool_result` content once the call has finished.
+    /// The call's native output once it has finished: the structured
+    /// `tool_use_result` when the frame carries one, else the `tool_result` content.
     pub output: Option<&'a Value>,
+    /// The `tool_result` content behind a structured `output`, the text a
+    /// Bash result falls back to.
+    pub output_fallback: Option<&'a Value>,
     /// One of `running`, `completed`, `failed`, `interrupted`, `cancelled`.
     pub status: &'static str,
     pub ordinal: u64,
@@ -251,7 +286,12 @@ pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallAr
     }));
 
     let output_value = call.output.cloned();
-    let output_text = call.output.and_then(tool_output_text);
+    let non_empty = |text: String| (!text.is_empty()).then_some(text);
+    let output_text = call.output.map(native_output_text).and_then(non_empty);
+    let command_output = call
+        .output
+        .map(|value| command_output_text(value, call.output_fallback))
+        .and_then(non_empty);
     let input = call.input;
     // Upstream order: a Read names its file, a search names its query, then a
     // Skill, then the MCP presentation.
@@ -285,7 +325,7 @@ pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallAr
             json!({
                 "type": "command_execution",
                 "input": str_field(&["command", "cmd", "script"]).unwrap_or_default(),
-                "output": output_text,
+                "output": command_output,
             })
         }
         ToolItemType::FileChange => {
@@ -360,13 +400,27 @@ mod tests {
     }
 
     #[test]
-    fn tool_output_joins_text_blocks() {
-        assert_eq!(tool_output_text(&json!("plain")), Some("plain".into()));
+    fn native_output_is_text_or_json_like_upstream() {
+        assert_eq!(native_output_text(&json!("plain")), "plain");
         assert_eq!(
-            tool_output_text(&json!([{"type":"text","text":"a"},{"type":"text","text":"b"}])),
-            Some("ab".into())
+            native_output_text(&json!([{"type":"text","text":"a"}])),
+            r#"[{"type":"text","text":"a"}]"#
         );
-        assert_eq!(tool_output_text(&json!([])), None);
+    }
+
+    #[test]
+    fn command_output_prefers_structured_streams_then_the_content() {
+        let content = json!([{"type":"text","text":"ack"}]);
+        assert_eq!(
+            command_output_text(&json!({"stdout": "out", "stderr": "warn"}), None),
+            "out\nwarn"
+        );
+        assert_eq!(
+            command_output_text(&json!({"stdout": " ", "stderr": ""}), Some(&content)),
+            "ack"
+        );
+        assert_eq!(command_output_text(&json!({"stdout": ""}), None), "");
+        assert_eq!(command_output_text(&json!("plain"), None), "plain");
     }
 
     #[test]
@@ -388,6 +442,7 @@ mod tests {
                 input: &input,
                 presentation: &ToolPresentation::default(),
                 output: Some(&json!("out")),
+                output_fallback: None,
                 status: "completed",
                 ordinal: 102,
                 started_at: at,

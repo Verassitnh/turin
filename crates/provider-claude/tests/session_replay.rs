@@ -1160,3 +1160,59 @@ async fn subagent_frames_stay_out_of_the_parent_turn() {
     assert_eq!(last["model"], "haiku");
     assert_eq!(subagents[1]["progress"], "running echo");
 }
+
+/// Bash output is the structured `stdout` and `stderr`, as upstream reads it.
+/// A background run has empty streams, so its content acknowledgement shows.
+#[tokio::test]
+async fn bash_output_comes_from_the_structured_streams() {
+    let harness = one_turn(vec![
+        assistant_tool_use(
+            "00000000-0000-4000-8000-000000000501",
+            None,
+            "toolu_bash",
+            "Bash",
+            json!({"command": "ls"}),
+        ),
+        user_tool_result(
+            "00000000-0000-4000-8000-000000000502",
+            None,
+            "toolu_bash",
+            "out",
+            json!({"stdout": "out", "stderr": "warn", "interrupted": false}),
+        ),
+        assistant_tool_use(
+            "00000000-0000-4000-8000-000000000503",
+            None,
+            "toolu_bg",
+            "Bash",
+            json!({"command": "sleep 1", "run_in_background": true}),
+        ),
+        user_tool_result(
+            "00000000-0000-4000-8000-000000000504",
+            None,
+            "toolu_bg",
+            "Command started in background",
+            json!({"stdout": "", "stderr": "", "backgroundTaskId": "b1"}),
+        ),
+    ]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "Run commands"))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    let outputs: Vec<Value> = turn_items(&seen)
+        .iter()
+        .filter_map(|item| serde_json::to_value(item).ok())
+        .filter(|item| item["type"] == "command_execution" && item["status"] == "completed")
+        .map(|item| item["output"].clone())
+        .collect();
+    assert_eq!(
+        outputs,
+        vec![json!("out\nwarn"), json!("Command started in background")]
+    );
+}

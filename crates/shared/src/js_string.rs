@@ -138,6 +138,16 @@ pub fn code_unit_cmp(left: &str, right: &str) -> std::cmp::Ordering {
 /// whitespace, before digits), as `localeCompare` sees it in en-US.
 const COLLATION_PUNCTUATION: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
 
+/// Options for [`locale_compare_with`]: the `Intl.Collator` options callers
+/// set. The default is `new Intl.Collator()`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LocaleCompareOptions {
+    /// `numeric: true`: a run of ASCII digits compares by value, so `file2` < `file10`.
+    pub numeric: bool,
+    /// `sensitivity: "base"`: letters that differ only by case or accents compare equal.
+    pub base_sensitivity: bool,
+}
+
 /// Approximates `String.prototype.localeCompare` in the default en-US locale
 /// (ICU root collation) without an ICU dependency.
 ///
@@ -146,6 +156,16 @@ const COLLATION_PUNCTUATION: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
 /// (lowercase before uppercase). Characters outside ASCII letters/digits fall
 /// back to code point order after the letters.
 pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
+    locale_compare_with(left, right, LocaleCompareOptions::default())
+}
+
+/// [`locale_compare`] with `Intl.Collator` options. `sensitivity: "base"`
+/// keeps only the first level.
+pub fn locale_compare_with(
+    left: &str,
+    right: &str,
+    options: LocaleCompareOptions,
+) -> std::cmp::Ordering {
     use unicode_normalization::UnicodeNormalization;
 
     struct Key {
@@ -156,16 +176,35 @@ pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
         tertiary: Vec<u8>,
     }
 
-    fn key(value: &str) -> Key {
+    /// Weight of an ASCII digit. A numeric run is this class weight, then its
+    /// significant digit count, then its digits, so runs compare by value.
+    const DIGIT: u32 = 2_000;
+
+    fn key(value: &str, numeric: bool) -> Key {
         let mut primary = Vec::new();
         let mut secondary: Vec<Vec<u32>> = Vec::new();
         let mut tertiary = Vec::new();
-        for c in value.nfd() {
+        let mut chars = value.nfd().peekable();
+        while let Some(c) = chars.next() {
             if ('\u{0300}'..='\u{036f}').contains(&c) {
                 // Accent: attach to the previous base character.
                 if let Some(marks) = secondary.last_mut() {
                     marks.push(c as u32);
                 }
+                continue;
+            }
+            if numeric && c.is_ascii_digit() {
+                let mut run = vec![c];
+                while let Some(next) = chars.next_if(char::is_ascii_digit) {
+                    run.push(next);
+                }
+                // Leading zeros are not significant: `x01` and `x1` tie at the base level.
+                let significant: Vec<char> = run.into_iter().skip_while(|d| *d == '0').collect();
+                primary.push(DIGIT);
+                primary.push(significant.len() as u32);
+                primary.extend(significant.iter().map(|d| DIGIT + (*d as u32 - '0' as u32)));
+                secondary.push(Vec::new());
+                tertiary.push(0);
                 continue;
             }
             let lowered = c.to_lowercase().next().unwrap_or(c);
@@ -177,7 +216,7 @@ pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
             } else if let Some(index) = COLLATION_PUNCTUATION.find(c) {
                 1_000 + index as u32
             } else if c.is_ascii_digit() {
-                2_000 + (c as u32 - '0' as u32)
+                DIGIT + (c as u32 - '0' as u32)
             } else if lowered.is_ascii_lowercase() {
                 3_000 + (lowered as u32 - 'a' as u32)
             } else {
@@ -194,9 +233,12 @@ pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
         }
     }
 
-    let (left, right) = (key(left), key(right));
-    left.primary
-        .cmp(&right.primary)
+    let (left, right) = (key(left, options.numeric), key(right, options.numeric));
+    let primary = left.primary.cmp(&right.primary);
+    if options.base_sensitivity {
+        return primary;
+    }
+    primary
         .then_with(|| left.secondary.cmp(&right.secondary))
         .then_with(|| left.tertiary.cmp(&right.tertiary))
 }

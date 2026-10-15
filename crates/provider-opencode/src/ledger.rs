@@ -436,8 +436,11 @@ fn parse_darwin_line(line: &str) -> Option<Observed> {
     let pid: u32 = parts.next()?.parse().ok()?;
     let pgid: u32 = parts.next()?.parse().ok()?;
     let stat = parts.next()?;
-    let rest = line.trim_start();
-    let after_stat = rest.splitn(4, char::is_whitespace).nth(3)?;
+    let mut after_stat = line;
+    for _ in 0..3 {
+        let field = after_stat.trim_start();
+        after_stat = &field[field.find(char::is_whitespace)?..];
+    }
     let after_stat = after_stat.trim_start();
     let start_time = darwin_lstart(after_stat)?;
     let command = after_stat[start_time.len()..].trim_start().to_string();
@@ -509,6 +512,16 @@ mod tests {
         assert!(!parsed.zombie);
         assert_eq!(parsed.start_time, "Sat Sep  6 20:51:57 2026");
         assert_eq!(parsed.command, "/bin/sh -c sleep serve --port=4096");
+    }
+
+    #[test]
+    fn darwin_ps_handles_padded_columns() {
+        let line = " 5175  5162 S    Thu Oct 15 13:03:10 2026     sh -c sleep 600";
+        let parsed = parse_darwin_line(line).unwrap();
+        assert_eq!(parsed.pid, 5175);
+        assert_eq!(parsed.pgid, 5162);
+        assert_eq!(parsed.start_time, "Thu Oct 15 13:03:10 2026");
+        assert_eq!(parsed.command, "sh -c sleep 600");
     }
 
     #[cfg(unix)]

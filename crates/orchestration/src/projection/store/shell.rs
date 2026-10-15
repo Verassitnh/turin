@@ -340,7 +340,7 @@ pub fn thread_shell_from_projection(
                 == turin_contracts::orchestration_v2::OrchestrationV2ConversationMessageRole::User
         })
         .collect::<Vec<_>>();
-    user_messages.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    user_messages.sort_by_key(|message| std::cmp::Reverse(message.updated_at));
     let latest_user_message = user_messages.first();
     let runs_for_work = projection
         .runs
@@ -1070,13 +1070,12 @@ fn visible_item_count_for_shell(
     inherited_prefix_count + item_count_through_run(source_state, run_id) + 1 + state.item_count
 }
 
+type RunCountsByThread = HashMap<ThreadId, HashMap<RunId, u64>>;
+
 fn run_maps_by_thread_id(
     run_rows: &[ShellRunRow],
     item_count_rows: &[ShellRunItemCountRow],
-) -> (
-    HashMap<ThreadId, HashMap<RunId, u64>>,
-    HashMap<ThreadId, HashMap<RunId, u64>>,
-) {
+) -> (RunCountsByThread, RunCountsByThread) {
     let mut run_ordinals: HashMap<ThreadId, HashMap<RunId, u64>> = HashMap::new();
     for row in run_rows {
         if let (Ok(thread_id), Ok(run_id)) =

@@ -79,7 +79,6 @@ envelope! {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use turin_contracts::orchestration_v2::KNOWN_ORCHESTRATION_V2_EVENT_TYPES;
 
     /// The tag table above must stay in step with the contracts' list.

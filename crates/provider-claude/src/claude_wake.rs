@@ -116,6 +116,7 @@ pub fn tool_use_ids(raw: &Value) -> Vec<&str> {
         .flatten()
         .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
         .filter_map(|block| block.get("id").and_then(Value::as_str))
+        .filter(|id| !id.trim().is_empty())
         .collect()
 }
 

@@ -1700,7 +1700,12 @@ impl ClaudeActor {
             if block.get("type").and_then(Value::as_str) != Some("tool_use") {
                 continue;
             }
-            let Some(id) = block.get("id").and_then(Value::as_str) else {
+            // A blank id names no call, so the block is skipped.
+            let Some(id) = block
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+            else {
                 continue;
             };
             match block.get("name").and_then(Value::as_str) {
@@ -1758,7 +1763,7 @@ impl ClaudeActor {
             .iter()
             .filter_map(|index| active.stream.thinking.get(index))
             .filter(|block| !block.text.is_empty())
-            .map(|block| reasoning_update(&active.scope, block, now, false))
+            .filter_map(|block| reasoning_update(&active.scope, block, now, false))
             .collect();
         for event in events {
             self.emit(event);
@@ -2187,10 +2192,13 @@ impl ClaudeActor {
             active.input.provider_turn_ordinal,
             native,
         );
-        events.push(ProviderAdapterV2Event::TurnItemUpdated {
-            driver: driver(),
-            turn_item: compaction_item(&active.scope, native, ordinal, before, after, now),
-        });
+        if let Some(turn_item) = compaction_item(&active.scope, native, ordinal, before, after, now)
+        {
+            events.push(ProviderAdapterV2Event::TurnItemUpdated {
+                driver: driver(),
+                turn_item,
+            });
+        }
         for event in events {
             self.emit(event);
         }
@@ -2542,7 +2550,7 @@ fn stream_events(
             };
             // A block with no text yet has nothing to show.
             if !block.text.is_empty() {
-                events.push(reasoning_update(&active.scope, &block, now, false));
+                events.extend(reasoning_update(&active.scope, &block, now, false));
             }
             active.stream.thinking.insert(index, block);
         }
@@ -2568,7 +2576,7 @@ fn stream_events(
             if let Some(block) = active.stream.thinking.remove(&index)
                 && !block.text.is_empty()
             {
-                events.push(reasoning_update(&active.scope, &block, now, true));
+                events.extend(reasoning_update(&active.scope, &block, now, true));
             }
         }
         _ => {}
@@ -2581,8 +2589,8 @@ fn reasoning_update(
     block: &StreamedThinking,
     now: UtcDateTime,
     completed: bool,
-) -> ProviderAdapterV2Event {
-    ProviderAdapterV2Event::TurnItemUpdated {
+) -> Option<ProviderAdapterV2Event> {
+    Some(ProviderAdapterV2Event::TurnItemUpdated {
         driver: driver(),
         turn_item: streaming_reasoning_item(
             scope,
@@ -2592,8 +2600,8 @@ fn reasoning_update(
             block.started_at,
             now,
             completed,
-        ),
-    }
+        )?,
+    })
 }
 
 /// Assistant text blocks become a node, message, and turn item. `tool_use`
@@ -2693,13 +2701,20 @@ fn assistant_events(
                     active.input.provider_turn_ordinal,
                     &native,
                 );
-                events.push(ProviderAdapterV2Event::TurnItemUpdated {
-                    driver: driver(),
-                    turn_item: reasoning_item(&active.scope, &native, ordinal, text, now),
-                });
+                if let Some(turn_item) = reasoning_item(&active.scope, &native, ordinal, text, now)
+                {
+                    events.push(ProviderAdapterV2Event::TurnItemUpdated {
+                        driver: driver(),
+                        turn_item,
+                    });
+                }
             }
             Some("tool_use") => {
-                let Some(native) = block.get("id").and_then(Value::as_str) else {
+                let Some(native) = block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                else {
                     continue;
                 };
                 let name = block
@@ -2745,7 +2760,9 @@ fn assistant_events(
                     started_at: now,
                     updated_at: now,
                 };
-                let artifacts = tool_call_artifacts(&active.scope, &call);
+                let Some(artifacts) = tool_call_artifacts(&active.scope, &call) else {
+                    continue;
+                };
                 events.push(ProviderAdapterV2Event::NodeUpdated {
                     driver: driver(),
                     node: artifacts.node,
@@ -2802,7 +2819,9 @@ fn assistant_text_events(
         active.input.provider_turn_ordinal,
         native,
     );
-    let artifacts = assistant_artifacts(&active.scope, native, ordinal, text, now);
+    let Some(artifacts) = assistant_artifacts(&active.scope, native, ordinal, text, now) else {
+        return vec![];
+    };
     active.last_assistant = Some(artifacts.message.clone());
     vec![
         ProviderAdapterV2Event::NodeUpdated {
@@ -2921,7 +2940,9 @@ fn tool_result_events(
             started_at: tracked.started_at,
             updated_at: now,
         };
-        let artifacts = tool_call_artifacts(&active.scope, &call);
+        let Some(artifacts) = tool_call_artifacts(&active.scope, &call) else {
+            continue;
+        };
         events.push(ProviderAdapterV2Event::NodeUpdated {
             driver: driver(),
             node: artifacts.node,
@@ -2984,7 +3005,9 @@ fn finish_running_tools(
             started_at: tracked.started_at,
             updated_at: now,
         };
-        let artifacts = tool_call_artifacts(&active.scope, &call);
+        let Some(artifacts) = tool_call_artifacts(&active.scope, &call) else {
+            continue;
+        };
         events.push(ProviderAdapterV2Event::NodeUpdated {
             driver: driver(),
             node: artifacts.node,

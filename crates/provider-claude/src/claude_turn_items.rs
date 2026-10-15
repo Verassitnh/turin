@@ -52,10 +52,18 @@ fn native_ref(driver: &ProviderDriverKind, native_item_id: &str) -> Value {
     json!({"driver": driver, "nativeId": native_item_id, "strength": "strong"})
 }
 
-fn decode<T: serde::de::DeserializeOwned>(value: Value) -> T {
-    // The JSON is built here from contract field names; a mismatch is a bug in
-    // this module and the unit tests below decode every shape.
-    serde_json::from_value(value).expect("Claude artifact matches the contract shape")
+/// Decodes an artifact built here from contract field names. The unit tests
+/// decode every shape, but a native frame can still carry a value the contract
+/// rejects (a blank id, say). Such an artifact is logged and dropped, so one
+/// malformed frame cannot panic the session actor.
+fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Option<T> {
+    match serde_json::from_value(value) {
+        Ok(artifact) => Some(artifact),
+        Err(error) => {
+            tracing::warn!(%error, "Claude artifact does not match the contract shape; dropped");
+            None
+        }
+    }
 }
 
 pub struct AssistantArtifacts {
@@ -72,7 +80,7 @@ pub fn assistant_artifacts(
     ordinal: u64,
     text: &str,
     at: turin_contracts::UtcDateTime,
-) -> AssistantArtifacts {
+) -> Option<AssistantArtifacts> {
     let driver = &scope.driver;
     let node_id = derive::node_from_provider_item(driver, native_item_id);
     let message_id = derive::message_from_provider_item(driver, native_item_id);
@@ -85,13 +93,13 @@ pub fn assistant_artifacts(
         "providerThreadId": scope.provider_thread_id, "providerTurnId": scope.provider_turn_id,
         "nativeItemRef": native, "runtimeRequestId": null, "checkpointScopeId": null,
         "startedAt": at, "completedAt": at,
-    }));
+    }))?;
     let message = decode(json!({
         "createdBy": "agent", "creationSource": "provider", "id": message_id,
         "threadId": scope.thread_id, "runId": scope.run_id, "nodeId": node_id,
         "role": "assistant", "text": text, "attachments": [], "streaming": false,
         "createdAt": at, "updatedAt": at,
-    }));
+    }))?;
     let turn_item = decode(json!({
         "type": "assistant_message", "id": item_id, "threadId": scope.thread_id,
         "runId": scope.run_id, "nodeId": node_id, "providerThreadId": scope.provider_thread_id,
@@ -99,12 +107,12 @@ pub fn assistant_artifacts(
         "parentItemId": null, "ordinal": ordinal, "status": "completed", "title": null,
         "startedAt": at, "completedAt": at, "updatedAt": at,
         "messageId": message_id, "text": text, "streaming": false,
-    }));
-    AssistantArtifacts {
+    }))?;
+    Some(AssistantArtifacts {
         node,
         message,
         turn_item,
-    }
+    })
 }
 
 /// Item type and request kind for a native tool name (upstream
@@ -189,7 +197,7 @@ pub fn reasoning_item(
     ordinal: u64,
     text: &str,
     at: turin_contracts::UtcDateTime,
-) -> OrchestrationV2TurnItem {
+) -> Option<OrchestrationV2TurnItem> {
     streaming_reasoning_item(scope, native_item_id, ordinal, text, at, at, true)
 }
 
@@ -204,7 +212,7 @@ pub fn streaming_reasoning_item(
     started_at: turin_contracts::UtcDateTime,
     updated_at: turin_contracts::UtcDateTime,
     completed: bool,
-) -> OrchestrationV2TurnItem {
+) -> Option<OrchestrationV2TurnItem> {
     let driver = &scope.driver;
     decode(json!({
         "type": "reasoning",
@@ -231,7 +239,7 @@ pub fn compaction_item(
     before_tokens: Option<u64>,
     after_tokens: Option<u64>,
     at: turin_contracts::UtcDateTime,
-) -> OrchestrationV2TurnItem {
+) -> Option<OrchestrationV2TurnItem> {
     let driver = &scope.driver;
     let mut item = json!({
         "type": "compaction",
@@ -288,7 +296,7 @@ pub struct ToolCall<'a> {
 }
 
 /// Upstream `buildToolCallArtifacts`: the tool execution node and its turn item.
-pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallArtifacts {
+pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> Option<ToolCallArtifacts> {
     let driver = &scope.driver;
     let node_id = derive::node_from_provider_item(driver, call.native_item_id);
     let item_id = derive::turn_item_from_provider_item(driver, call.native_item_id);
@@ -301,7 +309,7 @@ pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallAr
         "providerThreadId": scope.provider_thread_id, "providerTurnId": scope.provider_turn_id,
         "nativeItemRef": native, "runtimeRequestId": null, "checkpointScopeId": null,
         "startedAt": call.started_at, "completedAt": completed_at,
-    }));
+    }))?;
 
     let output_value = call.output.cloned();
     let non_empty = |text: String| (!text.is_empty()).then_some(text);
@@ -383,8 +391,8 @@ pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallAr
             item.insert(key.clone(), value.clone());
         }
     }
-    let turn_item = decode(Value::Object(item));
-    ToolCallArtifacts { node, turn_item }
+    let turn_item = decode(Value::Object(item))?;
+    Some(ToolCallArtifacts { node, turn_item })
 }
 
 /// Upstream `WEB_FETCH_SNIPPET_MAX_CHARS`: a WebFetch row keeps this much page text.
@@ -520,7 +528,7 @@ mod tests {
     fn builds_assistant_and_tool_artifacts_in_contract_shape() {
         let at: UtcDateTime = serde_json::from_value(json!("2026-10-15T00:00:00.000Z")).unwrap();
         let scope = scope();
-        let assistant = assistant_artifacts(&scope, "msg-1:0", 101, "hi", at);
+        let assistant = assistant_artifacts(&scope, "msg-1:0", 101, "hi", at).unwrap();
         assert!(matches!(
             assistant.turn_item,
             OrchestrationV2TurnItem::AssistantMessage { .. }
@@ -541,7 +549,8 @@ mod tests {
                 started_at: at,
                 updated_at: at,
             },
-        );
+        )
+        .unwrap();
         assert!(matches!(
             tool.turn_item,
             OrchestrationV2TurnItem::CommandExecution { .. }
@@ -563,7 +572,28 @@ mod tests {
             started_at: at,
             updated_at: at,
         };
-        serde_json::to_value(tool_call_artifacts(&scope(), &call).turn_item).unwrap()
+        serde_json::to_value(tool_call_artifacts(&scope(), &call).unwrap().turn_item).unwrap()
+    }
+
+    #[test]
+    fn an_artifact_the_contract_rejects_is_dropped_not_panicked() {
+        // A blank native id is not a TrimmedNonEmptyString: the builder returns None.
+        let at = UtcDateTime::now();
+        let input = json!({"command": "ls"});
+        let blank = ToolCall {
+            native_item_id: "",
+            tool_name: "Bash",
+            input: &input,
+            presentation: &ToolPresentation::default(),
+            output: None,
+            output_fallback: None,
+            status: "running",
+            ordinal: 1,
+            started_at: at,
+            updated_at: at,
+        };
+        assert!(tool_call_artifacts(&scope(), &blank).is_none());
+        assert!(assistant_artifacts(&scope(), "", 1, "hi", at).is_none());
     }
 
     #[test]

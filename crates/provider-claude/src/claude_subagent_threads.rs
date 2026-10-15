@@ -287,7 +287,9 @@ pub fn child_tool_call<'a>(
 
 /// The node and turn item of a child tool call, as events.
 pub fn tool_call_events(scope: &TurnScope, call: &ToolCall<'_>) -> Vec<ProviderAdapterV2Event> {
-    let artifacts = tool_call_artifacts(scope, call);
+    let Some(artifacts) = tool_call_artifacts(scope, call) else {
+        return Vec::new();
+    };
     vec![
         ProviderAdapterV2Event::NodeUpdated {
             driver: scope.driver.clone(),

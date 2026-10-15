@@ -815,7 +815,11 @@ impl SubagentRegistry {
                     ));
                 }
                 Some("tool_use") => {
-                    let Some(native) = block.get("id").and_then(Value::as_str) else {
+                    let Some(native) = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.trim().is_empty())
+                    else {
                         continue;
                     };
                     let name = block

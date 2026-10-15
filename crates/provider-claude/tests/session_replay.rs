@@ -512,6 +512,33 @@ async fn failed_turn_stops_and_settles_the_workflow_it_follows() {
     }
 }
 
+/// A `tool_use` whose id is blank names no call. The block is skipped, and the
+/// turn still completes instead of the session actor panicking.
+#[tokio::test]
+async fn blank_tool_use_id_is_skipped_and_the_turn_completes() {
+    let harness = one_turn(vec![assistant_tool_use(
+        "00000000-0000-4000-8000-000000000801",
+        None,
+        "  ",
+        "Bash",
+        json!({"command": "ls"}),
+    )]);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(thread, "List the files."))
+        .await
+        .expect("start turn");
+
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(
+        status,
+        ProviderAdapterV2TurnTerminalStatus::Completed,
+        "{seen:?}"
+    );
+}
+
 #[tokio::test]
 async fn steering_replaces_the_active_prompt_and_completes() {
     let harness = Harness::fixture("message_steering");

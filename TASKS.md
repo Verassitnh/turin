@@ -120,7 +120,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
 | T00 | Foundation fixes from QC wf_6ce02f2f-38c (docs part done by PM; helpers: Codex died on auth expiry → Sonnet r2) | `crates/contracts/src/base_schemas.rs` | Codex → Sonnet | done (merged) |
-| T00c | QC low items: UtcDateTime parse bounds/leap/zone-less, private field; `forward_compatible_*::optional` | `crates/contracts/src/base_schemas.rs` | Cursor Auto | active (base: T01) |
+| T00c | QC low items: UtcDateTime parse bounds/leap/zone-less, private field; `forward_compatible_*::optional` | `crates/contracts/src/base_schemas.rs` | Cursor Auto | done (merged into T01; UtcDateTime field now private) |
 | T00i | Upstream coverage inventory → docs/inventory/upstream-coverage.md | docs | Cursor Auto | done (merged): 40.4% of kept lines ported (54.9% incl. partial); 36.1% of all needed; 135 unassigned files → N1–N11 |
 | N1 | App runtime: settings + secrets, keybindings file, data dir, environment descriptor, storage cleanup | `crates/runtime` | Cursor Auto | active |
 | N2s | Project services (server): identity, favicons, scratch projects, agent-session scan/import | `crates/projects` | Cursor Auto | active |

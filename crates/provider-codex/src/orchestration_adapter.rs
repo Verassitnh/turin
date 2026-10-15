@@ -3,9 +3,11 @@
 use crate::{
     adapter::{CodexAdapter, CodexEvent, CodexSession},
     approvals::{Decision, PendingRequest},
+    items,
     params::RuntimePolicy,
     projection::{self, RuntimeState, TurnState},
     runtime::CodexRuntimeConfig,
+    subagent,
 };
 use async_trait::async_trait;
 use futures::stream;
@@ -18,14 +20,19 @@ use turin_contracts::{
     model::ProviderOptionSelectionValue,
     model_selection::ModelSelection,
     orchestration_v2::{
-        OrchestrationV2NativeRefStrength, OrchestrationV2ProviderCapabilities,
-        OrchestrationV2ProviderRef, OrchestrationV2ProviderSession,
-        OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
-        OrchestrationV2ProviderThreadForkedFrom, OrchestrationV2ProviderThreadStatus,
-        OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus,
+        OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeKind,
+        OrchestrationV2ExecutionNodeStatus, OrchestrationV2NativeRefStrength,
+        OrchestrationV2ProviderCapabilities, OrchestrationV2ProviderRef,
+        OrchestrationV2ProviderSession, OrchestrationV2ProviderSessionStatus,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadForkedFrom,
+        OrchestrationV2ProviderThreadStatus, OrchestrationV2ProviderTurn,
+        OrchestrationV2ProviderTurnStatus, OrchestrationV2ResponseCapability,
+        OrchestrationV2RuntimeRequest, OrchestrationV2RuntimeRequestKind,
+        OrchestrationV2RuntimeRequestStatus, OrchestrationV2TurnItem,
+        OrchestrationV2TurnItemStatus,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
-    provider_policy::ProviderApprovalDecision,
+    provider_policy::{ProviderApprovalDecision, ProviderRequestKind},
 };
 use turin_provider_core::{
     failure::ProviderFailureCause,
@@ -52,7 +59,7 @@ pub(crate) fn driver() -> ProviderDriverKind {
 fn nonempty(value: &str) -> TrimmedNonEmptyString {
     TrimmedNonEmptyString::new(value).expect("nonempty provider value")
 }
-fn native_ref(id: &str) -> OrchestrationV2ProviderRef {
+pub(crate) fn native_ref(id: &str) -> OrchestrationV2ProviderRef {
     OrchestrationV2ProviderRef {
         driver: driver(),
         native_id: Some(nonempty(id)),
@@ -305,8 +312,31 @@ fn project_parked(
     }
 }
 
-/// Projects one arrival in order. It parks the arrival if its turn is unknown,
-/// or if an earlier parked item for the same turn is still waiting.
+/// Whether an item's turn is registered, or is the first `turn/started` of a
+/// registered subagent, which opens a child turn when it projects.
+fn admitted(item: &Parked, state: &RuntimeState) -> bool {
+    match item.turn() {
+        None => true,
+        Some(turn) => {
+            state.turns.contains_key(turn)
+                || match item {
+                    Parked::Event(event) => {
+                        let thread = event
+                            .params
+                            .get("threadId")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        event.method == "turn/started"
+                            && subagent::opens_child_turn(state, thread, turn)
+                    }
+                    Parked::Request(_) => false,
+                }
+        }
+    }
+}
+
+/// Projects one arrival in order. It parks the arrival if its turn is not
+/// admitted, or if an earlier parked item for the same turn is still waiting.
 fn ingest(
     parked: &mut VecDeque<Parked>,
     item: Parked,
@@ -316,10 +346,7 @@ fn ingest(
     let behind_parked = item
         .turn()
         .is_some_and(|turn| parked.iter().any(|p| p.turn() == Some(turn)));
-    let unregistered = item
-        .turn()
-        .is_some_and(|turn| !state.turns.contains_key(turn));
-    if behind_parked || unregistered {
+    if behind_parked || !admitted(&item, state) {
         if parked.len() >= PARKED_LIMIT {
             parked.pop_front();
         }
@@ -329,26 +356,31 @@ fn ingest(
     project_parked(item, state, session_id)
 }
 
-/// Projects every parked item whose turn is registered now, keeping arrival order.
+/// Projects every parked item that is admitted now, keeping arrival order. A
+/// projected item can register a subagent that an earlier parked item waits on,
+/// so the pass repeats until it makes no progress.
 fn drain_parked(
     parked: &mut VecDeque<Parked>,
     state: &mut RuntimeState,
     session_id: &ProviderSessionId,
 ) -> Vec<ProviderAdapterV2Event> {
     let mut events = vec![];
-    let mut index = 0;
-    while index < parked.len() {
-        let ready = parked[index]
-            .turn()
-            .is_none_or(|turn| state.turns.contains_key(turn));
-        if ready {
-            let item = parked.remove(index).expect("index in range");
-            events.extend(project_parked(item, state, session_id));
-        } else {
-            index += 1;
+    loop {
+        let mut progressed = false;
+        let mut index = 0;
+        while index < parked.len() {
+            if admitted(&parked[index], state) {
+                let item = parked.remove(index).expect("index in range");
+                events.extend(project_parked(item, state, session_id));
+                progressed = true;
+            } else {
+                index += 1;
+            }
+        }
+        if !progressed {
+            return events;
         }
     }
-    events
 }
 
 async fn project_pump(
@@ -966,29 +998,9 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
     }
 }
 
-fn project_request(
-    request: PendingRequest,
-    state: &mut RuntimeState,
-    session_id: &ProviderSessionId,
-) -> Vec<ProviderAdapterV2Event> {
-    use turin_contracts::orchestration_v2::{
-        OrchestrationV2ResponseCapability, OrchestrationV2RuntimeRequest,
-        OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
-    };
-    let native_turn = request.params.get("turnId").and_then(Value::as_str);
-    let context = native_turn.and_then(|id| state.turns.get(id).cloned());
-    let Some(context) = context else {
-        return vec![];
-    };
-    let native_req = request
-        .params
-        .get("approvalId")
-        .or_else(|| request.params.get("itemId"))
-        .and_then(Value::as_str);
-    let provider_turn_id = native_turn.map(|id| derive::provider_turn(&driver(), id));
-    let id = IdAllocator.runtime_request(&driver(), provider_turn_id.as_ref(), native_req);
-    state.requests.insert(id.clone(), request.id);
-    let kind = match request.method.as_str() {
+/// The runtime request kind for a Codex server request method.
+fn runtime_kind(method: &str) -> OrchestrationV2RuntimeRequestKind {
+    match method {
         "item/fileChange/requestApproval" | "applyPatchApproval" => {
             OrchestrationV2RuntimeRequestKind::FileChange
         }
@@ -996,25 +1008,167 @@ fn project_request(
         "mcpServer/elicitation/request" => OrchestrationV2RuntimeRequestKind::McpElicitation,
         "item/tool/requestUserInput" => OrchestrationV2RuntimeRequestKind::UserInput,
         _ => OrchestrationV2RuntimeRequestKind::Command,
+    }
+}
+
+/// The approval kind an approval node is raised for. Plan questions are not
+/// approvals, so they have none.
+fn approval_kind(method: &str) -> Option<ProviderRequestKind> {
+    match runtime_kind(method) {
+        OrchestrationV2RuntimeRequestKind::Command => Some(ProviderRequestKind::Command),
+        OrchestrationV2RuntimeRequestKind::FileRead => Some(ProviderRequestKind::FileRead),
+        OrchestrationV2RuntimeRequestKind::FileChange => Some(ProviderRequestKind::FileChange),
+        OrchestrationV2RuntimeRequestKind::Permission => Some(ProviderRequestKind::Permission),
+        OrchestrationV2RuntimeRequestKind::McpElicitation => {
+            Some(ProviderRequestKind::McpElicitation)
+        }
+        OrchestrationV2RuntimeRequestKind::UserInput
+        | OrchestrationV2RuntimeRequestKind::DynamicToolCall
+        | OrchestrationV2RuntimeRequestKind::AuthRefresh => None,
+    }
+}
+
+/// Upstream `buildApprovalRequestArtifacts`. A request from a subagent is asked on
+/// the top-level turn that owns it, under the subagent that asked, so the user can
+/// answer where they can see it. Native subagent threads are hidden.
+fn project_request(
+    request: PendingRequest,
+    state: &mut RuntimeState,
+    session_id: &ProviderSessionId,
+) -> Vec<ProviderAdapterV2Event> {
+    let Some(native_turn) = request.params.get("turnId").and_then(Value::as_str) else {
+        return vec![];
+    };
+    let Some(context) = state.turns.get(native_turn) else {
+        return vec![];
+    };
+    let owner_native = subagent::owner_native_turn(state, context);
+    let native_item = request.params.get("itemId").and_then(Value::as_str);
+    let native_req = request
+        .params
+        .get("approvalId")
+        .or_else(|| request.params.get("itemId"))
+        .and_then(Value::as_str);
+    let parent_node = subagent::subagent_node(state, context).unwrap_or_else(|| {
+        derive::node_from_provider_item(&driver(), native_item.or(native_req).unwrap_or_default())
+    });
+    let Some(owner) = state.turns.get_mut(&owner_native) else {
+        return vec![];
+    };
+    let now = UtcDateTime::now();
+    let provider_turn_id = derive::provider_turn(&driver(), &owner_native);
+    let id = IdAllocator.runtime_request(&driver(), Some(&provider_turn_id), native_req);
+    state.requests.insert(id.clone(), request.id);
+    let thread_id = owner.input.thread_id.clone();
+    let kind = runtime_kind(&request.method);
+    let Some(item_kind) = approval_kind(&request.method) else {
+        // Plan questions take the user-input path, whose node and item are not ported.
+        let runtime_request = OrchestrationV2RuntimeRequest {
+            id,
+            node_id: owner.input.root_node_id.clone(),
+            provider_turn_id: Some(provider_turn_id),
+            native_request_ref: native_req.map(native_ref),
+            kind: OrchestrationV2RuntimeRequestKind::UserInput,
+            status: OrchestrationV2RuntimeRequestStatus::Pending,
+            response_capability: OrchestrationV2ResponseCapability::Live {
+                provider_session_id: session_id.clone(),
+            },
+            created_at: now,
+            resolved_at: None,
+            decision: None,
+            answers: None,
+        };
+        return vec![ProviderAdapterV2Event::RuntimeRequestUpdated {
+            driver: driver(),
+            thread_id: Some(thread_id),
+            runtime_request,
+        }];
+    };
+    let ordinal_key = format!(
+        "{}:approval:{}",
+        native_item.or(native_req).unwrap_or_default(),
+        native_req.unwrap_or_default()
+    );
+    let (ordinal, _) = items::resolve_position(owner, &ordinal_key, None, now);
+    let prompt = request
+        .params
+        .get("reason")
+        .or_else(|| request.params.get("command"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let node_id = derive::approval_node(&id);
+    let turn_item_id = derive::approval_turn_item(&id);
+    let node = OrchestrationV2ExecutionNode {
+        id: node_id.clone(),
+        thread_id: owner.input.thread_id.clone(),
+        run_id: owner.run_id(),
+        parent_node_id: Some(parent_node),
+        root_node_id: owner.input.root_node_id.clone(),
+        kind: OrchestrationV2ExecutionNodeKind::ApprovalRequest,
+        status: OrchestrationV2ExecutionNodeStatus::Waiting,
+        counts_for_run: false,
+        provider_thread_id: Some(owner.input.provider_thread.id.clone()),
+        provider_turn_id: Some(provider_turn_id.clone()),
+        native_item_ref: native_item.map(items::native_item_ref),
+        runtime_request_id: Some(id.clone()),
+        checkpoint_scope_id: None,
+        started_at: Some(now),
+        completed_at: None,
+    };
+    let turn_item = OrchestrationV2TurnItem::ApprovalRequest {
+        tool_non_execution_kind: None,
+        tool_surface: None,
+        tool_icon: None,
+        tool_source: None,
+        id: turn_item_id,
+        thread_id: owner.input.thread_id.clone(),
+        run_id: owner.run_id(),
+        node_id: Some(node_id.clone()),
+        provider_thread_id: Some(owner.input.provider_thread.id.clone()),
+        provider_turn_id: Some(provider_turn_id.clone()),
+        native_item_ref: native_item.map(items::native_item_ref),
+        parent_item_id: None,
+        ordinal,
+        status: OrchestrationV2TurnItemStatus::Waiting,
+        title: None,
+        started_at: Some(now),
+        completed_at: None,
+        updated_at: now,
+        request_id: id.clone(),
+        request_kind: item_kind,
+        prompt,
+        app_name: None,
+        options: None,
     };
     let runtime_request = OrchestrationV2RuntimeRequest {
         id,
-        node_id: context.input.root_node_id,
-        provider_turn_id,
+        node_id,
+        provider_turn_id: Some(provider_turn_id),
         native_request_ref: native_req.map(native_ref),
         kind,
         status: OrchestrationV2RuntimeRequestStatus::Pending,
         response_capability: OrchestrationV2ResponseCapability::Live {
             provider_session_id: session_id.clone(),
         },
-        created_at: UtcDateTime::now(),
+        created_at: now,
         resolved_at: None,
         decision: None,
         answers: None,
     };
-    vec![ProviderAdapterV2Event::RuntimeRequestUpdated {
-        driver: driver(),
-        thread_id: Some(context.input.thread_id),
-        runtime_request,
-    }]
+    let thread_id = owner.input.thread_id.clone();
+    vec![
+        ProviderAdapterV2Event::NodeUpdated {
+            driver: driver(),
+            node,
+        },
+        ProviderAdapterV2Event::TurnItemUpdated {
+            driver: driver(),
+            turn_item,
+        },
+        ProviderAdapterV2Event::RuntimeRequestUpdated {
+            driver: driver(),
+            thread_id: Some(thread_id),
+            runtime_request,
+        },
+    ]
 }

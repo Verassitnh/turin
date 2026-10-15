@@ -19,7 +19,8 @@ use turin_contracts::{
         OrchestrationV2PlanArtifact, OrchestrationV2PlanArtifactStatus,
         OrchestrationV2PlanStepStatus, OrchestrationV2ProviderThread, OrchestrationV2ProviderTurn,
         OrchestrationV2RuntimeRequest, OrchestrationV2RuntimeRequestKind,
-        OrchestrationV2RuntimeRequestStatus, OrchestrationV2TurnItem,
+        OrchestrationV2RuntimeRequestStatus, OrchestrationV2Subagent,
+        OrchestrationV2SubagentOrigin, OrchestrationV2SubagentStatus, OrchestrationV2TurnItem,
         OrchestrationV2TurnItemStatus,
     },
     provider_instance::ProviderInstanceId,
@@ -1339,5 +1340,128 @@ async fn mid_tool_interrupt_terminates_background_terminal() {
             ..
         }
     )));
+    replay.driver.verify_complete().unwrap();
+}
+
+/// The latest state of each subagent the replay reported, in first-seen order.
+fn subagents(events: &[ProviderAdapterV2Event]) -> Vec<OrchestrationV2Subagent> {
+    let mut latest: Vec<OrchestrationV2Subagent> = vec![];
+    for event in events {
+        if let ProviderAdapterV2Event::SubagentUpdated { subagent, .. } = event {
+            match latest.iter_mut().find(|known| known.id == subagent.id) {
+                Some(slot) => *slot = subagent.clone(),
+                None => latest.push(subagent.clone()),
+            }
+        }
+    }
+    latest
+}
+
+/// The latest state of each turn item, as JSON so a test can select by type and thread.
+fn latest_items(events: &[ProviderAdapterV2Event]) -> Vec<Value> {
+    let mut latest: Vec<Value> = vec![];
+    for event in events {
+        if let ProviderAdapterV2Event::TurnItemUpdated { turn_item, .. } = event {
+            let item = serde_json::to_value(turn_item).expect("turn item json");
+            match latest.iter_mut().find(|known| known["id"] == item["id"]) {
+                Some(slot) => *slot = item,
+                None => latest.push(item),
+            }
+        }
+    }
+    latest
+}
+
+/// Items of one thread, selected by type, in first-seen order.
+fn items_of<'a>(items: &'a [Value], thread: &str, kind: &str) -> Vec<&'a Value> {
+    items
+        .iter()
+        .filter(|item| item["threadId"] == thread && item["type"] == kind)
+        .collect()
+}
+
+/// Whether the replay created an app thread with this id.
+fn has_app_thread(events: &[ProviderAdapterV2Event], child: &str) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            ProviderAdapterV2Event::AppThreadCreated { app_thread, .. }
+                if app_thread.id.as_str() == child
+        )
+    })
+}
+
+#[tokio::test]
+async fn subagent_replay_runs_spawned_children_and_settles_their_results() {
+    let transcript = fixture("subagent");
+    let policy = recorded_policy(&transcript, RuntimeMode::FullAccess);
+    let mut replay = open(transcript.clone()).await;
+    replay.start(&recorded_text(&transcript, 0), policy).await;
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+
+    let subagents = subagents(&seen);
+    assert_eq!(subagents.len(), 2);
+    for subagent in &subagents {
+        assert_eq!(
+            subagent.origin,
+            OrchestrationV2SubagentOrigin::ProviderNative
+        );
+        assert_eq!(subagent.created_by, OrchestrationV2Actor::Agent);
+        assert_eq!(subagent.driver.as_str(), "codex");
+        assert_eq!(subagent.status, OrchestrationV2SubagentStatus::Completed);
+        assert!(subagent.child_thread_id.is_some());
+        assert!(subagent.native_task_ref.is_some());
+        assert!(subagent.completed_at.is_some());
+    }
+    let result_for = |needle: &str| {
+        subagents
+            .iter()
+            .find(|subagent| subagent.prompt.contains(needle))
+            .and_then(|subagent| subagent.result.clone())
+            .unwrap_or_default()
+    };
+    assert!(result_for("package.json").contains("effect-codex-app-server"));
+    assert!(!result_for("package.json").contains("tsconfig.base.json"));
+    assert!(result_for("tsconfig.json").contains("../../tsconfig.base.json"));
+
+    let items = latest_items(&seen);
+    let root = "thread-1";
+    assert!(
+        items_of(&items, root, "command_execution").is_empty(),
+        "subagent commands stay in the child thread"
+    );
+    assert_eq!(items_of(&items, root, "subagent").len(), 2);
+    for subagent in &subagents {
+        let child = subagent.child_thread_id.as_ref().expect("child").as_str();
+        assert!(has_app_thread(&seen, child), "child thread is created");
+        assert!(
+            items_of(&items, child, "user_message")
+                .iter()
+                .any(|item| item["text"] == subagent.prompt.as_str()),
+            "child thread holds its prompt"
+        );
+        assert!(
+            !items_of(&items, child, "command_execution").is_empty(),
+            "child thread holds its command"
+        );
+        let head: String = subagent
+            .result
+            .iter()
+            .flat_map(|r| r.chars())
+            .take(40)
+            .collect();
+        assert!(
+            items_of(&items, child, "assistant_message")
+                .iter()
+                .any(|item| item["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(&head))),
+            "child thread holds its answer"
+        );
+    }
     replay.driver.verify_complete().unwrap();
 }

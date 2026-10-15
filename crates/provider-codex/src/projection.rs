@@ -6,11 +6,16 @@
 //! The caller holds the `RuntimeState` lock across each call. Projection is
 //! synchronous, so a turn is only ever borrowed mutably in one place.
 //!
-//! Not ported yet: subagent, fork, goal, background-task, and MCP app capture.
+//! Subagent threads and their child turns project through `subagent`.
+//! Not ported yet: fork, goal, background-task, and MCP app capture.
 //! MCP and dynamic-tool calls project as `dynamic_tool` items.
 use crate::{
-    adapter::CodexEvent, codex_turn_token_usage::CodexTurnTokenUsageState, items,
-    items::ItemArtifacts, orchestration_adapter::driver,
+    adapter::CodexEvent,
+    codex_turn_token_usage::CodexTurnTokenUsageState,
+    items,
+    items::ItemArtifacts,
+    orchestration_adapter::driver,
+    subagent::{self, SubagentThread},
 };
 use serde_json::{Value, json};
 use std::{
@@ -19,14 +24,14 @@ use std::{
 };
 use tokio::time::Instant;
 use turin_contracts::{
-    PlanId, PositiveInt, RuntimeRequestId, TrimmedNonEmptyString, UtcDateTime,
+    PlanId, PositiveInt, RunAttemptId, RunId, RuntimeRequestId, TrimmedNonEmptyString, UtcDateTime,
     orchestration_v2::{
         OrchestrationV2ExecutionNodeStatus, OrchestrationV2NativeRefStrength,
         OrchestrationV2PlanArtifact, OrchestrationV2PlanArtifactStatus, OrchestrationV2PlanStep,
         OrchestrationV2PlanStepStatus, OrchestrationV2ProviderRef,
         OrchestrationV2ProviderThreadDisposition, OrchestrationV2ProviderTurn,
         OrchestrationV2ProviderTurnStatus, OrchestrationV2ProviderTurnTokenUsage,
-        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
+        OrchestrationV2SubagentStatus, OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
     },
     provider_runtime::TurnTokenUsage,
 };
@@ -57,6 +62,8 @@ pub struct TurnState {
     pub completed_texts: HashSet<String>,
     /// Raw `mcpToolCall` / `dynamicToolCall` items still in progress, in first-seen order.
     pub running_tools: Vec<Value>,
+    /// The native subagent thread this is a child turn of. Its run and attempt are empty.
+    pub subagent: Option<String>,
 }
 
 impl TurnState {
@@ -70,7 +77,20 @@ impl TurnState {
             final_answer_items: vec![],
             completed_texts: HashSet::new(),
             running_tools: vec![],
+            subagent: None,
         }
+    }
+
+    /// The run a turn's items belong to. A child turn has none, as upstream's do.
+    pub fn run_id(&self) -> Option<RunId> {
+        self.subagent.is_none().then(|| self.input.run_id.clone())
+    }
+
+    /// The attempt a turn's provider turn reports. A child turn has none.
+    pub fn attempt_id(&self) -> Option<RunAttemptId> {
+        self.subagent
+            .is_none()
+            .then(|| self.input.attempt_id.clone())
     }
 }
 
@@ -113,6 +133,9 @@ pub struct RuntimeState {
     pub plan_ids: HashMap<String, PlanId>,
     /// Token usage keyed by native thread id.
     pub usage: HashMap<String, CodexTurnTokenUsageState>,
+    /// Native subagent threads, keyed by native thread id. A child's `turn/started`
+    /// opens a child turn here, so the thread is the lookup from frame to subagent.
+    pub subagents: HashMap<String, SubagentThread>,
 }
 
 fn group_of(kind: TextKind) -> usize {
@@ -160,7 +183,7 @@ fn plan_id(plan_ids: &mut HashMap<String, PlanId>, turn: &TurnState, key: &str) 
     plan_ids
         .entry(key.to_owned())
         .or_insert_with(|| {
-            IdAllocator.plan(&turn.input.thread_id, Some(&turn.input.run_id), &driver())
+            IdAllocator.plan(&turn.input.thread_id, turn.run_id().as_ref(), &driver())
         })
         .clone()
 }
@@ -239,7 +262,7 @@ fn emit_text(
             let plan = OrchestrationV2PlanArtifact::ProposedPlan {
                 id,
                 thread_id: turn.input.thread_id.clone(),
-                run_id: Some(turn.input.run_id.clone()),
+                run_id: turn.run_id(),
                 node_id: node.id.clone(),
                 // A finished proposal stays active until Implement consumes it.
                 status: OrchestrationV2PlanArtifactStatus::Active,
@@ -418,7 +441,7 @@ fn flush_turn(
         .collect()
 }
 
-fn provider_turn(
+pub(crate) fn provider_turn(
     turn: &TurnState,
     status: OrchestrationV2ProviderTurnStatus,
     completed_at: Option<UtcDateTime>,
@@ -429,7 +452,7 @@ fn provider_turn(
         id: derive::provider_turn(&driver(), &turn.native_turn),
         provider_thread_id: turn.input.provider_thread.id.clone(),
         node_id: turn.input.root_node_id.clone(),
-        run_attempt_id: Some(turn.input.attempt_id.clone()),
+        run_attempt_id: turn.attempt_id(),
         native_turn_ref: Some(OrchestrationV2ProviderRef {
             driver: driver(),
             native_id: Some(TrimmedNonEmptyString::new(&turn.native_turn).expect("native turn")),
@@ -488,10 +511,20 @@ pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderA
             .or_default()
             .accumulate(&native_turn, usage);
     }
+    let now = UtcDateTime::now();
+    if !state.turns.contains_key(&native_turn) {
+        // A subagent's first `turn/started` opens its child turn. Other frames for
+        // a turn that is not registered are dropped here.
+        if raw.method == "turn/started" && subagent::opens_child_turn(state, &thread, &native_turn)
+        {
+            let started_at = time_secs(raw.params.pointer("/turn/startedAt")).unwrap_or(now);
+            return subagent::start_child_turn(state, &thread, &native_turn, started_at);
+        }
+        return vec![];
+    }
     let Some(mut turn) = state.turns.remove(&native_turn) else {
         return vec![];
     };
-    let now = UtcDateTime::now();
     let events = match raw.method.as_str() {
         "turn/started" => {
             turn.started_at = time_secs(raw.params.pointer("/turn/startedAt")).or(Some(now));
@@ -508,8 +541,8 @@ pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderA
                 ),
             }]
         }
-        "item/started" => item_started(&raw.params, &mut turn, now),
-        "item/completed" => item_completed(&raw.params, &mut turn, state, now),
+        "item/started" => item_started(&raw.params, &thread, &mut turn, state, now),
+        "item/completed" => item_completed(&raw.params, &thread, &mut turn, state, now),
         "item/agentMessage/delta" => {
             let item = str_of(&raw.params, "itemId").unwrap_or_default().to_owned();
             let delta = str_of(&raw.params, "delta").unwrap_or_default();
@@ -579,22 +612,25 @@ fn reasoning_key(native_turn: &str, native_item: &str, stream: &str, index: u64)
 
 fn item_started(
     params: &Value,
+    thread: &str,
     turn: &mut TurnState,
+    state: &mut RuntimeState,
     now: UtcDateTime,
 ) -> Vec<ProviderAdapterV2Event> {
     let Some(item) = params.get("item") else {
         return vec![];
     };
     let kind = str_of(item, "type").unwrap_or_default();
-    // Compaction, user messages, and subagent activity are not ported yet.
-    if matches!(
-        kind,
-        "contextCompaction" | "userMessage" | "subAgentActivity"
-    ) {
-        return vec![];
+    let started_at = time_ms(params.get("startedAtMs").and_then(Value::as_i64));
+    // Upstream handles these before it resolves an item position.
+    match kind {
+        // Compaction is not ported yet.
+        "contextCompaction" => return vec![],
+        "userMessage" => return subagent::child_user_message(state, turn, item, started_at),
+        "subAgentActivity" => return sub_agent_activity(item, thread, turn, state),
+        _ => {}
     }
     let native_item = str_of(item, "id").unwrap_or_default();
-    let started_at = time_ms(params.get("startedAtMs").and_then(Value::as_i64));
     if kind != "reasoning" {
         items::resolve_position(turn, native_item, started_at, now);
     }
@@ -622,6 +658,50 @@ fn item_started(
             emit_item(items::dynamic_tool(turn, item, now))
         }
         "webSearch" => emit_item(items::web_search(turn, item, false, now)),
+        _ => vec![],
+    }
+}
+
+/// Upstream `subAgentActivity` on `item/started`: a `started` activity registers
+/// the subagent under this turn, and a terminal one settles the subagent it names.
+fn sub_agent_activity(
+    item: &Value,
+    thread: &str,
+    turn: &mut TurnState,
+    state: &mut RuntimeState,
+) -> Vec<ProviderAdapterV2Event> {
+    let agent_thread = str_of(item, "agentThreadId").unwrap_or_default();
+    let call = str_of(item, "id").unwrap_or_default();
+    state
+        .usage
+        .entry(thread.to_owned())
+        .or_default()
+        .mark_subagent(&turn.native_turn);
+    match str_of(item, "kind").unwrap_or_default() {
+        "started" => {
+            let ordinal = subagent::spawned_under(state, &turn.input.root_node_id) + 1;
+            let spawn = subagent::Spawn {
+                native_thread: agent_thread,
+                native_item: format!("{call}:{agent_thread}"),
+                native_tool_call: call,
+                prompt: "",
+                title: str_of(item, "agentPath"),
+                model: None,
+                ordinal,
+                emit_initial_prompt: false,
+            };
+            subagent::register(state, turn, spawn)
+        }
+        "completed" => subagent::activity_finished(
+            state,
+            agent_thread,
+            OrchestrationV2SubagentStatus::Completed,
+        ),
+        "interrupted" => subagent::activity_finished(
+            state,
+            agent_thread,
+            OrchestrationV2SubagentStatus::Interrupted,
+        ),
         _ => vec![],
     }
 }
@@ -677,6 +757,7 @@ fn track_command(turn: &mut TurnState, item: &Value) {
 
 fn item_completed(
     params: &Value,
+    thread: &str,
     turn: &mut TurnState,
     state: &mut RuntimeState,
     now: UtcDateTime,
@@ -709,12 +790,93 @@ fn item_completed(
         }
         "agentMessage" => {
             let final_text = str_of(item, "text").unwrap_or_default().to_owned();
-            let events = complete_text(state, turn, &native_item, Some(final_text), true, false);
+            let final_answer = str_of(item, "phase") != Some("commentary");
+            let mut events = complete_text(
+                state,
+                turn,
+                &native_item,
+                Some(final_text.clone()),
+                true,
+                false,
+            );
             turn.final_answer_items.retain(|id| id != &native_item);
+            // A child's final answer is its subagent's result.
+            if final_answer
+                && !events.is_empty()
+                && let Some(thread) = turn.subagent.clone()
+            {
+                events.extend(subagent::set_result(state, &thread, &final_text));
+            }
+            events
+        }
+        "userMessage" => subagent::child_user_message(state, turn, item, None),
+        "subAgentActivity" => {
+            let status = match str_of(item, "kind") {
+                Some("completed") => OrchestrationV2SubagentStatus::Completed,
+                Some("interrupted") => OrchestrationV2SubagentStatus::Interrupted,
+                _ => return vec![],
+            };
+            subagent::activity_finished(
+                state,
+                str_of(item, "agentThreadId").unwrap_or_default(),
+                status,
+            )
+        }
+        "collabAgentToolCall" => {
+            let mut events = vec![];
+            if str_of(item, "tool") == Some("spawnAgent") {
+                state
+                    .usage
+                    .entry(thread.to_owned())
+                    .or_default()
+                    .mark_subagent(&turn.native_turn);
+                events.extend(spawn_agents(item, turn, state, &native_item));
+            }
+            events.extend(subagent::update_states(
+                state,
+                item.get("agentsStates").unwrap_or(&Value::Null),
+            ));
             events
         }
         _ => vec![],
     }
+}
+
+/// Upstream `registerSubagentThreads`: each thread a `spawnAgent` call received
+/// becomes a subagent, numbered in the order the call lists them.
+fn spawn_agents(
+    item: &Value,
+    turn: &mut TurnState,
+    state: &mut RuntimeState,
+    call: &str,
+) -> Vec<ProviderAdapterV2Event> {
+    let prompt = str_of(item, "prompt").unwrap_or_default();
+    let model = str_of(item, "model").filter(|model| !model.is_empty());
+    let mut events = vec![];
+    for (index, agent_thread) in item
+        .get("receiverThreadIds")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .enumerate()
+    {
+        events.extend(subagent::register(
+            state,
+            turn,
+            subagent::Spawn {
+                native_thread: agent_thread,
+                native_item: format!("{call}:{agent_thread}"),
+                native_tool_call: call,
+                prompt,
+                title: None,
+                model,
+                ordinal: index + 1,
+                emit_initial_prompt: true,
+            },
+        ));
+    }
+    events
 }
 
 /// Completes every reasoning part of an item. Parts without a streamed buffer
@@ -797,7 +959,7 @@ fn todo_updated(
     let plan_artifact = OrchestrationV2PlanArtifact::TodoList {
         id: plan,
         thread_id: turn.input.thread_id.clone(),
-        run_id: Some(turn.input.run_id.clone()),
+        run_id: turn.run_id(),
         node_id: node.id.clone(),
         status: OrchestrationV2PlanArtifactStatus::Active,
         detail_in_turn_item: None,
@@ -917,18 +1079,23 @@ fn turn_completed(
                 status == OrchestrationV2ProviderTurnStatus::Completed,
             )
         });
-    let provider = provider_turn(
-        turn,
-        status,
-        time_secs(params.pointer("/turn/completedAt")).or(Some(now)),
-        None,
-        token,
-    );
+    let completed_at = time_secs(params.pointer("/turn/completedAt")).unwrap_or(now);
+    let provider = provider_turn(turn, status, Some(completed_at), None, token);
     events.push(ProviderAdapterV2Event::ProviderTurnUpdated {
         driver: driver(),
         thread_id: Some(turn.input.thread_id.clone()),
         provider_turn: provider,
     });
+    // A child turn settles its subagent. Only a top-level turn ends a run.
+    if turn.subagent.is_some() {
+        events.extend(subagent::finish_child_turn(
+            state,
+            turn,
+            status,
+            completed_at,
+        ));
+        return events;
+    }
     events.push(ProviderAdapterV2Event::TurnTerminal {
         driver: driver(),
         provider_thread_id: turn.input.provider_thread.id.clone(),

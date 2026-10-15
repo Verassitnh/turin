@@ -162,6 +162,7 @@ pub fn controller(
 }
 
 impl Shared {
+    #[allow(clippy::result_large_err)]
     fn start(self: &Arc<Self>, owner: String) -> Result<ProviderAuthState, ProviderSetupError> {
         if !self.enabled {
             return Err(setup_error(
@@ -234,6 +235,7 @@ impl Shared {
         Ok(starting)
     }
 
+    #[allow(clippy::result_large_err)]
     fn cancel(&self, owner: &str, id: &str) -> Result<ProviderAuthState, ProviderSetupError> {
         let mut flow = self.flow.lock().expect("flow");
         match flow.as_ref() {

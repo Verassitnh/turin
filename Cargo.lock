@@ -7128,6 +7128,7 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "futures",
+ "getrandom 0.3.4",
  "indexmap",
  "parking_lot",
  "pretty_assertions",

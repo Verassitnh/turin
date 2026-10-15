@@ -4,6 +4,7 @@ mod assets;
 mod branding;
 mod components;
 mod hooks;
+mod pull_request;
 // The view-model layer is a library until the orchestrator and views are wired
 // to it; every upstream selector is ported ahead of its callers.
 #[allow(dead_code)]

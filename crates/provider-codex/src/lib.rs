@@ -4,6 +4,7 @@ pub mod approvals;
 pub mod cli_args;
 pub mod codex_developer_instructions;
 pub mod codex_launch_args;
+pub mod codex_managed_errors;
 pub mod codex_mcp_elicitation;
 pub mod codex_model;
 pub mod codex_provider;

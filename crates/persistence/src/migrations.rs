@@ -267,6 +267,10 @@ fn execute_catching_statements(conn: &Connection, sql: &str) -> Result<(), Persi
     Ok(())
 }
 
+/// Splits a migration script on `;`. Quotes and `;` inside `--` or `/* */`
+/// comments do not count, as in SQLite's own tokenizer. A comment stays in the
+/// statement it precedes, so an apostrophe in a note cannot hide the `ALTER`
+/// after it.
 fn sql_statements(sql: &str) -> Vec<&str> {
     let bytes = sql.as_bytes();
     let mut out = Vec::new();
@@ -284,6 +288,19 @@ fn sql_statements(sql: &str) -> Vec<&str> {
                 quote = None;
             }
             i += 1;
+            continue;
+        }
+        if byte == b'-' && bytes.get(i + 1) == Some(&b'-') {
+            i = bytes[i..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(bytes.len(), |newline| i + newline + 1);
+            continue;
+        }
+        if byte == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            i = sql[i + 2..]
+                .find("*/")
+                .map_or(bytes.len(), |end| i + 2 + end + 2);
             continue;
         }
         if byte == b'\'' || byte == b'"' {
@@ -348,13 +365,19 @@ fn strip_leading_sql_comments(sql: &str) -> &str {
     let mut rest = sql;
     loop {
         let trimmed = rest.trim_start();
-        let Some(after) = trimmed.strip_prefix("--") else {
+        if let Some(after) = trimmed.strip_prefix("--") {
+            let Some(newline) = after.find('\n') else {
+                return "";
+            };
+            rest = &after[newline + 1..];
+        } else if let Some(after) = trimmed.strip_prefix("/*") {
+            let Some(end) = after.find("*/") else {
+                return "";
+            };
+            rest = &after[end + 2..];
+        } else {
             return trimmed;
-        };
-        let Some(newline) = after.find('\n') else {
-            return "";
-        };
-        rest = &after[newline + 1..];
+        }
     }
 }
 
@@ -419,4 +442,40 @@ fn is_constraint(err: &rusqlite::Error) -> bool {
         rusqlite::Error::SqliteFailure(code, _)
             if code.code == rusqlite::ErrorCode::ConstraintViolation
     )
+}
+
+#[cfg(test)]
+mod sql_splitter_tests {
+    use super::*;
+
+    const SCRIPT: &str = "-- don't touch the next column; it's a note\nALTER TABLE t ADD COLUMN a TEXT;\n/* a; b's block */\nALTER TABLE t ADD COLUMN b TEXT;\n-- trailing; it's\nALTER TABLE t ADD COLUMN c TEXT;";
+
+    #[test]
+    fn comments_do_not_split_or_quote_statements() {
+        let statements = sql_statements(SCRIPT);
+        assert_eq!(statements.len(), 3, "{statements:?}");
+        assert_eq!(
+            statements
+                .iter()
+                .map(|s| add_column_target(s))
+                .collect::<Vec<_>>(),
+            vec![Some(("t", "a")), Some(("t", "b")), Some(("t", "c"))]
+        );
+    }
+
+    #[test]
+    fn add_column_guard_still_adds_the_columns_after_a_commented_one() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER, a TEXT);")
+            .unwrap();
+        execute_add_column_if_missing(&conn, SCRIPT).unwrap();
+        assert!(column_exists(&conn, "t", "b").unwrap());
+        assert!(column_exists(&conn, "t", "c").unwrap());
+    }
+
+    #[test]
+    fn a_quote_inside_a_string_is_not_a_comment() {
+        let statements = sql_statements("SELECT '--not a comment; x'; SELECT '/*' ; SELECT 2");
+        assert_eq!(statements.len(), 3, "{statements:?}");
+    }
 }

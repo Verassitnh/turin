@@ -309,29 +309,32 @@ impl ClaudeSession {
         parse_control_response(response, &subtype)
     }
     pub async fn await_control_response(&self, request_id: &str) -> Result<Value> {
+        let (sender, receiver) = oneshot::channel();
+        // Check `unmatched` and register in `pending` under one guard pair, in the same order as
+        // `route_control_response`. Otherwise a response could be buffered between the two steps
+        // and never be looked at again, and this await would wait forever.
         let early = {
+            let mut pending = self.state.pending.lock().unwrap();
             let mut unmatched = self.state.unmatched.lock().unwrap();
-            unmatched
-                .iter()
-                .position(|(id, _)| id == request_id)
-                .map(|index| unmatched.remove(index).unwrap().1)
+            match unmatched.iter().position(|(id, _)| id == request_id) {
+                Some(index) => Some(unmatched.remove(index).unwrap().1),
+                None => {
+                    if pending.closed {
+                        anyhow::bail!("claude process closed");
+                    }
+                    pending.requests.insert(
+                        request_id.into(),
+                        Pending {
+                            sender,
+                            subtype: "await_control_response".into(),
+                        },
+                    );
+                    None
+                }
+            }
         };
         if let Some(response) = early {
             return parse_control_response(response, "await_control_response");
-        }
-        let (sender, receiver) = oneshot::channel();
-        {
-            let mut pending = self.state.pending.lock().unwrap();
-            if pending.closed {
-                anyhow::bail!("claude process closed");
-            }
-            pending.requests.insert(
-                request_id.into(),
-                Pending {
-                    sender,
-                    subtype: "await_control_response".into(),
-                },
-            );
         }
         let response = receiver
             .await
@@ -593,24 +596,7 @@ async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
                 match value.get("type").and_then(Value::as_str) {
                     Some("control_response") => {
                         let response = value.get("response").cloned().unwrap_or(Value::Null);
-                        if let Some(id) = response.get("request_id").and_then(Value::as_str) {
-                            if let Some(pending) = state.pending.lock().unwrap().requests.remove(id)
-                            {
-                                if pending.subtype == "initialize"
-                                    && response.get("subtype").and_then(Value::as_str)
-                                        == Some("success")
-                                {
-                                    replay_pending(&response, &state, &mut handlers);
-                                }
-                                let _ = pending.sender.send(response);
-                            } else {
-                                let mut unmatched = state.unmatched.lock().unwrap();
-                                if unmatched.len() >= 1024 {
-                                    unmatched.pop_front();
-                                }
-                                unmatched.push_back((id.into(), response));
-                            }
-                        }
+                        route_control_response(&state, response, &mut handlers);
                     }
                     Some("control_request") => dispatch(value, &state, &mut handlers),
                     Some("control_cancel_request") => {
@@ -646,6 +632,30 @@ async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
     handlers.abort_all();
     state.pending.lock().unwrap().fail_all();
     let _ = state.events.send(SessionEvent::Eof);
+}
+/// Delivers a control response to its waiter, or buffers it for a waiter that has not registered yet.
+/// The `pending` guard stays held while buffering: `await_control_response` checks `unmatched` and
+/// registers in `pending` under the same guards, so a response cannot fall between those two steps.
+fn route_control_response(state: &Arc<Shared>, response: Value, tasks: &mut JoinSet<()>) {
+    let Some(id) = response.get("request_id").and_then(Value::as_str) else {
+        return;
+    };
+    let mut pending = state.pending.lock().unwrap();
+    let Some(entry) = pending.requests.remove(id) else {
+        let mut unmatched = state.unmatched.lock().unwrap();
+        if unmatched.len() >= 1024 {
+            unmatched.pop_front();
+        }
+        unmatched.push_back((id.into(), response));
+        return;
+    };
+    drop(pending);
+    if entry.subtype == "initialize"
+        && response.get("subtype").and_then(Value::as_str) == Some("success")
+    {
+        replay_pending(&response, state, tasks);
+    }
+    let _ = entry.sender.send(response);
 }
 fn replay_pending(response: &Value, state: &Arc<Shared>, tasks: &mut JoinSet<()>) {
     for name in [
@@ -1290,6 +1300,56 @@ for line in sys.stdin:
         })
         .await
         .unwrap_or_else(|_| panic!("grandchild {pid} still alive"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+    /// Races `await_control_response` against `route_control_response` on a multi-thread runtime.
+    /// Before the shared lock order, a response landing between the waiter's unmatched check and its
+    /// pending insert was buffered and never delivered, so the waiter hung. Each round must finish.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn await_control_response_never_misses_a_racing_response() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-race-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+"#,
+        );
+        let session = Arc::new(
+            ClaudeSession::spawn(options, Arc::new(Accept))
+                .await
+                .unwrap(),
+        );
+        for round in 0..2000 {
+            let id = format!("race-{round}");
+            let waiter = tokio::spawn({
+                let session = session.clone();
+                let id = id.clone();
+                async move { session.await_control_response(&id).await }
+            });
+            let router = tokio::task::spawn_blocking({
+                let state = session.state.clone();
+                let id = id.clone();
+                move || {
+                    let mut tasks = JoinSet::new();
+                    let response =
+                        json!({"subtype":"success","request_id":id,"response":{"round":round}});
+                    route_control_response(&state, response, &mut tasks);
+                }
+            });
+            router.await.unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(2), waiter)
+                .await
+                .unwrap_or_else(|_| panic!("response {id} was lost in round {round}"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(response["round"], round);
+        }
+        drop(session);
         fs::remove_dir_all(dir).unwrap();
     }
 }

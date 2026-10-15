@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use futures::{FutureExt, StreamExt};
 use serde_json::{Value, json};
+use turin_contracts::provider_policy::{ProviderInteractionMode, RuntimeMode};
 use turin_contracts::{
     CommandId, ThreadId, UtcDateTime,
     orchestration_v2::{
@@ -704,4 +705,55 @@ async fn unsettle_marks_the_thread_active_and_repeats_as_a_no_op_on_updated_at()
         .thread;
     assert_eq!(second.updated_at, first.updated_at);
     assert_eq!(second.unsettled_at, first.unsettled_at);
+}
+
+#[tokio::test]
+async fn runtime_and_interaction_modes_update_the_thread_row() {
+    let (orchestrator, _) = harness().await;
+    let id = thread("thread:modes");
+    orchestrator
+        .dispatch(create_command(
+            "command:create-modes",
+            "thread:modes",
+            "Modes",
+        ))
+        .await
+        .expect("create commits");
+
+    let runtime = orchestrator
+        .dispatch(mutation(
+            "thread.runtime-mode.set",
+            "command:runtime",
+            "thread:modes",
+            json!({"runtimeMode": "auto"}),
+        ))
+        .await
+        .expect("runtime mode commits");
+    assert_eq!(runtime.stored_events.len(), 1);
+    let after_runtime = orchestrator
+        .get_thread_projection(&id)
+        .await
+        .unwrap()
+        .thread;
+    assert_eq!(after_runtime.runtime_mode, RuntimeMode::Auto);
+
+    orchestrator
+        .dispatch(mutation(
+            "thread.interaction-mode.set",
+            "command:interaction",
+            "thread:modes",
+            json!({"interactionMode": "plan"}),
+        ))
+        .await
+        .expect("interaction mode commits");
+    let after_interaction = orchestrator
+        .get_thread_projection(&id)
+        .await
+        .unwrap()
+        .thread;
+    assert_eq!(
+        after_interaction.interaction_mode,
+        ProviderInteractionMode::Plan
+    );
+    assert_eq!(after_interaction.runtime_mode, RuntimeMode::Auto);
 }

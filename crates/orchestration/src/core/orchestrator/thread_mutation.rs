@@ -18,6 +18,7 @@ use turin_contracts::{
 
 use super::Orchestrator;
 use super::dispatch::{Decision, dispatch_failure};
+use super::provider_detach;
 use crate::pipeline::orchestrator_port::{
     OrchestratorError, OrchestratorPort, RecordField, RecordFilter,
 };
@@ -363,6 +364,60 @@ pub(super) async fn decide(
                 ..thread
             };
             thread_event!(decision, ThreadUnsettled, updated);
+        }
+        C::ThreadInteractionModeSet {
+            thread_id,
+            interaction_mode,
+            ..
+        } => {
+            let thread = load_live_thread(orchestrator, command, thread_id).await?;
+            let now = decision.now();
+            let updated = OrchestrationV2AppThread {
+                interaction_mode: *interaction_mode,
+                updated_at: now,
+                ..thread
+            };
+            thread_event!(decision, ThreadInteractionModeUpdated, updated);
+        }
+        C::ThreadRuntimeModeSet {
+            thread_id,
+            runtime_mode,
+            ..
+        } => {
+            let thread = load_live_thread(orchestrator, command, thread_id).await?;
+            let now = decision.now();
+            let updated = OrchestrationV2AppThread {
+                runtime_mode: *runtime_mode,
+                updated_at: now,
+                ..thread
+            };
+            thread_event!(decision, ThreadRuntimeModeUpdated, updated);
+            // A runtime-mode change restarts only sessions that cannot switch mode in place.
+            let records = orchestrator
+                .get_thread_records(
+                    thread_id,
+                    &[RecordField::ProviderSessions],
+                    &RecordFilter::default(),
+                )
+                .await?;
+            let to_restart: Vec<_> = records
+                .provider_sessions
+                .iter()
+                .filter(|session| {
+                    !session
+                        .capabilities
+                        .sessions
+                        .supports_runtime_mode_switch_in_session
+                })
+                .cloned()
+                .collect();
+            provider_detach::detach_sessions(
+                decision,
+                thread_id,
+                &to_restart,
+                "Runtime mode changed.",
+                false,
+            );
         }
         _ => return Ok(false),
     }

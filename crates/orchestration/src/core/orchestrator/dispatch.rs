@@ -48,6 +48,10 @@ impl Decision {
         }
     }
 
+    pub fn command_id(&self) -> &CommandId {
+        &self.command_id
+    }
+
     /// `DateTime.now` for this decision (see the field doc).
     pub fn now(&self) -> UtcDateTime {
         self.now

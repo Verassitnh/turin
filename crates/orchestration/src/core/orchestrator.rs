@@ -12,6 +12,7 @@
 //! `dispatch::decide`, which reports `OrchestratorError::CommandRejected`.
 
 pub mod dispatch;
+mod provider_detach;
 pub mod services;
 #[cfg(test)]
 mod tests;

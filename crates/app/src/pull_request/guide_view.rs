@@ -17,14 +17,15 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight, Global, Hsla,
-    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight, Global,
+    Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render,
     ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
     div, point, px, relative, rems,
 };
-use gpui_kit::component::scroll::ScrollableElement as _;
+use turin_contracts::EnvironmentId;
 use turin_contracts::pull_request::{
     PullRequestDiffSide, PullRequestRef, PullRequestReviewCommentDraft, PullRequestReviewPosition,
 };
@@ -32,7 +33,6 @@ use turin_contracts::pull_request_review_guide::{
     PullRequestReviewGuide, PullRequestReviewGuideAttentionKind, PullRequestReviewGuideExcerpt,
     PullRequestReviewGuideExcerptSide, PullRequestReviewGuideStop,
 };
-use turin_contracts::EnvironmentId;
 
 use super::code_tab::items::FileView;
 use super::code_tab::patch::{ParsedPatch, parse_patch, resolve_diff_review_position};
@@ -56,9 +56,12 @@ use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_LG, RADIUS_MD, TEXT_2XS, TEXT_3XS, TEXT_LG, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{
-    Badge, BadgeSize, BadgeVariant, Button, ButtonSize, ButtonVariant, Icon, IconName, Kbd,
-    Tooltip,
+    Badge, BadgeSize, BadgeVariant, Button, ButtonSize, ButtonVariant, Icon, IconName, Kbd, Tooltip,
 };
+
+/// The last stop's "Finish review".
+pub type FinishHandler = Rc<dyn Fn(&mut App)>;
+type SelectStop = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 /// `@min-[56rem]/guide`: the rail sits beside the stop from this width.
 const RAIL_BESIDE: f32 = 896.;
@@ -187,8 +190,24 @@ pub fn alert(
         } else {
             theme.card_foreground
         })
-        .child(div().flex().flex_shrink_0().size_4().items_center().justify_center().child(icon))
-        .child(div().flex().min_w_0().flex_1().flex_col().gap(px(2.)).child(content))
+        .child(
+            div()
+                .flex()
+                .flex_shrink_0()
+                .size_4()
+                .items_center()
+                .justify_center()
+                .child(icon),
+        )
+        .child(
+            div()
+                .flex()
+                .min_w_0()
+                .flex_1()
+                .flex_col()
+                .gap(px(2.))
+                .child(content),
+        )
         .children(action.map(|action| div().flex().flex_shrink_0().items_center().child(action)))
 }
 
@@ -233,7 +252,7 @@ pub struct GuideTour {
     focus: FocusHandle,
     draft: Option<Draft>,
     open_files: HashSet<String>,
-    on_finish: Option<Rc<dyn Fn(&mut App)>>,
+    on_finish: Option<FinishHandler>,
     /// Parsed diff by the patch it came from.
     parsed: Option<(usize, usize, Vec<Rc<FileView>>)>,
     requested_diff: bool,
@@ -243,7 +262,12 @@ pub struct GuideTour {
 }
 
 impl GuideTour {
-    pub fn new(ctx: DetailContext, guide: PullRequestReviewGuide, _: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        ctx: DetailContext,
+        guide: PullRequestReviewGuide,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let progress = progress_store(cx);
         let review = review_store(cx);
         let subscriptions = vec![
@@ -280,7 +304,7 @@ impl GuideTour {
         self
     }
 
-    pub fn set_finish(&mut self, handler: Option<Rc<dyn Fn(&mut App)>>) {
+    pub fn set_finish(&mut self, handler: Option<FinishHandler>) {
         self.on_finish = handler;
     }
 
@@ -339,7 +363,10 @@ impl GuideTour {
                 if next > position {
                     seen.insert(position);
                 }
-                GuideProgress { position: next, seen }
+                GuideProgress {
+                    position: next,
+                    seen,
+                }
             })
         });
         self.rail_open = false;
@@ -385,45 +412,52 @@ impl GuideTour {
                 source.load_diff(&self.ctx.reference, None, cx);
             }
         }
-        let result = self
-            .ctx
-            .snapshot(cx)
-            .and_then(|snapshot| snapshot.diffs.get(&None))
-            .cloned();
         let mut out = StopFiles {
             files: HashMap::new(),
             loading: false,
             error: None,
         };
-        match result {
-            None | Some(Loadable::Pending) => out.loading = true,
-            Some(Loadable::Failed(error)) => out.error = Some(error),
-            Some(Loadable::Ready(result)) => {
-                let identity = (result.patch.as_ptr() as usize, result.patch.len());
-                if self.parsed.as_ref().map(|(ptr, len, _)| (*ptr, *len)) != Some(identity) {
-                    let files = match parse_patch(&result.patch) {
-                        Some(ParsedPatch::Files(files)) => {
-                            files.into_iter().map(|file| Rc::new(FileView::new(file))).collect()
+        // The answer holds a whole patch, so it is read in place rather than copied per frame.
+        let mut next_cursor: Option<String> = None;
+        let mut missing = false;
+        {
+            let store = self.ctx.store.clone();
+            let result = store
+                .read(cx)
+                .detail(&self.ctx.reference)
+                .and_then(|snapshot| snapshot.diffs.get(&None));
+            match result {
+                None | Some(Loadable::Pending) => out.loading = true,
+                Some(Loadable::Failed(error)) => out.error = Some(error.clone()),
+                Some(Loadable::Ready(result)) => {
+                    let identity = (result.patch.as_ptr() as usize, result.patch.len());
+                    if self.parsed.as_ref().map(|(ptr, len, _)| (*ptr, *len)) != Some(identity) {
+                        let files = match parse_patch(&result.patch) {
+                            Some(ParsedPatch::Files(files)) => files
+                                .into_iter()
+                                .map(|file| Rc::new(FileView::new(file)))
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        self.parsed = Some((identity.0, identity.1, files));
+                        self.tokens.borrow_mut().clear();
+                    }
+                    if let Some((_, _, files)) = &self.parsed {
+                        for view in files {
+                            out.files.insert(view.path.clone(), view.clone());
                         }
-                        _ => Vec::new(),
-                    };
-                    self.parsed = Some((identity.0, identity.1, files));
-                    self.tokens.borrow_mut().clear();
-                }
-                if let Some((_, _, files)) = &self.parsed {
-                    for view in files {
-                        out.files.insert(view.path.clone(), view.clone());
                     }
+                    missing = wanted.iter().any(|path| !out.files.contains_key(*path));
+                    next_cursor = result.next_cursor.as_ref().map(|c| c.as_str().to_owned());
                 }
-                let missing = wanted.iter().any(|path| !out.files.contains_key(*path));
-                if let (true, Some(cursor)) = (missing, result.next_cursor.as_ref()) {
-                    out.loading = true;
-                    if self.requested_cursors.insert(cursor.as_str().to_owned())
-                        && let Some(source) = self.ctx.source(cx)
-                    {
-                        source.load_diff_page(&self.ctx.reference, None, cursor.as_str(), cx);
-                    }
-                }
+            }
+        }
+        if let (true, Some(cursor)) = (missing, next_cursor) {
+            out.loading = true;
+            if self.requested_cursors.insert(cursor.clone())
+                && let Some(source) = self.ctx.source(cx)
+            {
+                source.load_diff_page(&self.ctx.reference, None, &cursor, cx);
             }
         }
         out
@@ -434,7 +468,9 @@ impl GuideTour {
             return tokens.clone();
         }
         let tokens = Rc::new(row_tokens(view, dark));
-        self.tokens.borrow_mut().insert(view.key.clone(), tokens.clone());
+        self.tokens
+            .borrow_mut()
+            .insert(view.key.clone(), tokens.clone());
         tokens
     }
 
@@ -536,14 +572,19 @@ fn note_marker(marker: &str, theme: &AppTheme) -> AnyElement {
 
 fn prose(id: impl Into<ElementId>, text: &str) -> AnyElement {
     div()
-        .child(pull_request_markdown(id, SharedString::from(text.to_owned())))
+        .child(pull_request_markdown(
+            id,
+            SharedString::from(text.to_owned()),
+        ))
         .into_any_element()
 }
 
 /// `GuideNotes`: a stop's notes, lettered in the order the excerpts mark them.
 fn notes_section(
     stop_index: usize,
-    notes: &[LetteredNote<&turin_contracts::pull_request_review_guide::PullRequestReviewGuideNote>],
+    notes: &[LetteredNote<
+        &turin_contracts::pull_request_review_guide::PullRequestReviewGuideNote,
+    >],
     theme: &AppTheme,
 ) -> Option<AnyElement> {
     if notes.is_empty() {
@@ -551,7 +592,13 @@ fn notes_section(
     }
     let mut list = div().flex().flex_col().gap_3();
     for LetteredNote { marker, note } in notes {
-        let file = note.path.as_str().rsplit('/').next().unwrap_or("").to_owned();
+        let file = note
+            .path
+            .as_str()
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_owned();
         list = list.child(
             div()
                 .flex()
@@ -592,7 +639,9 @@ fn notes_section(
                                     .text_size(TEXT_XS.size)
                                     .text_color(theme.muted_foreground)
                                     .child(prose(
-                                        SharedString::from(format!("guide-note-{stop_index}-{marker}")),
+                                        SharedString::from(format!(
+                                            "guide-note-{stop_index}-{marker}"
+                                        )),
                                         &note.body,
                                     )),
                             )
@@ -638,7 +687,7 @@ fn rail(
     position: usize,
     seen: &BTreeSet<usize>,
     show_count: bool,
-    on_select: Rc<dyn Fn(usize, &mut Window, &mut App)>,
+    on_select: SelectStop,
     theme: &AppTheme,
 ) -> AnyElement {
     let mut list = div().flex().flex_col().gap(px(2.));
@@ -661,7 +710,11 @@ fn rail(
                 theme.border
             })
             .text_size(TEXT_2XS.size)
-            .text_color(if read { theme.success_foreground } else { theme.muted_foreground })
+            .text_color(if read {
+                theme.success_foreground
+            } else {
+                theme.muted_foreground
+            })
             .child(if read {
                 Icon::new(IconName::Check)
                     .size(rems(0.75))
@@ -681,7 +734,9 @@ fn rail(
                 .px_2()
                 .py(px(6.))
                 .cursor_pointer()
-                .when(active, |this| this.bg(theme.accent).text_color(theme.accent_foreground))
+                .when(active, |this| {
+                    this.bg(theme.accent).text_color(theme.accent_foreground)
+                })
                 .when(!active, |this| {
                     this.hover(move |style| style.bg(with_alpha(accent, 0.5)))
                 })
@@ -697,7 +752,11 @@ fn rail(
                             div()
                                 .text_size(TEXT_SM.size)
                                 .line_height(TEXT_SM.line_height)
-                                .text_color(if active { theme.accent_foreground } else { theme.foreground })
+                                .text_color(if active {
+                                    theme.accent_foreground
+                                } else {
+                                    theme.foreground
+                                })
                                 .child(SharedString::from(stop.title.as_str().to_owned())),
                         )
                         .child(
@@ -731,7 +790,11 @@ fn rail(
                 div()
                     .text_size(TEXT_XS.size)
                     .text_color(theme.muted_foreground)
-                    .child(SharedString::from(format!("{} of {} read", seen.len(), stops.len()))),
+                    .child(SharedString::from(format!(
+                        "{} of {} read",
+                        seen.len(),
+                        stops.len()
+                    ))),
             )
         })
         .child(list)
@@ -769,7 +832,11 @@ impl GuideTour {
         theme: &AppTheme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let number = if row.kind == DiffRowKind::Deletion { row.old_line } else { row.new_line };
+        let number = if row.kind == DiffRowKind::Deletion {
+            row.old_line
+        } else {
+            row.new_line
+        };
         let group: SharedString = format!("{id}-row").into();
         let row_for_click = row.clone();
         div()
@@ -788,7 +855,11 @@ impl GuideTour {
                     .justify_end()
                     .pr(px(12.))
                     .border_l(px(4.))
-                    .border_color(palette.bar(row.kind).unwrap_or(gpui_kit::transparent_black()))
+                    .border_color(
+                        palette
+                            .bar(row.kind)
+                            .unwrap_or(gpui_kit::transparent_black()),
+                    )
                     .bg(palette.gutter(row.kind).unwrap_or(palette.bg))
                     .font_family(metrics.font.clone())
                     .text_size(metrics.size)
@@ -830,7 +901,11 @@ impl GuideTour {
                     .font_family(metrics.font.clone())
                     .text_size(metrics.size)
                     .line_height(metrics.line)
-                    .child(code_text(row.text.trim_end_matches(['\n', '\r']), tokens, palette.fg)),
+                    .child(code_text(
+                        row.text.trim_end_matches(['\n', '\r']),
+                        tokens,
+                        palette.fg,
+                    )),
             )
             .into_any_element()
     }
@@ -849,7 +924,13 @@ impl GuideTour {
         px(widest as f32 * f32::from(metrics.size) * 0.62 + 26.)
     }
 
-    fn header_bar(&self, path: &str, trailing: Option<AnyElement>, palette: &Palette, theme: &AppTheme) -> AnyElement {
+    fn header_bar(
+        &self,
+        path: &str,
+        trailing: Option<AnyElement>,
+        palette: &Palette,
+        theme: &AppTheme,
+    ) -> AnyElement {
         div()
             .flex()
             .w_full()
@@ -864,7 +945,13 @@ impl GuideTour {
             .font_family(SharedString::from(theme.fonts.sans.clone()))
             .text_size(px(12.))
             .line_height(relative(1.))
-            .child(div().min_w_0().flex_1().truncate().child(SharedString::from(path.to_owned())))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .child(SharedString::from(path.to_owned())),
+            )
             .children(trailing)
             .into_any_element()
     }
@@ -885,7 +972,10 @@ impl GuideTour {
         let path = excerpt.path.as_str().to_owned();
         let view = files.files.get(&path).cloned();
         let range = ExcerptRange::from(excerpt);
-        let shown = view.as_ref().map(|view| excerpt_rows(&view.rows, &range)).unwrap_or_default();
+        let shown = view
+            .as_ref()
+            .map(|view| excerpt_rows(&view.rows, &range))
+            .unwrap_or_default();
         let body: AnyElement = match (&view, shown.is_empty()) {
             (Some(view), false) => {
                 let metrics = Self::metrics(theme);
@@ -917,17 +1007,21 @@ impl GuideTour {
                 let mut rows = div().flex().flex_col().w_full();
                 for (offset, row) in shown.iter().enumerate() {
                     let tokens_for_row = tokens.get(first + offset).map_or(&[][..], Vec::as_slice);
-                    rows = rows.child(self.diff_line(
-                        SharedString::from(format!("guide-{index}-{offset}")),
-                        row,
-                        tokens_for_row,
-                        gutter,
-                        self.can_comment.then(|| (index, view.clone())).filter(|_| self.draft.is_none()),
-                        &metrics,
-                        palette,
-                        theme,
-                        cx,
-                    ));
+                    rows = rows.child(
+                        self.diff_line(
+                            SharedString::from(format!("guide-{index}-{offset}")),
+                            row,
+                            tokens_for_row,
+                            gutter,
+                            self.can_comment
+                                .then(|| (index, view.clone()))
+                                .filter(|_| self.draft.is_none()),
+                            &metrics,
+                            palette,
+                            theme,
+                            cx,
+                        ),
+                    );
                     // Notes, queued comments and the draft share the line they belong to.
                     let on_side = |side: PullRequestDiffSide| match side {
                         PullRequestDiffSide::Left => row.old_line,
@@ -979,15 +1073,21 @@ impl GuideTour {
                                 .bg(palette.bg)
                                 .font_family(SharedString::from(theme.fonts.sans.clone()))
                                 .text_color(theme.foreground)
-                                .child(PendingReviewCommentCard::new(comment.clone(), move |_, _, cx| {
-                                    let id = id.clone();
-                                    entity
-                                        .update(cx, |this, cx| {
-                                            let key = pull_request_review_key(&this.ctx.reference);
-                                            this.review.update(cx, |store, _| store.remove_comment(&key, &id));
-                                        })
-                                        .ok();
-                                })),
+                                .child(PendingReviewCommentCard::new(
+                                    comment.clone(),
+                                    move |_, _, cx| {
+                                        let id = id.clone();
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                let key =
+                                                    pull_request_review_key(&this.ctx.reference);
+                                                this.review.update(cx, |store, _| {
+                                                    store.remove_comment(&key, &id)
+                                                });
+                                            })
+                                            .ok();
+                                    },
+                                )),
                         );
                     }
                     if let (Some((line, side)), Some(draft)) = (draft_anchor, &self.draft)
@@ -1005,7 +1105,11 @@ impl GuideTour {
                 }
                 let stat = format!(
                     "{}showing {} of {} diff lines",
-                    if excerpt.side == PullRequestReviewGuideExcerptSide::Old { "removed code, " } else { "" },
+                    if excerpt.side == PullRequestReviewGuideExcerptSide::Old {
+                        "removed code, "
+                    } else {
+                        ""
+                    },
                     shown.len(),
                     view.rows.len()
                 );
@@ -1017,30 +1121,34 @@ impl GuideTour {
                     .rounded(RADIUS_LG)
                     .border_1()
                     .border_color(with_alpha(theme.border, 0.6))
-                    .child(self.header_bar(
-                        &path,
-                        Some(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_size(TEXT_XS.size)
-                                .text_color(theme.muted_foreground)
-                                .child(SharedString::from(stat))
-                                .child(
-                                    Button::new(SharedString::from(format!("guide-open-{index}")))
+                    .child(
+                        self.header_bar(
+                            &path,
+                            Some(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_size(TEXT_XS.size)
+                                    .text_color(theme.muted_foreground)
+                                    .child(SharedString::from(stat))
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "guide-open-{index}"
+                                        )))
                                         .size(ButtonSize::IconXs)
                                         .variant(ButtonVariant::GhostMuted)
                                         .icon(IconName::ArrowUpRight)
                                         .icon_size(rems(0.875))
                                         .tooltip(Tooltip::new(format!("Open {path} in Code")))
                                         .on_click(move |_, _, cx| open(&open_path, cx)),
-                                )
-                                .into_any_element(),
+                                    )
+                                    .into_any_element(),
+                            ),
+                            palette,
+                            theme,
                         ),
-                        palette,
-                        theme,
-                    ))
+                    )
                     .child(rows)
                     .into_any_element()
             }
@@ -1161,11 +1269,19 @@ impl GuideTour {
                     cx.notify();
                 }))
                 .child(
-                    Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+                    Icon::new(if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size(rems(0.875))
+                    .color(theme.muted_foreground),
+                )
+                .child(
+                    Icon::new(IconName::FileCode)
                         .size(rems(0.875))
                         .color(theme.muted_foreground),
                 )
-                .child(Icon::new(IconName::FileCode).size(rems(0.875)).color(theme.muted_foreground))
                 .child(
                     div()
                         .min_w_0()
@@ -1174,16 +1290,19 @@ impl GuideTour {
                         .text_color(theme.foreground)
                         .child(SharedString::from(path.clone())),
                 )
-                .when_some(file.note.as_ref().filter(|note| !note.trim().is_empty()), |this, note| {
-                    this.child(
-                        div()
-                            .ml_auto()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme.muted_foreground)
-                            .child(SharedString::from(note.clone())),
-                    )
-                })
+                .when_some(
+                    file.note.as_ref().filter(|note| !note.trim().is_empty()),
+                    |this, note| {
+                        this.child(
+                            div()
+                                .ml_auto()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.muted_foreground)
+                                .child(SharedString::from(note.clone())),
+                        )
+                    },
+                )
                 .when_some(view.as_ref(), |this, view| {
                     this.child(
                         div()
@@ -1198,8 +1317,15 @@ impl GuideTour {
                         let metrics = Self::metrics(theme);
                         let tokens = self.tokens_for(view, theme.is_dark());
                         let gutter = Self::gutter_width(&view.rows, &metrics);
-                        let mut rows = div().flex().flex_col().w_full().bg(palette.bg).border_t_1().border_color(with_alpha(theme.border, 0.6));
-                        for (offset, row) in view.rows.iter().take(FILE_DIFF_ROW_LIMIT).enumerate() {
+                        let mut rows = div()
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .bg(palette.bg)
+                            .border_t_1()
+                            .border_color(with_alpha(theme.border, 0.6));
+                        for (offset, row) in view.rows.iter().take(FILE_DIFF_ROW_LIMIT).enumerate()
+                        {
                             rows = rows.child(self.diff_line(
                                 SharedString::from(format!("guide-file-{index}-{offset}")),
                                 row,
@@ -1217,11 +1343,13 @@ impl GuideTour {
                             let path = path.clone();
                             rows = rows.child(
                                 div().flex().items_center().gap_2().px_3().py_2().child(
-                                    Button::new(SharedString::from(format!("guide-file-more-{index}")))
-                                        .size(ButtonSize::Xs)
-                                        .variant(ButtonVariant::Outline)
-                                        .label("Open the rest in Code")
-                                        .on_click(move |_, _, cx| open(&path, cx)),
+                                    Button::new(SharedString::from(format!(
+                                        "guide-file-more-{index}"
+                                    )))
+                                    .size(ButtonSize::Xs)
+                                    .variant(ButtonVariant::Outline)
+                                    .label("Open the rest in Code")
+                                    .on_click(move |_, _, cx| open(&path, cx)),
                                 ),
                             );
                         }
@@ -1242,7 +1370,10 @@ impl GuideTour {
             }
             list = list.child(
                 div()
-                    .when(index > 0, |this| this.border_t_1().border_color(with_alpha(theme.border, 0.6)))
+                    .when(index > 0, |this| {
+                        this.border_t_1()
+                            .border_color(with_alpha(theme.border, 0.6))
+                    })
                     .child(entry),
             );
         }
@@ -1286,9 +1417,13 @@ impl GuideTour {
         let beside_notes = self.width >= NOTES_BESIDE && !lettered.lettered.is_empty();
         let narrow = self.width < RAIL_BESIDE;
         let rail_open = self.rail_open;
-        let next_title = self.guide.stops.get(position + 1).map(|next| next.title.as_str().to_owned());
+        let next_title = self
+            .guide
+            .stops
+            .get(position + 1)
+            .map(|next| next.title.as_str().to_owned());
         let can_finish = self.on_finish.is_some();
-        let select: Rc<dyn Fn(usize, &mut Window, &mut App)> = {
+        let select: SelectStop = {
             let entity = cx.entity().downgrade();
             Rc::new(move |index, _, cx| {
                 entity.update(cx, |this, cx| this.go_to(index, cx)).ok();
@@ -1301,23 +1436,37 @@ impl GuideTour {
             .justify_between()
             .gap_2()
             .child(if narrow {
-                div().child(
-                    Button::new("guide-rail-toggle")
-                        .size(ButtonSize::Xs)
-                        .variant(ButtonVariant::GhostMuted)
-                        .child(SharedString::from(format!("Stop {} of {count}", position + 1)))
-                        .child(Icon::new(if rail_open { IconName::ChevronUp } else { IconName::ChevronDown }).size(rems(0.875)))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.rail_open = !this.rail_open;
-                            cx.notify();
-                        })),
-                )
-                .into_any_element()
+                div()
+                    .child(
+                        Button::new("guide-rail-toggle")
+                            .size(ButtonSize::Xs)
+                            .variant(ButtonVariant::GhostMuted)
+                            .child(SharedString::from(format!(
+                                "Stop {} of {count}",
+                                position + 1
+                            )))
+                            .child(
+                                Icon::new(if rail_open {
+                                    IconName::ChevronUp
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .size(rems(0.875)),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.rail_open = !this.rail_open;
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element()
             } else {
                 div()
                     .text_size(TEXT_XS.size)
                     .text_color(theme.muted_foreground)
-                    .child(SharedString::from(format!("Stop {} of {count}", position + 1)))
+                    .child(SharedString::from(format!(
+                        "Stop {} of {count}",
+                        position + 1
+                    )))
                     .into_any_element()
             })
             .child(
@@ -1358,7 +1507,12 @@ impl GuideTour {
                     }),
             );
 
-        let mut article = div().flex().min_w_0().flex_col().gap(rems(1.25)).child(header);
+        let mut article = div()
+            .flex()
+            .min_w_0()
+            .flex_col()
+            .gap(rems(1.25))
+            .child(header);
         if narrow && rail_open {
             article = article.child(div().pt_3().child(rail(
                 &self.guide.stops,
@@ -1388,7 +1542,10 @@ impl GuideTour {
                         div()
                             .text_size(TEXT_SM.size)
                             .text_color(theme.muted_foreground)
-                            .child(prose(SharedString::from(format!("guide-summary-{position}")), &stop.summary)),
+                            .child(prose(
+                                SharedString::from(format!("guide-summary-{position}")),
+                                &stop.summary,
+                            )),
                     )
                 }),
         );
@@ -1396,21 +1553,20 @@ impl GuideTour {
             // A call for the reader to make, not a warning, so it reads as a plain notice.
             article = article.child(alert(
                 AlertVariant::Default,
-                Icon::new(IconName::Eye).size(rems(1.)).color(theme.muted_foreground).into_any_element(),
+                Icon::new(IconName::Eye)
+                    .size(rems(1.))
+                    .color(theme.muted_foreground)
+                    .into_any_element(),
                 div()
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)
                             .child(attention_label(attention.kind)),
                     )
-                    .child(
-                        div()
-                            .text_color(theme.muted_foreground)
-                            .child(prose(
-                                SharedString::from(format!("guide-attention-{position}")),
-                                attention.note.as_str(),
-                            )),
-                    )
+                    .child(div().text_color(theme.muted_foreground).child(prose(
+                        SharedString::from(format!("guide-attention-{position}")),
+                        attention.note.as_str(),
+                    )))
                     .into_any_element(),
                 None,
                 cx,
@@ -1430,7 +1586,9 @@ impl GuideTour {
             let mut excerpts = div().flex().min_w_0().flex_col().gap_4();
             for (index, excerpt) in stop.excerpts.iter().enumerate() {
                 let markers = lettered.by_excerpt.get(index).cloned().unwrap_or_default();
-                excerpts = excerpts.child(self.excerpt_view(index, excerpt, &files, &markers, &palette, &theme, cx));
+                excerpts = excerpts.child(
+                    self.excerpt_view(index, excerpt, &files, &markers, &palette, &theme, cx),
+                );
             }
             article = article.child(excerpts);
         }
@@ -1481,7 +1639,12 @@ impl GuideTour {
                         Button::new("guide-footer-next")
                             .variant(ButtonVariant::Default)
                             .min_w_0()
-                            .child(div().min_w_0().truncate().child(SharedString::from(format!("Next: {title}"))))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(SharedString::from(format!("Next: {title}"))),
+                            )
                             .child(Icon::new(IconName::ArrowRight).size(rems(1.)))
                             .on_click(cx.listener(|this, _, _, cx| this.step(1, cx)))
                             .into_any_element(),
@@ -1503,12 +1666,11 @@ impl GuideTour {
                 .flex()
                 .gap_8()
                 .child(div().min_w_0().flex_1().child(article))
-                .child(
-                    div()
-                        .w(rems(20.))
-                        .flex_shrink_0()
-                        .children(notes_section(position, &lettered.lettered, &theme)),
-                )
+                .child(div().w(rems(20.)).flex_shrink_0().children(notes_section(
+                    position,
+                    &lettered.lettered,
+                    &theme,
+                )))
                 .into_any_element()
         } else {
             article.into_any_element()
@@ -1543,9 +1705,15 @@ impl GuideTour {
         });
         Some(
             alert(
-                if banner.running { AlertVariant::Info } else { AlertVariant::Warning },
+                if banner.running {
+                    AlertVariant::Info
+                } else {
+                    AlertVariant::Warning
+                },
                 icon,
-                div().child(SharedString::from(banner.message)).into_any_element(),
+                div()
+                    .child(SharedString::from(banner.message))
+                    .into_any_element(),
                 rewrite,
                 cx,
             )
@@ -1559,10 +1727,9 @@ impl Render for GuideTour {
         let theme = cx.app_theme().clone();
         let key = self.key();
         let progress = self.progress.read(cx).get(&key);
-        let count = self.guide.stops.len();
         let position = self.position(cx);
         let stop = self.guide.stops.get(position).cloned();
-        let select: Rc<dyn Fn(usize, &mut Window, &mut App)> = {
+        let select: SelectStop = {
             let entity = cx.entity().downgrade();
             Rc::new(move |index, _, cx| {
                 entity.update(cx, |this, cx| this.go_to(index, cx)).ok();
@@ -1629,16 +1796,14 @@ impl Render for GuideTour {
                                     .px_4()
                                     .py_4()
                                     .when(wide, |this| {
-                                        this.child(
-                                            div().w(rems(16.)).flex_shrink_0().child(rail(
-                                                &self.guide.stops,
-                                                position,
-                                                &progress.seen,
-                                                true,
-                                                select,
-                                                &theme,
-                                            )),
-                                        )
+                                        this.child(div().w(rems(16.)).flex_shrink_0().child(rail(
+                                            &self.guide.stops,
+                                            position,
+                                            &progress.seen,
+                                            true,
+                                            select,
+                                            &theme,
+                                        )))
                                     })
                                     .child(main),
                             ),
@@ -1673,7 +1838,10 @@ mod tests {
     #[test]
     fn progress_keys_are_per_guide_head() {
         assert_eq!(guide_progress_key("env:pr", "abc"), "env:pr:abc");
-        assert_ne!(guide_progress_key("env:pr", "abc"), guide_progress_key("env:pr", "def"));
+        assert_ne!(
+            guide_progress_key("env:pr", "abc"),
+            guide_progress_key("env:pr", "def")
+        );
     }
 
     #[test]

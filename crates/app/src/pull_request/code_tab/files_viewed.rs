@@ -49,7 +49,8 @@ impl FilesViewed {
         for path in &answered {
             self.answered_from.remove(path);
         }
-        self.overlay = settle_file_viewed_overlay(&self.overlay, Some(&self.states), &pending, &answered);
+        self.overlay =
+            settle_file_viewed_overlay(&self.overlay, Some(&self.states), &pending, &answered);
     }
 
     fn pending(&self) -> HashSet<String> {

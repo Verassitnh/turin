@@ -36,8 +36,12 @@ use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 /// `getReviewPositionAnchor`: the line and side a position is drawn under.
 pub fn review_position_anchor(position: &PullRequestReviewPosition) -> (i64, PullRequestDiffSide) {
     match position {
-        PullRequestReviewPosition::Added { new_line } => (new_line.get() as i64, PullRequestDiffSide::Right),
-        PullRequestReviewPosition::Deleted { old_line } => (old_line.get() as i64, PullRequestDiffSide::Left),
+        PullRequestReviewPosition::Added { new_line } => {
+            (new_line.get() as i64, PullRequestDiffSide::Right)
+        }
+        PullRequestReviewPosition::Deleted { old_line } => {
+            (old_line.get() as i64, PullRequestDiffSide::Left)
+        }
         PullRequestReviewPosition::Context {
             old_line,
             new_line,
@@ -67,11 +71,13 @@ fn card(cx: &App) -> gpui_kit::Div {
         .shadow(tokens::shadow_sm(0.05))
 }
 
+type RemoveHandler = std::rc::Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
 /// A comment waiting to be sent with the rest of the review.
 #[derive(IntoElement)]
 pub struct PendingReviewCommentCard {
     comment: PendingReviewComment,
-    on_remove: std::rc::Rc<dyn Fn(&str, &mut Window, &mut App)>,
+    on_remove: RemoveHandler,
 }
 
 impl PendingReviewCommentCard {
@@ -102,7 +108,11 @@ impl gpui_kit::RenderOnce for PendingReviewCommentCard {
                     .text_size(TEXT_XS.size)
                     .line_height(TEXT_XS.line_height)
                     .text_color(theme.muted_foreground)
-                    .child(Icon::new(IconName::MessageSquare).size(rems(0.875)).color(theme.muted_foreground))
+                    .child(
+                        Icon::new(IconName::MessageSquare)
+                            .size(rems(0.875))
+                            .color(theme.muted_foreground),
+                    )
                     .child("Pending \u{2014} sent when you submit the review")
                     .child(
                         div().ml_auto().child(
@@ -127,7 +137,7 @@ impl gpui_kit::RenderOnce for PendingReviewCommentCard {
 }
 
 fn relative_line(value: f32) -> gpui_kit::DefiniteLength {
-    gpui_kit::relative(value).into()
+    gpui_kit::relative(value)
 }
 
 // ── Draft ───────────────────────────────────────────────────────────────────
@@ -163,7 +173,10 @@ impl DraftCommentCard {
         });
         input.update(cx, |input, cx| input.focus(window, cx));
         let subscription = cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
-            if let InputEvent::PressEnter { secondary: true, .. } = event {
+            if let InputEvent::PressEnter {
+                secondary: true, ..
+            } = event
+            {
                 this.submit(cx);
             }
         });
@@ -202,7 +215,10 @@ impl Render for DraftCommentCard {
                     cx.stop_propagation();
                 }
             }))
-            .child(Textarea::new(&self.input).aria_label(format!("Comment on lines {}", self.range_label)))
+            .child(
+                Textarea::new(&self.input)
+                    .aria_label(format!("Comment on lines {}", self.range_label)),
+            )
             .child(
                 div()
                     .mt(px(6.))
@@ -222,7 +238,9 @@ impl Render for DraftCommentCard {
                             .size(ButtonSize::Xs)
                             .variant(ButtonVariant::GhostMuted)
                             .label("Cancel")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(DraftCommentEvent::Cancel))),
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(DraftCommentEvent::Cancel)),
+                            ),
                     )
                     .child(
                         Button::new(SharedString::from(format!("{:?}-draft-submit", self.id)))
@@ -275,7 +293,10 @@ impl ReviewThreadCard {
     ) -> Self {
         let reply = cx.new(|cx| TextareaState::new(window, cx).rows(2).placeholder("Reply"));
         cx.subscribe(&reply, |this, _, event: &InputEvent, cx| {
-            if let InputEvent::PressEnter { secondary: true, .. } = event {
+            if let InputEvent::PressEnter {
+                secondary: true, ..
+            } = event
+            {
                 this.send(cx);
             }
         })
@@ -293,7 +314,8 @@ impl ReviewThreadCard {
 
     /// Takes the snapshot's newest answer; only a change repaints.
     pub fn set_props(&mut self, props: ThreadCardProps, cx: &mut Context<Self>) {
-        let cursor_moved = self.props.thread.next_comments_cursor != props.thread.next_comments_cursor;
+        let cursor_moved =
+            self.props.thread.next_comments_cursor != props.thread.next_comments_cursor;
         if cursor_moved {
             self.loading_cursor = None;
         }
@@ -343,7 +365,12 @@ impl ReviewThreadCard {
         }
     }
 
-    fn begin_edit(&mut self, comment: &PullRequestThreadComment, window: &mut Window, cx: &mut Context<Self>) {
+    fn begin_edit(
+        &mut self,
+        comment: &PullRequestThreadComment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let id = comment.id.as_str().to_owned();
         let body = comment.body.clone();
         let editor = cx.new(|cx| {
@@ -358,16 +385,16 @@ impl ReviewThreadCard {
         let subscription = cx.subscribe(&editor, |this, _, event: &MarkdownEditorEvent, cx| {
             match event {
                 MarkdownEditorEvent::Save(body) => {
-                    if let Some(edit) = this.editing.take() {
-                        if let Some(source) = this.ctx.source(cx) {
-                            source.update_comment(
-                                &this.ctx.reference,
-                                &edit.comment_id,
-                                PullRequestCommentUpdateKind::ReviewComment,
-                                body.clone(),
-                                cx,
-                            );
-                        }
+                    if let Some(edit) = this.editing.take()
+                        && let Some(source) = this.ctx.source(cx)
+                    {
+                        source.update_comment(
+                            &this.ctx.reference,
+                            &edit.comment_id,
+                            PullRequestCommentUpdateKind::ReviewComment,
+                            body.clone(),
+                            cx,
+                        );
                     }
                 }
                 MarkdownEditorEvent::Cancel => this.editing = None,
@@ -419,9 +446,9 @@ impl Render for ReviewThreadCard {
         let theme = cx.app_theme().clone();
         let thread = self.props.thread.clone();
         let comments = merge_pull_request_thread_comments(&thread.comments, &[]);
-        let comment_count = thread
-            .comment_count
-            .map_or(comments.len() as u64, |count| count.max(comments.len() as u64));
+        let comment_count = thread.comment_count.map_or(comments.len() as u64, |count| {
+            count.max(comments.len() as u64)
+        });
         let thread_id = thread.id.as_str().to_owned();
         let expanded = self.expanded;
         let resolved = thread.is_resolved;
@@ -434,9 +461,17 @@ impl Render for ReviewThreadCard {
             .line_height(TEXT_XS.line_height)
             .text_color(theme.muted_foreground)
             .child(
-                Icon::new(if resolved { IconName::CircleCheck } else { IconName::Circle })
-                    .size(rems(0.875))
-                    .color(if resolved { theme.success } else { theme.muted_foreground }),
+                Icon::new(if resolved {
+                    IconName::CircleCheck
+                } else {
+                    IconName::Circle
+                })
+                .size(rems(0.875))
+                .color(if resolved {
+                    theme.success
+                } else {
+                    theme.muted_foreground
+                }),
             )
             .child(
                 div()
@@ -451,7 +486,11 @@ impl Render for ReviewThreadCard {
                         "{} \u{b7} {} {}",
                         if resolved { "Resolved" } else { "Open" },
                         comment_count,
-                        if comment_count == 1 { "comment" } else { "comments" }
+                        if comment_count == 1 {
+                            "comment"
+                        } else {
+                            "comments"
+                        }
                     ))),
             )
             .when(thread.is_outdated, |this| this.child("outdated"))
@@ -495,10 +534,15 @@ impl Render for ReviewThreadCard {
                                 .line_height(TEXT_XS.line_height)
                                 .text_color(theme.muted_foreground)
                                 .child(PullRequestActorLabel::new(comment.author.clone()))
-                                .child(SharedString::from(format_relative_time_label(&comment.created_at)))
+                                .child(SharedString::from(format_relative_time_label(
+                                    &comment.created_at,
+                                )))
                                 .child(
                                     ReactionBar::new(
-                                        SharedString::from(format!("thread-reactions-{}", comment.id)),
+                                        SharedString::from(format!(
+                                            "thread-reactions-{}",
+                                            comment.id
+                                        )),
                                         self.ctx.clone(),
                                         comment.reactions.clone().unwrap_or_default(),
                                         self.props.can_react,
@@ -514,12 +558,10 @@ impl Render for ReviewThreadCard {
                                 .flex()
                                 .items_start()
                                 .gap_1()
-                                .child(
-                                    div().min_w_0().flex_1().child(pull_request_markdown(
-                                        SharedString::from(format!("thread-md-{}", comment.id)),
-                                        SharedString::from(comment.body.clone()),
-                                    )),
-                                )
+                                .child(div().min_w_0().flex_1().child(pull_request_markdown(
+                                    SharedString::from(format!("thread-md-{}", comment.id)),
+                                    SharedString::from(comment.body.clone()),
+                                )))
                                 .when(can_edit, |this| {
                                     this.child(
                                         EditButton::new(
@@ -527,14 +569,16 @@ impl Render for ReviewThreadCard {
                                             group.clone(),
                                             "Edit comment",
                                         )
-                                        .on_click(move |window, cx| {
-                                            let comment = comment_for_edit.clone();
-                                            entity
-                                                .update(cx, |this, cx| {
-                                                    this.begin_edit(&comment, window, cx)
-                                                })
-                                                .ok();
-                                        }),
+                                        .on_click(
+                                            move |window, cx| {
+                                                let comment = comment_for_edit.clone();
+                                                entity
+                                                    .update(cx, |this, cx| {
+                                                        this.begin_edit(&comment, window, cx)
+                                                    })
+                                                    .ok();
+                                            },
+                                        ),
                                     )
                                 })
                                 .into_any_element(),
@@ -542,7 +586,11 @@ impl Render for ReviewThreadCard {
                 );
             }
             body = body.child(list);
-            if let Some(cursor) = thread.next_comments_cursor.as_ref().map(|c| c.as_str().to_owned()) {
+            if let Some(cursor) = thread
+                .next_comments_cursor
+                .as_ref()
+                .map(|c| c.as_str().to_owned())
+            {
                 let loading = self.loading_cursor.is_some();
                 body = body.child(
                     div().mt_2().flex().child(
@@ -550,7 +598,11 @@ impl Render for ReviewThreadCard {
                             .size(ButtonSize::Xs)
                             .variant(ButtonVariant::Ghost)
                             .disabled(loading)
-                            .label(if loading { "Loading..." } else { "Load more comments" })
+                            .label(if loading {
+                                "Loading..."
+                            } else {
+                                "Load more comments"
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.load_more(cursor.clone(), cx)
                             })),
@@ -569,21 +621,25 @@ impl Render for ReviewThreadCard {
                                 .justify_end()
                                 .gap_2()
                                 .child(
-                                    Button::new(SharedString::from(format!("reply-cancel-{thread_id}")))
-                                        .size(ButtonSize::Xs)
-                                        .variant(ButtonVariant::Ghost)
-                                        .label("Cancel")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.replying = false;
-                                            cx.notify();
-                                        })),
+                                    Button::new(SharedString::from(format!(
+                                        "reply-cancel-{thread_id}"
+                                    )))
+                                    .size(ButtonSize::Xs)
+                                    .variant(ButtonVariant::Ghost)
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.replying = false;
+                                        cx.notify();
+                                    })),
                                 )
                                 .child(
-                                    Button::new(SharedString::from(format!("reply-send-{thread_id}")))
-                                        .size(ButtonSize::Xs)
-                                        .variant(ButtonVariant::Default)
-                                        .label("Reply")
-                                        .on_click(cx.listener(|this, _, _, cx| this.send(cx))),
+                                    Button::new(SharedString::from(format!(
+                                        "reply-send-{thread_id}"
+                                    )))
+                                    .size(ButtonSize::Xs)
+                                    .variant(ButtonVariant::Default)
+                                    .label("Reply")
+                                    .on_click(cx.listener(|this, _, _, cx| this.send(cx))),
                                 ),
                         )
                         .into_any_element()

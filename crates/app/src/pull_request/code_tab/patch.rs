@@ -59,7 +59,10 @@ pub struct PatchFile {
 pub enum ParsedPatch {
     Files(Vec<PatchFile>),
     /// A patch that could not be structured, shown as text.
-    Raw { reason: String, text: String },
+    Raw {
+        reason: String,
+        text: String,
+    },
 }
 
 impl PatchFile {
@@ -80,7 +83,11 @@ impl PatchFile {
     /// `buildFileDiffRenderKey`: stable across re-renders of the same file, distinct for every
     /// block in a patch.
     pub fn key(&self) -> String {
-        format!("{}:{}", self.prev_name.as_deref().unwrap_or("none"), self.name)
+        format!(
+            "{}:{}",
+            self.prev_name.as_deref().unwrap_or("none"),
+            self.name
+        )
     }
 
     pub fn rows(&self) -> Vec<DiffRow> {
@@ -129,11 +136,9 @@ pub fn fnv1a32(value: &str) -> u32 {
 
 /// `getDiffLineStat` over files.
 pub fn diff_line_stat(files: &[PatchFile]) -> (u64, u64) {
-    files
-        .iter()
-        .fold((0, 0), |(additions, deletions), file| {
-            (additions + file.additions, deletions + file.deletions)
-        })
+    files.iter().fold((0, 0), |(additions, deletions), file| {
+        (additions + file.additions, deletions + file.deletions)
+    })
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────────────
@@ -164,9 +169,7 @@ fn header_names(line: &str) -> (Option<String>, Option<String>) {
         if bytes >= 3 && (bytes - 3) % 2 == 0 {
             let half = (bytes - 3) / 2;
             let (left, right) = (&inner[..half], &inner[half + 1..]);
-            if inner.as_bytes().get(half) == Some(&b' ')
-                && right.strip_prefix("b/") == Some(left)
-            {
+            if inner.as_bytes().get(half) == Some(&b' ') && right.strip_prefix("b/") == Some(left) {
                 return (Some(left.to_owned()), Some(left.to_owned()));
             }
         }
@@ -270,7 +273,11 @@ impl FileBuilder {
                 match reader.content.last_mut() {
                     // A deletion after an addition starts a block of its own, so rows keep the
                     // order the patch gave them.
-                    Some(HunkContent::Change { deletions, additions: 0, .. }) => *deletions += 1,
+                    Some(HunkContent::Change {
+                        deletions,
+                        additions: 0,
+                        ..
+                    }) => *deletions += 1,
                     _ => reader.content.push(HunkContent::Change {
                         deletions: 1,
                         additions: 0,
@@ -353,7 +360,7 @@ pub fn parse_patch(patch: &str) -> Option<ParsedPatch> {
     let mut files: Vec<PatchFile> = Vec::new();
     let mut current: Option<FileBuilder> = None;
     let mut hunk: Option<HunkReader> = None;
-    let mut finish_file = |current: &mut Option<FileBuilder>, files: &mut Vec<PatchFile>| {
+    let finish_file = |current: &mut Option<FileBuilder>, files: &mut Vec<PatchFile>| {
         if let Some(builder) = current.take()
             && let Some(file) = builder.build()
         {
@@ -386,10 +393,10 @@ pub fn parse_patch(patch: &str) -> Option<ParsedPatch> {
                 // `\ No newline at end of file` belongs to the line just before it.
                 if let Some((kind, index)) = reader.last {
                     let strip = |lines: &mut Vec<String>, index: usize| {
-                        if let Some(text) = lines.get_mut(index) {
-                            if text.ends_with('\n') {
-                                text.pop();
-                            }
+                        if let Some(text) = lines.get_mut(index)
+                            && text.ends_with('\n')
+                        {
+                            text.pop();
                         }
                     };
                     match kind {
@@ -599,7 +606,11 @@ pub fn hide_whitespace_changes(file: &PatchFile) -> PatchFile {
         let mut original: Vec<Step> = Vec::new();
         for content in &hunk.hunk_content {
             match content {
-                HunkContent::Context { lines, addition_line_index, .. } => {
+                HunkContent::Context {
+                    lines,
+                    addition_line_index,
+                    ..
+                } => {
                     for offset in 0..*lines {
                         original.push(Step::Match(old_side.len(), new_side.len()));
                         let text = file.meta.addition_lines[addition_line_index + offset].as_str();
@@ -615,11 +626,13 @@ pub fn hide_whitespace_changes(file: &PatchFile) -> PatchFile {
                 } => {
                     for offset in 0..*deletions {
                         original.push(Step::Delete(old_side.len()));
-                        old_side.push(file.meta.deletion_lines[deletion_line_index + offset].as_str());
+                        old_side
+                            .push(file.meta.deletion_lines[deletion_line_index + offset].as_str());
                     }
                     for offset in 0..*additions {
                         original.push(Step::Add(new_side.len()));
-                        new_side.push(file.meta.addition_lines[addition_line_index + offset].as_str());
+                        new_side
+                            .push(file.meta.addition_lines[addition_line_index + offset].as_str());
                     }
                 }
             }
@@ -727,7 +740,14 @@ index 0000000..3333333
         let rows = files[0].rows();
         let summary: Vec<_> = rows
             .iter()
-            .map(|row| (row.kind, row.old_line, row.new_line, row.text.trim_end().to_owned()))
+            .map(|row| {
+                (
+                    row.kind,
+                    row.old_line,
+                    row.new_line,
+                    row.text.trim_end().to_owned(),
+                )
+            })
             .collect();
         assert_eq!(
             summary,
@@ -760,7 +780,8 @@ index 0000000..3333333
 
     #[test]
     fn a_removed_line_that_looks_like_a_header_stays_in_its_hunk() {
-        let patch = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,1 @@\n--- not a header\n keep\n";
+        let patch =
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,1 @@\n--- not a header\n keep\n";
         let files = files(patch);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].deletions, 1);
@@ -810,11 +831,15 @@ index 0000000..3333333
         let file = &files[0];
         assert_eq!(
             resolve_diff_review_position(file, 2, PullRequestDiffSide::Right),
-            Some(PullRequestReviewPosition::Added { new_line: PositiveInt::new(2).unwrap() })
+            Some(PullRequestReviewPosition::Added {
+                new_line: PositiveInt::new(2).unwrap()
+            })
         );
         assert_eq!(
             resolve_diff_review_position(file, 2, PullRequestDiffSide::Left),
-            Some(PullRequestReviewPosition::Deleted { old_line: PositiveInt::new(2).unwrap() })
+            Some(PullRequestReviewPosition::Deleted {
+                old_line: PositiveInt::new(2).unwrap()
+            })
         );
         assert_eq!(
             resolve_diff_review_position(file, 4, PullRequestDiffSide::Right),
@@ -824,23 +849,30 @@ index 0000000..3333333
                 side: PullRequestDiffSide::Right,
             })
         );
-        assert_eq!(resolve_diff_review_position(file, 99, PullRequestDiffSide::Right), None);
+        assert_eq!(
+            resolve_diff_review_position(file, 99, PullRequestDiffSide::Right),
+            None
+        );
     }
 
     #[test]
     fn hunk_ranges_feed_line_placement() {
         let files = files(SIMPLE);
         let ranges = files[0].hunk_ranges();
-        assert!(crate::pull_request::pull_request_diff_logic::is_line_in_file_diff(
-            &ranges,
-            PullRequestDiffSide::Right,
-            5
-        ));
-        assert!(!crate::pull_request::pull_request_diff_logic::is_line_in_file_diff(
-            &ranges,
-            PullRequestDiffSide::Right,
-            6
-        ));
+        assert!(
+            crate::pull_request::pull_request_diff_logic::is_line_in_file_diff(
+                &ranges,
+                PullRequestDiffSide::Right,
+                5
+            )
+        );
+        assert!(
+            !crate::pull_request::pull_request_diff_logic::is_line_in_file_diff(
+                &ranges,
+                PullRequestDiffSide::Right,
+                6
+            )
+        );
     }
 
     #[test]

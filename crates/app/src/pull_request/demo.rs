@@ -152,19 +152,8 @@ pub fn install(
             host.update(cx, |host, cx| {
                 host.open(demo_environment_id(), reference, tab, window, cx)
             });
-            // S2 DEV HOOK (remove once the detail panel mounts the tabs): show one tab bare.
-            let isolated = std::env::var("TURIN_PR_ISOLATED").ok().and_then(|_| {
-                let ctx = super::detail_context::DetailContext {
-                    store: store.clone(),
-                    environment_id: demo_environment_id(),
-                    reference: demo_reference(),
-                    nav: super::detail_context::DetailNav::noop(),
-                };
-                super::timeline_tab::mount_isolated(tab?, ctx, window, cx)
-            });
-            layout.update(cx, |layout, cx| match isolated {
-                Some(view) => layout.set_right_panel_content(Some(view), cx),
-                None => layout.set_right_panel_content(Some(host.clone().into()), cx),
+            layout.update(cx, |layout, cx| {
+                layout.set_right_panel_content(Some(host.clone().into()), cx);
             });
         }
     }

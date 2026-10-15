@@ -19,9 +19,9 @@ use gpui_kit::{
 };
 use turin_contracts::pull_request::PullRequestReviewVerdict;
 
+use super::detail_context::DetailContext;
 use super::dropdown::dropdown;
 use super::pull_request_review_store::{PullRequestReviewStore, pull_request_review_key};
-use super::detail_context::DetailContext;
 use super::view_model::ReviewSubmission;
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 
@@ -127,7 +127,12 @@ impl ReviewForm {
     ) -> Self {
         let store = review_store(cx);
         let key = pull_request_review_key(&ctx.reference);
-        let initial = store.read(cx).summaries.get(&key).cloned().unwrap_or_default();
+        let initial = store
+            .read(cx)
+            .summaries
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
         let summary = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .rows(3)
@@ -158,7 +163,8 @@ impl ReviewForm {
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.summary.update(cx, |summary, cx| summary.focus(window, cx));
+        self.summary
+            .update(cx, |summary, cx| summary.focus(window, cx));
     }
 
     pub fn set_pending(&mut self, pending: bool, cx: &mut Context<Self>) {
@@ -206,7 +212,10 @@ impl ReviewForm {
                     verdict: verdict.value,
                     body: body.clone(),
                 },
-                comments.iter().map(|comment| comment.draft.clone()).collect(),
+                comments
+                    .iter()
+                    .map(|comment| comment.draft.clone())
+                    .collect(),
                 cx,
             );
         }
@@ -236,10 +245,12 @@ impl Render for ReviewForm {
             .pending_review_comments(&self.ctx.reference)
             .len();
         let submit_disabled = self.pending
-            || selected.is_none_or(|verdict| !can_submit(verdict.value, &body, pending_comments, false));
+            || selected
+                .is_none_or(|verdict| !can_submit(verdict.value, &body, pending_comments, false));
         let placeholder = summary_placeholder(selected.map(|verdict| verdict.value), false);
-        self.summary
-            .update(cx, |summary, cx| summary.set_placeholder(placeholder, window, cx));
+        self.summary.update(cx, |summary, cx| {
+            summary.set_placeholder(placeholder, window, cx)
+        });
         let entity = cx.entity().downgrade();
         let verdict_menu = (offered.len() > 1).then(|| {
             let selected = selected.expect("a verdict is offered");
@@ -252,30 +263,33 @@ impl Render for ReviewForm {
                 .child(Icon::new(IconName::ChevronDown).size(rems(0.75)));
             let options: Vec<_> = offered.clone();
             let current = selected.value;
-            div().mr_auto().child(dropdown(
-                "review-verdict-menu",
-                Anchor::BottomLeft,
-                trigger,
-                move |mut menu, _, _| {
-                    for option in &options {
-                        let entity = entity.clone();
-                        let value = option.value;
-                        menu = menu.item(
-                            PopupMenuItem::new(option.label)
-                                .checked(option.value == current)
-                                .on_click(move |_, _, cx| {
-                                    entity
-                                        .update(cx, |this, cx| {
-                                            this.requested = value;
-                                            cx.notify();
-                                        })
-                                        .ok();
-                                }),
-                        );
-                    }
-                    menu
-                },
-            ))
+            div().flex_none().child(
+                dropdown(
+                    "review-verdict-menu",
+                    Anchor::BottomLeft,
+                    trigger,
+                    move |mut menu, _, _| {
+                        for option in &options {
+                            let entity = entity.clone();
+                            let value = option.value;
+                            menu = menu.item(
+                                PopupMenuItem::new(option.label)
+                                    .checked(option.value == current)
+                                    .on_click(move |_, _, cx| {
+                                        entity
+                                            .update(cx, |this, cx| {
+                                                this.requested = value;
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                    }),
+                            );
+                        }
+                        menu
+                    },
+                )
+                .trigger_style(gpui_kit::StyleRefinement::default().flex_none().w_auto()),
+            )
         });
         div()
             .child(Textarea::new(&self.summary).aria_label("Review summary"))
@@ -283,20 +297,24 @@ impl Render for ReviewForm {
                 div()
                     .mt_2()
                     .flex()
-                    .justify_end()
+                    .items_center()
                     .gap_2()
                     .children(verdict_menu)
                     .child(
-                        Button::new("review-submit")
-                            .size(ButtonSize::Xs)
-                            .variant(ButtonVariant::Default)
-                            .disabled(submit_disabled)
-                            .label(if self.pending {
-                                "Submitting..."
-                            } else {
-                                "Submit review"
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
+                        div().ml_auto().child(
+                            Button::new("review-submit")
+                                .size(ButtonSize::Xs)
+                                .variant(ButtonVariant::Default)
+                                .disabled(submit_disabled)
+                                .label(if self.pending {
+                                    "Submitting..."
+                                } else {
+                                    "Submit review"
+                                })
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.submit(window, cx)),
+                                ),
+                        ),
                     ),
             )
     }
@@ -324,7 +342,10 @@ mod tests {
 
     #[test]
     fn placeholder_asks_for_what_submit_waits_on() {
-        assert_eq!(summary_placeholder(None, false), "Summarize your review (optional)");
+        assert_eq!(
+            summary_placeholder(None, false),
+            "Summarize your review (optional)"
+        );
         assert_eq!(
             summary_placeholder(Some(Approve), false),
             "Summarize your review (optional)"

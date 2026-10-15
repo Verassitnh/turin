@@ -2,6 +2,30 @@
 
 use super::*;
 
+/// What a frame reads of the detail.
+enum DetailBits {
+    Pending,
+    Failed,
+    Ready {
+        commits: Vec<PullRequestCommit>,
+        viewed_enabled: bool,
+        viewed_in_environment: bool,
+        inline_comment: bool,
+        /// The conversations that are not placed on a line of the diff.
+        threads: Vec<PullRequestReviewThread>,
+    },
+}
+
+/// What a frame reads of the diff answer.
+enum DiffState {
+    Pending,
+    Failed(String),
+    Ready {
+        next_cursor: Option<turin_contracts::TrimmedNonEmptyString>,
+        truncated: bool,
+    },
+}
+
 /// What the toolbar reports about the diff on screen.
 struct ToolbarMeta {
     files: usize,
@@ -13,12 +37,7 @@ struct ToolbarMeta {
     inline_comment: bool,
 }
 
-fn warning_icon(
-    id: &str,
-    icon: IconName,
-    tooltip: &'static str,
-    color: Hsla,
-) -> AnyElement {
+fn warning_icon(id: &str, icon: IconName, tooltip: &'static str, color: Hsla) -> AnyElement {
     with_tooltip(
         SharedString::from(id.to_owned()),
         tooltip,
@@ -50,12 +69,21 @@ impl CodeTab {
     }
 
     /// The scope menu: "All commits" and the commits newest first, ten at a time.
-    fn scope_menu(&self, commits: &[PullRequestCommit], cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn scope_menu(
+        &self,
+        commits: &[PullRequestCommit],
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if commits.is_empty() {
             return None;
         }
-        let selected = commits.iter().find(|entry| Some(entry.oid.as_str()) == self.commit.as_deref());
-        let label = selected.map_or_else(|| "All commits".to_owned(), |entry| entry.message_headline.clone());
+        let selected = commits
+            .iter()
+            .find(|entry| Some(entry.oid.as_str()) == self.commit.as_deref());
+        let label = selected.map_or_else(
+            || "All commits".to_owned(),
+            |entry| entry.message_headline.clone(),
+        );
         let trigger = Button::new("diff-scope")
             .size(ButtonSize::Xs)
             .variant(ButtonVariant::Secondary)
@@ -72,66 +100,89 @@ impl CodeTab {
         let visible = self.visible_commits;
         let entries: Vec<(String, String)> = commits
             .iter()
-            .map(|entry| (entry.oid.as_str().to_owned(), entry.message_headline.clone()))
+            .map(|entry| {
+                (
+                    entry.oid.as_str().to_owned(),
+                    entry.message_headline.clone(),
+                )
+            })
             .collect();
         Some(
-            dropdown("diff-scope-menu", Anchor::TopLeft, trigger, move |menu, _, cx| {
-                let theme = cx.app_theme().clone();
-                let mut menu = menu.scrollable(true).max_h(px(360.)).min_w(px(256.)).max_w(px(448.));
-                let pick = |entity: gpui_kit::WeakEntity<CodeTab>, commit: Option<String>| {
-                    move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
-                        entity.update(cx, |this, cx| this.set_commit(commit.clone(), cx)).ok();
-                    }
-                };
-                menu = menu.item(
-                    PopupMenuItem::new("All commits")
-                        .checked(current.is_none())
-                        .on_click(pick(entity.clone(), None)),
-                );
-                for (oid, headline) in entries.iter().take(visible) {
-                    let short: String = oid.chars().take(7).collect();
-                    let headline = headline.clone();
-                    let mono = theme.fonts.mono.clone();
-                    let muted = theme.muted_foreground;
-                    menu = menu.item(
-                        PopupMenuItem::element(move |_, _| {
-                            div()
-                                .flex()
-                                .w_full()
-                                .min_w_0()
-                                .items_center()
-                                .gap_2()
-                                .child(div().min_w_0().truncate().child(SharedString::from(headline.clone())))
-                                .child(
-                                    div()
-                                        .ml_auto()
-                                        .flex_shrink_0()
-                                        .font_family(SharedString::from(mono.clone()))
-                                        .text_size(TEXT_XS.size)
-                                        .text_color(muted)
-                                        .child(SharedString::from(short.clone())),
-                                )
-                        })
-                        .checked(current.as_deref() == Some(oid.as_str()))
-                        .on_click(pick(entity.clone(), Some(oid.clone()))),
-                    );
-                }
-                if entries.len() > visible {
-                    let left = entries.len() - visible;
-                    let entity = entity.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(format!("Show more ({left} left)")).on_click(move |_, _, cx| {
+            dropdown(
+                "diff-scope-menu",
+                Anchor::TopLeft,
+                trigger,
+                move |menu, _, cx| {
+                    let theme = cx.app_theme().clone();
+                    let mut menu = menu
+                        .scrollable(true)
+                        .max_h(px(360.))
+                        .min_w(px(256.))
+                        .max_w(px(448.));
+                    let pick = |entity: gpui_kit::WeakEntity<CodeTab>, commit: Option<String>| {
+                        move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
                             entity
-                                .update(cx, |this, cx| {
-                                    this.visible_commits += COMMIT_PAGE_SIZE;
-                                    cx.notify();
-                                })
+                                .update(cx, |this, cx| this.set_commit(commit.clone(), cx))
                                 .ok();
-                        }),
+                        }
+                    };
+                    menu = menu.item(
+                        PopupMenuItem::new("All commits")
+                            .checked(current.is_none())
+                            .on_click(pick(entity.clone(), None)),
                     );
-                }
-                menu
-            })
+                    for (oid, headline) in entries.iter().take(visible) {
+                        let short: String = oid.chars().take(7).collect();
+                        let headline = headline.clone();
+                        let mono = theme.fonts.mono.clone();
+                        let muted = theme.muted_foreground;
+                        menu = menu.item(
+                            PopupMenuItem::element(move |_, _| {
+                                div()
+                                    .flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(SharedString::from(headline.clone())),
+                                    )
+                                    .child(
+                                        div()
+                                            .ml_auto()
+                                            .flex_shrink_0()
+                                            .font_family(SharedString::from(mono.clone()))
+                                            .text_size(TEXT_XS.size)
+                                            .text_color(muted)
+                                            .child(SharedString::from(short.clone())),
+                                    )
+                            })
+                            .checked(current.as_deref() == Some(oid.as_str()))
+                            .on_click(pick(entity.clone(), Some(oid.clone()))),
+                        );
+                    }
+                    if entries.len() > visible {
+                        let left = entries.len() - visible;
+                        let entity = entity.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(format!("Show more ({left} left)")).on_click(
+                                move |_, _, cx| {
+                                    entity
+                                        .update(cx, |this, cx| {
+                                            this.visible_commits += COMMIT_PAGE_SIZE;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                },
+                            ),
+                        );
+                    }
+                    menu
+                },
+            )
             .into_any_element(),
         )
     }
@@ -145,39 +196,53 @@ impl CodeTab {
             .icon(IconName::Settings2)
             .icon_size(rems(0.875))
             .tooltip(Tooltip::new("Diff options"));
-        dropdown("diff-options-menu", Anchor::TopRight, trigger, move |menu, _, _| {
-            let toggle = |entity: gpui_kit::WeakEntity<CodeTab>, apply: fn(&mut CodeTab, &mut Context<CodeTab>)| {
-                move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
-                    entity.update(cx, |this, cx| apply(this, cx)).ok();
-                }
-            };
-            menu.item(
-                PopupMenuItem::new("Hide whitespace changes")
-                    .checked(ignore)
-                    .on_click(toggle(entity.clone(), |this, cx| {
-                        this.set_ignore_whitespace(!this.ignore_whitespace, cx)
-                    })),
-            )
-            .item(
-                PopupMenuItem::new("Wrap lines")
-                    .checked(wrap)
-                    .on_click(toggle(entity.clone(), |this, cx| this.set_wrap(!this.wrap, cx))),
-            )
-            .item(PopupMenuItem::separator())
-            .item(
-                PopupMenuItem::new("Stacked")
-                    .checked(layout == DiffLayout::Stacked)
-                    .on_click(toggle(entity.clone(), |this, cx| this.set_layout(DiffLayout::Stacked, cx))),
-            )
-            .item(
-                PopupMenuItem::new("Split")
-                    .checked(layout == DiffLayout::Split)
-                    .on_click(toggle(entity.clone(), |this, cx| this.set_layout(DiffLayout::Split, cx))),
-            )
-        })
+        dropdown(
+            "diff-options-menu",
+            Anchor::TopRight,
+            trigger,
+            move |menu, _, _| {
+                let toggle =
+                    |entity: gpui_kit::WeakEntity<CodeTab>,
+                     apply: fn(&mut CodeTab, &mut Context<CodeTab>)| {
+                        move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
+                            entity.update(cx, apply).ok();
+                        }
+                    };
+                menu.item(
+                    PopupMenuItem::new("Hide whitespace changes")
+                        .checked(ignore)
+                        .on_click(toggle(entity.clone(), |this, cx| {
+                            this.set_ignore_whitespace(!this.ignore_whitespace, cx)
+                        })),
+                )
+                .item(
+                    PopupMenuItem::new("Wrap lines")
+                        .checked(wrap)
+                        .on_click(toggle(entity.clone(), |this, cx| {
+                            this.set_wrap(!this.wrap, cx)
+                        })),
+                )
+                .item(PopupMenuItem::separator())
+                .item(
+                    PopupMenuItem::new("Stacked")
+                        .checked(layout == DiffLayout::Stacked)
+                        .on_click(toggle(entity.clone(), |this, cx| {
+                            this.set_layout(DiffLayout::Stacked, cx)
+                        })),
+                )
+                .item(
+                    PopupMenuItem::new("Split")
+                        .checked(layout == DiffLayout::Split)
+                        .on_click(toggle(entity.clone(), |this, cx| {
+                            this.set_layout(DiffLayout::Split, cx)
+                        })),
+                )
+            },
+        )
         .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn icon_toggle(
         &self,
         id: &'static str,
@@ -203,7 +268,12 @@ impl CodeTab {
             .into_any_element()
     }
 
-    fn toolbar(&self, commits: &[PullRequestCommit], meta: &ToolbarMeta, cx: &mut Context<Self>) -> AnyElement {
+    fn toolbar(
+        &self,
+        commits: &[PullRequestCommit],
+        meta: &ToolbarMeta,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let wide = self.toolbar_width >= WIDE_TOOLBAR;
         let warning = theme.warning_foreground;
@@ -332,20 +402,30 @@ impl CodeTab {
                     Button::new("diff-fold-all")
                         .size(ButtonSize::IconSm)
                         .variant(ButtonVariant::Ghost)
-                        .icon(if all_collapsed { IconName::ChevronsUpDown } else { IconName::ChevronsDownUp })
+                        .icon(if all_collapsed {
+                            IconName::ChevronsUpDown
+                        } else {
+                            IconName::ChevronsDownUp
+                        })
                         .icon_size(rems(0.875))
                         .tooltip(Tooltip::new(if all_collapsed {
                             "Expand all files"
                         } else {
                             "Collapse all files"
                         }))
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_all_files(all_collapsed, cx))),
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_all_files(all_collapsed, cx)
+                        })),
                 )
                 .child(self.icon_toggle(
                     "diff-tree",
                     IconName::FolderTree,
                     self.tree_open,
-                    if self.tree_open { "Hide file tree" } else { "Show file tree" },
+                    if self.tree_open {
+                        "Hide file tree"
+                    } else {
+                        "Show file tree"
+                    },
                     ToggleVariant::Ghost,
                     ToggleSize::Sm,
                     |this, cx| {
@@ -478,25 +558,26 @@ impl CodeTab {
         if open {
             let mut by_file: Vec<(String, Vec<PullRequestReviewThread>)> = Vec::new();
             for thread in &threads {
-                match by_file.iter_mut().find(|(path, _)| path == thread.path.as_str()) {
+                match by_file
+                    .iter_mut()
+                    .find(|(path, _)| path == thread.path.as_str())
+                {
                     Some((_, list)) => list.push(thread.clone()),
                     None => by_file.push((thread.path.as_str().to_owned(), vec![thread.clone()])),
                 }
             }
             let mut list = div().flex().flex_col().gap_3().px_4().pb_3();
             for (path, threads) in by_file {
-                let mut group = div().child(
-                    with_tooltip(
-                        SharedString::from(format!("orphan-{path}")),
-                        path.clone(),
-                        div()
-                            .truncate()
-                            .px_3()
-                            .text_size(TEXT_XS.size)
-                            .text_color(theme.muted_foreground)
-                            .child(SharedString::from(path.clone())),
-                    ),
-                );
+                let mut group = div().child(with_tooltip(
+                    SharedString::from(format!("orphan-{path}")),
+                    path.clone(),
+                    div()
+                        .truncate()
+                        .px_3()
+                        .text_size(TEXT_XS.size)
+                        .text_color(theme.muted_foreground)
+                        .child(SharedString::from(path.clone())),
+                ));
                 let mut stack = div().mt_1().flex().flex_col().gap_2();
                 for thread in threads {
                     let mut entry = div();
@@ -555,9 +636,13 @@ impl CodeTab {
                             "Conversations not on the current diff"
                         })
                         .child(
-                            Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
-                                .size(rems(0.875))
-                                .color(theme.muted_foreground),
+                            Icon::new(if open {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size(rems(0.875))
+                            .color(theme.muted_foreground),
                         )
                         .child(SharedString::from(count.to_string())),
                 )
@@ -572,20 +657,68 @@ impl Render for CodeTab {
         self.request_diff(cx);
         self.sync(cx);
         let theme = cx.app_theme().clone();
-        let snapshot = self.ctx.snapshot(cx).cloned();
-        let detail = snapshot.as_ref().and_then(|snapshot| match &snapshot.detail {
-            Loadable::Ready(detail) => Some(detail.clone()),
+        // Only what the frame needs is copied out of the snapshot: it holds whole patches, and
+        // scrolling re-renders this view.
+        let (bits, diff) = {
+            let snapshot = self.ctx.snapshot(cx);
+            let bits = snapshot.map(|snapshot| match &snapshot.detail {
+                Loadable::Ready(detail) => DetailBits::Ready {
+                    commits: detail.commits.clone(),
+                    viewed_enabled: detail.capabilities.viewed_files.is_some(),
+                    viewed_in_environment: detail.capabilities.viewed_files
+                        == Some(
+                            turin_contracts::pull_request::PullRequestViewedFilesStore::Environment,
+                        ),
+                    inline_comment: detail.capabilities.review.inline_comment
+                        && detail.viewer_permissions.comment,
+                    threads: detail
+                        .review_threads
+                        .iter()
+                        .filter(|thread| !self.placed.contains(thread.id.as_str()))
+                        .cloned()
+                        .collect(),
+                },
+                Loadable::Pending => DetailBits::Pending,
+                Loadable::Failed(_) => DetailBits::Failed,
+            });
+            let diff = snapshot
+                .and_then(|snapshot| snapshot.diffs.get(&self.commit))
+                .map(|state| match state {
+                    Loadable::Pending => DiffState::Pending,
+                    Loadable::Failed(error) => DiffState::Failed(error.clone()),
+                    Loadable::Ready(result) => DiffState::Ready {
+                        next_cursor: result.next_cursor.clone(),
+                        truncated: result.truncated,
+                    },
+                });
+            (bits, diff)
+        };
+        let (next_cursor, truncated) = match &diff {
+            Some(DiffState::Ready {
+                next_cursor,
+                truncated,
+            }) => (next_cursor.clone(), *truncated),
+            _ => (None, false),
+        };
+        let ready = match &bits {
+            Some(DetailBits::Ready {
+                commits,
+                viewed_enabled,
+                viewed_in_environment,
+                inline_comment,
+                threads,
+            }) => Some((
+                commits,
+                *viewed_enabled,
+                *viewed_in_environment,
+                *inline_comment,
+                threads,
+            )),
             _ => None,
-        });
-        let diff = snapshot.as_ref().and_then(|snapshot| snapshot.diffs.get(&self.commit)).cloned();
-        let next_cursor = diff
-            .as_ref()
-            .and_then(Loadable::ready)
-            .and_then(|result| result.next_cursor.clone());
-        let truncated = diff.as_ref().and_then(Loadable::ready).is_some_and(|result| result.truncated);
+        };
 
         // Newest first: the last commit is the one a reader coming back to a change is looking for.
-        let mut commits: Vec<PullRequestCommit> = detail.as_ref().map(|d| d.commits.clone()).unwrap_or_default();
+        let mut commits: Vec<PullRequestCommit> = ready.map(|r| r.0.clone()).unwrap_or_default();
         commits.sort_by_key(|commit| {
             std::cmp::Reverse(crate::state::time::parse_ms(&commit.committed_date).unwrap_or(0))
         });
@@ -593,52 +726,47 @@ impl Render for CodeTab {
         let files = self.files();
         let file_views: &[FileView] = files.as_deref().map_or(&[], Vec::as_slice);
         let paths: Vec<String> = file_views.iter().map(|view| view.path.clone()).collect();
-        let viewed_enabled = detail.as_ref().is_some_and(|d| d.capabilities.viewed_files.is_some());
-        let collapsed_keys: Vec<bool> = file_views.iter().map(|view| self.collapsed(&view.key)).collect();
+        let viewed_enabled = ready.is_some_and(|r| r.1);
+        let collapsed_keys: Vec<bool> = file_views
+            .iter()
+            .map(|view| self.collapsed(&view.key))
+            .collect();
         let meta = ToolbarMeta {
             files: file_views.len(),
             more: next_cursor.is_some(),
             withheld: truncated || matches!(self.parsed, Parsed::Raw(_)),
             all_collapsed: !collapsed_keys.is_empty() && collapsed_keys.iter().all(|c| *c),
-            viewed: (viewed_enabled && !paths.is_empty()).then(|| (self.viewed.viewed_count(&paths), paths.len())),
-            viewed_in_environment: detail.as_ref().is_some_and(|d| {
-                d.capabilities.viewed_files
-                    == Some(turin_contracts::pull_request::PullRequestViewedFilesStore::Environment)
-            }),
-            inline_comment: detail
-                .as_ref()
-                .is_some_and(|d| d.capabilities.review.inline_comment && d.viewer_permissions.comment),
+            viewed: (viewed_enabled && !paths.is_empty())
+                .then(|| (self.viewed.viewed_count(&paths), paths.len())),
+            viewed_in_environment: ready.is_some_and(|r| r.2),
+            inline_comment: ready.is_some_and(|r| r.3),
         };
         let toolbar = self.toolbar(&commits, &meta, cx);
 
         let body: AnyElement = match (&diff, &self.parsed) {
-            _ if detail.is_none() && !matches!(snapshot.as_ref().map(|s| &s.detail), Some(Loadable::Failed(_))) => {
+            _ if ready.is_none() && !matches!(bits, Some(DetailBits::Failed)) => {
                 self.loading_state(cx)
             }
-            (None | Some(Loadable::Pending), _) => self.loading_state(cx),
-            (Some(Loadable::Failed(error)), Parsed::Empty) => self.message(error.clone(), cx),
+            (None | Some(DiffState::Pending), _) => self.loading_state(cx),
+            (Some(DiffState::Failed(error)), Parsed::Empty) => self.message(error.clone(), cx),
             (_, Parsed::Raw(raw)) if file_views.is_empty() && next_cursor.is_none() => {
                 self.raw_slices(&raw.clone(), cx)
             }
-            (_, Parsed::Empty) | (_, Parsed::Files(_)) if self.items.is_empty() && next_cursor.is_none() => self.message(
-                if self.commit.is_none() {
-                    "This pull request has no file changes."
-                } else {
-                    "This commit has no file changes."
-                },
-                cx,
-            ),
+            (_, Parsed::Empty) | (_, Parsed::Files(_))
+                if self.items.is_empty() && next_cursor.is_none() =>
+            {
+                self.message(
+                    if self.commit.is_none() {
+                        "This pull request has no file changes."
+                    } else {
+                        "This commit has no file changes."
+                    },
+                    cx,
+                )
+            }
             _ => {
-                let orphan_threads: Vec<PullRequestReviewThread> = detail
-                    .as_ref()
-                    .map(|d| {
-                        d.review_threads
-                            .iter()
-                            .filter(|thread| !self.placed.contains(thread.id.as_str()))
-                            .cloned()
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let orphan_threads: Vec<PullRequestReviewThread> =
+                    ready.map(|r| r.4.clone()).unwrap_or_default();
                 let orphans = self.orphans(orphan_threads, next_cursor.is_some(), window, cx);
                 let tree = (self.tree_open && !file_views.is_empty())
                     .then(|| self.file_tree(file_views, next_cursor.is_some(), cx));
@@ -664,7 +792,9 @@ impl Render for CodeTab {
                                     .child(
                                         list(
                                             self.list.clone(),
-                                            cx.processor(|this, ix, window, cx| this.render_item(ix, window, cx)),
+                                            cx.processor(|this, ix, window, cx| {
+                                                this.render_item(ix, window, cx)
+                                            }),
                                         )
                                         .size_full(),
                                     )

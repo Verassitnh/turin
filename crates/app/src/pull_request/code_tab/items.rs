@@ -38,12 +38,22 @@ impl FileView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
-    FileHeader { file: usize },
+    FileHeader {
+        file: usize,
+    },
     /// A binary file has no hunks to show.
-    Binary { file: usize },
+    Binary {
+        file: usize,
+    },
     /// "N unmodified lines" between hunks.
-    Separator { file: usize, lines: usize },
-    Line { file: usize, row: usize },
+    Separator {
+        file: usize,
+        lines: usize,
+    },
+    Line {
+        file: usize,
+        row: usize,
+    },
     /// One row of the split layout: the old side and the new side.
     Split {
         file: usize,
@@ -95,7 +105,9 @@ pub fn build_items(input: &BuildInput<'_>) -> Vec<Item> {
         }
         let annotations_after = |items: &mut Vec<Item>, old: Option<i64>, new: Option<i64>| {
             if let Some(line) = old
-                && input.annotated.contains(&(index, PullRequestDiffSide::Left, line))
+                && input
+                    .annotated
+                    .contains(&(index, PullRequestDiffSide::Left, line))
             {
                 items.push(Item::Annotation {
                     file: index,
@@ -104,7 +116,9 @@ pub fn build_items(input: &BuildInput<'_>) -> Vec<Item> {
                 });
             }
             if let Some(line) = new
-                && input.annotated.contains(&(index, PullRequestDiffSide::Right, line))
+                && input
+                    .annotated
+                    .contains(&(index, PullRequestDiffSide::Right, line))
             {
                 items.push(Item::Annotation {
                     file: index,
@@ -125,7 +139,10 @@ pub fn build_items(input: &BuildInput<'_>) -> Vec<Item> {
                 }
             }
             if !input.split {
-                items.push(Item::Line { file: index, row: cursor });
+                items.push(Item::Line {
+                    file: index,
+                    row: cursor,
+                });
                 annotations_after(&mut items, row.old_line, row.new_line);
                 cursor += 1;
                 continue;
@@ -191,7 +208,7 @@ mod tests {
     const PATCH: &str = "diff --git a/a.rs b/a.rs
 --- a/a.rs
 +++ b/a.rs
-@@ -3,3 +3,4 @@
+@@ -3,4 +3,5 @@
  keep
 -old1
 -old2
@@ -211,7 +228,12 @@ mod tests {
         }
     }
 
-    fn build(split: bool, folded: bool, annotated: HashSet<AnnotationKey>, footer: bool) -> Vec<Item> {
+    fn build(
+        split: bool,
+        folded: bool,
+        annotated: HashSet<AnnotationKey>,
+        footer: bool,
+    ) -> Vec<Item> {
         let views = views();
         build_items(&BuildInput {
             files: &views,
@@ -229,17 +251,23 @@ mod tests {
         assert_eq!(items[1], Item::Separator { file: 0, lines: 2 });
         // keep, old1, old2, new1, new2, new3, tail
         assert_eq!(
-            items[2..9].iter().filter(|item| matches!(item, Item::Line { .. })).count(),
+            items[2..9]
+                .iter()
+                .filter(|item| matches!(item, Item::Line { .. }))
+                .count(),
             7
         );
-        // Between hunks: lines 6..=20 of the new file are not shown.
-        assert!(items.contains(&Item::Separator { file: 0, lines: 14 }));
+        // Between hunks: lines 8..=20 of the new file are not shown.
+        assert!(items.contains(&Item::Separator { file: 0, lines: 13 }));
         assert_eq!(items.len(), 1 + 1 + 7 + 1 + 2);
     }
 
     #[test]
     fn a_folded_file_is_only_its_header() {
-        assert_eq!(build(false, true, HashSet::new(), false), vec![Item::FileHeader { file: 0 }]);
+        assert_eq!(
+            build(false, true, HashSet::new(), false),
+            vec![Item::FileHeader { file: 0 }]
+        );
     }
 
     #[test]
@@ -249,10 +277,18 @@ mod tests {
         annotated.insert((0, PullRequestDiffSide::Left, 4));
         let items = build(false, false, annotated, false);
         let position = |wanted: &Item| items.iter().position(|item| item == wanted).unwrap();
-        let old2 = position(&Item::Annotation { file: 0, side: PullRequestDiffSide::Left, line: 4 });
+        let old2 = position(&Item::Annotation {
+            file: 0,
+            side: PullRequestDiffSide::Left,
+            line: 4,
+        });
         // Row order: keep(3/3) old1(4) old2(5) new1(4) new2(5)...; left 4 hangs under old1.
         assert!(matches!(items[old2 - 1], Item::Line { row: 1, .. }));
-        let new2 = position(&Item::Annotation { file: 0, side: PullRequestDiffSide::Right, line: 5 });
+        let new2 = position(&Item::Annotation {
+            file: 0,
+            side: PullRequestDiffSide::Right,
+            line: 5,
+        });
         assert!(matches!(items[new2 - 1], Item::Line { row: 4, .. }));
     }
 
@@ -281,6 +317,9 @@ mod tests {
 
     #[test]
     fn a_footer_closes_a_diff_that_is_still_paging() {
-        assert_eq!(build(false, true, HashSet::new(), true).last(), Some(&Item::Footer));
+        assert_eq!(
+            build(false, true, HashSet::new(), true).last(),
+            Some(&Item::Footer)
+        );
     }
 }

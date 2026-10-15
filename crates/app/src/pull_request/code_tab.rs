@@ -28,18 +28,18 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, Context, ElementId, Entity, FontWeight, HighlightStyle,
-    Hsla, InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, StyledText,
-    Styled as _, Subscription, Window, div, list, px, relative, rems,
+    Anchor, AnyElement, App, AppContext as _, Context, Entity, HighlightStyle, Hsla,
+    InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState, ParentElement as _,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, Subscription,
+    Window, div, list, px, relative, rems,
 };
-use gpui_kit::component::menu::PopupMenuItem;
 use turin_contracts::pull_request::{
-    PullRequestCommit, PullRequestDiffResult, PullRequestDiffSide, PullRequestFileViewedState,
-    PullRequestReviewCommentDraft, PullRequestReviewPosition, PullRequestReviewThread,
+    PullRequestCommit, PullRequestDiffResult, PullRequestDiffSide, PullRequestReviewCommentDraft,
+    PullRequestReviewPosition, PullRequestReviewThread,
 };
 
 use self::files_viewed::FilesViewed;
@@ -73,7 +73,7 @@ use super::view_model::{Loadable, PullRequestDetailSnapshot};
 use crate::components::chat::markdown::code_highlight::highlight_code;
 use crate::state::helpers::review_guide_tour::DiffRowKind;
 use crate::theme::color::{MixSpace, color_mix, with_alpha};
-use crate::theme::tokens::{TEXT_2XS, TEXT_3XS, TEXT_SM, TEXT_XS};
+use crate::theme::tokens::{TEXT_2XS, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{
     Button, ButtonSize, ButtonVariant, Icon, IconName, Toggle, ToggleSize, ToggleVariant, Tooltip,
@@ -186,24 +186,25 @@ pub(crate) fn row_tokens(view: &FileView, dark: bool) -> Vec<LineTokens> {
     };
     let (new_offsets, new_tokens) = side(&meta.addition_lines);
     let (old_offsets, old_tokens) = side(&meta.deletion_lines);
-    let slice = |offsets: &[usize], tokens: &[(Range<usize>, Hsla)], line: usize, lines: &[String]| {
-        let start = offsets[line];
-        let text_len = lines[line].trim_end_matches(['\n', '\r']).len();
-        let end = start + text_len;
-        let first = tokens.partition_point(|(range, _)| range.end <= start);
-        let mut out: LineTokens = Vec::new();
-        for (range, color) in &tokens[first..] {
-            if range.start >= end {
-                break;
+    let slice =
+        |offsets: &[usize], tokens: &[(Range<usize>, Hsla)], line: usize, lines: &[String]| {
+            let start = offsets[line];
+            let text_len = lines[line].trim_end_matches(['\n', '\r']).len();
+            let end = start + text_len;
+            let first = tokens.partition_point(|(range, _)| range.end <= start);
+            let mut out: LineTokens = Vec::new();
+            for (range, color) in &tokens[first..] {
+                if range.start >= end {
+                    break;
+                }
+                let from = range.start.max(start) - start;
+                let to = range.end.min(end) - start;
+                if to > from && out.last().is_none_or(|(last, _)| last.end <= from) {
+                    out.push((from..to, *color));
+                }
             }
-            let from = range.start.max(start) - start;
-            let to = range.end.min(end) - start;
-            if to > from && out.last().is_none_or(|(last, _)| last.end <= from) {
-                out.push((from..to, *color));
-            }
-        }
-        out
-    };
+            out
+        };
     let (mut added, mut removed) = (0, 0);
     view.rows
         .iter()
@@ -305,7 +306,9 @@ fn parse_key(commit: &Option<String>, patch: &str, ignore_whitespace: bool) -> P
         .bytes()
         .take(256)
         .chain(patch.bytes().rev().take(256))
-        .fold(0u64, |acc, byte| acc.wrapping_mul(31).wrapping_add(u64::from(byte)));
+        .fold(0u64, |acc, byte| {
+            acc.wrapping_mul(31).wrapping_add(u64::from(byte))
+        });
     ParseKey {
         commit: commit.clone(),
         ptr: patch.as_ptr() as usize,
@@ -667,43 +670,53 @@ impl CodeTab {
     /// Reads the snapshot, re-parses when the patch moved, and rebuilds the list when anything
     /// it shows has changed.
     fn sync(&mut self, cx: &mut Context<Self>) {
-        let Some(snapshot) = self.ctx.snapshot(cx).cloned() else {
-            return;
-        };
-        self.viewed.sync(&snapshot.files_viewed);
-        let result = match snapshot.diffs.get(&self.commit) {
-            Some(Loadable::Ready(result)) => Some(result.clone()),
-            _ => None,
-        };
-        match &result {
-            Some(result) => {
-                let key = parse_key(&self.commit, &result.patch, self.ignore_whitespace);
-                if self.parse_key.as_ref() != Some(&key) {
-                    self.parse_key = Some(key);
-                    self.parsed = parse_files(&result.patch, self.ignore_whitespace);
-                    self.tokens.borrow_mut().clear();
-                    self.dirty = true;
+        let store = self.ctx.store.clone();
+        let reference = self.ctx.reference.clone();
+        let mut leave_commit = false;
+        {
+            let Some(snapshot) = store.read(cx).detail(&reference) else {
+                return;
+            };
+            self.viewed.sync(&snapshot.files_viewed);
+            let result = match snapshot.diffs.get(&self.commit) {
+                Some(Loadable::Ready(result)) => Some(result),
+                _ => None,
+            };
+            match result {
+                Some(result) => {
+                    let key = parse_key(&self.commit, &result.patch, self.ignore_whitespace);
+                    if self.parse_key.as_ref() != Some(&key) {
+                        self.parse_key = Some(key);
+                        self.parsed = parse_files(&result.patch, self.ignore_whitespace);
+                        self.tokens.borrow_mut().clear();
+                        self.dirty = true;
+                    }
+                }
+                None => {
+                    if self.parse_key.take().is_some() {
+                        self.parsed = Parsed::Empty;
+                        self.dirty = true;
+                    }
                 }
             }
-            None => {
-                if self.parse_key.take().is_some() {
-                    self.parsed = Parsed::Empty;
-                    self.dirty = true;
-                }
+            // A rebase or a force-push can take the scoped commit out of the change; the scope
+            // then goes back to the whole change rather than sitting under a name nothing matches.
+            if let (Some(commit), Loadable::Ready(detail)) = (&self.commit, &snapshot.detail)
+                && !detail
+                    .commits
+                    .iter()
+                    .any(|entry| entry.oid.as_str() == commit)
+            {
+                leave_commit = true;
+            } else if self.dirty {
+                self.rebuild(snapshot, result, cx);
+                self.dirty = false;
             }
         }
-        // A rebase or a force-push can take the scoped commit out of the change; the scope then
-        // goes back to the whole change rather than sitting under a name nothing matches.
-        if let (Some(commit), Loadable::Ready(detail)) = (&self.commit, &snapshot.detail)
-            && !detail.commits.iter().any(|entry| entry.oid.as_str() == commit)
-        {
+        if leave_commit {
             self.commit = None;
             self.reset_scope();
             self.request_diff(cx);
-        }
-        if self.dirty {
-            self.rebuild(&snapshot, result.as_ref(), cx);
-            self.dirty = false;
         }
     }
 
@@ -746,13 +759,21 @@ impl CodeTab {
                     {
                         self.placed.insert(thread.id.as_str().to_owned());
                         let key = (index, thread.side, line.get() as i64);
-                        self.groups.entry(key).or_default().threads.push(thread.clone());
+                        self.groups
+                            .entry(key)
+                            .or_default()
+                            .threads
+                            .push(thread.clone());
                         annotated.insert(key);
                     }
                 }
             }
             // Pending comments anchor to the head diff exactly like host threads do.
-            let pending = self.review.read(cx).pending_review_comments(&self.ctx.reference).to_vec();
+            let pending = self
+                .review
+                .read(cx)
+                .pending_review_comments(&self.ctx.reference)
+                .to_vec();
             for comment in pending {
                 let Some(index) = files_ref
                     .iter()
@@ -791,7 +812,12 @@ impl CodeTab {
         {
             let key = files_ref[index].key.clone();
             if self.collapsed(&key) {
-                self.toggled = toggle_file_diff_fold_for_viewed(&key, false, self.fold_override, &self.toggled);
+                self.toggled = toggle_file_diff_fold_for_viewed(
+                    &key,
+                    false,
+                    self.fold_override,
+                    &self.toggled,
+                );
                 self.reveal = Some(path);
                 self.dirty = true;
                 return;

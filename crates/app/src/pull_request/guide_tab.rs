@@ -10,9 +10,6 @@
 //! sound (they need the app's toast and notification services and the reader leaving the tab),
 //! and the header menu's rewrite entry (the panel header, S1) — [`GuideTab::write`] is its seam.
 
-use std::rc::Rc;
-
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render,
     SharedString, Styled as _, Subscription, Window, div, rems,
@@ -20,7 +17,7 @@ use gpui_kit::{
 use turin_contracts::pull_request_review_guide::PullRequestReviewGuideRun;
 
 use super::detail_context::DetailContext;
-use super::guide_view::{GuideBanner, GuideTour};
+use super::guide_view::{FinishHandler, GuideBanner, GuideTour};
 use super::presentation_view::Spinner;
 use super::view_model::Loadable;
 use crate::theme::ActiveAppTheme;
@@ -36,7 +33,7 @@ pub struct GuideTab {
     /// What the snapshot said about the run when the write was asked for.
     baseline: String,
     tour: Option<Entity<GuideTour>>,
-    on_finish: Option<Rc<dyn Fn(&mut App)>>,
+    on_finish: Option<FinishHandler>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -55,7 +52,7 @@ impl GuideTab {
     }
 
     /// The last stop's "Finish review": the panel opens the composer on the review.
-    pub fn set_on_finish(&mut self, handler: Option<Rc<dyn Fn(&mut App)>>, cx: &mut Context<Self>) {
+    pub fn set_on_finish(&mut self, handler: Option<FinishHandler>, cx: &mut Context<Self>) {
         self.on_finish = handler;
         cx.notify();
     }
@@ -90,7 +87,9 @@ impl GuideTab {
                 .ctx
                 .snapshot(cx)
                 .and_then(|snapshot| snapshot.guide.ready())
-                .is_some_and(|result| matches!(result.run, Some(PullRequestReviewGuideRun::Running { .. })))
+                .is_some_and(|result| {
+                    matches!(result.run, Some(PullRequestReviewGuideRun::Running { .. }))
+                })
     }
 }
 
@@ -101,7 +100,10 @@ fn run_signature(
         format!(
             "{:?}|{:?}",
             result.run,
-            result.guide.as_ref().map(|guide| guide.generated_at.clone())
+            result
+                .guide
+                .as_ref()
+                .map(|guide| guide.generated_at.clone())
         )
     })
 }
@@ -127,39 +129,64 @@ pub fn is_guide_stale(guide_head: &str, current_head_sha: Option<&str>) -> bool 
 impl Render for GuideTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.app_theme().clone();
-        let snapshot = self.ctx.snapshot(cx).cloned();
-        let can_write = snapshot.as_ref().is_some_and(|snapshot| snapshot.can_write);
-        let can_comment = match snapshot.as_ref().map(|snapshot| &snapshot.detail) {
-            Some(Loadable::Ready(detail)) => {
-                detail.capabilities.review.inline_comment && detail.viewer_permissions.comment
-            }
-            _ => false,
+        // The snapshot also holds whole patches; only what the tab reads is copied.
+        let (can_write, can_comment, guide_state) = match self.ctx.snapshot(cx) {
+            Some(snapshot) => (
+                snapshot.can_write,
+                matches!(&snapshot.detail, Loadable::Ready(detail)
+                    if detail.capabilities.review.inline_comment && detail.viewer_permissions.comment),
+                Some(snapshot.guide.clone()),
+            ),
+            None => (false, false, None),
         };
-        let guide_state = snapshot.as_ref().map(|snapshot| snapshot.guide.clone());
         let result = guide_state.as_ref().and_then(Loadable::ready);
-        let query_error = guide_state.as_ref().and_then(Loadable::error).map(str::to_owned);
-        let running_in_snapshot =
-            result.is_some_and(|result| matches!(result.run, Some(PullRequestReviewGuideRun::Running { .. })));
+        let query_error = guide_state
+            .as_ref()
+            .and_then(Loadable::error)
+            .map(str::to_owned);
+        let running_in_snapshot = result.is_some_and(|result| {
+            matches!(result.run, Some(PullRequestReviewGuideRun::Running { .. }))
+        });
         // The source has taken the run over once the snapshot says anything new about it.
         if self.starting && self.baseline != run_signature(result) {
             self.starting = false;
         }
         let running = self.starting || running_in_snapshot;
-        let current_head = result.and_then(|result| result.current_head_sha.as_ref().map(|sha| sha.as_str().to_owned()));
-        let failure = current_failure(result.and_then(|result| result.run.as_ref()), current_head.as_deref())
-            .map(str::to_owned);
-        let write_button = |id: &'static str, label: &'static str, size: ButtonSize, running: bool, cx: &mut Context<Self>| {
+        let current_head = result.and_then(|result| {
+            result
+                .current_head_sha
+                .as_ref()
+                .map(|sha| sha.as_str().to_owned())
+        });
+        let failure = current_failure(
+            result.and_then(|result| result.run.as_ref()),
+            current_head.as_deref(),
+        )
+        .map(str::to_owned);
+        let write_button = |id: &'static str,
+                            label: &'static str,
+                            size: ButtonSize,
+                            running: bool,
+                            cx: &mut Context<Self>| {
             can_write.then(|| {
                 Button::new(id)
                     .size(size)
                     .variant(ButtonVariant::Outline)
                     .disabled(running)
                     .child(if running {
-                        Spinner::new("guide-write-spinner").size(rems(0.875)).into_any_element()
+                        Spinner::new("guide-write-spinner")
+                            .size(rems(0.875))
+                            .into_any_element()
                     } else {
-                        Icon::new(IconName::Sparkles).size(rems(0.875)).into_any_element()
+                        Icon::new(IconName::Sparkles)
+                            .size(rems(0.875))
+                            .into_any_element()
                     })
-                    .child(if running { "Reading the change..." } else { label })
+                    .child(if running {
+                        "Reading the change..."
+                    } else {
+                        label
+                    })
                     .on_click(cx.listener(|this, _, _, cx| this.write(cx)))
             })
         };
@@ -199,7 +226,11 @@ impl Render for GuideTab {
                         .line_height(TEXT_SM.line_height)
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.foreground)
-                        .child(if running { "Writing a review guide" } else { "No review guide yet" }),
+                        .child(if running {
+                            "Writing a review guide"
+                        } else {
+                            "No review guide yet"
+                        }),
                 )
                 .child(
                     div()
@@ -211,7 +242,11 @@ impl Render for GuideTab {
                 )
                 .children(write_button(
                     "guide-write",
-                    if failure.is_none() { "Write guide" } else { "Try again" },
+                    if failure.is_none() {
+                        "Write guide"
+                    } else {
+                        "Try again"
+                    },
                     ButtonSize::Sm,
                     running,
                     cx,
@@ -266,7 +301,10 @@ mod tests {
 
     #[test]
     fn a_failure_shows_only_for_the_head_being_read() {
-        assert_eq!(current_failure(Some(&failed("abc")), Some("abc")), Some("model timed out"));
+        assert_eq!(
+            current_failure(Some(&failed("abc")), Some("abc")),
+            Some("model timed out")
+        );
         assert_eq!(current_failure(Some(&failed("abc")), Some("def")), None);
         assert_eq!(current_failure(Some(&failed("abc")), None), None);
         assert_eq!(current_failure(None, Some("abc")), None);

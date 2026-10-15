@@ -24,6 +24,7 @@ use turin_contracts::pull_request::{
 use super::comment_body::{EditButton, ReactionBar};
 use super::comment_form::{MarkdownEditor, MarkdownEditorEvent};
 use super::detail_context::DetailContext;
+use super::presentation_view::review_outcome_icon;
 use super::presentation_view::{
     PullRequestActorAvatar, PullRequestDiffStat, pull_request_meta_line, with_tooltip,
 };
@@ -31,15 +32,13 @@ use super::pull_request_detail_logic::{
     PullRequestCommentOrder, PullRequestReviewOutcome, PullRequestTimelineEvent,
     PullRequestTimelineEventKind, PullRequestTimelineRow, PullRequestTimelineSource,
     build_pull_request_timeline, group_pull_request_timeline_conversations,
-    is_pull_request_verdict_stale, newest_pull_request_commit_at,
-    pull_request_review_outcome,
+    is_pull_request_verdict_stale, newest_pull_request_commit_at, pull_request_review_outcome,
 };
 use super::pull_request_editing_logic::{EditingSubject, can_edit_pull_request_comment};
 use super::pull_request_presentation::{
     pull_request_review_outcome_label, pull_request_review_outcome_stale_label,
     pull_request_review_outcome_tone_class_name,
 };
-use super::presentation_view::review_outcome_icon;
 use super::relative_time::format_relative_time_label;
 use super::view_model::Loadable;
 use crate::theme::color::with_alpha;
@@ -116,7 +115,10 @@ impl TimelineTab {
         };
         let id = comment.id.as_str().to_owned();
         let body = comment.body.clone();
-        let can_write = self.ctx.snapshot(cx).is_some_and(|snapshot| snapshot.can_write);
+        let can_write = self
+            .ctx
+            .snapshot(cx)
+            .is_some_and(|snapshot| snapshot.can_write);
         let editor = cx.new(|cx| {
             let mut editor = MarkdownEditor::new(
                 SharedString::from(format!("timeline-edit-{id}")),
@@ -129,17 +131,22 @@ impl TimelineTab {
             editor
         });
         let comment_id = id.clone();
-        let subscription = cx.subscribe(&editor, move |this, _, event: &MarkdownEditorEvent, cx| {
-            match event {
+        let subscription = cx.subscribe(
+            &editor,
+            move |this, _, event: &MarkdownEditorEvent, cx| match event {
                 MarkdownEditorEvent::Save(body) => this.save_edit(body.clone(), cx),
                 MarkdownEditorEvent::Cancel => {
-                    if this.edit.as_ref().is_some_and(|edit| edit.comment_id == comment_id) {
+                    if this
+                        .edit
+                        .as_ref()
+                        .is_some_and(|edit| edit.comment_id == comment_id)
+                    {
                         this.edit = None;
                         cx.notify();
                     }
                 }
-            }
-        });
+            },
+        );
         self.edit = Some(EditSession {
             comment_id: id,
             kind,
@@ -184,7 +191,11 @@ fn timeline_marker(top: Option<Pixels>, theme: &AppTheme, child: impl IntoElemen
         .bg(theme.background)
         .child(child);
     match top {
-        Some(top) => div().absolute().left_0().top(top - px(MARKER / 2.)).child(boxed),
+        Some(top) => div()
+            .absolute()
+            .left_0()
+            .top(top - px(MARKER / 2.))
+            .child(boxed),
         None => div()
             .absolute()
             .left_0()
@@ -207,7 +218,11 @@ fn icon_marker(top: Option<Pixels>, icon: IconName, theme: &AppTheme) -> Div {
             .items_center()
             .justify_center()
             .bg(theme.background)
-            .child(Icon::new(icon).size(rems(0.875)).color(theme.muted_foreground)),
+            .child(
+                Icon::new(icon)
+                    .size(rems(0.875))
+                    .color(theme.muted_foreground),
+            ),
     )
 }
 
@@ -238,7 +253,9 @@ fn actor_name(actor: Option<&PullRequestActor>, theme: &AppTheme) -> Div {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.foreground)
         .child(SharedString::from(
-            actor.map_or("ghost", |actor| actor.login.as_str()).to_owned(),
+            actor
+                .map_or("ghost", |actor| actor.login.as_str())
+                .to_owned(),
         ))
 }
 
@@ -256,40 +273,47 @@ fn friendly_review_state(value: &str) -> String {
 
 /// `PullRequestMetaLine` segments for a remark: when, and which file.
 fn remark_meta(event: &PullRequestTimelineEvent, theme: &AppTheme) -> Div {
-    text_size(pull_request_meta_line(
-        [
-            Some(
-                div()
-                    .child(SharedString::from(format_relative_time_label(&event.at)))
-                    .into_any_element(),
-            ),
-            event.path.as_ref().map(|path| {
-                div()
-                    .flex()
-                    .min_w_0()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        Icon::new(IconName::FileCode)
-                            .size(rems(0.75))
-                            .color(theme.muted_foreground),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .child(SharedString::from(path.clone())),
-                    )
-                    .into_any_element()
-            }),
-        ],
-        theme,
-    ), TEXT_2XS)
+    text_size(
+        pull_request_meta_line(
+            [
+                Some(
+                    div()
+                        .child(SharedString::from(format_relative_time_label(&event.at)))
+                        .into_any_element(),
+                ),
+                event.path.as_ref().map(|path| {
+                    div()
+                        .flex()
+                        .min_w_0()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Icon::new(IconName::FileCode)
+                                .size(rems(0.75))
+                                .color(theme.muted_foreground),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(SharedString::from(path.clone())),
+                        )
+                        .into_any_element()
+                }),
+            ],
+            theme,
+        ),
+        TEXT_2XS,
+    )
     .flex_wrap()
     .text_color(theme.muted_foreground)
 }
 
-fn body_block(event_id: &str, event: &PullRequestTimelineEvent, theme: &AppTheme) -> Option<AnyElement> {
+fn body_block(
+    event_id: &str,
+    event: &PullRequestTimelineEvent,
+    theme: &AppTheme,
+) -> Option<AnyElement> {
     let body = event.body.as_ref()?;
     // `TimelineBody`: `mt-3`.
     Some(
@@ -317,7 +341,12 @@ fn body_block(event_id: &str, event: &PullRequestTimelineEvent, theme: &AppTheme
 // ── Rendering ───────────────────────────────────────────────────────────────
 
 impl TimelineTab {
-    fn open_on_host_button(&self, id: String, url: Option<String>, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn open_on_host_button(
+        &self,
+        id: String,
+        url: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let url = url?;
         Some(
             div()
@@ -399,14 +428,17 @@ impl TimelineTab {
                                 .text_color(theme.muted_foreground)
                                 .child(SharedString::from(event.title.clone())),
                         )
-                        .when_some(event.review_state.as_ref(), |this, state| {
-                            this.child(
-                                text_size(div(), TEXT_3XS)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.muted_foreground)
-                                    .child(SharedString::from(friendly_review_state(state))),
-                            )
-                        }),
+                        .when_some(
+                            event.review_state.as_ref(),
+                            |this, state| {
+                                this.child(
+                                    text_size(div(), TEXT_3XS)
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.muted_foreground)
+                                        .child(SharedString::from(friendly_review_state(state))),
+                                )
+                            },
+                        ),
                     )
                     .child(div().mt_1().child(remark_meta(event, theme))),
             )
@@ -477,12 +509,20 @@ impl TimelineTab {
         let comments = format!(
             "{} {}",
             events.len(),
-            if events.len() == 1 { "comment" } else { "comments" }
+            if events.len() == 1 {
+                "comment"
+            } else {
+                "comments"
+            }
         );
         let authors = format!(
             "{} {} \u{b7} {}",
             actors.len(),
-            if actors.len() == 1 { "author" } else { "authors" },
+            if actors.len() == 1 {
+                "author"
+            } else {
+                "authors"
+            },
             format_relative_time_label(&first.at)
         );
         let trigger_id = SharedString::from(format!("conversation-{key}"));
@@ -519,14 +559,21 @@ impl TimelineTab {
                         .child(SharedString::from(comments)),
                 )
                 .child(
-                    text_size(div().truncate().text_color(theme.muted_foreground), TEXT_3XS)
-                        .child(SharedString::from(authors)),
+                    text_size(
+                        div().truncate().text_color(theme.muted_foreground),
+                        TEXT_3XS,
+                    )
+                    .child(SharedString::from(authors)),
                 ),
         )
         .child(
-            Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown })
-                .size(rems(0.875))
-                .color(theme.muted_foreground),
+            Icon::new(if open {
+                IconName::ChevronUp
+            } else {
+                IconName::ChevronDown
+            })
+            .size(rems(0.875))
+            .color(theme.muted_foreground),
         );
         let cards = open.then(|| {
             let mut list = div().mt_1().flex().flex_col().gap_1();
@@ -570,7 +617,10 @@ impl TimelineTab {
         let open_commit = self.ctx.nav.open_commit.clone();
         let short: String = event.id.chars().take(7).collect();
         let hover = theme.primary;
-        let title = event.body.clone().unwrap_or_else(|| "Untitled commit".to_owned());
+        let title = event
+            .body
+            .clone()
+            .unwrap_or_else(|| "Untitled commit".to_owned());
         let _ = cx;
         div()
             .id(SharedString::from(group.to_string()))
@@ -583,7 +633,13 @@ impl TimelineTab {
             .pl(rems(3.))
             .cursor_pointer()
             .on_click(move |_, _, cx| open_commit(&oid, cx))
-            .child(actor_marker(None, &event.commit_authors, IconName::GitCommitHorizontal, false, theme))
+            .child(actor_marker(
+                None,
+                &event.commit_authors,
+                IconName::GitCommitHorizontal,
+                false,
+                theme,
+            ))
             .child(
                 div()
                     .flex()
@@ -630,11 +686,8 @@ impl TimelineTab {
                         event.additions.zip(event.deletions),
                         |this, (additions, deletions)| {
                             this.child(
-                                text_size(
-                                    div().ml_auto().flex_shrink_0(),
-                                    TEXT_3XS,
-                                )
-                                .child(PullRequestDiffStat::new(additions, deletions).mono()),
+                                text_size(div().ml_auto().flex_shrink_0(), TEXT_3XS)
+                                    .child(PullRequestDiffStat::new(additions, deletions).mono()),
                             )
                         },
                     ),
@@ -764,7 +817,12 @@ impl TimelineTab {
         timeline_ghost(6, cx)
     }
 
-    fn activity_unavailable(&self, error: &str, theme: &AppTheme, cx: &mut Context<Self>) -> AnyElement {
+    fn activity_unavailable(
+        &self,
+        error: &str,
+        theme: &AppTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let ctx = self.ctx.clone();
         div()
             .flex()
@@ -785,8 +843,11 @@ impl TimelineTab {
                     .child("Could not load pull request activity"),
             )
             .child(
-                text_size(div().max_w(rems(28.)).text_color(theme.muted_foreground), TEXT_XS)
-                    .child(SharedString::from(error.to_owned())),
+                text_size(
+                    div().max_w(rems(28.)).text_color(theme.muted_foreground),
+                    TEXT_XS,
+                )
+                .child(SharedString::from(error.to_owned())),
             )
             .child(
                 Button::new("timeline-retry")
@@ -831,7 +892,12 @@ pub fn timeline_ghost(rows: usize, cx: &App) -> AnyElement {
                         .h(rems(0.875))
                         .w(relative(TITLE_WIDTHS[index % TITLE_WIDTHS.len()])),
                 )
-                .child(skeleton(SkeletonShape::Block, cx).h_3().mt(rems(0.375)).w(rems(4.))),
+                .child(
+                    skeleton(SkeletonShape::Block, cx)
+                        .h_3()
+                        .mt(rems(0.375))
+                        .w(rems(4.)),
+                ),
         );
     }
     skeleton_group(
@@ -843,13 +909,17 @@ pub fn timeline_ghost(rows: usize, cx: &App) -> AnyElement {
 impl Render for TimelineTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.app_theme().clone();
-        let snapshot = self.ctx.snapshot(cx).cloned();
+        // The snapshot also holds whole patches; only the detail is copied.
+        let snapshot = self
+            .ctx
+            .snapshot(cx)
+            .map(|snapshot| (snapshot.detail.clone(), snapshot.activity_pending));
         let content = match snapshot {
             None => self.ghost(cx),
-            Some(snapshot) => match &snapshot.detail {
+            Some((detail, activity_pending)) => match &detail {
                 Loadable::Pending => self.ghost(cx),
                 Loadable::Failed(error) => self.activity_unavailable(error, &theme, cx),
-                Loadable::Ready(_) if snapshot.activity_pending => self.ghost(cx),
+                Loadable::Ready(_) if activity_pending => self.ghost(cx),
                 Loadable::Ready(detail) => {
                     let source = PullRequestTimelineSource {
                         created_at: detail.created_at.clone(),
@@ -938,9 +1008,7 @@ impl Render for TimelineTab {
                                                 .color(theme.muted_foreground),
                                         ),
                                     )
-                                    .child(
-                                        text_size(div(), TEXT_XS).child("No activity yet."),
-                                    ),
+                                    .child(text_size(div(), TEXT_XS).child("No activity yet.")),
                             )
                         })
                         .into_any_element()
@@ -961,41 +1029,15 @@ mod tests {
 
     #[test]
     fn review_states_read_as_words() {
-        assert_eq!(friendly_review_state("CHANGES_REQUESTED"), "Changes requested");
+        assert_eq!(
+            friendly_review_state("CHANGES_REQUESTED"),
+            "Changes requested"
+        );
         assert_eq!(friendly_review_state("commented"), "Commented");
-        assert_eq!(friendly_review_state("changes-requested"), "Changes requested");
+        assert_eq!(
+            friendly_review_state("changes-requested"),
+            "Changes requested"
+        );
         assert_eq!(friendly_review_state(""), "");
-    }
-}
-
-/// S2 DEV HOOK: one tab bare, for screenshots while the detail panel shell is in flight.
-pub fn mount_isolated(
-    tab: super::detail_context::DetailTab,
-    ctx: DetailContext,
-    window: &mut Window,
-    cx: &mut App,
-) -> Option<gpui_kit::AnyView> {
-    use super::detail_context::DetailTab;
-    if let Some(source) = ctx.source(cx) {
-        source.open_detail(&ctx.reference, cx);
-    }
-    let bg = cx.app_theme().background;
-    let view: gpui_kit::AnyView = match tab {
-        DetailTab::Timeline => cx.new(|cx| TimelineTab::new(ctx, window, cx)).into(),
-        DetailTab::Code => cx.new(|cx| super::code_tab::CodeTab::new(ctx, window, cx)).into(),
-        DetailTab::Guide => cx.new(|cx| super::guide_tab::GuideTab::new(ctx, window, cx)).into(),
-        _ => return None,
-    };
-    Some(cx.new(|_| Frame { view, bg }).into())
-}
-
-struct Frame {
-    view: gpui_kit::AnyView,
-    bg: gpui_kit::Hsla,
-}
-
-impl Render for Frame {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().bg(self.bg).child(self.view.clone())
     }
 }

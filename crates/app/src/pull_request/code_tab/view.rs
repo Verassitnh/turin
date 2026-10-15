@@ -142,7 +142,9 @@ impl CodeTab {
             .font_family(metrics.font.clone())
             .text_size(metrics.size)
             .line_height(metrics.line)
-            .when(!self.wrap, |this| this.whitespace_nowrap().overflow_hidden())
+            .when(!self.wrap, |this| {
+                this.whitespace_nowrap().overflow_hidden()
+            })
             .child(code_text(text, tokens, palette.fg))
             .into_any_element()
     }
@@ -169,7 +171,11 @@ impl CodeTab {
         } else {
             PullRequestDiffSide::Right
         };
-        let number = if row.kind == DiffRowKind::Deletion { row.old_line } else { row.new_line };
+        let number = if row.kind == DiffRowKind::Deletion {
+            row.old_line
+        } else {
+            row.new_line
+        };
         let gutter = self.gutter(
             ix,
             "u",
@@ -217,7 +223,10 @@ impl CodeTab {
     ) -> AnyElement {
         let tokens = self.tokens_for(file, view, theme.is_dark());
         let group: SharedString = format!("diff-row-{ix}").into();
-        let mut half = |index: Option<usize>, side: PullRequestDiffSide, name: &str, cx: &mut Context<Self>| {
+        let half = |index: Option<usize>,
+                    side: PullRequestDiffSide,
+                    name: &str,
+                    cx: &mut Context<Self>| {
             let (kind, number, text, row_tokens) = match index {
                 Some(row_ix) => {
                     let row = &view.rows[row_ix];
@@ -244,21 +253,23 @@ impl CodeTab {
                 } else {
                     palette.line(kind).unwrap_or(palette.bg)
                 })
-                .child(self.gutter(
-                    ix,
-                    name,
-                    number,
-                    if empty { DiffRowKind::Context } else { kind },
-                    width,
-                    index
-                        .filter(|_| can_comment)
-                        .map(|row_ix| (file, row_ix, side)),
-                    metrics,
-                    palette,
-                    theme,
-                    &group,
-                    cx,
-                ))
+                .child(
+                    self.gutter(
+                        ix,
+                        name,
+                        number,
+                        if empty { DiffRowKind::Context } else { kind },
+                        width,
+                        index
+                            .filter(|_| can_comment)
+                            .map(|row_ix| (file, row_ix, side)),
+                        metrics,
+                        palette,
+                        theme,
+                        &group,
+                        cx,
+                    ),
+                )
                 .child(self.code_cell(&text, &row_tokens, metrics, palette))
         };
         let left = half(left, PullRequestDiffSide::Left, "l", cx);
@@ -269,12 +280,18 @@ impl CodeTab {
             .flex()
             .w_full()
             .child(left)
-            .child(div().w(px(1.)).flex_shrink_0().bg(with_alpha(theme.border, 0.6)))
+            .child(
+                div()
+                    .w(px(1.))
+                    .flex_shrink_0()
+                    .bg(with_alpha(theme.border, 0.6)),
+            )
             .child(right)
             .into_any_element()
     }
 
     /// `[data-diffs-header]`: sticky upstream; here a plain row.
+    #[allow(clippy::too_many_arguments)]
     fn file_header(
         &self,
         ix: usize,
@@ -344,16 +361,30 @@ impl CodeTab {
                     Button::new(SharedString::from(format!("fold-{ix}")))
                         .size(ButtonSize::IconMicro)
                         .variant(ButtonVariant::GhostMuted)
-                        .icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown })
+                        .icon(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
                         .icon_size(rems(1.))
-                        .tooltip(Tooltip::new(if collapsed { "Expand diff" } else { "Collapse diff" }))
+                        .tooltip(Tooltip::new(if collapsed {
+                            "Expand diff"
+                        } else {
+                            "Collapse diff"
+                        }))
                         .on_click(cx.listener({
                             let key = key.clone();
                             move |this, _, _, cx| this.toggle_file(&key, cx)
                         })),
                 ),
             )
-            .child(div().min_w_0().flex_1().truncate().child(SharedString::from(title)))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .child(SharedString::from(title)),
+            )
             .child(
                 div()
                     .flex()
@@ -416,7 +447,11 @@ impl CodeTab {
             .into_any_element()
     }
 
-    fn thread_props(&self, snapshot: &PullRequestDetailSnapshot, thread: &PullRequestReviewThread) -> Option<ThreadCardProps> {
+    fn thread_props(
+        &self,
+        snapshot: &PullRequestDetailSnapshot,
+        thread: &PullRequestReviewThread,
+    ) -> Option<ThreadCardProps> {
         let Loadable::Ready(detail) = &snapshot.detail else {
             return None;
         };
@@ -437,8 +472,10 @@ impl CodeTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<ReviewThreadCard>> {
-        let snapshot = self.ctx.snapshot(cx)?.clone();
-        let props = self.thread_props(&snapshot, thread)?;
+        let props = {
+            let snapshot = self.ctx.snapshot(cx)?;
+            self.thread_props(snapshot, thread)?
+        };
         // Named with the pull request too: a thread's id is the host's own, and two pull requests
         // can hand out the same one.
         let key = format!(
@@ -457,6 +494,7 @@ impl CodeTab {
         Some(card)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn annotation(
         &mut self,
         file: usize,
@@ -467,7 +505,11 @@ impl CodeTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let group = self.groups.get(&(file, side, line)).cloned().unwrap_or_default();
+        let group = self
+            .groups
+            .get(&(file, side, line))
+            .cloned()
+            .unwrap_or_default();
         let mut body = div()
             .w_full()
             .py_1()
@@ -483,7 +525,9 @@ impl CodeTab {
             let id = comment.id.clone();
             let entity = cx.entity().downgrade();
             body = body.child(PendingReviewCommentCard::new(comment, move |_, _, cx| {
-                entity.update(cx, |this, cx| this.remove_pending(&id, cx)).ok();
+                entity
+                    .update(cx, |this, cx| this.remove_pending(&id, cx))
+                    .ok();
             }));
         }
         if group.draft
@@ -501,7 +545,12 @@ impl CodeTab {
             .snapshot(cx)
             .and_then(|snapshot| snapshot.diffs.get(&self.commit))
             .and_then(Loadable::ready)
-            .and_then(|result| result.next_cursor.as_ref().map(|cursor| cursor.as_str().to_owned()));
+            .and_then(|result| {
+                result
+                    .next_cursor
+                    .as_ref()
+                    .map(|cursor| cursor.as_str().to_owned())
+            });
         let _ = cursor_error;
         div()
             .flex()
@@ -519,14 +568,24 @@ impl CodeTab {
                     .label("Load more files")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let (Some(cursor), Some(source)) = (next.clone(), this.ctx.source(cx)) {
-                            source.load_diff_page(&this.ctx.reference, this.commit.clone(), &cursor, cx);
+                            source.load_diff_page(
+                                &this.ctx.reference,
+                                this.commit.clone(),
+                                &cursor,
+                                cx,
+                            );
                         }
                     })),
             )
             .into_any_element()
     }
 
-    pub(super) fn render_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_item(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(item) = self.items.get(ix).cloned() else {
             return div().into_any_element();
         };
@@ -627,9 +686,17 @@ fn checkbox(checked: bool, theme: &AppTheme) -> AnyElement {
         .rounded(px(4.))
         .border_1()
         .border_color(if checked { theme.primary } else { theme.input })
-        .bg(if checked { theme.primary } else { theme.background })
+        .bg(if checked {
+            theme.primary
+        } else {
+            theme.background
+        })
         .when(checked, |this| {
-            this.child(Icon::new(IconName::Check).size(rems(0.75)).color(theme.primary_foreground))
+            this.child(
+                Icon::new(IconName::Check)
+                    .size(rems(0.75))
+                    .color(theme.primary_foreground),
+            )
         })
         .into_any_element()
 }
@@ -672,8 +739,8 @@ pub fn tree_rows(paths: &[String]) -> Vec<TreeRow> {
             .iter()
             .filter(|(_, child)| child.file.is_some())
             .collect();
-        directories.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
-        files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        directories.sort_by_key(|(name, _)| name.to_lowercase());
+        files.sort_by_key(|(name, _)| name.to_lowercase());
         for (name, child) in directories {
             let (mut label, mut current) = (name.clone(), child);
             while current.children.len() == 1 {
@@ -705,7 +772,12 @@ pub fn tree_rows(paths: &[String]) -> Vec<TreeRow> {
 }
 
 impl CodeTab {
-    pub(super) fn file_tree(&self, files: &[FileView], more: bool, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn file_tree(
+        &self,
+        files: &[FileView],
+        more: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let paths: Vec<String> = files.iter().map(|view| view.path.clone()).collect();
         let stats: HashMap<&str, (u64, u64)> = files
@@ -726,13 +798,27 @@ impl CodeTab {
                 .pl(px(8. + row.depth as f32 * 12.))
                 .pr_2()
                 .text_size(TEXT_XS.size)
-                .text_color(if is_file { theme.foreground } else { theme.muted_foreground })
+                .text_color(if is_file {
+                    theme.foreground
+                } else {
+                    theme.muted_foreground
+                })
                 .child(
-                    Icon::new(if is_file { IconName::FileCode } else { IconName::Folder })
-                        .size(rems(0.875))
-                        .color(theme.muted_foreground),
+                    Icon::new(if is_file {
+                        IconName::FileCode
+                    } else {
+                        IconName::Folder
+                    })
+                    .size(rems(0.875))
+                    .color(theme.muted_foreground),
                 )
-                .child(div().min_w_0().flex_1().truncate().child(SharedString::from(row.name.clone())));
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .child(SharedString::from(row.name.clone())),
+                );
             if let Some(path) = path {
                 let accent = theme.accent;
                 if let Some((added, removed)) = stats.get(path.as_str()).copied() {
@@ -771,25 +857,40 @@ impl CodeTab {
             )
             .when(more, |this| {
                 this.child(
-                    div().flex_shrink_0().border_t_1().border_color(with_alpha(theme.border, 0.6)).p_2().child(
-                        Button::new("tree-load-more")
-                            .size(ButtonSize::Xs)
-                            .variant(ButtonVariant::Outline)
-                            .label("Load more files")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let next = this
-                                    .ctx
-                                    .snapshot(cx)
-                                    .and_then(|snapshot| snapshot.diffs.get(&this.commit))
-                                    .and_then(Loadable::ready)
-                                    .and_then(|result| {
-                                        result.next_cursor.as_ref().map(|cursor| cursor.as_str().to_owned())
-                                    });
-                                if let (Some(cursor), Some(source)) = (next, this.ctx.source(cx)) {
-                                    source.load_diff_page(&this.ctx.reference, this.commit.clone(), &cursor, cx);
-                                }
-                            })),
-                    ),
+                    div()
+                        .flex_shrink_0()
+                        .border_t_1()
+                        .border_color(with_alpha(theme.border, 0.6))
+                        .p_2()
+                        .child(
+                            Button::new("tree-load-more")
+                                .size(ButtonSize::Xs)
+                                .variant(ButtonVariant::Outline)
+                                .label("Load more files")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let next = this
+                                        .ctx
+                                        .snapshot(cx)
+                                        .and_then(|snapshot| snapshot.diffs.get(&this.commit))
+                                        .and_then(Loadable::ready)
+                                        .and_then(|result| {
+                                            result
+                                                .next_cursor
+                                                .as_ref()
+                                                .map(|cursor| cursor.as_str().to_owned())
+                                        });
+                                    if let (Some(cursor), Some(source)) =
+                                        (next, this.ctx.source(cx))
+                                    {
+                                        source.load_diff_page(
+                                            &this.ctx.reference,
+                                            this.commit.clone(),
+                                            &cursor,
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        ),
                 )
             })
             .into_any_element()

@@ -13,9 +13,9 @@ use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, App, ElementId, InteractiveElement as _, IntoElement, ParentElement,
-    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    linear_color_stop, linear_gradient, px, rems,
+    Anchor, App, ElementId, InteractiveElement as _, IntoElement, ParentElement, RenderOnce,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, linear_color_stop,
+    linear_gradient, px, rems,
 };
 use turin_contracts::pull_request::{PullRequestReaction, PullRequestReactionContent};
 
@@ -34,12 +34,18 @@ use crate::ui::{
     popover,
 };
 
+type ClickHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+type ToggleReaction = Rc<dyn Fn(PullRequestReactionContent, bool, &mut App)>;
+
 /// The id a reaction on the change request's own description is sent with (upstream omits
 /// `subjectId`; the source resolves the host's id for the description).
 pub const PULL_REQUEST_SUBJECT: &str = "";
 
 /// `PullRequestMarkdown`: the body through ChatMarkdown.
-pub fn pull_request_markdown(id: impl Into<ElementId>, text: impl Into<SharedString>) -> ChatMarkdown {
+pub fn pull_request_markdown(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+) -> ChatMarkdown {
     ChatMarkdown::new(id, text)
 }
 
@@ -113,19 +119,13 @@ impl RenderOnce for CommentBody {
                     )
                     .when(overflowing && !expanded, |this| {
                         // `h-10 bg-gradient-to-t from-background to-transparent`
-                        this.child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .bottom_0()
-                                .h_10()
-                                .bg(linear_gradient(
-                                    180.,
-                                    linear_color_stop(with_alpha(theme.background, 0.), 0.),
-                                    linear_color_stop(theme.background, 1.),
-                                )),
-                        )
+                        this.child(div().absolute().left_0().right_0().bottom_0().h_10().bg(
+                            linear_gradient(
+                                180.,
+                                linear_color_stop(with_alpha(theme.background, 0.), 0.),
+                                linear_color_stop(theme.background, 1.),
+                            ),
+                        ))
                     }),
             )
             .when(overflowing, |this| {
@@ -163,7 +163,7 @@ pub struct EditButton {
     id: ElementId,
     group: SharedString,
     label: SharedString,
-    on_click: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_click: Option<ClickHandler>,
     margin_top: bool,
 }
 
@@ -272,8 +272,16 @@ impl RenderOnce for PickerTrigger {
         pill(self.id)
             .px(rems(0.375))
             .border_color(if open { hover_border } else { border })
-            .text_color(if open { theme.foreground } else { theme.muted_foreground })
-            .hover(move |style| style.border_color(hover_border).text_color(theme.foreground))
+            .text_color(if open {
+                theme.foreground
+            } else {
+                theme.muted_foreground
+            })
+            .hover(move |style| {
+                style
+                    .border_color(hover_border)
+                    .text_color(theme.foreground)
+            })
             .child(Icon::path(SMILE_PLUS).size(rems(0.875)))
     }
 }
@@ -334,10 +342,13 @@ impl ReactionBar {
 }
 
 impl RenderOnce for ReactionBar {
-    fn render(self, window: &mut Window, cx: &mut App) -> AnyElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme().clone();
         let state = window.use_keyed_state(
-            ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "reaction-state".into()),
+            ElementId::NamedChild(
+                std::sync::Arc::new(self.id.clone()),
+                "reaction-state".into(),
+            ),
             cx,
             |_, _| ReactionState::default(),
         );
@@ -358,7 +369,7 @@ impl RenderOnce for ReactionBar {
         let can_react = self.can_react;
         let ctx = self.ctx.clone();
         let subject = self.subject_id.clone();
-        let toggle: Rc<dyn Fn(PullRequestReactionContent, bool, &mut App)> = {
+        let toggle: ToggleReaction = {
             let state = state.clone();
             Rc::new(move |content, reacted, cx| {
                 state.update(cx, |state, cx| {
@@ -497,7 +508,11 @@ mod tests {
     use pretty_assertions::assert_eq;
     use turin_contracts::PositiveInt;
 
-    fn reaction(content: PullRequestReactionContent, count: u64, viewer: bool) -> PullRequestReaction {
+    fn reaction(
+        content: PullRequestReactionContent,
+        count: u64,
+        viewer: bool,
+    ) -> PullRequestReaction {
         PullRequestReaction {
             content,
             count: PositiveInt::new(count).unwrap(),

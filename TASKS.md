@@ -32,6 +32,10 @@ workflows unlimited. Cheap models still go first on mechanical work. Cheap
 models go first on anything mechanical; escalate to Codex only on failure or
 when the logic is subtle (state machines, protocol framing, concurrency).
 
+## Integration branch
+
+`stage` = main + every in-flight foundation branch (T01, T02b, T08, T09a, T10a, T11a, T12a). PM re-merges it when those move; dependent tasks base on it and `git merge stage` when told. Never merged to main directly — tasks merge to main individually after QC.
+
 ## Workflow
 
 1. PM creates a worktree: `scripts/agent-worktree.sh <task-id>` →
@@ -106,14 +110,16 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
 | T09a | Codex app-server protocol: codegen types from JSON schema + stdio JSON-RPC client | `crates/codex-app-server` | Codex → Grok | done → QC pending |
-| T09 | Codex provider: CodexAdapterV2 + provider/Codex* | `crates/provider-codex` | Codex (high) | todo |
+| T09 | Codex provider: CodexAdapterV2 + provider/Codex* | `crates/provider-codex` | Codex (high) | active (base: stage) |
 | T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok | done → QC wf_54f7c42f-d77 |
-| T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex (high) | todo |
+| T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex (high) | active (base: stage) |
 | T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | done (r2 routing/perms/ledger, live smoke ok) → QC pending |
 | T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok | todo |
 | T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok | done (nested Cursor shapes) → QC pending |
 | T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok | todo |
-| T13 | Orchestrator: event sink/store, projections, run execution, turn services | `crates/orchestration` | Codex (high), split into sub-tasks | todo |
+| T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex (high) | active (base: stage) |
+| T13b | Orchestrator write side: EventSink/Store, outbox/worker, receipts, command policy, thread lifecycle services | `crates/orchestration/src/pipeline/**` | Codex (high) | active (base: stage) |
+| T13c | Orchestrator core + provider run services (Orchestrator.ts, ProviderSessionManager, RunExecution, ingest, recovery, checkpoints, PR reactors) | `crates/orchestration/src/core/**` | Codex (high) | todo (after T13a/b + T08) |
 | T14 | Client view-model reducers (`client-runtime/state`) | `crates/app/src/state` | Opus → Sonnet | r2 active (logic → Sonnet per model policy) |
 
 ### Wave 4: UI (after T03 + T14)

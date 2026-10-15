@@ -7488,6 +7488,7 @@ dependencies = [
  "turin-persistence",
  "turin-provider-core",
  "turin-shared",
+ "turin-source-control",
  "unicode-segmentation",
  "url",
  "uuid",

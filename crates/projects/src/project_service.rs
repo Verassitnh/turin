@@ -14,13 +14,13 @@ use turin_contracts::project::{
 use turin_contracts::{CommandId, ProjectId};
 use turin_git::workspace::workspace_paths::WorkspacePaths;
 
-use crate::keyed_lock::KeyedLock;
 use crate::project_enrichment_service::{ProjectEnrichment, ProjectEnrichmentService};
 use crate::project_ports::{
     CommandStatus, EventIdAllocator, PortError, ProjectCommand, ProjectCommandPlanner,
     ProjectCommandReceipt, ProjectCommandRejection, ProjectEventSink, ProjectPlanState, ProjectRow,
     ProjectSettingsOverrides, ProjectStoreReads, ThreadDeletions,
 };
+use turin_shared::keyed_lock::KeyedLock;
 
 /// Upstream `ProjectCreateInput`.
 #[derive(Debug, Clone, PartialEq)]
@@ -377,25 +377,28 @@ impl ProjectService {
             }
         };
 
-        let receipt: ProjectCommandReceipt = {
-            let _project_guard = self.project_locks.lock(project_id.clone()).await;
-            let result: Result<ProjectCommandReceipt, anyhow::Error> = match &workspace_root {
-                None => plan_and_commit.await,
-                Some(root) => {
-                    let _workspace_guard = self.workspace_locks.lock(root.clone()).await;
-                    plan_and_commit.await
+        // Project lock outside workspace lock, as upstream.
+        let result: Result<ProjectCommandReceipt, anyhow::Error> = self
+            .project_locks
+            .with_lock(project_id.clone(), || async {
+                match &workspace_root {
+                    None => plan_and_commit.await,
+                    Some(root) => {
+                        self.workspace_locks
+                            .with_lock(root.clone(), || plan_and_commit)
+                            .await
+                    }
                 }
-            };
-            result.map_err(|cause| {
-                ProjectServiceError::from(operation_error(
-                    ProjectOperation::DispatchProjectCommand,
-                    Some(&project_id),
-                    None,
-                    cause,
-                ))
-            })?
-        };
-
+            })
+            .await;
+        let receipt: ProjectCommandReceipt = result.map_err(|cause| {
+            ProjectServiceError::from(operation_error(
+                ProjectOperation::DispatchProjectCommand,
+                Some(&project_id),
+                None,
+                cause,
+            ))
+        })?;
         if receipt.project_id != project_id || receipt.command_type != command.command_type() {
             return Err(operation_error(
                 ProjectOperation::DispatchProjectCommand,
@@ -2075,5 +2078,54 @@ mod tests {
 
         assert!(h.threads.deleted.lock().is_empty());
         assert_eq!(*h.settings.cleared.lock(), vec![pid("project:imported")]);
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_lock_waiter_leaves_no_project_key_behind() {
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        let h = Harness::with_metadata(Arc::new(NoMetadata), Arc::new(NoMetadata), move |store| {
+            Arc::new(GatedSink {
+                inner: Arc::clone(store),
+                reached: Mutex::new(Some(reached_tx)),
+                release: release_rx,
+            }) as Arc<dyn ProjectEventSink>
+        });
+        let root = h.root("abandoned-waiter");
+        h.service
+            .create(h.create(
+                "command:abandoned:create",
+                "project:abandoned",
+                "Abandoned",
+                &root,
+            ))
+            .await
+            .expect("create");
+
+        let deletion = h
+            .service
+            .delete(h.delete("command:abandoned:delete", "project:abandoned"));
+        let abandon = async {
+            // The delete holds the project lock. The update queues behind it and is dropped.
+            reached_rx.await.expect("delete reached its commit");
+            let queued = tokio::time::timeout(
+                Duration::from_millis(20),
+                h.service.update(h.update_title(
+                    "command:abandoned:update",
+                    "project:abandoned",
+                    "Dropped",
+                )),
+            )
+            .await;
+            assert!(queued.is_err(), "the update waits on the lock");
+            release_tx.send(true).expect("release delete");
+        };
+        let (deleted, ()) = tokio::join!(deletion, abandon);
+
+        deleted.expect("delete");
+        assert!(
+            h.service.project_locks.active_keys().is_empty(),
+            "no key outlives its holders and waiters"
+        );
     }
 }

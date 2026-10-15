@@ -5,7 +5,6 @@ pub mod agent_session_importer;
 pub mod agent_session_json;
 pub mod agent_session_scanner;
 pub mod codex_home_layout;
-pub mod keyed_lock;
 pub mod managed_project_folders;
 pub mod project_enrichment_service;
 pub mod project_favicon_resolver;

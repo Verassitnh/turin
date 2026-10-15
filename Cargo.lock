@@ -7167,6 +7167,7 @@ dependencies = [
  "tracing",
  "turin-contracts",
  "turin-git",
+ "turin-shared",
  "unicode-normalization",
  "uuid",
 ]

@@ -17,9 +17,9 @@
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Context, CursorStyle, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, Styled as _,
-    Subscription, Window, actions, div, px, rems,
+    AnyView, App, Context, CursorStyle, FocusHandle, InteractiveElement as _, IntoElement,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render,
+    Styled as _, Subscription, Window, actions, div, px, rems,
 };
 
 use super::chat::panel_layout_controls::PanelLayoutControls;
@@ -100,6 +100,12 @@ pub struct AppSidebarLayout {
     /// The last drag moved past [`RESIZE_CLICK_SLOP`]; the rail's
     /// double-click reset ignores it, as useResizeDrag suppresses the click.
     last_drag_moved: bool,
+    /// Replaces the chat column (the pull request page and the demo hooks).
+    main_content: Option<AnyView>,
+    /// Replaces the right panel's body.
+    right_panel_content: Option<AnyView>,
+    /// A modal layer over the whole window (dialogs).
+    overlay: Option<AnyView>,
     sidebar: Entity<Sidebar>,
     store: Entity<SidebarStore>,
     _appearance: Subscription,
@@ -129,11 +135,33 @@ impl AppSidebarLayout {
             right_panel_width: PREVIEW_PANEL_DEFAULT_WIDTH,
             resizing: None,
             last_drag_moved: false,
+            main_content: None,
+            right_panel_content: None,
+            overlay: None,
             sidebar,
             store,
             _appearance: appearance,
             _sidebar_events: sidebar_events,
         }
+    }
+
+    /// Shows `content` where the chat column normally sits.
+    pub fn set_main_content(&mut self, content: Option<AnyView>, cx: &mut Context<Self>) {
+        self.main_content = content;
+        cx.notify();
+    }
+
+    /// Shows `content` over the whole window (a dialog), or removes it.
+    pub fn set_overlay(&mut self, content: Option<AnyView>, cx: &mut Context<Self>) {
+        self.overlay = content;
+        cx.notify();
+    }
+
+    /// Shows `content` as the right panel's body and opens the panel when it is set.
+    pub fn set_right_panel_content(&mut self, content: Option<AnyView>, cx: &mut Context<Self>) {
+        self.right_panel_open = content.is_some();
+        self.right_panel_content = content;
+        cx.notify();
     }
 
     fn on_sidebar_event(
@@ -261,6 +289,10 @@ impl AppSidebarLayout {
 
 impl Render for AppSidebarLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // "Open diff" on a turn's changed files card shows the right panel.
+        if crate::diff::take_open_panel_request(cx) {
+            self.right_panel_open = true;
+        }
         let theme = cx.app_theme().clone();
         let viewport_width = f32::from(window.viewport_size().width);
         let sidebar_width = self.effective_sidebar_width(viewport_width);
@@ -437,12 +469,13 @@ impl Render for AppSidebarLayout {
                     .child(
                         SidebarInset::new()
                             .with(|this| this.flex_row().h_full())
-                            .when(!maximized, |this| {
-                                this.child(ChatView {
+                            .when(!maximized, |this| match self.main_content.clone() {
+                                Some(content) => this.child(content),
+                                None => this.child(ChatView {
                                     sidebar_open,
                                     right_panel_open,
                                     thread: routed_thread.clone(),
-                                })
+                                }),
                             })
                             .when(right_panel_open, |this| {
                                 this.child(
@@ -460,7 +493,10 @@ impl Render for AppSidebarLayout {
                                                 this.flex_shrink_0().w(px(right_panel_width))
                                             }
                                         })
-                                        .child(RightPanelTabs),
+                                        .child(match self.right_panel_content.clone() {
+                                            Some(content) => content.into_any_element(),
+                                            None => RightPanelTabs.into_any_element(),
+                                        }),
                                 )
                             }),
                     ),
@@ -471,6 +507,7 @@ impl Render for AppSidebarLayout {
             })
             .child(sidebar_toggle)
             .child(layout_controls)
+            .children(self.overlay.clone())
     }
 }
 

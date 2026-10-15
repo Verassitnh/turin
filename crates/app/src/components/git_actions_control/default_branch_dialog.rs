@@ -28,7 +28,7 @@ impl Render for DefaultBranchForm {
             .flex()
             .flex_col()
             .gap_4()
-            .w(px(520.))
+            .w_full()
             .child(
                 div()
                     .text_size(TEXT_SM.size)
@@ -67,7 +67,9 @@ impl Render for DefaultBranchForm {
                                 window.close_dialog(cx);
                                 proceed
                                     .update(cx, |control, cx| {
-                                        control.continue_pending_default_branch_action(false, window, cx)
+                                        control.continue_pending_default_branch_action(
+                                            false, window, cx,
+                                        )
                                     })
                                     .ok();
                             }),
@@ -81,7 +83,9 @@ impl Render for DefaultBranchForm {
                                 window.close_dialog(cx);
                                 feature
                                     .update(cx, |control, cx| {
-                                        control.continue_pending_default_branch_action(true, window, cx)
+                                        control.continue_pending_default_branch_action(
+                                            true, window, cx,
+                                        )
                                     })
                                     .ok();
                             }),
@@ -91,13 +95,14 @@ impl Render for DefaultBranchForm {
 }
 
 /// Opens the confirmation for the control's pending action.
-pub fn open(control: WeakEntity<GitActionsControl>, window: &mut Window, cx: &mut gpui_kit::App) {
-    let copy = control
-        .upgrade()
-        .and_then(|control| {
-            let status = control.read(cx).status_for(cx).status;
-            control.read(cx).pending_default_copy(status.as_ref())
-        });
+pub fn open(
+    control: WeakEntity<GitActionsControl>,
+    copy: Option<
+        turin_review::action_state::git_actions_control_logic::DefaultBranchActionDialogCopy,
+    >,
+    window: &mut Window,
+    cx: &mut gpui_kit::App,
+) {
     let (title, description, continue_label) = match copy {
         Some(copy) => (copy.title, copy.description, copy.continue_label),
         None => (
@@ -112,6 +117,6 @@ pub fn open(control: WeakEntity<GitActionsControl>, window: &mut Window, cx: &mu
         continue_label,
     });
     window.open_dialog(cx, move |dialog, _, _| {
-        dialog.title(title.clone()).child(form.clone())
+        dialog.title(title.clone()).w(px(560.)).child(form.clone())
     });
 }

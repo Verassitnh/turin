@@ -25,14 +25,12 @@ use std::time::Duration;
 
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::{
-    AppContext as _, Context, Entity, EventEmitter, Task, WeakEntity, Window,
-};
+use gpui_kit::{AppContext as _, Context, Entity, EventEmitter, Task, WeakEntity, Window};
 use turin_contracts::git::{GitStackedAction, VcsStatusResult};
 use turin_contracts::{EnvironmentId, ThreadId};
 use turin_review::action_state::git_actions_control_logic::{
-    GIT_ACTION_SUCCESS_VISIBLE_MS, GitQuickActionKind, build_menu_items, resolve_default_branch_action_dialog_copy,
-    resolve_quick_action, change_request_terminology,
+    GIT_ACTION_SUCCESS_VISIBLE_MS, GitQuickActionKind, build_menu_items,
+    change_request_terminology, resolve_default_branch_action_dialog_copy, resolve_quick_action,
 };
 
 use self::backend::{GitActionTarget, GitThreadContext, SharedGitActionsBackend, VcsActionState};
@@ -52,7 +50,7 @@ pub enum GitDisplayMode {
 }
 
 /// `GitActionsControlProps`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitActionsControlProps {
     pub display_mode: GitDisplayMode,
     pub compact: bool,
@@ -72,7 +70,10 @@ pub enum GitActionsControlEvent {
     /// `onOpenChanges`: the diff panel's Changes view.
     OpenChanges,
     /// `setDraftThreadContext({ branch, … })`.
-    DraftBranchChanged { branch: Option<String>, manual: bool },
+    DraftBranchChanged {
+        branch: Option<String>,
+        manual: bool,
+    },
     /// A server thread's stored branch was updated.
     ThreadBranchUpdated { branch: Option<String> },
 }
@@ -101,7 +102,11 @@ pub struct GitActionsControl {
 impl EventEmitter<GitActionsControlEvent> for GitActionsControl {}
 
 impl GitActionsControl {
-    pub fn new(backend: SharedGitActionsBackend, props: GitActionsControlProps, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        backend: SharedGitActionsBackend,
+        props: GitActionsControlProps,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Elapsed counters and the progress rows tick by the second, and the
         // window-focus refresh debounce of upstream is the host's concern.
         let ticker = cx.spawn(async move |this, cx| {
@@ -134,6 +139,9 @@ impl GitActionsControl {
     /// The host's props changed (route, status of the draft, …). The target
     /// of an action is read from the props *when the action is requested*.
     pub fn set_props(&mut self, props: GitActionsControlProps, cx: &mut Context<Self>) {
+        if self.props == props {
+            return;
+        }
         self.props = props;
         cx.notify();
     }
@@ -226,7 +234,9 @@ impl GitActionsControl {
                 branch,
                 expected_branch,
             } => {
-                let task = self.backend.update_thread_branch(target, branch.clone(), expected_branch, cx);
+                let task =
+                    self.backend
+                        .update_thread_branch(target, branch.clone(), expected_branch, cx);
                 cx.spawn_in(window, async move |this, cx| {
                     let outcome = task.await;
                     this.update_in(cx, |this, window, cx| match outcome {
@@ -234,7 +244,9 @@ impl GitActionsControl {
                             this.props.thread.branch = branch.clone();
                             cx.emit(GitActionsControlEvent::ThreadBranchUpdated { branch });
                         }
-                        Err(message) => this.toast_error("Unable to update thread branch", &message, window, cx),
+                        Err(message) => {
+                            this.toast_error("Unable to update thread branch", &message, window, cx)
+                        }
                     })
                     .ok();
                 })
@@ -265,7 +277,13 @@ impl GitActionsControl {
 
     // ── Running actions ─────────────────────────────────────────────────
 
-    pub(crate) fn toast_error(&self, title: &str, description: &str, window: &mut Window, cx: &mut gpui_kit::App) {
+    pub(crate) fn toast_error(
+        &self,
+        title: &str,
+        description: &str,
+        window: &mut Window,
+        cx: &mut gpui_kit::App,
+    ) {
         window.push_notification(
             Notification::error(description.to_owned()).title(title.to_owned()),
             cx,
@@ -296,7 +314,8 @@ impl GitActionsControl {
             GitActionPlan::Skip => return,
             GitActionPlan::ConfirmDefaultBranch(pending) => {
                 self.pending_default = Some(pending);
-                default_branch_dialog::open(cx.entity().downgrade(), window, cx);
+                let copy = self.pending_default_copy(status.as_ref());
+                default_branch_dialog::open(cx.entity().downgrade(), copy, window, cx);
                 cx.notify();
                 return;
             }
@@ -409,7 +428,30 @@ impl GitActionsControl {
         let Some(target) = self.current_target() else {
             return;
         };
-        self.run_git_action(target, continue_pending_action(&pending, feature_branch), window, cx);
+        self.run_git_action(
+            target,
+            continue_pending_action(&pending, feature_branch),
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn open_commit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let status = self.status_for(cx).status;
+        commit_dialog::open(cx.entity().downgrade(), status, window, cx);
+    }
+
+    pub(crate) fn open_publish_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.current_target() else {
+            return;
+        };
+        publish_dialog::open(
+            cx.entity().downgrade(),
+            self.backend.clone(),
+            target,
+            window,
+            cx,
+        );
     }
 
     /// `runQuickAction`.
@@ -417,13 +459,15 @@ impl GitActionsControl {
         let status = self.status_for(cx).status;
         let busy = self.is_action_running(cx);
         let is_default_ref = status.as_ref().is_some_and(|status| status.is_default_ref);
-        let has_primary_remote = status.as_ref().is_some_and(|status| status.has_primary_remote);
+        let has_primary_remote = status
+            .as_ref()
+            .is_some_and(|status| status.has_primary_remote);
         let quick = resolve_quick_action(status.as_ref(), busy, is_default_ref, has_primary_remote);
         let Some(target) = self.current_target() else {
             return;
         };
         match quick.kind {
-            GitQuickActionKind::OpenPublish => publish_dialog::open(cx.entity().downgrade(), window, cx),
+            GitQuickActionKind::OpenPublish => self.open_publish_dialog(window, cx),
             GitQuickActionKind::RunPull => self.run_pull(target, window, cx),
             GitQuickActionKind::ShowHint => {
                 window.push_notification(
@@ -453,7 +497,11 @@ impl GitActionsControl {
                     Ok(result) => {
                         use turin_contracts::git::VcsPullStatus;
                         let pulled = result.status == VcsPullStatus::Pulled;
-                        let title = if pulled { "Pulled" } else { "Already up to date" };
+                        let title = if pulled {
+                            "Pulled"
+                        } else {
+                            "Already up to date"
+                        };
                         let description = if pulled {
                             format!(
                                 "Updated {} from {}",
@@ -510,7 +558,12 @@ impl GitActionsControl {
         .detach();
     }
 
-    pub(crate) fn open_changed_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_changed_file(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(cwd) = self.props.git_cwd.clone() else {
             self.toast_error("Editor opening is unavailable.", "", window, cx);
             return;
@@ -559,7 +612,8 @@ impl GitActionsControl {
     pub(crate) fn pending_default_copy(
         &self,
         status: Option<&VcsStatusResult>,
-    ) -> Option<turin_review::action_state::git_actions_control_logic::DefaultBranchActionDialogCopy> {
+    ) -> Option<turin_review::action_state::git_actions_control_logic::DefaultBranchActionDialogCopy>
+    {
         let pending = self.pending_default.as_ref()?;
         let terminology = change_request_terminology(
             status
@@ -574,10 +628,19 @@ impl GitActionsControl {
         ))
     }
 
-    pub(crate) fn menu_items(&self, cx: &gpui_kit::App) -> Vec<turin_review::action_state::git_actions_control_logic::GitActionMenuItem> {
+    pub(crate) fn menu_items(
+        &self,
+        cx: &gpui_kit::App,
+    ) -> Vec<turin_review::action_state::git_actions_control_logic::GitActionMenuItem> {
         let status = self.status_for(cx).status;
-        let has_primary_remote = status.as_ref().is_some_and(|status| status.has_primary_remote);
-        build_menu_items(status.as_ref(), self.is_action_running(cx), has_primary_remote)
+        let has_primary_remote = status
+            .as_ref()
+            .is_some_and(|status| status.has_primary_remote);
+        build_menu_items(
+            status.as_ref(),
+            self.is_action_running(cx),
+            has_primary_remote,
+        )
     }
 }
 

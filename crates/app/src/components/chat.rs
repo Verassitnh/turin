@@ -1,6 +1,7 @@
 //! Ports of upstream/apps/web/src/components/chat.
 
 pub mod changed_files_tree;
+pub mod chat_git_host;
 pub mod chat_header;
 pub mod composer_pending_panels;
 pub mod composer_surface;

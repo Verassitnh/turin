@@ -13,7 +13,8 @@ use gpui_kit::component::Selectable;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, CursorStyle, ElementId, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement, RenderOnce, StatefulInteractiveElement as _, Styled, Window, div, px, rems,
+    IntoElement, ParentElement, RenderOnce, StatefulInteractiveElement as _, Styled, Window, div,
+    px, rems,
 };
 
 use crate::theme::color::with_alpha;
@@ -33,9 +34,7 @@ pub fn panel_hover_surface(theme: &AppTheme) -> Hsla {
 
 /// `THREAD_DETAILS_PANEL_ICON_CLASS`: `size-4 shrink-0 text-muted-foreground`.
 pub fn panel_icon(name: IconName, theme: &AppTheme) -> Icon {
-    Icon::new(name)
-        .size(rems(1.))
-        .color(theme.muted_foreground)
+    Icon::new(name).size(rems(1.)).color(theme.muted_foreground)
 }
 
 /// `THREAD_DETAILS_PANEL_SPLIT_SEPARATOR_CLASS`: `h-4 w-px shrink-0 bg-border/65`.
@@ -50,7 +49,11 @@ pub fn panel_split_separator(theme: &AppTheme) -> AnyElement {
 
 /// `THREAD_DETAILS_PANEL_SPLIT_GROUP_CLASS` frame: `flex w-full items-center
 /// rounded-lg` with a hover surface over both halves.
-pub fn panel_split_group(id: impl Into<ElementId>, active: bool, theme: &AppTheme) -> gpui_kit::Stateful<gpui_kit::Div> {
+pub fn panel_split_group(
+    id: impl Into<ElementId>,
+    active: bool,
+    theme: &AppTheme,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     let hover = panel_hover_surface(theme);
     div()
         .id(id)

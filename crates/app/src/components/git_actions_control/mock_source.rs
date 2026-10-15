@@ -254,7 +254,9 @@ impl GitActionsBackend for MockGitActionsBackend {
         cx: &mut App,
     ) -> Task<Result<SourceControlPublishRepositoryResult, String>> {
         cx.spawn(async move |cx| {
-            cx.background_executor().timer(Duration::from_millis(800)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(800))
+                .await;
             Ok(parse(json!({
                 "repository": {
                     "provider": "github",

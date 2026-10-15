@@ -86,8 +86,14 @@ pub fn plan_git_action(
     thread_id: &ThreadId,
     action_id: String,
 ) -> GitActionPlan {
-    let action_branch = status.and_then(|status| status.ref_name.as_ref()).map(|name| name.as_str().to_owned());
-    let action_is_default_branch = if input.feature_branch { false } else { is_default_ref };
+    let action_branch = status
+        .and_then(|status| status.ref_name.as_ref())
+        .map(|name| name.as_str().to_owned());
+    let action_is_default_branch = if input.feature_branch {
+        false
+    } else {
+        is_default_ref
+    };
     let action_can_commit = matches!(
         input.action,
         GitStackedAction::Commit | GitStackedAction::CommitPush | GitStackedAction::CommitPushPr
@@ -122,12 +128,17 @@ pub fn plan_git_action(
         // A pull request the action opens is linked to the thread it ran
         // beside. Drafts have no server thread yet, so there is nothing to link to.
         thread_id: thread.is_server_thread.then(|| thread_id.clone()),
-        project_id: (!thread.is_server_thread).then(|| thread.project_id.clone()).flatten(),
+        project_id: (!thread.is_server_thread)
+            .then(|| thread.project_id.clone())
+            .flatten(),
     })
 }
 
 /// A pending confirmation, continued: the same action without the prompt.
-pub fn continue_pending_action(pending: &PendingDefaultBranchAction, feature_branch: bool) -> RunGitActionInput {
+pub fn continue_pending_action(
+    pending: &PendingDefaultBranchAction,
+    feature_branch: bool,
+) -> RunGitActionInput {
     RunGitActionInput {
         action: match pending.action {
             DefaultBranchConfirmableAction::Push => GitStackedAction::Push,
@@ -204,8 +215,10 @@ pub fn present_action_result(
         title,
         description,
         cta,
-        dismiss_after_visible_ms: resolve_git_action_result_toast_timing(GitActionToastType::Success)
-            .dismiss_after_visible_ms,
+        dismiss_after_visible_ms: resolve_git_action_result_toast_timing(
+            GitActionToastType::Success,
+        )
+        .dismiss_after_visible_ms,
     }
 }
 
@@ -219,7 +232,10 @@ pub enum BranchSync {
         expected_branch: Option<String>,
     },
     /// `setDraftThreadContext`; `manual` is `environmentSelection: "manual"`.
-    SetDraftBranch { branch: Option<String>, manual: bool },
+    SetDraftBranch {
+        branch: Option<String>,
+        manual: bool,
+    },
 }
 
 pub fn resolve_branch_sync(

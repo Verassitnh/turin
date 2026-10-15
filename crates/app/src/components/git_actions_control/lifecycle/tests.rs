@@ -35,7 +35,9 @@ fn status(overrides: Value) -> VcsStatusResult {
         "pr": null,
     });
     for (key, value) in overrides.as_object().unwrap() {
-        base.as_object_mut().unwrap().insert(key.clone(), value.clone());
+        base.as_object_mut()
+            .unwrap()
+            .insert(key.clone(), value.clone());
     }
     serde_json::from_value(base).unwrap()
 }
@@ -99,7 +101,10 @@ mod git_action_targets_across_thread_navigation {
     #[test]
     fn runs_a_retained_pr_toast_in_the_thread_that_produced_it() {
         let first = target("first", "/first");
-        let produced = result(json!({ "status": "skipped_not_requested" }), committed_toast());
+        let produced = result(
+            json!({ "status": "skipped_not_requested" }),
+            committed_toast(),
+        );
         let ActionPresentation::Toast { cta, .. } = present_action_result(&produced, &first, false)
         else {
             panic!("expected a toast");
@@ -131,7 +136,11 @@ mod git_action_targets_across_thread_navigation {
 
     #[test]
     fn runs_the_panel_button_in_the_current_thread_after_navigation() {
-        for (thread, cwd) in [("first", "/first"), ("second", "/second"), ("first", "/first")] {
+        for (thread, cwd) in [
+            ("first", "/first"),
+            ("second", "/second"),
+            ("first", "/first"),
+        ] {
             let current = target(thread, cwd);
             let GitActionPlan::Run(request) = plan(
                 &RunGitActionInput::new(GitStackedAction::Commit),
@@ -149,7 +158,10 @@ mod git_action_targets_across_thread_navigation {
 
     #[test]
     fn the_panel_shows_results_inline_instead_of_a_toast() {
-        let produced = result(json!({ "status": "skipped_not_requested" }), committed_toast());
+        let produced = result(
+            json!({ "status": "skipped_not_requested" }),
+            committed_toast(),
+        );
         assert_eq!(
             present_action_result(&produced, &target("t", "/t"), true),
             ActionPresentation::Inline {
@@ -340,7 +352,13 @@ mod thread_branch_sync {
             BranchSync::None
         );
         assert_eq!(
-            live_draft_branch_sync(&server_thread("main"), Some("main"), Some(&on_feature), false, false),
+            live_draft_branch_sync(
+                &server_thread("main"),
+                Some("main"),
+                Some(&on_feature),
+                false,
+                false
+            ),
             BranchSync::None
         );
     }
@@ -363,14 +381,24 @@ mod menu_action_disabled_reasons {
         }
     }
 
-    fn reason(id: GitActionMenuItemId, overrides: Value, busy: bool, remote: bool) -> Option<String> {
+    fn reason(
+        id: GitActionMenuItemId,
+        overrides: Value,
+        busy: bool,
+        remote: bool,
+    ) -> Option<String> {
         menu_action_disabled_reason(&item(id, true), Some(&status(overrides)), busy, remote)
     }
 
     #[test]
     fn enabled_items_have_no_reason() {
         assert_eq!(
-            menu_action_disabled_reason(&item(GitActionMenuItemId::Commit, false), None, false, true),
+            menu_action_disabled_reason(
+                &item(GitActionMenuItemId::Commit, false),
+                None,
+                false,
+                true
+            ),
             None
         );
     }
@@ -382,7 +410,8 @@ mod menu_action_disabled_reasons {
             Some("Git action in progress.")
         );
         assert_eq!(
-            menu_action_disabled_reason(&item(GitActionMenuItemId::Push, true), None, false, true).as_deref(),
+            menu_action_disabled_reason(&item(GitActionMenuItemId::Push, true), None, false, true)
+                .as_deref(),
             Some("Git status is unavailable.")
         );
     }
@@ -403,7 +432,9 @@ mod menu_action_disabled_reasons {
 
     #[test]
     fn push_walks_its_blockers_in_order() {
-        let push = |overrides: Value, remote: bool| reason(GitActionMenuItemId::Push, overrides, false, remote);
+        let push = |overrides: Value, remote: bool| {
+            reason(GitActionMenuItemId::Push, overrides, false, remote)
+        };
         assert_eq!(
             push(json!({ "refName": null }), true).as_deref(),
             Some("Detached HEAD: check out a branch before pushing.")
@@ -413,11 +444,19 @@ mod menu_action_disabled_reasons {
             Some("Commit or stash local changes before pushing.")
         );
         assert_eq!(
-            push(json!({ "hasWorkingTreeChanges": false, "behindCount": 2 }), true).as_deref(),
+            push(
+                json!({ "hasWorkingTreeChanges": false, "behindCount": 2 }),
+                true
+            )
+            .as_deref(),
             Some("Branch is behind upstream. Pull/rebase before pushing.")
         );
         assert_eq!(
-            push(json!({ "hasWorkingTreeChanges": false, "hasUpstream": false }), false).as_deref(),
+            push(
+                json!({ "hasWorkingTreeChanges": false, "hasUpstream": false }),
+                false
+            )
+            .as_deref(),
             Some("Add an \"origin\" remote before pushing.")
         );
         assert_eq!(
@@ -438,7 +477,8 @@ mod menu_action_disabled_reasons {
             Some("No local commits to include in a pull request.")
         );
         assert_eq!(
-            pr(json!({ "hasWorkingTreeChanges": false, "aheadCount": 1, "behindCount": 1 })).as_deref(),
+            pr(json!({ "hasWorkingTreeChanges": false, "aheadCount": 1, "behindCount": 1 }))
+                .as_deref(),
             Some("Branch is behind upstream. Pull/rebase before creating a pull request.")
         );
     }

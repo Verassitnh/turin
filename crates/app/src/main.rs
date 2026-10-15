@@ -6,6 +6,7 @@ mod components;
 mod hooks;
 mod project_icon_colors;
 mod project_identity;
+mod pull_request_reference;
 // The view-model layer is a library until the orchestrator and views are wired
 // to it; every upstream selector is ported ahead of its callers.
 #[allow(dead_code)]

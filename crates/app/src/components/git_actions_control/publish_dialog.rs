@@ -20,7 +20,9 @@ use turin_contracts::source_control::{
 };
 
 use super::GitActionsControl;
-use super::backend::{GitActionTarget, PublishProviderState, PublishRepositoryInput};
+use super::backend::{
+    GitActionTarget, PublishProviderState, PublishRepositoryInput, SharedGitActionsBackend,
+};
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_LG, RADIUS_MD, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
@@ -39,6 +41,7 @@ pub fn is_publishable_repository(value: &str) -> bool {
 
 pub struct PublishForm {
     control: WeakEntity<GitActionsControl>,
+    backend: SharedGitActionsBackend,
     target: GitActionTarget,
     provider: PublishProviderState,
     step: usize,
@@ -56,6 +59,7 @@ pub struct PublishForm {
 impl PublishForm {
     fn new(
         control: WeakEntity<GitActionsControl>,
+        backend: SharedGitActionsBackend,
         target: GitActionTarget,
         provider: PublishProviderState,
         window: &mut Window,
@@ -73,15 +77,20 @@ impl PublishForm {
         });
         let remote_name = cx.new(|cx| InputState::new(window, cx).default_value("origin"));
         let subscriptions = vec![
-            cx.subscribe_in(&repository, window, |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => this.submit(window, cx),
-                InputEvent::Change => cx.notify(),
-                _ => {}
-            }),
+            cx.subscribe_in(
+                &repository,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.submit(window, cx),
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
+                },
+            ),
             cx.subscribe(&remote_name, |_, _, _: &InputEvent, cx| cx.notify()),
         ];
         Self {
             control,
+            backend,
             target,
             provider,
             step: 0,
@@ -102,7 +111,9 @@ impl PublishForm {
     }
 
     fn can_submit(&self, cx: &gpui_kit::App) -> bool {
-        self.provider.ready && !self.pending && is_publishable_repository(&self.repository_value(cx))
+        self.provider.ready
+            && !self.pending
+            && is_publishable_repository(&self.repository_value(cx))
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -115,17 +126,14 @@ impl PublishForm {
         let input = PublishRepositoryInput {
             repository: self.repository_value(cx).trim().to_owned(),
             visibility: self.visibility,
-            remote_name: if remote.is_empty() { "origin".to_owned() } else { remote },
+            remote_name: if remote.is_empty() {
+                "origin".to_owned()
+            } else {
+                remote
+            },
             protocol: self.protocol,
         };
-        let backend = self
-            .control
-            .upgrade()
-            .map(|control| control.read(cx).backend.clone());
-        let Some(backend) = backend else {
-            return;
-        };
-        let task = backend.publish_repository(&self.target, input, cx);
+        let task = self.backend.publish_repository(&self.target, input, cx);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let outcome = task.await;
@@ -169,8 +177,11 @@ impl Render for PublishForm {
         let step = self.step;
 
         // WizardSteps: numbered, the current one emphasised, summaries under.
-        let steps = div().flex().items_center().gap_3().children(STEPS.iter().enumerate().map(
-            |(index, name)| {
+        let steps = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .children(STEPS.iter().enumerate().map(|(index, name)| {
                 let current = index == step;
                 let done = index < step;
                 let summary = match index {
@@ -193,7 +204,11 @@ impl Render for PublishForm {
                             .justify_center()
                             .rounded_full()
                             .text_size(TEXT_XS.size)
-                            .bg(if current || done { theme.primary } else { theme.muted })
+                            .bg(if current || done {
+                                theme.primary
+                            } else {
+                                theme.muted
+                            })
                             .text_color(if current || done {
                                 theme.primary_foreground
                             } else {
@@ -230,8 +245,7 @@ impl Render for PublishForm {
                                     .child(summary)
                             })),
                     )
-            },
-        ));
+            }));
 
         let body = match step {
             0 => {
@@ -257,7 +271,11 @@ impl Render for PublishForm {
                             .py_3()
                             .when(ready, |this| this.cursor(CursorStyle::PointingHand))
                             .when(!ready, |this| this.opacity(0.64))
-                            .child(Icon::new(IconName::Github).size(rems(1.25)).color(theme.foreground))
+                            .child(
+                                Icon::new(IconName::Github)
+                                    .size(rems(1.25))
+                                    .color(theme.foreground),
+                            )
                             .child(
                                 div()
                                     .min_w_0()
@@ -381,7 +399,12 @@ impl Render for PublishForm {
                                             .px_3()
                                             .font_family(theme.fonts.mono.clone())
                                             .text_size(TEXT_SM.size)
-                                            .child(Input::new(&self.repository).appearance(false).bordered(false).p_0()),
+                                            .child(
+                                                Input::new(&self.repository)
+                                                    .appearance(false)
+                                                    .bordered(false)
+                                                    .p_0(),
+                                            ),
                                     ),
                             ),
                     )
@@ -468,31 +491,39 @@ impl Render for PublishForm {
                                                 .flex_col()
                                                 .gap(rems(0.375))
                                                 .child(label("Protocol"))
-                                                .child(div().flex().gap_1().children(
-                                                    [
-                                                        ("SSH", SourceControlCloneProtocol::Ssh),
-                                                        ("HTTPS", SourceControlCloneProtocol::Https),
-                                                    ]
-                                                    .into_iter()
-                                                    .map(|(name, value)| {
-                                                        let weak = weak_protocol.clone();
-                                                        Button::new(name)
-                                                            .variant(if protocol == value {
-                                                                ButtonVariant::Secondary
-                                                            } else {
-                                                                ButtonVariant::Outline
-                                                            })
-                                                            .size(ButtonSize::Sm)
-                                                            .label(name)
-                                                            .on_click(move |_, _, cx| {
-                                                                weak.update(cx, |this, cx| {
-                                                                    this.protocol = value;
-                                                                    cx.notify();
+                                                .child(
+                                                    div().flex().gap_1().children(
+                                                        [
+                                                            (
+                                                                "SSH",
+                                                                SourceControlCloneProtocol::Ssh,
+                                                            ),
+                                                            (
+                                                                "HTTPS",
+                                                                SourceControlCloneProtocol::Https,
+                                                            ),
+                                                        ]
+                                                        .into_iter()
+                                                        .map(|(name, value)| {
+                                                            let weak = weak_protocol.clone();
+                                                            Button::new(name)
+                                                                .variant(if protocol == value {
+                                                                    ButtonVariant::Secondary
+                                                                } else {
+                                                                    ButtonVariant::Outline
                                                                 })
-                                                                .ok();
-                                                            })
-                                                    }),
-                                                )),
+                                                                .size(ButtonSize::Sm)
+                                                                .label(name)
+                                                                .on_click(move |_, _, cx| {
+                                                                    weak.update(cx, |this, cx| {
+                                                                        this.protocol = value;
+                                                                        cx.notify();
+                                                                    })
+                                                                    .ok();
+                                                                })
+                                                        }),
+                                                    ),
+                                                ),
                                         ),
                                 )
                             }),
@@ -512,7 +543,10 @@ impl Render for PublishForm {
                                 .text_size(TEXT_XS.size)
                                 .text_color(theme.muted_foreground)
                                 .child(Spinner::new().with_size(Size::XSmall))
-                                .child(format!("Publishing repository to {}...", self.provider.label)),
+                                .child(format!(
+                                    "Publishing repository to {}...",
+                                    self.provider.label
+                                )),
                         )
                     })
                     .children(self.error.clone().filter(|_| !self.pending).map(|error| {
@@ -525,7 +559,11 @@ impl Render for PublishForm {
                             .py_2()
                             .text_size(TEXT_XS.size)
                             .text_color(theme.destructive_foreground)
-                            .child(div().font_weight(FontWeight::MEDIUM).child("Publish failed"))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("Publish failed"),
+                            )
                             .child(div().mt(px(2.)).child(error))
                     }))
                     .into_any_element()
@@ -701,7 +739,7 @@ impl Render for PublishForm {
             .flex()
             .flex_col()
             .gap_4()
-            .w(px(520.))
+            .w_full()
             .child(
                 div()
                     .text_size(TEXT_SM.size)
@@ -715,17 +753,20 @@ impl Render for PublishForm {
 }
 
 /// Opens the wizard for the control's checkout.
-pub fn open(control: WeakEntity<GitActionsControl>, window: &mut Window, cx: &mut gpui_kit::App) {
-    let Some(entity) = control.upgrade() else {
-        return;
-    };
-    let Some(target) = entity.read(cx).current_target() else {
-        return;
-    };
-    let provider = entity.read(cx).backend.publish_provider(cx);
-    let form = cx.new(|cx| PublishForm::new(control, target, provider, window, cx));
+pub fn open(
+    control: WeakEntity<GitActionsControl>,
+    backend: SharedGitActionsBackend,
+    target: GitActionTarget,
+    window: &mut Window,
+    cx: &mut gpui_kit::App,
+) {
+    let provider = backend.publish_provider(cx);
+    let form = cx.new(|cx| PublishForm::new(control, backend, target, provider, window, cx));
     window.open_dialog(cx, move |dialog, _, _| {
-        dialog.title("Publish repository").child(form.clone())
+        dialog
+            .title("Publish repository")
+            .w(px(560.))
+            .child(form.clone())
     });
 }
 

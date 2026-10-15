@@ -22,6 +22,8 @@ use gpui_kit::{
     Subscription, Window, actions, div, px, rems,
 };
 
+use super::branch_toolbar::mock_source::MockBranchBackend;
+use super::chat::chat_git_host::{ChatGitBackends, ChatGitHost, RoutedGitThread};
 use super::chat::panel_layout_controls::PanelLayoutControls;
 use super::chat_view::ChatView;
 use super::command_palette::command_palette_logic::SearchOverlayMode;
@@ -31,6 +33,7 @@ use super::command_palette::{
     self, CommandPalette, CommandPaletteEvent, CommandPaletteOpenDetail, CycleAppearance,
     SelectTheme, ToggleCommandPalette, ToggleFilePicker, ToggleProjectSearch,
 };
+use super::git_actions_control::mock_source::MockGitActionsBackend;
 use super::right_panel_tabs::RightPanelTabs;
 use super::sidebar::mock_source::mock_sidebar;
 use super::sidebar::view_model::SidebarStore;
@@ -61,6 +64,8 @@ actions!(
         ToggleSidebar,
         /// `rightPanel.toggle` (mod+alt+b).
         ToggleRightPanel,
+        /// `threadDetails.toggle` (mod+shift+b).
+        ToggleThreadDetails,
     ]
 );
 
@@ -72,6 +77,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-b", ToggleSidebar, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-b", ToggleThreadDetails, Some(KEY_CONTEXT)),
     ]);
     thread_sidebar::bind_keys(cx, KEY_CONTEXT);
     command_palette::bind_keys(cx, KEY_CONTEXT);
@@ -111,6 +117,8 @@ pub struct AppSidebarLayout {
     sidebar: Entity<Sidebar>,
     store: Entity<SidebarStore>,
     palette: Entity<CommandPalette>,
+    git_host: Entity<ChatGitHost>,
+    thread_details_open: bool,
     _appearance: Subscription,
     _sidebar_events: Subscription,
     _palette_events: Subscription,
@@ -132,8 +140,17 @@ impl AppSidebarLayout {
         let sidebar = cx.new(|cx| Sidebar::new(store.clone(), backend, window, cx));
         let sidebar_events = cx.subscribe_in(&sidebar, window, Self::on_sidebar_event);
         let palette = cx.new(|cx| CommandPalette::new(palette_backend, window, cx));
+        let git_host = cx.new(|_| {
+            ChatGitHost::new(ChatGitBackends {
+                git: std::rc::Rc::new(MockGitActionsBackend::new()),
+                branch: std::rc::Rc::new(MockBranchBackend::new()),
+            })
+        });
         let palette_events = cx.subscribe_in(&palette, window, Self::on_palette_event);
         sidebar.update(cx, |sidebar, cx| sidebar.apply_dev_overrides(window, cx));
+        if let Ok(spec) = std::env::var("TURIN_GIT_UI") {
+            git_host.update(cx, |host, cx| host.run_demo_steps(spec, window, cx));
+        }
         if let Ok(spec) = std::env::var("TURIN_PALETTE") {
             palette.update(cx, |palette, cx| palette.run_demo_steps(spec, window, cx));
         }
@@ -149,6 +166,8 @@ impl AppSidebarLayout {
             sidebar,
             store,
             palette,
+            git_host,
+            thread_details_open: std::env::var("TURIN_THREAD_DETAILS").is_ok_and(|v| v == "1"),
             _appearance: appearance,
             _sidebar_events: sidebar_events,
             _palette_events: palette_events,
@@ -304,6 +323,49 @@ impl AppSidebarLayout {
         Some((project.into(), thread.title.clone().into()))
     }
 
+    /// The routed thread as the git surfaces read it.
+    fn routed_git_thread(&self, cx: &App) -> Option<RoutedGitThread> {
+        let Some(SidebarRoute::Thread(key)) = self.sidebar.read(cx).route() else {
+            return None;
+        };
+        let snapshot = self.store.read(cx).snapshot();
+        let thread = snapshot
+            .threads
+            .iter()
+            .find(|thread| &thread.key() == key)?;
+        let project = snapshot.project(&thread.project_key())?;
+        Some(RoutedGitThread {
+            environment_id: thread.environment_id.clone(),
+            thread_id: thread.id.clone(),
+            project_cwd: project.workspace_root.clone(),
+            branch: thread.branch.clone(),
+            worktree_path: thread.worktree_path.clone(),
+            has_session: thread.runtime.is_some(),
+            pull_requests: thread.pull_requests.clone(),
+            project_threads: snapshot
+                .threads
+                .iter()
+                .filter(|other| other.project_key() == thread.project_key())
+                .map(|other| super::branch_toolbar::backend::ProjectThreadInfo {
+                    branch: other.branch.clone(),
+                    worktree_path: other.worktree_path.clone(),
+                    updated_at: other.updated_at.clone(),
+                    archived_at: other.archived_at.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    fn toggle_thread_details(
+        &mut self,
+        _: &ToggleThreadDetails,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.thread_details_open = !self.thread_details_open;
+        cx.notify();
+    }
+
     /// Opens the right panel; used by the screenshot harness (`TURIN_SHELL_RIGHT_PANEL`).
     pub fn set_right_panel_open(&mut self, open: bool) {
         self.right_panel_open = open;
@@ -442,6 +504,9 @@ impl Render for AppSidebarLayout {
         let maximized = right_panel_open && self.right_panel_maximized;
         let resizing = self.resizing.map(|drag| drag.target);
         let routed_thread = self.routed_thread(cx);
+        let routed_git = self.routed_git_thread(cx);
+        self.git_host
+            .update(cx, |host, cx| host.sync(routed_git, window, cx));
 
         let sidebar_rail = SidebarRail::new(px(sidebar_width))
             .active(resizing == Some(ResizeTarget::Sidebar))
@@ -542,6 +607,10 @@ impl Render for AppSidebarLayout {
             .flex()
             .items_center()
             .child(PanelLayoutControls {
+                thread_details_open: self.thread_details_open,
+                on_toggle_thread_details: Box::new(|_, window, cx| {
+                    window.dispatch_action(Box::new(ToggleThreadDetails), cx);
+                }),
                 right_panel_open,
                 right_panel_maximized: maximized,
                 on_toggle_right_panel: Box::new(|_, window, cx| {
@@ -566,6 +635,7 @@ impl Render for AppSidebarLayout {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_right_panel))
+            .on_action(cx.listener(Self::toggle_thread_details))
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_file_picker))
             .on_action(cx.listener(Self::toggle_project_search))
@@ -616,6 +686,8 @@ impl Render for AppSidebarLayout {
                                     sidebar_open,
                                     right_panel_open,
                                     thread: routed_thread.clone(),
+                                    git_host: self.git_host.clone(),
+                                    thread_details_open: self.thread_details_open,
                                 })
                             })
                             .when(right_panel_open, |this| {

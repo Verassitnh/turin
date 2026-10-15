@@ -129,6 +129,9 @@ pub const SEND_ARROW: &str = "brand/send-arrow.svg";
 /// Lucide `chevron-down` at `stroke-width` 2.25 (ComposerControl.tsx); the
 /// stock `IconName::ChevronDown` is stroke 2.
 pub const CHEVRON_DOWN: &str = "brand/chevron-down.svg";
+/// EnvironmentMachineIcon's hand-drawn Mac mini / Mac Studio (lucide has no Apple desktops).
+pub const MAC_MINI: &str = "brand/mac-mini.svg";
+pub const MAC_STUDIO: &str = "brand/mac-studio.svg";
 
 const BRAND: &[(&str, &[u8])] = &[
     (SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg")),
@@ -136,6 +139,8 @@ const BRAND: &[(&str, &[u8])] = &[
         CHEVRON_DOWN,
         include_bytes!("../assets/brand/chevron-down.svg"),
     ),
+    (MAC_MINI, include_bytes!("../assets/brand/mac-mini.svg")),
+    (MAC_STUDIO, include_bytes!("../assets/brand/mac-studio.svg")),
 ];
 
 pub struct AppAssets;

@@ -15,6 +15,8 @@ use gpui_kit::{
     WeakEntity, Window, div, px, rems,
 };
 
+use turin_contracts::git::VcsStatusResult;
+
 use super::GitActionsControl;
 use crate::components::sidebar::thread_status_indicators::format_diff_count;
 use crate::theme::color::with_alpha;
@@ -55,34 +57,33 @@ pub struct CommitDialogForm {
 }
 
 impl CommitDialogForm {
-    fn new(control: WeakEntity<GitActionsControl>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (branch, is_default_ref, files) = control
-            .upgrade()
-            .map(|control| {
-                let status = control.read(cx).status_for(cx).status;
-                match status {
-                    Some(status) => (
-                        status
-                            .ref_name
-                            .as_ref()
-                            .map(|name| name.as_str().to_owned())
-                            .unwrap_or_else(|| "(detached HEAD)".to_owned()),
-                        status.is_default_ref,
-                        status
-                            .working_tree
-                            .files
-                            .iter()
-                            .map(|file| FileRow {
-                                path: file.path.as_str().to_owned(),
-                                insertions: file.insertions,
-                                deletions: file.deletions,
-                            })
-                            .collect(),
-                    ),
-                    None => ("(detached HEAD)".to_owned(), false, Vec::new()),
-                }
-            })
-            .unwrap_or_else(|| ("(detached HEAD)".to_owned(), false, Vec::new()));
+    fn new(
+        control: WeakEntity<GitActionsControl>,
+        status: Option<VcsStatusResult>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (branch, is_default_ref, files) = match status {
+            Some(status) => (
+                status
+                    .ref_name
+                    .as_ref()
+                    .map(|name| name.as_str().to_owned())
+                    .unwrap_or_else(|| "(detached HEAD)".to_owned()),
+                status.is_default_ref,
+                status
+                    .working_tree
+                    .files
+                    .iter()
+                    .map(|file| FileRow {
+                        path: file.path.as_str().to_owned(),
+                        insertions: file.insertions,
+                        deletions: file.deletions,
+                    })
+                    .collect(),
+            ),
+            None => ("(detached HEAD)".to_owned(), false, Vec::new()),
+        };
         let message = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 6)
@@ -112,7 +113,8 @@ impl CommitDialogForm {
             return;
         }
         let all_selected = self.excluded.is_empty();
-        let file_paths = (!all_selected).then(|| selected.iter().map(|file| file.path.clone()).collect());
+        let file_paths =
+            (!all_selected).then(|| selected.iter().map(|file| file.path.clone()).collect());
         let message = self.message.read(cx).value().to_string();
         window.close_dialog(cx);
         self.control
@@ -259,7 +261,7 @@ impl Render for CommitDialogForm {
             .flex()
             .flex_col()
             .gap_4()
-            .w(px(480.))
+            .w_full()
             .child(
                 div()
                     .text_size(TEXT_SM.size)
@@ -327,7 +329,10 @@ impl Render for CommitDialogForm {
                                                             let paths = all_paths.clone();
                                                             weak_all
                                                                 .update(cx, |this, cx| {
-                                                                    this.excluded = if this.excluded.is_empty() {
+                                                                    this.excluded = if this
+                                                                        .excluded
+                                                                        .is_empty()
+                                                                    {
                                                                         paths.into_iter().collect()
                                                                     } else {
                                                                         HashSet::new()
@@ -338,12 +343,18 @@ impl Render for CommitDialogForm {
                                                         }),
                                                 )
                                             })
-                                            .child(div().text_color(theme.muted_foreground).child("Files"))
+                                            .child(
+                                                div()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Files"),
+                                            )
                                             .when(!all_selected && !self.editing, |this| {
                                                 this.child(
-                                                    div().text_color(theme.muted_foreground).child(format!(
-                                                        "({selected_count} of {file_count})"
-                                                    )),
+                                                    div().text_color(theme.muted_foreground).child(
+                                                        format!(
+                                                            "({selected_count} of {file_count})"
+                                                        ),
+                                                    ),
                                                 )
                                             }),
                                     )
@@ -365,7 +376,10 @@ impl Render for CommitDialogForm {
                                     }),
                             )
                             .child(if file_count == 0 {
-                                div().font_weight(FontWeight::MEDIUM).child("none").into_any_element()
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("none")
+                                    .into_any_element()
                             } else {
                                 div()
                                     .flex()
@@ -382,16 +396,27 @@ impl Render for CommitDialogForm {
                                             })
                                             .border_1()
                                             .border_color(ring)
-                                            .child(scroll_area("commit-files").child(
-                                                div().flex().flex_col().gap_1().p_1().children(rows),
-                                            )),
+                                            .child(
+                                                scroll_area("commit-files").child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_1()
+                                                        .p_1()
+                                                        .children(rows),
+                                                ),
+                                            ),
                                     )
                                     .child(
                                         div()
                                             .flex()
                                             .justify_end()
                                             .font_family(theme.fonts.mono.clone())
-                                            .child(counts(total_insertions, total_deletions, &theme)),
+                                            .child(counts(
+                                                total_insertions,
+                                                total_deletions,
+                                                &theme,
+                                            )),
                                     )
                                     .into_any_element()
                             }),
@@ -463,10 +488,18 @@ impl Render for CommitDialogForm {
 }
 
 /// Opens the dialog for the control.
-pub fn open(control: WeakEntity<GitActionsControl>, window: &mut Window, cx: &mut gpui_kit::App) {
-    let form = cx.new(|cx| CommitDialogForm::new(control, window, cx));
+pub fn open(
+    control: WeakEntity<GitActionsControl>,
+    status: Option<VcsStatusResult>,
+    window: &mut Window,
+    cx: &mut gpui_kit::App,
+) {
+    let form = cx.new(|cx| CommitDialogForm::new(control, status, window, cx));
     window.open_dialog(cx, move |dialog, _, _| {
-        dialog.title(COMMIT_DIALOG_TITLE).child(form.clone())
+        dialog
+            .title(COMMIT_DIALOG_TITLE)
+            .w(px(560.))
+            .child(form.clone())
     });
 }
 
@@ -476,7 +509,10 @@ mod tests {
 
     #[test]
     fn keeps_the_end_of_a_long_path() {
-        assert_eq!(start_truncated_path("crates/app/src/lib.rs", 52), "crates/app/src/lib.rs");
+        assert_eq!(
+            start_truncated_path("crates/app/src/lib.rs", 52),
+            "crates/app/src/lib.rs"
+        );
         let long = "crates/app/src/components/a/very/deeply/nested/folder/structure/file_name.rs";
         let cut = start_truncated_path(long, 30);
         assert!(cut.starts_with('…'));

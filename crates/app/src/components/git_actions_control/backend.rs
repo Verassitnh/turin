@@ -14,7 +14,9 @@
 use std::rc::Rc;
 
 use gpui_kit::{App, Task};
-use turin_contracts::git::{GitRunStackedActionResult, GitStackedAction, VcsPullResult, VcsStatusResult};
+use turin_contracts::git::{
+    GitRunStackedActionResult, GitStackedAction, VcsPullResult, VcsStatusResult,
+};
 use turin_contracts::source_control::{
     SourceControlCloneProtocol, SourceControlPublishRepositoryResult,
     SourceControlRepositoryVisibility,

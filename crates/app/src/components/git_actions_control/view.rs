@@ -7,20 +7,19 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Sizable as _, Size};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, px, rems,
+    AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, px, rems,
 };
 use turin_contracts::git::{GitStackedAction, VcsStatusResult};
 use turin_review::action_state::git_actions_control_logic::{
-    GitActionIconName, GitActionMenuItem, GitActionProgressInput, GitQuickAction, GitQuickActionKind,
-    format_git_action_elapsed, resolve_git_action_progress_presentation, resolve_quick_action,
+    GitActionIconName, GitActionMenuItem, GitActionProgressInput, GitQuickAction,
+    GitQuickActionKind, format_git_action_elapsed, resolve_git_action_progress_presentation,
+    resolve_quick_action,
 };
 
 use super::GitActionsControl;
-use super::commit_dialog;
 use super::lifecycle::{RunGitActionInput, menu_action_disabled_reason};
-use super::publish_dialog;
 use crate::components::chat::thread_details_control::{
     ThreadDetailsControl, ThreadDetailsPart, panel_hover_surface, panel_icon, panel_split_group,
     panel_split_separator,
@@ -108,7 +107,12 @@ impl GitActionsControl {
     }
 
     /// `GitActionSuccessButtonContent`.
-    fn success_content(&self, title: &str, description: Option<&str>, theme: &AppTheme) -> AnyElement {
+    fn success_content(
+        &self,
+        title: &str,
+        description: Option<&str>,
+        theme: &AppTheme,
+    ) -> AnyElement {
         let mut column = div().flex().flex_col().min_w_0().flex_1().child(
             div()
                 .flex()
@@ -145,7 +149,8 @@ impl GitActionsControl {
         label: SharedString,
         disabled: bool,
         reason: Option<String>,
-        on_click: impl Fn(&mut GitActionsControl, &mut Window, &mut Context<GitActionsControl>) + 'static,
+        on_click: impl Fn(&mut GitActionsControl, &mut Window, &mut Context<GitActionsControl>)
+        + 'static,
         weak: gpui_kit::WeakEntity<GitActionsControl>,
         theme: &AppTheme,
     ) -> AnyElement {
@@ -197,11 +202,14 @@ impl GitActionsControl {
         let status_view = self.status_for(cx);
         let status = status_view.status.clone();
         let busy = self.is_action_running(cx);
-        let has_primary_remote = status.as_ref().is_some_and(|status| status.has_primary_remote);
+        let has_primary_remote = status
+            .as_ref()
+            .is_some_and(|status| status.has_primary_remote);
         let items = self.menu_items(cx);
         let mut rows: Vec<AnyElement> = Vec::new();
         for item in items {
-            let reason = menu_action_disabled_reason(&item, status.as_ref(), busy, has_primary_remote);
+            let reason =
+                menu_action_disabled_reason(&item, status.as_ref(), busy, has_primary_remote);
             let disabled = item.disabled;
             let dialog_action = item.dialog_action;
             rows.push(self.menu_row(
@@ -210,7 +218,9 @@ impl GitActionsControl {
                 item.label.clone().into(),
                 disabled,
                 if disabled { reason } else { None },
-                move |this, window, cx| this.open_dialog_for_menu_item(&item_for(dialog_action), window, cx),
+                move |this, window, cx| {
+                    this.open_dialog_for_menu_item(&item_for(dialog_action), window, cx)
+                },
                 weak.clone(),
                 &theme,
             ));
@@ -225,7 +235,7 @@ impl GitActionsControl {
                 "Publish repository...".into(),
                 busy,
                 None,
-                |this, window, cx| publish_dialog::open(cx.entity().downgrade(), window, cx),
+                |this, window, cx| this.open_publish_dialog(window, cx),
                 weak.clone(),
                 &theme,
             ));
@@ -286,23 +296,30 @@ impl GitActionsControl {
             return;
         };
         match item.dialog_action {
-            GitDialogAction::Push => {
-                self.run_git_action(target, RunGitActionInput::new(GitStackedAction::Push), window, cx)
-            }
+            GitDialogAction::Push => self.run_git_action(
+                target,
+                RunGitActionInput::new(GitStackedAction::Push),
+                window,
+                cx,
+            ),
             GitDialogAction::CreatePr => self.run_git_action(
                 target,
                 RunGitActionInput::new(GitStackedAction::CreatePr),
                 window,
                 cx,
             ),
-            GitDialogAction::Commit => commit_dialog::open(cx.entity().downgrade(), window, cx),
+            GitDialogAction::Commit => self.open_commit_dialog(window, cx),
         }
     }
 }
 
 /// The menu item a dialog action stands for (enabled), for re-dispatch.
-fn item_for(action: turin_review::action_state::git_actions_control_logic::GitDialogAction) -> GitActionMenuItem {
-    use turin_review::action_state::git_actions_control_logic::{GitActionMenuItemId, GitDialogAction};
+fn item_for(
+    action: turin_review::action_state::git_actions_control_logic::GitDialogAction,
+) -> GitActionMenuItem {
+    use turin_review::action_state::git_actions_control_logic::{
+        GitActionMenuItemId, GitDialogAction,
+    };
     GitActionMenuItem {
         id: match action {
             GitDialogAction::Commit => GitActionMenuItemId::Commit,
@@ -332,7 +349,10 @@ fn diff_totals(status: Option<&VcsStatusResult>) -> (u64, u64) {
     match status {
         Some(status) => match &status.branch_changes {
             Some(changes) => (changes.insertions, changes.deletions),
-            None => (status.working_tree.insertions, status.working_tree.deletions),
+            None => (
+                status.working_tree.insertions,
+                status.working_tree.deletions,
+            ),
         },
         None => (0, 0),
     }
@@ -350,13 +370,18 @@ impl Render for GitActionsControl {
         let status = status_view.status.clone();
         // Default to true while loading so we don't flash init controls.
         let is_repo = status.as_ref().map(|status| status.is_repo).unwrap_or(true);
-        let has_primary_remote = status.as_ref().is_some_and(|status| status.has_primary_remote);
+        let has_primary_remote = status
+            .as_ref()
+            .is_some_and(|status| status.has_primary_remote);
         let is_default_ref = status.as_ref().is_some_and(|status| status.is_default_ref);
         let busy = self.is_action_running(cx);
         let quick = resolve_quick_action(status.as_ref(), busy, is_default_ref, has_primary_remote);
-        let quick_disabled_reason = quick
-            .disabled
-            .then(|| quick.hint.clone().unwrap_or_else(|| "This action is currently unavailable.".to_owned()));
+        let quick_disabled_reason = quick.disabled.then(|| {
+            quick
+                .hint
+                .clone()
+                .unwrap_or_else(|| "This action is currently unavailable.".to_owned())
+        });
         let action_state = self.action_state(cx);
         let progress = resolve_git_action_progress_presentation(&GitActionProgressInput {
             is_running: action_state.is_running,
@@ -371,7 +396,11 @@ impl Render for GitActionsControl {
         let mut children: Vec<AnyElement> = Vec::new();
 
         if !is_repo {
-            let label = if self.init_pending { "Initializing..." } else { "Initialize Git" };
+            let label = if self.init_pending {
+                "Initializing..."
+            } else {
+                "Initialize Git"
+            };
             let weak_init = weak.clone();
             children.push(if panel {
                 ThreadDetailsControl::new("git-init")
@@ -421,7 +450,9 @@ impl Render for GitActionsControl {
                     .disabled(!can_open)
                     .on_click(move |_, _, cx| {
                         weak_changes
-                            .update(cx, |_, cx| cx.emit(super::GitActionsControlEvent::OpenChanges))
+                            .update(cx, |_, cx| {
+                                cx.emit(super::GitActionsControlEvent::OpenChanges)
+                            })
                             .ok();
                     })
                     .child(panel_icon(IconName::FileDiff, &theme))
@@ -466,7 +497,9 @@ impl GitActionsControl {
         &mut self,
         quick: &GitQuickAction,
         quick_disabled_reason: Option<&str>,
-        progress: Option<&turin_review::action_state::git_actions_control_logic::GitActionProgressPresentation>,
+        progress: Option<
+            &turin_review::action_state::git_actions_control_logic::GitActionProgressPresentation,
+        >,
         success: Option<&super::InlineSuccess>,
         busy: bool,
         _: &mut Window,
@@ -568,7 +601,9 @@ impl GitActionsControl {
                         .content({
                             let weak_content = weak.clone();
                             move |_, _, cx| match weak_content.upgrade() {
-                                Some(control) => control.update(cx, |control, cx| control.menu_content(cx)),
+                                Some(control) => {
+                                    control.update(cx, |control, cx| control.menu_content(cx))
+                                }
                                 None => div().into_any_element(),
                             }
                         }),

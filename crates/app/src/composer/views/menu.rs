@@ -559,14 +559,13 @@ impl ChatComposer {
             }
             _ => None,
         };
-        let label = match (trigger.kind, item) {
-            (ComposerTriggerKind::SlashCommand, ComposerCommandItem::Skill { skill, .. }) => {
-                format!(
-                    "/skill:{}",
-                    format_provider_skill_display_name(&skill.name, skill.display_name.as_deref())
-                )
-            }
-            _ => item.label().to_owned(),
+        // A slash skill's `/skill:` prefix is dimmed (ComposerCommandMenu.tsx).
+        let (label_prefix, label) = match (trigger.kind, item) {
+            (ComposerTriggerKind::SlashCommand, ComposerCommandItem::Skill { skill, .. }) => (
+                Some("/skill:"),
+                format_provider_skill_display_name(&skill.name, skill.display_name.as_deref()),
+            ),
+            _ => (None, item.label().to_owned()),
         };
         let badge = match item {
             ComposerCommandItem::Skill { skill, .. } => {
@@ -616,13 +615,20 @@ impl ChatComposer {
                     .gap_2()
                     .child(
                         div()
+                            .flex()
                             .min_w_0()
                             .max_w(gpui_kit::relative(0.45))
                             .flex_shrink_0()
                             .truncate()
                             .text_size(TEXT_XS.size)
                             .font_weight(FontWeight::MEDIUM)
-                            .child(label),
+                            .children(label_prefix.map(|prefix| {
+                                div()
+                                    .flex_shrink_0()
+                                    .text_color(theme.secondary_label)
+                                    .child(prefix)
+                            }))
+                            .child(div().min_w_0().truncate().child(label)),
                     )
                     .child(
                         div()

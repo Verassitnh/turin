@@ -774,3 +774,71 @@ while (my $line = <STDIN>) {
     .unwrap();
     assert_eq!(result["userAgent"], "mock");
 }
+
+fn client_pair() -> (
+    Arc<crate::client::Client>,
+    tokio::io::DuplexStream,
+    tokio::io::DuplexStream,
+) {
+    let (client_read, peer_writer) = tokio::io::duplex(1024 * 1024);
+    let (peer_reader, client_write) = tokio::io::duplex(1024 * 1024);
+    (
+        Arc::new(crate::client::Client::from_io(client_read, client_write)),
+        peer_reader,
+        peer_writer,
+    )
+}
+
+async fn next_frame(lines: &mut tokio::io::Lines<BufReader<tokio::io::DuplexStream>>) -> Value {
+    let line = timeout(Duration::from_secs(1), lines.next_line())
+        .await
+        .expect("peer frame")
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+const TOOL_INPUT_PARAMS: &str = r#"{"isBlocking":true,"itemId":"approval-1","threadId":"thread-1","turnId":"turn-1","questions":[{"id":"approved","header":"Approve","question":"Continue?"}]}"#;
+
+#[tokio::test]
+async fn known_server_request_without_handler_is_method_not_found() {
+    let (client, peer_reader, mut peer_writer) = client_pair();
+    let unknown_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = unknown_calls.clone();
+    client.handle_unknown_server_request(Arc::new(move |_method, _params| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async { Ok(Some(json!({"answered":"by-unknown"}))) }.boxed()
+    }));
+    let mut lines = BufReader::new(peer_reader).lines();
+    write_frame(
+        &mut peer_writer,
+        json!({"id":9,"method":"item/tool/requestUserInput","params":serde_json::from_str::<Value>(TOOL_INPUT_PARAMS).unwrap()}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":9,"error":{"code":-32601,"message":"Method not found: item/tool/requestUserInput"}})
+    );
+    assert_eq!(unknown_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn handlers_registered_under_unknown_request_method_are_ignored() {
+    let (client, peer_reader, mut peer_writer) = client_pair();
+    client.handle_server_request("x/custom-request", |_params| async {
+        Ok(Some(json!({"from":"registered"})))
+    });
+    client.handle_unknown_server_request(Arc::new(move |_method, _params| {
+        async { Ok(Some(json!({"from":"unknown"}))) }.boxed()
+    }));
+    let mut lines = BufReader::new(peer_reader).lines();
+    write_frame(
+        &mut peer_writer,
+        json!({"id":3,"method":"x/custom-request","params":{"a":1}}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":3,"result":{"from":"unknown"}})
+    );
+}

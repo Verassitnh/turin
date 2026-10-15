@@ -80,38 +80,33 @@ impl Client {
         raw.set_request_handler(Arc::new(move |method, params| {
             let requests = requests.clone();
             async move {
+                // Mirrors upstream dispatchRequest: only protocol-known methods reach the
+                // registered handlers, and a known method without one answers -32601 rather
+                // than falling through to the unknown-request handler.
+                let Some(entry) = meta::method_meta(meta::SERVER_REQUEST_METHODS, &method) else {
+                    let unknown = requests.unknown_request.lock().clone();
+                    return match unknown {
+                        Some(handler) => handler(method, params).await,
+                        None => Err(ProtocolError::method_not_found(&method)),
+                    };
+                };
+                validate_known(&method, entry.params, params.as_ref()).map_err(invalid_params)?;
                 let handler = requests.requests.lock().get(&method).cloned();
-                let unknown = requests.unknown_request.lock().clone();
-                if let Some(handler) = handler {
-                    let entry = meta::method_meta(meta::SERVER_REQUEST_METHODS, &method);
-                    validate_known(
-                        &method,
-                        entry.and_then(|entry| entry.params),
-                        params.as_ref(),
-                    )
-                    .map_err(invalid_params)?;
-                    let result = handler(params).await.map_err(|error| match error {
-                        AppServerError::Request { error, .. } => *error,
-                        other => ProtocolError {
-                            code: -32603,
-                            message: format!(
-                                "Codex App Server request handler failed for method '{method}'"
-                            ),
-                            data: Some(Value::String(other.to_string())),
-                        },
-                    })?;
-                    validate_known(
-                        &method,
-                        entry.and_then(|entry| entry.response),
-                        result.as_ref(),
-                    )
-                    .map_err(invalid_params)?;
-                    Ok(result)
-                } else if let Some(handler) = unknown {
-                    handler(method, params).await
-                } else {
-                    Err(ProtocolError::method_not_found(&method))
-                }
+                let Some(handler) = handler else {
+                    return Err(ProtocolError::method_not_found(&method));
+                };
+                let result = handler(params).await.map_err(|error| match error {
+                    AppServerError::Request { error, .. } => *error,
+                    other => ProtocolError {
+                        code: -32603,
+                        message: format!(
+                            "Codex App Server request handler failed for method '{method}'"
+                        ),
+                        data: Some(Value::String(other.to_string())),
+                    },
+                })?;
+                validate_known(&method, entry.response, result.as_ref()).map_err(invalid_params)?;
+                Ok(result)
             }
             .boxed()
         }));

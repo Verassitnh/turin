@@ -8,6 +8,8 @@ PM (Claude Opus 5.5) owns this file. Agents don't edit it; they report back.
 
 **Haiku everywhere (user, 2026-10-15 ~13:30 UTC): "just go crazy with haiku, its not worth it with the others."** All backend/logic work and QC run on Claude Haiku 5.5 (effort high). Cursor/Codex/OpenRouter are not worth pursuing now. UI stays on Sonnet (max 2). Opus = PM only, minimal.
 
+**No Codex, ever (user, 2026-10-15): "Don't delegate anything to codex, I'm saving codex for a different project."** Never target the Codex provider for any Turin task or QC role.
+
 **Claude budget (user, 2026-10-15 ~12:55 UTC): Claude usage nearly out.** Use
 Cursor Auto, Codex and Haiku as much as possible; be very sparing with Opus
 and Sonnet. UI may now be written by **Sonnet** (replaces the Opus-only UI

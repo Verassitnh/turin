@@ -70,6 +70,9 @@ impl AssetSource for AppAssets {
         if let Some(bytes) = AppIcons.load(path)? {
             return Ok(Some(bytes));
         }
+        if let Some(bytes) = crate::settings::icons::SettingsIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
         Assets.load(path)
     }
 
@@ -81,6 +84,7 @@ impl AssetSource for AppAssets {
             .map(SharedString::from)
             .collect();
         names.extend(AppIcons.list(path)?);
+        names.extend(crate::settings::icons::SettingsIcons.list(path)?);
         names.extend(Assets.list(path)?);
         names.sort();
         names.dedup();

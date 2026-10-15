@@ -1,0 +1,394 @@
+//! The settings window content: sidebar nav + routed page (the `/settings`
+//! route of upstream/apps/web/src/routes/settings.tsx with
+//! AppSidebarLayout's settings branch).
+//!
+//! One view owns the UI state of every page (open menus, text inputs,
+//! search) and renders the active page from the [`SettingsViewModel`].
+
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
+    AnyElement, App, AppContext as _, Context, Entity, Focusable as _, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, Subscription, Window, div, px, rems,
+};
+use serde_json::Value;
+
+use super::controls::MenuState;
+use super::layout::{SettingsMetrics, SettingsSearchTarget};
+use super::search::{SettingsPath, SettingsScopeKind};
+use super::view_model::{SettingsStore, SettingsViewModel};
+use crate::components::drag_region::DragRegion as _;
+use crate::components::sidebar::sidebar_chrome::{SidebarChromeFooter, SidebarChromeHeader};
+use crate::components::thread_sidebar_width::THREAD_SIDEBAR_DEFAULT_WIDTH;
+use crate::components::workspace_breadcrumb::{
+    WorkspaceBreadcrumb, WorkspaceBreadcrumbItem, WorkspaceBreadcrumbSeparator,
+    workspace_breadcrumb_text,
+};
+use crate::components::workspace_titlebar::{workspace_controls_left, workspace_titlebar_content_left};
+use crate::theme::ActiveAppTheme;
+use crate::theme::tokens::{WORKSPACE_TOPBAR_HEIGHT, TEXT_SM};
+use crate::ui::{Button, ButtonSize, ButtonVariant, IconName, Tooltip};
+
+/// `/settings/<section>` plus the General page's detail page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsRoute {
+    Section(SettingsPath),
+    OpenSourceLicenses,
+}
+
+impl SettingsRoute {
+    pub fn pathname(self) -> &'static str {
+        match self {
+            Self::Section(path) => path.path(),
+            Self::OpenSourceLicenses => "/settings/open-source-licenses",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "open-source-licenses" | "licenses" => Some(Self::OpenSourceLicenses),
+            other => SettingsPath::from_path(&format!("/settings/{other}")).map(Self::Section),
+        }
+    }
+
+    /// `SETTINGS_BREADCRUMB_LABELS`.
+    pub fn breadcrumb_label(self) -> &'static str {
+        match self {
+            Self::Section(path) => path.label(),
+            Self::OpenSourceLicenses => "Open source licenses",
+        }
+    }
+}
+
+/// Which settings file a row's key lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Which {
+    Client,
+    Server,
+}
+
+/// What a settings page is targeting: all projects, or one project's overrides
+/// (`SettingsScopeSearch.project`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SettingsScope {
+    #[default]
+    AllProjects,
+    Project(String),
+}
+
+impl SettingsScope {
+    pub fn kind(&self) -> SettingsScopeKind {
+        match self {
+            Self::AllProjects => SettingsScopeKind::All,
+            Self::Project(_) => SettingsScopeKind::Project,
+        }
+    }
+}
+
+type InputCommit = Rc<dyn Fn(&mut SettingsView, String, &mut Window, &mut Context<SettingsView>)>;
+
+pub struct SettingsView {
+    pub(super) store: Entity<SettingsStore>,
+    pub(super) route: SettingsRoute,
+    pub(super) scope: SettingsScope,
+    pub(super) menus: MenuState,
+    pub(super) inputs: HashMap<SharedString, Entity<InputState>>,
+    input_commits: HashMap<SharedString, InputCommit>,
+    pub(super) nav_search: Entity<InputState>,
+    pub(super) nav_query: String,
+    pub(super) sidebar_open: bool,
+    pub(super) panels: super::panels::PanelState,
+    pub(super) dialog: Option<super::dialog::Dialog>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl SettingsView {
+    pub fn new(store: Entity<SettingsStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let nav_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let subscriptions = vec![
+            cx.observe(&store, |_, _, cx| cx.notify()),
+            cx.subscribe_in(&nav_search, window, |this, state, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.nav_query = state.read(cx).value().to_string();
+                    cx.notify();
+                }
+            }),
+        ];
+        Self {
+            store,
+            route: SettingsRoute::Section(SettingsPath::General),
+            scope: SettingsScope::default(),
+            menus: MenuState::default(),
+            inputs: HashMap::new(),
+            input_commits: HashMap::new(),
+            nav_search,
+            nav_query: String::new(),
+            sidebar_open: true,
+            panels: Default::default(),
+            dialog: None,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    pub fn set_route(&mut self, route: SettingsRoute, cx: &mut Context<Self>) {
+        self.route = route;
+        self.menus.close();
+        cx.notify();
+    }
+
+    pub fn vm(&self, cx: &App) -> Rc<SettingsViewModel> {
+        self.store.read(cx).vm().clone()
+    }
+
+    // ── dev hooks (settings/demo.rs) ────────────────────────────────────
+
+    pub(super) fn open_menu_for_demo(&mut self, id: String, cx: &mut Context<Self>) {
+        self.menus.open(id);
+        cx.notify();
+    }
+
+    pub(super) fn set_nav_query_for_demo(
+        &mut self,
+        query: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.nav_query = query.clone();
+        self.nav_search
+            .update(cx, |state, cx| state.set_value(query, window, cx));
+        cx.notify();
+    }
+
+    // ── patching ────────────────────────────────────────────────────────
+
+    pub(super) fn update_client(&self, patch: Value, cx: &mut App) {
+        let source = self.store.read(cx).source();
+        source.update_client(patch, cx);
+    }
+
+    pub(super) fn update_server(&self, patch: Value, cx: &mut App) {
+        let source = self.store.read(cx).source();
+        source.update_server(patch, cx);
+    }
+
+    pub(super) fn update(&self, which: Which, patch: Value, cx: &mut App) {
+        match which {
+            Which::Client => self.update_client(patch, cx),
+            Which::Server => self.update_server(patch, cx),
+        }
+    }
+
+    // ── closures over this view ─────────────────────────────────────────
+
+    /// A `Fn(&mut Window, &mut App)` that runs `f` on this view.
+    pub(super) fn cb(
+        &self,
+        cx: &mut Context<Self>,
+        f: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl Fn(&mut Window, &mut App) + 'static {
+        let entity = cx.entity();
+        move |window, cx| {
+            entity.update(cx, |this, cx| f(this, window, cx));
+        }
+    }
+
+    // ── text inputs ─────────────────────────────────────────────────────
+
+    /// A text input whose text is `value` unless the user is editing it; `commit`
+    /// runs on Enter or blur (`DraftInput`).
+    pub(super) fn input(
+        &mut self,
+        id: &str,
+        value: &str,
+        placeholder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        commit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Entity<InputState> {
+        let key = SharedString::from(id.to_owned());
+        self.input_commits.insert(key.clone(), Rc::new(commit));
+        if let Some(state) = self.inputs.get(&key) {
+            let state = state.clone();
+            let focused = state.read(cx).focus_handle(cx).is_focused(window);
+            if !focused && state.read(cx).value() != value {
+                state.update(cx, |state, cx| state.set_value(value.to_owned(), window, cx));
+            }
+            return state;
+        }
+        let state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder.to_owned())
+                .default_value(value.to_owned())
+        });
+        let subscription_key = key.clone();
+        let subscription = cx.subscribe_in(&state, window, move |this, state, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                let text = state.read(cx).value().to_string();
+                if let Some(commit) = this.input_commits.get(&subscription_key).cloned() {
+                    commit(this, text, window, cx);
+                }
+            }
+        });
+        self._subscriptions.push(subscription);
+        self.inputs.insert(key, state.clone());
+        state
+    }
+}
+
+impl Render for SettingsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.app_theme().clone();
+        let viewport_width = f32::from(window.viewport_size().width);
+        let sidebar_width = THREAD_SIDEBAR_DEFAULT_WIDTH;
+        let main_width = if self.sidebar_open {
+            viewport_width - sidebar_width
+        } else {
+            viewport_width
+        };
+        // `max-w-4xl`, `px-6` each side, row `px-4` each side.
+        let content_width = main_width.min(896.) - 48.;
+        cx.set_global(SettingsMetrics {
+            row_width: content_width - 32.,
+        });
+
+        let route = self.route;
+        let header_left = if self.sidebar_open {
+            px(20.)
+        } else {
+            workspace_titlebar_content_left(window)
+        };
+        let breadcrumb = WorkspaceBreadcrumb::new()
+            .child(WorkspaceBreadcrumbItem::new(false).child(workspace_breadcrumb_text("Settings")))
+            .child(WorkspaceBreadcrumbSeparator)
+            .child(
+                WorkspaceBreadcrumbItem::new(true)
+                    .child(workspace_breadcrumb_text(route.breadcrumb_label())),
+            );
+        let restore = (route == SettingsRoute::Section(SettingsPath::General)).then(|| {
+            let changed = self.changed_setting_labels(cx);
+            Button::new("restore-device-defaults")
+                .variant(ButtonVariant::Ghost)
+                .size(ButtonSize::Xs)
+                .icon(IconName::RotateCcw)
+                .label("Restore device defaults")
+                .disabled(changed.is_empty())
+                .on_click(cx.listener(|this, _, window, cx| this.restore_defaults(window, cx)))
+        });
+
+        let sidebar_toggle = div()
+            .absolute()
+            .top_0()
+            .left(workspace_controls_left(window) + px(1.))
+            .h(WORKSPACE_TOPBAR_HEIGHT)
+            .flex()
+            .items_center()
+            .child(
+                Button::new("sidebar-trigger")
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::IconSm)
+                    .icon(if self.sidebar_open {
+                        IconName::PanelLeftClose
+                    } else {
+                        IconName::PanelLeft
+                    })
+                    .tooltip(Tooltip::new("Toggle main sidebar").shortcut("⌘B"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sidebar_open = !this.sidebar_open;
+                        cx.notify();
+                    })),
+            );
+
+        let page = self.render_page(window, cx);
+
+        div()
+            .id("settings-root")
+            .relative()
+            .flex()
+            .flex_row()
+            .size_full()
+            .overflow_hidden()
+            .bg(theme.app_chrome_background)
+            .text_color(theme.foreground)
+            .font_family(theme.fonts.sans.clone())
+            .text_size(rems(1.))
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.menus.any_open() {
+                        this.menus.close();
+                        cx.notify();
+                    }
+                }),
+            )
+            .when(self.sidebar_open, |this| {
+                this.child(
+                    div()
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .h_full()
+                        .w(px(sidebar_width))
+                        .bg(theme.sidebar)
+                        .border_r_1()
+                        .border_color(theme.sidebar_border)
+                        .text_color(theme.sidebar_foreground)
+                        .child(SidebarChromeHeader)
+                        .child(self.render_nav(window, cx))
+                        .child(SidebarChromeFooter),
+                )
+            })
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .bg(theme.background)
+                    .child(
+                        div()
+                            .id("settings-header")
+                            .relative()
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap_3()
+                            .h(WORKSPACE_TOPBAR_HEIGHT)
+                            .pl(header_left)
+                            .pr(px(20.))
+                            .bg(theme.background)
+                            .child(
+                                div()
+                                    .flex()
+                                    .w_full()
+                                    .items_center()
+                                    .gap_3()
+                                    .text_size(TEXT_SM.size)
+                                    .child(breadcrumb)
+                                    .child(div().ml_auto().flex().flex_shrink_0().items_center().children(restore)),
+                            )
+                            .drag_region(window, cx),
+                    )
+                    .child(div().flex().flex_col().flex_1().min_h_0().child(page)),
+            )
+            .child(sidebar_toggle)
+            .children(self.render_dialog(cx))
+    }
+}
+
+/// Convenience for panels: a titled, id-anchored section.
+pub(super) fn section_title(text: &'static str) -> AnyElement {
+    div()
+        .font_weight(FontWeight::MEDIUM)
+        .child(text)
+        .into_any_element()
+}
+
+#[allow(dead_code)]
+fn _search_target_marker(_: SettingsSearchTarget) {}

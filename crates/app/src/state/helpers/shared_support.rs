@@ -697,10 +697,10 @@ pub fn parse_change_request_url(target_url: &str) -> Option<ChangeRequestLink> {
         return claim(&host, GITCAFE_PATH.captures(pathname));
     }
     // GitHub, and any Enterprise install: /{owner}/{repo}/pull/{n}
-    if is_host_of(&host, "github.com", Some("github")) {
-        if let Some(captures) = GITHUB_PATH.captures(pathname) {
-            return claim(&host, Some(captures));
-        }
+    if is_host_of(&host, "github.com", Some("github"))
+        && let Some(captures) = GITHUB_PATH.captures(pathname)
+    {
+        return claim(&host, Some(captures));
     }
     // Forgejo and Gitea use /pulls/ on arbitrary self-hosted domains.
     if let Some(forgejo) = FORGEJO_PATH.captures(pathname) {
@@ -842,19 +842,18 @@ pub fn legacy_thread_pull_request_key(
     linked: &ThreadLinkedPullRequest,
     fallback_host: Option<&str>,
 ) -> NormalizedThreadPullRequestKey {
-    if let Some(parsed) = parse_change_request_url(linked.url.as_str()) {
-        if parsed.number == linked.number.get() {
-            let canonical =
-                canonical_repository_key(&format!("{}/{}", parsed.host, parsed.repository));
-            if parsed.authority.is_some() || canonical.starts_with("dev.azure.com/") {
-                return normalize_thread_pull_request_key(&ThreadPullRequestKeySource {
-                    host: &parsed.host,
-                    repository: &parsed.repository,
-                    number: parsed.number,
-                    authority: parsed.authority.as_deref(),
-                    url: None,
-                });
-            }
+    if let Some(parsed) = parse_change_request_url(linked.url.as_str())
+        && parsed.number == linked.number.get()
+    {
+        let canonical = canonical_repository_key(&format!("{}/{}", parsed.host, parsed.repository));
+        if parsed.authority.is_some() || canonical.starts_with("dev.azure.com/") {
+            return normalize_thread_pull_request_key(&ThreadPullRequestKeySource {
+                host: &parsed.host,
+                repository: &parsed.repository,
+                number: parsed.number,
+                authority: parsed.authority.as_deref(),
+                url: None,
+            });
         }
     }
     let host: String = match fallback_host {
@@ -923,4 +922,103 @@ pub fn thread_pull_requests_of<'a>(
         })
     })();
     Cow::Owned(link.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_file_path_positions_from_suffixes_and_hashes() {
+        let position = |path: &str, hash: &str| {
+            let split = split_file_path_position(path, hash);
+            (split.path, split.line, split.column)
+        };
+        assert_eq!(
+            position("/a/b.ts:12:3", ""),
+            ("/a/b.ts".to_owned(), Some(12), Some(3))
+        );
+        assert_eq!(
+            position("/a/b.ts", "#L7C2"),
+            ("/a/b.ts".to_owned(), Some(7), Some(2))
+        );
+        assert_eq!(
+            position("/a/b.ts:0", ""),
+            ("/a/b.ts".to_owned(), None, None)
+        );
+        assert_eq!(position("/a/b.ts", ""), ("/a/b.ts".to_owned(), None, None));
+    }
+
+    #[test]
+    fn compares_semver_versions_like_upstream() {
+        use Ordering::{Equal, Greater, Less};
+        assert_eq!(compare_semver_versions("2.1.10", "2.1.9"), Greater);
+        assert_eq!(compare_semver_versions("v2.1", "2.1.0"), Equal);
+        assert_eq!(compare_semver_versions("2.1.0-beta", "2.1.0"), Less);
+        assert_eq!(
+            compare_semver_versions("2.1.0-beta.2", "2.1.0-beta.10"),
+            Less
+        );
+        assert_eq!(compare_semver_versions("2.1.0-beta", "2.1.0-beta.1"), Less);
+        // `split("-", 2)` drops everything past the second piece.
+        assert_eq!(normalize_semver_version("1.0.0-beta-1"), "1.0.0-beta");
+    }
+
+    #[test]
+    fn parses_change_request_urls_by_host_shape() {
+        let link = |url: &str| {
+            parse_change_request_url(url).map(|l| (l.host, l.repository, l.number, l.authority))
+        };
+        assert_eq!(
+            link("https://github.com/Acme/Web/pull/7/files"),
+            Some(("github.com".into(), "acme/web".into(), 7, None))
+        );
+        assert_eq!(
+            link("http://forge.example:3000/team/repo/pulls/7"),
+            Some((
+                "forge.example".into(),
+                "team/repo".into(),
+                7,
+                Some("forge.example:3000".into())
+            ))
+        );
+        assert_eq!(
+            link("https://gitlab.com/g/s/r/-/merge_requests/3"),
+            Some(("gitlab.com".into(), "g/s/r".into(), 3, None))
+        );
+        assert_eq!(link("https://github.com/acme/web/issues/7"), None);
+        assert_eq!(link("javascript:alert(1)"), None);
+        assert_eq!(link("https://github.com/acme/web/pull/0"), None);
+    }
+
+    #[test]
+    fn canonicalizes_azure_repository_keys() {
+        assert_eq!(
+            canonical_repository_key("ssh.dev.azure.com/v3/org/project/web"),
+            "dev.azure.com/org/project/_git/web"
+        );
+        assert_eq!(
+            canonical_repository_key("org.visualstudio.com/defaultcollection/project/_git/web"),
+            "dev.azure.com/org/project/_git/web"
+        );
+        assert_eq!(
+            canonical_repository_key("github.com/acme/web"),
+            "github.com/acme/web"
+        );
+    }
+
+    #[test]
+    fn mime_types_follow_extensions_and_data_urls() {
+        assert_eq!(media_mime_type("a/b.PNG?x=1").as_deref(), Some("image/png"));
+        assert_eq!(
+            media_mime_type("data:Video/MP4;base64,AA").as_deref(),
+            Some("video/mp4")
+        );
+        assert_eq!(media_mime_type("notes.txt"), None);
+        assert_eq!(
+            media_mime_type_from_extension(".mkv").as_deref(),
+            Some("video/x-matroska")
+        );
+        assert_eq!(media_mime_type_from_extension("mp4"), None);
+    }
 }

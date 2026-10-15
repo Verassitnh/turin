@@ -989,3 +989,67 @@ async fn handler_request_error_is_passed_through_unchanged() {
         json!({"id":5,"error":{"code":-32000,"message":"approval expired","data":{"reason":"timeout"}}})
     );
 }
+
+#[tokio::test]
+async fn invalid_server_request_payload_uses_the_upstream_message() {
+    let (client, peer_reader, mut peer_writer) = client_pair();
+    client.handle_server_request("item/tool/requestUserInput", |_params| async {
+        Err(AppServerError::Cancelled)
+    });
+    let mut lines = BufReader::new(peer_reader).lines();
+    write_frame(
+        &mut peer_writer,
+        json!({"id":7,"method":"item/tool/requestUserInput","params":{"threadId":5}}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":7,"error":{"code":-32602,"message":"Invalid payload for method 'item/tool/requestUserInput' during 'decode-payload'"}})
+    );
+    write_frame(
+        &mut peer_writer,
+        json!({"id":8,"method":"item/tool/requestUserInput"}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":8,"error":{"code":-32602,"message":"Invalid payload for method 'item/tool/requestUserInput' during 'decode-payload'"}})
+    );
+}
+
+#[tokio::test]
+async fn invalid_server_response_payload_uses_the_upstream_message() {
+    let (client, peer_reader, mut peer_writer) = client_pair();
+    client.handle_server_request("item/tool/requestUserInput", |_params| async {
+        Ok(Some(json!({"wrong": true})))
+    });
+    let mut lines = BufReader::new(peer_reader).lines();
+    write_frame(
+        &mut peer_writer,
+        json!({"id":10,"method":"item/tool/requestUserInput","params":serde_json::from_str::<Value>(TOOL_INPUT_PARAMS).unwrap()}),
+    )
+    .await;
+    assert_eq!(
+        next_frame(&mut lines).await,
+        json!({"id":10,"error":{"code":-32602,"message":"Invalid payload for method 'item/tool/requestUserInput' during 'encode-payload'"}})
+    );
+}
+
+#[test]
+fn payload_on_a_method_without_schema_reports_only_its_kind() {
+    let secret = "unexpected-payload-secret";
+    let error = crate::client::check_payload(
+        "initialized",
+        "decode-payload",
+        None,
+        Some(&json!({"token": secret})),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert_eq!(
+        error.message,
+        "Method 'initialized' does not accept a payload during 'decode-payload'"
+    );
+    assert_eq!(error.data, Some(json!({"payloadKind": "object"})));
+    assert!(!json!(error).to_string().contains(secret));
+}

@@ -1,13 +1,13 @@
 //! Port of upstream/packages/effect-codex-app-server/src/client.ts
 use crate::{
-    errors::{AppServerError, ProtocolError},
+    errors::{AppServerError, ProtocolError, payload_kind},
     generated::meta::{self, MethodMeta},
     protocol::{NotificationHandler, Protocol, ProtocolOptions, RequestHandler},
     schema,
 };
 use futures::{FutureExt, future::BoxFuture};
 use parking_lot::Mutex;
-use serde_json::Value;
+use serde_json::{Value, json};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::{
@@ -90,7 +90,7 @@ impl Client {
                         None => Err(ProtocolError::method_not_found(&method)),
                     };
                 };
-                validate_known(&method, entry.params, params.as_ref()).map_err(invalid_params)?;
+                check_payload(&method, "decode-payload", entry.params, params.as_ref())?;
                 let handler = requests.requests.lock().get(&method).cloned();
                 let Some(handler) = handler else {
                     return Err(ProtocolError::method_not_found(&method));
@@ -110,7 +110,7 @@ impl Client {
                         }
                     }
                 })?;
-                validate_known(&method, entry.response, result.as_ref()).map_err(invalid_params)?;
+                check_payload(&method, "encode-payload", entry.response, result.as_ref())?;
                 Ok(result)
             }
             .boxed()
@@ -331,12 +331,30 @@ fn validate_known(
     }
     schema::validate_optional(schema_name, payload)
 }
-fn invalid_params(detail: String) -> ProtocolError {
-    ProtocolError {
-        code: -32602,
-        message: format!("Invalid params: {detail}"),
-        data: None,
+/// Mirrors upstream decodeOptionalPayload/encodeOptionalPayload for server requests: a method
+/// without a schema must not carry a payload, and a method with one must match it. The wire
+/// messages use upstream's wording; the schema detail stays out of the peer-visible error.
+pub(crate) fn check_payload(
+    method: &str,
+    operation: &'static str,
+    schema_name: Option<&str>,
+    payload: Option<&Value>,
+) -> Result<(), ProtocolError> {
+    if let (None, Some(payload)) = (schema_name, payload) {
+        return Err(ProtocolError {
+            code: -32602,
+            message: format!("Method '{method}' does not accept a payload during '{operation}'"),
+            data: Some(json!({"payloadKind": payload_kind(payload)})),
+        });
     }
+    validate_known(method, schema_name, payload).map_err(|detail| {
+        tracing::debug!(%method, operation, %detail, "Codex App Server payload failed schema validation");
+        ProtocolError {
+            code: -32602,
+            message: format!("Invalid payload for method '{method}' during '{operation}'"),
+            data: None,
+        }
+    })
 }
 impl Drop for Client {
     fn drop(&mut self) {

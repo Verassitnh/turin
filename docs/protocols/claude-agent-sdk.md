@@ -18,7 +18,7 @@ Every emitted conversation frame carries a top-level `type`; most have `uuid` an
 
 | Direction/type | Required and salient fields | Meaning |
 |---|---|---|
-| stdin `user` | `message:{role:"user",content:string\|block[]}`, `parent_tool_use_id:null`, `session_id?:string`, `uuid?:string` | Submit prompt; CLI also emits user frames for tool results. |
+| stdin `user` | `message:{role:"user",content:string\|block[]}`, `parent_tool_use_id:null`, `uuid?:string`, `priority?:"now"\|"next"\|"later"` | Submit prompt; CLI also emits user frames for tool results. Upstream sets UUID for prompt echo and may set priority (`ClaudeAdapterV2.ts:1558-1595`). |
 | stdout `system/init` | `session_id:string`, `tools:string[]`, `model:string`, `mcp_servers`, `capabilities?:string[]` | Session identity and available capabilities. |
 | stdout `stream_event` | `event` Anthropic streaming event, `parent_tool_use_id`, `uuid`, `session_id` | Partial text/thinking/tool JSON when partials enabled (`sdk.d.ts:5164`). |
 | stdout `assistant` | `message:{id,model,role:"assistant",content:block[],usage,…}`, `parent_tool_use_id:string\|null`, `uuid`, `session_id` | Completed *block*, not necessarily whole turn; consecutive frames may share message id (`sdk.d.ts:3399-3410`). |
@@ -46,11 +46,11 @@ Envelope: `{type:"control_request",request_id:string,request:{subtype:string,…
 | `can_use_tool` CLI→host | `tool_name:string`, `input:object`, `tool_use_id:string`, optional suggestions/reason/agent_id; success payload is permission result `{behavior:"allow",updatedInput?:object,updatedPermissions?:array}` or `{behavior:"deny",message:string,toolUseID?:string}` (`sdk.d.ts:4484-4535,2405-2420`) | Upstream routes approval/user input through `canUseToolEffect` (`ClaudeAdapterV2.ts:8098-8328`). Deny if owning turn vanished. |
 | `hook_callback` CLI→host | `callback_id`, `input`, `tool_use_id?`; response hook output (`sdk.d.ts:4870-4890`) | Only if hooks registered; upstream primarily relies on user settings/hooks. |
 | `interrupt` host→CLI | no required payload; receipt may contain `still_queued`, and `cancelled` with `cancel_queued:true` (`sdk.d.ts:4342-4362`) | Abort active turn; queued sends can survive. Feature-detect capabilities. |
-| `set_permission_mode`, `set_model` host→CLI | `mode:string`, `model?:string|null`; ack (`sdk.d.ts:4780-4802`) | Upstream live query exposes both (`ClaudeAdapterV2.ts:863-900`). |
+| `set_permission_mode`, `set_model`, `apply_flag_settings`, `stop_task` host→CLI | `mode:string`, `model?:string|null`, settings object, or `task_id:string`; ack (`sdk.d.ts:3644-3650,4780-4807`) | Upstream live query exposes all four (`ClaudeAdapterV2.ts:863-930`). |
 | `mcp_message` both directions | `server_name:string`, `message:JSON-RPC object`; response `mcp_response?` (`sdk.d.ts:4439-4450`) | In-process MCP server bridge; full MCP initialize/tools/list/tools/call must be supported. `mcp_set_servers`, `mcp_status`, `mcp_reconnect` are related controls. |
 | `request_user_dialog` CLI→host | `dialog_kind:string`, `payload:object`, `tool_use_id?`; result dialog-specific | Upstream supports `resume_return` and maps it into an AskUserQuestion approval (`ClaudeAdapterV2.ts:8330-8385`). |
 
-The SDK additionally exposes `rewindFiles`, `forkSession`, `getMcpStatus`, `setMcpServers`, `setMaxThinkingTokens`, `supportedModels`, `supportedCommands`, `stopTask`, etc. Upstream’s live runner invokes initialization, submit/stream, interrupt, model/mode changes, and selected session/fork/rewind/MCP operations (`ClaudeAdapterV2.ts:735-905` and later runtime methods). Preserve the full control union from `sdk.d.ts:4695` as an open enum, implementing only used requests first.
+The SDK additionally exposes `rewindFiles`, `forkSession`, `getMcpStatus`, `setMcpServers`, `setMaxThinkingTokens`, `supportedModels`, and `supportedCommands`. Upstream’s live runner uses prompt offer/stream, interrupt, model/mode/flag changes, stop task, MCP registration, session fork, and a subagent launch lookup through CLI session storage (`ClaudeAdapterV2.ts:408-492,735-940`). Preserve the full control union from `sdk.d.ts:4693` as an open enum, implementing the used requests first.
 
 ## Turn sequence
 

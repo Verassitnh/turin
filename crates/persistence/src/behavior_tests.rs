@@ -999,6 +999,23 @@ async fn provider_runtime_keeps_imported_transcripts_and_skips_bad_rows() {
         let listed = list(tx, false)?;
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].thread_id.as_str(), "thread-1");
+
+        tx.execute(
+            "
+            INSERT INTO provider_session_runtime (
+              thread_id, provider_name, adapter_key, runtime_mode, status, last_seen_at,
+              provider_instance_id
+            ) VALUES
+              ('thread-yolo', 'codex', 'codex', 'yolo', 'running', ?1, 'codex'),
+              ('thread-slug', 'codex', 'codex', 'full-access', 'running', ?1, '1bad'),
+              ('thread-stamp', 'codex', 'codex', 'full-access', 'running', X'01', 'codex')
+            ",
+            [NOW],
+        )
+        .map_err(sql_err)?;
+        let listed = list(tx, false)?;
+        assert_eq!(listed.len(), 1);
+        assert!(get_by_thread_id(tx, &thread_id("thread-yolo")).is_err());
         Ok(())
     })
     .await

@@ -3,8 +3,9 @@
 //! JSON columns are `serde_json::Value`. Rows that no longer decode are skipped
 //! by `list` and fail `get_by_thread_id`, matching upstream.
 
+use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
-use turin_contracts::ThreadId;
+use turin_contracts::{ThreadId, js_trim};
 
 use crate::errors::{PersistenceDecodeError, PersistenceError, PersistenceErrorCorrelation};
 
@@ -336,15 +337,15 @@ WHERE thread_id = ?1
 ";
 
 struct RawRuntime {
-    thread_id: String,
-    provider_name: String,
-    provider_instance_id: Option<String>,
-    adapter_key: String,
-    runtime_mode: String,
-    status: String,
-    last_seen_at: String,
-    resume_cursor: Option<String>,
-    runtime_payload: Option<String>,
+    thread_id: Value,
+    provider_name: Value,
+    provider_instance_id: Value,
+    adapter_key: Value,
+    runtime_mode: Value,
+    status: Value,
+    last_seen_at: Value,
+    resume_cursor: Value,
+    runtime_payload: Value,
 }
 
 fn decode_raw(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRuntime> {
@@ -362,37 +363,84 @@ fn decode_raw(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRuntime> {
 }
 
 fn decode_runtime(row: RawRuntime) -> Result<ProviderSessionRuntime, (String, String)> {
-    let status = ProviderSessionStatus::parse(&row.status).ok_or_else(|| {
-        (
-            row.thread_id.clone(),
-            format!("unknown status {}", row.status),
-        )
-    })?;
-    let resume_cursor = parse_json_column(&row.thread_id, row.resume_cursor.as_deref())?;
-    let runtime_payload = parse_json_column(&row.thread_id, row.runtime_payload.as_deref())?;
-    let thread_id = ThreadId::new(&row.thread_id)
-        .map_err(|err| (row.thread_id.clone(), format!("invalid thread id: {err}")))?;
+    let thread_text = match &row.thread_id {
+        Value::Text(text) => text.clone(),
+        _ => return Err(("<unknown>".into(), "thread id is not text".into())),
+    };
+    let fail = |issue: String| (thread_text.clone(), issue);
+    let provider_name = require_text(row.provider_name, "provider name").map_err(fail)?;
+    let provider_instance_id = provider_instance_id(row.provider_instance_id).map_err(fail)?;
+    let adapter_key = require_text(row.adapter_key, "adapter key").map_err(fail)?;
+    let runtime_mode = runtime_mode(row.runtime_mode).map_err(fail)?;
+    let status_text = require_text(row.status, "status").map_err(fail)?;
+    let status = ProviderSessionStatus::parse(&status_text)
+        .ok_or_else(|| fail(format!("unknown status {status_text}")))?;
+    let last_seen_at = require_text(row.last_seen_at, "last seen at").map_err(fail)?;
+    let resume_cursor = parse_json_value(&thread_text, row.resume_cursor)?;
+    let runtime_payload = parse_json_value(&thread_text, row.runtime_payload)?;
+    let thread_id =
+        ThreadId::new(&thread_text).map_err(|err| fail(format!("invalid thread id: {err}")))?;
     Ok(ProviderSessionRuntime {
         thread_id,
-        provider_name: row.provider_name,
-        provider_instance_id: row.provider_instance_id,
-        adapter_key: row.adapter_key,
-        runtime_mode: row.runtime_mode,
+        provider_name,
+        provider_instance_id,
+        adapter_key,
+        runtime_mode,
         status,
-        last_seen_at: row.last_seen_at,
+        last_seen_at,
         resume_cursor,
         runtime_payload,
     })
 }
 
-fn parse_json_column(
+fn require_text(value: Value, label: &str) -> Result<String, String> {
+    match value {
+        Value::Text(text) => Ok(text),
+        _ => Err(format!("{label} is not text")),
+    }
+}
+
+fn runtime_mode(value: Value) -> Result<String, String> {
+    let text = require_text(value, "runtime mode")?;
+    match text.as_str() {
+        "approval-required" | "auto-accept-edits" | "auto" | "full-access" => Ok(text),
+        _ => Err(format!("unknown runtime mode {text}")),
+    }
+}
+
+/// `ProviderInstanceId`: null, or a trimmed slug of 1..=64 chars.
+fn provider_instance_id(value: Value) -> Result<Option<String>, String> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Text(text) => {
+            let trimmed = js_trim(&text);
+            if trimmed.is_empty() {
+                return Err("provider instance id is empty".into());
+            }
+            let chars = trimmed.chars().count();
+            let mut iter = trimmed.chars();
+            let slug = iter.next().is_some_and(|c| c.is_ascii_alphabetic())
+                && iter.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                && (1..=64).contains(&chars);
+            if !slug {
+                return Err(format!("invalid provider instance id {trimmed}"));
+            }
+            Ok(Some(trimmed.to_owned()))
+        }
+        _ => Err("provider instance id is not text".into()),
+    }
+}
+
+fn parse_json_value(
     thread_id: &str,
-    json: Option<&str>,
+    value: Value,
 ) -> Result<Option<serde_json::Value>, (String, String)> {
-    let Some(json) = json else {
-        return Ok(None);
+    let json = match value {
+        Value::Null => return Ok(None),
+        Value::Text(text) => text,
+        _ => return Err((thread_id.to_owned(), "json column is not text".into())),
     };
-    match serde_json::from_str::<serde_json::Value>(json) {
+    match serde_json::from_str::<serde_json::Value>(&json) {
         Ok(serde_json::Value::Null) => Ok(None),
         Ok(value) => Ok(Some(value)),
         Err(err) => Err((thread_id.to_owned(), err.to_string())),

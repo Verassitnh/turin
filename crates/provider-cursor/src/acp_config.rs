@@ -51,6 +51,11 @@ pub fn restore_user_config(
     Ok(())
 }
 
+/// Runs `operation` with the Cursor user files restored afterwards.
+///
+/// File IO runs on the blocking pool. The restore also runs if `operation` is
+/// dropped mid-await: [`RestoreOnDrop`] restores synchronously, so a cancelled
+/// turn does not leave model edits in `~/.cursor`.
 pub async fn with_user_config<T, F, Fut>(
     cursor_home: Option<&Path>,
     operation: F,
@@ -62,14 +67,51 @@ where
     let Some(cursor_home) = cursor_home else {
         return operation().await;
     };
-    let snapshot = snapshot_user_config(cursor_home)?;
+    let home = cursor_home.to_path_buf();
+    let snapshot = blocking({
+        let home = home.clone();
+        move || snapshot_user_config(&home)
+    })
+    .await?;
+    let mut guard = RestoreOnDrop {
+        home: home.clone(),
+        snapshot: Some(snapshot),
+    };
     let result = operation().await;
-    let restored = restore_user_config(cursor_home, &snapshot);
+    let snapshot = guard
+        .snapshot
+        .take()
+        .expect("snapshot is armed until restore");
+    let restored = blocking(move || restore_user_config(&home, &snapshot)).await;
     match (result, restored) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
     }
+}
+
+/// Restores the snapshot when dropped while still armed.
+struct RestoreOnDrop {
+    home: PathBuf,
+    snapshot: Option<CursorUserConfigSnapshot>,
+}
+
+impl Drop for RestoreOnDrop {
+    fn drop(&mut self) {
+        if let Some(snapshot) = self.snapshot.take() {
+            let _ = restore_user_config(&self.home, &snapshot);
+        }
+    }
+}
+
+async fn blocking<T, F>(work: F) -> Result<T, CursorError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, CursorError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| CursorError::new(CursorOperation::Config, "Cursor config task stopped."))?
 }
 
 fn read_snap(path: &Path) -> Result<FileSnap, CursorError> {
@@ -261,5 +303,34 @@ mod tests {
         let cli: Value = serde_json::from_slice(&fs::read(home.join(CLI_CONFIG)).unwrap()).unwrap();
         assert!(cli.get("model").is_none());
         assert!(cli.get("permissions").is_some());
+    }
+
+    #[tokio::test]
+    async fn restores_when_the_operation_is_dropped_mid_await() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        fs::write(
+            home.join(CLI_CONFIG),
+            json!({"model": "composer-2"}).to_string(),
+        )
+        .unwrap();
+        let (written_tx, written_rx) = tokio::sync::oneshot::channel();
+        let op_home = home.clone();
+        let turn = with_user_config(Some(&home), move || async move {
+            fs::write(
+                op_home.join(CLI_CONFIG),
+                json!({"model": "gpt-5.5"}).to_string(),
+            )
+            .unwrap();
+            let _ = written_tx.send(());
+            std::future::pending::<Result<(), CursorError>>().await
+        });
+        // The turn is cancelled after the CLI rewrote its config and before it returned.
+        tokio::select! {
+            _ = turn => unreachable!("the operation never completes"),
+            _ = written_rx => {}
+        }
+        let cli: Value = serde_json::from_slice(&fs::read(home.join(CLI_CONFIG)).unwrap()).unwrap();
+        assert_eq!(cli["model"], "composer-2");
     }
 }

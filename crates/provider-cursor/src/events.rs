@@ -18,6 +18,7 @@ use turin_contracts::orchestration_v2::{
 };
 use turin_contracts::provider_instance::ProviderDriverKind;
 use turin_contracts::provider_policy::{ProviderApprovalOption, ProviderRequestKind};
+use turin_contracts::provider_runtime::ThreadTokenUsageSnapshot;
 use turin_contracts::{
     MessageId, NodeId, PlanId, ProviderThreadId, ProviderTurnId, RunId, RuntimeRequestId, ThreadId,
     TrimmedNonEmptyString, TurnItemId, UtcDateTime,
@@ -747,7 +748,7 @@ pub(crate) fn tool_body(raw: &Value, status: ToolStatus) -> ItemBody {
                 .iter()
                 .find_map(|key| input.and_then(|input| str_at(input, key)))
                 .or(title)
-                .unwrap_or_default()
+                .unwrap_or("Command")
                 .to_owned(),
             output: (!output_text.is_empty()).then(|| output_text.clone()),
             exit_code: raw
@@ -772,8 +773,10 @@ pub(crate) fn tool_body(raw: &Value, status: ToolStatus) -> ItemBody {
                 .unwrap_or("file");
             ItemBody::FileChange {
                 file_name: trimmed(path),
-                // A failed change keeps its error where the diff would be.
-                diff_str: (failed && !output_text.is_empty()).then(|| output_text.clone()),
+                // Upstream: the patch from the diff content, else the raw output text
+                // (a failed change keeps its error there).
+                diff_str: tool_diff_patch(raw)
+                    .or_else(|| (!output_text.is_empty()).then(|| output_text.clone())),
                 old_str: diff
                     .and_then(|diff| str_at(diff, "oldText"))
                     .map(str::to_owned),
@@ -829,6 +832,143 @@ pub(crate) fn tool_body(raw: &Value, status: ToolStatus) -> ItemBody {
             output: output_value,
         },
     }
+}
+
+/// Upstream `acpToolCallDiffPatch`: a diff's own `patch.text` when it has one,
+/// else a unified patch built from `oldText` and `newText`.
+pub(crate) fn tool_diff_patch(raw: &Value) -> Option<String> {
+    let diffs: Vec<&Value> = raw
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("diff"))
+        .collect();
+    if let Some(text) = diffs.iter().find_map(|diff| {
+        diff.get("patch")
+            .and_then(|patch| patch.get("text"))
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+    }) {
+        return Some(text.to_owned());
+    }
+    let patches: Vec<String> = diffs
+        .iter()
+        .filter_map(|diff| {
+            let path = str_at(diff, "path")?;
+            let new_text = diff.get("newText")?.as_str()?;
+            let old_text = diff.get("oldText").and_then(Value::as_str);
+            let old_name = if old_text.is_none() {
+                "/dev/null"
+            } else {
+                path
+            };
+            unified_patch(old_name, path, old_text.unwrap_or(""), new_text)
+        })
+        .collect();
+    (!patches.is_empty()).then(|| patches.concat())
+}
+
+/// A unified diff with three lines of context around one changed range. The
+/// range is the span between the common prefix and suffix, which covers a single
+/// edit exactly; upstream's structuredPatch can split several edits into hunks.
+fn unified_patch(old_name: &str, new_name: &str, old: &str, new: &str) -> Option<String> {
+    const CONTEXT: usize = 3;
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    if old_lines == new_lines {
+        return None;
+    }
+    let prefix = old_lines
+        .iter()
+        .zip(&new_lines)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let max_suffix = old_lines.len().min(new_lines.len()) - prefix;
+    let suffix = (0..max_suffix)
+        .take_while(|index| {
+            old_lines[old_lines.len() - 1 - index] == new_lines[new_lines.len() - 1 - index]
+        })
+        .count();
+    let before = prefix.min(CONTEXT);
+    let after = suffix.min(CONTEXT);
+    let start = prefix - before;
+    let old_range = &old_lines[prefix..old_lines.len() - suffix];
+    let new_range = &new_lines[prefix..new_lines.len() - suffix];
+    let old_len = before + old_range.len() + after;
+    let new_len = before + new_range.len() + after;
+    let mut hunk = format!(
+        "@@ -{} +{} @@\n",
+        hunk_range(start, old_len),
+        hunk_range(start, new_len)
+    );
+    let mut push = |marker: char, line: &str| {
+        hunk.push(marker);
+        hunk.push_str(line);
+        hunk.push('\n');
+    };
+    for line in &old_lines[start..prefix] {
+        push(' ', line);
+    }
+    for line in old_range {
+        push('-', line);
+    }
+    for line in new_range {
+        push('+', line);
+    }
+    for line in &old_lines[old_lines.len() - suffix..old_lines.len() - suffix + after] {
+        push(' ', line);
+    }
+    Some(format!("--- {old_name}\n+++ {new_name}\n{hunk}"))
+}
+
+/// Unified-diff range text: `start,len` with 1-based start, or `0,0` for an empty side.
+fn hunk_range(start: usize, len: usize) -> String {
+    if len == 0 {
+        format!("{start},0")
+    } else {
+        format!("{},{len}", start + 1)
+    }
+}
+
+/// Upstream `UsageUpdated`: the context meter from a `usage_update`, or from an
+/// idle `state_update` that carries usage. None when the payload has no count.
+pub(crate) fn context_usage(raw: &Value) -> Option<ThreadTokenUsageSnapshot> {
+    let update = raw.get("update").unwrap_or(raw);
+    let mut fields = serde_json::Map::new();
+    match update.get("sessionUpdate").and_then(Value::as_str)? {
+        "usage_update" => {
+            fields.insert("usedTokens".to_owned(), update.get("used")?.clone());
+            if let Some(size) = update
+                .get("size")
+                .and_then(Value::as_u64)
+                .filter(|size| *size > 0)
+            {
+                fields.insert("maxTokens".to_owned(), json!(size));
+            }
+            if let Some(cost) = update.get("cost") {
+                let currency =
+                    str_at(cost, "currency").map(|text| text.chars().take(32).collect::<String>());
+                if let (Some(amount), Some(currency)) =
+                    (cost.get("amount").and_then(Value::as_f64), currency)
+                {
+                    fields.insert(
+                        "cost".to_owned(),
+                        json!({"amount": amount, "currency": currency}),
+                    );
+                }
+            }
+        }
+        "state_update" => {
+            if update.get("state").and_then(Value::as_str) != Some("idle") {
+                return None;
+            }
+            let usage = update.get("usage").filter(|usage| !usage.is_null())?;
+            fields.insert("usedTokens".to_owned(), usage.get("totalTokens")?.clone());
+        }
+        _ => return None,
+    }
+    serde_json::from_value(Value::Object(fields)).ok()
 }
 
 fn file_search_result(file: &str, preview: Option<String>) -> OrchestrationV2FileSearchResult {
@@ -894,6 +1034,7 @@ struct TextSegment {
 #[derive(Debug, Clone)]
 struct ToolState {
     raw: Value,
+    status: ToolStatus,
     started_at: UtcDateTime,
 }
 
@@ -1133,10 +1274,12 @@ impl TurnStream {
     /// A `tool_call` or `tool_call_update`. Upstream `ensureToolStarted` plus
     /// `emitToolArtifacts`: the node and item carry the merged tool payload, so
     /// streamed output reaches the card as it arrives.
+    /// Keeps the call's state for the rest of the turn. A late update that omits
+    /// fields (or the status) merges into what was seen, so a finished call keeps
+    /// its title, kind, and input, and does not flip back to running.
     pub(crate) fn tool_update(
         &mut self,
         call_id: &str,
-        status: ToolStatus,
         update: &Value,
         now: UtcDateTime,
     ) -> Events {
@@ -1145,16 +1288,26 @@ impl TurnStream {
         self.complete_text(TextKind::Assistant, now, &mut out);
         let previous = self.tools.get(call_id).cloned();
         let raw = merge_tool_update(previous.as_ref().map(|tool| &tool.raw), update);
+        let status = ToolStatus::from_acp(
+            raw.get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
         let started_at = previous.as_ref().map_or(now, |tool| tool.started_at);
-        let state = ToolState { raw, started_at };
+        let state = ToolState {
+            raw,
+            status,
+            started_at,
+        };
         let completed = status != ToolStatus::Running;
-        let item_status = status.item_status();
-        out.extend(self.tool_events(call_id, &state, item_status, completed.then_some(now), now));
-        if completed {
-            self.tools.remove(call_id);
-        } else {
-            self.tools.insert(call_id.to_owned(), state);
-        }
+        out.extend(self.tool_events(
+            call_id,
+            &state,
+            status.item_status(),
+            completed.then_some(now),
+            now,
+        ));
+        self.tools.insert(call_id.to_owned(), state);
         out
     }
 
@@ -1194,6 +1347,7 @@ impl TurnStream {
         native: &str,
         steps: Vec<OrchestrationV2PlanStep>,
         status: OrchestrationV2TurnItemStatus,
+        artifact_status: OrchestrationV2PlanArtifactStatus,
         now: UtcDateTime,
     ) -> Events {
         let mut out = Vec::new();
@@ -1219,7 +1373,7 @@ impl TurnStream {
                 thread_id: self.scope.thread_id.clone(),
                 run_id: Some(self.scope.run_id.clone()),
                 node_id: frame.node_id.clone(),
-                status: plan_artifact_status(status),
+                status: artifact_status,
                 detail_in_turn_item: None,
                 steps: steps.clone(),
                 explanation: None,
@@ -1289,7 +1443,12 @@ impl TurnStream {
     ) -> Events {
         let unfinished = unfinished_item_status(status);
         let mut out = Vec::new();
-        let mut tools: Vec<(String, ToolState)> = self.tools.drain().collect();
+        // Finished calls already emitted their terminal item. Only open ones take the turn's status.
+        let mut tools: Vec<(String, ToolState)> = self
+            .tools
+            .drain()
+            .filter(|(_, state)| state.status == ToolStatus::Running)
+            .collect();
         tools.sort_by(|a, b| a.0.cmp(&b.0));
         for (call_id, state) in tools {
             let item_status = if status == OrchestrationV2ProviderTurnStatus::Completed {
@@ -1309,7 +1468,8 @@ impl TurnStream {
             } else {
                 unfinished
             };
-            out.extend(self.plan_update(&native, state.steps, item_status, now));
+            let artifact = plan_artifact_status(item_status);
+            out.extend(self.plan_update(&native, state.steps, item_status, artifact, now));
         }
         out
     }
@@ -1379,7 +1539,7 @@ fn unfinished_item_status(
     }
 }
 
-fn plan_artifact_status(
+pub(crate) fn plan_artifact_status(
     status: OrchestrationV2TurnItemStatus,
 ) -> OrchestrationV2PlanArtifactStatus {
     // Upstream: a finished list is `active`, an open one is `draft`.
@@ -1399,19 +1559,28 @@ pub(crate) fn project(stream: &mut TurnStream, update: &CursorUpdate, now: UtcDa
         }
         CursorUpdate::Thought { text } => stream.push_text(TextKind::Reasoning, text, None, now),
         CursorUpdate::Tool {
-            tool_call_id,
-            status,
-            raw,
-            ..
-        } => stream.tool_update(tool_call_id, ToolStatus::from_acp(status), raw, now),
+            tool_call_id, raw, ..
+        } => stream.tool_update(tool_call_id, raw, now),
         CursorUpdate::Plan { steps, .. } => {
             let native = format!("plan:{}", stream.scope().run_id.as_str());
-            stream.plan_update(
-                &native,
-                plan_steps_from_acp(steps),
-                OrchestrationV2TurnItemStatus::Running,
-                now,
-            )
+            let steps = plan_steps_from_acp(steps);
+            // Upstream: a todo list is finished when every step is, otherwise active.
+            let done = !steps.is_empty()
+                && steps
+                    .iter()
+                    .all(|step| step.status == OrchestrationV2PlanStepStatus::Completed);
+            let (item, artifact) = if done {
+                (
+                    OrchestrationV2TurnItemStatus::Completed,
+                    OrchestrationV2PlanArtifactStatus::Completed,
+                )
+            } else {
+                (
+                    OrchestrationV2TurnItemStatus::Running,
+                    OrchestrationV2PlanArtifactStatus::Active,
+                )
+            };
+            stream.plan_update(&native, steps, item, artifact, now)
         }
         CursorUpdate::Commands { .. }
         | CursorUpdate::Config { .. }
@@ -1473,5 +1642,204 @@ mod tests {
             &unknown[0],
             CursorUpdate::Unknown { session_update, .. } if session_update == "future_variant"
         ));
+    }
+
+    fn scope() -> Scope {
+        let driver = ProviderDriverKind::new("cursor").unwrap();
+        let instance =
+            turin_contracts::provider_instance::ProviderInstanceId::new("cursor").unwrap();
+        let thread_id = turin_contracts::ThreadId::new("thread-events").unwrap();
+        let run_id = derive::run(&thread_id, 1);
+        Scope {
+            provider_thread_id: derive::provider_thread(&driver, Some(&instance), "sess-e"),
+            provider_turn_id: derive::provider_turn(&driver, "sess-e:run"),
+            root_node_id: derive::root_node(&run_id),
+            driver,
+            thread_id,
+            run_id,
+        }
+    }
+
+    fn now() -> UtcDateTime {
+        UtcDateTime::now()
+    }
+
+    fn statuses_of(events: &[ProviderAdapterV2Event], id_suffix: &str) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderAdapterV2Event::TurnItemUpdated { turn_item, .. } => {
+                    serde_json::to_value(turn_item).ok()
+                }
+                _ => None,
+            })
+            .filter(|item| item["id"].as_str().is_some_and(|id| id.contains(id_suffix)))
+            .map(|item| item["status"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn statuses_of_type(events: &[ProviderAdapterV2Event], item_type: &str) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderAdapterV2Event::TurnItemUpdated { turn_item, .. } => {
+                    serde_json::to_value(turn_item).ok()
+                }
+                _ => None,
+            })
+            .filter(|item| item["type"] == item_type)
+            .map(|item| item["status"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_completed_tool_keeps_its_state_for_late_updates() {
+        let mut stream = TurnStream::new(scope(), 1, now());
+        stream.tool_update(
+            "call-x",
+            &json!({"sessionUpdate": "tool_call", "toolCallId": "call-x", "title": "Read a.rs", "kind": "read", "status": "pending", "rawInput": {"path": "a.rs"}}),
+            now(),
+        );
+        stream.tool_update(
+            "call-x",
+            &json!({"toolCallId": "call-x", "status": "completed", "rawOutput": "ok"}),
+            now(),
+        );
+        // A late update that carries only output keeps the title, kind, and input.
+        let late = stream.tool_update(
+            "call-x",
+            &json!({"toolCallId": "call-x", "rawOutput": "later"}),
+            now(),
+        );
+        let late_item = late
+            .iter()
+            .find_map(|event| match event {
+                ProviderAdapterV2Event::TurnItemUpdated { turn_item, .. } => {
+                    serde_json::to_value(turn_item).ok()
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(late_item["status"], "completed");
+        assert_eq!(late_item["title"], "Read a.rs");
+        assert_eq!(late_item["toolName"], "Read");
+        assert_eq!(late_item["input"]["path"], "a.rs");
+    }
+
+    #[test]
+    fn an_interrupted_turn_closes_open_tools_but_not_finished_ones() {
+        let mut stream = TurnStream::new(scope(), 1, now());
+        stream.tool_update(
+            "done",
+            &json!({"toolCallId": "done", "kind": "execute", "status": "completed", "rawInput": {"command": "ls"}}),
+            now(),
+        );
+        stream.tool_update(
+            "open",
+            &json!({"toolCallId": "open", "kind": "execute", "status": "in_progress", "rawInput": {"command": "sleep 9"}}),
+            now(),
+        );
+        let events = stream.finish(OrchestrationV2ProviderTurnStatus::Interrupted, now());
+        assert_eq!(statuses_of(&events, "done"), Vec::<String>::new());
+        assert_eq!(statuses_of(&events, "open"), vec!["interrupted".to_owned()]);
+    }
+
+    #[test]
+    fn an_acp_plan_completes_only_when_every_step_is() {
+        let steps = |done: bool| {
+            vec![PlanStep {
+                text: "Inspect".to_owned(),
+                status: if done { "completed" } else { "in_progress" }.to_owned(),
+            }]
+        };
+        let plan_events = |done: bool| {
+            let mut stream = TurnStream::new(scope(), 1, now());
+            let update = CursorUpdate::Plan {
+                steps: steps(done),
+                raw: Value::Null,
+            };
+            project(&mut stream, &update, now())
+        };
+        let open = plan_events(false);
+        let artifact = |events: &[ProviderAdapterV2Event]| {
+            events
+                .iter()
+                .find_map(|event| match event {
+                    ProviderAdapterV2Event::PlanUpdated { plan, .. } => {
+                        serde_json::to_value(plan).ok()
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(artifact(&open)["status"], "active");
+        assert_eq!(
+            statuses_of_type(&open, "todo_list"),
+            vec!["running".to_owned()]
+        );
+        let done = plan_events(true);
+        assert_eq!(artifact(&done)["status"], "completed");
+        assert_eq!(
+            statuses_of_type(&done, "todo_list"),
+            vec!["completed".to_owned()]
+        );
+    }
+
+    #[test]
+    fn an_execute_call_without_a_command_or_title_is_labelled_command() {
+        let body = tool_body(&json!({"kind": "execute"}), ToolStatus::Running);
+        assert!(matches!(
+            body,
+            ItemBody::Command { ref input, .. } if input == "Command"
+        ));
+    }
+
+    #[test]
+    fn an_edit_carries_the_unified_patch_on_success() {
+        let raw = json!({
+            "kind": "edit",
+            "status": "completed",
+            "content": [{"type": "diff", "path": "src/a.rs", "oldText": "a\nb\nc\nd\ne", "newText": "a\nb\nX\nd\ne"}]
+        });
+        assert_eq!(
+            tool_diff_patch(&raw).as_deref(),
+            Some("--- src/a.rs\n+++ src/a.rs\n@@ -1,5 +1,5 @@\n a\n b\n-c\n+X\n d\n e\n")
+        );
+        let created = json!({
+            "content": [{"type": "diff", "path": "src/new.rs", "newText": "x\ny"}]
+        });
+        assert_eq!(
+            tool_diff_patch(&created).as_deref(),
+            Some("--- /dev/null\n+++ src/new.rs\n@@ -0,0 +1,2 @@\n+x\n+y\n")
+        );
+        let unchanged = json!({
+            "content": [{"type": "diff", "path": "src/a.rs", "oldText": "a", "newText": "a"}]
+        });
+        assert_eq!(tool_diff_patch(&unchanged), None);
+    }
+
+    #[test]
+    fn usage_updates_map_to_the_context_meter() {
+        let usage = context_usage(&json!({
+            "sessionId": "s",
+            "update": {"sessionUpdate": "usage_update", "used": 1200, "size": 200000,
+                       "cost": {"amount": 0.5, "currency": "USD"}}
+        }))
+        .unwrap();
+        assert_eq!(usage.used_tokens, 1200);
+        assert_eq!(usage.max_tokens.map(|max| max.get()), Some(200000));
+        assert_eq!(
+            usage.cost.as_ref().map(|cost| cost.currency.as_str()),
+            Some("USD")
+        );
+        let idle = context_usage(&json!({
+            "update": {"sessionUpdate": "state_update", "state": "idle", "usage": {"totalTokens": 77}}
+        }))
+        .unwrap();
+        assert_eq!(idle.used_tokens, 77);
+        assert!(context_usage(&json!({
+            "update": {"sessionUpdate": "state_update", "state": "running", "usage": {"totalTokens": 5}}
+        }))
+        .is_none());
     }
 }

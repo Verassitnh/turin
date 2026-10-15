@@ -240,8 +240,8 @@ impl ManagedServerProvider for CursorSnapshot {
         }))
     }
 
-    /// Cursor's usage limits come from the dashboard, which is not ported.
-    /// See PORTING.md Deviations.
+    /// Cursor's plan limit windows come from the Cursor API (`usageLimits.ts`), which is
+    /// not ported. See PORTING.md Deviations.
     async fn apply_usage_limits(&self, _update: ProviderUsageLimitsUpdate, _checked_at: &str) {}
 }
 

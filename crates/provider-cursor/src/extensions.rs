@@ -7,7 +7,8 @@
 
 use serde_json::Value;
 use turin_acp::cursor::{
-    AskAnswer, AskQuestionParams, AskQuestionResult, CreatePlanResult, CursorTodo, TodoStatus,
+    AskAnswer, AskQuestionParams, AskQuestionResult, CreatePlanParams, CreatePlanResult,
+    CursorTodo, TodoStatus,
 };
 use turin_contracts::base_schemas::TrimmedNonEmptyString;
 use turin_contracts::orchestration_v2::{
@@ -103,6 +104,33 @@ fn plan_step_status(status: &TodoStatus) -> OrchestrationV2PlanStepStatus {
         TodoStatus::InProgress => OrchestrationV2PlanStepStatus::Running,
         TodoStatus::Pending | TodoStatus::Cancelled => OrchestrationV2PlanStepStatus::Pending,
     }
+}
+
+/// The markdown a plan card shows: the plan text, else the overview, else the
+/// todo list. None when all three are blank, and then no card opens. Upstream
+/// `captureProposedPlan` returns without emitting for an empty plan.
+pub fn plan_markdown(params: &CreatePlanParams) -> Option<String> {
+    let plan = params.plan.trim();
+    if !plan.is_empty() {
+        return Some(plan.to_owned());
+    }
+    if let Some(overview) = params
+        .overview
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(overview.to_owned());
+    }
+    let todos: Vec<String> = params
+        .todos
+        .iter()
+        .filter(|todo| todo.status != TodoStatus::Cancelled)
+        .map(|todo| todo.content.trim())
+        .filter(|text| !text.is_empty())
+        .map(|text| format!("- {text}"))
+        .collect();
+    (!todos.is_empty()).then(|| todos.join("\n"))
 }
 
 pub fn ask_result(disposition: AskDisposition) -> AskQuestionResult {

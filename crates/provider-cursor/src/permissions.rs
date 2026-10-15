@@ -94,6 +94,34 @@ pub fn request_kind(request: &PermissionRequest) -> OrchestrationV2RuntimeReques
     }
 }
 
+/// The text an approval card shows: the command in `rawInput` when there is one,
+/// else the tool title, else the session. Upstream `runtimeModel.ts` detail chain.
+pub fn card_detail(request: &PermissionRequest) -> String {
+    let command = request
+        .raw
+        .get("toolCall")
+        .and_then(|tool| tool.get("rawInput"))
+        .and_then(|input| {
+            ["command", "cmd"]
+                .iter()
+                .find_map(|key| input.get(*key).and_then(Value::as_str))
+        })
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    let title = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    match command.or(title) {
+        Some(text) => text.to_owned(),
+        None => format!(
+            "Session {}",
+            request.session_id.as_deref().unwrap_or("unknown")
+        ),
+    }
+}
+
 /// The request kind shown on an approval turn item.
 pub fn provider_request_kind(request: &PermissionRequest) -> ProviderRequestKind {
     match request.tool_kind.as_deref() {

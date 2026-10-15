@@ -34,6 +34,7 @@ use turin_contracts::orchestration_v2::{
 };
 use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceId};
 use turin_contracts::provider_policy::{ProviderApprovalDecision, ProviderInteractionMode};
+use turin_contracts::provider_runtime::ThreadTokenUsageSnapshot;
 use turin_contracts::{
     PositiveInt, ProviderSessionId, RunAttemptId, RuntimeRequestId, ThreadId,
     TrimmedNonEmptyString, UtcDateTime,
@@ -152,6 +153,8 @@ struct SessionInner {
     provider_session: OrchestrationV2ProviderSession,
     /// The session as published to clients, once `initialize` succeeded.
     published: OnceLock<OrchestrationV2ProviderSession>,
+    /// Latest context-window usage from the agent. Kept so a thread bound later still has it.
+    context_usage: Mutex<Option<ThreadTokenUsageSnapshot>>,
 }
 
 impl Drop for SessionInner {
@@ -286,6 +289,7 @@ impl CursorSession {
             provider_session_id,
             provider_session,
             published: OnceLock::new(),
+            context_usage: Mutex::new(None),
         });
         register_handlers(&client, &inner);
         Self {
@@ -666,7 +670,7 @@ impl CursorSession {
             handoff_ids: Vec::new(),
             forked_from: None,
             pending_background_tasks: Vec::new(),
-            context_usage: None,
+            context_usage: self.inner.context_usage.lock().expect("usage").clone(),
             native_metadata: None,
             goal: None,
             created_at: now,
@@ -1125,9 +1129,35 @@ fn request_id_of(raw: &str) -> Option<RuntimeRequestId> {
 
 /// Projects one ACP `session/update` into the open turn.
 fn project_update(inner: &SessionInner, update: &events::CursorUpdate) {
+    if let events::CursorUpdate::Usage { raw } = update {
+        record_usage(inner, raw);
+        return;
+    }
     let now = UtcDateTime::now();
     let events = turn_events(inner, |stream| events::project(stream, update, now));
     send(inner, events);
+}
+
+/// Upstream `UsageUpdated`: keep the snapshot and republish the provider thread
+/// with `contextUsage`. Usage can arrive between turns, so no turn is required.
+fn record_usage(inner: &SessionInner, raw: &Value) {
+    let Some(usage) = events::context_usage(raw) else {
+        return;
+    };
+    *inner.context_usage.lock().expect("usage") = Some(usage.clone());
+    let mut thread = inner.provider_thread.lock().expect("provider thread");
+    if let Some(thread) = thread.as_mut() {
+        thread.context_usage = Some(usage);
+        thread.updated_at = UtcDateTime::now();
+        send(
+            inner,
+            vec![ProviderAdapterV2Event::ProviderThreadUpdated {
+                driver: inner.driver.clone(),
+                provider_thread: thread.clone(),
+                retained_native_turn_ids: None,
+            }],
+        );
+    }
 }
 
 fn native_session_id(thread: &OrchestrationV2ProviderThread) -> Option<String> {
@@ -1551,6 +1581,7 @@ async fn handle_permission(
         if permissions::is_ask_question_fallback(&request) {
             tracing::debug!(tool_call_id = ?request.tool_call_id, "cursor ask_question fallback permission");
         }
+        let detail = permissions::card_detail(&request);
         let (card, events) = open_card(
             &inner,
             &request_id,
@@ -1560,10 +1591,10 @@ async fn handle_permission(
                 body: ItemBody::ApprovalRequest {
                     request_id: request_id.clone(),
                     request_kind: permissions::provider_request_kind(&request),
-                    prompt: request.title.clone(),
+                    prompt: Some(detail.clone()),
                     options: permissions::approval_options(&request),
                 },
-                title: request.title.clone(),
+                title: Some(detail),
             },
         );
         inner.pending.lock().expect("pending").insert(
@@ -1576,15 +1607,16 @@ async fn handle_permission(
         send(&inner, events);
     }
     let decision = rx.await.unwrap_or(ProviderApprovalDecision::Cancel);
+    let answer = permissions::answer_for_decision(&request, decision);
+    // A grant the agent cannot honour (no allow_once option) would cancel every later match.
     if let Some(key) = key
         && decision == ProviderApprovalDecision::AcceptForSession
+        && matches!(answer, permissions::PermissionAnswer::Selected { .. })
         && let Some(inner) = weak.upgrade()
     {
         inner.grants.lock().expect("grants").insert(key);
     }
-    Ok(permissions::permission_result(
-        &permissions::answer_for_decision(&request, decision),
-    ))
+    Ok(permissions::permission_result(&answer))
 }
 
 fn register_ask(client: &AcpClient, inner: &Arc<SessionInner>) {
@@ -1656,6 +1688,14 @@ fn register_plan(client: &AcpClient, inner: &Arc<SessionInner>) {
             let Some(request_id) = request_id_of(&ctx.request_id) else {
                 return Ok(cancelled());
             };
+            // A blank plan is never offered for approval.
+            let Some(markdown) = extensions::plan_markdown(&parsed) else {
+                return Ok(extensions::nested_outcome(&extensions::plan_result(
+                    PlanDisposition::Rejected {
+                        reason: Some("The plan is empty.".to_owned()),
+                    },
+                )));
+            };
             let (tx, rx) = oneshot::channel();
             {
                 let Some(inner) = weak.upgrade() else {
@@ -1673,14 +1713,14 @@ fn register_plan(client: &AcpClient, inner: &Arc<SessionInner>) {
                         node_kind: OrchestrationV2ExecutionNodeKind::UserInputRequest,
                         body: ItemBody::ProposedPlan {
                             plan_id: plan_id.clone(),
-                            markdown: parsed.plan.clone(),
+                            markdown: markdown.clone(),
                             streaming: false,
                         },
                         title: parsed.name.clone(),
                     },
                 );
                 events.extend(turn_events(&inner, |stream| {
-                    stream.proposed_plan(&plan_id, &request_id, &parsed.plan, now)
+                    stream.proposed_plan(&plan_id, &request_id, &markdown, now)
                 }));
                 if !steps.is_empty() {
                     events.extend(turn_events(&inner, |stream| {
@@ -1688,6 +1728,7 @@ fn register_plan(client: &AcpClient, inner: &Arc<SessionInner>) {
                             &format!("todos:{}", parsed.tool_call_id),
                             steps,
                             OrchestrationV2TurnItemStatus::Running,
+                            events::plan_artifact_status(OrchestrationV2TurnItemStatus::Running),
                             now,
                         )
                     }));
@@ -1729,6 +1770,7 @@ fn register_todos(client: &AcpClient, inner: &Arc<SessionInner>) {
                         &native,
                         steps,
                         OrchestrationV2TurnItemStatus::Completed,
+                        events::plan_artifact_status(OrchestrationV2TurnItemStatus::Completed),
                         now,
                     )
                 });
@@ -2908,7 +2950,8 @@ mod tests {
             .rev()
             .find(|item| item["type"] == "approval_request")
             .unwrap();
-        assert_eq!(approval["prompt"], "Run ls");
+        // The command is the detail when rawInput has one, as upstream shows it.
+        assert_eq!(approval["prompt"], "ls");
         let labels: Vec<&str> = approval["options"]
             .as_array()
             .unwrap()
@@ -3152,5 +3195,150 @@ mod tests {
         // The turn is closed, so a late update is not projected into it.
         assert!(session.inner.active_turn.lock().unwrap().is_none());
         peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn approval_card_falls_back_to_the_session_when_nothing_names_the_tool() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-t").await;
+            let prompt = read_frame(&mut read).await;
+            write_frame(
+                &mut write,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 51,
+                    "method": "session/request_permission",
+                    "params": {
+                        "sessionId": "sess-t",
+                        "toolCall": {"toolCallId": "call-blank", "kind": "other"},
+                        "options": [{"optionId": "once", "name": "Allow once", "kind": "allow_once"}]
+                    }
+                }),
+            )
+            .await;
+            let answered = read_frame(&mut read).await;
+            assert_eq!(answered["result"]["outcome"]["optionId"], "once");
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+            )
+            .await;
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let mut events = session.events();
+        let context = turn_context(&session, "thread-blank-card");
+        let run = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(context, "hi").await }
+        });
+        let seen = collect_turn(&session, &mut events).await;
+        run.await.unwrap().unwrap();
+        peer.await.unwrap();
+        let approval = turn_items(&seen)
+            .into_iter()
+            .find(|item| item["type"] == "approval_request")
+            .unwrap();
+        assert_eq!(approval["prompt"], "Session sess-t");
+    }
+
+    #[tokio::test]
+    async fn a_blank_plan_is_rejected_without_a_card() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-t").await;
+            let prompt = read_frame(&mut read).await;
+            write_frame(
+                &mut write,
+                json!({"jsonrpc": "2.0", "id": 61, "method": "cursor/create_plan", "params": {
+                    "toolCallId": "p-blank", "plan": "   \n", "overview": " ", "todos": [
+                        {"id": "x", "content": " ", "status": "pending"},
+                        {"id": "y", "content": "Gone", "status": "cancelled"}
+                    ]
+                }}),
+            )
+            .await;
+            let planned = read_frame(&mut read).await;
+            assert_eq!(planned["result"]["outcome"]["outcome"], "rejected");
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+            )
+            .await;
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let mut events = session.events();
+        let context = turn_context(&session, "thread-blank-plan");
+        let run = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(context, "hi").await }
+        });
+        let seen = collect_turn(&session, &mut events).await;
+        run.await.unwrap().unwrap();
+        peer.await.unwrap();
+        assert!(
+            seen.iter()
+                .all(|event| event["type"] != "runtime_request.updated")
+        );
+        assert!(
+            turn_items(&seen)
+                .iter()
+                .all(|item| item["type"] != "proposed_plan")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_grant_without_allow_once_is_not_recorded() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-t").await;
+            let prompt = read_frame(&mut read).await;
+            for id in [71, 72] {
+                write_frame(
+                    &mut write,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "method": "session/request_permission",
+                        "params": {
+                            "sessionId": "sess-t",
+                            "toolCall": {"toolCallId": format!("call-{id}"), "title": "Deploy", "kind": "execute", "rawInput": {"command": "deploy"}},
+                            "options": [{"optionId": "no", "name": "Reject", "kind": "reject_once"}]
+                        }
+                    }),
+                )
+                .await;
+                let answered = read_frame(&mut read).await;
+                assert_eq!(answered["result"]["outcome"]["outcome"], "cancelled");
+            }
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+            )
+            .await;
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let mut events = session.events();
+        let context = turn_context(&session, "thread-grant");
+        let run = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(context, "hi").await }
+        });
+        let seen = collect_turn(&session, &mut events).await;
+        run.await.unwrap().unwrap();
+        peer.await.unwrap();
+        // The second identical request still gets its own card: nothing was granted.
+        let approvals: std::collections::HashSet<String> = turn_items(&seen)
+            .into_iter()
+            .filter(|item| item["type"] == "approval_request")
+            .map(|item| item["id"].to_string())
+            .collect();
+        assert_eq!(approvals.len(), 2);
     }
 }

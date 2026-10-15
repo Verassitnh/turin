@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use futures::{FutureExt, StreamExt};
-use serde_json::json;
+use serde_json::{Value, json};
 use turin_contracts::{
     CommandId, ThreadId, UtcDateTime,
     orchestration_v2::{
@@ -353,5 +353,230 @@ async fn an_imported_native_thread_is_not_ported_and_leaves_no_receipt() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+/// A thread-row command: `kind` is the wire type, `extra` adds its fields.
+fn mutation(
+    kind: &str,
+    command: &str,
+    thread_id: &str,
+    mut extra: Value,
+) -> OrchestrationV2ServerCommand {
+    let object = extra.as_object_mut().expect("extra is an object");
+    object.insert("type".to_owned(), json!(kind));
+    object.insert("commandId".to_owned(), json!(command));
+    object.insert("threadId".to_owned(), json!(thread_id));
+    serde_json::from_value(extra).expect("thread mutation decodes")
+}
+
+#[tokio::test]
+async fn unarchive_of_a_live_thread_is_refused_and_the_refusal_replays() {
+    let (orchestrator, _) = harness().await;
+    orchestrator
+        .dispatch(create_command("command:create-live", "thread:live", "Live"))
+        .await
+        .expect("create commits");
+    let command = mutation(
+        "thread.unarchive",
+        "command:unarchive-live",
+        "thread:live",
+        json!({}),
+    );
+
+    let error = orchestrator
+        .dispatch(command.clone())
+        .await
+        .expect_err("a live thread is not archived");
+    assert!(
+        matches!(error, OrchestratorError::Dispatch { .. }),
+        "{error:?}"
+    );
+
+    let replay = orchestrator
+        .dispatch(command)
+        .await
+        .expect_err("the rejected receipt replays");
+    assert!(
+        matches!(
+            replay,
+            OrchestratorError::CommandPreviouslyRejected { ref detail, .. }
+                if detail == "Orchestration command thread.unarchive (command:unarchive-live) failed."
+        ),
+        "{replay:?}"
+    );
+}
+
+#[tokio::test]
+async fn pin_reorder_and_unpin_each_write_the_thread_row() {
+    let (orchestrator, _) = harness().await;
+    let id = thread("thread:pinned");
+    orchestrator
+        .dispatch(create_command(
+            "command:create-pinned",
+            "thread:pinned",
+            "Pinned",
+        ))
+        .await
+        .expect("create commits");
+
+    orchestrator
+        .dispatch(mutation(
+            "thread.pin",
+            "command:pin",
+            "thread:pinned",
+            json!({"orderKey": "a0"}),
+        ))
+        .await
+        .expect("pin commits");
+    let pinned = orchestrator
+        .get_thread_projection(&id)
+        .await
+        .unwrap()
+        .thread;
+    assert!(pinned.pinned_at.flatten().is_some());
+    assert_eq!(
+        pinned
+            .pin_order_key
+            .clone()
+            .flatten()
+            .map(|key| key.as_str().to_owned()),
+        Some("a0".to_owned())
+    );
+
+    orchestrator
+        .dispatch(mutation(
+            "thread.pin.reorder",
+            "command:reorder",
+            "thread:pinned",
+            json!({"orderKey": "a1"}),
+        ))
+        .await
+        .expect("reorder commits");
+    let reordered = orchestrator
+        .get_thread_projection(&id)
+        .await
+        .unwrap()
+        .thread;
+    assert_eq!(
+        reordered
+            .pin_order_key
+            .clone()
+            .flatten()
+            .map(|key| key.as_str().to_owned()),
+        Some("a1".to_owned())
+    );
+
+    orchestrator
+        .dispatch(mutation(
+            "thread.unpin",
+            "command:unpin",
+            "thread:pinned",
+            json!({}),
+        ))
+        .await
+        .expect("unpin commits");
+    let unpinned = orchestrator
+        .get_thread_projection(&id)
+        .await
+        .unwrap()
+        .thread;
+    assert!(unpinned.pinned_at.flatten().is_none());
+    assert!(unpinned.pin_order_key.clone().flatten().is_none());
+}
+
+#[tokio::test]
+async fn reordering_an_unpinned_thread_is_refused() {
+    let (orchestrator, _) = harness().await;
+    orchestrator
+        .dispatch(create_command(
+            "command:create-loose",
+            "thread:loose",
+            "Loose",
+        ))
+        .await
+        .expect("create commits");
+
+    let error = orchestrator
+        .dispatch(mutation(
+            "thread.pin.reorder",
+            "command:reorder-loose",
+            "thread:loose",
+            json!({"orderKey": "a1"}),
+        ))
+        .await
+        .expect_err("an unpinned thread has no slot to move");
+    assert!(
+        matches!(error, OrchestratorError::Dispatch { .. }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn auto_settle_toggles_and_records_the_disable_time() {
+    let (orchestrator, _) = harness().await;
+    let id = thread("thread:auto");
+    orchestrator
+        .dispatch(create_command("command:create-auto", "thread:auto", "Auto"))
+        .await
+        .expect("create commits");
+
+    orchestrator
+        .dispatch(mutation(
+            "thread.auto-settle.set",
+            "command:auto-off",
+            "thread:auto",
+            json!({"enabled": false}),
+        ))
+        .await
+        .expect("disable commits");
+    let disabled = orchestrator
+        .get_thread_projection(&id)
+        .await
+        .unwrap()
+        .thread;
+    assert!(disabled.auto_settle_disabled_at.flatten().is_some());
+
+    orchestrator
+        .dispatch(mutation(
+            "thread.auto-settle.set",
+            "command:auto-on",
+            "thread:auto",
+            json!({"enabled": true}),
+        ))
+        .await
+        .expect("enable commits");
+    let enabled = orchestrator
+        .get_thread_projection(&id)
+        .await
+        .unwrap()
+        .thread;
+    assert!(enabled.auto_settle_disabled_at.flatten().is_none());
+}
+
+#[tokio::test]
+async fn mark_unread_without_a_completed_run_is_refused() {
+    let (orchestrator, _) = harness().await;
+    orchestrator
+        .dispatch(create_command(
+            "command:create-unread",
+            "thread:unread",
+            "Unread",
+        ))
+        .await
+        .expect("create commits");
+
+    let error = orchestrator
+        .dispatch(mutation(
+            "thread.mark-unread",
+            "command:unread",
+            "thread:unread",
+            json!({}),
+        ))
+        .await
+        .expect_err("no run has completed yet");
+    assert!(
+        matches!(error, OrchestratorError::Dispatch { .. }),
+        "{error:?}"
     );
 }

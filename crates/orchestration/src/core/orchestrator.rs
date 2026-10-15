@@ -16,6 +16,7 @@ pub mod services;
 #[cfg(test)]
 mod tests;
 mod thread_lifecycle;
+mod thread_mutation;
 
 use std::sync::Arc;
 

@@ -305,6 +305,11 @@ pub struct PullRequestsUnavailableState {
 }
 
 impl PullRequestsUnavailableState {
+    pub fn title(mut self, title: impl Into<SharedString>) -> Self {
+        self.title = title.into();
+        self
+    }
+
     pub fn new(error: impl Into<SharedString>) -> Self {
         Self {
             title: "Could not load pull requests".into(),

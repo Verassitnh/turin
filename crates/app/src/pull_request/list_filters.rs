@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{Anchor, App, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, rems};
+use gpui_kit::{Anchor, AnyElement, App, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, rems};
 use turin_contracts::pull_request::{
     PullRequestChecksFilter, PullRequestDraftFilter, PullRequestInvolvement, PullRequestListState,
     PullRequestReviewFilter,
@@ -185,7 +185,7 @@ pub fn compact_filter_menu<V: Clone + PartialEq + 'static>(
     options: Vec<FilterOption<V>>,
     on_change: Rc<dyn Fn(V, &mut Window, &mut App)>,
     cx: &App,
-) -> Option<impl IntoElement> {
+) -> Option<AnyElement> {
     let current = options
         .iter()
         .find(|option| option.value == value)
@@ -223,9 +223,12 @@ pub fn compact_filter_menu<V: Clone + PartialEq + 'static>(
             )
             .child(Icon::new(IconName::ChevronDown).size(rems(0.75)).color(muted.into()))
     };
-    Some(dropdown(id, Anchor::TopLeft, button, move |menu, _, _| {
-        radio_items(menu, &value, &options, on_change.clone())
-    }))
+    Some(
+        dropdown(id, Anchor::TopLeft, button, move |menu, _, _| {
+            radio_items(menu, &value, &options, on_change.clone())
+        })
+        .into_any_element(),
+    )
 }
 
 /// A "Filters" submenu row: icon, name and the current choice on the right.
@@ -251,6 +254,15 @@ fn radio_submenu<V: Clone + PartialEq + 'static>(
     menu.submenu(submenu_label(name, &current), window, cx, move |submenu, _, _| {
         radio_items(submenu.label(name), &value, &options, on_pick.clone())
     })
+}
+
+/// An option callback that reports `wrap(value)` as a scope change.
+fn pick_with<V: 'static>(
+    change: &OnScopeChange,
+    wrap: fn(V) -> ScopeChange,
+) -> Rc<dyn Fn(V, &mut Window, &mut App)> {
+    let change = change.clone();
+    Rc::new(move |value, window, cx| change(wrap(value), window, cx))
 }
 
 /// Everything the "Filters" menu reads.
@@ -287,7 +299,7 @@ pub fn filters_menu(
     input: FiltersMenuInput,
     on_change: OnScopeChange,
     cx: &App,
-) -> impl IntoElement {
+) -> AnyElement {
     let theme = cx.app_theme();
     let count = filter_count(&input.scope);
     let badge_bg = theme.muted;
@@ -311,12 +323,8 @@ pub fn filters_menu(
         let scope = input.scope.clone();
         let change = on_change.clone();
         let mut menu = menu;
-        let pick = |wrap: fn(_) -> ScopeChange| -> Rc<dyn Fn(_, &mut Window, &mut App)> {
-            let change = change.clone();
-            Rc::new(move |value, window: &mut Window, cx: &mut App| change(wrap(value), window, cx))
-        };
-        menu = radio_submenu(menu, "State", scope.state, state_tabs(), pick(ScopeChange::State), window, cx);
-        menu = radio_submenu(menu, "Involvement", scope.involvement, involvement_tabs(), pick(ScopeChange::Involvement), window, cx);
+        menu = radio_submenu(menu, "State", scope.state, state_tabs(), pick_with(&change, ScopeChange::State), window, cx);
+        menu = radio_submenu(menu, "Involvement", scope.involvement, involvement_tabs(), pick_with(&change, ScopeChange::Involvement), window, cx);
         menu = menu.separator();
         // Author: a flat list of the authors seen in the loaded rows, "Anyone" first.
         let authors = input.authors.clone();
@@ -395,9 +403,9 @@ pub fn filters_menu(
             }
             submenu
         });
-        menu = radio_submenu(menu, "Draft", scope.draft, draft_options(), pick(ScopeChange::Draft), window, cx);
-        menu = radio_submenu(menu, "Review", scope.review, review_options(), pick(ScopeChange::Review), window, cx);
-        menu = radio_submenu(menu, "Checks", scope.checks, checks_options(), pick(ScopeChange::Checks), window, cx);
+        menu = radio_submenu(menu, "Draft", scope.draft, draft_options(), pick_with(&change, ScopeChange::Draft), window, cx);
+        menu = radio_submenu(menu, "Review", scope.review, review_options(), pick_with(&change, ScopeChange::Review), window, cx);
+        menu = radio_submenu(menu, "Checks", scope.checks, checks_options(), pick_with(&change, ScopeChange::Checks), window, cx);
         if input.host_options.len() > 2 {
             menu = menu.separator();
             let host_value = scope.host.clone().unwrap_or_default();
@@ -431,4 +439,5 @@ pub fn filters_menu(
             cx,
         )
     })
+    .into_any_element()
 }

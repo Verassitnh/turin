@@ -11,6 +11,8 @@
 use gpui_kit::{App, AppContext as _, Entity, Window};
 
 use super::detail_context::DetailTab;
+use super::list_page::{PullRequestsPage, PullRequestsPageEvent};
+use super::pull_request_list_preferences::{PullRequestListPreferences, PullRequestListSort};
 use super::mock_source::{MockPullRequestSource, demo_environment_id, demo_reference};
 use super::panel_host::PullRequestPanelHost;
 use super::view_model::PullRequestStore;
@@ -39,7 +41,7 @@ pub fn parse(value: &str) -> Option<Scenario> {
     }
 }
 
-/// Installs the scenario into the shell. Returns whether one was requested.
+/// Installs the scenario into the shell.
 pub fn install(
     layout: &Entity<AppSidebarLayout>,
     scenario: Scenario,
@@ -48,8 +50,29 @@ pub fn install(
 ) {
     let store: Entity<PullRequestStore> = MockPullRequestSource::start(cx);
     let host = cx.new(|cx| PullRequestPanelHost::new(store.clone(), cx));
+    let page = cx.new(|cx| PullRequestsPage::new(store.clone(), window, cx));
+    layout.update(cx, |layout, cx| {
+        layout.set_main_content(Some(page.clone().into()), cx);
+    });
+    // Choosing a row opens its detail in the right panel, as the route does.
+    let panel_host = host.clone();
+    let panel_layout = layout.clone();
+    window
+        .subscribe(&page, cx, move |_, event: &PullRequestsPageEvent, window, cx| {
+            let PullRequestsPageEvent::Select {
+                environment_id,
+                reference,
+            } = event;
+            panel_host.update(cx, |host, cx| {
+                host.open(environment_id.clone(), reference.clone(), None, window, cx)
+            });
+            panel_layout.update(cx, |layout, cx| {
+                layout.set_right_panel_content(Some(panel_host.clone().into()), cx);
+            });
+        })
+        .detach();
     match scenario {
-        Scenario::List(_) => {}
+        Scenario::List(preset) => apply_list_preset(&page, &store, preset.as_deref(), cx),
         Scenario::Detail { tab, number } => {
             let mut reference = demo_reference();
             if let Some(number) = number
@@ -65,6 +88,41 @@ pub fn install(
             });
         }
     }
+}
+
+/// `list:<preset>`: scopes the page the way a reader would have, for screenshots.
+fn apply_list_preset(
+    page: &Entity<PullRequestsPage>,
+    store: &Entity<PullRequestStore>,
+    preset: Option<&str>,
+    cx: &mut App,
+) {
+    use turin_contracts::pull_request::{PullRequestInvolvement, PullRequestListState};
+    let mut scope = PullRequestListPreferences::default();
+    match preset {
+        Some("all") => scope.state = PullRequestListState::All,
+        Some("filters") => {
+            scope.state = PullRequestListState::All;
+            scope.sort = Some(PullRequestListSort::Updated);
+            scope.involvement = PullRequestInvolvement::All;
+            scope.draft = Some(turin_contracts::pull_request::PullRequestDraftFilter::Hide);
+        }
+        Some("authored") => scope.involvement = PullRequestInvolvement::Authored,
+        Some("empty") => scope.q = Some("zzzz-no-match".into()),
+        Some("error") => {
+            store.update(cx, |store, cx| {
+                store.update_list(cx, |list| {
+                    list.merged = None;
+                    list.error = Some("gh: could not reach api.github.com. Check your connection.".into());
+                })
+            });
+        }
+        Some("loading") => {
+            store.update(cx, |store, cx| store.update_list(cx, |list| list.merged = None));
+        }
+        _ => {}
+    }
+    page.update(cx, |page, cx| page.set_scope(scope, cx));
 }
 
 #[cfg(test)]

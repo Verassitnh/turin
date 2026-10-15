@@ -10,7 +10,6 @@
 //! and the close sweep, line-count (stats) lazy reads, optimistic overrides, the right-panel
 //! surface store (the host of this page opens the detail panel on [`PullRequestsPageEvent::Select`]).
 
-use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -474,8 +473,6 @@ impl Render for PullRequestsPage {
                     page.update(cx, |this, cx| this.select(&entry, cx)).ok();
                 })
             };
-            let mut seen = HashSet::new();
-            let _ = &mut seen;
             div()
                 .flex()
                 .flex_col()

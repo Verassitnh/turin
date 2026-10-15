@@ -5,10 +5,60 @@
 //! caches import cleanly.
 
 use crate::base_schemas::{
-    IsoDateTime, NonNegativeInt, PositiveInt, ProjectId, ThreadId, TrimmedNonEmptyString,
+    ContractError, IsoDateTime, NonNegativeInt, PositiveInt, ProjectId, ThreadId,
+    TrimmedNonEmptyString, js_trim,
 };
 use crate::source_control::SourceControlProviderKind;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// Length as `Schema.isMaxLength`/`isMinLength`/`isNonEmpty` count it: UTF-16
+/// code units (JS `string.length`), not bytes or chars.
+fn utf16_len(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+
+/// Defines a `deserialize_with` module that decodes `$ty` normally and then
+/// runs `$check` (returning `Some(message)` on failure) over the decoded
+/// value, i.e. a decode-time `Schema.check(...)`. The nested `optional`
+/// module is the same check for an `Option<$ty>` field (absent/`None` pass).
+macro_rules! checked_field {
+    ($name:ident: $ty:ty, |$v:ident| $check:expr) => {
+        #[allow(dead_code)]
+        mod $name {
+            #[allow(unused_imports)]
+            use super::*;
+
+            fn check($v: &$ty) -> Option<&'static str> {
+                $check
+            }
+
+            pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<$ty, D::Error> {
+                let value = <$ty>::deserialize(d)?;
+                match check(&value) {
+                    Some(message) => Err(serde::de::Error::custom(message)),
+                    None => Ok(value),
+                }
+            }
+
+            pub mod optional {
+                #[allow(unused_imports, dead_code)]
+                use super::super::*;
+
+                pub fn deserialize<'de, D: Deserializer<'de>>(
+                    d: D,
+                ) -> Result<Option<$ty>, D::Error> {
+                    let value = Option::<$ty>::deserialize(d)?;
+                    if let Some(inner) = &value {
+                        if let Some(message) = super::check(inner) {
+                            return Err(serde::de::Error::custom(message));
+                        }
+                    }
+                    Ok(value)
+                }
+            }
+        }
+    };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PullRequestInvolvement {
@@ -59,11 +109,11 @@ pub enum PullRequestReviewDecision {
 pub struct PullRequestQualifierValue(TrimmedNonEmptyString);
 
 impl PullRequestQualifierValue {
-    pub fn new(value: impl AsRef<str>) -> Result<Self, crate::base_schemas::ContractError> {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
         let value = TrimmedNonEmptyString::new(value)?;
-        if value.as_str().len() > 200 {
-            return Err(crate::base_schemas::ContractError {
-                expected: "a search qualifier of at most 200 chars",
+        if utf16_len(value.as_str()) > 200 {
+            return Err(ContractError {
+                expected: "a search qualifier of at most 200 characters",
                 got: value.as_str().to_owned(),
             });
         }
@@ -120,6 +170,20 @@ pub enum PullRequestChecksFilter {
     Failing,
 }
 
+// `PullRequestQualifierValues`: at most ten values; `labels`: at most ten groups.
+checked_field!(qualifier_values: Vec<PullRequestQualifierValue>, |v| {
+    (v.len() > 10).then_some("at most 10 qualifier values")
+});
+checked_field!(label_groups: Vec<Vec<PullRequestQualifierValue>>, |v| {
+    if v.len() > 10 {
+        Some("at most 10 label groups")
+    } else if v.iter().any(|group| group.len() > 10) {
+        Some("at most 10 qualifier values per label group")
+    } else {
+        None
+    }
+});
+
 /// Narrowings beyond state and involvement, each absent by default — an
 /// absent field filters nothing, which is what every listing did before there
 /// were any. Optional as a whole so a page and a server of different ages
@@ -143,9 +207,17 @@ pub struct PullRequestListFilters {
     /// either size. Typed rather than picked, since a project's labels are
     /// its own and no menu can list them. Bounded because each becomes a
     /// host search qualifier.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "label_groups::optional::deserialize"
+    )]
     pub labels: Option<Vec<Vec<PullRequestQualifierValue>>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "qualifier_values::optional::deserialize"
+    )]
     pub excluded_labels: Option<Vec<PullRequestQualifierValue>>,
     /// One login, as `author:` names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -736,7 +808,57 @@ pub struct PullRequestListEntry {
 /// Each value is opaque: only the provider that issued one knows what it
 /// means, and the page hands back exactly what it was given rather than
 /// composing one. (`Schema.Record`, so insertion order is preserved.)
-pub type PullRequestListCursors = indexmap::IndexMap<TrimmedNonEmptyString, TrimmedNonEmptyString>;
+pub type PullRequestListCursors = indexmap::IndexMap<TrimmedNonEmptyString, PullRequestListCursor>;
+
+/// One continuation value: trimmed, non-empty, at most 4096 characters —
+/// bounded because it arrives from the page and is unfolded into a host's
+/// own filter.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PullRequestListCursor(TrimmedNonEmptyString);
+
+impl PullRequestListCursor {
+    pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
+        let value = TrimmedNonEmptyString::new(value)?;
+        if utf16_len(value.as_str()) > 4096 {
+            return Err(ContractError {
+                expected: "a continuation of at most 4096 characters",
+                got: value.as_str().to_owned(),
+            });
+        }
+        Ok(Self(value))
+    }
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Display for PullRequestListCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.as_str())
+    }
+}
+
+impl Serialize for PullRequestListCursor {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for PullRequestListCursor {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Self::new(<std::borrow::Cow<'de, str>>::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
+checked_field!(list_limit: i64, |v| {
+    (!(1..=500).contains(v)).then_some("an integer between 1 and 500")
+});
+checked_field!(project_ids: Vec<ProjectId>, |v| {
+    (v.len() > 100).then_some("at most 100 project ids")
+});
+checked_field!(list_query: TrimmedNonEmptyString, |v| {
+    (utf16_len(v.as_str()) > 200).then_some("a search of at most 200 characters")
+});
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -753,7 +875,11 @@ pub struct PullRequestListInput {
     /// quiet about it. Absent means every project, which is what every
     /// listing asked for before there were several connections to spread
     /// across.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "project_ids::optional::deserialize"
+    )]
     pub project_ids: Option<Vec<ProjectId>>,
     /// Narrows the listing to one host, named as the host itself rather
     /// than as its provider kind: github.com and a GitHub Enterprise install
@@ -762,7 +888,11 @@ pub struct PullRequestListInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<TrimmedNonEmptyString>,
     /// Rows to return per repository, which with a continuation is rows per slice.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "list_limit::optional::deserialize"
+    )]
     pub limit: Option<i64>,
     /// Carry on from an answer already on the page rather than read the
     /// listing again. Only the repositories named here are read, one slice
@@ -781,7 +911,11 @@ pub struct PullRequestListInput {
     /// is the host's own business — GitHub reads a body, GitLab a
     /// description — and a host with no text filter answers unnarrowed
     /// rather than pretending.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "list_query::optional::deserialize"
+    )]
     pub query: Option<TrimmedNonEmptyString>,
 }
 
@@ -1015,17 +1149,10 @@ pub struct PullRequestStackLayer {
     pub state: PullRequestState,
 }
 
-string_literal!(
-    /// Constant `"native"` kind of a host-native stack.
-    NativeStackKind,
-    "native"
-);
-
 /// The host-native stack a pull request belongs to, in the thread link's shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PullRequestStack {
-    pub kind: NativeStackKind,
     pub id: TrimmedNonEmptyString,
     pub number: PositiveInt,
     pub url: TrimmedNonEmptyString,
@@ -1051,10 +1178,18 @@ pub struct PullRequestDiffStat {
     pub deletions: NonNegativeInt,
 }
 
+checked_field!(stats_refs: Vec<PullRequestRef>, |v| {
+    (v.len() > 500).then_some("at most 500 refs")
+});
+
 /// The rows whose line counts are wanted, which is the rows the page is showing.
+///
+/// Bounded at the largest listing a page can hold, since each ref becomes a
+/// lookup of its own on the host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PullRequestListStatsInput {
+    #[serde(deserialize_with = "stats_refs::deserialize")]
     pub refs: Vec<PullRequestRef>,
 }
 
@@ -1377,32 +1512,17 @@ pub struct PullRequestDiffFileContentsResult {
     pub new_contents: String,
 }
 
-/// `FilePath`: non-empty, at most 4096 chars, deliberately NOT trimmed — a
-/// leading or trailing space is a legal part of a file's name, and the mark
-/// is keyed by the name the host gave.
-mod file_path {
-    use super::*;
-
-    const MAX_FILE_PATH_LENGTH: usize = 4096;
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-        let value = String::deserialize(d)?;
-        if value.is_empty() || value.len() > MAX_FILE_PATH_LENGTH {
-            Err(serde::de::Error::custom(
-                "file paths must be 1..=4096 chars and are not trimmed",
-            ))
-        } else {
-            Ok(value)
-        }
+// `FilePath`: non-empty, at most 4096 characters, deliberately NOT trimmed — a
+// leading or trailing space is a legal part of a file's name, and the mark
+// is keyed by the name the host gave. Bounded because a path arrives from a
+// client rather than from the host.
+checked_field!(file_path: String, |v| {
+    if v.is_empty() || utf16_len(v) > 4096 {
+        Some("file paths must be 1..=4096 characters and are not trimmed")
+    } else {
+        None
     }
-
-    pub fn deserialize_vec<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
-        Vec::<serde_json::Value>::deserialize(d)?
-            .into_iter()
-            .map(|value| deserialize(value).map_err(serde::de::Error::custom))
-            .collect()
-    }
-}
+});
 
 /// Where one file of a change request stands with the person reading it.
 /// `dismissed` is the file that was cleared and has since been pushed to,
@@ -1500,59 +1620,36 @@ pub struct PullRequestActionInput {
     pub update_method: Option<PullRequestUpdateMethod>,
 }
 
-/// Serde codec for the `files` write batch (paths validated per element).
-mod set_files_viewed_field {
-    use super::*;
+// How many presses one write carries (`MAX_FILES_VIEWED_PRESSES`); each
+// element's path is validated by its own field attribute.
+checked_field!(set_files_viewed_field: Vec<PullRequestSetFilesViewedFile>, |v| {
+    (v.len() > 500).then_some("at most 500 files per write")
+});
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<Vec<PullRequestSetFilesViewedFile>, D::Error> {
-        Vec::<serde_json::Value>::deserialize(d)?
-            .into_iter()
-            .map(|value| {
-                let path = value
-                    .get("path")
-                    .cloned()
-                    .map(|path| {
-                        file_path::deserialize(path).map_err(|error| {
-                            serde::de::Error::custom(error.to_string())
-                        })
-                    })
-                    .transpose()?;
-                let viewed = value
-                    .get("viewed")
-                    .cloned()
-                    .map(|viewed| {
-                        <bool as serde::Deserialize>::deserialize(viewed)
-                            .map_err(|error| serde::de::Error::custom(error.to_string()))
-                    })
-                    .transpose()?;
-                Ok(PullRequestSetFilesViewedFile {
-                    path: path.ok_or_else(|| serde::de::Error::custom("missing field `path`"))?,
-                    viewed: viewed.ok_or_else(|| serde::de::Error::custom("missing field `viewed`"))?,
-                })
-            })
-            .collect()
+// `CommentBody`: non-empty and at most 65536 characters, not trimmed — the
+// body is markdown, where leading spaces open a code block and two trailing
+// spaces are a line break. A whitespace-only body is valid here; the service
+// rejects it.
+checked_field!(comment_body: String, |v| {
+    if v.is_empty() || utf16_len(v) > 65_536 {
+        Some("comment bodies must be 1..=65,536 characters and are not trimmed")
+    } else {
+        None
     }
-}
-
-/// `CommentBody`: non-empty and at most 65536 chars, not trimmed — the body
-/// is markdown, where leading spaces open a code block and two trailing
-/// spaces are a line break.
-mod comment_body {
-    use super::*;
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-        let value = String::deserialize(d)?;
-        if value.is_empty() || value.len() > 65_536 {
-            Err(serde::de::Error::custom(
-                "comment bodies must be 1..=65,536 chars and are not trimmed",
-            ))
-        } else {
-            Ok(value)
-        }
-    }
-}
+});
+// A body that may be empty (`Schema.String.check(isMaxLength(65_536))`).
+checked_field!(markdown_body: String, |v| {
+    (utf16_len(v) > 65_536).then_some("bodies must be at most 65,536 characters")
+});
+checked_field!(update_title: TrimmedNonEmptyString, |v| {
+    (utf16_len(v.as_str()) > 1024).then_some("titles must be at most 1024 characters")
+});
+checked_field!(reviewer_requests: Vec<PullRequestReviewerRequestReviewer>, |v| {
+    (v.is_empty() || v.len() > 25).then_some("between 1 and 25 reviewers")
+});
+checked_field!(label_names: Vec<TrimmedNonEmptyString>, |v| {
+    (v.is_empty() || v.len() > 25).then_some("between 1 and 25 labels")
+});
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1592,9 +1689,17 @@ pub struct PullRequestUpdateInput {
     pub allow_stale: Option<bool>,
     pub repository: TrimmedNonEmptyString,
     pub number: PositiveInt,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "update_title::optional::deserialize"
+    )]
     pub title: Option<TrimmedNonEmptyString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "markdown_body::optional::deserialize"
+    )]
     pub body: Option<String>,
 }
 
@@ -1635,7 +1740,11 @@ pub struct PullRequestCommentUpdateInput {
 
 /// The coordinates of one line in a pull request diff.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum PullRequestReviewPosition {
     #[serde(rename = "added")]
     Added { new_line: PositiveInt },
@@ -1684,7 +1793,7 @@ pub struct PullRequestSubmitReviewInput {
     pub number: PositiveInt,
     pub verdict: PullRequestReviewVerdict,
     /// The review's own words. May be empty, which is how an approval with no remarks is sent.
-    #[serde(default)]
+    #[serde(deserialize_with = "markdown_body::deserialize")]
     pub body: String,
     pub comments: Vec<PullRequestReviewCommentDraft>,
 }
@@ -1795,6 +1904,7 @@ pub struct PullRequestReviewerRequestInput {
     /// Who, as the candidate list named them. Bounded because every host
     /// bounds it as well — GitHub refuses past fifteen — and because these
     /// travel into a request body a page composed.
+    #[serde(deserialize_with = "reviewer_requests::deserialize")]
     pub reviewers: Vec<PullRequestReviewerRequestReviewer>,
     pub requested: bool,
 }
@@ -1814,6 +1924,7 @@ pub struct PullRequestLabelChangeInput {
     pub allow_stale: Option<bool>,
     pub repository: TrimmedNonEmptyString,
     pub number: PositiveInt,
+    #[serde(deserialize_with = "label_names::deserialize")]
     pub labels: Vec<TrimmedNonEmptyString>,
     pub applied: bool,
 }
@@ -1828,43 +1939,26 @@ pub enum PullRequestUnavailableReason {
 
 /// What each host needs before it can be read, so a failure names the fix
 /// rather than the symptom. The reason names keep their `cli-` prefix for
-/// wire compatibility; for GitHub and Bitbucket they mean "no credential"
-/// and "a refused credential", not a missing tool.
+/// wire compatibility; for GitHub they mean "no credential" and "a refused
+/// credential", not a missing tool.
 ///
-/// Cut hosts stay in the table so upstream text still resolves.
-fn provider_requirement(
-    provider: &str,
-) -> Option<(&'static str, &'static str)> {
+/// Only GitHub is kept; upstream's forgejo, gitlab, azure-devops and
+/// bitbucket entries are cut with those hosts (see PORTING.md Deviations).
+fn provider_requirement(provider: &str) -> Option<(&'static str, &'static str)> {
     match provider {
         "github" => Some((
             "No GitHub credential on the server. Set GH_TOKEN, or install the GitHub CLI (https://cli.github.com/) and run `gh auth login`.",
             "GitHub has no working credential for this host. Run `gh auth login`, or check the account and hosts in Settings → Source Control.",
-        )),
-        "forgejo" => Some((
-            "Install Forgejo CLI (`fj` 0.6 or later) from https://codeberg.org/forgejo-contrib/forgejo-cli or Gitea CLI (`tea` 0.16 or later) from https://gitea.com/gitea/tea to browse Forgejo pull requests.",
-            "Authenticate your Forgejo or Gitea server with `fj --host <server-url> auth add-token` on the T3 Code server. If fj is missing or unconfigured for that server, use `tea login add`. A configured fj account must be repaired with fj.",
-        )),
-        "gitlab" => Some((
-            "GitLab CLI (`glab`) is required to browse change requests on this host. Install it from https://gitlab.com/gitlab-org/cli and reload.",
-            "GitLab CLI is not authenticated. Run `glab auth login` and retry.",
-        )),
-        "azure-devops" => Some((
-            "Azure CLI (`az`) with the Azure DevOps extension is required. Install `az`, then run `az extension add --name azure-devops`.",
-            "Azure CLI is not signed in. Run `az login` and retry.",
-        )),
-        "bitbucket" => Some((
-            "Bitbucket needs API credentials on the server. Add them in Settings → Source Control.",
-            "Bitbucket rejected the configured credentials. Check them in Settings → Source Control.",
         )),
         _ => None,
     }
 }
 
 /// Enough of `RepositoryIdentity` for [`pull_request_host_of`], kept
-/// structural so both the server and the page can call it.
+/// structural so both the server and the page can call it. (Upstream also
+/// reads `locator.remoteUrl`, but only for Forgejo, which is cut.)
 pub struct RepositoryIdentityLike<'a> {
     pub canonical_key: Option<&'a str>,
-    pub remote_url: Option<&'a str>,
 }
 
 /// The host a project's repository is addressed below. `canonicalKey` is the
@@ -1877,37 +1971,15 @@ pub struct RepositoryIdentityLike<'a> {
 /// two must agree on what they are called.
 pub fn pull_request_host_of(
     identity: Option<&RepositoryIdentityLike<'_>>,
-    kind: SourceControlProviderKind,
+    kind: &SourceControlProviderKind,
 ) -> String {
-    if kind.as_str() == "forgejo" {
-        // Only http(s) remotes name their host directly; SSH remotes retain
-        // their canonical host, and the CLI resolves their web endpoint.
-        if let Some(remote) = identity.and_then(|i| i.remote_url) {
-            if let Some(host) = url_host(remote) {
-                return host;
-            }
-        }
-    }
     let host = identity
         .and_then(|i| i.canonical_key)
         .and_then(|key| key.split('/').next())
-        .map(|segment| segment.trim())
-        .filter(|segment| !segment.is_empty());
-    host.unwrap_or(kind.as_str()).to_lowercase()
-}
-
-/// Minimal `new URL(remote).host` for http(s) URLs: lowercased authority
-/// (userinfo stripped, port kept), or `None` when it is not one.
-fn url_host(remote: &str) -> Option<String> {
-    let rest = remote
-        .strip_prefix("http://")
-        .or_else(|| remote.strip_prefix("https://"))?;
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let host = authority.rsplit('@').next().unwrap_or("");
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_lowercase())
+        .map(js_trim);
+    match host {
+        Some(host) if !host.is_empty() => host.to_lowercase(),
+        _ => kind.as_str().to_owned(),
     }
 }
 
@@ -1923,13 +1995,14 @@ fn url_host(remote: &str) -> Option<String> {
 ///
 /// Shared between the server and the page so both narrow by the same login.
 pub fn resolve_pull_request_author_filter(author: &str, viewer: Option<&str>) -> String {
-    let trimmed = author.trim();
+    let trimmed = js_trim(author);
+    // /^@?me$/i
     let is_me = trimmed.eq_ignore_ascii_case("me") || trimmed.eq_ignore_ascii_case("@me");
     if !is_me {
         return trimmed.to_owned();
     }
     match viewer {
-        Some(viewer) if !viewer.trim().is_empty() => viewer.to_owned(),
+        Some(viewer) if !js_trim(viewer).is_empty() => viewer.to_owned(),
         _ => trimmed.to_owned(),
     }
 }
@@ -1939,7 +2012,7 @@ pub fn resolve_pull_request_author_filter(author: &str, viewer: Option<&str>) ->
 /// read, and one entry in the host switcher when only that host cannot.
 /// `None` when the reason is not about setting a host up.
 pub fn pull_request_provider_requirement(
-    provider: SourceControlProviderKind,
+    provider: &SourceControlProviderKind,
     reason: PullRequestUnavailableReason,
 ) -> Option<&'static str> {
     let requirement = provider_requirement(provider.as_str())?;
@@ -1958,7 +2031,11 @@ pub fn pull_request_provider_requirement(
 /// `HttpServerRespondable` encoder; both are RPC-transport concerns Turin
 /// cuts — see PORTING.md.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum PullRequestUnavailableError {
     #[serde(rename = "PullRequestUnavailableError")]
     Unavailable {
@@ -1972,8 +2049,12 @@ pub enum PullRequestUnavailableError {
 
 impl std::fmt::Display for PullRequestUnavailableError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self::Unavailable { reason, provider, .. } = self;
-        let requirement = provider.as_ref().and_then(|p| provider_requirement(p.as_str()));
+        let Self::Unavailable {
+            reason, provider, ..
+        } = self;
+        let requirement = provider
+            .as_ref()
+            .and_then(|p| provider_requirement(p.as_str()));
         match reason {
             PullRequestUnavailableReason::CliMissing => f.write_str(
                 requirement
@@ -1985,9 +2066,9 @@ impl std::fmt::Display for PullRequestUnavailableError {
                     .map(|r| r.1)
                     .unwrap_or("This host has no working credentials."),
             ),
-            PullRequestUnavailableReason::ProviderUnsupported => f.write_str(
-                "Change requests cannot be browsed for this project's host yet.",
-            ),
+            PullRequestUnavailableReason::ProviderUnsupported => {
+                f.write_str("Change requests cannot be browsed for this project's host yet.")
+            }
         }
     }
 }
@@ -1997,7 +2078,11 @@ impl std::error::Error for PullRequestUnavailableError {}
 /// `PullRequestOperationError` (Schema.TaggedError; upstream's 502 HTTP
 /// annotation is cut with the RPC transport).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "_tag", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "_tag",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum PullRequestOperationError {
     #[serde(rename = "PullRequestOperationError")]
     #[error("Pull request operation {operation} failed: {detail}")]
@@ -2046,28 +2131,32 @@ mod tests {
 
     #[test]
     fn qualifier_values_are_bounded() {
-        assert!(serde_json::from_value::<PullRequestListFilters>(serde_json::json!({
-            "author": "x".repeat(201),
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<PullRequestListFilters>(serde_json::json!({
+                "author": "x".repeat(201),
+            }))
+            .is_err()
+        );
     }
 
     #[test]
-    fn comment_bodies_reject_blank_and_oversized() {
-        let input = serde_json::json!({
-            "projectId": "p1", "repository": "o/r", "number": 1, "body": "   ",
-        });
-        assert!(serde_json::from_value::<PullRequestCommentInput>(input).is_err());
-        let input = serde_json::json!({
-            "projectId": "p1", "repository": "o/r", "number": 1, "body": "x".repeat(65_537),
-        });
-        assert!(serde_json::from_value::<PullRequestCommentInput>(input).is_err());
+    fn comment_bodies_reject_empty_and_oversized_but_never_trim() {
+        let with_body = |body: serde_json::Value| {
+            serde_json::from_value::<PullRequestCommentInput>(serde_json::json!({
+                "projectId": "p1", "repository": "o/r", "number": 1, "body": body,
+            }))
+        };
+        assert!(with_body(serde_json::json!("")).is_err());
+        // `Schema.isNonEmpty` only checks length: whitespace-only decodes (the
+        // service rejects it), so it must not be trimmed away either.
+        assert_eq!(with_body(serde_json::json!("   ")).unwrap().body, "   ");
+        assert!(with_body(serde_json::json!("x".repeat(65_537))).is_err());
+        assert!(with_body(serde_json::json!("x".repeat(65_536))).is_ok());
         // Bodies are not trimmed: leading spaces survive.
-        let ok: PullRequestCommentInput = serde_json::from_value(serde_json::json!({
-            "projectId": "p1", "repository": "o/r", "number": 1, "body": "  code block",
-        }))
-        .unwrap();
-        assert_eq!(ok.body, "  code block");
+        assert_eq!(
+            with_body(serde_json::json!("  code block")).unwrap().body,
+            "  code block"
+        );
     }
 
     #[test]
@@ -2077,10 +2166,12 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(viewed.path, " leading.txt");
-        assert!(serde_json::from_value::<PullRequestFileViewed>(serde_json::json!({
-            "path": "", "state": "viewed",
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<PullRequestFileViewed>(serde_json::json!({
+                "path": "", "state": "viewed",
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -2097,35 +2188,52 @@ mod tests {
 
     #[test]
     fn host_of_reads_canonical_key_first_segment() {
-        let identity = RepositoryIdentityLike {
-            canonical_key: Some("github.com pingdotgg/t3code"),
-            remote_url: None,
+        let github = SourceControlProviderKind::new("github").unwrap();
+        let key = |key| RepositoryIdentityLike {
+            canonical_key: Some(key),
         };
         assert_eq!(
-            pull_request_host_of(Some(&identity), SourceControlProviderKind::new("github").unwrap()),
+            pull_request_host_of(Some(&key("GitHub.com/pingdotgg/t3code")), &github),
             "github.com"
         );
-
-        // Forgejo reads the host out of an http remote.
-        let forgejo = RepositoryIdentityLike {
-            canonical_key: Some("codeberg.org/x/y"),
-            remote_url: Some("https://CodeBerg.org/x/y"),
-        };
         assert_eq!(
-            pull_request_host_of(Some(&forgejo), SourceControlProviderKind::new("forgejo").unwrap()),
-            "codeberg.org"
+            pull_request_host_of(Some(&key("  github.acme.dev /org/repo")), &github),
+            "github.acme.dev"
         );
-
-        // No identity at all: the provider kind stands in.
+        // No usable key: the provider kind stands in, once per kind.
+        assert_eq!(pull_request_host_of(None, &github), "github");
         assert_eq!(
-            pull_request_host_of(None, SourceControlProviderKind::new("github").unwrap()),
+            pull_request_host_of(
+                Some(&RepositoryIdentityLike {
+                    canonical_key: None
+                }),
+                &github
+            ),
             "github"
+        );
+        assert_eq!(pull_request_host_of(Some(&key("")), &github), "github");
+        assert_eq!(
+            pull_request_host_of(Some(&key("/owner/repo")), &github),
+            "github"
+        );
+        assert_eq!(
+            pull_request_host_of(Some(&key("   /owner/repo")), &github),
+            "github"
+        );
+        // Other kinds bucket by their canonical host too.
+        let gitlab = SourceControlProviderKind::new("gitlab").unwrap();
+        assert_eq!(
+            pull_request_host_of(Some(&key("forge.example/team/repo")), &gitlab),
+            "forge.example"
         );
     }
 
     #[test]
     fn author_filter_resolves_me() {
-        assert_eq!(resolve_pull_request_author_filter(" @Me ", Some("dev")), "dev");
+        assert_eq!(
+            resolve_pull_request_author_filter(" @Me ", Some("dev")),
+            "dev"
+        );
         assert_eq!(resolve_pull_request_author_filter("me", None), "me");
         assert_eq!(resolve_pull_request_author_filter("me", Some("  ")), "me");
         assert_eq!(resolve_pull_request_author_filter(" theo ", None), "theo");
@@ -2135,15 +2243,15 @@ mod tests {
     fn provider_requirement_sentences() {
         let github = SourceControlProviderKind::new("github").unwrap();
         assert_eq!(
-            pull_request_provider_requirement(
-                github.clone(),
-                PullRequestUnavailableReason::CliMissing
-            )
-            .unwrap(),
+            pull_request_provider_requirement(&github, PullRequestUnavailableReason::CliMissing)
+                .unwrap(),
             "No GitHub credential on the server. Set GH_TOKEN, or install the GitHub CLI (https://cli.github.com/) and run `gh auth login`."
         );
         assert_eq!(
-            pull_request_provider_requirement(github, PullRequestUnavailableReason::ProviderUnsupported),
+            pull_request_provider_requirement(
+                &github,
+                PullRequestUnavailableReason::ProviderUnsupported
+            ),
             None
         );
         let error = PullRequestUnavailableError::Unavailable {
@@ -2169,5 +2277,732 @@ mod tests {
         assert_eq!(json["reason"], "cli-unauthenticated");
         let back: PullRequestUnavailableError = serde_json::from_value(json).unwrap();
         assert_eq!(back, error);
+    }
+
+    // --- ported from pullRequest.test.ts --------------------------------
+
+    use serde_json::{Value, json};
+
+    fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, serde_json::Error> {
+        serde_json::from_value(value)
+    }
+
+    fn list_result() -> Value {
+        json!({
+            "viewers": { "github.com": "bilal", "gitlab.com": "bilal.hassan" },
+            "providers": [
+                {
+                    "host": "github.com", "kind": "github", "searchesOnHost": true,
+                    "projectCount": 1, "configured": true, "detail": null,
+                },
+                {
+                    "host": "gitlab.com", "kind": "gitlab", "searchesOnHost": true,
+                    "projectCount": 1, "configured": false, "detail": "glab is not installed.",
+                },
+            ],
+            "entries": [{
+                "provider": "github", "host": "github.com", "projectId": "project-1",
+                "projectTitle": "t3code", "repository": "pingdotgg/t3code", "number": 1,
+                "title": "Add a pull requests page",
+                "url": "https://github.com/pingdotgg/t3code/pull/1",
+                "author": { "login": "octocat", "name": null, "avatarUrl": null },
+                "headBranch": "feat/page", "baseBranch": "main", "state": "open",
+                "isDraft": false, "mergeability": "mergeable", "additions": 1, "deletions": 0,
+                "createdAt": "2026-07-01T00:00:00Z", "updatedAt": "2026-07-02T00:00:00Z",
+                "viewerReviewRequested": false,
+                "labels": [{ "name": "backend", "color": null }],
+            }],
+            "errors": [],
+            "truncated": false,
+            "nextCursors": { "github.com pingdotgg/t3code": "2026-07-02T00:00:00Z|1|1" },
+        })
+    }
+
+    #[test]
+    fn list_result_round_trips_without_inventing_or_dropping_keys() {
+        let decoded: PullRequestListResult = decode(list_result()).unwrap();
+        // IsoDateTime is a passthrough string: not normalised to millis.
+        assert_eq!(decoded.entries[0].created_at, "2026-07-01T00:00:00Z");
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), list_result());
+        // Record keys keep their wire order.
+        let keys: Vec<&str> = decoded.viewers.keys().map(|k| k.as_str()).collect();
+        assert_eq!(keys, ["github.com", "gitlab.com"]);
+    }
+
+    #[test]
+    fn viewer_is_keyed_by_host_so_two_hosts_of_one_kind_stay_separate() {
+        let mut value = list_result();
+        value["viewers"] = json!({ "github.com": "bilal", "github.acme.dev": "b.hassan" });
+        let decoded: PullRequestListResult = decode(value).unwrap();
+        let by_host = |host: &str| {
+            decoded
+                .viewers
+                .get(&TrimmedNonEmptyString::new(host).unwrap())
+                .map(|v| v.as_str().to_owned())
+        };
+        assert_eq!(by_host("github.com").as_deref(), Some("bilal"));
+        assert_eq!(by_host("github.acme.dev").as_deref(), Some("b.hassan"));
+    }
+
+    #[test]
+    fn list_input_trims_and_bounds_a_search() {
+        let input: PullRequestListInput =
+            decode(json!({"state": "open", "query": "  page  "})).unwrap();
+        assert_eq!(input.query.unwrap().as_str(), "page");
+        let none: PullRequestListInput = decode(json!({"state": "open"})).unwrap();
+        assert!(none.query.is_none());
+        let ok: PullRequestListInput =
+            decode(json!({"state": "open", "query": "p".repeat(200)})).unwrap();
+        assert_eq!(ok.query.unwrap().as_str().len(), 200);
+        assert!(
+            decode::<PullRequestListInput>(json!({"state": "open", "query": "p".repeat(201)}))
+                .is_err()
+        );
+        // Blank after trimming is not a search either.
+        assert!(decode::<PullRequestListInput>(json!({"state": "open", "query": "   "})).is_err());
+        // `isMaxLength` counts UTF-16 code units: an emoji is two.
+        assert!(
+            decode::<PullRequestListInput>(json!({"state": "open", "query": "😀".repeat(100)}))
+                .is_ok()
+        );
+        assert!(
+            decode::<PullRequestListInput>(json!({"state": "open", "query": "😀".repeat(101)}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn list_input_cursors_round_trip_and_are_bounded() {
+        let cursors = json!({ "github.com pingdotgg/t3code": "2026-07-02T00:00:00Z|99|1,2" });
+        let input: PullRequestListInput =
+            decode(json!({"state": "open", "cursors": cursors})).unwrap();
+        assert_eq!(
+            serde_json::to_value(&input).unwrap(),
+            json!({"state": "open", "cursors": cursors})
+        );
+        let none: PullRequestListInput = decode(json!({"state": "open"})).unwrap();
+        assert!(none.cursors.is_none());
+        let long = |length: usize| json!({"github.com acme/web": "c".repeat(length)});
+        assert!(
+            decode::<PullRequestListInput>(json!({"state": "open", "cursors": long(4096)})).is_ok()
+        );
+        assert!(
+            decode::<PullRequestListInput>(json!({"state": "open", "cursors": long(4097)}))
+                .is_err()
+        );
+        // The same bound applies to the cursors a result hands out.
+        let mut result = list_result();
+        result["nextCursors"] = long(4097);
+        assert!(decode::<PullRequestListResult>(result).is_err());
+    }
+
+    #[test]
+    fn list_input_bounds_limit_and_project_ids() {
+        let with = |field: &str, value: Value| {
+            decode::<PullRequestListInput>(json!({"state": "all", field: value}))
+        };
+        assert!(with("limit", json!(1)).is_ok());
+        assert!(with("limit", json!(500)).is_ok());
+        assert!(with("limit", json!(0)).is_err());
+        assert!(with("limit", json!(501)).is_err());
+        assert!(with("limit", json!(1.5)).is_err());
+        let ids = |n: usize| json!((0..n).map(|i| format!("p{i}")).collect::<Vec<_>>());
+        assert!(with("projectIds", ids(100)).is_ok());
+        assert!(with("projectIds", ids(101)).is_err());
+    }
+
+    #[test]
+    fn list_filters_bound_qualifier_values_and_groups() {
+        let with =
+            |field: &str, value: Value| decode::<PullRequestListFilters>(json!({field: value}));
+        let values = |n: usize| json!((0..n).map(|i| format!("l{i}")).collect::<Vec<_>>());
+        assert!(with("excludedLabels", values(10)).is_ok());
+        assert!(with("excludedLabels", values(11)).is_err());
+        assert!(
+            with(
+                "labels",
+                json!((0..10).map(|_| values(10)).collect::<Vec<_>>())
+            )
+            .is_ok()
+        );
+        assert!(
+            with(
+                "labels",
+                json!((0..11).map(|_| values(1)).collect::<Vec<_>>())
+            )
+            .is_err()
+        );
+        assert!(with("labels", json!([values(11)])).is_err());
+        assert!(with("author", json!("x".repeat(200))).is_ok());
+        assert!(with("author", json!("😀".repeat(101))).is_err());
+        assert!(with("draft", json!("both")).is_err());
+        // Qualifier values are trimmed.
+        let filters = with("author", json!("  octocat ")).unwrap();
+        assert_eq!(filters.author.unwrap().as_str(), "octocat");
+    }
+
+    #[test]
+    fn reviewer_request_is_bounded_and_keeps_teams_apart() {
+        let decode_request = |reviewers: Value, requested: bool| {
+            decode::<PullRequestReviewerRequestInput>(json!({
+                "projectId": "p1", "repository": "acme/web", "number": 1,
+                "reviewers": reviewers, "requested": requested,
+            }))
+        };
+        let many = |n: usize| {
+            json!(
+                (0..n)
+                    .map(|i| json!({"id": format!("user{i}"), "kind": "user"}))
+                    .collect::<Vec<_>>()
+            )
+        };
+        for requested in [true, false] {
+            assert_eq!(
+                decode_request(json!([{"id": "octocat", "kind": "user"}]), requested)
+                    .unwrap()
+                    .requested,
+                requested
+            );
+        }
+        assert!(decode_request(json!([]), true).is_err());
+        assert_eq!(decode_request(many(25), true).unwrap().reviewers.len(), 25);
+        assert!(decode_request(many(26), true).is_err());
+        let kinds: Vec<_> = decode_request(
+            json!([{"id": "octocat", "kind": "user"}, {"id": "web-platform", "kind": "team"}]),
+            true,
+        )
+        .unwrap()
+        .reviewers
+        .into_iter()
+        .map(|r| r.kind)
+        .collect();
+        assert_eq!(
+            kinds,
+            [PullRequestReviewerKind::User, PullRequestReviewerKind::Team]
+        );
+    }
+
+    #[test]
+    fn label_change_is_bounded() {
+        let with = |labels: Value| {
+            decode::<PullRequestLabelChangeInput>(json!({
+                "projectId": "p1", "repository": "acme/web", "number": 1,
+                "labels": labels, "applied": true,
+            }))
+        };
+        let names = |n: usize| json!((0..n).map(|i| format!("l{i}")).collect::<Vec<_>>());
+        assert!(with(names(0)).is_err());
+        assert!(with(names(1)).is_ok());
+        assert!(with(names(25)).is_ok());
+        assert!(with(names(26)).is_err());
+    }
+
+    #[test]
+    fn actions_carry_their_own_strategy_options() {
+        let base = json!({"projectId": "project-1", "repository": "acme/web", "number": 7});
+        let with = |extra: Value| {
+            let mut value = base.clone();
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            decode::<PullRequestActionInput>(value)
+        };
+        let rebase = with(json!({"action": "update-branch", "updateMethod": "rebase"})).unwrap();
+        assert_eq!(rebase.action, PullRequestAction::UpdateBranch);
+        assert_eq!(rebase.update_method, Some(PullRequestUpdateMethod::Rebase));
+        assert_eq!(
+            with(json!({"action": "update-branch"}))
+                .unwrap()
+                .update_method,
+            None
+        );
+        // A way no host offers.
+        assert!(with(json!({"action": "update-branch", "updateMethod": "squash"})).is_err());
+        let armed = with(json!({"action": "enable-auto-merge", "mergeMethod": "squash"})).unwrap();
+        assert_eq!(armed.action, PullRequestAction::EnableAutoMerge);
+        assert_eq!(armed.merge_method, Some(PullRequestMergeMethod::Squash));
+        assert_eq!(
+            with(json!({"action": "disable-auto-merge"}))
+                .unwrap()
+                .merge_method,
+            None
+        );
+        let revert = with(json!({"action": "revert"})).unwrap();
+        assert_eq!(
+            (revert.action, revert.merge_method),
+            (PullRequestAction::Revert, None)
+        );
+        assert_eq!(
+            with(json!({"action": "approve-workflows"})).unwrap().action,
+            PullRequestAction::ApproveWorkflows
+        );
+        assert!(with(json!({"action": "explode"})).is_err());
+    }
+
+    #[test]
+    fn capabilities_without_optional_keys_decode_as_a_server_with_none() {
+        let base = json!({
+            "diff": true, "comment": true, "actions": [], "mergeMethods": [], "search": true,
+            "review": { "inlineComment": true, "reply": true, "resolve": true, "verdicts": [] },
+            "reviewers": { "request": true, "listCandidates": true },
+        });
+        let capabilities: PullRequestCapabilities = decode(base.clone()).unwrap();
+        assert_eq!(capabilities.reactions, None);
+        assert_eq!(capabilities.update_methods, None);
+        assert_eq!(capabilities.viewed_files, None);
+        // Optional keys stay absent on the way back out.
+        assert_eq!(serde_json::to_value(&capabilities).unwrap(), base);
+    }
+
+    #[test]
+    fn files_viewed_keeps_path_spaces_and_bounds_the_batch() {
+        let batch = |files: Value| {
+            decode::<PullRequestSetFilesViewedInput>(json!({
+                "projectId": "p1", "repository": "group/project", "number": 7, "files": files,
+            }))
+        };
+        let kept = batch(json!([{"path": "docs/readme.md ", "viewed": true}])).unwrap();
+        assert_eq!(kept.files[0].path, "docs/readme.md ");
+        assert!(batch(json!([{"path": "", "viewed": true}])).is_err());
+        let presses = |n: usize| {
+            json!(
+                (0..n)
+                    .map(|i| json!({"path": format!("src/f{i}.ts"), "viewed": true}))
+                    .collect::<Vec<_>>()
+            )
+        };
+        assert!(batch(presses(500)).is_ok());
+        assert!(batch(presses(501)).is_err());
+        let path = |len: usize| json!([{"path": "a".repeat(len), "viewed": true}]);
+        assert!(batch(path(4096)).is_ok());
+        assert!(batch(path(4097)).is_err());
+        // Missing `viewed` is a decode error, not a default.
+        assert!(batch(json!([{"path": "a"}])).is_err());
+        let reported: PullRequestFilesViewedResult = decode(json!({
+            "files": [{"path": " leading.md", "state": "viewed"}], "truncated": false,
+        }))
+        .unwrap();
+        assert_eq!(reported.files[0].path, " leading.md");
+    }
+
+    // --- round-trip tests for tricky fields ------------------------------
+
+    fn comment() -> Value {
+        json!({
+            "id": "c1", "kind": "issue-comment", "author": null, "body": "hi",
+            "createdAt": "2026-07-01T00:00:00Z", "url": null, "path": null, "reviewState": null,
+        })
+    }
+
+    #[test]
+    fn edited_at_distinguishes_absent_from_null() {
+        let absent: PullRequestComment = decode(comment()).unwrap();
+        assert_eq!(absent.edited_at, None);
+        assert_eq!(serde_json::to_value(&absent).unwrap(), comment());
+
+        let mut with_null = comment();
+        with_null["editedAt"] = Value::Null;
+        let decoded: PullRequestComment = decode(with_null.clone()).unwrap();
+        assert_eq!(decoded.edited_at, Some(None));
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), with_null);
+
+        let mut with_value = comment();
+        with_value["editedAt"] = json!("2026-07-02T00:00:00Z");
+        let decoded: PullRequestComment = decode(with_value.clone()).unwrap();
+        assert_eq!(
+            decoded.edited_at,
+            Some(Some("2026-07-02T00:00:00Z".to_owned()))
+        );
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), with_value);
+    }
+
+    #[test]
+    fn summary_keeps_null_apart_from_absent_for_every_nullable_optional() {
+        let minimal = json!({
+            "provider": "github", "projectId": "p1", "repository": "o/r", "number": 3,
+            "title": "t", "url": "https://x", "state": "merged", "headBranch": "h",
+            "baseBranch": "b", "updatedAt": "2026-07-01T00:00:00Z",
+        });
+        let absent: PullRequestSummary = decode(minimal.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&absent).unwrap(), minimal);
+
+        let mut nulls = minimal.clone();
+        for key in [
+            "closedAt",
+            "mergedAt",
+            "author",
+            "reviewDecision",
+            "checksState",
+            "stack",
+        ] {
+            nulls[key] = Value::Null;
+        }
+        let decoded: PullRequestSummary = decode(nulls.clone()).unwrap();
+        assert_eq!(decoded.closed_at, Some(None));
+        assert_eq!(decoded.author, Some(None));
+        assert_eq!(decoded.review_decision, Some(None));
+        assert_eq!(decoded.checks_state, Some(None));
+        assert_eq!(decoded.stack, Some(None));
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), nulls);
+    }
+
+    #[test]
+    fn detail_head_repository_keeps_null_apart_from_absent() {
+        let key = "headRepositoryNameWithOwner";
+        let mut checked = 0;
+        for (value, expected) in [
+            (None, None),
+            (Some(Value::Null), Some(None)),
+            (Some(json!(" fork/repo ")), Some(Some("fork/repo"))),
+        ] {
+            let mut detail = detail_json();
+            if let Some(value) = value {
+                detail[key] = value;
+            }
+            let decoded: PullRequestDetail = decode(detail).unwrap();
+            assert_eq!(
+                decoded
+                    .head_repository_name_with_owner
+                    .as_ref()
+                    .map(|o| o.as_ref().map(|s| s.as_str())),
+                expected
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 3);
+    }
+
+    fn detail_json() -> Value {
+        json!({
+            "provider": "github",
+            "capabilities": {
+                "diff": true, "comment": true, "actions": ["merge"], "mergeMethods": ["squash"],
+                "search": true,
+                "review": { "inlineComment": true, "reply": true, "resolve": true, "verdicts": [] },
+                "reviewers": { "request": true, "listCandidates": true },
+            },
+            "viewerPermissions": {
+                "actions": [], "comment": true, "resolve": true, "verdicts": [],
+                "requestReviewers": true,
+            },
+            "projectId": "p1", "projectTitle": "T", "workspaceRoot": "/w", "repository": "o/r",
+            "number": 1, "title": "t", "body": "", "url": "https://x", "author": null,
+            "state": "open", "isDraft": false, "mergeability": "unknown", "additions": 0,
+            "deletions": 0, "changedFiles": 0, "headBranch": "h", "baseBranch": "b",
+            "createdAt": "2026-07-01T00:00:00Z", "updatedAt": "2026-07-01T00:00:00Z",
+            "mergedAt": null, "closedAt": null, "reviewers": [], "labels": [], "checks": [],
+            "mergeCapabilities": { "merge": true, "squash": true, "rebase": false },
+        })
+    }
+
+    #[test]
+    fn detail_round_trips_and_view_requires_activity() {
+        let detail = detail_json();
+        let decoded: PullRequestDetail = decode(detail.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), detail);
+
+        let mut view = detail;
+        view.as_object_mut().unwrap().extend(
+            json!({
+                "comments": [comment()], "commentCount": 1, "commentsTruncated": false,
+                "reviewThreads": [], "commits": [],
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let decoded: PullRequestDetailView = decode(view.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), view);
+        // Activity's own keys are required on the composed view.
+        view.as_object_mut().unwrap().remove("commentCount");
+        assert!(decode::<PullRequestDetailView>(view).is_err());
+        // The activity half alone may leave author/reviewers out or null.
+        let activity: PullRequestActivity = decode(json!({
+            "author": null, "comments": [], "commentCount": 0, "commentsTruncated": false,
+            "reviewThreads": [], "commits": [],
+        }))
+        .unwrap();
+        assert_eq!(activity.author, Some(None));
+        assert_eq!(activity.reviewers, None);
+    }
+
+    #[test]
+    fn positive_ints_reject_zero_and_review_thread_line_may_be_null() {
+        let thread = |line: Value| {
+            decode::<PullRequestReviewThread>(json!({
+                "id": "t", "path": "a.rs", "line": line, "side": "left",
+                "isResolved": false, "isOutdated": false, "comments": [],
+            }))
+        };
+        assert_eq!(thread(Value::Null).unwrap().line, None);
+        assert_eq!(
+            thread(json!(4)).unwrap().line.map(PositiveInt::get),
+            Some(4)
+        );
+        assert!(thread(json!(0)).is_err());
+        assert!(
+            decode::<PullRequestReaction>(json!({
+                "content": "heart", "count": 0, "actors": [], "viewerHasReacted": false,
+            }))
+            .is_err()
+        );
+        assert!(
+            decode::<PullRequestRef>(json!({
+                "projectId": "p", "repository": "o/r", "number": 0,
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reaction_and_enum_wire_names() {
+        for (wire, expected) in [
+            ("thumbs-up", PullRequestReactionContent::ThumbsUp),
+            ("thumbs-down", PullRequestReactionContent::ThumbsDown),
+            ("hooray", PullRequestReactionContent::Hooray),
+            ("eyes", PullRequestReactionContent::Eyes),
+        ] {
+            assert_eq!(
+                decode::<PullRequestReactionContent>(json!(wire)).unwrap(),
+                expected
+            );
+            assert_eq!(serde_json::to_value(expected).unwrap(), json!(wire));
+        }
+        assert!(decode::<PullRequestReactionContent>(json!("tada")).is_err());
+        for wire in [
+            "merge",
+            "ready",
+            "draft",
+            "close",
+            "reopen",
+            "update-branch",
+            "enable-auto-merge",
+            "disable-auto-merge",
+            "revert",
+            "approve-workflows",
+        ] {
+            let action: PullRequestAction = decode(json!(wire)).unwrap();
+            assert_eq!(serde_json::to_value(action).unwrap(), json!(wire));
+        }
+        for wire in ["changes-requested", "review-required", "approved"] {
+            let decision: PullRequestReviewDecision = decode(json!(wire)).unwrap();
+            assert_eq!(serde_json::to_value(decision).unwrap(), json!(wire));
+        }
+        for wire in ["up-to-date", "behind", "unknown"] {
+            let cmp: PullRequestBaseComparison = decode(json!(wire)).unwrap();
+            assert_eq!(serde_json::to_value(cmp).unwrap(), json!(wire));
+        }
+        for wire in [
+            "pending",
+            "action-required",
+            "success",
+            "failure",
+            "skipped",
+            "neutral",
+            "cancelled",
+        ] {
+            let status: PullRequestCheckStatus = decode(json!(wire)).unwrap();
+            assert_eq!(serde_json::to_value(status).unwrap(), json!(wire));
+        }
+        for wire in ["issue-comment", "review-comment", "review"] {
+            let kind: PullRequestCommentKind = decode(json!(wire)).unwrap();
+            assert_eq!(serde_json::to_value(kind).unwrap(), json!(wire));
+        }
+        for wire in ["comment", "approve", "request-changes"] {
+            let verdict: PullRequestReviewVerdict = decode(json!(wire)).unwrap();
+            assert_eq!(serde_json::to_value(verdict).unwrap(), json!(wire));
+        }
+    }
+
+    #[test]
+    fn stack_has_no_kind_discriminator() {
+        let stack: PullRequestStack = decode(json!({
+            "id": "s1", "number": 1, "url": "https://x", "base": "main",
+            "layers": [{ "number": 2, "headBranch": "h", "state": "open" }],
+        }))
+        .unwrap();
+        let encoded = serde_json::to_value(&stack).unwrap();
+        assert!(encoded.get("kind").is_none());
+        assert_eq!(
+            encoded["layers"][0],
+            json!({"number": 2, "headBranch": "h", "state": "open"})
+        );
+    }
+
+    #[test]
+    fn update_and_review_inputs_bound_their_text() {
+        let reference = json!({"projectId": "p", "repository": "o/r", "number": 1});
+        let with = |extra: Value| {
+            let mut value = reference.clone();
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            value
+        };
+        assert!(decode::<PullRequestUpdateInput>(with(json!({"title": "t".repeat(1024)}))).is_ok());
+        assert!(
+            decode::<PullRequestUpdateInput>(with(json!({"title": "t".repeat(1025)}))).is_err()
+        );
+        // An empty description is how one is cleared.
+        assert_eq!(
+            decode::<PullRequestUpdateInput>(with(json!({"body": ""})))
+                .unwrap()
+                .body,
+            Some(String::new())
+        );
+        assert!(
+            decode::<PullRequestUpdateInput>(with(json!({"body": "x".repeat(65_537)}))).is_err()
+        );
+
+        let review = |body: Value| {
+            decode::<PullRequestSubmitReviewInput>(with(json!({
+                "verdict": "approve", "body": body, "comments": [],
+            })))
+        };
+        assert!(review(json!("")).is_ok());
+        assert!(review(json!("😀".repeat(32_768))).is_ok());
+        assert!(review(json!("😀".repeat(32_769))).is_err());
+        // The body key is required.
+        assert!(
+            decode::<PullRequestSubmitReviewInput>(with(json!({
+                "verdict": "approve", "comments": [],
+            })))
+            .is_err()
+        );
+
+        let draft = |body: Value| {
+            decode::<PullRequestReviewCommentDraft>(json!({
+                "path": "a.rs", "position": {"kind": "deleted", "oldLine": 3}, "body": body,
+            }))
+        };
+        assert!(draft(json!("")).is_err());
+        assert!(draft(json!(" ")).is_ok());
+
+        let edit = |kind: &str| {
+            decode::<PullRequestCommentUpdateInput>(with(json!({
+                "commentId": "c", "kind": kind, "body": "b",
+            })))
+        };
+        assert!(edit("issue-comment").is_ok());
+        assert!(edit("review-comment").is_ok());
+        assert!(edit("review").is_err());
+    }
+
+    #[test]
+    fn review_position_rejects_unknown_kind_and_missing_fields() {
+        assert!(
+            decode::<PullRequestReviewPosition>(json!({"kind": "moved", "newLine": 1})).is_err()
+        );
+        assert!(decode::<PullRequestReviewPosition>(json!({"kind": "added"})).is_err());
+        assert!(
+            decode::<PullRequestReviewPosition>(
+                json!({"kind": "context", "oldLine": 1, "newLine": 1})
+            )
+            .is_err()
+        );
+        assert!(
+            decode::<PullRequestReviewPosition>(json!({"kind": "added", "newLine": 0})).is_err()
+        );
+        let deleted = PullRequestReviewPosition::Deleted {
+            old_line: PositiveInt::new(3).unwrap(),
+        };
+        assert_eq!(
+            serde_json::to_value(&deleted).unwrap(),
+            json!({"kind": "deleted", "oldLine": 3})
+        );
+    }
+
+    #[test]
+    fn routing_identity_provider_is_always_github() {
+        let ok = decode::<PullRequestRoutingIdentityResult>(json!({
+            "accountId": "a", "host": "github.com", "provider": "github", "viewer": "v",
+        }));
+        assert!(ok.is_ok());
+        assert!(
+            decode::<PullRequestRoutingIdentityResult>(json!({
+                "accountId": "a", "host": "github.com", "provider": "gitlab", "viewer": "v",
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn operation_error_round_trips_and_formats() {
+        let wire = json!({
+            "_tag": "PullRequestOperationError", "operation": "merge",
+            "detail": "conflicts", "reason": "not-found",
+        });
+        let error: PullRequestOperationError = decode(wire.clone()).unwrap();
+        assert_eq!(
+            error.to_string(),
+            "Pull request operation merge failed: conflicts"
+        );
+        assert_eq!(serde_json::to_value(&error).unwrap(), wire);
+        assert!(
+            decode::<PullRequestOperationError>(json!({
+                "_tag": "PullRequestOperationError", "operation": "merge", "detail": "d",
+                "reason": "gone",
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unavailable_error_messages_fall_back_without_a_known_host() {
+        let message = |reason, provider: Option<&str>| {
+            PullRequestUnavailableError::Unavailable {
+                reason,
+                provider: provider.map(|p| SourceControlProviderKind::new(p).unwrap()),
+                cause: None,
+            }
+            .to_string()
+        };
+        assert_eq!(
+            message(PullRequestUnavailableReason::CliMissing, None),
+            "The tool this host is read through is not installed or set up."
+        );
+        assert_eq!(
+            message(
+                PullRequestUnavailableReason::CliUnauthenticated,
+                Some("gitlab")
+            ),
+            "This host has no working credentials."
+        );
+        assert!(
+            message(
+                PullRequestUnavailableReason::CliUnauthenticated,
+                Some("github")
+            )
+            .starts_with("GitHub has no working credential")
+        );
+    }
+
+    #[test]
+    fn author_filter_matches_js_regex_semantics() {
+        // U+FEFF is JS whitespace, so `trim()` strips it before the /^@?me$/i test.
+        assert_eq!(
+            resolve_pull_request_author_filter("\u{feff}me\u{feff}", Some("dev")),
+            "dev"
+        );
+        assert_eq!(
+            resolve_pull_request_author_filter("me-too", Some("dev")),
+            "me-too"
+        );
+        assert_eq!(
+            resolve_pull_request_author_filter("@@me", Some("dev")),
+            "@@me"
+        );
+        // The viewer is returned as given (only its emptiness is judged after trimming).
+        assert_eq!(
+            resolve_pull_request_author_filter("me", Some(" dev ")),
+            " dev "
+        );
+        // U+0085 is not JS whitespace, so a viewer of just that is not "empty".
+        assert_eq!(
+            resolve_pull_request_author_filter("me", Some("\u{85}")),
+            "\u{85}"
+        );
     }
 }

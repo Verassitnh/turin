@@ -10,16 +10,13 @@
 //! are wire-identical to the runtime schemas here (both spell timestamps as
 //! ISO strings once serde_json is the only codec), so they are type aliases.
 //!
-//! Fields typed by `providerRuntime.ts` (`toolSurface`/`toolIcon`/
-//! `toolSource`, `turnTokenUsage`, `contextUsage`) are dropped until that
-//! module lands; see the Deviations report for this task.
 
 use crate::base_schemas::{
     CheckpointId, CheckpointRef, CheckpointScopeId, CommandId, ContextHandoffId, ContextTransferId,
     EventId, IsoDateTime, MessageId, NodeId, NonNegativeInt, PlanId, PositiveInt, ProjectId,
     ProviderSessionId, ProviderThreadId, ProviderTurnId, RawEventId, RunAttemptId, RunId,
     RuntimeRequestId, ScheduledTaskId, TaggedUnion, ThreadId, TrimmedNonEmptyString, TurnItemId,
-    UtcDateTime, unknown_union_tag,
+    UtcDateTime, js_len,
 };
 use crate::chat_attachment::ChatAttachment;
 use crate::composer_context::OrchestrationMessageContext;
@@ -28,6 +25,10 @@ use crate::provider_instance::{ProviderDriverKind, ProviderInstanceId};
 use crate::provider_policy::{
     ProviderApprovalDecision, ProviderApprovalOption, ProviderInteractionMode, ProviderRequestKind,
     ProviderUserInputAnswers, RuntimeMode, UserInputAttachmentAnswerPayload, UserInputAttachments,
+};
+use crate::provider_runtime::{
+    ThreadTokenUsageSnapshot, ToolActivityIcon, ToolActivitySource, ToolActivitySurface,
+    TurnTokenUsage,
 };
 use crate::thread_pull_request::{
     ThreadLinkedPullRequest, ThreadPullRequestLink, ThreadPullRequestLinkSource,
@@ -1320,10 +1321,13 @@ impl OrchestrationV2PendingBackgroundTask {
     }
 
     fn from_object(mut object: serde_json::Map<String, serde_json::Value>) -> Result<Self, String> {
-        let kind = object
-            .get("kind")
-            .and_then(|k| k.as_str())
-            .map(str::to_owned);
+        // Upstream's fallback arm takes `kind: optional(String)`: a kind that
+        // is present but not a string fails the whole union.
+        let kind = match object.get("kind") {
+            None => None,
+            Some(serde_json::Value::String(kind)) => Some(kind.clone()),
+            Some(_) => return Err("a pending background task `kind` must be a string".to_owned()),
+        };
         match kind.as_deref() {
             Some("subagent") => {
                 #[derive(Deserialize)]
@@ -1533,15 +1537,8 @@ pub enum OrchestrationV2ProviderThreadStatus {
     Error,
 }
 
-fn default_none<T>() -> Option<Option<T>> {
-    Some(None)
-}
-
 /// The app's record of a provider conversation, with its pending-work roster
 /// and the native metadata the provider reported for it.
-///
-/// NOTE (Turin deviation): the upstream `contextUsage` field is dropped
-/// until `providerRuntime` (ThreadTokenUsageSnapshot) is ported.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestrationV2ProviderThread {
@@ -1561,20 +1558,15 @@ pub struct OrchestrationV2ProviderThread {
     /// Optional Type so adapters can omit empty rosters; historical JSON decodes to [].
     #[serde(default)]
     pub pending_background_tasks: Vec<OrchestrationV2PendingBackgroundTask>,
-    /// Provider-reported native metadata; rows written before it decode to null.
-    #[serde(
-        default = "default_none",
-        skip_serializing_if = "Option::is_none",
-        with = "crate::base_schemas::double_option"
-    )]
-    pub native_metadata: Option<Option<OrchestrationV2ProviderThreadNativeMetadata>>,
+    /// `optional(NullOr(..)).pipe(withDecodingDefault(null))`: absent decodes to
+    /// null and the key is always encoded.
+    #[serde(default)]
+    pub context_usage: Option<ThreadTokenUsageSnapshot>,
+    #[serde(default)]
+    pub native_metadata: Option<OrchestrationV2ProviderThreadNativeMetadata>,
     /// Native goal on this provider thread; rows written before goals decode to null.
-    #[serde(
-        default = "default_none",
-        skip_serializing_if = "Option::is_none",
-        with = "crate::base_schemas::double_option"
-    )]
-    pub goal: Option<Option<OrchestrationV2ProviderGoal>>,
+    #[serde(default)]
+    pub goal: Option<OrchestrationV2ProviderGoal>,
     pub created_at: UtcDateTime,
     pub updated_at: UtcDateTime,
 }
@@ -1741,10 +1733,7 @@ pub enum OrchestrationV2ProviderTurnStatus {
 }
 
 /// A provider-native turn, mapped onto the app's node for one attempt.
-///
-/// NOTE (Turin deviation): the upstream `turnTokenUsage` field is dropped
-/// until `providerRuntime` (TurnTokenUsage) is ported.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestrationV2ProviderTurn {
     pub id: ProviderTurnId,
@@ -1758,6 +1747,8 @@ pub struct OrchestrationV2ProviderTurn {
     pub completed_at: Option<UtcDateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<OrchestrationV2ProviderTurnTokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_token_usage: Option<TurnTokenUsage>,
 }
 
 /// Read side of [`OrchestrationV2ProviderTurn`] that
@@ -1905,7 +1896,13 @@ pub enum OrchestrationV2NotificationSource {
 
 impl OrchestrationV2NotificationSource {
     fn from_object(object: &serde_json::Map<String, serde_json::Value>) -> Result<Self, String> {
-        let kind = object.get("kind").and_then(|k| k.as_str());
+        // Upstream's fallback arm takes `kind: optional(String)`: a kind that
+        // is present but not a string fails the whole union.
+        let kind = match object.get("kind") {
+            None => None,
+            Some(serde_json::Value::String(kind)) => Some(kind.as_str()),
+            Some(_) => return Err("a notification source `kind` must be a string".to_owned()),
+        };
         match kind {
             Some("delegated_task") => {
                 #[derive(Deserialize)]
@@ -1944,16 +1941,24 @@ impl OrchestrationV2NotificationSource {
                     #[serde(default)]
                     child_thread_id: Option<ThreadId>,
                 }
-                let raw: Raw = serde_json::from_value(serde_json::Value::Object(object.clone()))
-                    .map_err(|e| e.to_string())?;
-                Ok(Self::Subagent {
-                    child_thread_id: raw.child_thread_id,
-                })
+                // A broken `childThreadId` fails the `work: "subagent"` member
+                // only; the plain `background_task` member after it still
+                // matches, as in upstream's member-order decoding.
+                Ok(
+                    match serde_json::from_value::<Raw>(serde_json::Value::Object(object.clone())) {
+                        Ok(raw) => Self::Subagent {
+                            child_thread_id: raw.child_thread_id,
+                        },
+                        Err(_) => Self::BackgroundTask,
+                    },
+                )
             }
             Some("command") | Some("background_command") => Ok(Self::Command),
             Some("monitor") => Ok(Self::Monitor),
-            // Plain `background_task` (with any `work` but subagent), a kind
-            // from a newer server, or no kind at all: generic background work.
+            Some("system") => Ok(Self::System),
+            Some("background_task") => Ok(Self::BackgroundTask),
+            // A kind from a newer server, or no kind at all: generic
+            // background work.
             _ => Ok(Self::BackgroundTask),
         }
     }
@@ -2292,7 +2297,8 @@ pub struct OrchestrationV2ProviderFailureMessage(TrimmedNonEmptyString);
 impl OrchestrationV2ProviderFailureMessage {
     pub fn new(value: impl AsRef<str>) -> Result<Self, crate::base_schemas::ContractError> {
         let value = TrimmedNonEmptyString::new(value)?;
-        if value.as_str().len() > 4_096 {
+        // `Schema.isMaxLength` counts UTF-16 code units, like JS `length`.
+        if js_len(value.as_str()) > 4_096 {
             return Err(crate::base_schemas::ContractError {
                 expected: "a failure message of at most 4,096 chars",
                 got: value.as_str().to_owned(),
@@ -2319,7 +2325,7 @@ impl Serialize for OrchestrationV2ProviderFailureMessage {
 
 impl<'de> Deserialize<'de> for OrchestrationV2ProviderFailureMessage {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Self::new(<std::borrow::Cow<'de, str>>::deserialize(d)?).map_err(serde::de::Error::custom)
+        Self::new(String::deserialize(d)?).map_err(serde::de::Error::custom)
     }
 }
 
@@ -2331,7 +2337,8 @@ pub struct OrchestrationV2ProviderFailureCode(TrimmedNonEmptyString);
 impl OrchestrationV2ProviderFailureCode {
     pub fn new(value: impl AsRef<str>) -> Result<Self, crate::base_schemas::ContractError> {
         let value = TrimmedNonEmptyString::new(value)?;
-        if value.as_str().len() > 128 {
+        // `Schema.isMaxLength` counts UTF-16 code units, like JS `length`.
+        if js_len(value.as_str()) > 128 {
             return Err(crate::base_schemas::ContractError {
                 expected: "a failure code of at most 128 chars",
                 got: value.as_str().to_owned(),
@@ -2358,7 +2365,7 @@ impl Serialize for OrchestrationV2ProviderFailureCode {
 
 impl<'de> Deserialize<'de> for OrchestrationV2ProviderFailureCode {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Self::new(<std::borrow::Cow<'de, str>>::deserialize(d)?).map_err(serde::de::Error::custom)
+        Self::new(String::deserialize(d)?).map_err(serde::de::Error::custom)
     }
 }
 
@@ -2454,11 +2461,6 @@ pub enum OrchestrationV2HandoffStrategy {
 /// The unit of a turn's timeline. One item per thing the agent did or that
 /// happened, tagged by `type`.
 ///
-/// Turin deviation: the upstream base fields `toolSurface`, `toolIcon`, and
-/// `toolSource` (typed by `providerRuntime.ts`) are dropped until that module
-/// is ported; they were `Schema.optional`, so payloads carrying them still
-/// decode.
-///
 /// Member order matches upstream's union (order matters for the
 /// forward-compatible array codec's documentation, not for dispatch — serde
 /// picks by `type`).
@@ -2472,6 +2474,12 @@ pub enum OrchestrationV2TurnItem {
     Notification {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2495,6 +2503,12 @@ pub enum OrchestrationV2TurnItem {
     UserMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2525,6 +2539,12 @@ pub enum OrchestrationV2TurnItem {
     AssistantMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2548,6 +2568,12 @@ pub enum OrchestrationV2TurnItem {
     Reasoning {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2568,6 +2594,12 @@ pub enum OrchestrationV2TurnItem {
     ProposedPlan {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2589,6 +2621,12 @@ pub enum OrchestrationV2TurnItem {
     TodoList {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2611,6 +2649,12 @@ pub enum OrchestrationV2TurnItem {
     UserInputRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2635,6 +2679,12 @@ pub enum OrchestrationV2TurnItem {
     FileChange {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2666,6 +2716,12 @@ pub enum OrchestrationV2TurnItem {
     CommandExecution {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2694,6 +2750,12 @@ pub enum OrchestrationV2TurnItem {
     FileSearch {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2716,6 +2778,12 @@ pub enum OrchestrationV2TurnItem {
     WebSearch {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2738,6 +2806,12 @@ pub enum OrchestrationV2TurnItem {
     ApprovalRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2766,6 +2840,12 @@ pub enum OrchestrationV2TurnItem {
     Checkpoint {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2787,6 +2867,12 @@ pub enum OrchestrationV2TurnItem {
     RunInterruptRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2806,6 +2892,12 @@ pub enum OrchestrationV2TurnItem {
     RunInterruptResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2825,6 +2917,12 @@ pub enum OrchestrationV2TurnItem {
     SystemNotice {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2844,6 +2942,12 @@ pub enum OrchestrationV2TurnItem {
     Error {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2865,6 +2969,12 @@ pub enum OrchestrationV2TurnItem {
     Compaction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2890,6 +3000,12 @@ pub enum OrchestrationV2TurnItem {
     Handoff {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2923,6 +3039,12 @@ pub enum OrchestrationV2TurnItem {
     Fork {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2946,6 +3068,12 @@ pub enum OrchestrationV2TurnItem {
     ThreadCreated {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2971,6 +3099,12 @@ pub enum OrchestrationV2TurnItem {
     SecretRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -2994,6 +3128,12 @@ pub enum OrchestrationV2TurnItem {
     Subagent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -3021,6 +3161,12 @@ pub enum OrchestrationV2TurnItem {
     DynamicTool {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_non_execution_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_surface: Option<ToolActivitySurface>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_icon: Option<ToolActivityIcon>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_source: Option<ToolActivitySource>,
         id: TurnItemId,
         thread_id: ThreadId,
         run_id: Option<RunId>,
@@ -3038,6 +3184,9 @@ pub enum OrchestrationV2TurnItem {
         tool_name: Option<TrimmedNonEmptyString>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         viewed_image_path: Option<TrimmedNonEmptyString>,
+        /// `Schema.Unknown`: a JSON-stringified `undefined` drops the key, so
+        /// an absent `input` decodes (to null).
+        #[serde(default)]
         input: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<serde_json::Value>,
@@ -3082,12 +3231,11 @@ impl TaggedUnion for OrchestrationV2TurnItem {
 /// `hasUnknownUnionTag(TurnItem.members, "type")`: whether a raw turn item
 /// payload carries a `type` this build does not know.
 pub fn is_unknown_turn_item(payload: &serde_json::Value) -> bool {
-    unknown_union_tag(
+    crate::base_schemas::has_unknown_union_tag(
         payload,
         OrchestrationV2TurnItem::TAG,
         OrchestrationV2TurnItem::known_tags(),
     )
-    .is_some()
 }
 
 /// A timeline row: a turn item at a position, from this thread or inherited
@@ -3130,10 +3278,10 @@ pub mod projected_turn_item_array {
         let raw = Vec::<serde_json::Value>::deserialize(d)?;
         let mut rows = Vec::with_capacity(raw.len());
         for value in raw {
-            if let Some(item) = value.get("item") {
-                if is_unknown_turn_item(item) {
-                    continue;
-                }
+            if let Some(item) = value.get("item")
+                && is_unknown_turn_item(item)
+            {
+                continue;
             }
             rows.push(serde_json::from_value(value).map_err(serde::de::Error::custom)?);
         }
@@ -3158,6 +3306,11 @@ pub struct OrchestrationV2RawProviderEvent {
     pub message_kind: OrchestrationV2RawProviderEventMessageKind,
     pub method: Option<TrimmedNonEmptyString>,
     pub json_rpc_id: Option<OrchestrationV2JsonRpcId>,
+    /// `Schema.Unknown`. Upstream requires the key (an absent key fails with
+    /// "Missing key"); Turin defaults an absent key to `null` so rows persisted
+    /// without `payload` still load (DB safety, see PORTING.md Deviations).
+    /// Re-encode writes `"payload": null` in that case.
+    #[serde(default)]
     pub payload: serde_json::Value,
     pub observed_at: UtcDateTime,
 }
@@ -3184,7 +3337,9 @@ pub enum OrchestrationV2RawProviderEventMessageKind {
 #[serde(untagged)]
 pub enum OrchestrationV2JsonRpcId {
     Str(String),
-    Number(f64),
+    /// `serde_json::Number`, not `f64`: an integer id must re-encode as `5`,
+    /// not `5.0` (see PORTING.md Deviations).
+    Number(serde_json::Number),
 }
 
 /// One committed event of the orchestrator's event log, tagged by `type`.
@@ -4304,6 +4459,7 @@ pub enum OrchestrationV2ShellLocation {
 /// One shell subscription frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
+#[allow(clippy::large_enum_variant)] // wire enum mirrors upstream; boxing would leak into every consumer
 pub enum OrchestrationV2ShellStreamItem {
     #[serde(rename = "synchronized")]
     Synchronized,
@@ -5008,6 +5164,7 @@ pub enum OrchestrationV2Command {
 /// send them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all_fields = "camelCase")]
+#[allow(clippy::large_enum_variant)] // wire enum mirrors upstream; boxing would leak into every consumer
 pub enum OrchestrationV2InternalCommand {
     /// Records what a pull request watch saw, and wakes the agent in the same
     /// transaction when `wake` is set. Rejected once the watch started at
@@ -5102,6 +5259,7 @@ pub struct OrchestrationV2ArchivedShellSnapshot {
 /// One archived-shell subscription frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
+#[allow(clippy::large_enum_variant)] // wire enum mirrors upstream; boxing would leak into every consumer
 pub enum OrchestrationV2ArchivedShellStreamItem {
     #[serde(rename = "snapshot")]
     Snapshot {
@@ -5124,11 +5282,11 @@ pub enum OrchestrationV2ArchivedShellStreamItem {
 #[serde(rename_all = "camelCase")]
 pub struct OrchestrationV2ThreadLaunchInitialMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    message_id: Option<MessageId>,
-    text: String,
+    pub message_id: Option<MessageId>,
+    pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    context: Option<OrchestrationMessageContext>,
-    attachments: Vec<ChatAttachment>,
+    pub context: Option<OrchestrationMessageContext>,
+    pub attachments: Vec<ChatAttachment>,
 }
 
 /// Input of a thread launch.
@@ -5137,21 +5295,21 @@ pub struct OrchestrationV2ThreadLaunchInitialMessage {
 pub struct OrchestrationV2ThreadLaunchInput {
     pub command_id: CommandId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    creation_source: Option<OrchestrationV2CreationSource>,
+    pub creation_source: Option<OrchestrationV2CreationSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    thread_id: Option<ThreadId>,
+    pub thread_id: Option<ThreadId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    reuse_existing_thread: Option<bool>,
+    pub reuse_existing_thread: Option<bool>,
     pub project_id: ProjectId,
     pub title: TrimmedNonEmptyString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    generate_title: Option<bool>,
+    pub generate_title: Option<bool>,
     pub model_selection: ModelSelection,
     pub runtime_mode: RuntimeMode,
     pub interaction_mode: ProviderInteractionMode,
     pub workspace_strategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    initial_message: Option<OrchestrationV2ThreadLaunchInitialMessage>,
+    pub initial_message: Option<OrchestrationV2ThreadLaunchInitialMessage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5290,6 +5448,7 @@ pub struct OrchestrationV2ThreadHistoryPage {
 /// subscription. A known type whose payload does not decode still fails.
 /// Decode-only: servers never send it (serializing it is an error).
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // wire enum mirrors upstream; boxing would leak into every consumer
 pub enum OrchestrationV2ThreadStreamItem {
     /// `kind: "synchronized"`.
     Synchronized,
@@ -5321,6 +5480,7 @@ pub enum OrchestrationV2ThreadStreamItem {
 /// Derived codec for the three encodable arms of the thread stream.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
+#[allow(clippy::large_enum_variant)] // wire enum mirrors upstream; boxing would leak into every consumer
 enum ThreadStreamItemWire {
     #[serde(rename = "synchronized")]
     Synchronized,
@@ -5374,7 +5534,7 @@ impl Serialize for OrchestrationV2ThreadStreamItem {
                 projection: projection.clone(),
                 history_cursor: history_cursor.clone(),
                 has_more_history: *has_more_history,
-                latest_local_turn_ordinal: latest_local_turn_ordinal.clone(),
+                latest_local_turn_ordinal: *latest_local_turn_ordinal,
                 payload_budget_exceeded: *payload_budget_exceeded,
                 turn_items_omit_local_visible: *turn_items_omit_local_visible,
             }
@@ -5613,12 +5773,6 @@ pub enum OrchestrationV2RpcError {
     ThreadLaunch(OrchestrationV2ThreadLaunchError),
     #[error(transparent)]
     StopWorkflow(OrchestrationV2StopWorkflowError),
-    #[error(transparent)]
-    SearchThread(OrchestrationV2SearchThreadError),
-    #[error(transparent)]
-    WorkflowFile(OrchestrationWorkflowFileError),
-    #[error(transparent)]
-    GetWorkflowScript(OrchestrationGetWorkflowScriptError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5833,7 +5987,8 @@ pub struct OrchestrationV2SearchQuery(TrimmedNonEmptyString);
 impl OrchestrationV2SearchQuery {
     pub fn new(value: impl AsRef<str>) -> Result<Self, crate::base_schemas::ContractError> {
         let value = TrimmedNonEmptyString::new(value)?;
-        if value.as_str().len() > 200 {
+        // `Schema.isMaxLength` counts UTF-16 code units (JS string length).
+        if js_len(value.as_str()) > 200 {
             return Err(crate::base_schemas::ContractError {
                 expected: "a search query of at most 200 chars",
                 got: value.as_str().to_owned(),
@@ -5864,15 +6019,61 @@ impl<'de> Deserialize<'de> for OrchestrationV2SearchQuery {
     }
 }
 
+/// Fails unless `count` (a UTF-16 length, like JS `.length`) is within `max`.
+fn check_max_length<E: serde::de::Error>(what: &str, count: usize, max: usize) -> Result<(), E> {
+    if count > max {
+        return Err(E::custom(format!(
+            "{what} must have at most {max} elements/characters, got {count}"
+        )));
+    }
+    Ok(())
+}
+
+/// `Schema.String.check(Schema.isMaxLength(200))`.
+fn deserialize_string_max_200<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let value = String::deserialize(d)?;
+    check_max_length("a string", js_len(&value), 200)?;
+    Ok(value)
+}
+
+/// `Schema.optional(Schema.String.check(Schema.isMaxLength(200)))`.
+fn deserialize_optional_string_max_200<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<String>, D::Error> {
+    deserialize_string_max_200(d).map(Some)
+}
+
+/// `Schema.optionalKey(Schema.Array(skill).check(Schema.isMaxLength(1_000)))`.
+fn deserialize_skills_max_1000<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Vec<OrchestrationV2SearchThreadSkill>>, D::Error> {
+    let skills = Vec::<OrchestrationV2SearchThreadSkill>::deserialize(d)?;
+    check_max_length("skills", skills.len(), 1_000)?;
+    Ok(Some(skills))
+}
+
+/// `Schema.optionalKey(Schema.Array(navigation).check(Schema.isMaxLength(17)))`.
+fn deserialize_navigation_max_17<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Vec<OrchestrationV2ThreadFindNavigation>>, D::Error> {
+    let navigation = Vec::<OrchestrationV2ThreadFindNavigation>::deserialize(d)?;
+    check_max_length("navigation", navigation.len(), 17)?;
+    Ok(Some(navigation))
+}
+
 /// One skill a search is narrowed to, by the label this client displays
-/// (including custom display names). Upstream bounds `name` and
-/// `displayName` at 200 chars; those plain-String bounds are not enforced
-/// here (see the task Deviations report).
+/// (including custom display names). `name` and `displayName` are at most 200
+/// UTF-16 code units, checked on decode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestrationV2SearchThreadSkill {
+    #[serde(deserialize_with = "deserialize_string_max_200")]
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_string_max_200"
+    )]
     pub display_name: Option<String>,
 }
 
@@ -5889,7 +6090,11 @@ pub struct OrchestrationV2SearchThreadStart {
 pub struct OrchestrationV2SearchThreadInput {
     pub thread_id: ThreadId,
     /// Match the skill labels displayed by this client, including custom display names.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_skills_max_1000"
+    )]
     pub skills: Option<Vec<OrchestrationV2SearchThreadSkill>>,
     pub query: OrchestrationV2SearchQuery,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5910,8 +6115,7 @@ pub struct OrchestrationV2ThreadFindMatch {
 }
 
 /// Counts and identities around the selection, so clients can step without
-/// another round trip (upstream inline struct; the array's max-17 bound is
-/// not enforced here — see the task Deviations report).
+/// another round trip (upstream inline struct; the array is capped at 17).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestrationV2ThreadFindNavigation {
@@ -5931,7 +6135,11 @@ pub struct OrchestrationV2SearchThreadResult {
     pub total_matches: NonNegativeInt,
     pub active_index: NonNegativeInt,
     pub r#match: Option<OrchestrationV2ThreadFindMatch>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_navigation_max_17"
+    )]
     pub navigation: Option<Vec<OrchestrationV2ThreadFindNavigation>>,
 }
 
@@ -5959,6 +6167,14 @@ impl std::error::Error for OrchestrationV2SearchThreadError {}
 // Provider replay transcripts
 // ---------------------------------------------------------------------------
 
+/// `Schema.optional(Schema.Unknown)`: absent is `None`, but an explicit `null`
+/// is a value (`Some(Null)`), not absence.
+fn deserialize_optional_unknown<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(d).map(Some)
+}
+
 /// One recorded provider-protocol frame expectation or emission.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -5981,7 +6197,11 @@ pub enum ProviderReplayEntry {
     },
     RuntimeExit {
         status: ProviderReplayRuntimeExitStatus,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_optional_unknown"
+        )]
         error: Option<serde_json::Value>,
     },
 }
@@ -6270,11 +6490,7 @@ mod tests {
         let OrchestrationV2ThreadStreamItem::Snapshot { projection, .. } = &items[0] else {
             panic!("expected a snapshot");
         };
-        let ids: Vec<&str> = projection
-            .turn_items
-            .iter()
-            .map(|item| item_id(item))
-            .collect();
+        let ids: Vec<&str> = projection.turn_items.iter().map(item_id).collect();
         assert_eq!(ids, vec!["item-known"]);
         let visible_ids: Vec<&str> = projection
             .visible_turn_items
@@ -7518,8 +7734,8 @@ mod tests {
         }))
         .unwrap();
         assert!(provider_thread.pending_background_tasks.is_empty());
-        assert_eq!(provider_thread.native_metadata, Some(None));
-        assert_eq!(provider_thread.goal, Some(None));
+        assert_eq!(provider_thread.native_metadata, None);
+        assert_eq!(provider_thread.goal, None);
         // (Upstream also asserts contextUsage is null here; that field is
         // dropped until providerRuntime lands — see the module note.)
 
@@ -7542,8 +7758,8 @@ mod tests {
         }))
         .unwrap();
         assert!(runtime_thread.pending_background_tasks.is_empty());
-        assert_eq!(runtime_thread.native_metadata, Some(None));
-        assert_eq!(runtime_thread.goal, Some(None));
+        assert_eq!(runtime_thread.native_metadata, None);
+        assert_eq!(runtime_thread.goal, None);
     }
 
     #[test]

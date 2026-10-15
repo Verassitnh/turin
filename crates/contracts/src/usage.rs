@@ -6,7 +6,7 @@
 //! `(day, hourStart?, provider, model, sourcePath?)` buckets.
 
 use crate::base_schemas::{
-    ContractError, NonNegativeInt, TrimmedNonEmptyString, forward_compatible_array,
+    ContractError, NonNegativeInt, TrimmedNonEmptyString, forward_compatible_array, js_trim,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
@@ -46,7 +46,7 @@ pub struct UsageDay(String);
 
 impl UsageDay {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
-        let trimmed = value.as_ref().trim();
+        let trimmed = js_trim(value.as_ref());
         let bytes = trimmed.as_bytes();
         let valid = trimmed.len() == 10
             && bytes[..4].iter().all(|b| b.is_ascii_digit())
@@ -137,9 +137,13 @@ pub struct UsageTokenTotals {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageCategoryCost {
+    #[serde(with = "crate::base_schemas::js_number")]
     pub input: f64,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub cache_read: f64,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub cache_write: f64,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub output: f64,
 }
 
@@ -162,10 +166,12 @@ pub struct UsageBucket {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<TrimmedNonEmptyString>,
     pub totals: UsageTokenTotals,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub cost_usd: f64,
     /// What the cached input would have cost at full input rates minus what
     /// it actually cost. Requires the rate table, so it is computed alongside
     /// cost rather than derived on the client.
+    #[serde(with = "crate::base_schemas::js_number")]
     pub cache_savings_usd: f64,
     /// `costUsd` by token category. Cost with no known rates stays out of it,
     /// and it is absent when nothing could be split or the server predates it.
@@ -173,11 +179,14 @@ pub struct UsageBucket {
     pub category_cost_usd: Option<UsageCategoryCost>,
     /// Cost of fast and ultrafast requests. Absent when zero; the rest is standard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub fast_cost_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub ultrafast_cost_usd: Option<f64>,
     /// What fast and ultrafast requests cost above the standard rate. Absent when zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub speed_premium_usd: Option<f64>,
     pub cost_source: UsageCostSource,
     /// Distinct assistant responses, after de-duplication.
@@ -322,6 +331,7 @@ pub struct UsageSummaryInput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSummary {
+    #[serde(with = "crate::base_schemas::js_number")]
     pub contract_version: f64,
     pub read_at: String,
     pub time_zone: TrimmedNonEmptyString,
@@ -368,5 +378,107 @@ impl fmt::Display for UsageReadErrorReason {
             Self::ScanFailed => "scanFailed",
             Self::InvalidWindow => "invalidWindow",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn bucket() -> serde_json::Value {
+        json!({
+            "day": "2026-08-20",
+            "provider": "claude",
+            "model": "claude-opus",
+            "totals": {
+                "uncachedInputTokens": 1, "cachedInputTokens": 2, "cacheCreationTokens": 3,
+                "outputTokens": 4, "reasoningTokens": 1,
+            },
+            "costUsd": 0.25,
+            "cacheSavingsUsd": 0.5,
+            "categoryCostUsd": { "input": 0.1, "cacheRead": 0.05, "cacheWrite": 0.05, "output": 0.05 },
+            "costSource": "modelPriced",
+            "records": 5,
+            "unpricedRecords": 0,
+            "sessions": 1,
+        })
+    }
+
+    fn source() -> serde_json::Value {
+        json!({
+            "fingerprint": { "hostId": "h", "provider": "codex", "resolvedHomePath": "/h", "volumeId": "" },
+            "status": "ok",
+            "scannedFiles": 1, "skippedFiles": 0, "malformedRecords": 0, "distinctSessions": 1,
+            "message": null,
+        })
+    }
+
+    #[test]
+    fn bucket_round_trips_with_fractional_cost_and_omitted_optionals() {
+        let decoded: UsageBucket = serde_json::from_value(bucket()).unwrap();
+        assert_eq!(decoded.cost_usd, 0.25);
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), bucket());
+    }
+
+    #[test]
+    fn day_pattern_and_trimming() {
+        assert_eq!(
+            UsageDay::new(" 2026-08-20 ").unwrap().as_str(),
+            "2026-08-20"
+        );
+        assert!(UsageDay::new("2026-8-20").is_err());
+        assert!(UsageDay::new("2026-08-20x").is_err());
+        assert!(UsageDay::new("２０２６-08-20").is_err());
+    }
+
+    #[test]
+    fn summary_drops_undecodable_buckets_and_sources() {
+        let summary: UsageSummary = serde_json::from_value(json!({
+            "contractVersion": 6,
+            "readAt": "2026-08-22T00:00:00.000Z",
+            "timeZone": "UTC",
+            "sinceDay": "2026-08-01",
+            "untilDay": "2026-08-22",
+            "buckets": [bucket(), { "day": "bad" }],
+            "sources": [source(), 7],
+            "pricing": { "status": "fresh", "source": "litellm", "fetchedAt": null, "knownModels": 3 },
+            "scanDurationMs": 12,
+        }))
+        .unwrap();
+        assert_eq!(summary.buckets.len(), 1);
+        assert_eq!(summary.sources.len(), 1);
+        assert_eq!(summary.contract_version, 6.0);
+    }
+
+    #[test]
+    fn source_refreshing_is_only_ever_true() {
+        let mut refreshing = source();
+        refreshing["refreshing"] = json!(true);
+        refreshing["action"] = json!("enableCursorKeychain");
+        let decoded: UsageSource = serde_json::from_value(refreshing.clone()).unwrap();
+        assert_eq!(decoded.refreshing, Some(true));
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), refreshing);
+        let mut bad = source();
+        bad["refreshing"] = json!(false);
+        assert!(serde_json::from_value::<UsageSource>(bad).is_err());
+        // `message` is a required nullable key and must encode `null`.
+        let plain: UsageSource = serde_json::from_value(source()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap()["message"],
+            json!(null)
+        );
+    }
+
+    #[test]
+    fn read_error_message() {
+        let error: UsageReadError = serde_json::from_value(json!({
+            "_tag": "UsageReadError", "reason": "invalidWindow", "detail": "since after until",
+        }))
+        .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "Usage read failed (invalidWindow): since after until"
+        );
     }
 }

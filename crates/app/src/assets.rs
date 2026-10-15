@@ -48,8 +48,17 @@ icon_assets!(
 
 /// The composer's send arrow (ComposerPrimaryActions.tsx).
 pub const SEND_ARROW: &str = "brand/send-arrow.svg";
+/// Lucide `chevron-down` at `stroke-width` 2.25 (ComposerControl.tsx); the
+/// stock `IconName::ChevronDown` is stroke 2.
+pub const CHEVRON_DOWN: &str = "brand/chevron-down.svg";
 
-const BRAND: &[(&str, &[u8])] = &[(SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg"))];
+const BRAND: &[(&str, &[u8])] = &[
+    (SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg")),
+    (
+        CHEVRON_DOWN,
+        include_bytes!("../assets/brand/chevron-down.svg"),
+    ),
+];
 
 pub struct AppAssets;
 

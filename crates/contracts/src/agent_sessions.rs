@@ -22,9 +22,13 @@ pub struct AgentSessionImportSource {
     pub provider_session_id: TrimmedNonEmptyString,
     pub file_path: TrimmedNonEmptyString,
     pub size: NonNegativeInt,
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub mtime_ms: Option<f64>,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub device: f64,
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub inode: Option<f64>,
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub birthtime_ms: Option<f64>,
 }
 
@@ -152,5 +156,97 @@ impl std::fmt::Display for AgentSessionScanOperation {
             Self::ReadSettings => "read-settings",
             Self::ReadProjects => "read-projects",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn candidate() -> serde_json::Value {
+        json!({
+            "path": "/projects/repo",
+            "title": "repo",
+            "sources": ["codex"],
+            "threadCount": 3,
+            "lastActiveAt": "2026-08-20T12:00:00.000Z",
+            "alreadyImported": false,
+        })
+    }
+
+    #[test]
+    fn decodes_candidates_from_servers_that_predate_the_git_scan() {
+        let result: AgentSessionScanResult = serde_json::from_value(json!({
+            "candidates": [candidate()],
+            "scannedAt": "2026-08-22T12:00:00.000Z",
+        }))
+        .unwrap();
+        // Absent git: distinct from `null` (not a repository).
+        assert_eq!(result.candidates[0].git, None);
+        let encoded = serde_json::to_value(&result).unwrap();
+        assert!(encoded["candidates"][0].get("git").is_none());
+    }
+
+    #[test]
+    fn preserves_reported_git_identity_and_null() {
+        let git =
+            json!({ "remoteKey": "github.com/pingdotgg/t3code", "repository": "pingdotgg/t3code" });
+        let mut with_git = candidate();
+        with_git["git"] = git.clone();
+        let mut null_git = candidate();
+        null_git["git"] = json!(null);
+        let result: AgentSessionScanResult = serde_json::from_value(json!({
+            "candidates": [with_git, null_git],
+            "scannedAt": "2026-08-22T12:00:00.000Z",
+        }))
+        .unwrap();
+        let reported = result.candidates[0].git.clone().unwrap().unwrap();
+        assert_eq!(reported.repository.as_deref(), Some("pingdotgg/t3code"));
+        assert_eq!(result.candidates[1].git, Some(None));
+        let encoded = serde_json::to_value(&result).unwrap();
+        assert_eq!(encoded["candidates"][0]["git"], git);
+        assert_eq!(encoded["candidates"][1]["git"], json!(null));
+    }
+
+    #[test]
+    fn import_source_keeps_nullable_numbers_required() {
+        let source = json!({
+            "provider": "claudeAgent",
+            "providerInstanceId": "claudeAgent",
+            "providerSessionId": "s1",
+            "filePath": "/tmp/a.jsonl",
+            "size": 10,
+            "mtimeMs": 1.5,
+            "device": 7,
+            "inode": null,
+            "birthtimeMs": null,
+        });
+        let decoded: AgentSessionImportSource = serde_json::from_value(source.clone()).unwrap();
+        assert_eq!(decoded.mtime_ms, Some(1.5));
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), source);
+    }
+
+    #[test]
+    fn error_messages() {
+        let error = AgentSessionImportProjectChangedError::Changed {
+            project_id: ProjectId::new("p1").unwrap(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Project 'p1' changed directories. Scan for projects again before importing history."
+        );
+        let error = AgentSessionScanError::ScanError {
+            operation: AgentSessionScanOperation::ReadProjects,
+            cause: json!("boom"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Failed to scan agent sessions during read-projects."
+        );
+        assert_eq!(
+            serde_json::to_value(&error).unwrap()["_tag"],
+            json!("AgentSessionScanError")
+        );
     }
 }

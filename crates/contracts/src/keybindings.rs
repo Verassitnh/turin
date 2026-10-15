@@ -1,6 +1,6 @@
 //! Port of upstream/packages/contracts/src/keybindings.ts
 
-use crate::base_schemas::{ContractError, TrimmedString};
+use crate::base_schemas::{ContractError, TrimmedString, js_len, js_trim};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
@@ -192,7 +192,8 @@ pub struct KeybindingCommand(String);
 
 impl KeybindingCommand {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
-        let value = value.as_ref().trim();
+        // Literals and the template pattern match the raw string: no trimming.
+        let value = value.as_ref();
         let valid = STATIC_KEYBINDING_COMMANDS.contains(&value) || is_script_run_command(value);
         if !valid {
             return Err(ContractError {
@@ -244,8 +245,8 @@ pub struct KeybindingValue(TrimmedString);
 
 impl KeybindingValue {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
-        let trimmed = value.as_ref().trim();
-        if trimmed.is_empty() || trimmed.len() > MAX_KEYBINDING_VALUE_LENGTH {
+        let trimmed = js_trim(value.as_ref());
+        if trimmed.is_empty() || js_len(trimmed) > MAX_KEYBINDING_VALUE_LENGTH {
             return Err(ContractError {
                 expected: "a keybinding value of 1..=64 chars",
                 got: value.as_ref().to_owned(),
@@ -282,8 +283,8 @@ pub struct KeybindingWhen(TrimmedString);
 
 impl KeybindingWhen {
     pub fn new(value: impl AsRef<str>) -> Result<Self, ContractError> {
-        let trimmed = value.as_ref().trim();
-        if trimmed.is_empty() || trimmed.len() > MAX_KEYBINDING_WHEN_LENGTH {
+        let trimmed = js_trim(value.as_ref());
+        if trimmed.is_empty() || js_len(trimmed) > MAX_KEYBINDING_WHEN_LENGTH {
             return Err(ContractError {
                 expected: "a when expression of 1..=256 chars",
                 got: value.as_ref().to_owned(),
@@ -364,11 +365,21 @@ pub struct PreviewForwardedShortcut {
     pub shortcut: KeybindingShortcut,
 }
 
+fn non_empty_name<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let name = String::deserialize(d)?;
+    if name.is_empty() {
+        Err(serde::de::Error::custom("expected a non-empty string"))
+    } else {
+        Ok(name)
+    }
+}
+
 /// AST of a `when` expression (recursive union on `type`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum KeybindingWhenNode {
     Identifier {
+        #[serde(deserialize_with = "non_empty_name")]
         name: String,
     },
     Not {
@@ -528,5 +539,152 @@ mod tests {
         .unwrap();
         assert_eq!(holder.rules.len(), 1);
         assert_eq!(holder.rules[0].command.as_str(), "terminal.toggle");
+    }
+
+    use serde_json::{Value, json};
+
+    fn shortcut() -> Value {
+        json!({ "key": "p", "metaKey": false, "ctrlKey": false, "shiftKey": false, "altKey": false, "modKey": true })
+    }
+
+    fn resolved(value: Value) -> Vec<ResolvedKeybindingRule> {
+        #[derive(Deserialize)]
+        struct Holder(#[serde(with = "resolved_keybindings_config")] Vec<ResolvedKeybindingRule>);
+        serde_json::from_value::<Holder>(value).unwrap().0
+    }
+
+    #[test]
+    fn every_static_command_decodes_and_is_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for command in STATIC_KEYBINDING_COMMANDS {
+            assert!(seen.insert(*command), "duplicate {command}");
+            let rule: KeybindingRule =
+                serde_json::from_value(json!({ "key": "mod+x", "command": command })).unwrap();
+            assert_eq!(
+                serde_json::to_value(&rule).unwrap()["command"],
+                json!(command)
+            );
+        }
+        assert_eq!(STATIC_KEYBINDING_COMMANDS.len(), 82);
+        assert!(
+            THREAD_JUMP_KEYBINDING_COMMANDS
+                .iter()
+                .all(|c| STATIC_KEYBINDING_COMMANDS.contains(c))
+        );
+        assert!(
+            MODEL_PICKER_JUMP_KEYBINDING_COMMANDS
+                .iter()
+                .all(|c| STATIC_KEYBINDING_COMMANDS.contains(c))
+        );
+    }
+
+    #[test]
+    fn commands_are_matched_verbatim_and_script_ids_are_bounded() {
+        assert!(KeybindingCommand::new(" terminal.toggle ").is_err());
+        assert!(KeybindingCommand::new("script.Test.run").is_err());
+        assert!(KeybindingCommand::new("script..run").is_err());
+        assert!(KeybindingCommand::new("script.-a.run").is_err());
+        assert!(KeybindingCommand::new("script.setup.run").is_ok());
+        assert!(KeybindingCommand::new(format!("script.{}.run", "a".repeat(24))).is_ok());
+        assert!(KeybindingCommand::new(format!("script.{}.run", "a".repeat(25))).is_err());
+    }
+
+    #[test]
+    fn rule_values_are_trimmed_and_when_is_optional() {
+        let rule: KeybindingRule = serde_json::from_value(json!({
+            "key": "  mod+shift+s ", "command": "thread.settle", "when": " !terminalFocus ",
+        }))
+        .unwrap();
+        assert_eq!(rule.key.as_str(), "mod+shift+s");
+        assert_eq!(rule.when.as_ref().unwrap().as_str(), "!terminalFocus");
+        assert!(
+            serde_json::from_value::<KeybindingRule>(
+                json!({ "key": "k", "command": "thread.settle", "when": "   " })
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<KeybindingRule>(
+                json!({ "key": "k", "command": "thread.settle", "when": "w".repeat(257) })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn config_array_is_capped() {
+        #[derive(Deserialize)]
+        struct Holder(#[serde(with = "keybindings_config")] Vec<KeybindingRule>);
+        let rules = |n: usize| vec![json!({ "key": "k", "command": "terminal.toggle" }); n];
+        assert_eq!(
+            serde_json::from_value::<Holder>(json!(rules(3)))
+                .unwrap()
+                .0
+                .len(),
+            3
+        );
+        assert!(serde_json::from_value::<Holder>(json!(rules(256))).is_ok());
+        assert!(serde_json::from_value::<Holder>(json!(rules(257))).is_err());
+    }
+
+    #[test]
+    fn resolved_rules_parse_with_when_ast() {
+        let parsed = resolved(json!([{
+            "command": "terminal.split",
+            "shortcut": shortcut(),
+            "whenAst": {
+                "type": "and",
+                "left": { "type": "identifier", "name": "terminalOpen" },
+                "right": { "type": "not", "node": { "type": "identifier", "name": "terminalFocus" } },
+            },
+        }]));
+        assert_eq!(parsed.len(), 1);
+        assert!(matches!(
+            parsed[0].when_ast,
+            Some(KeybindingWhenNode::And { .. })
+        ));
+        assert!(
+            serde_json::from_value::<KeybindingWhenNode>(
+                json!({ "type": "identifier", "name": "" })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn resolved_config_drops_unknown_commands_when_nodes_and_garbage() {
+        let parsed = resolved(json!([
+            { "command": "terminal.toggle", "shortcut": shortcut() },
+            { "command": "someFuture.toggle", "shortcut": shortcut() },
+            { "command": "terminal.split", "shortcut": shortcut(), "whenAst": { "type": "xor", "left": 1, "right": 2 } },
+            "garbage",
+            null,
+            { "command": "filePicker.toggle", "shortcut": shortcut() },
+        ]));
+        let commands: Vec<&str> = parsed.iter().map(|rule| rule.command.as_str()).collect();
+        assert_eq!(commands, ["terminal.toggle", "filePicker.toggle"]);
+    }
+
+    #[test]
+    fn resolved_rules_encode_plain_and_ignore_unknown_fields() {
+        let input = json!([{ "command": "terminal.toggle", "shortcut": shortcut() }]);
+        let parsed = resolved(input.clone());
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), input);
+        let with_extra = resolved(
+            json!([{ "command": "terminal.toggle", "shortcut": shortcut(), "key": "mod+j" }]),
+        );
+        assert_eq!(serde_json::to_value(&with_extra).unwrap(), input);
+    }
+
+    #[test]
+    fn parse_error_message_and_tag() {
+        let error: KeybindingsConfigError = serde_json::from_value(json!({
+            "_tag": "KeybindingsConfigParseError", "configPath": "/k.json", "detail": "bad",
+        }))
+        .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "Unable to parse keybindings config at /k.json: bad"
+        );
     }
 }

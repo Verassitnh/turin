@@ -137,6 +137,8 @@ pub enum PersistenceError {
     },
     #[error("persistence connection closed")]
     Closed,
+    #[error("persistence task panicked: {message}")]
+    Panicked { message: String },
 }
 
 impl PersistenceError {

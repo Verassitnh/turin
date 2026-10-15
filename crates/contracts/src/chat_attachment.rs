@@ -79,48 +79,13 @@ pub const SNAP_SHOT_ACCESSIBLE_TEXT_MAX_CHARS: usize = 32_000;
 pub const SNAP_SHOT_ACCESSIBILITY_MAX_NODES: usize = 10_000;
 pub const SNAP_SHOT_ACCESSIBILITY_MAX_SERIALIZED_CHARS: usize = 32_000;
 
-/// `TrimmedNonEmptyString.check(isMaxLength(n))` field decoders (UTF-16 length,
-/// like JS). `required` for plain fields, `optional` for `Schema.optional*`.
-macro_rules! trimmed_max {
-    ($name:ident, $max:expr) => {
-        mod $name {
-            use super::*;
-
-            fn check(value: TrimmedNonEmptyString) -> Result<TrimmedNonEmptyString, String> {
-                if js_len(value.as_str()) > $max {
-                    Err(format!("expected at most {} characters", $max))
-                } else {
-                    Ok(value)
-                }
-            }
-
-            #[allow(dead_code)]
-            pub fn required<'de, D: Deserializer<'de>>(
-                d: D,
-            ) -> Result<TrimmedNonEmptyString, D::Error> {
-                check(TrimmedNonEmptyString::deserialize(d)?).map_err(serde::de::Error::custom)
-            }
-
-            #[allow(dead_code)]
-            pub fn optional<'de, D: Deserializer<'de>>(
-                d: D,
-            ) -> Result<Option<TrimmedNonEmptyString>, D::Error> {
-                Option::<TrimmedNonEmptyString>::deserialize(d)?
-                    .map(check)
-                    .transpose()
-                    .map_err(serde::de::Error::custom)
-            }
-        }
-    };
-}
-
-trimmed_max!(max_50, 50);
-trimmed_max!(max_100, 100);
-trimmed_max!(max_255, 255);
-trimmed_max!(max_1000, 1_000);
-trimmed_max!(max_2000, 2_000);
-trimmed_max!(max_8000, 8_000);
-trimmed_max!(max_32000, SNAP_SHOT_ACCESSIBLE_TEXT_MAX_CHARS);
+crate::max_len!(max_50, 50);
+crate::max_len!(max_100, 100);
+crate::max_len!(max_255, 255);
+crate::max_len!(max_1000, 1_000);
+crate::max_len!(max_2000, 2_000);
+crate::max_len!(max_8000, 8_000);
+crate::max_len!(max_32000, 32_000);
 
 /// `Schema.isMaxLength(n)` on a plain array (checked on the raw input).
 fn max_items<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
@@ -751,7 +716,7 @@ mod tests {
             .map(|_| SnapShotAccessibilityNode {
                 role: TrimmedNonEmptyString::new("text").unwrap(),
                 name: None,
-                value: Some(TrimmedNonEmptyString::new(&"x".repeat(8_000)).unwrap()),
+                value: Some(TrimmedNonEmptyString::new("x".repeat(8_000)).unwrap()),
                 description: None,
                 bounds: None,
                 state: None,

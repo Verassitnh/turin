@@ -3,6 +3,8 @@
 //! Only the sizing rules; the owning view re-measures on every layout, which
 //! replaces the resize observer.
 
+use super::use_resizable_width::clamp_resizable_width;
+
 pub const PREVIEW_PANEL_WIDTH_STORAGE_KEY: &str = "t3code:preview-panel-width";
 pub const PREVIEW_PANEL_MIN_WIDTH: f32 = 360.;
 /// Upper bound as a fraction of the viewport; only binds on wide screens.
@@ -26,11 +28,13 @@ pub fn get_preview_panel_max_width(viewport_width: f32, container_width: Option<
     PREVIEW_PANEL_MIN_WIDTH.max(fraction_cap.min(container_cap))
 }
 
-/// `useResizableWidth`'s clamp.
+/// The panel's width through `useResizableWidth`'s clamp.
 pub fn clamp_preview_panel_width(width: f32, max_width: f32) -> f32 {
-    width.clamp(
+    clamp_resizable_width(
+        width,
+        PREVIEW_PANEL_DEFAULT_WIDTH,
         PREVIEW_PANEL_MIN_WIDTH,
-        max_width.max(PREVIEW_PANEL_MIN_WIDTH),
+        max_width,
     )
 }
 

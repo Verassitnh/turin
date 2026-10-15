@@ -2,3 +2,4 @@
 //! lives on the owning GPUI entity).
 
 pub mod use_preview_panel_inline_size;
+pub mod use_resizable_width;

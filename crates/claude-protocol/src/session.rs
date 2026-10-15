@@ -4,11 +4,12 @@ use crate::{
     launch::LaunchOptions,
 };
 use anyhow::{Context, Result};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
+    panic::AssertUnwindSafe,
     pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
@@ -574,6 +575,7 @@ async fn read_loop(stdout: tokio::process::ChildStdout, state: Arc<Shared>) {
     let mut lines = FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_STDOUT_LINE));
     let mut handlers = JoinSet::new();
     loop {
+        while handlers.try_join_next().is_some() {}
         match lines.next().await {
             Some(Ok(line)) => {
                 if line.trim().is_empty() {
@@ -684,7 +686,10 @@ fn dispatch(value: Value, state: &Arc<Shared>, tasks: &mut JoinSet<()>) {
     let state = state.clone();
     tasks.spawn(async move {
         let request = ControlRequest { request_id: id.clone(), subtype: subtype.clone(), kind: InboundControl::from_body(&body), body: body.clone() };
-        let outcome = state.handler.handle(request, token).await;
+        let outcome = AssertUnwindSafe(async { state.handler.handle(request, token).await })
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|panic| Err(anyhow::anyhow!(panic_message(panic.as_ref()))));
         state.inbound.lock().unwrap().remove(&id);
         // A cancel aborts the handler's token. The SDK still writes whatever the
         // handler settled (including an error). Only an explicit None stays silent.
@@ -710,6 +715,14 @@ fn dispatch(value: Value, state: &Arc<Shared>, tasks: &mut JoinSet<()>) {
         };
         let _ = state.writer.send(WriteCommand::Json(response));
     });
+}
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    let detail = panic
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into());
+    format!("control handler panicked: {detail}")
 }
 /// The SDK's reply when no callback is registered for a subtype. `None` means stay silent.
 fn unhandled_reply(body: &Value) -> Option<Result<Value, String>> {
@@ -1062,6 +1075,59 @@ for line in sys.stdin:
                 .is_err(),
             "request_user_dialog must stay unanswered"
         );
+        session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    struct PanicOnce(std::sync::atomic::AtomicBool);
+    impl ControlHandler for PanicOnce {
+        fn handle(&self, _: ControlRequest, _: CancellationToken) -> HandlerFuture {
+            let first = !self.0.swap(true, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if first {
+                    panic!("boom");
+                }
+                Ok(Some(json!({"behavior":"allow","updatedInput":{}})))
+            })
+        }
+    }
+    #[tokio::test]
+    async fn panicking_handler_replies_with_an_error_and_frees_the_request_id() {
+        let dir = std::env::temp_dir().join(format!("turin-claude-panic-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+request={"type":"control_request","request_id":"p1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{},"tool_use_id":"t1"}}
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        print(json.dumps(request),flush=True)
+    elif value.get("type")=="control_response":
+        print(json.dumps({"type":"system","subtype":"status","reply":value["response"]}),flush=True)
+        if value["response"]["subtype"]=="error":
+            print(json.dumps(request),flush=True)
+"#,
+        );
+        let handler = Arc::new(PanicOnce(std::sync::atomic::AtomicBool::new(false)));
+        let mut session = ClaudeSession::spawn(options, handler).await.unwrap();
+        let mut seen = vec![];
+        while seen.len() < 2 {
+            match tokio::time::timeout(Duration::from_secs(3), session.next_event())
+                .await
+                .expect("panicking handler left the request unanswered")
+                .unwrap()
+            {
+                SessionEvent::Frame(frame) => seen.push(frame.raw["reply"].clone()),
+                SessionEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(seen[0]["subtype"], "error");
+        assert_eq!(seen[0]["error"], "control handler panicked: boom");
+        assert_eq!(seen[1]["subtype"], "success");
+        assert_eq!(seen[1]["response"]["toolUseID"], "t1");
         session.shutdown().await.unwrap();
         fs::remove_dir_all(dir).unwrap();
     }

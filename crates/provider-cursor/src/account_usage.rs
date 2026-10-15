@@ -169,7 +169,13 @@ pub async fn read_cursor_account_usage(
     end_date: f64,
     client: Arc<dyn DashboardClient>,
 ) -> AccountUsageRead {
-    let token = match load_token(&source) {
+    // The credential file is blocking IO, so it stays off the async workers.
+    let loaded = tokio::task::spawn_blocking(move || load_token(&source))
+        .await
+        .unwrap_or(TokenLoad::Failed {
+            error: "Cursor credentials could not be read.".to_owned(),
+        });
+    let token = match loaded {
         TokenLoad::Missing { error } => return AccountUsageRead::empty(true, error),
         TokenLoad::Failed { error } => return AccountUsageRead::empty(false, Some(error)),
         TokenLoad::Token(token) => token,
@@ -1339,6 +1345,27 @@ mod tests {
         .await;
         assert!(result.error.is_some());
         assert!(result.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unreadable_credentials_stop_before_any_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(&path, "{not json").unwrap();
+        let client = script(|_| async { panic!("no request") });
+        let result = read_cursor_account_usage(
+            CredentialSource::File(path),
+            0.0,
+            1_781_000_000_000.0,
+            client,
+        )
+        .await;
+        assert_eq!(
+            result.error.as_deref(),
+            Some("Cursor credentials could not be read.")
+        );
+        assert!(!result.missing);
+        assert!(result.account_key.is_none());
     }
 
     #[tokio::test(start_paused = true)]

@@ -9,7 +9,9 @@
 use serde_json::{Value, json};
 use turin_contracts::base_schemas::TrimmedNonEmptyString;
 use turin_contracts::orchestration_v2::OrchestrationV2RuntimeRequestKind;
-use turin_contracts::provider_policy::{ProviderApprovalDecision, ProviderApprovalOption};
+use turin_contracts::provider_policy::{
+    ProviderApprovalDecision, ProviderApprovalOption, ProviderRequestKind,
+};
 
 pub const ALWAYS_ALLOW_LABEL: &str = "Always allow (saved to Cursor config)";
 pub const ALLOW_FOR_THREAD_LABEL: &str = "Allow for this thread";
@@ -92,6 +94,16 @@ pub fn request_kind(request: &PermissionRequest) -> OrchestrationV2RuntimeReques
     }
 }
 
+/// The request kind shown on an approval turn item.
+pub fn provider_request_kind(request: &PermissionRequest) -> ProviderRequestKind {
+    match request.tool_kind.as_deref() {
+        Some("read") => ProviderRequestKind::FileRead,
+        Some("edit" | "delete" | "move") => ProviderRequestKind::FileChange,
+        Some("execute") => ProviderRequestKind::Command,
+        _ => ProviderRequestKind::Permission,
+    }
+}
+
 pub fn approval_options(request: &PermissionRequest) -> Vec<ProviderApprovalOption> {
     let mut options = Vec::new();
     if let Some(option) = option_for_kind(request, "allow_once") {
@@ -122,21 +134,29 @@ pub fn approval_options(request: &PermissionRequest) -> Vec<ProviderApprovalOpti
 }
 
 /// Stable identity for the host-side per-thread allowance. Tool call ids are
-/// unique per request, so they are not part of the key.
-pub fn session_grant_key(request: &PermissionRequest) -> String {
+/// unique per request, so they are not part of the key. A request with neither a
+/// title nor `rawInput` has nothing to match on, so it gets no key and always
+/// shows its card. Otherwise one "allow for this thread" would cover every later
+/// request of the same kind.
+pub fn session_grant_key(request: &PermissionRequest) -> Option<String> {
     let raw_input = request
         .raw
         .get("toolCall")
         .and_then(|tool| tool.get("rawInput"))
-        .map(Value::to_string)
-        .unwrap_or_default();
-    format!(
-        "{}\n{}\n{raw_input}",
+        .map(Value::to_string);
+    if request.title.is_none() && raw_input.is_none() {
+        return None;
+    }
+    Some(format!(
+        "{}\n{}\n{}",
         request.tool_kind.as_deref().unwrap_or(""),
-        request.title.as_deref().unwrap_or("")
-    )
+        request.title.as_deref().unwrap_or(""),
+        raw_input.unwrap_or_default()
+    ))
 }
 
+/// The CLI's `ask_question` fallback sends one permission per question, with the
+/// tool call id `<toolCallId>_q<index>` (docs/protocols/cursor-acp.md).
 pub fn is_ask_question_fallback(request: &PermissionRequest) -> bool {
     request
         .options
@@ -145,7 +165,13 @@ pub fn is_ask_question_fallback(request: &PermissionRequest) -> bool {
         || request
             .tool_call_id
             .as_deref()
-            .is_some_and(|id| id.contains("_q"))
+            .is_some_and(is_question_call_id)
+}
+
+fn is_question_call_id(id: &str) -> bool {
+    id.rsplit_once("_q").is_some_and(|(_, index)| {
+        !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +274,36 @@ mod tests {
             .to_string()
             .contains("allow_always")
         );
+    }
+
+    #[test]
+    fn grant_key_needs_a_title_or_raw_input() {
+        let titled = parse_permission_request(&json!({
+            "toolCall": {"toolCallId": "c1", "title": "Run ls", "kind": "execute"}
+        }));
+        assert!(session_grant_key(&titled).is_some());
+        let untitled = parse_permission_request(&json!({
+            "toolCall": {"toolCallId": "c2", "kind": "execute"}
+        }));
+        assert_eq!(session_grant_key(&untitled), None);
+        let with_input = parse_permission_request(&json!({
+            "toolCall": {"toolCallId": "c3", "kind": "execute", "rawInput": {"command": "ls"}}
+        }));
+        assert_ne!(session_grant_key(&with_input), session_grant_key(&titled));
+    }
+
+    #[test]
+    fn ask_question_fallback_matches_the_documented_id_suffix_only() {
+        let fallback = |id: &str| {
+            is_ask_question_fallback(&parse_permission_request(
+                &json!({"toolCall": {"toolCallId": id}, "options": []}),
+            ))
+        };
+        assert!(fallback("tool-1_q0"));
+        assert!(fallback("tool-1_q12"));
+        assert!(!fallback("tool_queue_3"));
+        assert!(!fallback("tool-1_q"));
+        assert!(!fallback("tool-1_q1x"));
     }
 
     #[test]

@@ -4,34 +4,38 @@
 //! and `session/load` that fail with authentication required stay unsigned-in.
 //! Model changes and session open/load snapshot the Cursor user files they
 //! rewrite. `session/cancel` interrupts the active prompt.
+//!
+//! Provider events are the only output. A turn streams items while its prompt
+//! runs, and every card (approval, question, plan) is a runtime request plus a
+//! turn item, so a client sees the same content whichever way it renders them.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use async_trait::async_trait;
 use futures::stream::{self, unfold};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use turin_acp::compat::InitializeResponse;
-use turin_acp::cursor::{AskQuestionParams, CreatePlanParams};
+use turin_acp::cursor::{AskQuestionParams, CreatePlanParams, UpdateTodosParams};
 use turin_acp::protocol::RequestContext;
 use turin_acp::{AcpClient, AcpError, SpawnCommand, spawn};
 use turin_contracts::model_selection::ModelSelection;
 use turin_contracts::orchestration_v2::{
-    OrchestrationV2NativeRefStrength, OrchestrationV2ProviderCapabilities,
-    OrchestrationV2ProviderRef, OrchestrationV2ProviderSession,
-    OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
-    OrchestrationV2ProviderThreadDisposition, OrchestrationV2ProviderThreadStatus,
-    OrchestrationV2ResponseCapability, OrchestrationV2RuntimeRequest,
-    OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
-    OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
+    OrchestrationV2ExecutionNodeKind, OrchestrationV2ProviderCapabilities,
+    OrchestrationV2ProviderSession, OrchestrationV2ProviderSessionStatus,
+    OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadDisposition,
+    OrchestrationV2ProviderThreadStatus, OrchestrationV2ProviderTurn,
+    OrchestrationV2ProviderTurnStatus, OrchestrationV2ResponseCapability,
+    OrchestrationV2RuntimeRequest, OrchestrationV2RuntimeRequestKind,
+    OrchestrationV2RuntimeRequestStatus, OrchestrationV2TurnItemStatus,
 };
 use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceId};
-use turin_contracts::provider_policy::ProviderApprovalDecision;
+use turin_contracts::provider_policy::{ProviderApprovalDecision, ProviderInteractionMode};
 use turin_contracts::{
-    PositiveInt, ProviderSessionId, ProviderThreadId, ProviderTurnId, RuntimeRequestId, ThreadId,
+    PositiveInt, ProviderSessionId, RunAttemptId, RuntimeRequestId, ThreadId,
     TrimmedNonEmptyString, UtcDateTime,
 };
 use turin_provider_core::failure::ProviderFailureCause;
@@ -53,7 +57,7 @@ use crate::acp_config::{default_cursor_home, with_user_config};
 use crate::auth::{self, CursorSignInStatus};
 use crate::capabilities::{self, SelectionTransition};
 use crate::error::{CursorError, CursorOperation};
-use crate::events::{self, CursorUpdate};
+use crate::events::{self, CardItem, Events, ItemBody, Scope, TurnStream};
 use crate::extensions::{self, AskDisposition, PlanDisposition};
 use crate::models::config_updates;
 use crate::permissions;
@@ -84,14 +88,15 @@ pub enum RuntimeReply {
     Plan(PlanDisposition),
 }
 
-/// What a waiting card asked for, read without taking the card.
+/// What a waiting card asked, read without closing the card.
 enum Waiting {
     Permission,
     Ask(AskQuestionParams),
     Plan,
 }
 
-enum Pending {
+/// The agent's call, held until the user answers the card.
+enum Waiter {
     Permission(oneshot::Sender<ProviderApprovalDecision>),
     Ask {
         sender: oneshot::Sender<AskDisposition>,
@@ -100,13 +105,32 @@ enum Pending {
     Plan(oneshot::Sender<PlanDisposition>),
 }
 
+/// The runtime request for a card, plus its turn item when a turn is open.
+/// Without a turn there is no node or item to attach to.
+struct Card {
+    request: OrchestrationV2RuntimeRequest,
+    thread_id: Option<ThreadId>,
+    item: Option<CardItem>,
+}
+
+struct Pending {
+    waiter: Waiter,
+    card: Card,
+}
+
+/// Where one prompt is running. Upstream `ProviderAdapterV2TurnInput` fields the
+/// turn needs after `startTurn` returns.
+#[derive(Clone)]
+struct TurnContext {
+    scope: Scope,
+    run_ordinal: i64,
+    provider_turn_ordinal: i64,
+    attempt_id: RunAttemptId,
+}
+
 struct ActiveTurn {
-    thread_id: ThreadId,
-    run_id: turin_contracts::RunId,
-    provider_thread_id: ProviderThreadId,
-    provider_turn_id: ProviderTurnId,
-    node_id: turin_contracts::NodeId,
-    ordinal: std::sync::atomic::AtomicU64,
+    context: TurnContext,
+    stream: TurnStream,
 }
 
 struct SessionInner {
@@ -119,6 +143,8 @@ struct SessionInner {
     active_turn: Mutex<Option<ActiveTurn>>,
     home: Option<PathBuf>,
     image_prompts: AtomicBool,
+    /// Whether the session's Cursor mode is `plan`. Starts as `agent`.
+    plan_mode: AtomicBool,
     capabilities: Mutex<OrchestrationV2ProviderCapabilities>,
     auth: Mutex<CursorSignInStatus>,
     initialize: Mutex<Option<InitializeResponse>>,
@@ -126,27 +152,29 @@ struct SessionInner {
     driver: ProviderDriverKind,
     provider_session_id: ProviderSessionId,
     provider_session: OrchestrationV2ProviderSession,
+    /// The session as published to clients, once `initialize` succeeded.
+    published: OnceLock<OrchestrationV2ProviderSession>,
 }
 
 impl Drop for SessionInner {
     fn drop(&mut self) {
         if let Ok(mut pending) = self.pending.lock() {
             for (_, item) in pending.drain() {
-                cancel_pending(item);
+                cancel_waiter(item.waiter);
             }
         }
     }
 }
 
-fn cancel_pending(item: Pending) {
-    match item {
-        Pending::Permission(sender) => {
+fn cancel_waiter(waiter: Waiter) {
+    match waiter {
+        Waiter::Permission(sender) => {
             let _ = sender.send(ProviderApprovalDecision::Cancel);
         }
-        Pending::Ask { sender, .. } => {
+        Waiter::Ask { sender, .. } => {
             let _ = sender.send(AskDisposition::Cancelled);
         }
-        Pending::Plan(sender) => {
+        Waiter::Plan(sender) => {
             let _ = sender.send(PlanDisposition::Cancelled);
         }
     }
@@ -252,6 +280,7 @@ impl CursorSession {
             active_turn: Mutex::new(None),
             home: cursor_home,
             image_prompts: AtomicBool::new(false),
+            plan_mode: AtomicBool::new(false),
             capabilities: Mutex::new(capabilities::cursor_capabilities()),
             auth: Mutex::new(CursorSignInStatus::idle()),
             initialize: Mutex::new(None),
@@ -259,6 +288,7 @@ impl CursorSession {
             driver,
             provider_session_id,
             provider_session,
+            published: OnceLock::new(),
         });
         register_handlers(&client, &inner);
         Self {
@@ -345,6 +375,17 @@ impl CursorSession {
             Ok(())
         })
         .await
+    }
+
+    /// Upstream `makeCursorAgentOptions` sets `mode: "plan"` for plan interaction.
+    /// Only changes are sent, so a default turn never touches the session mode.
+    async fn sync_interaction_mode(&self, plan: bool) -> Result<(), CursorError> {
+        if self.inner.plan_mode.load(Ordering::SeqCst) == plan {
+            return Ok(());
+        }
+        self.set_mode(if plan { "plan" } else { "agent" }).await?;
+        self.inner.plan_mode.store(plan, Ordering::SeqCst);
+        Ok(())
     }
 
     pub async fn set_mode(&self, mode_id: &str) -> Result<Value, CursorError> {
@@ -509,9 +550,9 @@ impl CursorSession {
             .client
             .prompt(json!({"sessionId": session_id, "prompt": prompt}))
             .await;
-        // The turn is over either way. A permission, question, or plan card still
-        // waiting here would never get an answer, because the agent stopped asking.
-        self.cancel_waiters();
+        // The turn is over either way. A card still waiting here would never get
+        // an answer, because the agent stopped asking.
+        cancel_all(&self.inner);
         let result = result.map_err(|error| self.fail_auth(CursorOperation::Prompt, error))?;
         let stop_reason = result
             .get("stopReason")
@@ -523,19 +564,12 @@ impl CursorSession {
         })
     }
 
-    /// The kind of card still open for `request_id`, without closing it.
-    fn waiting(&self, request_id: &str) -> Option<Waiting> {
-        let pending = self.inner.pending.lock().expect("pending");
-        match pending.get(request_id)? {
-            Pending::Permission(_) => Some(Waiting::Permission),
-            Pending::Plan(_) => Some(Waiting::Plan),
-            Pending::Ask { params, .. } => Some(Waiting::Ask(params.clone())),
-        }
-    }
-
-    /// Cancels waiting cards, then `session/cancel`.
+    /// Marks the active turn interrupted, cancels waiting cards, then `session/cancel`.
     pub async fn cancel_turn(&self) -> Result<(), CursorError> {
-        self.cancel_waiters();
+        if let Some(active) = self.inner.active_turn.lock().expect("turn").as_mut() {
+            active.stream.interrupted = true;
+        }
+        cancel_all(&self.inner);
         let session_id = self.session_id()?;
         self.inner
             .client
@@ -544,6 +578,8 @@ impl CursorSession {
             .map_err(|error| CursorError::from_acp(CursorOperation::Cancel, &error))
     }
 
+    /// Answers the card for `request_id`, emits its resolution, and releases the
+    /// agent's call.
     pub fn answer_request(&self, request_id: &str, reply: RuntimeReply) -> Result<(), CursorError> {
         let pending = self
             .inner
@@ -551,44 +587,44 @@ impl CursorSession {
             .lock()
             .expect("pending")
             .remove(request_id)
-            .ok_or_else(|| {
-                CursorError::new(
-                    CursorOperation::Permission,
-                    "That Cursor request is no longer waiting.",
-                )
-            })?;
-        let matched = match (pending, reply) {
-            (Pending::Permission(sender), RuntimeReply::Approval(decision)) => {
+            .ok_or_else(not_waiting)?;
+        let decision = reply_decision(&reply);
+        let Pending { waiter, card } = pending;
+        let matched = match (waiter, reply) {
+            (Waiter::Permission(sender), RuntimeReply::Approval(decision)) => {
                 sender.send(decision).is_ok()
             }
-            (Pending::Ask { sender, .. }, RuntimeReply::UserInput(disposition)) => {
+            (Waiter::Ask { sender, .. }, RuntimeReply::UserInput(disposition)) => {
                 sender.send(disposition).is_ok()
             }
-            (Pending::Plan(sender), RuntimeReply::Plan(disposition)) => {
+            (Waiter::Plan(sender), RuntimeReply::Plan(disposition)) => {
                 sender.send(disposition).is_ok()
             }
             (other, _) => {
-                cancel_pending(other);
+                cancel_waiter(other);
                 false
             }
         };
-        if matched {
-            Ok(())
-        } else {
-            Err(CursorError::new(
-                CursorOperation::Permission,
-                "That Cursor request is no longer waiting.",
-            ))
+        resolve_card(&self.inner, card, decision);
+        if matched { Ok(()) } else { Err(not_waiting()) }
+    }
+
+    /// The kind of card still open for `request_id`, without closing it.
+    fn waiting(&self, request_id: &str) -> Option<Waiting> {
+        let pending = self.inner.pending.lock().expect("pending");
+        match &pending.get(request_id)?.waiter {
+            Waiter::Permission(_) => Some(Waiting::Permission),
+            Waiter::Ask { params, .. } => Some(Waiting::Ask(params.clone())),
+            Waiter::Plan(_) => Some(Waiting::Plan),
         }
     }
-}
 
-impl CursorSession {
     fn publish_session(&self) {
         let mut session = self.inner.provider_session.clone();
         session.status = OrchestrationV2ProviderSessionStatus::Ready;
         session.capabilities = self.capabilities();
         session.updated_at = UtcDateTime::now();
+        let _ = self.inner.published.set(session.clone());
         let _ = self
             .inner
             .provider_events
@@ -615,13 +651,16 @@ impl CursorSession {
             provider_session_id: Some(self.inner.provider_session_id.clone()),
             app_thread_id: Some(app_thread_id),
             owner_node_id: None,
-            native_thread_ref: Some(OrchestrationV2ProviderRef {
-                driver: self.inner.driver.clone(),
-                native_id: TrimmedNonEmptyString::new(native_session_id).ok(),
-                strength: OrchestrationV2NativeRefStrength::Strong,
-                fingerprint: None,
-                ordinal: None,
-            }),
+            native_thread_ref: Some(
+                turin_contracts::orchestration_v2::OrchestrationV2ProviderRef {
+                    driver: self.inner.driver.clone(),
+                    native_id: TrimmedNonEmptyString::new(native_session_id).ok(),
+                    strength:
+                        turin_contracts::orchestration_v2::OrchestrationV2NativeRefStrength::Strong,
+                    fingerprint: None,
+                    ordinal: None,
+                },
+            ),
             native_conversation_head_ref: None,
             status: OrchestrationV2ProviderThreadStatus::Idle,
             first_run_ordinal: None,
@@ -647,20 +686,231 @@ impl CursorSession {
         thread
     }
 
-    fn emit_terminal(
+    /// One prompt as a turn: open the turn, stream its items, and close it with a
+    /// terminal status. Dropping this future mid-prompt closes the turn as
+    /// interrupted and cancels the agent's work.
+    async fn run_turn(
         &self,
-        provider_thread_id: &ProviderThreadId,
-        provider_turn_id: &ProviderTurnId,
-        run_ordinal: i64,
-        status: ProviderAdapterV2TurnTerminalStatus,
-        failure: Option<&str>,
-    ) {
-        let failure = match status {
-            ProviderAdapterV2TurnTerminalStatus::Failed => Some(
-                turin_provider_core::failure::make_provider_failure(
+        context: TurnContext,
+        text: &str,
+    ) -> Result<PromptOutcome, CursorError> {
+        begin_turn(&self.inner, &context)?;
+        let mut guard = TurnGuard {
+            inner: Arc::clone(&self.inner),
+            armed: true,
+        };
+        let outcome = self.prompt(text, &[]).await;
+        guard.armed = false;
+        match &outcome {
+            Ok(outcome) => finish_turn(
+                &self.inner,
+                turn_status(outcome.stop_reason.as_deref()),
+                None,
+            ),
+            Err(error) => finish_turn(
+                &self.inner,
+                OrchestrationV2ProviderTurnStatus::Failed,
+                Some(error.to_string()),
+            ),
+        }
+        outcome
+    }
+}
+
+/// Closes the turn when its future is dropped before the prompt returns.
+struct TurnGuard {
+    inner: Arc<SessionInner>,
+    armed: bool,
+}
+
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        cancel_all(&self.inner);
+        finish_turn(
+            &self.inner,
+            OrchestrationV2ProviderTurnStatus::Interrupted,
+            None,
+        );
+        let session_id = self
+            .inner
+            .thread
+            .lock()
+            .ok()
+            .and_then(|thread| thread.as_ref().map(|thread| thread.session_id.clone()));
+        if let (Some(session_id), Ok(handle)) = (session_id, tokio::runtime::Handle::try_current())
+        {
+            let client = self.inner.client.clone();
+            handle.spawn(async move {
+                let _ = client.cancel(json!({"sessionId": session_id})).await;
+            });
+        }
+    }
+}
+
+fn not_waiting() -> CursorError {
+    CursorError::new(
+        CursorOperation::Permission,
+        "That Cursor request is no longer waiting.",
+    )
+}
+
+fn reply_decision(reply: &RuntimeReply) -> Option<ProviderApprovalDecision> {
+    match reply {
+        RuntimeReply::Approval(decision) => Some(*decision),
+        RuntimeReply::UserInput(AskDisposition::Cancelled) => {
+            Some(ProviderApprovalDecision::Cancel)
+        }
+        RuntimeReply::UserInput(_) => None,
+        RuntimeReply::Plan(PlanDisposition::Accepted { .. }) => {
+            Some(ProviderApprovalDecision::Accept)
+        }
+        RuntimeReply::Plan(PlanDisposition::Rejected { .. }) => {
+            Some(ProviderApprovalDecision::Decline)
+        }
+        RuntimeReply::Plan(PlanDisposition::Cancelled) => Some(ProviderApprovalDecision::Cancel),
+    }
+}
+
+fn send(inner: &SessionInner, events: Events) {
+    for event in events {
+        let _ = inner.provider_events.send(event);
+    }
+}
+
+/// Runs `f` against the open turn's stream and returns what it produced. With no
+/// open turn there is nothing to attach items to, so the result is empty.
+fn turn_events(inner: &SessionInner, f: impl FnOnce(&mut TurnStream) -> Events) -> Events {
+    match inner.active_turn.lock().expect("turn").as_mut() {
+        Some(active) => f(&mut active.stream),
+        None => Vec::new(),
+    }
+}
+
+fn begin_turn(inner: &SessionInner, context: &TurnContext) -> Result<(), CursorError> {
+    let now = UtcDateTime::now();
+    let provider_turn_ordinal = u64::try_from(context.provider_turn_ordinal)
+        .unwrap_or(1)
+        .max(1);
+    let stream = TurnStream::new(context.scope.clone(), provider_turn_ordinal, now);
+    {
+        let mut active = inner.active_turn.lock().expect("turn");
+        if active.is_some() {
+            return Err(CursorError::new(
+                CursorOperation::Prompt,
+                format!(
+                    "Cursor provider turn {} is still active.",
+                    context.scope.provider_turn_id.as_str()
+                ),
+            ));
+        }
+        *active = Some(ActiveTurn {
+            context: context.clone(),
+            stream,
+        });
+    }
+    send(
+        inner,
+        vec![ProviderAdapterV2Event::ProviderTurnUpdated {
+            driver: inner.driver.clone(),
+            thread_id: Some(context.scope.thread_id.clone()),
+            provider_turn: provider_turn(
+                context,
+                OrchestrationV2ProviderTurnStatus::Running,
+                now,
+                None,
+            ),
+        }],
+    );
+    Ok(())
+}
+
+fn provider_turn(
+    context: &TurnContext,
+    status: OrchestrationV2ProviderTurnStatus,
+    started_at: UtcDateTime,
+    completed_at: Option<UtcDateTime>,
+) -> OrchestrationV2ProviderTurn {
+    OrchestrationV2ProviderTurn {
+        id: context.scope.provider_turn_id.clone(),
+        provider_thread_id: context.scope.provider_thread_id.clone(),
+        node_id: context.scope.root_node_id.clone(),
+        run_attempt_id: Some(context.attempt_id.clone()),
+        native_turn_ref: Some(events::native_ref(
+            &context.scope.driver,
+            context.scope.run_id.as_str(),
+            true,
+        )),
+        ordinal: positive(context.provider_turn_ordinal),
+        status,
+        started_at: Some(started_at),
+        completed_at,
+        token_usage: None,
+        turn_token_usage: None,
+    }
+}
+
+fn positive(value: i64) -> PositiveInt {
+    PositiveInt::new(u64::try_from(value).unwrap_or(1).max(1)).expect("positive ordinal")
+}
+
+/// Closes the open turn. Upstream `finalizeTurn`: open items close first, then the
+/// provider turn and thread update, then the terminal event.
+fn finish_turn(
+    inner: &SessionInner,
+    status: OrchestrationV2ProviderTurnStatus,
+    failure: Option<String>,
+) {
+    let Some(ActiveTurn {
+        context,
+        mut stream,
+    }) = inner.active_turn.lock().expect("turn").take()
+    else {
+        return;
+    };
+    let now = UtcDateTime::now();
+    let status = if stream.interrupted {
+        OrchestrationV2ProviderTurnStatus::Interrupted
+    } else {
+        status
+    };
+    let mut events = stream.finish(status, now);
+    events.push(ProviderAdapterV2Event::ProviderTurnUpdated {
+        driver: inner.driver.clone(),
+        thread_id: Some(context.scope.thread_id.clone()),
+        provider_turn: provider_turn(&context, status, stream.started_at(), Some(now)),
+    });
+    if let Some(thread) = inner
+        .provider_thread
+        .lock()
+        .expect("provider thread")
+        .as_mut()
+    {
+        let run_ordinal = positive(context.run_ordinal);
+        thread.status = OrchestrationV2ProviderThreadStatus::Active;
+        thread.first_run_ordinal = Some(thread.first_run_ordinal.unwrap_or(run_ordinal));
+        thread.last_run_ordinal = Some(run_ordinal);
+        thread.updated_at = now;
+        events.push(ProviderAdapterV2Event::ProviderThreadUpdated {
+            driver: inner.driver.clone(),
+            provider_thread: thread.clone(),
+            retained_native_turn_ids: None,
+        });
+    }
+    let (terminal, failure, failure_item_ordinal, disposition) = match status {
+        OrchestrationV2ProviderTurnStatus::Failed => {
+            let ordinal = stream.item_ordinal(&format!(
+                "terminal-failure:{}",
+                context.scope.provider_turn_id.as_str()
+            ));
+            (
+                ProviderAdapterV2TurnTerminalStatus::Failed,
+                Some(turin_provider_core::failure::make_provider_failure(
                     turin_provider_core::failure::ProviderFailureInput {
                         cause: None,
-                        message: failure,
+                        message: failure.as_deref(),
                         code: None,
                         class: Some(
                             turin_contracts::orchestration_v2::OrchestrationV2ProviderFailureClass::ProviderError,
@@ -668,71 +918,51 @@ impl CursorSession {
                         retryable: Some(Some(true)),
                         reset_at: None,
                     },
-                ),
-            ),
-            _ => None,
-        };
-        let disposition = if failure.is_some() {
-            OrchestrationV2ProviderThreadDisposition::Broken
-        } else {
-            OrchestrationV2ProviderThreadDisposition::Reusable
-        };
-        let _ = self
-            .inner
-            .provider_events
-            .send(ProviderAdapterV2Event::TurnTerminal {
-                driver: self.inner.driver.clone(),
-                provider_thread_id: provider_thread_id.clone(),
-                provider_turn_id: provider_turn_id.clone(),
-                run_ordinal: PositiveInt::new(u64::try_from(run_ordinal).unwrap_or(0).max(1))
-                    .expect("run ordinal"),
-                status,
-                failure,
-                failure_item_ordinal: None,
-                retry: None,
-                retry_started_at: None,
-                thread_disposition: disposition,
-            });
-    }
-
-    fn cancel_waiters(&self) {
-        let pending = std::mem::take(&mut *self.inner.pending.lock().expect("pending"));
-        for (_, item) in pending {
-            cancel_pending(item);
+                )),
+                Some(positive(ordinal as i64)),
+                OrchestrationV2ProviderThreadDisposition::Broken,
+            )
         }
-    }
+        OrchestrationV2ProviderTurnStatus::Interrupted => (
+            ProviderAdapterV2TurnTerminalStatus::Interrupted,
+            None,
+            None,
+            OrchestrationV2ProviderThreadDisposition::Reusable,
+        ),
+        OrchestrationV2ProviderTurnStatus::Cancelled => (
+            ProviderAdapterV2TurnTerminalStatus::Cancelled,
+            None,
+            None,
+            OrchestrationV2ProviderThreadDisposition::Reusable,
+        ),
+        _ => (
+            ProviderAdapterV2TurnTerminalStatus::Completed,
+            None,
+            None,
+            OrchestrationV2ProviderThreadDisposition::Reusable,
+        ),
+    };
+    events.push(ProviderAdapterV2Event::TurnTerminal {
+        driver: inner.driver.clone(),
+        provider_thread_id: context.scope.provider_thread_id.clone(),
+        provider_turn_id: context.scope.provider_turn_id.clone(),
+        run_ordinal: positive(context.run_ordinal),
+        status: terminal,
+        failure,
+        failure_item_ordinal,
+        retry: None,
+        retry_started_at: None,
+        thread_disposition: disposition,
+    });
+    send(inner, events);
 }
 
-/// `session/new` and `session/load` require an absolute `cwd`. A relative path
-/// resolves against the Turin process cwd, as upstream's `process.cwd()` does.
-fn absolute_path(path: &Path) -> PathBuf {
-    let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    if path.as_os_str().is_empty() {
-        current
-    } else if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        current.join(path)
-    }
-}
-
-fn absolute_cwd(cwd: Option<&str>) -> PathBuf {
-    absolute_path(Path::new(cwd.map_or("", str::trim)))
-}
-
-fn native_session_id(thread: &OrchestrationV2ProviderThread) -> Option<String> {
-    thread
-        .native_thread_ref
-        .as_ref()
-        .and_then(|reference| reference.native_id.as_ref())
-        .map(|id| id.as_str().to_owned())
-}
-
-fn terminal_status(stop_reason: Option<&str>) -> ProviderAdapterV2TurnTerminalStatus {
+/// Upstream `terminalStatus` without the interrupt case, which `finish_turn` checks.
+fn turn_status(stop_reason: Option<&str>) -> OrchestrationV2ProviderTurnStatus {
     match stop_reason {
-        Some("cancelled" | "canceled") => ProviderAdapterV2TurnTerminalStatus::Cancelled,
-        Some("refusal") => ProviderAdapterV2TurnTerminalStatus::Failed,
-        _ => ProviderAdapterV2TurnTerminalStatus::Completed,
+        Some("cancelled" | "canceled") => OrchestrationV2ProviderTurnStatus::Cancelled,
+        Some("refusal") => OrchestrationV2ProviderTurnStatus::Failed,
+        _ => OrchestrationV2ProviderTurnStatus::Completed,
     }
 }
 
@@ -764,120 +994,167 @@ fn map_error(kind: ProviderAdapterErrorKind, error: CursorError) -> ProviderAdap
         .with_cause(ProviderFailureCause::tagged("CursorError").with_message(error.to_string()))
 }
 
-fn emit_runtime_request(
-    inner: &SessionInner,
-    request_id: &str,
-    kind: OrchestrationV2RuntimeRequestKind,
-    status: OrchestrationV2RuntimeRequestStatus,
-    decision: Option<ProviderApprovalDecision>,
-) {
-    let Ok(id) = RuntimeRequestId::new(request_id) else {
-        return;
-    };
-    let turn = inner.active_turn.lock().expect("turn");
+/// Every open card resolves as cancelled: the agent's calls are answered and the
+/// cards close. Used when a prompt ends, a turn is interrupted, or the session drops.
+fn cancel_all(inner: &SessionInner) {
+    let pending: Vec<Pending> = inner
+        .pending
+        .lock()
+        .expect("pending")
+        .drain()
+        .map(|(_, pending)| pending)
+        .collect();
+    for Pending { waiter, card } in pending {
+        cancel_waiter(waiter);
+        resolve_card(inner, card, Some(ProviderApprovalDecision::Cancel));
+    }
+}
+
+/// Closes a card: the runtime request resolves, and its item and node follow.
+fn resolve_card(inner: &SessionInner, mut card: Card, decision: Option<ProviderApprovalDecision>) {
     let now = UtcDateTime::now();
+    let cancelled = decision == Some(ProviderApprovalDecision::Cancel);
+    card.request.status = if cancelled {
+        OrchestrationV2RuntimeRequestStatus::Cancelled
+    } else {
+        OrchestrationV2RuntimeRequestStatus::Resolved
+    };
+    card.request.decision = decision;
+    card.request.resolved_at = Some(now);
+    let mut events = vec![runtime_request_event(
+        inner,
+        card.thread_id.clone(),
+        card.request,
+    )];
+    if let Some(item) = card.item {
+        let status = if cancelled {
+            OrchestrationV2TurnItemStatus::Cancelled
+        } else {
+            OrchestrationV2TurnItemStatus::Completed
+        };
+        events.extend(TurnStream::card_events(&inner.driver, &item, status, now));
+    }
+    send(inner, events);
+}
+
+fn runtime_request_event(
+    inner: &SessionInner,
+    thread_id: Option<ThreadId>,
+    runtime_request: OrchestrationV2RuntimeRequest,
+) -> ProviderAdapterV2Event {
+    ProviderAdapterV2Event::RuntimeRequestUpdated {
+        driver: inner.driver.clone(),
+        thread_id,
+        runtime_request,
+    }
+}
+
+/// A new waiting card: its request, and its node and item when a turn is open.
+/// Events are not sent here, so the caller can register the waiter first.
+fn open_card(
+    inner: &SessionInner,
+    request_id: &RuntimeRequestId,
+    request_kind: OrchestrationV2RuntimeRequestKind,
+    spec: CardSpec,
+) -> (Card, Events) {
+    let now = UtcDateTime::now();
+    let (thread_id, provider_turn_id, item) = match inner.active_turn.lock().expect("turn").as_mut()
+    {
+        Some(active) => {
+            let item =
+                active
+                    .stream
+                    .request_card(request_id, spec.node_kind, spec.body, spec.title, now);
+            (
+                Some(active.context.scope.thread_id.clone()),
+                Some(active.context.scope.provider_turn_id.clone()),
+                Some(item),
+            )
+        }
+        None => (None, None, None),
+    };
     let request = OrchestrationV2RuntimeRequest {
-        id: id.clone(),
-        node_id: derive::approval_node(&id),
-        provider_turn_id: turn.as_ref().map(|turn| turn.provider_turn_id.clone()),
-        native_request_ref: Some(OrchestrationV2ProviderRef {
-            driver: inner.driver.clone(),
-            native_id: TrimmedNonEmptyString::new(request_id).ok(),
-            strength: OrchestrationV2NativeRefStrength::Weak,
-            fingerprint: None,
-            ordinal: None,
-        }),
-        kind,
-        status,
+        id: request_id.clone(),
+        node_id: derive::approval_node(request_id),
+        provider_turn_id,
+        native_request_ref: Some(events::native_ref(
+            &inner.driver,
+            request_id.as_str(),
+            false,
+        )),
+        kind: request_kind,
+        status: OrchestrationV2RuntimeRequestStatus::Pending,
         response_capability: OrchestrationV2ResponseCapability::Live {
             provider_session_id: inner.provider_session_id.clone(),
         },
         created_at: now,
-        resolved_at: matches!(
-            status,
-            OrchestrationV2RuntimeRequestStatus::Resolved
-                | OrchestrationV2RuntimeRequestStatus::Cancelled
-        )
-        .then(UtcDateTime::now),
-        decision,
+        resolved_at: None,
+        decision: None,
         answers: None,
     };
-    let thread_id = turn.as_ref().map(|turn| turn.thread_id.clone());
-    drop(turn);
-    let _ = inner
-        .provider_events
-        .send(ProviderAdapterV2Event::RuntimeRequestUpdated {
-            driver: inner.driver.clone(),
+    let mut events = vec![runtime_request_event(
+        inner,
+        thread_id.clone(),
+        request.clone(),
+    )];
+    if let Some(item) = &item {
+        events.extend(TurnStream::card_events(
+            &inner.driver,
+            item,
+            OrchestrationV2TurnItemStatus::Waiting,
+            now,
+        ));
+    }
+    (
+        Card {
+            request,
             thread_id,
-            runtime_request: request,
-        });
+            item,
+        },
+        events,
+    )
 }
 
-fn emit_update(inner: &SessionInner, update: &CursorUpdate) {
-    let guard = inner.active_turn.lock().expect("turn");
-    let Some(turn) = guard.as_ref() else {
-        return;
-    };
-    let ordinal = turn.ordinal.fetch_add(1, Ordering::SeqCst);
-    let native = format!("cursor-item-{ordinal}");
+struct CardSpec {
+    node_kind: OrchestrationV2ExecutionNodeKind,
+    body: ItemBody,
+    title: Option<String>,
+}
+
+fn request_id_of(raw: &str) -> Option<RuntimeRequestId> {
+    RuntimeRequestId::new(raw).ok()
+}
+
+/// Projects one ACP `session/update` into the open turn.
+fn project_update(inner: &SessionInner, update: &events::CursorUpdate) {
     let now = UtcDateTime::now();
-    let item = match update {
-        CursorUpdate::Text { text, .. } => OrchestrationV2TurnItem::AssistantMessage {
-            tool_non_execution_kind: None,
-            tool_surface: None,
-            tool_icon: None,
-            tool_source: None,
-            id: derive::turn_item_from_provider_item(&inner.driver, &native),
-            thread_id: turn.thread_id.clone(),
-            run_id: Some(turn.run_id.clone()),
-            node_id: Some(turn.node_id.clone()),
-            provider_thread_id: Some(turn.provider_thread_id.clone()),
-            provider_turn_id: Some(turn.provider_turn_id.clone()),
-            native_item_ref: None,
-            parent_item_id: None,
-            ordinal,
-            status: OrchestrationV2TurnItemStatus::Completed,
-            title: None,
-            started_at: Some(now),
-            completed_at: Some(now),
-            updated_at: now,
-            message_id: derive::message_from_provider_item(&inner.driver, &native),
-            text: text.clone(),
-            attachments: None,
-            streaming: true,
-        },
-        CursorUpdate::Thought { text } => OrchestrationV2TurnItem::Reasoning {
-            tool_non_execution_kind: None,
-            tool_surface: None,
-            tool_icon: None,
-            tool_source: None,
-            id: derive::turn_item_from_provider_item(&inner.driver, &native),
-            thread_id: turn.thread_id.clone(),
-            run_id: Some(turn.run_id.clone()),
-            node_id: Some(turn.node_id.clone()),
-            provider_thread_id: Some(turn.provider_thread_id.clone()),
-            provider_turn_id: Some(turn.provider_turn_id.clone()),
-            native_item_ref: None,
-            parent_item_id: None,
-            ordinal,
-            status: OrchestrationV2TurnItemStatus::Completed,
-            title: None,
-            started_at: Some(now),
-            completed_at: Some(now),
-            updated_at: now,
-            text: text.clone(),
-            streaming: true,
-        },
-        _ => return,
-    };
-    let driver = inner.driver.clone();
-    drop(guard);
-    let _ = inner
-        .provider_events
-        .send(ProviderAdapterV2Event::TurnItemUpdated {
-            driver,
-            turn_item: item,
-        });
+    let events = turn_events(inner, |stream| events::project(stream, update, now));
+    send(inner, events);
+}
+
+fn native_session_id(thread: &OrchestrationV2ProviderThread) -> Option<String> {
+    thread
+        .native_thread_ref
+        .as_ref()
+        .and_then(|reference| reference.native_id.as_ref())
+        .map(|id| id.as_str().to_owned())
+}
+
+/// `session/new` and `session/load` require an absolute `cwd`. A relative path
+/// resolves against the Turin process cwd, as upstream's `process.cwd()` does.
+fn absolute_path(path: &Path) -> PathBuf {
+    let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    if path.as_os_str().is_empty() {
+        current
+    } else if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        current.join(path)
+    }
+}
+
+fn absolute_cwd(cwd: Option<&str>) -> PathBuf {
+    absolute_path(Path::new(cwd.map_or("", str::trim)))
 }
 
 #[async_trait]
@@ -963,7 +1240,10 @@ impl ProviderSessionRuntime for CursorSession {
     }
 
     fn provider_session(&self) -> &OrchestrationV2ProviderSession {
-        &self.inner.provider_session
+        self.inner
+            .published
+            .get()
+            .unwrap_or(&self.inner.provider_session)
     }
 
     fn events(&self) -> ProviderEventStream {
@@ -1085,43 +1365,32 @@ impl ProviderSessionRuntime for CursorSession {
         self.apply_model_selection(&input.model_selection)
             .await
             .map_err(|error| map_error(kind.clone(), error))?;
+        self.sync_interaction_mode(
+            input.runtime_policy.interaction_mode == ProviderInteractionMode::Plan,
+        )
+        .await
+        .map_err(|error| map_error(kind.clone(), error))?;
         let native = native_session_id(&input.provider_thread).unwrap_or_default();
-        let provider_turn_id = derive::provider_turn(
-            &self.inner.driver,
-            &format!("{native}:{}", input.run_id.as_str()),
-        );
-        *self.inner.active_turn.lock().expect("turn") = Some(ActiveTurn {
-            thread_id: input.thread_id.clone(),
-            run_id: input.run_id.clone(),
-            provider_thread_id: input.provider_thread.id.clone(),
-            provider_turn_id: provider_turn_id.clone(),
-            node_id: input.root_node_id.clone(),
-            ordinal: std::sync::atomic::AtomicU64::new(0),
-        });
-        let outcome = self.prompt(&input.message.text, &[]).await;
-        *self.inner.active_turn.lock().expect("turn") = None;
-        match outcome {
-            Ok(outcome) => {
-                self.emit_terminal(
-                    &input.provider_thread.id,
-                    &provider_turn_id,
-                    input.run_ordinal,
-                    terminal_status(outcome.stop_reason.as_deref()),
-                    None,
-                );
-                Ok(())
-            }
-            Err(error) => {
-                self.emit_terminal(
-                    &input.provider_thread.id,
-                    &provider_turn_id,
-                    input.run_ordinal,
-                    ProviderAdapterV2TurnTerminalStatus::Failed,
-                    Some(&error.to_string()),
-                );
-                Err(map_error(kind, error))
-            }
-        }
+        let context = TurnContext {
+            scope: Scope {
+                driver: self.inner.driver.clone(),
+                thread_id: input.thread_id.clone(),
+                run_id: input.run_id.clone(),
+                root_node_id: input.root_node_id.clone(),
+                provider_thread_id: input.provider_thread.id.clone(),
+                provider_turn_id: derive::provider_turn(
+                    &self.inner.driver,
+                    &format!("{native}:{}", input.run_id.as_str()),
+                ),
+            },
+            run_ordinal: input.run_ordinal,
+            provider_turn_ordinal: input.provider_turn_ordinal,
+            attempt_id: input.attempt_id.clone(),
+        };
+        self.run_turn(context, &input.message.text)
+            .await
+            .map(|_| ())
+            .map_err(|error| map_error(kind, error))
     }
 
     async fn steer_turn(
@@ -1157,27 +1426,17 @@ impl ProviderSessionRuntime for CursorSession {
         input: ProviderAdapterV2RuntimeRequestResponseInput,
     ) -> Result<(), ProviderAdapterV2Error> {
         let request_id = input.request_id.as_str();
-        let (reply, request_kind) = match self.waiting(request_id) {
+        let reply = match self.waiting(request_id) {
             Some(Waiting::Ask(params)) => {
                 let cancelled = input.decision == Some(ProviderApprovalDecision::Cancel);
-                let disposition = extensions::ask_disposition_from_answers(
+                RuntimeReply::UserInput(extensions::ask_disposition_from_answers(
                     &params,
                     input.answers.as_ref().unwrap_or(&Default::default()),
                     cancelled,
-                );
-                (
-                    RuntimeReply::UserInput(disposition),
-                    OrchestrationV2RuntimeRequestKind::UserInput,
-                )
+                ))
             }
-            Some(Waiting::Plan) => (
-                RuntimeReply::Plan(plan_disposition(input.decision)),
-                OrchestrationV2RuntimeRequestKind::UserInput,
-            ),
-            _ => (
-                RuntimeReply::Approval(input.decision.unwrap_or(ProviderApprovalDecision::Cancel)),
-                OrchestrationV2RuntimeRequestKind::Permission,
-            ),
+            Some(Waiting::Plan) => RuntimeReply::Plan(plan_disposition(input.decision)),
+            _ => RuntimeReply::Approval(input.decision.unwrap_or(ProviderApprovalDecision::Cancel)),
         };
         self.answer_request(request_id, reply).map_err(|error| {
             map_error(
@@ -1187,20 +1446,7 @@ impl ProviderSessionRuntime for CursorSession {
                 },
                 error,
             )
-        })?;
-        let status = if input.decision == Some(ProviderApprovalDecision::Cancel) {
-            OrchestrationV2RuntimeRequestStatus::Cancelled
-        } else {
-            OrchestrationV2RuntimeRequestStatus::Resolved
-        };
-        emit_runtime_request(
-            &self.inner,
-            request_id,
-            request_kind,
-            status,
-            input.decision,
-        );
-        Ok(())
+        })
     }
 
     async fn read_thread_snapshot(
@@ -1247,11 +1493,11 @@ impl ProviderSessionRuntime for CursorSession {
     }
 }
 
-/// The client's handler map holds these closures, and the client lives inside
-/// `SessionInner`. A strong `Arc` here would make the cycle permanent: the
-/// cursor-agent child is never killed and open cards never resolve. Handlers
-/// hold `Weak` and drop their strong reference before waiting on the user.
 fn register_handlers(client: &AcpClient, inner: &Arc<SessionInner>) {
+    // The client's handler map holds these closures, and the client lives inside
+    // `SessionInner`. A strong `Arc` here would make the cycle permanent: the
+    // cursor-agent child is never killed and open cards never resolve. Handlers
+    // hold `Weak` and drop their strong reference before waiting on the user.
     {
         let weak = Arc::downgrade(inner);
         client.on_session_update(move |params| {
@@ -1259,7 +1505,7 @@ fn register_handlers(client: &AcpClient, inner: &Arc<SessionInner>) {
             async move {
                 if let Some(inner) = weak.upgrade() {
                     for update in events::parse_session_update(&params) {
-                        emit_update(&inner, &update);
+                        project_update(&inner, &update);
                     }
                 }
                 Ok(())
@@ -1275,9 +1521,11 @@ fn register_handlers(client: &AcpClient, inner: &Arc<SessionInner>) {
     }
     register_ask(client, inner);
     register_plan(client, inner);
-    register_side(client, turin_acp::cursor::UPDATE_TODOS);
-    register_side(client, turin_acp::cursor::TASK);
-    register_side(client, turin_acp::cursor::GENERATE_IMAGE);
+    register_todos(client, inner);
+    // Acknowledged, not projected: the CLI ignores the reply, and the task and
+    // image payloads have no turn item in this port.
+    register_ack(client, turin_acp::cursor::TASK);
+    register_ack(client, turin_acp::cursor::GENERATE_IMAGE);
 }
 
 async fn handle_permission(
@@ -1287,14 +1535,19 @@ async fn handle_permission(
 ) -> Result<Value, AcpError> {
     let request = permissions::parse_permission_request(&params);
     let key = permissions::session_grant_key(&request);
+    let cancelled = || permissions::permission_result(&permissions::PermissionAnswer::Cancelled);
+    let Some(request_id) = request_id_of(&ctx.request_id) else {
+        return Ok(cancelled());
+    };
     let (tx, rx) = oneshot::channel();
     {
         let Some(inner) = weak.upgrade() else {
-            return Ok(permissions::permission_result(
-                &permissions::PermissionAnswer::Cancelled,
-            ));
+            return Ok(cancelled());
         };
-        if inner.grants.lock().expect("grants").contains(&key) {
+        if key
+            .as_ref()
+            .is_some_and(|key| inner.grants.lock().expect("grants").contains(key))
+        {
             return Ok(permissions::permission_result(
                 &permissions::answer_for_decision(&request, ProviderApprovalDecision::Accept),
             ));
@@ -1302,21 +1555,33 @@ async fn handle_permission(
         if permissions::is_ask_question_fallback(&request) {
             tracing::debug!(tool_call_id = ?request.tool_call_id, "cursor ask_question fallback permission");
         }
-        inner
-            .pending
-            .lock()
-            .expect("pending")
-            .insert(ctx.request_id.clone(), Pending::Permission(tx));
-        emit_runtime_request(
+        let (card, events) = open_card(
             &inner,
-            &ctx.request_id,
+            &request_id,
             permissions::request_kind(&request),
-            OrchestrationV2RuntimeRequestStatus::Pending,
-            None,
+            CardSpec {
+                node_kind: OrchestrationV2ExecutionNodeKind::ApprovalRequest,
+                body: ItemBody::ApprovalRequest {
+                    request_id: request_id.clone(),
+                    request_kind: permissions::provider_request_kind(&request),
+                    prompt: request.title.clone(),
+                    options: permissions::approval_options(&request),
+                },
+                title: request.title.clone(),
+            },
         );
+        inner.pending.lock().expect("pending").insert(
+            ctx.request_id.clone(),
+            Pending {
+                waiter: Waiter::Permission(tx),
+                card,
+            },
+        );
+        send(&inner, events);
     }
     let decision = rx.await.unwrap_or(ProviderApprovalDecision::Cancel);
-    if decision == ProviderApprovalDecision::AcceptForSession
+    if let Some(key) = key
+        && decision == ProviderApprovalDecision::AcceptForSession
         && let Some(inner) = weak.upgrade()
     {
         inner.grants.lock().expect("grants").insert(key);
@@ -1336,27 +1601,41 @@ fn register_ask(client: &AcpClient, inner: &Arc<SessionInner>) {
                     "Invalid cursor/ask_question payload.",
                 ))
             })?;
+            let cancelled =
+                || extensions::nested_outcome(&extensions::ask_result(AskDisposition::Cancelled));
+            let Some(request_id) = request_id_of(&ctx.request_id) else {
+                return Ok(cancelled());
+            };
             let (tx, rx) = oneshot::channel();
             {
                 let Some(inner) = weak.upgrade() else {
-                    return Ok(extensions::nested_outcome(&extensions::ask_result(
-                        AskDisposition::Cancelled,
-                    )));
+                    return Ok(cancelled());
                 };
-                inner.pending.lock().expect("pending").insert(
-                    ctx.request_id.clone(),
-                    Pending::Ask {
-                        sender: tx,
-                        params: parsed,
+                let questions = extensions::user_input_questions(&parsed);
+                let (card, events) = open_card(
+                    &inner,
+                    &request_id,
+                    OrchestrationV2RuntimeRequestKind::UserInput,
+                    CardSpec {
+                        node_kind: OrchestrationV2ExecutionNodeKind::UserInputRequest,
+                        body: ItemBody::UserInputRequest {
+                            request_id: request_id.clone(),
+                            questions,
+                        },
+                        title: parsed.title.clone(),
                     },
                 );
-                emit_runtime_request(
-                    &inner,
-                    &ctx.request_id,
-                    OrchestrationV2RuntimeRequestKind::UserInput,
-                    OrchestrationV2RuntimeRequestStatus::Pending,
-                    None,
+                inner.pending.lock().expect("pending").insert(
+                    ctx.request_id.clone(),
+                    Pending {
+                        waiter: Waiter::Ask {
+                            sender: tx,
+                            params: parsed,
+                        },
+                        card,
+                    },
                 );
+                send(&inner, events);
             }
             let disposition = rx.await.unwrap_or(AskDisposition::Cancelled);
             Ok(extensions::nested_outcome(&extensions::ask_result(
@@ -1371,30 +1650,60 @@ fn register_plan(client: &AcpClient, inner: &Arc<SessionInner>) {
     client.on_ext_request(turin_acp::cursor::CREATE_PLAN, move |params, ctx| {
         let weak = weak.clone();
         async move {
-            serde_json::from_value::<CreatePlanParams>(params).map_err(|_| {
+            let parsed: CreatePlanParams = serde_json::from_value(params).map_err(|_| {
                 AcpError::from(turin_acp::errors::AcpRequestError::invalid_params(
                     "Invalid cursor/create_plan payload.",
                 ))
             })?;
+            let cancelled =
+                || extensions::nested_outcome(&extensions::plan_result(PlanDisposition::Cancelled));
+            let Some(request_id) = request_id_of(&ctx.request_id) else {
+                return Ok(cancelled());
+            };
             let (tx, rx) = oneshot::channel();
             {
                 let Some(inner) = weak.upgrade() else {
-                    return Ok(extensions::nested_outcome(&extensions::plan_result(
-                        PlanDisposition::Cancelled,
-                    )));
+                    return Ok(cancelled());
                 };
-                inner
-                    .pending
-                    .lock()
-                    .expect("pending")
-                    .insert(ctx.request_id.clone(), Pending::Plan(tx));
-                emit_runtime_request(
+                let plan_native = format!("plan:{}", parsed.tool_call_id);
+                let now = UtcDateTime::now();
+                let plan_id = events::plan_id(&inner.driver, &plan_native);
+                let steps = extensions::plan_steps(&parsed.todos);
+                let (card, mut events) = open_card(
                     &inner,
-                    &ctx.request_id,
+                    &request_id,
                     OrchestrationV2RuntimeRequestKind::UserInput,
-                    OrchestrationV2RuntimeRequestStatus::Pending,
-                    None,
+                    CardSpec {
+                        node_kind: OrchestrationV2ExecutionNodeKind::UserInputRequest,
+                        body: ItemBody::ProposedPlan {
+                            plan_id: plan_id.clone(),
+                            markdown: parsed.plan.clone(),
+                            streaming: false,
+                        },
+                        title: parsed.name.clone(),
+                    },
                 );
+                events.extend(turn_events(&inner, |stream| {
+                    stream.proposed_plan(&plan_id, &request_id, &parsed.plan, now)
+                }));
+                if !steps.is_empty() {
+                    events.extend(turn_events(&inner, |stream| {
+                        stream.plan_update(
+                            &format!("todos:{}", parsed.tool_call_id),
+                            steps,
+                            OrchestrationV2TurnItemStatus::Running,
+                            now,
+                        )
+                    }));
+                }
+                inner.pending.lock().expect("pending").insert(
+                    ctx.request_id.clone(),
+                    Pending {
+                        waiter: Waiter::Plan(tx),
+                        card,
+                    },
+                );
+                send(&inner, events);
             }
             let disposition = rx.await.unwrap_or(PlanDisposition::Cancelled);
             Ok(extensions::nested_outcome(&extensions::plan_result(
@@ -1404,8 +1713,37 @@ fn register_plan(client: &AcpClient, inner: &Arc<SessionInner>) {
     });
 }
 
-/// Side-channel requests the CLI ignores. Acknowledged, not projected yet.
-fn register_side(client: &AcpClient, method: &str) {
+/// `cursor/update_todos`: the CLI sends it after the tool completes, so the list
+/// is finished when it arrives.
+fn register_todos(client: &AcpClient, inner: &Arc<SessionInner>) {
+    let weak = Arc::downgrade(inner);
+    client.on_ext_request(turin_acp::cursor::UPDATE_TODOS, move |params, _ctx| {
+        let weak = weak.clone();
+        async move {
+            if let Some(inner) = weak.upgrade() {
+                let Ok(parsed) = serde_json::from_value::<UpdateTodosParams>(params) else {
+                    tracing::warn!("cursor/update_todos payload did not parse");
+                    return Ok(json!({}));
+                };
+                let now = UtcDateTime::now();
+                let native = format!("todos:{}", parsed.tool_call_id);
+                let steps = extensions::plan_steps(&parsed.todos);
+                let events = turn_events(&inner, |stream| {
+                    stream.plan_update(
+                        &native,
+                        steps,
+                        OrchestrationV2TurnItemStatus::Completed,
+                        now,
+                    )
+                });
+                send(&inner, events);
+            }
+            Ok(json!({}))
+        }
+    });
+}
+
+fn register_ack(client: &AcpClient, method: &str) {
     client.on_ext_request(method, |_params, _ctx| async { Ok(json!({})) });
 }
 
@@ -2092,5 +2430,719 @@ mod tests {
             .unwrap()
             .success();
         assert!(!alive, "cursor-agent child {pid} survived the session drop");
+    }
+
+    /// Peer side of `initialize` and `session/new`.
+    async fn peer_open(read: &mut DuplexStream, write: &mut DuplexStream, session_id: &str) {
+        let init = read_frame(read).await;
+        write_frame(write, v1_initialized(&init["id"])).await;
+        let created = read_frame(read).await;
+        write_frame(
+            write,
+            json!({"jsonrpc":"2.0","id": created["id"], "result": {"sessionId": session_id}}),
+        )
+        .await;
+    }
+
+    fn update(params: Value) -> Value {
+        json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-t", "update": params}})
+    }
+
+    fn turn_context(session: &CursorSession, thread: &str) -> TurnContext {
+        let driver = session.inner.driver.clone();
+        let thread_id = ThreadId::new(thread).unwrap();
+        let run_id = derive::run(&thread_id, 1);
+        TurnContext {
+            scope: Scope {
+                driver: driver.clone(),
+                thread_id,
+                run_id: run_id.clone(),
+                root_node_id: derive::root_node(&run_id),
+                provider_thread_id: derive::provider_thread(
+                    &driver,
+                    Some(&session.inner.instance_id),
+                    "sess-t",
+                ),
+                provider_turn_id: derive::provider_turn(
+                    &driver,
+                    &format!("sess-t:{}", run_id.as_str()),
+                ),
+            },
+            run_ordinal: 1,
+            provider_turn_ordinal: 1,
+            attempt_id: derive::run_attempt(&run_id, 1),
+        }
+    }
+
+    /// Collects provider events up to the turn's terminal event. Runtime cards are
+    /// answered with `Accept` as they arrive, so a turn never waits on the test.
+    async fn collect_turn(session: &CursorSession, events: &mut ProviderEventStream) -> Vec<Value> {
+        let mut seen = Vec::new();
+        loop {
+            let event = next_event(events).await;
+            let value = serde_json::to_value(&event).unwrap();
+            if let ProviderAdapterV2Event::RuntimeRequestUpdated {
+                runtime_request, ..
+            } = &event
+                && runtime_request.status == OrchestrationV2RuntimeRequestStatus::Pending
+            {
+                session
+                    .respond_to_runtime_request(ProviderAdapterV2RuntimeRequestResponseInput {
+                        request_id: runtime_request.id.clone(),
+                        decision: Some(Decision::Accept),
+                        answers: None,
+                        response: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+            let terminal = matches!(event, ProviderAdapterV2Event::TurnTerminal { .. });
+            seen.push(value);
+            if terminal {
+                return seen;
+            }
+        }
+    }
+
+    /// Turn items as the client sees them, in emission order.
+    fn turn_items(events: &[Value]) -> Vec<Value> {
+        events
+            .iter()
+            .filter(|event| event["type"] == "turn_item.updated")
+            .map(|event| event["turn_item"].clone())
+            .collect()
+    }
+
+    fn last_item_with_id(items: &[Value], id: &Value) -> Value {
+        items
+            .iter()
+            .rev()
+            .find(|item| &item["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no item {id}"))
+    }
+
+    #[tokio::test]
+    async fn assistant_text_accumulates_into_one_streaming_item() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-t").await;
+            let prompt = read_frame(&mut read).await;
+            for text in ["Hel", "lo"] {
+                write_frame(
+                    &mut write,
+                    update(json!({"sessionUpdate": "agent_message_chunk", "messageId": "m1", "content": {"type": "text", "text": text}})),
+                )
+                .await;
+            }
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+            )
+            .await;
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let mut events = session.events();
+        let context = turn_context(&session, "thread-text");
+        let run = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(context, "hi").await }
+        });
+        let seen = collect_turn(&session, &mut events).await;
+        run.await.unwrap().unwrap();
+        peer.await.unwrap();
+
+        let assistant: Vec<Value> = turn_items(&seen)
+            .into_iter()
+            .filter(|item| item["type"] == "assistant_message")
+            .collect();
+        let id = assistant[0]["id"].clone();
+        // Each chunk re-emits the same item with the text so far, then one completed update.
+        let texts: Vec<(&Value, &Value, &Value)> = assistant
+            .iter()
+            .map(|item| (&item["text"], &item["status"], &item["streaming"]))
+            .collect();
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert!(assistant.iter().all(|item| item["id"] == id));
+        assert_eq!(assistant[0]["text"], "Hel");
+        assert_eq!(assistant[0]["status"], "running");
+        assert_eq!(assistant[0]["streaming"], true);
+        let last = last_item_with_id(&assistant, &id);
+        assert_eq!(last["text"], "Hello");
+        assert_eq!(last["status"], "completed");
+        assert_eq!(last["streaming"], false);
+    }
+
+    #[tokio::test]
+    async fn a_new_message_id_starts_a_new_assistant_item() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-t").await;
+            let prompt = read_frame(&mut read).await;
+            for (message, text) in [("m1", "First"), ("m2", "Second")] {
+                write_frame(
+                    &mut write,
+                    update(json!({"sessionUpdate": "agent_message_chunk", "messageId": message, "content": {"type": "text", "text": text}})),
+                )
+                .await;
+            }
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+            )
+            .await;
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let mut events = session.events();
+        let context = turn_context(&session, "thread-msg");
+        let run = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(context, "hi").await }
+        });
+        let seen = collect_turn(&session, &mut events).await;
+        run.await.unwrap().unwrap();
+        peer.await.unwrap();
+        let completed: Vec<Value> = turn_items(&seen)
+            .into_iter()
+            .filter(|item| item["type"] == "assistant_message" && item["status"] == "completed")
+            .collect();
+        assert_eq!(completed.len(), 2);
+        assert_eq!(completed[0]["text"], "First");
+        assert_eq!(completed[1]["text"], "Second");
+        assert_ne!(completed[0]["id"], completed[1]["id"]);
+    }
+
+    #[tokio::test]
+    async fn tool_calls_stream_output_and_project_command_file_and_search_items() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-t").await;
+            let prompt = read_frame(&mut read).await;
+            for params in [
+                json!({"sessionUpdate": "tool_call", "toolCallId": "call-1", "title": "Run ls", "kind": "execute", "status": "pending", "rawInput": {"command": "ls -la"}}),
+                json!({"sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": "in_progress", "content": [{"type": "content", "content": {"type": "text", "text": "total 0\n"}}]}),
+                json!({"sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": "completed", "content": [{"type": "content", "content": {"type": "text", "text": "total 0\ndone\n"}}], "rawOutput": {"exitCode": 0}}),
+                json!({"sessionUpdate": "tool_call", "toolCallId": "call-2", "title": "Edit a.rs", "kind": "edit", "status": "completed", "locations": [{"path": "src/a.rs"}], "content": [{"type": "diff", "path": "src/a.rs", "oldText": "a", "newText": "b"}]}),
+                json!({"sessionUpdate": "tool_call", "toolCallId": "call-3", "title": "Find", "kind": "search", "status": "completed", "rawInput": {"pattern": "TODO"}, "rawOutput": {"files": ["src/a.rs", "src/b.rs"]}}),
+            ] {
+                write_frame(&mut write, update(params)).await;
+            }
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+            )
+            .await;
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let mut events = session.events();
+        let context = turn_context(&session, "thread-tools");
+        let run = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(context, "hi").await }
+        });
+        let seen = collect_turn(&session, &mut events).await;
+        run.await.unwrap().unwrap();
+        peer.await.unwrap();
+
+        let items = turn_items(&seen);
+        let command_id = items
+            .iter()
+            .find(|item| item["type"] == "command_execution")
+            .unwrap()["id"]
+            .clone();
+        let streaming = items
+            .iter()
+            .filter(|item| item["id"] == command_id)
+            .map(|item| item["output"].clone())
+            .collect::<Vec<_>>();
+        // Output streams in as the tool updates; the last update is the full text.
+        assert!(streaming.contains(&json!("total 0\n")), "{streaming:?}");
+        assert_eq!(streaming.last().unwrap(), "total 0\ndone\n");
+        let command = last_item_with_id(&items, &command_id);
+        assert_eq!(command["input"], "ls -la");
+        assert_eq!(command["exitCode"], 0);
+        assert_eq!(command["status"], "completed");
+
+        let file = items
+            .iter()
+            .rev()
+            .find(|item| item["type"] == "file_change")
+            .unwrap();
+        assert_eq!(file["fileName"], "src/a.rs");
+        assert_eq!(file["oldStr"], "a");
+        assert_eq!(file["newStr"], "b");
+
+        let search = items
+            .iter()
+            .rev()
+            .find(|item| item["type"] == "file_search")
+            .unwrap();
+        assert_eq!(search["pattern"], "TODO");
+        assert_eq!(search["results"][0]["fileName"], "src/a.rs");
+        assert_eq!(search["results"][1]["fileName"], "src/b.rs");
+
+        let nodes: Vec<&Value> = seen
+            .iter()
+            .filter(|event| event["type"] == "node.updated")
+            .map(|event| &event["node"]["kind"])
+            .collect();
+        assert!(nodes.iter().any(|kind| **kind == "tool_call"));
+    }
+
+    #[tokio::test]
+    async fn failed_search_keeps_its_error_under_the_searched_path() {
+        // Upstream adapter.test.ts: a failed grep shows its error on the searched path.
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-t").await;
+            let prompt = read_frame(&mut read).await;
+            write_frame(
+                &mut write,
+                update(json!({"sessionUpdate": "tool_call", "toolCallId": "call-f", "title": "Grep", "kind": "search", "status": "failed", "rawInput": {"pattern": "TODO", "path": "src"}, "content": [{"type": "content", "content": {"type": "text", "text": "search failed"}}]})),
+            )
+            .await;
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+            )
+            .await;
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let mut events = session.events();
+        let context = turn_context(&session, "thread-search");
+        let run = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(context, "hi").await }
+        });
+        let seen = collect_turn(&session, &mut events).await;
+        run.await.unwrap().unwrap();
+        peer.await.unwrap();
+        let search = turn_items(&seen)
+            .into_iter()
+            .rev()
+            .find(|item| item["type"] == "file_search")
+            .unwrap();
+        assert_eq!(search["pattern"], "TODO");
+        assert_eq!(search["status"], "failed");
+        assert_eq!(search["results"][0]["fileName"], "src");
+        assert_eq!(search["results"][0]["preview"], "search failed");
+    }
+
+    #[tokio::test]
+    async fn acp_plan_and_cursor_todos_project_todo_lists_without_cancelled_rows() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-t").await;
+            let prompt = read_frame(&mut read).await;
+            write_frame(
+                &mut write,
+                update(json!({"sessionUpdate": "plan", "entries": [{"content": "Inspect", "status": "in_progress", "priority": "high"}, {"content": "Ship", "status": "pending", "priority": "low"}]})),
+            )
+            .await;
+            write_frame(
+                &mut write,
+                json!({"jsonrpc": "2.0", "id": 30, "method": "cursor/update_todos", "params": {"toolCallId": "t1", "merge": false, "todos": [
+                    {"id": "a", "content": "Read", "status": "completed"},
+                    {"id": "b", "content": "Skip", "status": "cancelled"},
+                    {"id": "c", "content": "   ", "status": "pending"},
+                    {"id": "d", "content": "Write", "status": "in_progress"}
+                ]}}),
+            )
+            .await;
+            let ack = read_frame(&mut read).await;
+            assert_eq!(ack["result"], json!({}));
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+            )
+            .await;
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let mut events = session.events();
+        let context = turn_context(&session, "thread-plan");
+        let run = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(context, "hi").await }
+        });
+        let seen = collect_turn(&session, &mut events).await;
+        run.await.unwrap().unwrap();
+        peer.await.unwrap();
+
+        let plans: Vec<&Value> = seen
+            .iter()
+            .filter(|event| event["type"] == "plan.updated")
+            .map(|event| &event["plan"])
+            .collect();
+        assert_eq!(plans[0]["kind"], "todo_list");
+        assert_eq!(plans[0]["steps"][0]["text"], "Inspect");
+        assert_eq!(plans[0]["steps"][0]["status"], "running");
+        // The open ACP plan is re-emitted when the turn ends, so the todo list is
+        // found by its first step rather than by position.
+        let todo_steps = &plans
+            .iter()
+            .rev()
+            .find(|plan| plan["steps"][0]["text"] == "Read")
+            .unwrap()["steps"];
+        assert_eq!(todo_steps.as_array().unwrap().len(), 2);
+        assert_eq!(todo_steps[0]["id"], "todo-1");
+        assert_eq!(todo_steps[0]["text"], "Read");
+        assert_eq!(todo_steps[0]["status"], "completed");
+        assert_eq!(todo_steps[1]["id"], "todo-2");
+        assert_eq!(todo_steps[1]["text"], "Write");
+        assert_eq!(todo_steps[1]["status"], "running");
+        let todo_items: Vec<Value> = turn_items(&seen)
+            .into_iter()
+            .filter(|item| item["type"] == "todo_list")
+            .collect();
+        assert_eq!(
+            todo_items.last().unwrap()["steps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_and_question_cards_carry_their_content_on_turn_items() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-t").await;
+            let prompt = read_frame(&mut read).await;
+            write_frame(
+                &mut write,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "session/request_permission",
+                    "params": {
+                        "sessionId": "sess-t",
+                        "toolCall": {"toolCallId": "call-p", "title": "Run ls", "kind": "execute", "rawInput": {"command": "ls"}},
+                        "options": [
+                            {"optionId": "once", "name": "Allow once", "kind": "allow_once"},
+                            {"optionId": "always", "name": "Always", "kind": "allow_always"},
+                            {"optionId": "no", "name": "Reject", "kind": "reject_once"}
+                        ]
+                    }
+                }),
+            )
+            .await;
+            let permission = read_frame(&mut read).await;
+            assert_eq!(permission["result"]["outcome"]["optionId"], "once");
+            write_frame(
+                &mut write,
+                json!({"jsonrpc": "2.0", "id": 8, "method": "cursor/ask_question", "params": {
+                    "toolCallId": "tool-q", "title": "Pick",
+                    "questions": [{"id": "q1", "prompt": "Which?", "allowMultiple": false, "options": [{"id": "a", "label": "A"}]}]
+                }}),
+            )
+            .await;
+            let asked = read_frame(&mut read).await;
+            assert_eq!(asked["result"]["outcome"]["outcome"], "skipped");
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+            )
+            .await;
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let mut events = session.events();
+        let context = turn_context(&session, "thread-cards");
+        let run = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(context, "hi").await }
+        });
+        let seen = collect_turn(&session, &mut events).await;
+        run.await.unwrap().unwrap();
+        peer.await.unwrap();
+
+        let items = turn_items(&seen);
+        let approval = items
+            .iter()
+            .rev()
+            .find(|item| item["type"] == "approval_request")
+            .unwrap();
+        assert_eq!(approval["prompt"], "Run ls");
+        let labels: Vec<&str> = approval["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|option| option["label"].as_str().unwrap())
+            .collect();
+        assert!(labels.contains(&permissions::ALLOW_FOR_THREAD_LABEL));
+        assert!(labels.contains(&permissions::ALWAYS_ALLOW_LABEL));
+        assert!(labels.contains(&"Decline"));
+        assert_eq!(approval["status"], "completed");
+
+        let question = items
+            .iter()
+            .rev()
+            .find(|item| item["type"] == "user_input_request")
+            .unwrap();
+        assert_eq!(question["questions"][0]["id"], "q1");
+        assert_eq!(question["questions"][0]["question"], "Which?");
+        assert_eq!(question["questions"][0]["options"][0]["label"], "A");
+    }
+
+    #[tokio::test]
+    async fn create_plan_card_carries_the_plan_markdown() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-t").await;
+            let prompt = read_frame(&mut read).await;
+            write_frame(
+                &mut write,
+                json!({"jsonrpc": "2.0", "id": 9, "method": "cursor/create_plan", "params": {
+                    "toolCallId": "p1", "plan": "# Plan\n- one", "todos": [{"id": "x", "content": "One", "status": "pending"}]
+                }}),
+            )
+            .await;
+            let planned = read_frame(&mut read).await;
+            assert_eq!(planned["result"]["outcome"]["outcome"], "accepted");
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+            )
+            .await;
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let mut events = session.events();
+        let context = turn_context(&session, "thread-plan-card");
+        let run = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(context, "hi").await }
+        });
+        let seen = collect_turn(&session, &mut events).await;
+        run.await.unwrap().unwrap();
+        peer.await.unwrap();
+
+        let artifact = seen
+            .iter()
+            .find(|event| {
+                event["type"] == "plan.updated" && event["plan"]["kind"] == "proposed_plan"
+            })
+            .unwrap();
+        assert_eq!(artifact["plan"]["markdown"], "# Plan\n- one");
+        let proposed = turn_items(&seen)
+            .into_iter()
+            .rev()
+            .find(|item| item["type"] == "proposed_plan")
+            .unwrap();
+        assert_eq!(proposed["markdown"], "# Plan\n- one");
+        assert_eq!(proposed["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn interrupted_turn_reports_interrupted_not_cancelled() {
+        let (client, mut read, mut write) = pair();
+        let (sent_tx, sent_rx) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-t").await;
+            let prompt = read_frame(&mut read).await;
+            let _ = sent_tx.send(());
+            write_frame(
+                &mut write,
+                update(json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "working"}})),
+            )
+            .await;
+            let cancel = read_frame(&mut read).await;
+            assert_eq!(cancel["method"], "session/cancel");
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": prompt["id"], "result": {"stopReason": "cancelled"}}),
+            )
+            .await;
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let mut events = session.events();
+        let context = turn_context(&session, "thread-interrupt");
+        let run = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(context, "stop").await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), sent_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        session.cancel_turn().await.unwrap();
+        let seen = collect_turn(&session, &mut events).await;
+        assert_eq!(
+            run.await.unwrap().unwrap().stop_reason.as_deref(),
+            Some("cancelled")
+        );
+        peer.await.unwrap();
+        let terminal = seen.last().unwrap();
+        assert_eq!(terminal["type"], "turn.terminal");
+        assert_eq!(terminal["status"], "interrupted");
+        let assistant = turn_items(&seen)
+            .into_iter()
+            .rev()
+            .find(|item| item["type"] == "assistant_message")
+            .unwrap();
+        // Upstream closes open text as completed when the turn ends, whatever the status.
+        assert_eq!(assistant["status"], "completed");
+        assert_eq!(assistant["streaming"], false);
+    }
+
+    #[tokio::test]
+    async fn provider_session_reports_the_published_record() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            let init = read_frame(&mut read).await;
+            write_frame(&mut write, v1_initialized(&init["id"])).await;
+        });
+        let session = CursorSession::from_client(client, None);
+        assert_eq!(
+            session.provider_session().status,
+            OrchestrationV2ProviderSessionStatus::Starting
+        );
+        session.initialize().await.unwrap();
+        session.publish_session();
+        assert_eq!(
+            session.provider_session().status,
+            OrchestrationV2ProviderSessionStatus::Ready
+        );
+        assert_eq!(
+            session.provider_session().capabilities,
+            session.capabilities()
+        );
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn plan_interaction_switches_the_cursor_mode_and_back() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-mode").await;
+            for expected in ["plan", "agent"] {
+                let set = read_frame(&mut read).await;
+                assert_eq!(set["method"], "session/set_mode");
+                assert_eq!(set["params"]["modeId"], expected);
+                write_frame(
+                    &mut write,
+                    json!({"jsonrpc":"2.0","id": set["id"], "result": {}}),
+                )
+                .await;
+            }
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        session.sync_interaction_mode(true).await.unwrap();
+        // A repeat of the same mode sends nothing.
+        session.sync_interaction_mode(true).await.unwrap();
+        session.sync_interaction_mode(false).await.unwrap();
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_grant_does_not_cover_a_request_without_title_or_input() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-grant").await;
+            for (id, call) in [(41, "call-a"), (42, "call-b")] {
+                write_frame(
+                    &mut write,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "method": "session/request_permission",
+                        "params": {
+                            "sessionId": "sess-grant",
+                            "toolCall": {"toolCallId": call, "kind": "execute"},
+                            "options": [{"optionId": "once", "name": "Allow once", "kind": "allow_once"}]
+                        }
+                    }),
+                )
+                .await;
+            }
+            let first = read_frame(&mut read).await;
+            assert_eq!(first["result"]["outcome"]["optionId"], "once");
+            let second = read_frame(&mut read).await;
+            assert_eq!(second["id"], 42);
+            assert_eq!(second["result"]["outcome"]["outcome"], "cancelled");
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let mut events = session.events();
+        // Each request gets its own card: an untitled, input-less request is never granted.
+        let mut answered = 0;
+        while answered < 2 {
+            let event = next_event(&mut events).await;
+            if let ProviderAdapterV2Event::RuntimeRequestUpdated {
+                runtime_request, ..
+            } = event
+                && runtime_request.status == OrchestrationV2RuntimeRequestStatus::Pending
+            {
+                let decision = if answered == 0 {
+                    Decision::AcceptForSession
+                } else {
+                    Decision::Cancel
+                };
+                session
+                    .respond_to_runtime_request(ProviderAdapterV2RuntimeRequestResponseInput {
+                        request_id: runtime_request.id,
+                        decision: Some(decision),
+                        answers: None,
+                        response: None,
+                    })
+                    .await
+                    .unwrap();
+                answered += 1;
+            }
+        }
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_a_turn_mid_prompt_closes_it_as_interrupted_and_cancels() {
+        let (client, mut read, mut write) = pair();
+        let (sent_tx, sent_rx) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            peer_open(&mut read, &mut write, "sess-drop").await;
+            let _prompt = read_frame(&mut read).await;
+            let _ = sent_tx.send(());
+            let cancel = read_frame(&mut read).await;
+            assert_eq!(cancel["method"], "session/cancel");
+            assert_eq!(cancel["params"]["sessionId"], "sess-drop");
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        let mut events = session.events();
+        let context = turn_context(&session, "thread-drop");
+        let run = tokio::spawn({
+            let session = session.clone();
+            async move { session.run_turn(context, "long").await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), sent_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        run.abort();
+        let seen = collect_turn(&session, &mut events).await;
+        let terminal = seen.last().unwrap();
+        assert_eq!(terminal["type"], "turn.terminal");
+        assert_eq!(terminal["status"], "interrupted");
+        // The turn is closed, so a late update is not projected into it.
+        assert!(session.inner.active_turn.lock().unwrap().is_none());
+        peer.await.unwrap();
     }
 }

@@ -67,25 +67,42 @@ pub fn user_input_questions(params: &AskQuestionParams) -> Vec<OrchestrationV2Us
         .collect()
 }
 
+/// Upstream `cursorTodoSteps`: cancelled and blank todos are dropped, and each
+/// kept row's id is its position among the kept rows.
 pub fn plan_steps(todos: &[CursorTodo]) -> Vec<OrchestrationV2PlanStep> {
     todos
         .iter()
+        .filter(|todo| todo.status != TodoStatus::Cancelled)
         .filter_map(|todo| {
-            Some(OrchestrationV2PlanStep {
-                id: trimmed(&todo.id)?,
-                text: trimmed(&todo.content).or_else(|| trimmed(&todo.id))?,
-                status: match todo.status {
-                    TodoStatus::Completed => OrchestrationV2PlanStepStatus::Completed,
-                    TodoStatus::InProgress => OrchestrationV2PlanStepStatus::Running,
-                    TodoStatus::Pending | TodoStatus::Cancelled => {
-                        OrchestrationV2PlanStepStatus::Pending
-                    }
-                },
-                duration_anchor_at: None,
-                duration_ms: None,
-            })
+            TrimmedNonEmptyString::new(todo.content.trim())
+                .ok()
+                .map(|text| (text, plan_step_status(&todo.status)))
         })
+        .enumerate()
+        .map(|(index, (text, status))| plan_step(index, text, status))
         .collect()
+}
+
+pub(crate) fn plan_step(
+    index: usize,
+    text: TrimmedNonEmptyString,
+    status: OrchestrationV2PlanStepStatus,
+) -> OrchestrationV2PlanStep {
+    OrchestrationV2PlanStep {
+        id: TrimmedNonEmptyString::new(format!("todo-{}", index + 1)).expect("step id"),
+        text,
+        status,
+        duration_anchor_at: None,
+        duration_ms: None,
+    }
+}
+
+fn plan_step_status(status: &TodoStatus) -> OrchestrationV2PlanStepStatus {
+    match status {
+        TodoStatus::Completed => OrchestrationV2PlanStepStatus::Completed,
+        TodoStatus::InProgress => OrchestrationV2PlanStepStatus::Running,
+        TodoStatus::Pending | TodoStatus::Cancelled => OrchestrationV2PlanStepStatus::Pending,
+    }
 }
 
 pub fn ask_result(disposition: AskDisposition) -> AskQuestionResult {

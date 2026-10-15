@@ -15,7 +15,8 @@ use turin_contracts::base_schemas::{PositiveInt, ProjectId, TrimmedNonEmptyStrin
 use turin_contracts::environment::RepositoryIdentity;
 use turin_contracts::orchestration_project::OrchestrationProjectShell;
 use turin_contracts::pull_request::{
-    PullRequestActor, PullRequestCapabilities, PullRequestLabelCandidateList,
+    PullRequestActor, PullRequestCapabilities, PullRequestInvalidateInput,
+    PullRequestLabelCandidateList,
     PullRequestMergeCapabilities, PullRequestMergeability, PullRequestRef,
     PullRequestReviewerCandidateList, PullRequestState, PullRequestThreadCommentsResult,
     PullRequestViewerPermissions,
@@ -263,6 +264,46 @@ pub fn batched_change_request(
     ProviderBatchedChangeRequest {
         base: change_request(number, updated_at),
         repository: repository.to_owned(),
+    }
+}
+
+/// What a host with a narrow preview read hands back for `changeRequest(number, updatedAt)`.
+pub fn preview_of(change_request: &ProviderChangeRequest) -> ProviderChangeRequestPreview {
+    ProviderChangeRequestPreview {
+        number: change_request.number,
+        title: change_request.title.clone(),
+        url: change_request.url.clone(),
+        author: change_request.author.clone(),
+        state: change_request.state,
+        is_draft: change_request.is_draft,
+        created_at: change_request.created_at.clone(),
+    }
+}
+
+/// Decodes a service input from the object literal a test would write upstream.
+pub fn input<T: serde::de::DeserializeOwned>(value: Value) -> T {
+    serde_json::from_value(value).unwrap()
+}
+
+/// A reference as the object literal upstream spreads into other inputs (`{ ...ref, ... }`).
+pub fn ref_json(reference: &PullRequestRef) -> Value {
+    serde_json::to_value(reference).unwrap()
+}
+
+/// `{ ...ref, ...extra }`
+pub fn with_ref(reference: &PullRequestRef, extra: Value) -> Value {
+    let mut value = ref_json(reference);
+    if let (Some(target), Value::Object(extra)) = (value.as_object_mut(), extra) {
+        target.extend(extra);
+    }
+    value
+}
+
+/// `service.invalidate({ reference })`
+pub fn invalidate_ref(reference: &PullRequestRef) -> PullRequestInvalidateInput {
+    PullRequestInvalidateInput {
+        reference: Some(reference.clone()),
+        files_viewed_only: None,
     }
 }
 

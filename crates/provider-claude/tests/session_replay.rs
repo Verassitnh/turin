@@ -95,7 +95,8 @@ impl Harness {
 
     /// Replays inline NDJSON entries (for shapes the fixtures do not cover).
     fn lines(entries: &[Value]) -> Self {
-        let dir = std::env::temp_dir().join(format!("turin-claude-replay-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("turin-claude-replay-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("transcript.ndjson");
         let body: String = entries.iter().map(|e| format!("{e}\n")).collect();
@@ -239,7 +240,10 @@ fn message(id_text: &str, text: &str) -> ProviderAdapterV2TurnMessage {
 /// replay; the replay itself drives the sequence.
 async fn until_terminal(
     events: &mut ProviderEventStream,
-) -> (Vec<ProviderAdapterV2Event>, ProviderAdapterV2TurnTerminalStatus) {
+) -> (
+    Vec<ProviderAdapterV2Event>,
+    ProviderAdapterV2TurnTerminalStatus,
+) {
     let mut seen = vec![];
     loop {
         let event = tokio::time::timeout(Duration::from_secs(20), events.next())
@@ -283,16 +287,19 @@ async fn simple_fixture_completes_one_turn() {
     let mut events = runtime.events();
     let thread = harness.ensure(runtime.as_ref()).await;
     runtime
-        .start_turn(harness.turn_input(
-            thread,
-            "Respond with the following text: fixture simple ok",
-        ))
+        .start_turn(
+            harness.turn_input(thread, "Respond with the following text: fixture simple ok"),
+        )
         .await
         .expect("start turn");
 
     let (seen, status) = until_terminal(&mut events).await;
     assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
-    assert!(assistant_texts(&seen).iter().any(|t| t == "fixture simple ok"));
+    assert!(
+        assistant_texts(&seen)
+            .iter()
+            .any(|t| t == "fixture simple ok")
+    );
 }
 
 #[tokio::test]
@@ -370,7 +377,11 @@ async fn steering_replaces_the_active_prompt_and_completes() {
 
     let (seen, status) = until_terminal(&mut events).await;
     assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
-    assert!(assistant_texts(&seen).iter().any(|t| t == "steering fixture observed"));
+    assert!(
+        assistant_texts(&seen)
+            .iter()
+            .any(|t| t == "steering fixture observed")
+    );
 }
 
 #[tokio::test]
@@ -396,14 +407,11 @@ async fn interrupt_reaches_the_cli_and_marks_the_turn_interrupted() {
 
     let (seen, status) = until_terminal(&mut events).await;
     assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Interrupted);
-    let turn = seen
-        .iter()
-        .rev()
-        .find_map(|event| match event {
-            ProviderAdapterV2Event::ProviderTurnUpdated { provider_turn, .. } => {
-                Some(provider_turn.status)
-            }
-            _ => None,
-        });
+    let turn = seen.iter().rev().find_map(|event| match event {
+        ProviderAdapterV2Event::ProviderTurnUpdated { provider_turn, .. } => {
+            Some(provider_turn.status)
+        }
+        _ => None,
+    });
     assert_eq!(turn, Some(OrchestrationV2ProviderTurnStatus::Interrupted));
 }

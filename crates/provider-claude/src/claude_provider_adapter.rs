@@ -1,4 +1,7 @@
 //! Port of upstream/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts provider-core boundary.
+// `ProviderAdapterV2Error` is the provider-core trait's error type; boxing it
+// here would only diverge from the trait.
+#![allow(clippy::result_large_err)]
 use crate::{
     claude_adapter_v2::{ClaudeAdapterEvent, ClaudeAdapterV2, ClaudeHostRequest},
     claude_model_catalog::ClaudeModelCatalog,
@@ -132,7 +135,7 @@ fn make_thread(
         context_usage: None,
         native_metadata: None,
         goal: None,
-        created_at: now.clone(),
+        created_at: now,
         updated_at: now,
     }
 }
@@ -205,7 +208,7 @@ impl ProviderAdapterV2 for ClaudeProviderAdapter {
             cwd: tne(&cwd),
             model: Some(input.model_selection.model.clone()),
             capabilities: claude_provider_capabilities_v2(),
-            created_at: now.clone(),
+            created_at: now,
             updated_at: now,
             last_error: None,
         };
@@ -259,6 +262,9 @@ impl Drop for ClaudeSessionRuntime {
     }
 }
 
+/// Short-lived request messages; boxing the large variants would add an
+/// allocation per call for no lasting size win.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     Ensure(
         ProviderAdapterV2EnsureThreadInput,
@@ -443,6 +449,7 @@ struct ClaudeActor {
     events: mpsc::UnboundedSender<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Action {
     Command(Option<Command>),
     Event(Option<ClaudeAdapterEvent>),
@@ -606,7 +613,7 @@ impl ClaudeActor {
             }),
             ordinal,
             status: OrchestrationV2ProviderTurnStatus::Running,
-            started_at: Some(now.clone()),
+            started_at: Some(now),
             completed_at: None,
             token_usage: None,
             turn_token_usage: None,
@@ -943,7 +950,7 @@ impl ClaudeActor {
             context: None,
             attachments: vec![],
             streaming: false,
-            created_at: now.clone(),
+            created_at: now,
             updated_at: now,
             delegated_completion: None,
         };
@@ -1005,7 +1012,7 @@ impl ClaudeActor {
                 OrchestrationV2ProviderTurnStatus::Failed
             }
         };
-        active.turn.completed_at = Some(now.clone());
+        active.turn.completed_at = Some(now);
         active.thread.status = OrchestrationV2ProviderThreadStatus::Idle;
         active.thread.updated_at = now;
         let turn = active.turn.clone();

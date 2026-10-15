@@ -68,9 +68,8 @@ impl ProviderAdapterDriver for ClaudeDriver {
     }
 
     fn decode_config(&self, raw: &Value) -> Result<Value, String> {
-        decode(raw).and_then(|settings| {
-            serde_json::to_value(settings).map_err(|error| error.to_string())
-        })
+        decode(raw)
+            .and_then(|settings| serde_json::to_value(settings).map_err(|error| error.to_string()))
     }
 
     async fn create(

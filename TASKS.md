@@ -91,7 +91,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T00c | QC low items: UtcDateTime parse bounds/leap/zone-less, private field; `forward_compatible_*::optional` | `crates/contracts/src/base_schemas.rs` | Sonnet | todo (after T01 merges, to avoid conflicts) |
 | T01 | Port all kept contracts modules | `crates/contracts` | GLM → Sonnet | r3 active (resume after Claude limit; merging t01-aud-a..e) |
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | done (merged; QC PASS) |
-| T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | re-QC FAIL (1 high: Db drop deadlock) → T02c (Haiku) |
+| T02b | Persistence QC fix round (15 medium, 27 low) | `crates/persistence` | Grok | done (merged with T02c) |
 | T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | QC FAIL (1 high) → fix round r4 active; sidebar items moved to T15 |
 | T04 | Protocol research: Claude Agent SDK control protocol, `@cursor/sdk`, OpenCode v2 client | `docs/protocols/` | Codex | re-QC wf_9dc37bfd-861 FAIL (3 high: Cursor ext result nesting, OpenCode v1 dir routing, OpenCode auto perms) → T04c (Haiku) + implementers steered |
 
@@ -100,7 +100,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
 | T04c | Apply T04b re-QC corrections to protocol docs | `docs/protocols` | Haiku | done (16/16) → verify QC wf_6497dded-82d |
-| T02c | Persistence: Db drop deadlock + index DDL whitespace (from T02b re-QC) | `crates/persistence` | Haiku | active |
+| T02c | Persistence: Db drop deadlock + index DDL whitespace (from T02b re-QC) | `crates/persistence` | Haiku | done (merged; test catches bug, 6.5k cycles clean) |
 | T05a | Shared utils, contract-free files | `crates/shared` | GLM → Sonnet → Grok | r3 active (Grok) |
 | T05b | Shared utils, contract-dependent files | `crates/shared` | GLM | todo (after T01) |
 | T06 | Git: vcs drivers, GitManager, GitWorkflowService, checkpointing, workspace | `crates/git` | Grok | r2 active (core execute/parsers/checkpoints done) |

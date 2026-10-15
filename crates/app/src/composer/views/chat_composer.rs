@@ -142,6 +142,12 @@ impl ChatComposer {
         };
         this.install_key_handler(cx);
         this.apply_demo(window, cx);
+        // The composer takes focus when a thread opens.
+        let weak = cx.weak_entity();
+        window.defer(cx, move |window, cx| {
+            weak.update(cx, |this, cx| this.focus_editor(window, cx))
+                .ok();
+        });
         this
     }
 

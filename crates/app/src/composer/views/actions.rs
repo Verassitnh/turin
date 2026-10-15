@@ -564,7 +564,12 @@ impl ChatComposer {
             .or_else(|| entries.first().cloned());
         match key.key.as_str() {
             "Escape" => {
-                self.close_layer(window, cx);
+                // The editor is mid-update: close once it has returned.
+                let weak = cx.weak_entity();
+                window.defer(cx, move |window, cx| {
+                    weak.update(cx, |this, cx| this.close_layer(window, cx))
+                        .ok();
+                });
                 true
             }
             "ArrowDown" | "ArrowUp" if !entries.is_empty() => {

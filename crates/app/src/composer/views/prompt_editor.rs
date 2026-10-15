@@ -65,6 +65,10 @@ pub struct CommandKey {
     pub meta: bool,
     pub ctrl: bool,
     pub is_composing: bool,
+    /// The caret sits on the first / last visual line (for history recall);
+    /// only filled for ArrowUp / ArrowDown.
+    pub caret_on_first_line: bool,
+    pub caret_on_last_line: bool,
 }
 
 impl CommandKey {
@@ -77,6 +81,8 @@ impl CommandKey {
             meta: modifiers.platform,
             ctrl: modifiers.control,
             is_composing: false,
+            caret_on_first_line: false,
+            caret_on_last_line: false,
         }
     }
 
@@ -402,15 +408,20 @@ impl PromptEditor {
         if self.config.disabled {
             return;
         }
-        let key = CommandKey::from_event(event);
+        let mut key = CommandKey::from_event(event);
         let modifiers = event.keystroke.modifiers;
         let command = modifiers.platform;
+        if matches!(key.key.as_str(), "ArrowUp" | "ArrowDown") {
+            key.caret_on_first_line = self.is_caret_on_visual_edge(true);
+            key.caret_on_last_line = self.is_caret_on_visual_edge(false);
+        }
 
-        // Keys the host may claim first (menu navigation, send, history).
-        if matches!(
+        // Keys the host may claim first (menu navigation, send, history, stash).
+        if (matches!(
             key.key.as_str(),
             "Enter" | "Tab" | "Escape" | "ArrowUp" | "ArrowDown"
-        ) && let Some(handler) = self.command_handler.clone()
+        ) || (command && matches!(key.key.as_str(), "s" | "Backspace")))
+            && let Some(handler) = self.command_handler.clone()
             && handler(&mut self.state, &key, window, cx)
         {
             cx.stop_propagation();

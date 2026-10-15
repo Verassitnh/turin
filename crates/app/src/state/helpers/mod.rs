@@ -25,5 +25,6 @@ pub mod usage_access;
 pub mod usage_progress;
 pub mod user_message;
 pub mod vcs;
+pub mod vcs_action;
 pub mod vcs_ref;
 pub mod vcs_ref_invalidation;

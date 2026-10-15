@@ -7,8 +7,17 @@ license.workspace = true
 [dependencies]
 turin-contracts.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
+markdown.workspace = true
+percent-encoding.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+unicode-normalization.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

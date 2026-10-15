@@ -54,7 +54,7 @@ The committed exports were produced with this toolchain:
 - Icon Composer `ictool` 27.0 (bundle 129), from Xcode in `/Applications`, design generation 26
 - Python 3.14.3, numpy 2.5.4, Pillow 12.3.0 (zlib-ng 1.3.1, FreeType 2.14.3), pypng 0.20220715.0,
   scipy 1.18.1
-- macOS `sips` and `iconutil`, on macOS 27.0
+- macOS `sips` and `iconutil`, on macOS 27.0.1
 
 With that toolchain, re-running the script reproduces every committed file byte-for-byte, so
 `git status assets/` shows whether the exports are stale. A different `ictool` build changes

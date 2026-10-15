@@ -33,6 +33,8 @@ use crate::text_generation_operations::{
 /// Upstream `CURSOR_TIMEOUT_MS`. It covers everything from spawning the child to the reply.
 const CURSOR_TIMEOUT: Duration = Duration::from_secs(180);
 /// Upstream bounds the native cancel with a 5 second timeout, so a wedged pipe cannot hang the request.
+/// Sent after `session/cancel` so the cancel is written before the child is killed.
+const CURSOR_CANCEL_BARRIER: &str = "_t3/cancel_barrier";
 const CURSOR_CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 const CURSOR_BINARY: &str = "cursor-agent";
 const CURSOR_CLIENT_NAME: &str = "turin";
@@ -152,6 +154,7 @@ impl CursorAcpConnector for CursorAgentProcess {
             stdout,
             stdin,
             Some(on_eof),
+            None,
             Some(shutdown),
         ))
     }
@@ -369,11 +372,15 @@ impl CursorRunner {
         let result = match tokio::time::timeout_at(deadline, prompt).await {
             Ok(result) => result.map_err(|error| failed(operation, error))?,
             Err(_) => {
-                // Upstream cancels the native run when the request times out.
-                let _ = tokio::time::timeout(
-                    CURSOR_CANCEL_TIMEOUT,
-                    client.cancel(json!({"sessionId": session_id})),
-                )
+                // Upstream cancels the native run when the request times out. `cancel` is a
+                // notification with no write acknowledgement, and the child is killed as soon as
+                // this request returns. The request after it is a barrier: the writer is FIFO, so
+                // the peer can answer it only after it has read the cancel. Its answer is not
+                // needed; the timeout bounds the wait if the peer never answers.
+                let _ = tokio::time::timeout(CURSOR_CANCEL_TIMEOUT, async {
+                    let _ = client.cancel(json!({"sessionId": session_id})).await;
+                    let _ = client.ext_request(CURSOR_CANCEL_BARRIER, json!({})).await;
+                })
                 .await;
                 return Err(detail_error(operation, "Cursor SDK request timed out."));
             }

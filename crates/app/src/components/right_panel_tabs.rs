@@ -8,12 +8,17 @@
 //! placeholder until the diff task. The resize handle is drawn by
 //! `AppSidebarLayout`, which owns the width.
 
+use std::sync::Arc;
+
 use gpui_kit::{
     App, CursorStyle, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
     RenderOnce, Styled as _, Window, div, rems,
 };
 
 use super::drag_region::{DragRegion as _, no_drag};
+use crate::components::chat::timeline::fixtures::startup_thread;
+use crate::diff::mock_source::MockDiffSource;
+use crate::diff::panel::DiffPanel;
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_MD, TEXT_SM, TEXT_XS, WORKSPACE_TOPBAR_HEIGHT};
@@ -76,6 +81,10 @@ pub struct RightPanelTabs;
 impl RenderOnce for RightPanelTabs {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme().clone();
+        let diff_panel = window.use_keyed_state("diff-panel", cx, |window, cx| {
+            let source = Arc::new(MockDiffSource::new(startup_thread().checkpoints));
+            DiffPanel::new(source, window, cx)
+        });
         div()
             .flex()
             .flex_col()
@@ -116,22 +125,14 @@ impl RenderOnce for RightPanelTabs {
                     .drag_region(window, cx),
             )
             .child(
+                // The diff surface (`DiffPanel`, mode "embedded"): below the tab
+                // bar, filling the rest of the column.
                 div()
                     .flex()
-                    .flex_1()
                     .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap_1()
-                    .text_size(TEXT_SM.size)
-                    .text_color(theme.muted_foreground)
-                    .child("No changes yet")
-                    .child(
-                        div()
-                            .text_size(TEXT_XS.size)
-                            .text_color(with_alpha(theme.muted_foreground, 0.6))
-                            .child("Turn diffs will appear here."),
-                    ),
+                    .flex_1()
+                    .min_h_0()
+                    .child(diff_panel),
             )
     }
 }

@@ -242,8 +242,9 @@ impl TimelineSource for MockTimelineSource {
         tracing::info!(turn_count, message_id, "mock: revert to turn count");
     }
 
-    fn open_turn_diff(&self, run_id: &str, file_path: Option<&str>, _: &mut App) {
+    fn open_turn_diff(&self, run_id: &str, file_path: Option<&str>, cx: &mut App) {
         tracing::info!(run_id, ?file_path, "mock: open turn diff");
+        crate::diff::request_open_turn_diff(run_id, file_path, cx);
     }
 
     fn open_thread(&self, thread_id: &str, _: &mut App) {

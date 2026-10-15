@@ -365,6 +365,9 @@ pub fn notification_turn_item(
     let base = turn_item_common(item);
     OrchestrationV2TurnItem::Notification {
         tool_non_execution_kind: tool_non_execution_kind.clone(),
+        tool_surface: None,
+        tool_icon: None,
+        tool_source: None,
         id: base.id.clone(),
         thread_id: base.thread_id.clone(),
         run_id: base.run_id.cloned(),
@@ -521,6 +524,9 @@ mod tests {
         let now = UtcDateTime::now();
         OrchestrationV2TurnItem::UserMessage {
             tool_non_execution_kind: None,
+            tool_surface: None,
+            tool_icon: None,
+            tool_source: None,
             id: TurnItemId::new("item:delivery").unwrap(),
             thread_id: ThreadId::new("thread:parent").unwrap(),
             run_id: Some(RunId::new("run:delivery").unwrap()),

@@ -18,6 +18,7 @@ use super::sidebar::sidebar_chrome::WORKSPACE_TITLEBAR_CONTENT_LEFT;
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{CHAT_CONTENT_MAX_WIDTH, TEXT_SM, WORKSPACE_TOPBAR_HEIGHT};
+use gpui_kit::prelude::FluentBuilder as _;
 
 #[derive(IntoElement)]
 pub struct ChatView {
@@ -71,6 +72,10 @@ impl RenderOnce for ChatView {
                     .flex_col()
                     .flex_1()
                     .min_h_0()
+                    .when(
+                        std::env::var("TURIN_DEMO").is_ok_and(|v| v == "markdown"),
+                        |this| this.child(markdown_demo()),
+                    )
                     .child(
                         // Empty server thread (MessagesTimeline.tsx).
                         div()
@@ -100,4 +105,41 @@ impl RenderOnce for ChatView {
                     ),
             )
     }
+}
+
+// TEMP(T16): markdown harness, removed once the timeline view lands.
+fn markdown_demo() -> impl IntoElement {
+    use super::chat::markdown::ChatMarkdown;
+    use super::chat::timeline::fixtures::long_thread;
+    use super::chat::timeline::turn_item::TurnItemPayload;
+    let thread = long_thread(6);
+    let texts: Vec<String> = thread
+        .items
+        .iter()
+        .filter_map(|item| match &item.item.payload {
+            TurnItemPayload::AssistantMessage { text, .. } => Some(text.clone()),
+            TurnItemPayload::ProposedPlan { markdown, .. } => Some(markdown.clone()),
+            _ => None,
+        })
+        .skip(
+            std::env::var("TURIN_DEMO_SKIP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+        )
+        .collect();
+    crate::ui::scroll_area("md-demo").child(
+        div().px(rems(3.)).py_4().child(
+            div()
+                .mx_auto()
+                .w_full()
+                .max_w(CHAT_CONTENT_MAX_WIDTH)
+                .flex()
+                .flex_col()
+                .gap_6()
+                .children(texts.into_iter().enumerate().map(|(ix, text)| {
+                    ChatMarkdown::new(("md-demo", ix), text).document_order(ix as u64 * 10_000)
+                })),
+        ),
+    )
 }

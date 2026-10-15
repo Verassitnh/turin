@@ -86,9 +86,13 @@ pub fn github_markdown_links(markdown_source: &str, pull_request_url: Option<&st
             return;
         }
         if let Node::Text(_) = node {
-            let Some((start, end)) = offsets(node) else { return };
+            let Some((start, end)) = offsets(node) else {
+                return;
+            };
             // Work on source slices so escaped references and Markdown offsets stay intact.
-            let Some(slice) = source.get(start..end) else { return };
+            let Some(slice) = source.get(start..end) else {
+                return;
+            };
             for captures in REFERENCE.captures_iter(slice).flatten() {
                 let whole = captures.get(0).expect("group 0");
                 let label = whole.as_str();

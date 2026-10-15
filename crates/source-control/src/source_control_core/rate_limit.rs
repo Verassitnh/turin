@@ -67,7 +67,7 @@ fn normalized_key(provider: &SourceControlProviderKind, host: &str, scope: &str)
 }
 
 fn fallback_cooldown_ms(attempt: i64) -> i64 {
-    let exponent = (attempt - 1).max(0).min(60) as i32;
+    let exponent = (attempt - 1).clamp(0, 60) as i32;
     (FALLBACK_COOLDOWN_MS * 2f64.powi(exponent)).min(MAX_FALLBACK_COOLDOWN_MS) as i64
 }
 

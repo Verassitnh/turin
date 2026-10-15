@@ -120,7 +120,11 @@ pub struct FilterComposerPullRequestMatchesInput<'a, Entry, Linked> {
 }
 
 fn key_of(entry: &impl ComposerPullRequestMatch) -> String {
-    format!("{}#{}", entry.repository().trim().to_lowercase(), entry.number())
+    format!(
+        "{}#{}",
+        entry.repository().trim().to_lowercase(),
+        entry.number()
+    )
 }
 
 /// JS `localeCompare` for ISO timestamps: plain code-point order is what the strings need.
@@ -141,7 +145,11 @@ where
 {
     let repository = input.repository.trim().to_lowercase();
     let contains_query = |number: u64| number.to_string().contains(input.query);
-    let linked: Vec<&Linked> = input.linked.iter().filter(|e| contains_query(e.number())).collect();
+    let linked: Vec<&Linked> = input
+        .linked
+        .iter()
+        .filter(|e| contains_query(e.number()))
+        .collect();
     let linked_keys: HashSet<String> = linked.iter().map(|e| key_of(*e)).collect();
     let matching_entries = input.entries.iter().filter(|entry| {
         entry.project_id() == input.project_id
@@ -210,7 +218,12 @@ mod tests {
         }
     }
 
-    fn filter(entries: &[Row], linked: &[ComposerLinkedPullRequest], query: &str, limit: usize) -> Vec<ComposerMatch<Row, ComposerLinkedPullRequest>> {
+    fn filter(
+        entries: &[Row],
+        linked: &[ComposerLinkedPullRequest],
+        query: &str,
+        limit: usize,
+    ) -> Vec<ComposerMatch<Row, ComposerLinkedPullRequest>> {
         filter_composer_pull_request_matches(FilterComposerPullRequestMatchesInput {
             entries,
             linked,
@@ -224,12 +237,19 @@ mod tests {
     #[test]
     fn ranks_the_exact_number_above_newer_substring_matches() {
         let result = filter(
-            &[entry(1234, "2026-01-03"), entry(123, "2026-01-01"), entry(1230, "2026-01-02")],
+            &[
+                entry(1234, "2026-01-03"),
+                entry(123, "2026-01-01"),
+                entry(1230, "2026-01-02"),
+            ],
             &[],
             "123",
             10,
         );
-        assert_eq!(result.iter().map(|m| m.number()).collect::<Vec<_>>(), vec![123, 1234, 1230]);
+        assert_eq!(
+            result.iter().map(|m| m.number()).collect::<Vec<_>>(),
+            vec![123, 1234, 1230]
+        );
     }
 
     #[test]
@@ -243,7 +263,11 @@ mod tests {
     #[test]
     fn de_duplicates_and_honours_the_limit() {
         let result = filter(
-            &[entry(7, "2026-01-02"), entry(7, "2026-01-01"), entry(8, "2026-01-03")],
+            &[
+                entry(7, "2026-01-02"),
+                entry(7, "2026-01-01"),
+                entry(8, "2026-01-03"),
+            ],
             &[],
             "",
             1,
@@ -251,7 +275,12 @@ mod tests {
         assert_eq!(result.len(), 1);
     }
 
-    fn link(repository: &str, number: u64, source: ThreadPullRequestLinkSource, synced: bool) -> ThreadPullRequestLink {
+    fn link(
+        repository: &str,
+        number: u64,
+        source: ThreadPullRequestLinkSource,
+        synced: bool,
+    ) -> ThreadPullRequestLink {
         serde_json::from_value(serde_json::json!({
             "host": "github.com",
             "repository": repository,
@@ -284,11 +313,19 @@ mod tests {
 
     #[test]
     fn offers_a_linked_pull_request_from_another_repository_above_the_projects_own() {
-        let other = Row { repository: "owner/other".into(), ..entry(4, "2026-01-04") };
+        let other = Row {
+            repository: "owner/other".into(),
+            ..entry(4, "2026-01-04")
+        };
         let result = filter_composer_pull_request_matches(FilterComposerPullRequestMatchesInput {
             entries: &[entry(4, "2026-01-03"), other],
             linked: &composer_pull_requests_from_links(
-                &[link("owner/repo-b", 4, ThreadPullRequestLinkSource::Agent, true)],
+                &[link(
+                    "owner/repo-b",
+                    4,
+                    ThreadPullRequestLinkSource::Agent,
+                    true,
+                )],
                 "p1",
             ),
             project_id: "p1",
@@ -297,7 +334,10 @@ mod tests {
             limit: 10,
         });
         assert_eq!(
-            result.iter().map(|m| format!("{}#{}", m.repository(), m.number())).collect::<Vec<_>>(),
+            result
+                .iter()
+                .map(|m| format!("{}#{}", m.repository(), m.number()))
+                .collect::<Vec<_>>(),
             vec!["owner/repo-b#4", "owner/repo#4"]
         );
     }
@@ -307,7 +347,12 @@ mod tests {
         let result = filter(
             &[entry(4, "2026-01-03")],
             &composer_pull_requests_from_links(
-                &[link("Owner/Repo", 4, ThreadPullRequestLinkSource::Agent, true)],
+                &[link(
+                    "Owner/Repo",
+                    4,
+                    ThreadPullRequestLinkSource::Agent,
+                    true,
+                )],
                 "p1",
             ),
             "",
@@ -322,7 +367,12 @@ mod tests {
             composer_pull_requests_from_links(
                 &[
                     link("owner/repo-b", 4, ThreadPullRequestLinkSource::Agent, false),
-                    link("owner/repo-b", 5, ThreadPullRequestLinkSource::StackDismissed, true),
+                    link(
+                        "owner/repo-b",
+                        5,
+                        ThreadPullRequestLinkSource::StackDismissed,
+                        true
+                    ),
                 ],
                 "p1"
             )

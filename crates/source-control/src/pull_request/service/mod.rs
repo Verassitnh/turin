@@ -57,11 +57,12 @@ use turin_contracts::pull_request::{
     PullRequestLabelCandidateList, PullRequestLabelChangeInput, PullRequestListInput,
     PullRequestListResult, PullRequestListStatsInput, PullRequestListStatsResult,
     PullRequestPreview, PullRequestReactionInput, PullRequestRef, PullRequestReportStateInput,
-    PullRequestReviewerCandidateList, PullRequestReviewerRequestInput, PullRequestRoutingIdentityInput,
-    PullRequestRoutingIdentityResult, PullRequestRoutingResult, PullRequestSetFilesViewedInput,
-    PullRequestStack, PullRequestState, PullRequestSubmitReviewInput, PullRequestSummary,
-    PullRequestThreadCommentsInput, PullRequestThreadCommentsResult, PullRequestThreadReplyInput,
-    PullRequestThreadResolutionInput, PullRequestUpdateInput,
+    PullRequestReviewerCandidateList, PullRequestReviewerRequestInput,
+    PullRequestRoutingIdentityInput, PullRequestRoutingIdentityResult, PullRequestRoutingResult,
+    PullRequestSetFilesViewedInput, PullRequestStack, PullRequestState,
+    PullRequestSubmitReviewInput, PullRequestSummary, PullRequestThreadCommentsInput,
+    PullRequestThreadCommentsResult, PullRequestThreadReplyInput, PullRequestThreadResolutionInput,
+    PullRequestUpdateInput,
 };
 use turin_contracts::thread_pull_request::ThreadPullRequestKey;
 use turin_persistence::Db;
@@ -70,11 +71,11 @@ use self::cache::{Background, LastGood, StaleDiff, TtlCache};
 use self::detail::{PullRequestReading, detail_time_to_live};
 use self::epochs::{CredentialRef, Epochs, ref_scope};
 use self::errors::{PullRequestError, error_tag, tne};
-use self::ports::{PullRequestProjectSource, PullRequestSettings, RepositoryIdentityResolver};
-use self::viewers::{HeldViewer, ResolvedViewer, ViewerTarget};
 pub use self::errors::{is_provider_unusable, to_pull_request_error};
+use self::ports::{PullRequestProjectSource, PullRequestSettings, RepositoryIdentityResolver};
 pub use self::projects::SupportedProject;
 pub use self::routing::RoutingCredential;
+use self::viewers::{HeldViewer, ResolvedViewer, ViewerTarget};
 use crate::pull_request::provider_registry::PullRequestProviderRegistry;
 use crate::pull_request::read_cache::PullRequestReadCache;
 use crate::pull_request::review_guide_service::ReviewGuidePullRequests;
@@ -351,9 +352,9 @@ impl ViewedFilesDependencies for ViewedDeps {
     type Error = PullRequestError;
 
     fn ref_epoch(&self, reference: &PullRequestRef) -> u64 {
-        self.inner.upgrade().map_or(0, |inner| {
-            inner.state.lock().epochs.ref_epoch(reference)
-        })
+        self.inner
+            .upgrade()
+            .map_or(0, |inner| inner.state.lock().epochs.ref_epoch(reference))
     }
 
     fn file_revisions_epoch(&self) -> u64 {
@@ -726,7 +727,9 @@ impl PullRequestService {
         recover_transient_failure: Option<bool>,
     ) -> Result<PullRequestSummary, PullRequestError> {
         let reference = self.inner.credential_ref(input).await?;
-        self.inner.summary(&reference, recover_transient_failure).await
+        self.inner
+            .summary(&reference, recover_transient_failure)
+            .await
     }
 
     /// The host-native stack the pull request belongs to, or `None` when it is not in one or the

@@ -75,7 +75,9 @@ pub async fn cascade_rebase_stack(
     host: &dyn SourceControlHost,
     input: &CascadeRebaseInput,
 ) -> Result<u64, GitHubStackRebaseError> {
-    let Some(first) = input.layers.first() else { return Ok(0) };
+    let Some(first) = input.layers.first() else {
+        return Ok(0);
+    };
     let credential = api.credential(&input.host).await.map_err(|error| {
         // Unlike upstream (where a credential failure escapes untyped), keep it a typed git error.
         GitHubStackRebaseGitError {
@@ -182,7 +184,9 @@ async fn cascade_in_directory(
             .iter()
             .map(|l| format!("+refs/heads/{0}:refs/remotes/origin/{0}", l.head_branch)),
     );
-    git(fetch, false).await.map_err(failed("fetching", first.number, 0))?;
+    git(fetch, false)
+        .await
+        .map_err(failed("fetching", first.number, 0))?;
 
     let mut parent_old = format!("origin/{}", input.base);
     let mut parent_new = format!("origin/{}", input.base);
@@ -191,18 +195,24 @@ async fn cascade_in_directory(
         // The bottom layer's old parent is where it forked from the base; above that it is the
         // reviewed head of the layer below, which is exactly the commits this layer must not replay.
         let upstream = if index == 0 {
-            git(strings(&["merge-base", &parent_old, &layer.head_sha]), false)
-                .await
-                .map_err(failed("reading the fork point", layer.number, completed))?
-                .stdout
-                .trim()
-                .to_owned()
+            git(
+                strings(&["merge-base", &parent_old, &layer.head_sha]),
+                false,
+            )
+            .await
+            .map_err(failed("reading the fork point", layer.number, completed))?
+            .stdout
+            .trim()
+            .to_owned()
         } else {
             parent_old.clone()
         };
-        git(strings(&["checkout", "--quiet", "--detach", &layer.head_sha]), false)
-            .await
-            .map_err(failed("checking out", layer.number, completed))?;
+        git(
+            strings(&["checkout", "--quiet", "--detach", &layer.head_sha]),
+            false,
+        )
+        .await
+        .map_err(failed("checking out", layer.number, completed))?;
         let rebase = git(
             strings(&["rebase", "--quiet", "--onto", &parent_new, &upstream]),
             true,
@@ -211,7 +221,11 @@ async fn cascade_in_directory(
         .map_err(failed("rebasing", layer.number, completed))?;
         if rebase.exit_code != 0 {
             let _ = git(strings(&["rebase", "--abort"]), true).await;
-            return Err(GitHubStackRebaseConflictError { number: layer.number, completed }.into());
+            return Err(GitHubStackRebaseConflictError {
+                number: layer.number,
+                completed,
+            }
+            .into());
         }
         let rebased = git(strings(&["rev-parse", "HEAD"]), false)
             .await
@@ -309,7 +323,10 @@ mod tests {
         ) -> Result<Option<String>, GitCommandError> {
             unimplemented!()
         }
-        async fn git_resolve_primary_remote_name(&self, _: &str) -> Result<String, GitCommandError> {
+        async fn git_resolve_primary_remote_name(
+            &self,
+            _: &str,
+        ) -> Result<String, GitCommandError> {
             unimplemented!()
         }
         async fn git_ensure_remote(
@@ -320,7 +337,10 @@ mod tests {
         ) -> Result<String, GitCommandError> {
             unimplemented!()
         }
-        async fn git_list_local_branch_names(&self, _: &str) -> Result<Vec<String>, GitCommandError> {
+        async fn git_list_local_branch_names(
+            &self,
+            _: &str,
+        ) -> Result<Vec<String>, GitCommandError> {
             unimplemented!()
         }
         async fn git_fetch_remote_branch(
@@ -387,7 +407,11 @@ mod tests {
 
     impl Repo {
         async fn head(&self, branch: &str) -> String {
-            git(&self.remote, &["rev-parse", &format!("refs/heads/{branch}")]).await
+            git(
+                &self.remote,
+                &["rev-parse", &format!("refs/heads/{branch}")],
+            )
+            .await
         }
     }
 
@@ -398,7 +422,8 @@ mod tests {
         let base = root.path().to_string_lossy().into_owned();
         let remote = format!("{base}/remote.git");
         let work = format!("{base}/work");
-        let write = |path: &str, text: &str| std::fs::write(format!("{work}/{path}"), text).unwrap();
+        let write =
+            |path: &str, text: &str| std::fs::write(format!("{work}/{path}"), text).unwrap();
         git(&base, &["init", "--quiet", "--bare", "-b", "main", &remote]).await;
         git(&base, &["clone", "--quiet", &remote, &work]).await;
         write("index.ts", "export const answer = 41;\n");
@@ -406,17 +431,42 @@ mod tests {
         git(&work, &["commit", "--quiet", "-m", "Initial"]).await;
         git(&work, &["switch", "--quiet", "-c", "feat/answer-42"]).await;
         write("index.ts", "export const answer = 42;\n");
-        git(&work, &["commit", "--quiet", "-am", "A: set the answer to 42"]).await;
+        git(
+            &work,
+            &["commit", "--quiet", "-am", "A: set the answer to 42"],
+        )
+        .await;
         git(&work, &["switch", "--quiet", "-c", "feat/answer-doc"]).await;
-        write("index.ts", "/** The answer. */\nexport const answer = 42;\n");
-        git(&work, &["commit", "--quiet", "-am", "B: document the answer"]).await;
+        write(
+            "index.ts",
+            "/** The answer. */\nexport const answer = 42;\n",
+        );
+        git(
+            &work,
+            &["commit", "--quiet", "-am", "B: document the answer"],
+        )
+        .await;
         git(&work, &["switch", "--quiet", "main"]).await;
         write("README.md", "main moved ahead\n");
         git(&work, &["add", "-A"]).await;
         git(&work, &["commit", "--quiet", "-m", "Docs"]).await;
-        git(&work, &["push", "--quiet", "origin", "main", "feat/answer-42", "feat/answer-doc"])
-            .await;
-        let mut repo = Repo { _root: root, remote, layers: vec![] };
+        git(
+            &work,
+            &[
+                "push",
+                "--quiet",
+                "origin",
+                "main",
+                "feat/answer-42",
+                "feat/answer-doc",
+            ],
+        )
+        .await;
+        let mut repo = Repo {
+            _root: root,
+            remote,
+            layers: vec![],
+        };
         repo.layers = vec![
             CascadeLayer {
                 number: 1,
@@ -454,10 +504,20 @@ mod tests {
         let bottom = repo.head("feat/answer-42").await;
         let top = repo.head("feat/answer-doc").await;
         // Bottom sits on the new main; top sits on the new bottom with only its own commit.
-        assert_eq!(git(&repo.remote, &["rev-parse", &format!("{bottom}~1")]).await, main);
-        assert_eq!(git(&repo.remote, &["rev-parse", &format!("{top}~1")]).await, bottom);
         assert_eq!(
-            git(&repo.remote, &["log", "--format=%s", &format!("{bottom}..{top}")]).await,
+            git(&repo.remote, &["rev-parse", &format!("{bottom}~1")]).await,
+            main
+        );
+        assert_eq!(
+            git(&repo.remote, &["rev-parse", &format!("{top}~1")]).await,
+            bottom
+        );
+        assert_eq!(
+            git(
+                &repo.remote,
+                &["log", "--format=%s", &format!("{bottom}..{top}")]
+            )
+            .await,
             "B: document the answer"
         );
     }
@@ -468,7 +528,10 @@ mod tests {
         // Reviewed at the bottom layer's head, but the branch is really at its own commit.
         let stale = vec![
             repo.layers[0].clone(),
-            CascadeLayer { head_sha: repo.layers[0].head_sha.clone(), ..repo.layers[1].clone() },
+            CascadeLayer {
+                head_sha: repo.layers[0].head_sha.clone(),
+                ..repo.layers[1].clone()
+            },
         ];
         let error = cascade_rebase_stack(&FakeApi, &RealGitHost, &input(&repo, stale))
             .await

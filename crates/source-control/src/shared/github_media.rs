@@ -70,9 +70,15 @@ pub fn github_media_file_name(fetch_url: &str) -> String {
         .unwrap_or_default();
     let decoded = super::js::decode_uri_component(&segment).unwrap_or(segment);
     // /[\p{Cc}\\/]/gu
-    let name: String =
-        decoded.chars().filter(|c| !c.is_control() && *c != '\\' && *c != '/').collect();
-    if name.is_empty() { "github-media".to_owned() } else { name }
+    let name: String = decoded
+        .chars()
+        .filter(|c| !c.is_control() && *c != '\\' && *c != '/')
+        .collect();
+    if name.is_empty() {
+        "github-media".to_owned()
+    } else {
+        name
+    }
 }
 
 #[cfg(test)]
@@ -106,24 +112,46 @@ mod tests {
                 "https://media.githubusercontent.com/media/acme/web/main/a.png",
                 Some("https://media.githubusercontent.com/media/acme/web/main/a.png"),
             ),
-            ("https://objects.githubusercontent.com/github-production/x", None),
-            ("https://private-user-images.githubusercontent.com/1/a.png?jwt=x", None),
+            (
+                "https://objects.githubusercontent.com/github-production/x",
+                None,
+            ),
+            (
+                "https://private-user-images.githubusercontent.com/1/a.png?jwt=x",
+                None,
+            ),
             ("http://github.com/user-attachments/assets/abc", None),
             ("https://github.com/acme/web", None),
             ("https://github.com/acme/web/blob/main/", None),
             ("not a url", None),
         ];
         for (source, expected) in cases {
-            assert_eq!(github_media_fetch_url(source).as_deref(), expected, "{source}");
+            assert_eq!(
+                github_media_fetch_url(source).as_deref(),
+                expected,
+                "{source}"
+            );
         }
     }
 
     #[test]
     fn names_the_asset_after_its_last_segment() {
-        assert_eq!(github_media_file_name("https://raw.githubusercontent.com/a/b/main/shot%20one.png"), "shot one.png");
+        assert_eq!(
+            github_media_file_name("https://raw.githubusercontent.com/a/b/main/shot%20one.png"),
+            "shot one.png"
+        );
         // A sequence decodeURIComponent rejects stays encoded.
-        assert_eq!(github_media_file_name("https://raw.githubusercontent.com/a/b/main/bad%E0%A4%A.png"), "bad%E0%A4%A.png");
-        assert_eq!(github_media_file_name("https://github.com/user-attachments/assets/"), "github-media");
-        assert_eq!(github_media_file_name("https://raw.githubusercontent.com/a/b/main/x%2Fy%5Cz.png"), "xyz.png");
+        assert_eq!(
+            github_media_file_name("https://raw.githubusercontent.com/a/b/main/bad%E0%A4%A.png"),
+            "bad%E0%A4%A.png"
+        );
+        assert_eq!(
+            github_media_file_name("https://github.com/user-attachments/assets/"),
+            "github-media"
+        );
+        assert_eq!(
+            github_media_file_name("https://raw.githubusercontent.com/a/b/main/x%2Fy%5Cz.png"),
+            "xyz.png"
+        );
     }
 }

@@ -26,7 +26,10 @@ pub struct GitHubHostChoice {
 
 impl Default for GitHubHostChoice {
     fn default() -> Self {
-        Self { account: None, enabled: true }
+        Self {
+            account: None,
+            enabled: true,
+        }
     }
 }
 
@@ -47,13 +50,18 @@ pub struct GitHubSettings {
 impl GitHubSettings {
     /// The Settings choice for a (lowercased) host.
     pub fn host_choice(&self, host: &str) -> Option<&GitHubHostChoice> {
-        GitHubHost::new(host).ok().and_then(|key| self.hosts.get(&key))
+        GitHubHost::new(host)
+            .ok()
+            .and_then(|key| self.hosts.get(&key))
     }
 
     /// The trimmed token saved for a (lowercased) host; empty counts as none.
     pub fn token(&self, host: &str) -> Option<&str> {
         let key = GitHubHost::new(host).ok()?;
-        self.tokens.get(&key).map(|t| t.as_str()).filter(|t| !t.is_empty())
+        self.tokens
+            .get(&key)
+            .map(|t| t.as_str())
+            .filter(|t| !t.is_empty())
     }
 }
 
@@ -77,8 +85,16 @@ mod tests {
     #[test]
     fn missing_or_undecodable_blobs_read_as_defaults() {
         assert_eq!(read_settings(None), GitHubSettings::default());
-        assert_eq!(read_settings(Some(&json!("nope"))), GitHubSettings::default());
-        assert_eq!(read_settings(Some(&json!({ "hosts": { "github.com": { "enabled": "x" } } }))), GitHubSettings::default());
+        assert_eq!(
+            read_settings(Some(&json!("nope"))),
+            GitHubSettings::default()
+        );
+        assert_eq!(
+            read_settings(Some(
+                &json!({ "hosts": { "github.com": { "enabled": "x" } } })
+            )),
+            GitHubSettings::default()
+        );
     }
 
     #[test]
@@ -131,7 +147,10 @@ pub fn definition() -> SourceControlClientDefinition {
         label: "GitHub".into(),
         picker_label: "GitHub".into(),
         icon: "github".into(),
-        change_request: ChangeRequestTerminology { short_label: "PR", singular: "pull request" },
+        change_request: ChangeRequestTerminology {
+            short_label: "PR",
+            singular: "pull request",
+        },
         repository_path_hint: "owner/repo".into(),
         public_host: Some("github.com".into()),
         publish_description: "github.com".into(),
@@ -139,7 +158,10 @@ pub fn definition() -> SourceControlClientDefinition {
         new_repository_owner: Arc::new(|account| Some(account.map(str::to_owned))),
         default_clone_transport: CloneTransport::Https,
         change_request_url: Arc::new(|input| {
-            Some(format!("https://{}/{}/pull/{}", input.host, input.repository, input.number))
+            Some(format!(
+                "https://{}/{}/pull/{}",
+                input.host, input.repository, input.number
+            ))
         }),
         change_request_actions: HashSet::from([
             PullRequestAction::Merge,
@@ -160,11 +182,16 @@ pub fn definition() -> SourceControlClientDefinition {
             }
             reqwest::Url::parse(repository_url)
                 .ok()?
-                .join(&format!("/{}", crate::shared::js::encode_uri_component(login)))
+                .join(&format!(
+                    "/{}",
+                    crate::shared::js::encode_uri_component(login)
+                ))
                 .ok()
                 .map(|url| url.to_string())
         }),
-        reference_autolink_repository_url: Arc::new(|repository_url| Some(repository_url.to_owned())),
+        reference_autolink_repository_url: Arc::new(|repository_url| {
+            Some(repository_url.to_owned())
+        }),
         review_summary_required: Arc::new(|_| false),
         checkout_command_argument: Arc::new(|input| {
             CHECKOUT_COMMAND
@@ -197,7 +224,9 @@ pub fn definition() -> SourceControlClientDefinition {
 #[cfg(test)]
 mod definition_tests {
     use super::*;
-    use crate::source_control_core::definition::{ChangeRequestCheckoutInput, ChangeRequestUrlInput};
+    use crate::source_control_core::definition::{
+        ChangeRequestCheckoutInput, ChangeRequestUrlInput,
+    };
 
     #[test]
     fn builds_github_change_request_urls_and_commands() {
@@ -223,17 +252,30 @@ mod definition_tests {
             .as_deref(),
             Some("gh pr checkout 7")
         );
-        assert_eq!((d.checkout_command_argument)("gh pr checkout  42 ").as_deref(), Some("42"));
+        assert_eq!(
+            (d.checkout_command_argument)("gh pr checkout  42 ").as_deref(),
+            Some("42")
+        );
         assert_eq!((d.checkout_command_argument)("git checkout x"), None);
-        assert!((d.is_change_request_reference)("https://github.com/a/b/pull/12/files"));
-        assert!(!(d.is_change_request_reference)("https://ghe.example/a/b/pull/12"));
+        assert!((d.is_change_request_reference)(
+            "https://github.com/a/b/pull/12/files"
+        ));
+        assert!(!(d.is_change_request_reference)(
+            "https://ghe.example/a/b/pull/12"
+        ));
         assert!((d.is_change_request_url)("https://ghe.example/a/b/pull/12"));
         assert_eq!(
             (d.author_profile_url)("octo cat", "https://github.com/a/b").as_deref(),
             Some("https://github.com/octo%20cat")
         );
-        assert_eq!((d.author_profile_url)("dependabot[bot]", "https://github.com/a/b"), None);
-        assert_eq!((d.new_repository_owner)(Some("me")), Some(Some("me".to_owned())));
+        assert_eq!(
+            (d.author_profile_url)("dependabot[bot]", "https://github.com/a/b"),
+            None
+        );
+        assert_eq!(
+            (d.new_repository_owner)(Some("me")),
+            Some(Some("me".to_owned()))
+        );
         assert_eq!(d.change_request_actions.len(), 10);
     }
 }

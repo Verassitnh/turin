@@ -1172,7 +1172,6 @@ impl PullRequestProviderApi for GitHubPullRequestProvider {
         self.cli
             .revalidate(&input, read)
             .await
-            .map(|PullRequestChecks { state, checks }| PullRequestChecks { state, checks })
             .map_err(fail("getChangeRequestChecks"))
     }
 

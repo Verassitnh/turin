@@ -80,6 +80,9 @@ pub trait RepositoryGit: Send + Sync {
     ) -> Result<PushedBranch, Cause>;
 }
 
+/// Handed each stderr line of a git command as git writes it.
+pub type StderrLineFn = Arc<dyn Fn(&str) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct GitCommand {
     pub operation: &'static str,
@@ -89,7 +92,7 @@ pub struct GitCommand {
     pub timeout: Option<Duration>,
     pub env: Vec<(&'static str, &'static str)>,
     /// Receives each stderr line as git writes it; progress redraws arrive as separate lines.
-    pub on_stderr_line: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    pub on_stderr_line: Option<StderrLineFn>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1176,19 +1179,9 @@ mod tests {
             .discard_clone(partial.to_str().unwrap())
             .await
             .unwrap();
-        let error = expect_error(
-            service
-                .discard_clone(foreign.to_str().unwrap())
-                .await
-                .map(|()| ()),
-        );
+        let error = expect_error(service.discard_clone(foreign.to_str().unwrap()).await);
         assert!(detail_of(&error).contains("not from the clone"));
-        let replaced_error = expect_error(
-            service
-                .discard_clone(replaced.to_str().unwrap())
-                .await
-                .map(|()| ()),
-        );
+        let replaced_error = expect_error(service.discard_clone(replaced.to_str().unwrap()).await);
         assert!(detail_of(&replaced_error).contains("could not be inspected"));
         // A destination that never got created is nothing to discard.
         service

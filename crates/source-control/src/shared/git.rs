@@ -5,7 +5,8 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-static SCHEME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(?:ssh|https?|git)://").unwrap());
+static SCHEME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(?:ssh|https?|git)://").unwrap());
 static SCP_STYLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^[a-zA-Z0-9._-]+@([^:/\s]+):([^/\s]+(?:/[^/\s]+)+)$").unwrap()
 });
@@ -124,7 +125,10 @@ pub fn parse_origin_url_from_git_config(config_text: &str) -> Option<String> {
     let mut first_remote_url: Option<String> = None;
     // A trailing backslash continues the value on the next line.
     let joined = LINE_CONTINUATION.replace_all(config_text, "");
-    for raw_line in joined.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)) {
+    for raw_line in joined
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+    {
         let line = js_trim(raw_line);
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
@@ -143,8 +147,12 @@ pub fn parse_origin_url_from_git_config(config_text: &str) -> Option<String> {
             section = None;
             continue;
         }
-        let Some(section) = section.as_deref() else { continue };
-        let Some(m) = URL_LINE.captures(line) else { continue };
+        let Some(section) = section.as_deref() else {
+            continue;
+        };
+        let Some(m) = URL_LINE.captures(line) else {
+            continue;
+        };
         let url = parse_git_config_value(m.get(1).map_or("", |v| v.as_str()));
         if url.is_empty() {
             continue;
@@ -159,7 +167,9 @@ pub fn parse_origin_url_from_git_config(config_text: &str) -> Option<String> {
 }
 
 /// Best-effort parse of a GitHub `owner/repo` identifier from common remote URL shapes.
-pub fn parse_github_repository_name_with_owner_from_remote_url(url: Option<&str>) -> Option<String> {
+pub fn parse_github_repository_name_with_owner_from_remote_url(
+    url: Option<&str>,
+) -> Option<String> {
     let trimmed = js_trim(url.unwrap_or(""));
     if trimmed.is_empty() {
         return None;
@@ -179,7 +189,11 @@ mod tests {
             "https://github.com/T3Tools/T3Code.git",
             "ssh://git@github.com/T3Tools/T3Code",
         ] {
-            assert_eq!(normalize_git_remote_url(url), "github.com/t3tools/t3code", "{url}");
+            assert_eq!(
+                normalize_git_remote_url(url),
+                "github.com/t3tools/t3code",
+                "{url}"
+            );
         }
     }
 
@@ -351,7 +365,10 @@ mod tests {
 
     #[test]
     fn returns_none_when_there_is_no_remote_section() {
-        assert_eq!(parse_origin_url_from_git_config("[core]\n\tbare = false\n"), None);
+        assert_eq!(
+            parse_origin_url_from_git_config("[core]\n\tbare = false\n"),
+            None
+        );
         assert_eq!(parse_origin_url_from_git_config(""), None);
     }
 

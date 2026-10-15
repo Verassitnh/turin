@@ -19,9 +19,9 @@ use turin_contracts::base_schemas::EffectOption;
 use turin_contracts::pull_request::{PullRequestListState, PullRequestState};
 use turin_contracts::source_control::{
     ChangeRequest, ChangeRequestState, SourceControlProviderAccount, SourceControlProviderAuth,
-    SourceControlProviderAuthStatus, SourceControlProviderDiscoveryItem, SourceControlProviderError,
-    SourceControlProviderInfo, SourceControlProviderKind, SourceControlRepositoryCloneUrls,
-    SourceControlRepositoryVisibility,
+    SourceControlProviderAuthStatus, SourceControlProviderDiscoveryItem,
+    SourceControlProviderError, SourceControlProviderInfo, SourceControlProviderKind,
+    SourceControlRepositoryCloneUrls, SourceControlRepositoryVisibility,
 };
 
 use super::api::{
@@ -36,9 +36,9 @@ use super::credentials::GitHubCredentialUnavailableError;
 use super::definition::{GitHubSettings, KIND, read_settings};
 use super::pull_requests::{NormalizedGitHubPullRequestRecord, decode_github_pull_request_entries};
 use super::repository_resolution::{
-    GitHubRepositoryLocator, PullRequestReference, github_api_host_for_remote, parse_fetch_remotes,
-    parse_github_repository_selector, parse_pull_request_reference, resolve_github_repository,
-    ResolveGitHubRepositoryInput,
+    GitHubRepositoryLocator, PullRequestReference, ResolveGitHubRepositoryInput,
+    github_api_host_for_remote, parse_fetch_remotes, parse_github_repository_selector,
+    parse_pull_request_reference, resolve_github_repository,
 };
 use crate::shared::git::normalize_git_remote_url;
 use crate::shared::host_process::Environment;
@@ -158,7 +158,9 @@ pub fn parse_github_auth(
         .map(|host| effective_github_account(host, &auth_status.accounts, settings))
         .find(Option::is_some)
         .flatten();
-    let accounts = auth_status.parsed.then(|| auth_accounts(&auth_status.accounts));
+    let accounts = auth_status
+        .parsed
+        .then(|| auth_accounts(&auth_status.accounts));
 
     if let Some(chosen) = chosen {
         let detail = chosen.environment_variable.as_ref().map(|variable| {
@@ -183,7 +185,9 @@ pub fn parse_github_auth(
                 status: SourceControlProviderAuthStatus::Unauthenticated,
                 account: None,
                 host: Some(&fallback.host),
-                detail: Some("Every GitHub host gh is signed in to is turned off in Settings → Source Control."),
+                detail: Some(
+                    "Every GitHub host gh is signed in to is turned off in Settings → Source Control.",
+                ),
             }),
             accounts,
         );
@@ -200,11 +204,9 @@ pub fn parse_github_auth(
                 status: SourceControlProviderAuthStatus::Unauthenticated,
                 account: None,
                 host: failed_account.map(|a| a.host.as_str()),
-                detail: Some(
-                    failed_account
-                        .and_then(|a| a.error.as_deref())
-                        .unwrap_or("Run `gh auth login` to authenticate GitHub CLI with an active account."),
-                ),
+                detail: Some(failed_account.and_then(|a| a.error.as_deref()).unwrap_or(
+                    "Run `gh auth login` to authenticate GitHub CLI with an active account.",
+                )),
             }),
             accounts,
         );
@@ -229,7 +231,10 @@ pub fn parse_github_auth(
             status: SourceControlProviderAuthStatus::Unauthenticated,
             account: None,
             host: None,
-            detail: Some(line.as_deref().unwrap_or("Run `gh auth login` to authenticate GitHub CLI.")),
+            detail: Some(
+                line.as_deref()
+                    .unwrap_or("Run `gh auth login` to authenticate GitHub CLI."),
+            ),
         });
     }
 
@@ -238,7 +243,10 @@ pub fn parse_github_auth(
         status: SourceControlProviderAuthStatus::Unknown,
         account: None,
         host: None,
-        detail: Some(line.as_deref().unwrap_or("GitHub CLI auth status could not be parsed.")),
+        detail: Some(
+            line.as_deref()
+                .unwrap_or("GitHub CLI auth status could not be parsed."),
+        ),
     })
 }
 
@@ -253,7 +261,12 @@ pub fn cli_discovery_spec(settings: GitHubSettings) -> SourceControlCliDiscovery
         install_hint: DISCOVERY_INSTALL_HINT.into(),
         executable: "gh".into(),
         version_args: vec!["--version".into()],
-        auth_args: vec!["auth".into(), "status".into(), "--json".into(), "hosts".into()],
+        auth_args: vec![
+            "auth".into(),
+            "status".into(),
+            "--json".into(),
+            "hosts".into(),
+        ],
         remote_refinement_args: None,
         probe_timeout_ms: None,
         parse_auth: Arc::new(move |input| parse_github_auth(input, &settings)),
@@ -268,9 +281,11 @@ struct ViewerBody {
 
 /// The environment variable gh would take a github.com token from, if one is set.
 fn environment_token_variable(environment: &dyn Environment) -> Option<&'static str> {
-    ["GH_TOKEN", "GITHUB_TOKEN"]
-        .into_iter()
-        .find(|name| environment.get(name).is_some_and(|v| !js_trim(&v).is_empty()))
+    ["GH_TOKEN", "GITHUB_TOKEN"].into_iter().find(|name| {
+        environment
+            .get(name)
+            .is_some_and(|v| !js_trim(&v).is_empty())
+    })
 }
 
 async fn read_host_settings(host: &dyn SourceControlHost) -> GitHubSettings {
@@ -305,7 +320,11 @@ pub fn make_discovery(
             kind: kind(),
             label: DISCOVERY_LABEL.into(),
             install_hint: DISCOVERY_INSTALL_HINT.into(),
-            probe: Arc::new(GitHubDiscoveryProbe { api, host, environment }),
+            probe: Arc::new(GitHubDiscoveryProbe {
+                api,
+                host,
+                environment,
+            }),
         },
     )
 }
@@ -325,8 +344,13 @@ impl ManagedCliProbe for GitHubDiscoveryProbe {
             variable.map(str::to_owned)
         };
         // A host turned off in Settings stays off even with a token.
-        let Some(token_source) = token_source else { return cli };
-        if settings.host_choice("github.com").is_some_and(|c| !c.enabled) {
+        let Some(token_source) = token_source else {
+            return cli;
+        };
+        if settings
+            .host_choice("github.com")
+            .is_some_and(|c| !c.enabled)
+        {
             return cli;
         }
         let viewer = self
@@ -347,7 +371,8 @@ impl ManagedCliProbe for GitHubDiscoveryProbe {
         let accounts = cli.auth.accounts.clone();
         let auth = if let Some(login) = login {
             let detail = if saved_token {
-                "Using the token saved in Settings; it overrides GH_TOKEN and the gh login.".to_owned()
+                "Using the token saved in Settings; it overrides GH_TOKEN and the gh login."
+                    .to_owned()
             } else {
                 format!(
                     "Using {} from the server environment; it overrides the account chosen in Settings.",
@@ -409,7 +434,9 @@ impl ManagedCliProbe for GitHubDiscoveryProbe {
         let host = url_host(&url)?;
         let known = match self.api.credential(&host).await {
             Ok(_) => true,
-            Err(GitHubApiError::CredentialUnavailable(GitHubCredentialUnavailableError::HostDisabled(_))) => true,
+            Err(GitHubApiError::CredentialUnavailable(
+                GitHubCredentialUnavailableError::HostDisabled(_),
+            )) => true,
             Err(_) => false,
         };
         known.then(|| SourceControlProviderInfo {
@@ -444,14 +471,18 @@ impl std::fmt::Display for GitHubFailure {
 }
 
 fn failure(detail: impl Into<String>, cause: Option<Cause>) -> GitHubFailure {
-    GitHubFailure { detail: detail.into(), cause }
+    GitHubFailure {
+        detail: detail.into(),
+        cause,
+    }
 }
 
 fn cause_of(error: impl std::error::Error + Send + Sync + 'static) -> Option<Cause> {
     Some(Arc::new(error))
 }
 
-const PULL_REQUEST_NOT_FOUND: &str = "Pull request not found. Check the PR number or URL and try again.";
+const PULL_REQUEST_NOT_FOUND: &str =
+    "Pull request not found. Check the PR number or URL and try again.";
 const REPOSITORY_NOT_FOUND: &str = "Repository not found. Check the owner and name and try again.";
 
 /// `not_found` names what was missing, which only the operation knows.
@@ -465,7 +496,9 @@ fn from_github_api_error(error: GitHubApiError, not_found: &str) -> GitHubFailur
             ),
             // A missing or turned-off credential already says what to do about it.
             GitHubCredentialUnavailableError::NotSignedIn(_)
-            | GitHubCredentialUnavailableError::HostDisabled(_) => failure(error.to_string(), cause),
+            | GitHubCredentialUnavailableError::HostDisabled(_) => {
+                failure(error.to_string(), cause)
+            }
             GitHubCredentialUnavailableError::CliFailed(_) => failure(non_empty(&error), cause),
         },
         GitHubApiError::Authentication(_) => failure(
@@ -478,18 +511,27 @@ fn from_github_api_error(error: GitHubApiError, not_found: &str) -> GitHubFailur
         ),
         GitHubApiError::NotFound(_) => failure(not_found, cause),
         // GitHub's own reason ("A pull request already exists…") when it gave one.
-        GitHubApiError::Response(_) | GitHubApiError::Request(_) => failure(non_empty(&error), cause),
+        GitHubApiError::Response(_) | GitHubApiError::Request(_) => {
+            failure(non_empty(&error), cause)
+        }
     }
 }
 
 fn non_empty(error: &GitHubApiError) -> String {
     let message = error.to_string();
     let trimmed = js_trim(&message);
-    if trimmed.is_empty() { "GitHub request failed.".to_owned() } else { trimmed.to_owned() }
+    if trimmed.is_empty() {
+        "GitHub request failed.".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 fn not_found(cause: &str) -> GitHubFailure {
-    failure(PULL_REQUEST_NOT_FOUND, Some(crate::source_control_core::cause_from_message(cause)))
+    failure(
+        PULL_REQUEST_NOT_FOUND,
+        Some(crate::source_control_core::cause_from_message(cause)),
+    )
 }
 
 #[derive(Deserialize)]
@@ -558,12 +600,17 @@ struct PullRequestsByHeadRead {
 }
 
 /// One aliased `pullRequests` connection per lookup, each head and state passed as a variable.
-fn build_pull_requests_by_head_query(lookups: &[PullRequestsByHeadRead]) -> (String, Map<String, Value>) {
+fn build_pull_requests_by_head_query(
+    lookups: &[PullRequestsByHeadRead],
+) -> (String, Map<String, Value>) {
     let mut variables = Map::new();
     let mut declarations: Vec<String> = vec!["$owner: String!".into(), "$name: String!".into()];
     let mut selections: Vec<String> = Vec::new();
     for (index, lookup) in lookups.iter().enumerate() {
-        variables.insert(format!("h{index}"), Value::String(lookup.head_ref_name.clone()));
+        variables.insert(
+            format!("h{index}"),
+            Value::String(lookup.head_ref_name.clone()),
+        );
         variables.insert(format!("s{index}"), json!(graphql_states(lookup.state)));
         declarations.push(format!("$h{index}: String!"));
         declarations.push(format!("$s{index}: [PullRequestState!]"));
@@ -665,7 +712,10 @@ struct HeadBatcher {
 
 impl HeadBatcher {
     fn new(api: Arc<dyn GitHubApi>) -> Self {
-        Self { api, groups: Mutex::new(HashMap::new()) }
+        Self {
+            api,
+            groups: Mutex::new(HashMap::new()),
+        }
     }
 
     fn key(request: &PullRequestsByHeadRead) -> String {
@@ -674,7 +724,10 @@ impl HeadBatcher {
             request.owner.as_str(),
             request.name.as_str(),
             &request.allow_reserve.to_string(),
-            ambient::pinned_credential().map(|c| c.credential_fingerprint).unwrap_or_default().as_str(),
+            ambient::pinned_credential()
+                .map(|c| c.credential_fingerprint)
+                .unwrap_or_default()
+                .as_str(),
             ambient::credential_scope().as_str(),
         ]
         .join("\0")
@@ -687,14 +740,20 @@ impl HeadBatcher {
             let leader = {
                 let mut groups = self.groups.lock();
                 let group = groups.entry(key.clone()).or_default();
-                group.push(Entry { request: request.clone(), tx });
+                group.push(Entry {
+                    request: request.clone(),
+                    tx,
+                });
                 group.len() == 1
             };
             if leader {
                 let (window, batch_size) = if request.allow_reserve {
                     (HEAD_LOOKUP_BATCH_WINDOW, HEAD_LOOKUPS_PER_DOCUMENT)
                 } else {
-                    (BACKGROUND_HEAD_LOOKUP_BATCH_WINDOW, BACKGROUND_HEAD_LOOKUPS_PER_DOCUMENT)
+                    (
+                        BACKGROUND_HEAD_LOOKUP_BATCH_WINDOW,
+                        BACKGROUND_HEAD_LOOKUPS_PER_DOCUMENT,
+                    )
                 };
                 tokio::time::sleep(window).await;
                 let entries = self.groups.lock().remove(&key).unwrap_or_default();
@@ -703,7 +762,8 @@ impl HeadBatcher {
                 while iter.peek().is_some() {
                     chunks.push(iter.by_ref().take(batch_size).collect());
                 }
-                futures::future::join_all(chunks.into_iter().map(|chunk| self.run_chunk(chunk))).await;
+                futures::future::join_all(chunks.into_iter().map(|chunk| self.run_chunk(chunk)))
+                    .await;
             }
             match rx.await {
                 Ok(result) => return result,
@@ -721,7 +781,8 @@ impl HeadBatcher {
             first.request.name.clone(),
             first.request.allow_reserve,
         );
-        let requests: Vec<PullRequestsByHeadRead> = entries.iter().map(|e| e.request.clone()).collect();
+        let requests: Vec<PullRequestsByHeadRead> =
+            entries.iter().map(|e| e.request.clone()).collect();
         let (document, extra) = build_pull_requests_by_head_query(&requests);
         let mut variables = Map::new();
         variables.insert("owner".into(), Value::String(owner));
@@ -777,14 +838,14 @@ async fn graphql_json<A: serde::de::DeserializeOwned>(
         .graphql(input)
         .await
         .map_err(|error| from_github_api_error(error, PULL_REQUEST_NOT_FOUND))?;
-    serde_json::from_str::<A>(&raw)
-        .map_err(|error| failure(decode_detail, cause_of(error)))
+    serde_json::from_str::<A>(&raw).map_err(|error| failure(decode_detail, cause_of(error)))
 }
 
 static LINK_PATH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^/([\w.-]+)/([\w.-]+)/(?:pull|issues)/([1-9]\d*)(?:/.*)?$").unwrap()
 });
-static OWNER_SELECTOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([^:/\s]+):(.+)$").unwrap());
+static OWNER_SELECTOR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^([^:/\s]+):(.+)$").unwrap());
 static BARE_REPOSITORY_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[^/\s]+$").unwrap());
 static DOT_GIT_SUFFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\.git$").unwrap());
 
@@ -838,8 +899,10 @@ impl GitHubSourceControlProvider {
         &self,
         cwd: &str,
         args: &[&str],
-    ) -> Result<crate::source_control_core::host::SourceControlProcessOutput, turin_contracts::vcs::VcsError>
-    {
+    ) -> Result<
+        crate::source_control_core::host::SourceControlProcessOutput,
+        turin_contracts::vcs::VcsError,
+    > {
         self.host
             .process_run(SourceControlProcessInput {
                 operation: "GitHubSourceControlProvider.resolveRepository".into(),
@@ -861,7 +924,10 @@ impl GitHubSourceControlProvider {
         host: Option<&str>,
         context: Option<&SourceControlProviderContext>,
     ) -> Result<GitHubRepositoryLocator, GitHubFailure> {
-        let env_repository = self.environment.get("GH_REPO").map(|v| js_trim(&v).to_owned());
+        let env_repository = self
+            .environment
+            .get("GH_REPO")
+            .map(|v| js_trim(&v).to_owned());
         let host_hint: Option<String> = host.map(str::to_owned).or_else(|| context_host(context));
         let default_host = host_hint
             .clone()
@@ -875,15 +941,24 @@ impl GitHubSourceControlProvider {
         }
         let (remotes, resolved) = tokio::join!(
             self.git_read(cwd, &["remote", "-v"]),
-            self.git_read(cwd, &["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"]),
+            self.git_read(
+                cwd,
+                &["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"]
+            ),
         );
         let (remotes, resolved) = match (remotes, resolved) {
             (Ok(a), Ok(b)) => (Some(a), Some(b)),
             _ => (None, None),
         };
         let resolution = resolve_github_repository(&ResolveGitHubRepositoryInput {
-            remotes: remotes.as_ref().filter(|r| r.exit_code == 0).map_or("", |r| r.stdout.as_str()),
-            resolved: resolved.as_ref().filter(|r| r.exit_code == 0).map_or("", |r| r.stdout.as_str()),
+            remotes: remotes
+                .as_ref()
+                .filter(|r| r.exit_code == 0)
+                .map_or("", |r| r.stdout.as_str()),
+            resolved: resolved
+                .as_ref()
+                .filter(|r| r.exit_code == 0)
+                .map_or("", |r| r.stdout.as_str()),
             host_hint: host_hint.as_deref(),
             default_host: &default_host,
         });
@@ -892,7 +967,9 @@ impl GitHubSourceControlProvider {
         }
         if let Some(context) = context {
             let remote = normalize_git_remote_url(&context.remote_url);
-            let after_host = remote.find('/').map_or(remote.as_str(), |i| &remote[i + 1..]);
+            let after_host = remote
+                .find('/')
+                .map_or(remote.as_str(), |i| &remote[i + 1..]);
             // `remote.slice(remote.indexOf("/") + 1)`; indexOf -1 slices from 0.
             if let Some(fallback) = parse_github_repository_selector(
                 &format!("{}/{}", resolution.host, after_host),
@@ -948,16 +1025,25 @@ impl GitHubSourceControlProvider {
                 name: locator.name,
                 head_ref_name,
                 state: input.state,
-                limit: if owner_match.is_some() { OWNER_HEAD_SCAN_LIMIT } else { limit },
+                limit: if owner_match.is_some() {
+                    OWNER_HEAD_SCAN_LIMIT
+                } else {
+                    limit
+                },
                 allow_reserve: input.allow_reserve,
             })
             .await?;
-        let Some(owner_match) = owner_match else { return Ok(rows) };
+        let Some(owner_match) = owner_match else {
+            return Ok(rows);
+        };
         let head_owner = owner_match[1].to_lowercase();
         Ok(rows
             .into_iter()
             .filter(|row| {
-                row.head_repository_owner_login.as_deref().map(str::to_lowercase).as_deref()
+                row.head_repository_owner_login
+                    .as_deref()
+                    .map(str::to_lowercase)
+                    .as_deref()
                     == Some(head_owner.as_str())
             })
             .take(limit as usize)
@@ -992,7 +1078,8 @@ impl GitHubSourceControlProvider {
         let (locator, number) = match parsed {
             PullRequestReference::Url { locator, number } => (locator, number),
             PullRequestReference::Number { number } => (
-                self.resolve_repository(input.cwd, input.host.as_deref(), input.context).await?,
+                self.resolve_repository(input.cwd, input.host.as_deref(), input.context)
+                    .await?,
                 number,
             ),
             PullRequestReference::Branch { .. } => unreachable!("handled above"),
@@ -1021,16 +1108,26 @@ impl GitHubSourceControlProvider {
             .repository
             .and_then(|r| r.pull_request)
             .filter(|n| !n.is_null());
-        let Some(node) = node else { return Err(not_found("The pull request does not exist.")) };
+        let Some(node) = node else {
+            return Err(not_found("The pull request does not exist."));
+        };
         decode_github_pull_request_entries(&[node])
             .into_iter()
             .next()
             .ok_or_else(|| {
-                failure(decode_detail, Some(crate::source_control_core::cause_from_message("Malformed pull request.")))
+                failure(
+                    decode_detail,
+                    Some(crate::source_control_core::cause_from_message(
+                        "Malformed pull request.",
+                    )),
+                )
             })
     }
 
-    async fn read_repository(&self, locator: &GitHubRepositoryLocator) -> Result<RawRepository, GitHubFailure> {
+    async fn read_repository(
+        &self,
+        locator: &GitHubRepositoryLocator,
+    ) -> Result<RawRepository, GitHubFailure> {
         let response = self
             .rest(
                 GitHubRestInput {
@@ -1072,7 +1169,10 @@ impl GitHubSourceControlProvider {
     // Git and filesystem errors can carry arguments, paths and stderr, so the detail a client
     // sees is fixed and the raw error stays in `cause`.
     fn git_failure(cause: impl std::error::Error + Send + Sync + 'static) -> GitHubFailure {
-        failure("The pull request could not be checked out with git.", cause_of(cause))
+        failure(
+            "The pull request could not be checked out with git.",
+            cause_of(cause),
+        )
     }
 
     async fn run_git(
@@ -1113,7 +1213,10 @@ impl GitHubSourceControlProvider {
             .await?;
         let base = match &reference {
             PullRequestReference::Url { locator, .. } => locator.clone(),
-            _ => self.resolve_repository(&input.cwd, None, input.context.as_ref()).await?,
+            _ => {
+                self.resolve_repository(&input.cwd, None, input.context.as_ref())
+                    .await?
+            }
         };
         let base_name_with_owner = format!("{}/{}", base.owner, base.name).to_lowercase();
         let head_name_with_owner = pull_request.head_repository_name_with_owner.clone();
@@ -1125,11 +1228,19 @@ impl GitHubSourceControlProvider {
         let head_owner = pull_request
             .head_repository_owner_login
             .clone()
-            .or_else(|| head_name_with_owner.as_ref().and_then(|h| h.split('/').next().map(str::to_owned)));
+            .or_else(|| {
+                head_name_with_owner
+                    .as_ref()
+                    .and_then(|h| h.split('/').next().map(str::to_owned))
+            });
 
         let remotes = match self.git_read(&input.cwd, &["remote", "-v"]).await {
             Ok(result) => {
-                if result.exit_code == 0 { result.stdout } else { String::new() }
+                if result.exit_code == 0 {
+                    result.stdout
+                } else {
+                    String::new()
+                }
             }
             Err(error) => return Err(Self::git_failure(error)),
         };
@@ -1179,7 +1290,9 @@ impl GitHubSourceControlProvider {
             if let Some(known) = remote_for(head_name_with_owner) {
                 return Ok(known);
             }
-            let (owner, name) = head_name_with_owner.split_once('/').unwrap_or((head_name_with_owner, ""));
+            let (owner, name) = head_name_with_owner
+                .split_once('/')
+                .unwrap_or((head_name_with_owner, ""));
             let fork = self
                 .read_repository(&GitHubRepositoryLocator {
                     host: base.host.clone(),
@@ -1235,7 +1348,9 @@ impl GitHubSourceControlProvider {
             Ok(target) => target,
             Err(_) => {
                 let fallback = async {
-                    let remote = base_remote2(&self.host, &input.cwd, &remote_for, &base_name_with_owner).await?;
+                    let remote =
+                        base_remote2(&self.host, &input.cwd, &remote_for, &base_name_with_owner)
+                            .await?;
                     self.run_git(
                         &input.cwd,
                         "fetchPullRef",
@@ -1248,7 +1363,10 @@ impl GitHubSourceControlProvider {
                         ],
                     )
                     .await?;
-                    let commit_sha = self.host.git_resolve_commit(&input.cwd, "FETCH_HEAD").await?;
+                    let commit_sha = self
+                        .host
+                        .git_resolve_commit(&input.cwd, "FETCH_HEAD")
+                        .await?;
                     Ok::<_, turin_contracts::git::GitCommandError>(Target {
                         reference: commit_sha,
                         upstream: None,
@@ -1261,12 +1379,19 @@ impl GitHubSourceControlProvider {
 
         let switched = async {
             if !exists {
-                self.run_git(&input.cwd, "branch", &["branch", &local_branch, &target.reference]).await?;
+                self.run_git(
+                    &input.cwd,
+                    "branch",
+                    &["branch", &local_branch, &target.reference],
+                )
+                .await?;
             }
             self.host
                 .git_switch_ref(&turin_contracts::git::VcsSwitchRefInput {
-                    cwd: TrimmedNonEmptyString::new(&input.cwd).unwrap_or_else(|_| TrimmedNonEmptyString::new(".").expect("non-empty")),
-                    ref_name: TrimmedNonEmptyString::new(&local_branch).unwrap_or_else(|_| TrimmedNonEmptyString::new("HEAD").expect("non-empty")),
+                    cwd: TrimmedNonEmptyString::new(&input.cwd)
+                        .unwrap_or_else(|_| TrimmedNonEmptyString::new(".").expect("non-empty")),
+                    ref_name: TrimmedNonEmptyString::new(&local_branch)
+                        .unwrap_or_else(|_| TrimmedNonEmptyString::new("HEAD").expect("non-empty")),
                 })
                 .await?;
             if exists {
@@ -1403,7 +1528,10 @@ impl GitHubSourceControlProvider {
                 json!({ "_tag": "SchemaError", "message": "The linked subject response did not decode." }),
             )
         })?;
-        Ok(SourceControlLinkSubject { title: subject.title, body: subject.body })
+        Ok(SourceControlLinkSubject {
+            title: subject.title,
+            body: subject.body,
+        })
     }
 }
 
@@ -1425,7 +1553,11 @@ impl SourceControlProvider for GitHubSourceControlProvider {
         _state: HeadProbeState,
     ) -> Option<HeadBranchProbe> {
         Some(HeadBranchProbe {
-            head_selectors: head_selectors.iter().filter(|s| !s.contains(':')).cloned().collect(),
+            head_selectors: head_selectors
+                .iter()
+                .filter(|s| !s.contains(':'))
+                .cloned()
+                .collect(),
             limit: 100,
         })
     }
@@ -1434,14 +1566,20 @@ impl SourceControlProvider for GitHubSourceControlProvider {
         change_request_template::detect(cwd, treeish, self.host.as_ref()).await
     }
 
-    fn resolve_link(&self, input: ResolveSourceControlLinkInput) -> ResolveSourceControlLinkFuture<'_> {
+    fn resolve_link(
+        &self,
+        input: ResolveSourceControlLinkInput,
+    ) -> ResolveSourceControlLinkFuture<'_> {
         // Automatic enrichment must not send ambient CLI credentials to a host from message text.
         if url_host(&input.url).as_deref() != Some("github.com") {
             return None;
         }
         let path = input.url.path().to_owned();
         let matched = LINK_PATH.captures(&path)?;
-        let endpoint = format!("repos/{}/{}/issues/{}", &matched[1], &matched[2], &matched[3]);
+        let endpoint = format!(
+            "repos/{}/{}/issues/{}",
+            &matched[1], &matched[2], &matched[3]
+        );
         Some(Box::pin(self.read_link_subject(input, endpoint)))
     }
 
@@ -1450,14 +1588,19 @@ impl SourceControlProvider for GitHubSourceControlProvider {
         input: ListChangeRequestsInput,
     ) -> Result<Vec<ChangeRequest>, SourceControlProviderError> {
         // An open lookup is a user waiting on a status; the rest may be a background sweep.
-        let allow_reserve = matches!(input.state, Some(ChangeRequestState::Open)) || ambient::interactive();
+        let allow_reserve =
+            matches!(input.state, Some(ChangeRequestState::Open)) || ambient::interactive();
         let state = match input.state {
             None => PullRequestListState::All,
             Some(ChangeRequestState::Open) => PullRequestListState::Open,
             Some(ChangeRequestState::Closed) => PullRequestListState::Closed,
             Some(ChangeRequestState::Merged) => PullRequestListState::Merged,
         };
-        let default_limit = if matches!(input.state, Some(ChangeRequestState::Open)) { 1 } else { 20 };
+        let default_limit = if matches!(input.state, Some(ChangeRequestState::Open)) {
+            1
+        } else {
+            20
+        };
         let records = self
             .list_by_head(ListByHead {
                 cwd: &input.cwd,
@@ -1469,7 +1612,15 @@ impl SourceControlProvider for GitHubSourceControlProvider {
                 allow_reserve,
             })
             .await
-            .map_err(|e| provider_error("listChangeRequests", &input.cwd, Some(&input.head_selector), None, e))?;
+            .map_err(|e| {
+                provider_error(
+                    "listChangeRequests",
+                    &input.cwd,
+                    Some(&input.head_selector),
+                    None,
+                    e,
+                )
+            })?;
         Ok(records.into_iter().filter_map(to_change_request).collect())
     }
 
@@ -1477,7 +1628,15 @@ impl SourceControlProvider for GitHubSourceControlProvider {
         &self,
         input: GetChangeRequestInput,
     ) -> Result<ChangeRequest, SourceControlProviderError> {
-        let to_error = |e| provider_error("getChangeRequest", &input.cwd, Some(&input.reference), None, e);
+        let to_error = |e| {
+            provider_error(
+                "getChangeRequest",
+                &input.cwd,
+                Some(&input.reference),
+                None,
+                e,
+            )
+        };
         let record = self
             .read_pull_request(ReadPullRequest {
                 cwd: &input.cwd,
@@ -1503,10 +1662,17 @@ impl SourceControlProvider for GitHubSourceControlProvider {
         input: CreateChangeRequestInput,
     ) -> Result<(), SourceControlProviderError> {
         let run = async {
-            let locator = self.resolve_repository(&input.cwd, None, input.context.as_ref()).await?;
-            let body = tokio::fs::read_to_string(&input.body_file).await.map_err(|error| {
-                failure("The pull request description could not be read.", cause_of(error))
-            })?;
+            let locator = self
+                .resolve_repository(&input.cwd, None, input.context.as_ref())
+                .await?;
+            let body = tokio::fs::read_to_string(&input.body_file)
+                .await
+                .map_err(|error| {
+                    failure(
+                        "The pull request description could not be read.",
+                        cause_of(error),
+                    )
+                })?;
             self.rest(
                 GitHubRestInput {
                     host: locator.host.clone(),
@@ -1536,8 +1702,15 @@ impl SourceControlProvider for GitHubSourceControlProvider {
             .await?;
             Ok::<_, GitHubFailure>(())
         };
-        run.await
-            .map_err(|e| provider_error("createChangeRequest", &input.cwd, Some(&input.head_selector), None, e))
+        run.await.map_err(|e| {
+            provider_error(
+                "createChangeRequest",
+                &input.cwd,
+                Some(&input.head_selector),
+                None,
+                e,
+            )
+        })
     }
 
     async fn get_repository_clone_urls(
@@ -1545,29 +1718,49 @@ impl SourceControlProvider for GitHubSourceControlProvider {
         input: GetRepositoryCloneUrlsInput,
     ) -> Result<SourceControlRepositoryCloneUrls, SourceControlProviderError> {
         let run = async {
-            let fallback_host = match self.resolve_repository(&input.cwd, None, input.context.as_ref()).await {
+            let fallback_host = match self
+                .resolve_repository(&input.cwd, None, input.context.as_ref())
+                .await
+            {
                 Ok(locator) => locator.host,
-                Err(_) => self.environment.get("GH_HOST").unwrap_or_else(|| "github.com".to_owned()),
+                Err(_) => self
+                    .environment
+                    .get("GH_HOST")
+                    .unwrap_or_else(|| "github.com".to_owned()),
             }
             .to_lowercase();
             // A bare name is the signed-in account's repository, the way `gh repo view` reads it.
-            let bare_name = DOT_GIT_SUFFIX.replace(js_trim(&input.repository), "").into_owned();
-            let locator = match parse_github_repository_selector(&input.repository, &fallback_host) {
+            let bare_name = DOT_GIT_SUFFIX
+                .replace(js_trim(&input.repository), "")
+                .into_owned();
+            let locator = match parse_github_repository_selector(&input.repository, &fallback_host)
+            {
                 Some(locator) => Some(locator),
-                None if BARE_REPOSITORY_NAME.is_match(&bare_name) => Some(GitHubRepositoryLocator {
-                    host: fallback_host.clone(),
-                    owner: self.read_viewer_login(&fallback_host).await?,
-                    name: bare_name,
-                }),
+                None if BARE_REPOSITORY_NAME.is_match(&bare_name) => {
+                    Some(GitHubRepositoryLocator {
+                        host: fallback_host.clone(),
+                        owner: self.read_viewer_login(&fallback_host).await?,
+                        name: bare_name,
+                    })
+                }
                 None => None,
             };
             let Some(locator) = locator else {
                 return Err(failure("Repositories are named owner/name.", None));
             };
-            Ok(repository_clone_urls(&self.read_repository(&locator).await?))
+            Ok(repository_clone_urls(
+                &self.read_repository(&locator).await?,
+            ))
         };
-        run.await
-            .map_err(|e| provider_error("getRepositoryCloneUrls", &input.cwd, None, Some(&input.repository), e))
+        run.await.map_err(|e| {
+            provider_error(
+                "getRepositoryCloneUrls",
+                &input.cwd,
+                None,
+                Some(&input.repository),
+                e,
+            )
+        })
     }
 
     async fn create_repository(
@@ -1585,14 +1778,22 @@ impl SourceControlProvider for GitHubSourceControlProvider {
                 Some(locator) => Some(self.read_viewer_login(&locator.host).await?),
                 None => None,
             };
-            let owner: Option<String> = locator.as_ref().map(|l| l.owner.clone()).or_else(|| viewer.clone());
+            let owner: Option<String> = locator
+                .as_ref()
+                .map(|l| l.owner.clone())
+                .or_else(|| viewer.clone());
             let name = locator
                 .as_ref()
                 .map_or_else(|| js_trim(&input.repository).to_owned(), |l| l.name.clone());
             let host = locator.as_ref().map_or_else(
                 || {
-                    let gh_host = self.environment.get("GH_HOST").map(|h| js_trim(&h).to_lowercase());
-                    gh_host.filter(|h| !h.is_empty()).unwrap_or_else(|| "github.com".to_owned())
+                    let gh_host = self
+                        .environment
+                        .get("GH_HOST")
+                        .map(|h| js_trim(&h).to_lowercase());
+                    gh_host
+                        .filter(|h| !h.is_empty())
+                        .unwrap_or_else(|| "github.com".to_owned())
                 },
                 |l| l.host.clone(),
             );
@@ -1603,7 +1804,10 @@ impl SourceControlProvider for GitHubSourceControlProvider {
             let path = if is_viewer || owner.is_none() {
                 "user/repos".to_owned()
             } else {
-                format!("orgs/{}/repos", encode_uri_component(owner.as_deref().unwrap_or("")))
+                format!(
+                    "orgs/{}/repos",
+                    encode_uri_component(owner.as_deref().unwrap_or(""))
+                )
             };
             let response = self
                 .rest(
@@ -1626,12 +1830,21 @@ impl SourceControlProvider for GitHubSourceControlProvider {
                     ),
                 )
                 .await?;
-            let decoded = serde_json::from_str::<RawRepository>(&response.body)
-                .map_err(|error| failure("GitHub returned an invalid repository.", cause_of(error)))?;
+            let decoded =
+                serde_json::from_str::<RawRepository>(&response.body).map_err(|error| {
+                    failure("GitHub returned an invalid repository.", cause_of(error))
+                })?;
             Ok(repository_clone_urls(&decoded))
         };
-        run.await
-            .map_err(|e| provider_error("createRepository", &input.cwd, None, Some(&input.repository), e))
+        run.await.map_err(|e| {
+            provider_error(
+                "createRepository",
+                &input.cwd,
+                None,
+                Some(&input.repository),
+                e,
+            )
+        })
     }
 
     async fn get_default_branch(
@@ -1640,22 +1853,37 @@ impl SourceControlProvider for GitHubSourceControlProvider {
     ) -> Result<Option<String>, SourceControlProviderError> {
         let run = async {
             let locator = self
-                .resolve_repository(&input.cwd, context_host(input.context.as_ref()).as_deref(), input.context.as_ref())
+                .resolve_repository(
+                    &input.cwd,
+                    context_host(input.context.as_ref()).as_deref(),
+                    input.context.as_ref(),
+                )
                 .await?;
             let repository = self.read_repository(&locator).await?;
-            let branch = repository.default_branch.as_deref().map_or("", js_trim).to_owned();
+            let branch = repository
+                .default_branch
+                .as_deref()
+                .map_or("", js_trim)
+                .to_owned();
             Ok::<_, GitHubFailure>((!branch.is_empty()).then_some(branch))
         };
-        run.await.map_err(|e| provider_error("getDefaultBranch", &input.cwd, None, None, e))
+        run.await
+            .map_err(|e| provider_error("getDefaultBranch", &input.cwd, None, None, e))
     }
 
     async fn checkout_change_request(
         &self,
         input: CheckoutChangeRequestInput,
     ) -> Result<(), SourceControlProviderError> {
-        self.checkout_pull_request(&input)
-            .await
-            .map_err(|e| provider_error("checkoutChangeRequest", &input.cwd, Some(&input.reference), None, e))
+        self.checkout_pull_request(&input).await.map_err(|e| {
+            provider_error(
+                "checkoutChangeRequest",
+                &input.cwd,
+                Some(&input.reference),
+                None,
+                e,
+            )
+        })
     }
 }
 
@@ -1672,8 +1900,10 @@ mod tests {
     use parking_lot::Mutex as PlMutex;
     use turin_contracts::git::{GitCommandError, VcsSwitchRefResult};
 
-    type GraphqlFn = Box<dyn Fn(&GitHubGraphQlInput) -> Result<String, GitHubApiError> + Send + Sync>;
-    type RestFn = Box<dyn Fn(&GitHubRestInput) -> Result<GitHubRestResponse, GitHubApiError> + Send + Sync>;
+    type GraphqlFn =
+        Box<dyn Fn(&GitHubGraphQlInput) -> Result<String, GitHubApiError> + Send + Sync>;
+    type RestFn =
+        Box<dyn Fn(&GitHubRestInput) -> Result<GitHubRestResponse, GitHubApiError> + Send + Sync>;
 
     #[derive(Default)]
     struct FakeApi {
@@ -1710,7 +1940,12 @@ mod tests {
     fn remotes_output(entries: &[(&str, &str)]) -> String {
         entries
             .iter()
-            .flat_map(|(name, url)| [format!("{name}\t{url} (fetch)"), format!("{name}\t{url} (push)")])
+            .flat_map(|(name, url)| {
+                [
+                    format!("{name}\t{url} (fetch)"),
+                    format!("{name}\t{url} (push)"),
+                ]
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -1749,7 +1984,13 @@ mod tests {
 
     impl Options {
         fn new(remotes: String) -> Self {
-            Self { remotes, resolved: String::new(), local_branches: vec![], git_failure: false, env: vec![] }
+            Self {
+                remotes,
+                resolved: String::new(),
+                local_branches: vec![],
+                git_failure: false,
+                env: vec![],
+            }
         }
     }
 
@@ -1776,11 +2017,16 @@ mod tests {
     }
 
     fn process_output(stdout: &str, exit_code: i32) -> SourceControlProcessOutput {
-        SourceControlProcessOutput { exit_code, stdout: stdout.to_owned(), ..Default::default() }
+        SourceControlProcessOutput {
+            exit_code,
+            stdout: stdout.to_owned(),
+            ..Default::default()
+        }
     }
 
     /// The provider over a faked GitHubApi, git driver and process. `remotes` is what
     /// `git remote -v` prints; `log` records every driver call.
+    #[allow(clippy::field_reassign_with_default)]
     fn harness(options: Options, api: FakeApi) -> Harness {
         let log: Arc<PlMutex<Vec<(String, Value)>>> = Arc::new(PlMutex::new(Vec::new()));
         let record = {
@@ -1791,11 +2037,13 @@ mod tests {
         let (local_branches, git_failure) = (options.local_branches.clone(), options.git_failure);
         let mut host = ScriptedHost::default();
         host.process = Some(Box::new(move |input| {
-            Ok(if input.args.first().map(String::as_str) == Some("remote") {
-                process_output(&remotes, 0)
-            } else {
-                process_output(&resolved, if resolved.is_empty() { 1 } else { 0 })
-            })
+            Ok(
+                if input.args.first().map(String::as_str) == Some("remote") {
+                    process_output(&remotes, 0)
+                } else {
+                    process_output(&resolved, if resolved.is_empty() { 1 } else { 0 })
+                },
+            )
         }));
         let r = record.clone();
         host.git_execute = Some(Box::new(move |input| {
@@ -1803,41 +2051,58 @@ mod tests {
             Ok(SourceControlGitOutput::default())
         }));
         host.resolve_primary_remote_name = Some(Box::new(|_| Ok("origin".into())));
-        host.read_config_value =
-            Some(Box::new(|_| Ok(Some("git@github.com:acme/web.git".into()))));
+        host.read_config_value = Some(Box::new(|_| Ok(Some("git@github.com:acme/web.git".into()))));
         let r = record.clone();
         host.ensure_remote = Some(Box::new(move |(cwd, preferred, url)| {
-            r("ensureRemote", json!({ "cwd": cwd, "preferredName": preferred, "url": url }));
+            r(
+                "ensureRemote",
+                json!({ "cwd": cwd, "preferredName": preferred, "url": url }),
+            );
             Ok(preferred)
         }));
         let r = record.clone();
-        host.fetch_remote_tracking_branch = Some(Box::new(move |input: SourceControlGitRemoteBranch| {
-            r(
-                "fetchRemoteTrackingBranch",
-                json!({ "cwd": input.cwd, "remoteName": input.remote_name, "remoteBranch": input.remote_branch }),
-            );
-            Ok(())
-        }));
+        host.fetch_remote_tracking_branch = Some(Box::new(
+            move |input: SourceControlGitRemoteBranch| {
+                r(
+                    "fetchRemoteTrackingBranch",
+                    json!({ "cwd": input.cwd, "remoteName": input.remote_name, "remoteBranch": input.remote_branch }),
+                );
+                Ok(())
+            },
+        ));
         let r = record.clone();
-        host.set_branch_upstream =
-            Some(Box::new(move |(input, branch): (SourceControlGitRemoteBranch, String)| {
+        host.set_branch_upstream = Some(Box::new(
+            move |(input, branch): (SourceControlGitRemoteBranch, String)| {
                 r(
                     "setBranchUpstream",
                     json!({ "cwd": input.cwd, "branch": branch, "remoteName": input.remote_name, "remoteBranch": input.remote_branch }),
                 );
                 Ok(())
-            }));
+            },
+        ));
         let r = record;
         host.switch_ref = Some(Box::new(move |input| {
-            r("switchRef", json!({ "cwd": input.cwd.as_str(), "refName": input.ref_name.as_str() }));
-            Ok(VcsSwitchRefResult { ref_name: Some(input.ref_name) })
+            r(
+                "switchRef",
+                json!({ "cwd": input.cwd.as_str(), "refName": input.ref_name.as_str() }),
+            );
+            Ok(VcsSwitchRefResult {
+                ref_name: Some(input.ref_name),
+            })
         }));
         host.list_local_branch_names = Some(Box::new(move |_| {
-            if git_failure { Err(git_error()) } else { Ok(local_branches.clone()) }
+            if git_failure {
+                Err(git_error())
+            } else {
+                Ok(local_branches.clone())
+            }
         }));
         host.resolve_commit = Some(Box::new(|_| Ok("abc123".into())));
         let environment = MapEnvironment::new(options.env.iter().map(|(k, v)| (*k, *v)));
-        Harness { provider: make(Arc::new(api), Arc::new(host), environment), log }
+        Harness {
+            provider: make(Arc::new(api), Arc::new(host), environment),
+            log,
+        }
     }
 
     fn github_context(host: &str) -> SourceControlProviderContext {
@@ -1853,7 +2118,11 @@ mod tests {
         }
     }
 
-    fn list_input(head_selector: &str, state: Option<ChangeRequestState>, limit: Option<u32>) -> ListChangeRequestsInput {
+    fn list_input(
+        head_selector: &str,
+        state: Option<ChangeRequestState>,
+        limit: Option<u32>,
+    ) -> ListChangeRequestsInput {
         ListChangeRequestsInput {
             cwd: "/repo".into(),
             context: None,
@@ -1869,8 +2138,13 @@ mod tests {
         detail
     }
 
-    fn default_branch_input(context: Option<SourceControlProviderContext>) -> GetDefaultBranchInput {
-        GetDefaultBranchInput { cwd: "/repo".into(), context }
+    fn default_branch_input(
+        context: Option<SourceControlProviderContext>,
+    ) -> GetDefaultBranchInput {
+        GetDefaultBranchInput {
+            cwd: "/repo".into(),
+            context,
+        }
     }
 
     // --- repository resolution -------------------------------------------------------------
@@ -1893,7 +2167,11 @@ mod tests {
             },
         );
         assert_eq!(
-            h.provider.get_default_branch(default_branch_input(None)).await.unwrap().as_deref(),
+            h.provider
+                .get_default_branch(default_branch_input(None))
+                .await
+                .unwrap()
+                .as_deref(),
             Some("trunk")
         );
         assert_eq!(*paths.lock(), vec!["github.com repos/acme/web"]);
@@ -1913,30 +2191,45 @@ mod tests {
                 ..Default::default()
             },
         );
-        h.provider.get_default_branch(default_branch_input(None)).await.unwrap();
+        h.provider
+            .get_default_branch(default_branch_input(None))
+            .await
+            .unwrap();
         // A provider's host hint for the same alias (`github` here) resolves the same way.
         h.provider
             .get_default_branch(default_branch_input(Some(github_context("github"))))
             .await
             .unwrap();
-        assert_eq!(*hosts.lock(), vec!["github.com repos/acme/web", "github.com repos/acme/web"]);
+        assert_eq!(
+            *hosts.lock(),
+            vec!["github.com repos/acme/web", "github.com repos/acme/web"]
+        );
     }
 
     #[tokio::test]
     async fn names_a_missing_repository_rather_than_a_pull_request() {
         let h = harness(
-            Options::new(remotes_output(&[("origin", "git@github.com:acme/gone.git")])),
+            Options::new(remotes_output(&[(
+                "origin",
+                "git@github.com:acme/gone.git",
+            )])),
             FakeApi {
                 rest: Some(Box::new(|input| {
-                    Err(GitHubApiError::NotFound(crate::github::api::GitHubApiNotFoundError {
-                        host: input.host.clone(),
-                        operation: input.operation.clone(),
-                    }))
+                    Err(GitHubApiError::NotFound(
+                        crate::github::api::GitHubApiNotFoundError {
+                            host: input.host.clone(),
+                            operation: input.operation.clone(),
+                        },
+                    ))
                 })),
                 ..Default::default()
             },
         );
-        let error = h.provider.get_default_branch(default_branch_input(None)).await.unwrap_err();
+        let error = h
+            .provider
+            .get_default_branch(default_branch_input(None))
+            .await
+            .unwrap_err();
         assert!(detail_of(&error).contains("Repository not found"));
     }
 
@@ -1946,8 +2239,16 @@ mod tests {
             Options::new(remotes_output(&[("origin", "git@gitlab.com:a/b.git")])),
             FakeApi::default(),
         );
-        let error = h.provider.get_default_branch(default_branch_input(None)).await.unwrap_err();
-        assert!(detail_of(&error).contains("No GitHub repository"), "{}", detail_of(&error));
+        let error = h
+            .provider
+            .get_default_branch(default_branch_input(None))
+            .await
+            .unwrap_err();
+        assert!(
+            detail_of(&error).contains("No GitHub repository"),
+            "{}",
+            detail_of(&error)
+        );
     }
 
     // --- change request lookups by head ----------------------------------------------------
@@ -1988,8 +2289,14 @@ mod tests {
         };
         let (first, second) = tokio::join!(first, second);
         let first = first.unwrap();
-        assert_eq!(first.iter().map(|pr| pr.number.get()).collect::<Vec<_>>(), vec![7]);
-        assert_eq!(first[0].head_sha.as_ref().map(|s| s.as_str()), Some("a".repeat(40).as_str()));
+        assert_eq!(
+            first.iter().map(|pr| pr.number.get()).collect::<Vec<_>>(),
+            vec![7]
+        );
+        assert_eq!(
+            first[0].head_sha.as_ref().map(|s| s.as_str()),
+            Some("a".repeat(40).as_str())
+        );
         assert!(second.unwrap().is_empty());
         let documents = documents.lock();
         assert_eq!(documents.len(), 1);
@@ -2017,11 +2324,15 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .keys()
-                        .filter(|k| k.starts_with('h') && k[1..].chars().all(|ch| ch.is_ascii_digit()))
+                        .filter(|k| {
+                            k.starts_with('h') && k[1..].chars().all(|ch| ch.is_ascii_digit())
+                        })
                         .collect();
                     c.lock().push(heads.len());
-                    let repository: Map<String, Value> =
-                        heads.into_iter().map(|k| (k.clone(), json!({ "nodes": [] }))).collect();
+                    let repository: Map<String, Value> = heads
+                        .into_iter()
+                        .map(|k| (k.clone(), json!({ "nodes": [] })))
+                        .collect();
                     Ok(json!({ "data": { "repository": repository } }).to_string())
                 })),
                 ..Default::default()
@@ -2049,22 +2360,37 @@ mod tests {
             Options::new(web_remotes()),
             FakeApi {
                 graphql: Some(Box::new(|input| {
-                    let nodes = if input.variables.as_ref().unwrap().get("h0") == Some(&json!("main")) {
-                        vec![node(9, "main", "someone"), node(8, "main", "me"), node(7, "main", "me")]
-                    } else {
-                        vec![]
-                    };
-                    Ok(json!({ "data": { "repository": { "h0": { "nodes": nodes } } } }).to_string())
+                    let nodes =
+                        if input.variables.as_ref().unwrap().get("h0") == Some(&json!("main")) {
+                            vec![
+                                node(9, "main", "someone"),
+                                node(8, "main", "me"),
+                                node(7, "main", "me"),
+                            ]
+                        } else {
+                            vec![]
+                        };
+                    Ok(
+                        json!({ "data": { "repository": { "h0": { "nodes": nodes } } } })
+                            .to_string(),
+                    )
                 })),
                 ..Default::default()
             },
         );
         let open = h
             .provider
-            .list_change_requests(list_input("me:main", Some(ChangeRequestState::Open), Some(1)))
+            .list_change_requests(list_input(
+                "me:main",
+                Some(ChangeRequestState::Open),
+                Some(1),
+            ))
             .await
             .unwrap();
-        assert_eq!(open.iter().map(|pr| pr.number.get()).collect::<Vec<_>>(), vec![8]);
+        assert_eq!(
+            open.iter().map(|pr| pr.number.get()).collect::<Vec<_>>(),
+            vec![8]
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2073,30 +2399,44 @@ mod tests {
             Options::new(web_remotes()),
             FakeApi {
                 graphql: Some(Box::new(|input| {
-                    Err(if input.variables.as_ref().unwrap().get("h0") == Some(&json!("missing")) {
-                        GitHubApiError::CredentialUnavailable(GitHubCredentialUnavailableError::CliMissing(
-                            GitHubCliMissingError { host: "github.com".into() },
-                        ))
-                    } else {
-                        GitHubApiError::RateLimit(GitHubApiRateLimitError {
-                            host: "github.com".into(),
-                            operation: "x".into(),
-                            retry_at: Some(123),
-                        })
-                    })
+                    Err(
+                        if input.variables.as_ref().unwrap().get("h0") == Some(&json!("missing")) {
+                            GitHubApiError::CredentialUnavailable(
+                                GitHubCredentialUnavailableError::CliMissing(
+                                    GitHubCliMissingError {
+                                        host: "github.com".into(),
+                                    },
+                                ),
+                            )
+                        } else {
+                            GitHubApiError::RateLimit(GitHubApiRateLimitError {
+                                host: "github.com".into(),
+                                operation: "x".into(),
+                                retry_at: Some(123),
+                            })
+                        },
+                    )
                 })),
                 ..Default::default()
             },
         );
         let missing = h
             .provider
-            .list_change_requests(list_input("missing", Some(ChangeRequestState::Open), Some(1)))
+            .list_change_requests(list_input(
+                "missing",
+                Some(ChangeRequestState::Open),
+                Some(1),
+            ))
             .await
             .unwrap_err();
         assert!(detail_of(&missing).contains("No GitHub credential on the server"));
         let limited = h
             .provider
-            .list_change_requests(list_input("limited", Some(ChangeRequestState::Open), Some(1)))
+            .list_change_requests(list_input(
+                "limited",
+                Some(ChangeRequestState::Open),
+                Some(1),
+            ))
             .await
             .unwrap_err();
         assert!(detail_of(&limited).contains("rate limit exceeded"));
@@ -2114,7 +2454,8 @@ mod tests {
             Options::new(web_remotes()),
             FakeApi {
                 graphql: Some(Box::new(move |input| {
-                    v.lock().push(Value::Object(input.variables.clone().unwrap()));
+                    v.lock()
+                        .push(Value::Object(input.variables.clone().unwrap()));
                     Ok(json!({ "data": { "repository": { "pullRequest": node(42, "feature", "acme") } } }).to_string())
                 })),
                 ..Default::default()
@@ -2125,8 +2466,19 @@ mod tests {
             context: None,
             reference: reference.into(),
         };
-        assert_eq!(h.provider.get_change_request(get("#42")).await.unwrap().number.get(), 42);
-        h.provider.get_change_request(get("https://github.com/other/thing/pull/42")).await.unwrap();
+        assert_eq!(
+            h.provider
+                .get_change_request(get("#42"))
+                .await
+                .unwrap()
+                .number
+                .get(),
+            42
+        );
+        h.provider
+            .get_change_request(get("https://github.com/other/thing/pull/42"))
+            .await
+            .unwrap();
         assert_eq!(
             *variables.lock(),
             vec![
@@ -2149,7 +2501,11 @@ mod tests {
         );
         let error = h
             .provider
-            .get_change_request(GetChangeRequestInput { cwd: "/repo".into(), context: None, reference: "7".into() })
+            .get_change_request(GetChangeRequestInput {
+                cwd: "/repo".into(),
+                context: None,
+                reference: "7".into(),
+            })
             .await
             .unwrap_err();
         assert!(detail_of(&error).contains("Pull request not found"));
@@ -2212,7 +2568,11 @@ mod tests {
             Options::new(String::new()),
             FakeApi {
                 rest: Some(Box::new(move |input| {
-                    let method = if input.method == RestMethod::Post { "POST" } else { "GET" };
+                    let method = if input.method == RestMethod::Post {
+                        "POST"
+                    } else {
+                        "GET"
+                    };
                     r.lock().push(format!("{method} {}", input.path));
                     Ok(rest_response(if input.path == "user" {
                         json!({ "login": "me" })
@@ -2269,19 +2629,32 @@ mod tests {
             context: Some(github_context("code.example.test")),
             repository: repository.into(),
         };
-        let urls = h.provider.get_repository_clone_urls(lookup(" notes.git ")).await.unwrap();
+        let urls = h
+            .provider
+            .get_repository_clone_urls(lookup(" notes.git "))
+            .await
+            .unwrap();
         assert_eq!(urls.name_with_owner.as_str(), "me/notes");
         assert_eq!(urls.url.as_str(), "https://code.example.test/me/notes");
         assert_eq!(urls.ssh_url.as_str(), "git@code.example.test:me/notes.git");
         assert_eq!(
             *requests.lock(),
-            vec!["code.example.test GET user", "code.example.test GET repos/me/notes"]
+            vec![
+                "code.example.test GET user",
+                "code.example.test GET repos/me/notes"
+            ]
         );
         // Malformed names are still refused before any request.
         for repository in ["me/", "/notes", "a/b/c/d", "", "two words"] {
-            let error = h.provider.get_repository_clone_urls(lookup(repository)).await.unwrap_err();
+            let error = h
+                .provider
+                .get_repository_clone_urls(lookup(repository))
+                .await
+                .unwrap_err();
             assert!(
-                error.to_string().contains("Repositories are named owner/name."),
+                error
+                    .to_string()
+                    .contains("Repositories are named owner/name."),
                 "{repository}: {error}"
             );
         }
@@ -2300,16 +2673,24 @@ mod tests {
     }
 
     fn pull_request_graphql(pr: Value) -> GraphqlFn {
-        Box::new(move |_| Ok(json!({ "data": { "repository": { "pullRequest": pr.clone() } } }).to_string()))
+        Box::new(move |_| {
+            Ok(json!({ "data": { "repository": { "pullRequest": pr.clone() } } }).to_string())
+        })
     }
 
     #[tokio::test]
     async fn checks_a_same_repository_pull_request_out_from_its_head_branch() {
         let h = harness(
             Options::new(web_remotes()),
-            FakeApi { graphql: Some(pull_request_graphql(node(5, "feature/x", "acme"))), ..Default::default() },
+            FakeApi {
+                graphql: Some(pull_request_graphql(node(5, "feature/x", "acme"))),
+                ..Default::default()
+            },
         );
-        h.provider.checkout_change_request(checkout("5", false)).await.unwrap();
+        h.provider
+            .checkout_change_request(checkout("5", false))
+            .await
+            .unwrap();
         assert_eq!(
             *h.log.lock(),
             vec![
@@ -2317,8 +2698,14 @@ mod tests {
                     "fetchRemoteTrackingBranch".to_owned(),
                     json!({ "cwd": "/repo", "remoteName": "origin", "remoteBranch": "feature/x" })
                 ),
-                ("execute".to_owned(), json!(["branch", "feature/x", "refs/remotes/origin/feature/x"])),
-                ("switchRef".to_owned(), json!({ "cwd": "/repo", "refName": "feature/x" })),
+                (
+                    "execute".to_owned(),
+                    json!(["branch", "feature/x", "refs/remotes/origin/feature/x"])
+                ),
+                (
+                    "switchRef".to_owned(),
+                    json!({ "cwd": "/repo", "refName": "feature/x" })
+                ),
                 (
                     "setBranchUpstream".to_owned(),
                     json!({ "cwd": "/repo", "branch": "feature/x", "remoteName": "origin", "remoteBranch": "feature/x" })
@@ -2336,15 +2723,20 @@ mod tests {
             FakeApi {
                 graphql: Some(pull_request_graphql(node(6, "main", "someone"))),
                 rest: Some(Box::new(|input| {
-                    Err(GitHubApiError::Request(crate::github::api::GitHubApiRequestError {
-                        host: "github.com".into(),
-                        operation: input.operation.clone(),
-                        cause: crate::source_control_core::cause_from_message("offline"),
-                    }))
+                    Err(GitHubApiError::Request(
+                        crate::github::api::GitHubApiRequestError {
+                            host: "github.com".into(),
+                            operation: input.operation.clone(),
+                            cause: crate::source_control_core::cause_from_message("offline"),
+                        },
+                    ))
                 })),
             },
         );
-        h.provider.checkout_change_request(checkout("6", true)).await.unwrap_err();
+        h.provider
+            .checkout_change_request(checkout("6", true))
+            .await
+            .unwrap_err();
         // Nothing touched the local branches: `main` must not be reset to the fork's commit.
         assert!(h.log.lock().is_empty());
     }
@@ -2359,13 +2751,20 @@ mod tests {
                 graphql: Some(pull_request_graphql(node(6, "main", "someone"))),
                 rest: Some(Box::new(|input| {
                     Ok(rest_response(repository_body(
-                        if input.path == "repos/acme/web" { "acme/web" } else { "someone/web" },
+                        if input.path == "repos/acme/web" {
+                            "acme/web"
+                        } else {
+                            "someone/web"
+                        },
                         "main",
                     )))
                 })),
             },
         );
-        h.provider.checkout_change_request(checkout("6", true)).await.unwrap();
+        h.provider
+            .checkout_change_request(checkout("6", true))
+            .await
+            .unwrap();
         assert_eq!(
             *h.log.lock(),
             vec![
@@ -2377,8 +2776,14 @@ mod tests {
                     "fetchRemoteTrackingBranch".to_owned(),
                     json!({ "cwd": "/repo", "remoteName": "someone", "remoteBranch": "main" })
                 ),
-                ("switchRef".to_owned(), json!({ "cwd": "/repo", "refName": "someone/main" })),
-                ("execute".to_owned(), json!(["reset", "--hard", "--quiet", "refs/remotes/someone/main"])),
+                (
+                    "switchRef".to_owned(),
+                    json!({ "cwd": "/repo", "refName": "someone/main" })
+                ),
+                (
+                    "execute".to_owned(),
+                    json!(["reset", "--hard", "--quiet", "refs/remotes/someone/main"])
+                ),
                 (
                     "setBranchUpstream".to_owned(),
                     json!({ "cwd": "/repo", "branch": "someone/main", "remoteName": "someone", "remoteBranch": "main" })
@@ -2393,10 +2798,20 @@ mod tests {
         options.git_failure = true;
         let h = harness(
             options,
-            FakeApi { graphql: Some(pull_request_graphql(node(5, "feature/x", "acme"))), ..Default::default() },
+            FakeApi {
+                graphql: Some(pull_request_graphql(node(5, "feature/x", "acme"))),
+                ..Default::default()
+            },
         );
-        let error = h.provider.checkout_change_request(checkout("5", false)).await.unwrap_err();
-        assert_eq!(detail_of(&error), "The pull request could not be checked out with git.");
+        let error = h
+            .provider
+            .checkout_change_request(checkout("5", false))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            detail_of(&error),
+            "The pull request could not be checked out with git."
+        );
         assert!(!error.to_string().contains("secret-path"));
     }
 
@@ -2413,7 +2828,11 @@ mod tests {
     // --- auth parsing -----------------------------------------------------------------------
 
     fn probe_input(stdout: &str, stderr: &str, exit_code: i32) -> SourceControlAuthProbeInput {
-        SourceControlAuthProbeInput { stdout: stdout.into(), stderr: stderr.into(), exit_code }
+        SourceControlAuthProbeInput {
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            exit_code,
+        }
     }
 
     fn text(option: &EffectOption<TrimmedNonEmptyString>) -> Option<&str> {
@@ -2447,8 +2866,12 @@ mod tests {
         ] } })
         .to_string();
         let auth = parse_github_auth(
-            &probe_input(&stdout, "warning: ignored diagnostic from gh
-", 0),
+            &probe_input(
+                &stdout,
+                "warning: ignored diagnostic from gh
+",
+                0,
+            ),
             &GitHubSettings::default(),
         );
         assert_eq!(auth.status, SourceControlProviderAuthStatus::Authenticated);
@@ -2464,7 +2887,10 @@ mod tests {
         ] } })
         .to_string();
         let auth = parse_github_auth(&probe_input(&stdout, "", 0), &GitHubSettings::default());
-        assert_eq!(auth.status, SourceControlProviderAuthStatus::Unauthenticated);
+        assert_eq!(
+            auth.status,
+            SourceControlProviderAuthStatus::Unauthenticated
+        );
         assert_eq!(text(&auth.host), Some("github.com"));
         assert_eq!(text(&auth.detail), Some("The token in keyring is invalid."));
     }
@@ -2472,10 +2898,14 @@ mod tests {
     #[test]
     fn reports_an_update_hint_instead_of_unauthenticated_when_gh_predates_json() {
         let auth = parse_github_auth(
-            &probe_input("", "unknown flag: --json
+            &probe_input(
+                "",
+                "unknown flag: --json
 
 Usage:  gh auth status [flags]
-", 1),
+",
+                1,
+            ),
             &GitHubSettings::default(),
         );
         assert_eq!(auth.status, SourceControlProviderAuthStatus::Unknown);
@@ -2509,7 +2939,9 @@ Usage:  gh auth status [flags]
     fn reports_every_gh_login_and_leads_with_the_account_settings_pin() {
         let auth = parse_github_auth(
             &multi_account_status(vec![]),
-            &settings(json!({ "hosts": { "github.com": { "account": "work", "enabled": true } }, "tokens": {} })),
+            &settings(
+                json!({ "hosts": { "github.com": { "account": "work", "enabled": true } }, "tokens": {} }),
+            ),
         );
         assert_eq!(text(&auth.account), Some("work"));
         let accounts = auth.accounts.unwrap();
@@ -2530,7 +2962,13 @@ Usage:  gh auth status [flags]
             vec![
                 ("github.com".into(), "personal".into(), true, true, None),
                 ("github.com".into(), "work".into(), false, true, None),
-                ("ghe.acme.test".into(), "jm".into(), true, false, Some("expired".into())),
+                (
+                    "ghe.acme.test".into(),
+                    "jm".into(),
+                    true,
+                    false,
+                    Some("expired".into())
+                ),
             ]
         );
     }
@@ -2539,7 +2977,9 @@ Usage:  gh auth status [flags]
     fn falls_back_to_ghs_active_login_when_the_pinned_account_is_gone() {
         let auth = parse_github_auth(
             &multi_account_status(vec![]),
-            &settings(json!({ "hosts": { "github.com": { "account": "former-job", "enabled": true } }, "tokens": {} })),
+            &settings(
+                json!({ "hosts": { "github.com": { "account": "former-job", "enabled": true } }, "tokens": {} }),
+            ),
         );
         assert_eq!(text(&auth.account), Some("personal"));
     }
@@ -2550,10 +2990,15 @@ Usage:  gh auth status [flags]
             &multi_account_status(vec![]),
             &settings(json!({ "hosts": { "github.com": { "enabled": false } }, "tokens": {} })),
         );
-        assert_eq!(auth.status, SourceControlProviderAuthStatus::Unauthenticated);
+        assert_eq!(
+            auth.status,
+            SourceControlProviderAuthStatus::Unauthenticated
+        );
         assert_eq!(
             text(&auth.detail),
-            Some("Every GitHub host gh is signed in to is turned off in Settings → Source Control.")
+            Some(
+                "Every GitHub host gh is signed in to is turned off in Settings → Source Control."
+            )
         );
     }
 
@@ -2563,15 +3008,22 @@ Usage:  gh auth status [flags]
             &multi_account_status(vec![json!({
                 "state": "success", "active": false, "host": "github.com", "login": "bot", "tokenSource": "GH_TOKEN",
             })]),
-            &settings(json!({ "hosts": { "github.com": { "account": "work", "enabled": true } }, "tokens": {} })),
+            &settings(
+                json!({ "hosts": { "github.com": { "account": "work", "enabled": true } }, "tokens": {} }),
+            ),
         );
         assert_eq!(text(&auth.account), Some("bot"));
         assert_eq!(
             text(&auth.detail),
-            Some("Using GH_TOKEN from the server environment; it overrides the account chosen in Settings.")
+            Some(
+                "Using GH_TOKEN from the server environment; it overrides the account chosen in Settings."
+            )
         );
         assert_eq!(
-            auth.accounts.unwrap()[2].environment_variable.as_ref().map(|v| v.as_str()),
+            auth.accounts.unwrap()[2]
+                .environment_variable
+                .as_ref()
+                .map(|v| v.as_str()),
             Some("GH_TOKEN")
         );
     }
@@ -2587,7 +3039,9 @@ Usage:  gh auth status [flags]
                     rest: Some(Box::new(|input| {
                         assert_eq!(input.host, "github.com");
                         assert_eq!(input.path, "repos/owner/repo/issues/42");
-                        Ok(rest_response(json!({ "title": "Pairing expiry", "body": "Preserve remote access", "id": 1 })))
+                        Ok(rest_response(
+                            json!({ "title": "Pairing expiry", "body": "Preserve remote access", "id": 1 }),
+                        ))
                     })),
                     ..Default::default()
                 },
@@ -2596,7 +3050,8 @@ Usage:  gh auth status [flags]
                 .provider
                 .resolve_link(ResolveSourceControlLinkInput {
                     cwd: "/unrelated".into(),
-                    url: reqwest::Url::parse(&format!("https://github.com/owner/repo/{route}/42")).unwrap(),
+                    url: reqwest::Url::parse(&format!("https://github.com/owner/repo/{route}/42"))
+                        .unwrap(),
                 })
                 .expect("a lookup");
             assert_eq!(
@@ -2625,12 +3080,14 @@ Usage:  gh auth status [flags]
                 FakeApi {
                     rest: Some(Box::new(move |_| {
                         if stage == "read" {
-                            Err(GitHubApiError::Response(crate::github::api::GitHubApiResponseError {
-                                host: "github.com".into(),
-                                operation: "resolveLink".into(),
-                                status: 500,
-                                github_errors: None,
-                            }))
+                            Err(GitHubApiError::Response(
+                                crate::github::api::GitHubApiResponseError {
+                                    host: "github.com".into(),
+                                    operation: "resolveLink".into(),
+                                    status: 500,
+                                    github_errors: None,
+                                },
+                            ))
                         } else {
                             Ok(GitHubRestResponse {
                                 status: 200,
@@ -2652,8 +3109,20 @@ Usage:  gh auth status [flags]
                 })
                 .expect("a lookup");
             let error = lookup.await.unwrap_err();
-            let SourceControlProviderError::SourceControlProviderError { operation, detail, cause, .. } = &error;
-            assert_eq!(operation, if stage == "read" { "resolveLink" } else { "resolveLink.decode" });
+            let SourceControlProviderError::SourceControlProviderError {
+                operation,
+                detail,
+                cause,
+                ..
+            } = &error;
+            assert_eq!(
+                operation,
+                if stage == "read" {
+                    "resolveLink"
+                } else {
+                    "resolveLink.decode"
+                }
+            );
             assert_eq!(detail, "The linked subject could not be read.");
             assert!(!error.to_string().contains("private response text"));
             let cause = cause.as_ref().unwrap();
@@ -2689,7 +3158,8 @@ Usage:  gh auth status [flags]
                         let mut pr = node(42, "feature", "team");
                         pr["url"] = json!("https://code.example.test/team/project/pull/42");
                         pr["isCrossRepository"] = json!(false);
-                        pr["headRepository"] = json!({ "name": "project", "nameWithOwner": "team/project" });
+                        pr["headRepository"] =
+                            json!({ "name": "project", "nameWithOwner": "team/project" });
                         let repository = if input.operation == "getPullRequest" {
                             json!({ "pullRequest": pr })
                         } else {
@@ -2782,19 +3252,34 @@ Usage:  gh auth status [flags]
                 assert_eq!(variables["owner"], json!("team"));
                 assert_eq!(variables["name"], json!("project"));
             }
-            let rest: Vec<(String, String)> =
-                rest.lock().iter().map(|i| (i.host.clone(), i.path.clone())).collect();
+            let rest: Vec<(String, String)> = rest
+                .lock()
+                .iter()
+                .map(|i| (i.host.clone(), i.path.clone()))
+                .collect();
             assert_eq!(
                 rest,
                 vec![
-                    ("code.example.test".to_owned(), "repos/team/project/pulls".to_owned()),
-                    ("code.example.test".to_owned(), "repos/team/project".to_owned()),
-                    ("code.example.test".to_owned(), "repos/team/other".to_owned()),
+                    (
+                        "code.example.test".to_owned(),
+                        "repos/team/project/pulls".to_owned()
+                    ),
+                    (
+                        "code.example.test".to_owned(),
+                        "repos/team/project".to_owned()
+                    ),
+                    (
+                        "code.example.test".to_owned(),
+                        "repos/team/other".to_owned()
+                    ),
                     ("github.com".to_owned(), "repos/team/explicit".to_owned()),
                 ]
             );
             let log = h.log.lock();
-            let fetch = log.iter().find(|(name, _)| name == "fetchRemoteTrackingBranch").unwrap();
+            let fetch = log
+                .iter()
+                .find(|(name, _)| name == "fetchRemoteTrackingBranch")
+                .unwrap();
             assert_eq!(
                 fetch.1,
                 json!({ "cwd": "/repo", "remoteName": "enterprise", "remoteBranch": "feature" })
@@ -2808,9 +3293,24 @@ Usage:  gh auth status [flags]
             ("github.com", "", "", "acme/web"),
             ("code.example.test", "", "", "acme/web"),
             ("github.com", "remote.origin.gh-resolved base", "", "me/web"),
-            ("code.example.test", "remote.origin.gh-resolved base", "", "me/web"),
-            ("github.com", "remote.upstream.gh-resolved acme/other", "", "acme/other"),
-            ("code.example.test", "remote.upstream.gh-resolved acme/other", "", "acme/other"),
+            (
+                "code.example.test",
+                "remote.origin.gh-resolved base",
+                "",
+                "me/web",
+            ),
+            (
+                "github.com",
+                "remote.upstream.gh-resolved acme/other",
+                "",
+                "acme/other",
+            ),
+            (
+                "code.example.test",
+                "remote.upstream.gh-resolved acme/other",
+                "",
+                "acme/other",
+            ),
             ("github.com", "", "chosen/repo", "chosen/repo"),
             ("code.example.test", "", "chosen/repo", "chosen/repo"),
         ] {
@@ -2850,7 +3350,10 @@ Usage:  gh auth status [flags]
                 remote_url: format!("git@{host}:me/web.git"),
                 requested_host: None,
             };
-            h.provider.get_default_branch(default_branch_input(Some(context.clone()))).await.unwrap();
+            h.provider
+                .get_default_branch(default_branch_input(Some(context.clone())))
+                .await
+                .unwrap();
             h.provider
                 .create_change_request(CreateChangeRequestInput {
                     cwd: "/repo".into(),
@@ -2866,7 +3369,10 @@ Usage:  gh auth status [flags]
                 .unwrap();
             assert_eq!(
                 *targets.lock(),
-                vec![format!("{host}/repos/{expected}"), format!("{host}/repos/{expected}/pulls")],
+                vec![
+                    format!("{host}/repos/{expected}"),
+                    format!("{host}/repos/{expected}/pulls")
+                ],
                 "{host} {resolved:?} {env_repository:?}"
             );
         }
@@ -2877,8 +3383,17 @@ Usage:  gh auth status [flags]
         let h = harness(Options::new(String::new()), FakeApi::default());
         let probe = h
             .provider
-            .head_branch_probe(&["feature".into(), "me:feature".into()], HeadProbeState::All)
+            .head_branch_probe(
+                &["feature".into(), "me:feature".into()],
+                HeadProbeState::All,
+            )
             .unwrap();
-        assert_eq!(probe, HeadBranchProbe { head_selectors: vec!["feature".into()], limit: 100 });
+        assert_eq!(
+            probe,
+            HeadBranchProbe {
+                head_selectors: vec!["feature".into()],
+                limit: 100
+            }
+        );
     }
 }

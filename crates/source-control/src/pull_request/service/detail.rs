@@ -9,10 +9,9 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use turin_contracts::pull_request::{
-    PullRequestActivity, PullRequestChecks, PullRequestDetail, PullRequestPreview,
-    PullRequestRef, PullRequestReportStateInput, PullRequestStack, PullRequestStackLayer,
-    PullRequestState, PullRequestSummary, PullRequestThreadCommentsInput,
-    PullRequestThreadCommentsResult,
+    PullRequestActivity, PullRequestChecks, PullRequestDetail, PullRequestPreview, PullRequestRef,
+    PullRequestReportStateInput, PullRequestStack, PullRequestStackLayer, PullRequestState,
+    PullRequestSummary, PullRequestThreadCommentsInput, PullRequestThreadCommentsResult,
 };
 use turin_contracts::thread_pull_request::ThreadPullRequestKey;
 

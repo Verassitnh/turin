@@ -2,6 +2,8 @@
 //! recorded, and an operation with no script panics (the upstream `TestSourceControlHost`
 //! "Unexpected … in a test that supplied none" behaviour).
 
+#![allow(dead_code)] // scripted helpers the service tests still to be ported will use
+
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use turin_contracts::git::{GitCommandError, VcsSwitchRefInput, VcsSwitchRefResult};
@@ -16,19 +18,27 @@ use super::host::{
 type Handler<I, O> = Box<dyn Fn(I) -> O + Send + Sync>;
 
 #[derive(Default)]
+#[allow(clippy::type_complexity)] // each scripted operation is its own handler type
 pub(crate) struct ScriptedHost {
     pub settings: Mutex<ServerSettings>,
-    pub process: Option<Handler<SourceControlProcessInput, Result<SourceControlProcessOutput, VcsError>>>,
-    pub git_execute: Option<Handler<SourceControlGitExecuteInput, Result<SourceControlGitOutput, GitCommandError>>>,
+    pub process:
+        Option<Handler<SourceControlProcessInput, Result<SourceControlProcessOutput, VcsError>>>,
+    pub git_execute: Option<
+        Handler<SourceControlGitExecuteInput, Result<SourceControlGitOutput, GitCommandError>>,
+    >,
     pub resolve_commit: Option<Handler<(String, String), Result<String, GitCommandError>>>,
     pub remotes: Option<Handler<String, Result<VcsListRemotesResult, VcsError>>>,
-    pub read_config_value: Option<Handler<(String, String), Result<Option<String>, GitCommandError>>>,
+    pub read_config_value:
+        Option<Handler<(String, String), Result<Option<String>, GitCommandError>>>,
     pub resolve_primary_remote_name: Option<Handler<String, Result<String, GitCommandError>>>,
     pub ensure_remote: Option<Handler<(String, String, String), Result<String, GitCommandError>>>,
     pub list_local_branch_names: Option<Handler<String, Result<Vec<String>, GitCommandError>>>,
-    pub fetch_remote_branch: Option<Handler<(SourceControlGitRemoteBranch, String), Result<(), GitCommandError>>>,
-    pub fetch_remote_tracking_branch: Option<Handler<SourceControlGitRemoteBranch, Result<(), GitCommandError>>>,
-    pub set_branch_upstream: Option<Handler<(SourceControlGitRemoteBranch, String), Result<(), GitCommandError>>>,
+    pub fetch_remote_branch:
+        Option<Handler<(SourceControlGitRemoteBranch, String), Result<(), GitCommandError>>>,
+    pub fetch_remote_tracking_branch:
+        Option<Handler<SourceControlGitRemoteBranch, Result<(), GitCommandError>>>,
+    pub set_branch_upstream:
+        Option<Handler<(SourceControlGitRemoteBranch, String), Result<(), GitCommandError>>>,
     pub switch_ref: Option<Handler<VcsSwitchRefInput, Result<VcsSwitchRefResult, GitCommandError>>>,
     /// `(name, arguments)` of every call a script chose to record, in order.
     pub calls: Mutex<Vec<(String, serde_json::Value)>>,
@@ -47,7 +57,11 @@ macro_rules! scripted {
     ($self:ident, $field:ident, $name:literal, $arg:expr) => {{
         match &$self.$field {
             Some(run) => run($arg),
-            None => panic!(concat!("Unexpected git ", $name, " in a test that supplied none.")),
+            None => panic!(concat!(
+                "Unexpected git ",
+                $name,
+                " in a test that supplied none."
+            )),
         }
     }};
 }
@@ -72,8 +86,17 @@ impl SourceControlHost for ScriptedHost {
     ) -> Result<SourceControlGitOutput, GitCommandError> {
         scripted!(self, git_execute, "execute", input)
     }
-    async fn git_resolve_commit(&self, cwd: &str, revision: &str) -> Result<String, GitCommandError> {
-        scripted!(self, resolve_commit, "resolveCommit", (cwd.to_owned(), revision.to_owned()))
+    async fn git_resolve_commit(
+        &self,
+        cwd: &str,
+        revision: &str,
+    ) -> Result<String, GitCommandError> {
+        scripted!(
+            self,
+            resolve_commit,
+            "resolveCommit",
+            (cwd.to_owned(), revision.to_owned())
+        )
     }
     async fn git_remotes(&self, cwd: &str) -> Result<VcsListRemotesResult, VcsError> {
         match &self.remotes {
@@ -81,11 +104,25 @@ impl SourceControlHost for ScriptedHost {
             None => panic!("Unexpected git remotes in a test that supplied none."),
         }
     }
-    async fn git_read_config_value(&self, cwd: &str, key: &str) -> Result<Option<String>, GitCommandError> {
-        scripted!(self, read_config_value, "readConfigValue", (cwd.to_owned(), key.to_owned()))
+    async fn git_read_config_value(
+        &self,
+        cwd: &str,
+        key: &str,
+    ) -> Result<Option<String>, GitCommandError> {
+        scripted!(
+            self,
+            read_config_value,
+            "readConfigValue",
+            (cwd.to_owned(), key.to_owned())
+        )
     }
     async fn git_resolve_primary_remote_name(&self, cwd: &str) -> Result<String, GitCommandError> {
-        scripted!(self, resolve_primary_remote_name, "resolvePrimaryRemoteName", cwd.to_owned())
+        scripted!(
+            self,
+            resolve_primary_remote_name,
+            "resolvePrimaryRemoteName",
+            cwd.to_owned()
+        )
     }
     async fn git_ensure_remote(
         &self,
@@ -101,27 +138,47 @@ impl SourceControlHost for ScriptedHost {
         )
     }
     async fn git_list_local_branch_names(&self, cwd: &str) -> Result<Vec<String>, GitCommandError> {
-        scripted!(self, list_local_branch_names, "listLocalBranchNames", cwd.to_owned())
+        scripted!(
+            self,
+            list_local_branch_names,
+            "listLocalBranchNames",
+            cwd.to_owned()
+        )
     }
     async fn git_fetch_remote_branch(
         &self,
         input: &SourceControlGitRemoteBranch,
         local_branch: &str,
     ) -> Result<(), GitCommandError> {
-        scripted!(self, fetch_remote_branch, "fetchRemoteBranch", (input.clone(), local_branch.to_owned()))
+        scripted!(
+            self,
+            fetch_remote_branch,
+            "fetchRemoteBranch",
+            (input.clone(), local_branch.to_owned())
+        )
     }
     async fn git_fetch_remote_tracking_branch(
         &self,
         input: &SourceControlGitRemoteBranch,
     ) -> Result<(), GitCommandError> {
-        scripted!(self, fetch_remote_tracking_branch, "fetchRemoteTrackingBranch", input.clone())
+        scripted!(
+            self,
+            fetch_remote_tracking_branch,
+            "fetchRemoteTrackingBranch",
+            input.clone()
+        )
     }
     async fn git_set_branch_upstream(
         &self,
         input: &SourceControlGitRemoteBranch,
         branch: &str,
     ) -> Result<(), GitCommandError> {
-        scripted!(self, set_branch_upstream, "setBranchUpstream", (input.clone(), branch.to_owned()))
+        scripted!(
+            self,
+            set_branch_upstream,
+            "setBranchUpstream",
+            (input.clone(), branch.to_owned())
+        )
     }
     async fn git_switch_ref(
         &self,

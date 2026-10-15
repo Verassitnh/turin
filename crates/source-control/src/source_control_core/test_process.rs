@@ -35,7 +35,9 @@ pub(crate) async fn run(
     let spawn = |error: std::io::Error| {
         VcsError::Spawn(VcsProcessSpawnError::from_process_spawn_error(
             context.clone(),
-            VcsProcessSpawnFailure { cause: serde_json::Value::String(error.to_string()) },
+            VcsProcessSpawnFailure {
+                cause: serde_json::Value::String(error.to_string()),
+            },
         ))
     };
     let child = command.spawn().map_err(spawn)?;
@@ -43,10 +45,14 @@ pub(crate) async fn run(
     let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(result) => result.map_err(spawn)?,
         Err(_) => {
-            return Err(VcsError::Timeout(VcsProcessTimeoutError::from_process_timeout_error(
-                context,
-                VcsProcessTimeoutFailure { timeout_ms: timeout.as_millis() as f64 },
-            )));
+            return Err(VcsError::Timeout(
+                VcsProcessTimeoutError::from_process_timeout_error(
+                    context,
+                    VcsProcessTimeoutFailure {
+                        timeout_ms: timeout.as_millis() as f64,
+                    },
+                ),
+            ));
         }
     };
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -64,5 +70,10 @@ pub(crate) async fn run(
             None,
         )));
     }
-    Ok(SourceControlProcessOutput { exit_code: code, stdout, stderr, ..Default::default() })
+    Ok(SourceControlProcessOutput {
+        exit_code: code,
+        stdout,
+        stderr,
+        ..Default::default()
+    })
 }

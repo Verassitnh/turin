@@ -2,6 +2,8 @@
 //! (`project`), provider rows (`changeRequest`), a clock that moves with tokio's paused time
 //! (`TestClock`), and the service wired to in-memory ports (`makeService`).
 
+#![allow(dead_code)] // scripted helpers the service tests still to be ported will use
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -16,10 +18,9 @@ use turin_contracts::environment::RepositoryIdentity;
 use turin_contracts::orchestration_project::OrchestrationProjectShell;
 use turin_contracts::pull_request::{
     PullRequestActor, PullRequestCapabilities, PullRequestInvalidateInput,
-    PullRequestLabelCandidateList,
-    PullRequestMergeCapabilities, PullRequestMergeability, PullRequestRef,
-    PullRequestReviewerCandidateList, PullRequestState, PullRequestThreadCommentsResult,
-    PullRequestViewerPermissions,
+    PullRequestLabelCandidateList, PullRequestMergeCapabilities, PullRequestMergeability,
+    PullRequestRef, PullRequestReviewerCandidateList, PullRequestState,
+    PullRequestThreadCommentsResult, PullRequestViewerPermissions,
 };
 use turin_contracts::source_control::{SourceControlProviderError, SourceControlProviderKind};
 use turin_persistence::Db;
@@ -138,13 +139,11 @@ impl ProjectSpec {
     pub fn build(&self) -> OrchestrationProjectShell {
         // The host defaults from the provider, so a fixture only names one when the point of the
         // test is two hosts of the same kind.
-        let host = self
-            .host
-            .unwrap_or(if self.provider == Some("gitlab") {
-                "gitlab.com"
-            } else {
-                "github.com"
-            });
+        let host = self.host.unwrap_or(if self.provider == Some("gitlab") {
+            "gitlab.com"
+        } else {
+            "github.com"
+        });
         let mut shell = json!({
             "id": self.id,
             "title": self.title,
@@ -340,8 +339,16 @@ pub fn provider_error(
 }
 
 /// `unusable(provider, reason)`
-pub fn unusable(provider: &str, reason: PullRequestProviderErrorReason) -> PullRequestProviderError {
-    provider_error(provider, "getViewer", reason, &format!("{provider} is not usable."))
+pub fn unusable(
+    provider: &str,
+    reason: PullRequestProviderErrorReason,
+) -> PullRequestProviderError {
+    provider_error(
+        provider,
+        "getViewer",
+        reason,
+        &format!("{provider} is not usable."),
+    )
 }
 
 /// `requestFailed`
@@ -706,13 +713,19 @@ impl PullRequestProjectSource for Projects {
         &self,
         project_id: &ProjectId,
     ) -> Result<Option<OrchestrationProjectShell>, Cause> {
-        Ok(self.0.iter().find(|project| &project.id == project_id).cloned())
+        Ok(self
+            .0
+            .iter()
+            .find(|project| &project.id == project_id)
+            .cloned())
     }
 }
 
 type ResolveHandle = Arc<
-    dyn Fn(&str, &SourceControlProviderContext)
-            -> Result<Option<SourceControlProviderContext>, SourceControlProviderError>
+    dyn Fn(
+            &str,
+            &SourceControlProviderContext,
+        ) -> Result<Option<SourceControlProviderContext>, SourceControlProviderError>
         + Send
         + Sync,
 >;
@@ -808,10 +821,7 @@ impl Harness {
 }
 
 /// `makeService({ projects, providers })`
-pub async fn make_service(
-    projects: Vec<ProjectSpec>,
-    providers: Vec<FakeProvider>,
-) -> Harness {
+pub async fn make_service(projects: Vec<ProjectSpec>, providers: Vec<FakeProvider>) -> Harness {
     Harness::new(ServiceOptions {
         projects: projects.iter().map(ProjectSpec::build).collect(),
         providers,
@@ -829,7 +839,9 @@ pub fn operation_of(error: &PullRequestError) -> (String, String) {
     match error {
         PullRequestError::Operation(
             turin_contracts::pull_request::PullRequestOperationError::Operation {
-                operation, detail, ..
+                operation,
+                detail,
+                ..
             },
         ) => (operation.clone(), detail.as_str().to_owned()),
         other => panic!("expected an operation error, got {other:?}"),

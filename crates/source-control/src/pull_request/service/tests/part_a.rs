@@ -57,10 +57,8 @@ async fn caches_narrow_previews_and_invalidates_them_after_refresh_or_mutation()
     )
     .await;
     let reference = pr_ref("p1", "acme/web", 1);
-    let (first, second) = tokio::join!(
-        h.service.preview(&reference),
-        h.service.preview(&reference)
-    );
+    let (first, second) =
+        tokio::join!(h.service.preview(&reference), h.service.preview(&reference));
     second.unwrap();
     assert_eq!(
         serde_json::to_value(first.unwrap()).unwrap(),
@@ -198,7 +196,10 @@ async fn reuses_only_unexpired_detail_for_previews() {
     assert_eq!(preview_reads.load(SeqCst), 1);
 }
 
-fn reading_provider(reads: &Arc<Mutex<Vec<String>>>, state_of: fn(u64) -> PullRequestState) -> FakeProvider {
+fn reading_provider(
+    reads: &Arc<Mutex<Vec<String>>>,
+    state_of: fn(u64) -> PullRequestState,
+) -> FakeProvider {
     let details = reads.clone();
     let activities = reads.clone();
     FakeProvider::new("github")
@@ -380,5 +381,10 @@ async fn uses_full_detail_for_hosts_without_a_narrow_preview() {
     let preview = h.service.preview(&reference).await.unwrap();
     assert_eq!(preview.title.as_str(), "Change request 1");
     assert_eq!(reads.load(SeqCst), 1);
-    assert!(serde_json::to_value(&preview).unwrap().get("body").is_none());
+    assert!(
+        serde_json::to_value(&preview)
+            .unwrap()
+            .get("body")
+            .is_none()
+    );
 }

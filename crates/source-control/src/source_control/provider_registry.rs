@@ -81,13 +81,25 @@ impl SourceControlProvider for UnsupportedProvider {
         &self,
         input: ListChangeRequestsInput,
     ) -> Result<Vec<ChangeRequest>, SourceControlProviderError> {
-        Err(no_provider_error(&self.kind, "listChangeRequests", &input.cwd, None, None))
+        Err(no_provider_error(
+            &self.kind,
+            "listChangeRequests",
+            &input.cwd,
+            None,
+            None,
+        ))
     }
     async fn get_change_request(
         &self,
         input: GetChangeRequestInput,
     ) -> Result<ChangeRequest, SourceControlProviderError> {
-        Err(no_provider_error(&self.kind, "getChangeRequest", &input.cwd, Some(&input.reference), None))
+        Err(no_provider_error(
+            &self.kind,
+            "getChangeRequest",
+            &input.cwd,
+            Some(&input.reference),
+            None,
+        ))
     }
     async fn create_change_request(
         &self,
@@ -117,13 +129,25 @@ impl SourceControlProvider for UnsupportedProvider {
         &self,
         input: CreateRepositoryInput,
     ) -> Result<SourceControlRepositoryCloneUrls, SourceControlProviderError> {
-        Err(no_provider_error(&self.kind, "createRepository", &input.cwd, None, Some(&input.repository)))
+        Err(no_provider_error(
+            &self.kind,
+            "createRepository",
+            &input.cwd,
+            None,
+            Some(&input.repository),
+        ))
     }
     async fn get_default_branch(
         &self,
         input: GetDefaultBranchInput,
     ) -> Result<Option<String>, SourceControlProviderError> {
-        Err(no_provider_error(&self.kind, "getDefaultBranch", &input.cwd, None, None))
+        Err(no_provider_error(
+            &self.kind,
+            "getDefaultBranch",
+            &input.cwd,
+            None,
+            None,
+        ))
     }
     async fn checkout_change_request(
         &self,
@@ -155,7 +179,11 @@ fn select_provider_context(remotes: &[VcsRemote]) -> Option<SourceControlProvide
     candidates
         .iter()
         .find(|c| c.remote_name == "origin")
-        .or_else(|| candidates.iter().find(|c| c.provider.kind.as_str() != "unknown"))
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|c| c.provider.kind.as_str() != "unknown")
+        })
         .or_else(|| candidates.first())
         .cloned()
 }
@@ -191,9 +219,14 @@ impl SourceControlProvider for BoundProvider {
         resolver: &dyn ResolveProviderContext,
     ) -> Option<Result<turin_contracts::environment::RepositoryIdentity, SourceControlProviderError>>
     {
-        self.inner.refine_repository_identity(identity, resolver).await
+        self.inner
+            .refine_repository_identity(identity, resolver)
+            .await
     }
-    fn resolve_link(&self, input: ResolveSourceControlLinkInput) -> ResolveSourceControlLinkFuture<'_> {
+    fn resolve_link(
+        &self,
+        input: ResolveSourceControlLinkInput,
+    ) -> ResolveSourceControlLinkFuture<'_> {
         self.inner.resolve_link(input)
     }
     async fn list_change_requests(
@@ -252,7 +285,10 @@ fn bind_provider_context(
 ) -> Arc<dyn SourceControlProvider> {
     match context {
         None => provider,
-        Some(context) => Arc::new(BoundProvider { inner: provider, context: context.clone() }),
+        Some(context) => Arc::new(BoundProvider {
+            inner: provider,
+            context: context.clone(),
+        }),
     }
 }
 
@@ -262,7 +298,11 @@ type SharedLookup = Shared<BoxFuture<'static, ContextResult>>;
 enum CacheSlot {
     /// A lookup in flight, shared by every caller asking for the same checkout meanwhile.
     Pending(SharedLookup),
-    Ready { value: Option<SourceControlProviderContext>, expires_at: i64, seq: u64 },
+    Ready {
+        value: Option<SourceControlProviderContext>,
+        expires_at: i64,
+        seq: u64,
+    },
 }
 
 /// A bounded cache of provider detection by checkout, keeping successes for a short while and
@@ -292,7 +332,10 @@ impl SourceControlProviderRegistry {
         cwd: impl Into<String>,
     ) -> Self {
         Self {
-            providers: registrations.iter().map(|r| (r.kind.clone(), r.provider.clone())).collect(),
+            providers: registrations
+                .iter()
+                .map(|r| (r.kind.clone(), r.provider.clone()))
+                .collect(),
             discovery_specs: registrations.into_iter().map(|r| r.discovery).collect(),
             host,
             clock,
@@ -310,8 +353,14 @@ impl SourceControlProviderRegistry {
     }
 
     /// Return `None` synchronously for unsupported URLs, without starting a lookup.
-    pub fn resolve_link(&self, input: ResolveSourceControlLinkInput) -> ResolveSourceControlLinkFuture<'_> {
-        if input.url.scheme() != "https" || !input.url.username().is_empty() || input.url.password().is_some() {
+    pub fn resolve_link(
+        &self,
+        input: ResolveSourceControlLinkInput,
+    ) -> ResolveSourceControlLinkFuture<'_> {
+        if input.url.scheme() != "https"
+            || !input.url.username().is_empty()
+            || input.url.password().is_some()
+        {
             return None;
         }
         let kind = detect_source_control_provider_from_remote_url(input.url.as_str())?.kind;
@@ -319,19 +368,27 @@ impl SourceControlProviderRegistry {
     }
 
     async fn detect_provider_context(&self, cwd: &str) -> ContextResult {
-        let detection_error = |cause: String| SourceControlProviderError::SourceControlProviderError {
-            provider: SourceControlProviderKind::new("unknown").expect("valid kind"),
-            operation: "detectProvider".into(),
-            cwd: cwd.to_owned(),
-            command: None,
-            repository: None,
-            reference: None,
-            detail: "Failed to detect source control provider.".into(),
-            cause: Some(serde_json::Value::String(cause)),
-        };
-        let remotes = self.host.git_remotes(cwd).await.map_err(|e| detection_error(e.to_string()))?;
+        let detection_error =
+            |cause: String| SourceControlProviderError::SourceControlProviderError {
+                provider: SourceControlProviderKind::new("unknown").expect("valid kind"),
+                operation: "detectProvider".into(),
+                cwd: cwd.to_owned(),
+                command: None,
+                repository: None,
+                reference: None,
+                detail: "Failed to detect source control provider.".into(),
+                cause: Some(serde_json::Value::String(cause)),
+            };
+        let remotes = self
+            .host
+            .git_remotes(cwd)
+            .await
+            .map_err(|e| detection_error(e.to_string()))?;
         let context = select_provider_context(&remotes.remotes);
-        Ok(refine_unknown_remote_provider(&self.discovery_specs, self.host.as_ref(), cwd, context).await)
+        Ok(
+            refine_unknown_remote_provider(&self.discovery_specs, self.host.as_ref(), cwd, context)
+                .await,
+        )
     }
 
     /// Detection by checkout, shared between concurrent callers and kept for
@@ -341,7 +398,9 @@ impl SourceControlProviderRegistry {
             let mut cache = self.cache.lock();
             let now = self.clock.now_millis();
             match cache.slots.get(cwd) {
-                Some(CacheSlot::Ready { value, expires_at, .. }) if *expires_at > now => {
+                Some(CacheSlot::Ready {
+                    value, expires_at, ..
+                }) if *expires_at > now => {
                     return Ok(value.clone());
                 }
                 Some(CacheSlot::Pending(shared)) => shared.clone(),
@@ -359,7 +418,11 @@ impl SourceControlProviderRegistry {
                                     + PROVIDER_DETECTION_CACHE_TTL.as_millis() as i64;
                                 cache.slots.insert(
                                     key.clone(),
-                                    CacheSlot::Ready { value: value.clone(), expires_at, seq },
+                                    CacheSlot::Ready {
+                                        value: value.clone(),
+                                        expires_at,
+                                        seq,
+                                    },
                                 );
                                 if cache.slots.len() > PROVIDER_DETECTION_CACHE_CAPACITY {
                                     let now = registry.clock.now_millis();
@@ -372,7 +435,9 @@ impl SourceControlProviderRegistry {
                                             .slots
                                             .iter()
                                             .filter_map(|(k, slot)| match slot {
-                                                CacheSlot::Ready { seq, .. } => Some((*seq, k.clone())),
+                                                CacheSlot::Ready { seq, .. } => {
+                                                    Some((*seq, k.clone()))
+                                                }
                                                 CacheSlot::Pending(_) => None,
                                             })
                                             .min();
@@ -394,7 +459,9 @@ impl SourceControlProviderRegistry {
                     }
                     .boxed()
                     .shared();
-                    cache.slots.insert(cwd.to_owned(), CacheSlot::Pending(shared.clone()));
+                    cache
+                        .slots
+                        .insert(cwd.to_owned(), CacheSlot::Pending(shared.clone()));
                     shared
                 }
             }
@@ -515,7 +582,10 @@ mod tests {
 
     fn not_signed_in(host: &str) -> GitHubApiError {
         GitHubApiError::CredentialUnavailable(GitHubCredentialUnavailableError::NotSignedIn(
-            GitHubNotSignedInError { host: host.into(), account: None },
+            GitHubNotSignedInError {
+                host: host.into(),
+                account: None,
+            },
         ))
     }
 
@@ -533,6 +603,7 @@ mod tests {
         commands: Arc<Mutex<Vec<String>>>,
     }
 
+    #[allow(clippy::field_reassign_with_default)]
     fn make_registry(
         remotes: Vec<VcsRemote>,
         credential: CredentialFn,
@@ -570,11 +641,19 @@ mod tests {
             ManualClock::new(0),
             "/cwd",
         );
-        Fixture { registry: Arc::new(registry), commands }
+        Fixture {
+            registry: Arc::new(registry),
+            commands,
+        }
     }
 
     fn simple(remotes: Vec<VcsRemote>) -> Fixture {
-        make_registry(remotes, Box::new(|host| Err(not_signed_in(host))), None, None)
+        make_registry(
+            remotes,
+            Box::new(|host| Err(not_signed_in(host))),
+            None,
+            None,
+        )
     }
 
     fn kind(name: &str) -> SourceControlProviderKind {
@@ -583,8 +662,14 @@ mod tests {
 
     #[tokio::test]
     async fn routes_github_remotes_to_the_github_provider() {
-        let f = simple(vec![remote("origin", "git@github.com:pingdotgg/t3code.git")]);
-        assert_eq!(f.registry.resolve("/repo").await.unwrap().kind(), kind("github"));
+        let f = simple(vec![remote(
+            "origin",
+            "git@github.com:pingdotgg/t3code.git",
+        )]);
+        assert_eq!(
+            f.registry.resolve("/repo").await.unwrap().kind(),
+            kind("github")
+        );
     }
 
     #[tokio::test]
@@ -606,7 +691,12 @@ mod tests {
             .await
             .unwrap_err();
         let SourceControlProviderError::SourceControlProviderError {
-            provider, operation, cwd, reference, detail, ..
+            provider,
+            operation,
+            cwd,
+            reference,
+            detail,
+            ..
         } = error;
         assert_eq!(provider, kind("unknown"));
         assert_eq!(operation, "getChangeRequest");
@@ -617,30 +707,53 @@ mod tests {
 
     #[tokio::test]
     async fn retains_vcs_detection_failures_with_structured_cwd_context() {
-        let cause = VcsError::RepositoryDetection(VcsRepositoryDetectionError::VcsRepositoryDetectionError {
-            operation: "resolve".into(),
-            cwd: "/repo".into(),
-            detail: "raw VCS detection failure".into(),
-            cause: None,
-        });
-        let f = make_registry(vec![], Box::new(|host| Err(not_signed_in(host))), None, Some(cause.clone()));
+        let cause = VcsError::RepositoryDetection(
+            VcsRepositoryDetectionError::VcsRepositoryDetectionError {
+                operation: "resolve".into(),
+                cwd: "/repo".into(),
+                detail: "raw VCS detection failure".into(),
+                cause: None,
+            },
+        );
+        let f = make_registry(
+            vec![],
+            Box::new(|host| Err(not_signed_in(host))),
+            None,
+            Some(cause.clone()),
+        );
         let error = f.registry.resolve("/repo").await.err().unwrap();
         let rendered = error.to_string();
         let SourceControlProviderError::SourceControlProviderError {
-            provider, operation, cwd, detail, cause: kept, ..
+            provider,
+            operation,
+            cwd,
+            detail,
+            cause: kept,
+            ..
         } = error;
         assert_eq!(provider, kind("unknown"));
         assert_eq!(operation, "detectProvider");
         assert_eq!(cwd, "/repo");
         assert_eq!(detail, "Failed to detect source control provider.");
-        assert!(kept.unwrap().as_str().unwrap().contains("raw VCS detection failure"));
+        assert!(
+            kept.unwrap()
+                .as_str()
+                .unwrap()
+                .contains("raw VCS detection failure")
+        );
         assert!(!rendered.contains(&cause.to_string()));
     }
 
     #[tokio::test]
     async fn falls_back_to_a_non_origin_remote_when_origin_is_not_configured() {
-        let f = simple(vec![remote("upstream", "https://github.com/acme/project.git")]);
-        assert_eq!(f.registry.resolve("/repo").await.unwrap().kind(), kind("github"));
+        let f = simple(vec![remote(
+            "upstream",
+            "https://github.com/acme/project.git",
+        )]);
+        assert_eq!(
+            f.registry.resolve("/repo").await.unwrap().kind(),
+            kind("github")
+        );
     }
 
     #[tokio::test]
@@ -654,6 +767,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::field_reassign_with_default)]
     async fn caches_detection_for_a_short_while_and_never_a_failure() {
         // The scripted remotes handler counts through the process log, so use a fresh fixture whose
         // clock the test moves.
@@ -688,9 +802,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routes_linked_subjects_by_url_independently_of_the_checkout_and_skips_unsupported_links() {
+    async fn routes_linked_subjects_by_url_independently_of_the_checkout_and_skips_unsupported_links()
+     {
         let f = make_registry(
-            vec![remote("origin", "https://github.com/unrelated/checkout.git")],
+            vec![remote(
+                "origin",
+                "https://github.com/unrelated/checkout.git",
+            )],
             Box::new(|host| Err(not_signed_in(host))),
             Some(Box::new(|_| {
                 Ok(GitHubRestResponse {
@@ -725,7 +843,10 @@ mod tests {
             "http://github.com/team/project/issues/1",
             "https://user:secret@github.com/team/project/issues/1",
         ] {
-            assert!(f.registry.resolve_link(url(unsupported)).is_none(), "{unsupported}");
+            assert!(
+                f.registry.resolve_link(url(unsupported)).is_none(),
+                "{unsupported}"
+            );
         }
     }
 
@@ -749,9 +870,9 @@ mod tests {
                             fingerprint: format!("{host}:fingerprint"),
                         }),
                         "disabled" => Err(GitHubApiError::CredentialUnavailable(
-                            GitHubCredentialUnavailableError::HostDisabled(GitHubHostDisabledError {
-                                host: host.into(),
-                            }),
+                            GitHubCredentialUnavailableError::HostDisabled(
+                                GitHubHostDisabledError { host: host.into() },
+                            ),
                         )),
                         _ => Err(not_signed_in(host)),
                     }
@@ -762,7 +883,10 @@ mod tests {
             let handle = f.registry.resolve_handle("/repo", None).await.unwrap();
             assert_eq!(handle.provider.kind(), kind(expected), "{name}");
             if expected == "github" {
-                assert_eq!(handle.context.unwrap().provider.base_url, "https://code.example.test");
+                assert_eq!(
+                    handle.context.unwrap().provider.base_url,
+                    "https://code.example.test"
+                );
             }
             assert_eq!(*hosts.lock(), vec!["code.example.test"], "{name}");
             // Recognition goes through the credential layer; gh is only one of its sources.
@@ -797,7 +921,11 @@ mod tests {
             remote_url: remote_url.into(),
             requested_host: None,
         };
-        let unresolved = f.registry.resolve_handle("/repo", Some(context.clone())).await.unwrap();
+        let unresolved = f
+            .registry
+            .resolve_handle("/repo", Some(context.clone()))
+            .await
+            .unwrap();
         assert_eq!(unresolved.context, Some(context));
         assert!(hosts.lock().is_empty());
 
@@ -818,7 +946,9 @@ mod tests {
             vec![remote("origin", "git@github.com:acme/web.git")],
             Box::new(|host| Err(not_signed_in(host))),
             Some(Box::new(move |input| {
-                recorded.lock().push(format!("{} {}", input.host, input.path));
+                recorded
+                    .lock()
+                    .push(format!("{} {}", input.host, input.path));
                 Ok(GitHubRestResponse {
                     status: 200,
                     headers: Default::default(),
@@ -839,7 +969,10 @@ mod tests {
         // resolved from the context the registry binds.
         let provider = f.registry.resolve("/repo").await.unwrap();
         let branch = provider
-            .get_default_branch(GetDefaultBranchInput { cwd: "/repo".into(), context: None })
+            .get_default_branch(GetDefaultBranchInput {
+                cwd: "/repo".into(),
+                context: None,
+            })
             .await;
         // Resolution may still fail without remotes on the process; what matters is that the
         // bound context reached the provider (it is what names `github.com/acme/web`).

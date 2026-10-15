@@ -335,12 +335,10 @@ mod tests {
     #[tokio::test]
     async fn follows_the_cursor_until_github_has_no_more() {
         let pages = Pages::new(&[Some("a"), Some("b"), None]);
-        let result = read_graphql_pages(
-            |after, _| pages.read(after),
-            options(&|page| page.clone()),
-        )
-        .await
-        .unwrap();
+        let result =
+            read_graphql_pages(|after, _| pages.read(after), options(&|page| page.clone()))
+                .await
+                .unwrap();
         assert_eq!(
             pages.asked(),
             vec![None, Some("a".to_owned()), Some("b".to_owned())]

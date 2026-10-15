@@ -31,13 +31,6 @@ tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
-[features]
-svc-tests-a = []
-svc-tests-b = []
-svc-tests-c = []
-svc-tests-d = []
-svc-tests-e = []
-
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 pretty_assertions.workspace = true

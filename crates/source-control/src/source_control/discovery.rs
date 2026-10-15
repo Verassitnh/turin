@@ -44,7 +44,8 @@ const VCS_PROBES: &[VcsProbe] = &[
 ];
 
 fn text(value: &str) -> TrimmedNonEmptyString {
-    TrimmedNonEmptyString::new(value).unwrap_or_else(|_| TrimmedNonEmptyString::new("unknown").expect("non-empty"))
+    TrimmedNonEmptyString::new(value)
+        .unwrap_or_else(|_| TrimmedNonEmptyString::new("unknown").expect("non-empty"))
 }
 
 pub struct SourceControlDiscovery {
@@ -60,7 +61,11 @@ impl SourceControlDiscovery {
         providers: Arc<SourceControlProviderRegistry>,
         cwd: impl Into<String>,
     ) -> Self {
-        Self { host, providers, cwd: cwd.into() }
+        Self {
+            host,
+            providers,
+            cwd: cwd.into(),
+        }
     }
 
     async fn probe(&self, probe: &VcsProbe) -> VcsDiscoveryItem {
@@ -80,10 +85,15 @@ impl SourceControlDiscovery {
         let (status, version, detail) = match result {
             Ok(result) => (
                 SourceControlDiscoveryStatus::Available,
-                first_non_empty_line(&result.stdout).or_else(|| first_non_empty_line(&result.stderr)),
+                first_non_empty_line(&result.stdout)
+                    .or_else(|| first_non_empty_line(&result.stderr)),
                 None,
             ),
-            Err(cause) => (SourceControlDiscoveryStatus::Missing, None, detail_from_cause(&cause)),
+            Err(cause) => (
+                SourceControlDiscoveryStatus::Missing,
+                None,
+                detail_from_cause(&cause),
+            ),
         };
         VcsDiscoveryItem {
             kind: probe.kind,
@@ -103,6 +113,9 @@ impl SourceControlDiscovery {
             futures::future::join_all(VCS_PROBES.iter().map(|probe| self.probe(probe))),
             self.providers.discover(),
         );
-        SourceControlDiscoveryResult { version_control_systems, source_control_providers }
+        SourceControlDiscoveryResult {
+            version_control_systems,
+            source_control_providers,
+        }
     }
 }

@@ -10,11 +10,11 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 use turin_contracts::base_schemas::{ProjectId, TrimmedNonEmptyString};
 use turin_contracts::pull_request::{
-    PullRequestDiffStat, PullRequestDraftFilter, PullRequestInvolvement, PullRequestListCursor, PullRequestListEntry,
-    PullRequestListFilters, PullRequestListInput, PullRequestListProjectError,
-    PullRequestListResult, PullRequestListStatsInput, PullRequestListStatsResult,
-    PullRequestProviderSummary, PullRequestRef, PullRequestReviewFilter,
-    resolve_pull_request_author_filter,
+    PullRequestDiffStat, PullRequestDraftFilter, PullRequestInvolvement, PullRequestListCursor,
+    PullRequestListEntry, PullRequestListFilters, PullRequestListInput,
+    PullRequestListProjectError, PullRequestListResult, PullRequestListStatsInput,
+    PullRequestListStatsResult, PullRequestProviderSummary, PullRequestRef,
+    PullRequestReviewFilter, resolve_pull_request_author_filter,
 };
 
 use super::cursor::{ListCursor, list_cursor_at, next_list_cursor, parse_list_cursor};
@@ -421,10 +421,13 @@ impl Inner {
                 .push(project.clone());
         }
         enum Read {
-            One(SupportedProject),
+            One(Box<SupportedProject>),
             Chunk(Vec<SupportedProject>),
         }
-        let mut reads: Vec<Read> = separate.into_iter().map(Read::One).collect();
+        let mut reads: Vec<Read> = separate
+            .into_iter()
+            .map(|project| Read::One(Box::new(project)))
+            .collect();
         for group in together.into_values() {
             for chunk in group.chunks(REPOSITORY_SEARCH_CHUNK) {
                 reads.push(Read::Chunk(chunk.to_vec()));
@@ -462,10 +465,10 @@ impl Inner {
 
         let mut next_cursors = IndexMap::new();
         for batch in &batches {
-            if let Some(cursor) = &batch.next_cursor {
-                if let Ok(cursor) = PullRequestListCursor::new(cursor) {
-                    next_cursors.insert(tne(&batch.key), cursor);
-                }
+            if let Some(cursor) = &batch.next_cursor
+                && let Ok(cursor) = PullRequestListCursor::new(cursor)
+            {
+                next_cursors.insert(tne(&batch.key), cursor);
             }
         }
         let mut entries: Vec<PullRequestListEntry> = batches

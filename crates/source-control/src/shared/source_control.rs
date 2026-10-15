@@ -70,7 +70,10 @@ pub fn get_change_request_terminology_for_kind(
         "github" => GITHUB_CHANGE_REQUEST_PRESENTATION,
         _ => GENERIC_CHANGE_REQUEST_PRESENTATION,
     };
-    ChangeRequestTerminology { short_label: presentation.short_name, singular: presentation.long_name }
+    ChangeRequestTerminology {
+        short_label: presentation.short_name,
+        singular: presentation.long_name,
+    }
 }
 
 static SCP_SSH_REMOTE: LazyLock<Regex> =
@@ -88,7 +91,10 @@ fn parse_remote_host(remote_url: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    if let Some(host) = SCP_SSH_REMOTE.captures(trimmed).and_then(|c| c.get(1)).map(|m| m.as_str())
+    if let Some(host) = SCP_SSH_REMOTE
+        .captures(trimmed)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str())
         && !host.is_empty()
     {
         return Some(host.to_lowercase());
@@ -98,15 +104,20 @@ fn parse_remote_host(remote_url: &str) -> Option<String> {
     if url.scheme() == "ssh" {
         return Some(host.to_lowercase());
     }
-    Some(match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_owned(),
-    }
-    .to_lowercase())
+    Some(
+        match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_owned(),
+        }
+        .to_lowercase(),
+    )
 }
 
 fn parse_host_name(host: &str) -> String {
-    match reqwest::Url::parse(&format!("https://{host}")).ok().and_then(|u| u.host_str().map(str::to_owned)) {
+    match reqwest::Url::parse(&format!("https://{host}"))
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+    {
         Some(name) => name.to_lowercase(),
         None => {
             static PORT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r":\d+$").unwrap());
@@ -136,7 +147,11 @@ pub fn detect_source_control_provider_from_remote_url(
     let (kind, name) = if is_github_host(&hostname) {
         (
             "github",
-            if hostname == "github.com" { "GitHub".to_owned() } else { "GitHub Self-Hosted".to_owned() },
+            if hostname == "github.com" {
+                "GitHub".to_owned()
+            } else {
+                "GitHub Self-Hosted".to_owned()
+            },
         )
     } else {
         ("unknown", host.clone())
@@ -156,7 +171,12 @@ pub fn detect_source_control_provider_from_remote_url(
 /// (Upstream's Azure DevOps special case is cut with the host.)
 pub fn source_control_repository_selector(identity: Option<&RepositoryIdentity>) -> Option<String> {
     let identity = identity?;
-    if let Some(display_name) = identity.display_name.as_ref().map(|d| d.as_str()).filter(|d| !d.is_empty()) {
+    if let Some(display_name) = identity
+        .display_name
+        .as_ref()
+        .map(|d| d.as_str())
+        .filter(|d| !d.is_empty())
+    {
         return Some(display_name.to_owned());
     }
     match (&identity.owner, &identity.name) {
@@ -169,13 +189,19 @@ pub fn source_control_repository_selector(identity: Option<&RepositoryIdentity>)
 
 pub fn canonical_repository_key(key: &str) -> String {
     static SSH_AZURE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^(?:ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)/v3/([^/]+)/([^/]+)/([^/]+)$").unwrap()
+        Regex::new(
+            r"^(?:ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)/v3/([^/]+)/([^/]+)/([^/]+)$",
+        )
+        .unwrap()
     });
     static LEGACY_AZURE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^([^.]+)\.visualstudio\.com/(?:defaultcollection/)?([^/]+)/_git/([^/]+)$").unwrap()
+        Regex::new(r"^([^.]+)\.visualstudio\.com/(?:defaultcollection/)?([^/]+)/_git/([^/]+)$")
+            .unwrap()
     });
     let step = SSH_AZURE.replace(key, "dev.azure.com/$1/$2/_git/$3");
-    LEGACY_AZURE.replace(&step, "dev.azure.com/$1/$2/_git/$3").into_owned()
+    LEGACY_AZURE
+        .replace(&step, "dev.azure.com/$1/$2/_git/$3")
+        .into_owned()
 }
 
 #[cfg(test)]
@@ -191,24 +217,45 @@ mod tests {
         let github = resolve_change_request_presentation(None);
         assert_eq!(github.short_name, "PR");
         assert_eq!(github.checkout_command_example, Some("gh pr checkout 123"));
-        let generic = get_change_request_terminology_for_kind(&SourceControlProviderKind::new("whatever").unwrap());
+        let generic = get_change_request_terminology_for_kind(
+            &SourceControlProviderKind::new("whatever").unwrap(),
+        );
         assert_eq!(generic.short_label, "change request");
         assert_eq!(
-            get_change_request_terminology_for_kind(&SourceControlProviderKind::new("github").unwrap()),
-            ChangeRequestTerminology { short_label: "PR", singular: "pull request" }
+            get_change_request_terminology_for_kind(
+                &SourceControlProviderKind::new("github").unwrap()
+            ),
+            ChangeRequestTerminology {
+                short_label: "PR",
+                singular: "pull request"
+            }
         );
     }
 
     #[test]
     fn detects_github_hosts() {
-        assert_eq!(kind_of("git@github.com:owner/repo.git").as_deref(), Some("github"));
-        assert_eq!(kind_of("deploy@github.com:owner/repo.git").as_deref(), Some("github"));
-        assert_eq!(kind_of("https://github.example.com/owner/repo.git").as_deref(), Some("github"));
-        let enterprise = detect_source_control_provider_from_remote_url("https://github.example.com/o/r.git").unwrap();
+        assert_eq!(
+            kind_of("git@github.com:owner/repo.git").as_deref(),
+            Some("github")
+        );
+        assert_eq!(
+            kind_of("deploy@github.com:owner/repo.git").as_deref(),
+            Some("github")
+        );
+        assert_eq!(
+            kind_of("https://github.example.com/owner/repo.git").as_deref(),
+            Some("github")
+        );
+        let enterprise =
+            detect_source_control_provider_from_remote_url("https://github.example.com/o/r.git")
+                .unwrap();
         assert_eq!(enterprise.name.as_str(), "GitHub Self-Hosted");
         assert_eq!(enterprise.base_url, "https://github.example.com");
         assert_eq!(
-            detect_source_control_provider_from_remote_url("git@github.com:o/r.git").unwrap().name.as_str(),
+            detect_source_control_provider_from_remote_url("git@github.com:o/r.git")
+                .unwrap()
+                .name
+                .as_str(),
             "GitHub"
         );
     }
@@ -227,18 +274,27 @@ mod tests {
 
     #[test]
     fn preserves_ports_while_classifying_by_hostname() {
-        let p = detect_source_control_provider_from_remote_url("https://self-hosted.example.test:8443/group/repo.git").unwrap();
+        let p = detect_source_control_provider_from_remote_url(
+            "https://self-hosted.example.test:8443/group/repo.git",
+        )
+        .unwrap();
         assert_eq!(p.kind.as_str(), "unknown");
         assert_eq!(p.name.as_str(), "self-hosted.example.test:8443");
         assert_eq!(p.base_url, "https://self-hosted.example.test:8443");
-        let ssh = detect_source_control_provider_from_remote_url("ssh://git@code.example.test:24/team/project.git").unwrap();
+        let ssh = detect_source_control_provider_from_remote_url(
+            "ssh://git@code.example.test:24/team/project.git",
+        )
+        .unwrap();
         assert_eq!(ssh.name.as_str(), "code.example.test");
         assert_eq!(ssh.base_url, "https://code.example.test");
     }
 
     #[test]
     fn does_not_match_provider_names_embedded_in_unrelated_dns_labels() {
-        assert_eq!(kind_of("https://notgithub.example.com/owner/repo.git").as_deref(), Some("unknown"));
+        assert_eq!(
+            kind_of("https://notgithub.example.com/owner/repo.git").as_deref(),
+            Some("unknown")
+        );
     }
 
     #[test]
@@ -252,7 +308,12 @@ mod tests {
         ] {
             assert!(is_ssh_remote_url(yes), "{yes}");
         }
-        for no in ["https://gitlab.example.com/group/project.git", "/home/user/repos/project", "", "deploy@github.com/project/repo"] {
+        for no in [
+            "https://gitlab.example.com/group/project.git",
+            "/home/user/repos/project",
+            "",
+            "deploy@github.com/project/repo",
+        ] {
             assert!(!is_ssh_remote_url(no), "{no}");
         }
     }

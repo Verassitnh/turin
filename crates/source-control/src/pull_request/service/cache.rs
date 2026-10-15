@@ -112,6 +112,7 @@ struct Shared_<V: Clone> {
     capacity: usize,
     clock: Arc<dyn Clock>,
     /// Milliseconds a success is held for; zero means not at all.
+    #[allow(clippy::type_complexity)]
     ttl: Box<dyn Fn(&V, &str) -> i64 + Send + Sync>,
     state: Mutex<State<V>>,
 }
@@ -155,16 +156,16 @@ impl<V: Clone + Send + Sync + 'static> TtlCache<V> {
             let mut state = self.shared.state.lock();
             let mut live: Option<Flight<V>> = None;
             let mut cached: Option<V> = None;
-            if let Some(entry) = state.entries.shift_remove(key) {
-                if !Self::has_expired(&entry, now) {
-                    match &entry.slot {
-                        Slot::Done(value) => cached = Some(value.clone()),
-                        Slot::Pending(weak) => live = weak.upgrade(),
-                    }
-                    if cached.is_some() || live.is_some() {
-                        // Moved to the end of the map to keep it fresh.
-                        state.entries.insert(key.to_owned(), entry);
-                    }
+            if let Some(entry) = state.entries.shift_remove(key)
+                && !Self::has_expired(&entry, now)
+            {
+                match &entry.slot {
+                    Slot::Done(value) => cached = Some(value.clone()),
+                    Slot::Pending(weak) => live = weak.upgrade(),
+                }
+                if cached.is_some() || live.is_some() {
+                    // Moved to the end of the map to keep it fresh.
+                    state.entries.insert(key.to_owned(), entry);
                 }
             }
             if let Some(value) = cached {

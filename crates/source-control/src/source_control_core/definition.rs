@@ -59,6 +59,7 @@ pub type ChangeRequestProjectIdentity = RepositoryIdentity;
 type Fn1<A, R> = Arc<dyn Fn(&A) -> R + Send + Sync>;
 
 #[derive(Clone)]
+#[allow(clippy::type_complexity)] // each host hook is its own closure type
 pub struct SourceControlClientDefinition {
     pub kind: SourceControlProviderKind,
     /// The host's name, as in "Open on GitHub".
@@ -134,7 +135,9 @@ pub enum CloneTransport {
 /// Matching the parsed path keeps a query or fragment that mentions another host's route out.
 pub fn is_change_request_path(url: &str, route: &str) -> bool {
     static DIGITS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d+(?:/|$)").unwrap());
-    let Ok(parsed) = reqwest::Url::parse(url) else { return false };
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
     let path = parsed.path();
     match path.find(route) {
         Some(at) if at > 0 => DIGITS.is_match(&path[at + route.len()..]),
@@ -149,7 +152,9 @@ pub fn is_change_request_authority_of_project(
     identity: &ChangeRequestProjectIdentity,
     link: &ChangeRequestLink,
 ) -> bool {
-    let Some(authority) = &link.authority else { return true };
+    let Some(authority) = &link.authority else {
+        return true;
+    };
     if let Ok(remote) = reqwest::Url::parse(identity.locator.remote_url.as_str())
         && (remote.scheme() == "http" || remote.scheme() == "https")
     {
@@ -187,7 +192,11 @@ pub fn is_change_request_on_project_host(
 
 /// The repository path a project's identity names below its host.
 fn project_repository_path(identity: &ChangeRequestProjectIdentity) -> Option<String> {
-    if let Some(display) = identity.display_name.as_ref().filter(|d| !d.as_str().is_empty()) {
+    if let Some(display) = identity
+        .display_name
+        .as_ref()
+        .filter(|d| !d.as_str().is_empty())
+    {
         return Some(display.as_str().to_owned());
     }
     match (&identity.owner, &identity.name) {
@@ -227,9 +236,7 @@ pub fn unknown_source_control_client() -> SourceControlClientDefinition {
         repository_path_hint: "URL".into(),
         public_host: None,
         publish_description: "Your signed-in server".into(),
-        publish_host: Arc::new(|signed_in_host| {
-            signed_in_host.unwrap_or("your server").to_owned()
-        }),
+        publish_host: Arc::new(|signed_in_host| signed_in_host.unwrap_or("your server").to_owned()),
         new_repository_owner: Arc::new(|_| None),
         default_clone_transport: CloneTransport::Ssh,
         change_request_url: Arc::new(|_| None),
@@ -278,23 +285,31 @@ impl SourceControlClientRegistry {
 
     /// The definition for a kind, or `None` for one this client lacks.
     pub fn find(&self, kind: &str) -> Option<&SourceControlClientDefinition> {
-        self.by_kind.get(kind).map(|&index| &self.definitions[index])
+        self.by_kind
+            .get(kind)
+            .map(|&index| &self.definitions[index])
     }
 
     /// The definition whose public instance is `hostname`, if any.
     pub fn find_by_public_host(&self, hostname: &str) -> Option<&SourceControlClientDefinition> {
         let host = hostname.to_lowercase();
-        self.definitions.iter().find(|d| d.public_host.as_deref() == Some(host.as_str()))
+        self.definitions
+            .iter()
+            .find(|d| d.public_host.as_deref() == Some(host.as_str()))
     }
 
     /// The definition whose change request path shape `url` has, if any.
     pub fn find_by_change_request_url(&self, url: &str) -> Option<&SourceControlClientDefinition> {
-        self.definitions.iter().find(|d| (d.is_change_request_url)(url))
+        self.definitions
+            .iter()
+            .find(|d| (d.is_change_request_url)(url))
     }
 
     /// The name of the host a change request URL is on, for copy about that change request.
     pub fn host_label_for_change_request_url(&self, url: &str) -> String {
-        self.find_by_change_request_url(url).map_or("the host", |d| d.label.as_str()).to_owned()
+        self.find_by_change_request_url(url)
+            .map_or("the host", |d| d.label.as_str())
+            .to_owned()
     }
 }
 
@@ -304,21 +319,32 @@ pub fn make_source_control_client_registry(
 ) -> Result<SourceControlClientRegistry, String> {
     let mut by_kind = HashMap::new();
     for (index, definition) in definitions.iter().enumerate() {
-        if by_kind.insert(definition.kind.as_str().to_owned(), index).is_some() {
+        if by_kind
+            .insert(definition.kind.as_str().to_owned(), index)
+            .is_some()
+        {
             return Err(format!(
                 "Source control host '{}' is defined more than once.",
                 definition.kind
             ));
         }
     }
-    Ok(SourceControlClientRegistry { definitions, by_kind, unknown: unknown_source_control_client() })
+    Ok(SourceControlClientRegistry {
+        definitions,
+        by_kind,
+        unknown: unknown_source_control_client(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn identity(remote_url: &str, canonical_key: &str, display_name: Option<&str>) -> RepositoryIdentity {
+    fn identity(
+        remote_url: &str,
+        canonical_key: &str,
+        display_name: Option<&str>,
+    ) -> RepositoryIdentity {
         serde_json::from_value(serde_json::json!({
             "canonicalKey": canonical_key,
             "locator": { "source": "git-remote", "remoteName": "origin", "remoteUrl": remote_url },
@@ -329,13 +355,28 @@ mod tests {
 
     #[test]
     fn change_request_path_matches_route_then_digits() {
-        assert!(is_change_request_path("https://github.com/a/b/pull/12", "/pull/"));
-        assert!(is_change_request_path("https://github.com/a/b/pull/12/files", "/pull/"));
-        assert!(!is_change_request_path("https://github.com/a/b/pull/x", "/pull/"));
+        assert!(is_change_request_path(
+            "https://github.com/a/b/pull/12",
+            "/pull/"
+        ));
+        assert!(is_change_request_path(
+            "https://github.com/a/b/pull/12/files",
+            "/pull/"
+        ));
+        assert!(!is_change_request_path(
+            "https://github.com/a/b/pull/x",
+            "/pull/"
+        ));
         // A query or fragment that mentions the route is not the path.
-        assert!(!is_change_request_path("https://github.com/a/b?x=/pull/12", "/pull/"));
+        assert!(!is_change_request_path(
+            "https://github.com/a/b?x=/pull/12",
+            "/pull/"
+        ));
         assert!(!is_change_request_path("/pull/12", "/pull/"));
-        assert!(!is_change_request_path("https://github.com/pull/12", "/nope/"));
+        assert!(!is_change_request_path(
+            "https://github.com/pull/12",
+            "/nope/"
+        ));
     }
 
     #[test]
@@ -343,7 +384,9 @@ mod tests {
         let registry = make_source_control_client_registry(vec![]).unwrap();
         let unknown = registry.get(None);
         assert_eq!(unknown.label, "source control");
-        assert!(!(unknown.is_change_request_url)("https://github.com/a/b/pull/1"));
+        assert!(!(unknown.is_change_request_url)(
+            "https://github.com/a/b/pull/1"
+        ));
         assert_eq!((unknown.publish_host)(None), "your server");
         assert_eq!((unknown.publish_host)(Some("h")), "h");
         assert!(registry.find("github").is_none());
@@ -352,19 +395,35 @@ mod tests {
     #[test]
     fn project_repository_and_host_matching() {
         let kind = SourceControlProviderKind::new("github").unwrap();
-        let project = identity("git@github.com:acme/web.git", "github.com/acme/web", Some("acme/web"));
+        let project = identity(
+            "git@github.com:acme/web.git",
+            "github.com/acme/web",
+            Some("acme/web"),
+        );
         let link = ChangeRequestLink {
             host: "github.com".into(),
             repository: "acme/web".into(),
             number: 3,
             authority: None,
         };
-        assert!(is_change_request_in_project_repository(&kind, &project, &link));
+        assert!(is_change_request_in_project_repository(
+            &kind, &project, &link
+        ));
         assert!(is_change_request_on_project_host(&kind, &project, &link));
-        let other = ChangeRequestLink { repository: "acme/api".into(), ..link.clone() };
-        assert!(!is_change_request_in_project_repository(&kind, &project, &other));
-        let elsewhere = ChangeRequestLink { host: "ghe.example".into(), ..link };
-        assert!(!is_change_request_on_project_host(&kind, &project, &elsewhere));
+        let other = ChangeRequestLink {
+            repository: "acme/api".into(),
+            ..link.clone()
+        };
+        assert!(!is_change_request_in_project_repository(
+            &kind, &project, &other
+        ));
+        let elsewhere = ChangeRequestLink {
+            host: "ghe.example".into(),
+            ..link
+        };
+        assert!(!is_change_request_on_project_host(
+            &kind, &project, &elsewhere
+        ));
     }
 
     #[test]
@@ -375,8 +434,16 @@ mod tests {
             number: 1,
             authority: Some("forge.example:3000".into()),
         };
-        let http = identity("http://forge.example:3000/a/b.git", "forge.example/a/b", None);
-        let other_port = identity("http://forge.example:4000/a/b.git", "forge.example/a/b", None);
+        let http = identity(
+            "http://forge.example:3000/a/b.git",
+            "forge.example/a/b",
+            None,
+        );
+        let other_port = identity(
+            "http://forge.example:4000/a/b.git",
+            "forge.example/a/b",
+            None,
+        );
         let ssh = identity("git@forge.example:a/b.git", "forge.example/a/b", None);
         assert!(is_change_request_authority_of_project(&http, &link));
         assert!(!is_change_request_authority_of_project(&other_port, &link));

@@ -439,6 +439,47 @@ impl<T: Clone> Lru<T> {
     }
 }
 
+/// Consecutive failed PR lookups per cache key. A success clears the key.
+/// Bounded like upstream's `Map`: at capacity a new key evicts the oldest
+/// insertion, and an existing key keeps its place.
+struct FailureStreaks {
+    counts: HashMap<String, u32>,
+    order: VecDeque<String>,
+    capacity: usize,
+}
+
+impl FailureStreaks {
+    fn new(capacity: usize) -> Self {
+        Self {
+            counts: HashMap::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    /// Counts one more failure for `key` and returns the new streak.
+    fn record_failure(&mut self, key: &str) -> u32 {
+        if let Some(count) = self.counts.get_mut(key) {
+            *count += 1;
+            return *count;
+        }
+        if self.counts.len() >= self.capacity
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.counts.remove(&oldest);
+        }
+        self.order.push_back(key.to_owned());
+        self.counts.insert(key.to_owned(), 1);
+        1
+    }
+
+    fn clear(&mut self, key: &str) {
+        if self.counts.remove(key).is_some() {
+            self.order.retain(|item| item != key);
+        }
+    }
+}
+
 #[derive(Clone)]
 enum PrLookup {
     Found(Box<GitBranchPullRequest>),
@@ -458,6 +499,7 @@ pub struct GitManager {
     local_cache: parking_lot::Mutex<Lru<VcsStatusLocalResult>>,
     remote_cache: parking_lot::Mutex<Lru<VcsStatusRemoteResult>>,
     pr_cache: parking_lot::Mutex<Lru<PrLookup>>,
+    pr_failure_streaks: parking_lot::Mutex<FailureStreaks>,
     git_state: parking_lot::Mutex<Lru<String>>,
     pr_epoch: AtomicU64,
     pull_requests: broadcast::Sender<ThreadPullRequestKey>,
@@ -482,6 +524,9 @@ impl GitManager {
             local_cache: parking_lot::Mutex::new(Lru::new(STATUS_CACHE_CAPACITY)),
             remote_cache: parking_lot::Mutex::new(Lru::new(STATUS_CACHE_CAPACITY)),
             pr_cache: parking_lot::Mutex::new(Lru::new(PR_LOOKUP_CACHE_CAPACITY)),
+            pr_failure_streaks: parking_lot::Mutex::new(FailureStreaks::new(
+                PR_LOOKUP_CACHE_CAPACITY,
+            )),
             git_state: parking_lot::Mutex::new(Lru::new(PR_LOOKUP_CACHE_CAPACITY)),
             pr_epoch: AtomicU64::new(0),
             pull_requests: sender,
@@ -642,6 +687,7 @@ impl GitManager {
         }
         match self.lookup_branch_pull_request(cwd, branch).await {
             Ok(Some(found)) => {
+                self.pr_failure_streaks.lock().clear(&key);
                 self.pr_cache.lock().insert(
                     key,
                     PrLookup::Found(Box::new(found.clone())),
@@ -650,13 +696,14 @@ impl GitManager {
                 Ok(Some(found))
             }
             Ok(None) => {
+                self.pr_failure_streaks.lock().clear(&key);
                 self.pr_cache
                     .lock()
                     .insert(key, PrLookup::Missing, PR_LOOKUP_MISSING_TTL);
                 Ok(None)
             }
             Err(error) => {
-                let failures = 1;
+                let failures = self.pr_failure_streaks.lock().record_failure(&key);
                 self.pr_cache.lock().insert(
                     key,
                     PrLookup::Failed(Box::new(error.clone())),
@@ -1897,6 +1944,30 @@ mod tests {
             .expect("custom message");
         assert_eq!(custom.subject, format!("{long}."));
         assert_eq!(custom.body, body);
+    }
+
+    #[test]
+    fn failure_streaks_count_up_per_key_and_clear_on_success() {
+        let mut streaks = FailureStreaks::new(2);
+        assert_eq!(streaks.record_failure("a"), 1);
+        assert_eq!(streaks.record_failure("a"), 2);
+        assert_eq!(streaks.record_failure("b"), 1);
+        // A new key at capacity evicts the oldest insertion ("a").
+        assert_eq!(streaks.record_failure("c"), 1);
+        assert_eq!(streaks.record_failure("a"), 1);
+        streaks.clear("b");
+        assert_eq!(streaks.record_failure("b"), 1);
+    }
+
+    #[test]
+    fn repeated_failures_escalate_the_cached_backoff() {
+        let mut streaks = FailureStreaks::new(PR_LOOKUP_CACHE_CAPACITY);
+        let first = pr_lookup_failure_ttl(streaks.record_failure("branch"));
+        let second = pr_lookup_failure_ttl(streaks.record_failure("branch"));
+        let third = pr_lookup_failure_ttl(streaks.record_failure("branch"));
+        assert_eq!(first, Duration::from_secs(20));
+        assert_eq!(second, Duration::from_secs(40));
+        assert_eq!(third, Duration::from_secs(80));
     }
 
     #[test]

@@ -63,7 +63,9 @@ pub trait LimitRecoveryDispatch: Send + Sync {
 #[async_trait]
 impl LimitRecoveryDispatch for crate::pipeline::thread_management_service::ThreadManagementService {
     async fn dispatch(&self, command: OrchestrationV2ServerCommand) -> Result<(), BoxError> {
-        crate::pipeline::thread_management_service::ThreadManagementService::dispatch(self, command)
+        // `dispatch` lives on the core behind `Deref`; the service itself has no inherent one.
+        let core: &crate::pipeline::thread_management_service::ThreadManagementCore = self;
+        core.dispatch(command)
             .await
             .map(|_| ())
             .map_err(|error| Box::new(error) as BoxError)
@@ -97,7 +99,7 @@ pub fn limit_recovery_command(
         .latest_run_completed_at
         .as_ref()
         .unwrap_or(&thread.updated_at)
-        .0
+        .as_datetime()
         .timestamp_millis();
     if reset_ms <= completed_ms {
         return None;
@@ -133,7 +135,7 @@ pub fn limit_recovery_command(
     let snoozed_past_now = thread
         .snoozed_until
         .as_ref()
-        .is_some_and(|until| until.0.timestamp_millis() > now_ms);
+        .is_some_and(|until| until.as_datetime().timestamp_millis() > now_ms);
     if !recovery.auto_resume || reset_ms > now_ms || snoozed_past_now {
         return None;
     }
@@ -216,7 +218,7 @@ impl UsageLimitRecoveryWorker {
             .candidates
             .get_limit_recovery_candidates(now, auto_resume, snooze)
             .await?;
-        let now_ms = now.0.timestamp_millis();
+        let now_ms = now.as_datetime().timestamp_millis();
         for thread in &candidates {
             let Some(command) = limit_recovery_command(thread, auto_resume, now_ms, snooze) else {
                 continue;

@@ -26,11 +26,11 @@ fn utc(value: &str) -> UtcDateTime {
 }
 
 fn reset_future_ms() -> i64 {
-    utc(RESET_FUTURE).0.timestamp_millis()
+    utc(RESET_FUTURE).as_datetime().timestamp_millis()
 }
 
 fn now_ms() -> i64 {
-    utc(NOW).0.timestamp_millis()
+    utc(NOW).as_datetime().timestamp_millis()
 }
 
 fn failed_thread(reset_at: &str) -> ProjectionLimitRecoveryCandidate {

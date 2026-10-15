@@ -5,6 +5,13 @@
 //! Upstream launches through an injected Effect spawner. Here every spawn
 //! goes through [`LaunchHost`], so tests record launches and never start an
 //! application.
+//!
+//! `ExternalLauncherError` is the wire error from turin-contracts. Boxing it
+//! here would make the service error differ from the contract enum.
+#![allow(
+    clippy::result_large_err,
+    reason = "the error is the turin-contracts wire enum; boxing it would diverge from the contract"
+)]
 
 use std::io;
 use std::sync::{Arc, LazyLock};
@@ -123,10 +130,10 @@ impl ExternalLauncher {
     fn acquire_scan(&self) -> SharedScan {
         let now = self.host.monotonic_nanos();
         let mut state = self.discovery.state.lock();
-        if let Some(entry) = &state.entry {
-            if entry.expires_at_nanos.is_none_or(|expires| expires > now) {
-                return entry.scan.clone();
-            }
+        if let Some(entry) = &state.entry
+            && entry.expires_at_nanos.is_none_or(|expires| expires > now)
+        {
+            return entry.scan.clone();
         }
         state.generation += 1;
         let generation = state.generation;

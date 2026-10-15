@@ -63,10 +63,10 @@ impl NativeAppIconResolver {
     /// The cached icon PNG for the app, or `None` when no icon is available.
     /// Failures are logged and never cached.
     pub async fn resolve(&self, app: &ToolActivityNativeAppReference) -> Option<PathBuf> {
-        if let ToolActivityNativeAppReference::DisplayName { display_name } = app {
-            if contains_control_character(display_name.as_str()) {
-                return None;
-            }
+        if let ToolActivityNativeAppReference::DisplayName { display_name } = app
+            && contains_control_character(display_name.as_str())
+        {
+            return None;
         }
         let key = serde_json::to_string(app).ok()?;
         if let Some(cached) = self.cached(&key) {
@@ -160,13 +160,12 @@ impl NativeAppIconResolver {
         if source.is_none() {
             source = existing_file(&resources.join("AppIcon.icns"))?;
         }
-        if source.is_none() {
-            if let Some(entry) = resource_entries
+        if source.is_none()
+            && let Some(entry) = resource_entries
                 .iter()
                 .find(|entry| entry.to_lowercase().ends_with(".icns"))
-            {
-                source = existing_file(&resources.join(entry))?;
-            }
+        {
+            source = existing_file(&resources.join(entry))?;
         }
         let Some(source_candidate) = source else {
             return Ok(None);
@@ -378,6 +377,7 @@ mod tests {
     use crate::host::test_support::FakeHost;
 
     type Output = Box<dyn Fn(&str, &[String]) -> io::Result<String> + Send + Sync>;
+    type Recorded = (String, Vec<String>);
 
     fn display_name(name: &str) -> ToolActivityNativeAppReference {
         ToolActivityNativeAppReference::DisplayName {
@@ -395,7 +395,7 @@ mod tests {
     #[tokio::test]
     async fn escapes_spotlight_wildcards_and_caches_misses() {
         let cache = tempfile::tempdir().unwrap();
-        let commands: Arc<StdMutex<Vec<(String, Vec<String>)>>> = Arc::default();
+        let commands: Arc<StdMutex<Vec<Recorded>>> = Arc::default();
         let recorded = Arc::clone(&commands);
         let host = Arc::new(FakeHost::new());
         *host.output.lock().unwrap() = Some(Box::new(move |command: &str, args: &[String]| {

@@ -16,6 +16,7 @@ use turin_contracts::{CheckpointScopeId, RunId, ThreadId};
 use crate::{
     pipeline::orchestrator_port::BoxError,
     projection::store::{ProjectionStore, canonical::ProjectionRecordField},
+    reactors::checkpoint_capture_service::CheckpointCaptureService,
 };
 
 /// The `operation` of a [`RunFinalizationError`].
@@ -120,6 +121,18 @@ pub trait RunFinalizationObserver: Send + Sync {
         thread_id: &ThreadId,
         run_id: &RunId,
     ) -> Result<(), RunFinalizationRefreshError>;
+}
+
+/// The T13d capture service is the production `CheckpointCapture`. Its guard
+/// (`plan_capture`) owns the skip and invalid decisions, so this only forwards
+/// the scope triple.
+#[async_trait]
+impl CheckpointCapture for CheckpointCaptureService {
+    async fn execute(&self, input: &FinalizeInput) -> Result<(), BoxError> {
+        CheckpointCaptureService::execute(self, &input.thread_id, &input.run_id, &input.scope_id)
+            .await
+            .map_err(|error| Box::new(error) as BoxError)
+    }
 }
 
 /// `RunFinalizationService`.

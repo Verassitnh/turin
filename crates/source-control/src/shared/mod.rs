@@ -9,5 +9,6 @@ pub mod github_markdown_links;
 pub mod github_media;
 pub mod host_process;
 pub mod js;
+pub mod mime_types;
 pub mod source_control;
 pub mod thread_pull_requests;

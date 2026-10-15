@@ -8,6 +8,7 @@ pub mod credentials;
 pub mod definition;
 pub mod driver;
 pub mod graphql;
+pub mod media_fetch;
 pub mod pull_request_api;
 pub mod pull_request_json;
 pub mod pull_request_provider;

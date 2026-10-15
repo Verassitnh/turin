@@ -173,7 +173,6 @@ struct Shared {
 }
 pub struct ClaudeSession {
     state: Arc<Shared>,
-    pid: Option<u32>,
     events: mpsc::UnboundedReceiver<SessionEvent>,
     tasks: JoinSet<()>,
     initialization: Value,
@@ -226,7 +225,6 @@ impl ClaudeSession {
         tasks.spawn(stderr_loop(stderr, state.clone()));
         let mut session = Self {
             state,
-            pid,
             events,
             tasks,
             initialization: Value::Null,
@@ -393,7 +391,6 @@ impl ClaudeSession {
     pub async fn shutdown(mut self) -> Result<ProcessExit> {
         let _ = self.state.writer.send(WriteCommand::Close);
         let exit = self.wait_for_exit_with_signals().await;
-        self.pid = None;
         self.tasks.abort_all();
         while self.tasks.join_next().await.is_some() {}
         Ok(exit)
@@ -423,12 +420,12 @@ impl ClaudeSession {
             .await
             .is_err()
         {
-            signal_group(self.pid, term_signal());
+            signal_session_group(&self.state, term_signal());
             if tokio::time::timeout(Duration::from_secs(5), &mut wait)
                 .await
                 .is_err()
             {
-                signal_group(self.pid, kill_signal());
+                signal_session_group(&self.state, kill_signal());
                 let _ = tokio::time::timeout(Duration::from_secs(1), &mut wait).await;
             }
         }
@@ -453,9 +450,16 @@ fn parse_control_response(response: Value, subtype: &str) -> Result<Value> {
 }
 impl Drop for ClaudeSession {
     fn drop(&mut self) {
-        signal_group(self.pid, kill_signal());
+        signal_session_group(&self.state, kill_signal());
         self.tasks.abort_all();
     }
+}
+/// Signals the session's process group while the reaper has not taken it yet. Once the leader is
+/// reaped its pid can be reused by an unrelated process group, so the reaper's `take` is the only
+/// point after which the group is no longer ours to signal.
+fn signal_session_group(state: &Shared, signal: i32) {
+    let pgid = *state.pgid.lock().unwrap();
+    signal_group(pgid, signal);
 }
 #[cfg(unix)]
 fn term_signal() -> i32 {
@@ -1239,6 +1243,54 @@ for line in sys.stdin:
             .unwrap();
         assert_eq!(reply, json!({}));
         session.shutdown().await.unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+    /// Once the CLI exits on its own the reaper has reaped the leader and released the group id.
+    /// Cleanup must signal only the group the session still owns. The old pid can name an unrelated
+    /// process group by then, so a bystander in its own group must survive.
+    #[tokio::test]
+    async fn exited_session_does_not_signal_a_group_it_no_longer_owns() {
+        use std::os::unix::process::CommandExt;
+        let dir = std::env::temp_dir().join(format!("turin-claude-pgid-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let options = script(
+            &dir,
+            r#"#!/usr/bin/env python3
+import json,sys
+for line in sys.stdin:
+    value=json.loads(line)
+    if value.get("type")=="control_request" and value["request"]["subtype"]=="initialize":
+        print(json.dumps({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"models":[]}}}),flush=True)
+        raise SystemExit(0)
+"#,
+        );
+        let mut session = ClaudeSession::spawn(options, Arc::new(Accept))
+            .await
+            .unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                SessionEvent::Exit(_) => break,
+                SessionEvent::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        assert!(session.state.pgid.lock().unwrap().is_none());
+        let mut bystander = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        signal_session_group(&session.state, kill_signal());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let alive = bystander.try_wait().unwrap().is_none();
+        bystander.kill().unwrap();
+        bystander.wait().unwrap();
+        assert!(alive, "session signaled a process group it does not own");
+        drop(session);
         fs::remove_dir_all(dir).unwrap();
     }
     #[tokio::test]

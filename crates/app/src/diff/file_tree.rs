@@ -32,6 +32,19 @@ pub struct TreeState {
     pub cursor: Option<String>,
 }
 
+/// `--trees-item-padding-x` at compact density (8px × 0.8).
+const TREE_ROW_PADDING: f32 = 6.4;
+
+/// Left edge of a row's chevron/icon box at `depth`. `@pierre/trees` adds one
+/// spacing item per level (border 1px + `--trees-level-gap` 6.4px − 1px), and
+/// every item after the first is led in by `--trees-item-row-gap` 4.8px +
+/// `icon/2` − .5px. The spacing section's own 7.5px lead-in and its 4.8px gap
+/// to the icon cancel out, so each level is 6.4 + 4.8 + 8 − .5 = 18.7px.
+fn row_indent(depth: usize) -> f32 {
+    const LEVEL_STEP: f32 = 6.4 + 4.8 + 8. - 0.5;
+    TREE_ROW_PADDING + depth as f32 * LEVEL_STEP
+}
+
 /// `--trees-git-*-color` light/dark.
 fn status_color(status: GitStatus, dark: bool) -> Hsla {
     match (status, dark) {
@@ -330,7 +343,7 @@ impl DiffPanel {
             .h(px(24.))
             .items_center()
             .gap(px(4.8))
-            .pl(px(6.4 + row.depth as f32 * 12.))
+            .pl(px(row_indent(row.depth)))
             .pr(px(6.4))
             .rounded(RADIUS_MD)
             .cursor(CursorStyle::PointingHand)
@@ -412,4 +425,16 @@ impl DiffPanel {
 
 fn px_rems(pixels: f32) -> gpui_kit::Rems {
     rems(pixels / 16.)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_level_steps_18_7px_like_pierre_compact_density() {
+        assert!((row_indent(0) - 6.4).abs() < 1e-4);
+        assert!((row_indent(1) - 25.1).abs() < 1e-4);
+        assert!((row_indent(3) - 62.5).abs() < 1e-4);
+    }
 }

@@ -856,7 +856,7 @@ mod tests {
     fn resolve_pull_request_result_decodes() {
         let parsed: GitResolvePullRequestResult =
             serde_json::from_value(serde_json::json!({ "pullRequest": resolved_pr() })).unwrap();
-        assert_eq!(parsed.pull_request.number, 42);
+        assert_eq!(parsed.pull_request.number.get(), 42);
         assert_eq!(parsed.pull_request.head_branch.as_str(), "feature/pr-threads");
     }
 

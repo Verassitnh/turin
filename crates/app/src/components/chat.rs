@@ -2,6 +2,9 @@
 
 pub mod changed_files_tree;
 pub mod chat_header;
+// Chat-lane geometry for the canvas; the canvas does not call it yet.
+#[allow(dead_code)]
+pub mod chat_canvas_layout;
 pub mod composer_pending_panels;
 pub mod composer_surface;
 pub mod markdown;

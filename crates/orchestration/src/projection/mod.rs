@@ -3,6 +3,7 @@
 
 pub mod assistant_streaming;
 pub mod queued_run_order;
+pub mod project_store;
 pub mod store;
 pub mod thread_history_paging;
 pub mod thread_live_event_coalescer;

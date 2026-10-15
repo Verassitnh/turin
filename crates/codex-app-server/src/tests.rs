@@ -1083,3 +1083,89 @@ async fn invalid_utf8_in_a_frame_is_replaced_and_the_session_survives() {
         Some(json!({"text":"next"}))
     );
 }
+
+/// Spawns a shell that leaves a background descendant behind and exits, then returns the
+/// client (whose leader is already gone) and the descendant's pid.
+#[cfg(unix)]
+async fn client_whose_leader_exited_with_a_live_descendant() -> (crate::client::Client, i32) {
+    let pid_file = std::env::temp_dir().join(format!(
+        "turin-codex-descendant-{}-{}.pid",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let client = crate::client::Client::spawn(
+        "/bin/sh",
+        &[
+            "-c",
+            r#"sleep 300 & echo $! > "$1"; sleep 0.2"#,
+            "sh",
+            pid_file.to_str().unwrap(),
+        ],
+        None,
+    )
+    .unwrap();
+    let error = timeout(Duration::from_secs(2), client.raw.request("x/test", None))
+        .await
+        .expect("leader exit")
+        .unwrap_err();
+    assert!(matches!(error, AppServerError::ProcessExited(Some(0))));
+    let pid = timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("descendant pid");
+    let _ = std::fs::remove_file(&pid_file);
+    assert!(descendant_alive(pid));
+    (client, pid)
+}
+
+#[cfg(unix)]
+fn descendant_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Waits for the descendant to die, killing it if it outlives the check so a failure cannot
+/// leave a `sleep 300` behind.
+#[cfg(unix)]
+async fn assert_descendant_killed(pid: i32) {
+    let killed = timeout(Duration::from_secs(5), async {
+        while descendant_alive(pid) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    if !killed {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+    assert!(killed, "descendant {pid} survived after the leader exited");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_client_kills_descendants_after_the_leader_exited() {
+    let (client, pid) = client_whose_leader_exited_with_a_live_descendant().await;
+    drop(client);
+    assert_descendant_killed(pid).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_kills_descendants_after_the_leader_exited() {
+    let (client, pid) = client_whose_leader_exited_with_a_live_descendant().await;
+    client.shutdown().await.unwrap();
+    assert_descendant_killed(pid).await;
+}

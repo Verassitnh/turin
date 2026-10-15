@@ -10,14 +10,7 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, Ordering},
-    },
-};
+use std::{collections::HashMap, path::Path, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     process::Command,
@@ -44,7 +37,10 @@ struct Handlers {
 pub struct Client {
     pub raw: Protocol,
     handlers: Arc<Handlers>,
-    child_pid: Arc<AtomicU32>,
+    // Process-group id of the spawned child (0 when there is none). Recorded once at spawn and
+    // never cleared: descendants can outlive the leader, so the group must still be signalled
+    // after the leader has exited.
+    child_pgid: u32,
     child_task: Option<AbortOnDropHandle<()>>,
     stderr_task: Option<AbortOnDropHandle<()>>,
 }
@@ -152,7 +148,7 @@ impl Client {
         Self {
             raw,
             handlers,
-            child_pid: Arc::new(AtomicU32::new(0)),
+            child_pgid: 0,
             child_task: None,
             stderr_task: None,
         }
@@ -204,8 +200,7 @@ impl Client {
             })));
         }
         let terminator = client.raw.termination_handle();
-        client.child_pid.store(pid, Ordering::Release);
-        let child_pid = client.child_pid.clone();
+        client.child_pgid = pid;
         client.child_task = Some(AbortOnDropHandle::new(tokio::spawn(async move {
             let error = match child.wait().await {
                 Ok(status) => AppServerError::ProcessExited(status.code()),
@@ -216,7 +211,6 @@ impl Client {
             };
             let _ = exit_tx.send(Some(error.clone()));
             terminator.terminate(error);
-            child_pid.store(0, Ordering::Release);
         })));
         Ok(client)
     }
@@ -286,11 +280,7 @@ impl Client {
         self.raw.terminate(AppServerError::Cancelled);
         if let Some(mut task) = self.child_task.take() {
             #[cfg(unix)]
-            if let pid @ 1..=u32::MAX = self.child_pid.load(Ordering::Acquire) {
-                unsafe {
-                    libc::kill(-(pid as i32), libc::SIGTERM);
-                }
-            }
+            signal_group(self.child_pgid, libc::SIGTERM);
             #[cfg(not(unix))]
             task.abort();
             if tokio::time::timeout(std::time::Duration::from_secs(2), &mut task)
@@ -298,11 +288,7 @@ impl Client {
                 .is_err()
             {
                 #[cfg(unix)]
-                if let pid @ 1..=u32::MAX = self.child_pid.load(Ordering::Acquire) {
-                    unsafe {
-                        libc::kill(-(pid as i32), libc::SIGKILL);
-                    }
-                }
+                signal_group(self.child_pgid, libc::SIGKILL);
                 task.await.map_err(|error| AppServerError::Transport {
                     operation: "read-process-exit-status",
                     detail: error.to_string(),
@@ -356,14 +342,22 @@ pub(crate) fn check_payload(
         }
     })
 }
+/// The group id is the leader's pid: the kernel does not reuse it while the group has members.
+/// Known limit: once the group is empty its id can be reused by an unrelated new group leader,
+/// and a shutdown or drop after that would signal that group. The window is the time between
+/// the last descendant exiting and this client being dropped.
+#[cfg(unix)]
+fn signal_group(pgid: u32, signal: libc::c_int) {
+    if let pgid @ 1..=u32::MAX = pgid {
+        unsafe {
+            libc::kill(-(pgid as i32), signal);
+        }
+    }
+}
 impl Drop for Client {
     fn drop(&mut self) {
         #[cfg(unix)]
-        if let pid @ 1..=u32::MAX = self.child_pid.load(Ordering::Acquire) {
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
-            }
-        }
+        signal_group(self.child_pgid, libc::SIGKILL);
         drop(self.child_task.take());
         drop(self.stderr_task.take());
     }

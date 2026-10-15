@@ -218,7 +218,9 @@ pub fn split_file_path_position(path: &str, hash: &str) -> FilePathPosition {
 }
 
 // ---------------------------------------------------------------------------------------------
-// upstream: packages/shared/src/{filePreview,video,image}.ts
+// upstream: packages/shared/src/{video,image}.ts (mime types only; `filePreview.ts` is not
+// ported here: `decodeFilePreviewText` and `FILE_TEXT_PREVIEW_MAX_BYTES` live in turin-shared's
+// `file_preview.rs`, see PORTING.md DEDUP)
 // ---------------------------------------------------------------------------------------------
 
 fn image_mime_type_by_extension(extension: &str) -> Option<&'static str> {

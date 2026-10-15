@@ -186,6 +186,14 @@ impl ConnectionHooks for ClientHooks {
     }
 }
 
+/// Client handle for one ACP connection. Cheap to clone.
+///
+/// Handlers registered through the `on_*` methods are stored on the connection
+/// they serve, so they must not capture a strong `AcpClient`. The stored
+/// closure would keep the connection alive: its tasks never abort, and the
+/// child process is never signalled on drop. Capture a
+/// `std::sync::Weak<AcpClient>` instead (keep the owner in an `Arc`), or a
+/// narrow handle such as one channel sender or one shared-state `Arc`.
 #[derive(Clone)]
 pub struct AcpClient {
     connection: Connection,
@@ -605,6 +613,8 @@ impl AcpClient {
         queue.register(box_notify(handler));
     }
 
+    /// Registers a handler for an extension request. Do not capture a strong
+    /// `AcpClient` in `handler`; see the type docs.
     pub fn on_ext_request<F, Fut>(&self, method: impl Into<String>, handler: F)
     where
         F: Fn(Value, RequestContext) -> Fut + Send + Sync + 'static,
@@ -1046,6 +1056,34 @@ mod tests {
         let mut bytes = serde_json::to_vec(&value).unwrap();
         bytes.push(b'\n');
         write.write_all(&bytes).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn weak_handler_capture_lets_the_client_drop() {
+        use tokio::io::AsyncReadExt;
+        let (client, mut agent_read, _agent_write) = pair();
+        let owner = Arc::new(client);
+        let handler_weak = Arc::downgrade(&owner);
+        owner.on_request_permission(move |_params, _ctx| {
+            let handler_weak = handler_weak.clone();
+            async move {
+                let _client = handler_weak
+                    .upgrade()
+                    .ok_or_else(|| AcpError::transport("client dropped"))?;
+                Ok(json!({"outcome": {"outcome": "cancelled"}}))
+            }
+        });
+        let owner_weak = Arc::downgrade(&owner);
+        drop(owner);
+        // The stored handler holds only the weak handle, so the last strong
+        // handle drop tears the connection down and closes the outbound stream.
+        let mut buf = [0_u8; 16];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), agent_read.read(&mut buf))
+            .await
+            .expect("a weak-capturing handler kept the connection alive")
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(owner_weak.upgrade().is_none());
     }
 
     #[tokio::test]

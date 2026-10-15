@@ -6,13 +6,13 @@
 //! ported yet.
 
 use gpui_kit::{
-    App, CursorStyle, ElementId, FontWeight, InteractiveElement as _, IntoElement,
+    App, CursorStyle, ElementId, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
     Window, div, px, rems, svg,
 };
 
 use crate::assets::T3_WORDMARK;
-use crate::components::drag_region::DragRegion as _;
+use crate::components::drag_region::{DragRegion as _, no_drag};
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::{
     CONTROL_RADIUS, SIDEBAR_CONTENT_INSET, TEXT_SM, WORKSPACE_TOPBAR_HEIGHT,
@@ -120,6 +120,7 @@ pub fn sidebar_icon_button(
     let tooltip = Tooltip::new(label);
     div()
         .id(id)
+        .on_mouse_down(MouseButton::Left, no_drag)
         .group(group.clone())
         .flex()
         .flex_shrink_0()

@@ -16,12 +16,13 @@ use gpui_kit::Refineable as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, BoxShadow, ClickEvent, CursorStyle, ElementId, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Rems, RenderOnce, SharedString,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, px,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Rems, RenderOnce,
+    SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, div, px,
 };
 
 use super::icon::{Icon, IconName};
 use super::tooltip::Tooltip;
+use crate::components::drag_region::no_drag;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{self, RADIUS_MD, RADIUS_SM, TEXT_BASE, TEXT_SM, TEXT_XS, TextSize, tw};
 use crate::theme::{ActiveAppTheme, AppTheme};
@@ -413,6 +414,8 @@ impl RenderOnce for Button {
 
         let mut root = div()
             .id(self.id.clone())
+            // `no-drag`: buttons inside titlebar drag regions keep their clicks.
+            .on_mouse_down(MouseButton::Left, no_drag)
             .group(group.clone())
             .relative()
             .flex()

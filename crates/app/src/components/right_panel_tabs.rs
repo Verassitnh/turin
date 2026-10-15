@@ -9,11 +9,11 @@
 //! `AppSidebarLayout`, which owns the width.
 
 use gpui_kit::{
-    App, CursorStyle, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    Styled as _, Window, div, rems,
+    App, CursorStyle, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
+    RenderOnce, Styled as _, Window, div, rems,
 };
 
-use super::drag_region::DragRegion as _;
+use super::drag_region::{DragRegion as _, no_drag};
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_MD, TEXT_SM, TEXT_XS, WORKSPACE_TOPBAR_HEIGHT};
@@ -31,6 +31,7 @@ fn surface_tab(
     let theme = cx.app_theme().clone();
     let tab = div()
         .id(id)
+        .on_mouse_down(MouseButton::Left, no_drag)
         .flex()
         .h_6()
         .max_w(rems(9.))

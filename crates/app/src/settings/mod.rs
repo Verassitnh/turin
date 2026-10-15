@@ -9,3 +9,4 @@
 pub mod keybindings_logic;
 pub mod locale;
 pub mod usage_shortcuts;
+pub mod panels_logic;

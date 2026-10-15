@@ -178,6 +178,12 @@ impl Connection {
 
     pub async fn next_notification(&self) -> Option<IncomingNotification> {
         loop {
+            // `notify_waiters` stores no permit. Enable the waiter before checking
+            // the queue and the terminated flag, so a push or terminate that lands
+            // in between still wakes us instead of being lost.
+            let notified = self.inner.notify_waiters.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(item) = self.inner.notifications.lock().pop_front() {
                 return Some(item);
             }
@@ -186,7 +192,7 @@ impl Connection {
             {
                 return None;
             }
-            self.inner.notify_waiters.notified().await;
+            notified.await;
         }
     }
 
@@ -989,6 +995,51 @@ mod tests {
         let text = error.to_string();
         assert!(!text.contains(secret));
         assert!(text.contains("decode-notification-payload"));
+    }
+
+    // Needs a multi-thread runtime: on current_thread the consumer cannot run
+    // between the queue check and the await, so the race never opens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn next_notification_does_not_miss_a_push_racing_the_wait() {
+        let (connection, _read, _write) = start_pair(noop_request(), noop_notification());
+        // The window between the queue check and the await is a few instructions
+        // wide. The QC probe needed about 200k rounds to hit it reliably.
+        for index in 0..200_000 {
+            let consumer = tokio::spawn({
+                let connection = connection.clone();
+                async move { connection.next_notification().await }
+            });
+            connection
+                .inner
+                .push_notification(IncomingNotification::Ext {
+                    method: "x/race".to_owned(),
+                    params: json!({"index": index}),
+                });
+            let note = tokio::time::timeout(std::time::Duration::from_secs(2), consumer)
+                .await
+                .expect("consumer missed a push")
+                .unwrap();
+            assert!(matches!(note, Some(IncomingNotification::Ext { .. })));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn next_notification_wakes_on_termination_racing_the_wait() {
+        for _ in 0..1_000 {
+            let (connection, _read, _write) = start_pair(noop_request(), noop_notification());
+            let consumer = tokio::spawn({
+                let connection = connection.clone();
+                async move { connection.next_notification().await }
+            });
+            connection
+                .inner
+                .terminate(AcpError::transport("connection closed for test"));
+            let note = tokio::time::timeout(std::time::Duration::from_secs(2), consumer)
+                .await
+                .expect("consumer missed the termination wakeup")
+                .unwrap();
+            assert!(note.is_none());
+        }
     }
 
     #[tokio::test]

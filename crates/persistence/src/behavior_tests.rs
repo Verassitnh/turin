@@ -1,11 +1,13 @@
-//! Ports of Sqlite.test.ts, initializeV2Database.test.ts, and the persistence
-//! repository tests that do not depend on the Effect runtime.
+//! Ports of `upstream/apps/server/src/persistence/Sqlite.test.ts`,
+//! `upstream/apps/server/src/persistence/initializeV2Database.test.ts`, and the
+//! persistence repository tests that do not depend on the Effect runtime.
 
 use std::time::Duration;
 
 use rusqlite::Connection;
+use turin_contracts::{CommandId, EventId, ThreadId, UtcDateTime};
 
-use crate::db::{Db, WAL_SIZE_LIMIT_BYTES};
+use crate::db::{CHECKPOINT_FRAMES, Db, WAL_SIZE_LIMIT_BYTES, WRITER_BACKSTOP_FRAMES};
 use crate::errors::PersistenceError;
 use crate::initialize_v2_database::initialize_v2_database;
 use crate::orchestration_command_receipts::{
@@ -14,7 +16,7 @@ use crate::orchestration_command_receipts::{
 };
 use crate::orchestration_event_store::{
     AgentEvent, AppendAgentEvents, ApplicationStoredEvent, OrchestrationEventStore,
-    ProjectEventInput, ReadAgentEvents, ReadApplicationEvents,
+    ProjectEventInput, ReadAgentEvents, ReadApplicationEvents, StoredAgentEvent,
 };
 use crate::provider_session_runtime::{
     ProviderSessionRuntime, ProviderSessionStatus, UpsertConflict, get_by_thread_id, list,
@@ -27,6 +29,22 @@ use crate::pull_request_files_viewed::{
 use crate::pull_request_review_guides::{ThreadPullRequestKey, get as get_guide, put as put_guide};
 
 const NOW: &str = "2026-01-02T03:04:05.006Z";
+
+fn event_id(value: &str) -> EventId {
+    EventId::new(value).unwrap()
+}
+
+fn thread_id(value: &str) -> ThreadId {
+    ThreadId::new(value).unwrap()
+}
+
+fn command_id(value: &str) -> CommandId {
+    CommandId::new(value).unwrap()
+}
+
+fn at(value: &str) -> UtcDateTime {
+    value.parse().unwrap()
+}
 
 async fn memory_db() -> Db {
     Db::open_in_memory().await.expect("memory db")
@@ -42,10 +60,10 @@ fn sql_err(err: rusqlite::Error) -> PersistenceError {
 
 fn subagent(id: &str, node: &str, prompt: &str, progress: &str) -> AgentEvent {
     AgentEvent {
-        id: id.into(),
-        thread_id: "thread:subagent-prompt".into(),
+        id: event_id(id),
+        thread_id: thread_id("thread:subagent-prompt"),
         event_type: "subagent.updated".into(),
-        occurred_at: NOW.into(),
+        occurred_at: at(NOW),
         payload: serde_json::json!({
             "id": node,
             "prompt": prompt,
@@ -325,7 +343,7 @@ async fn stores_a_subagent_prompt_once_and_replays_it() {
         .read_agent_events(ReadAgentEvents {
             after_sequence: Some(0),
             through_sequence: None,
-            thread_id: Some("thread:subagent-prompt".into()),
+            thread_id: Some(thread_id("thread:subagent-prompt")),
             command_id: None,
             event_type: None,
             limit: None,
@@ -361,7 +379,7 @@ async fn stores_the_full_prompt_when_the_hint_row_rolled_back() {
         &"Audit the repository. ".repeat(20),
         "Reading files",
     );
-    event.thread_id = "thread:subagent-rollback".into();
+    event.thread_id = thread_id("thread:subagent-rollback");
     let store_for_rollback = store.clone();
     let rolled = event.clone();
     let err: Result<(), PersistenceError> = store
@@ -380,7 +398,7 @@ async fn stores_the_full_prompt_when_the_hint_row_rolled_back() {
     assert!(matches!(err, Err(PersistenceError::Closed)));
 
     let mut second = event.clone();
-    second.id = "event:subagent-after-rollback".into();
+    second.id = event_id("event:subagent-after-rollback");
     let appended = store
         .append_agent_events(AppendAgentEvents {
             command_id: None,
@@ -428,13 +446,13 @@ async fn stores_json_columns_as_text_and_rejects_invalid_json() {
     let store = memory_store().await;
     let appended = store
         .append_project_event(ProjectEventInput {
-            event_id: "evt-store-roundtrip".into(),
+            event_id: event_id("evt-store-roundtrip"),
             aggregate_id: "project-roundtrip".into(),
             event_type: "project.created".into(),
             occurred_at: NOW.into(),
-            command_id: Some("cmd-store-roundtrip".into()),
+            command_id: Some(command_id("cmd-store-roundtrip")),
             causation_event_id: None,
-            correlation_id: Some("cmd-store-roundtrip".into()),
+            correlation_id: Some(command_id("cmd-store-roundtrip")),
             payload: serde_json::json!({"title": "Roundtrip Project"}),
             metadata: serde_json::json!({"adapterKey": "codex", "origin": {"surface": "cli"}}),
         })
@@ -446,7 +464,7 @@ async fn stores_json_columns_as_text_and_rejects_invalid_json() {
         .read(move |conn| {
             conn.query_row(
                 "SELECT typeof(payload_json), typeof(metadata_json) FROM orchestration_events WHERE event_id = ?1",
-                [&event_id],
+                [event_id.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(sql_err)
@@ -524,7 +542,7 @@ async fn high_water_ignores_legacy_rows_and_pages_application_events() {
     assert_eq!(store.latest_application_sequence().await.unwrap(), 0);
     assert_eq!(
         store
-            .latest_agent_sequence(Some("legacy-only".into()))
+            .latest_agent_sequence(Some(thread_id("legacy-only")))
             .await
             .unwrap(),
         0
@@ -590,8 +608,8 @@ async fn high_water_ignores_legacy_rows_and_pages_application_events() {
         .read_agent_events(ReadAgentEvents {
             after_sequence: Some(0),
             through_sequence: Some(application),
-            thread_id: Some("target".into()),
-            command_id: Some("selected-command".into()),
+            thread_id: Some(thread_id("target")),
+            command_id: Some(command_id("selected-command")),
             event_type: None,
             limit: Some(17),
             skip_unknown_event_types: false,
@@ -602,7 +620,8 @@ async fn high_water_ignores_legacy_rows_and_pages_application_events() {
     assert!(
         scoped
             .iter()
-            .all(|event| event.command_id.as_deref() == Some("selected-command"))
+            .all(|event| event.command_id.as_ref().map(CommandId::as_str)
+                == Some("selected-command"))
     );
 }
 
@@ -641,7 +660,7 @@ async fn high_water_and_command_reads_use_their_indexes() {
     assert_eq!(store.latest_application_sequence().await.unwrap(), 25_000);
     assert_eq!(
         store
-            .latest_agent_sequence(Some("target".into()))
+            .latest_agent_sequence(Some(thread_id("target")))
             .await
             .unwrap(),
         1
@@ -651,7 +670,7 @@ async fn high_water_and_command_reads_use_their_indexes() {
             after_sequence: None,
             through_sequence: None,
             thread_id: None,
-            command_id: Some("retried-command".into()),
+            command_id: Some(command_id("retried-command")),
             event_type: None,
             limit: None,
             skip_unknown_event_types: false,
@@ -724,11 +743,131 @@ async fn high_water_and_command_reads_use_their_indexes() {
 }
 
 #[tokio::test]
+async fn a_panicking_write_does_not_poison_the_connection() {
+    let db = memory_db().await;
+    let err = db
+        .write(|_| -> Result<(), PersistenceError> { panic!("boom") })
+        .await
+        .unwrap_err();
+    match err {
+        PersistenceError::Panicked { message } => assert!(message.contains("boom"), "{message}"),
+        other => panic!("expected a panic error, got {other}"),
+    }
+    db.write(|_| Ok(())).await.unwrap();
+    db.read(|_| Ok(())).await.unwrap();
+}
+
+#[tokio::test]
+async fn releases_consumed_application_replay_pages() {
+    let store = memory_store().await;
+    store
+        .db()
+        .write(|tx| {
+            for index in 0..1501 {
+                crate::orchestration_event_store::append_project_event(
+                    tx,
+                    &ProjectEventInput {
+                        event_id: event_id(&format!("retention-{index}")),
+                        aggregate_id: format!("retention-{index}"),
+                        event_type: "project.created".into(),
+                        occurred_at: NOW.into(),
+                        command_id: None,
+                        causation_event_id: None,
+                        correlation_id: None,
+                        payload: serde_json::json!({
+                            "projectId": format!("retention-{index}"),
+                            "title": "Replay",
+                        }),
+                        metadata: serde_json::json!({}),
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut subscription = store.stream_application_events(0);
+    let mut count = 0;
+    while count < 1501 {
+        let event = tokio::time::timeout(Duration::from_secs(5), subscription.rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(event.sequence() > 0);
+        count += 1;
+    }
+    assert_eq!(count, 1501);
+    let (max_live, max_len, fetches) = subscription.replay_page_stats();
+    assert!(max_live <= 1, "retained {max_live} replay pages");
+    assert!(max_len <= 500, "page held {max_len} events");
+    assert!(fetches >= 4, "fetched {fetches} pages");
+}
+
+#[tokio::test]
+async fn live_buffer_counts_the_full_agent_event() {
+    let store = memory_store().await;
+    let mut subscription = store.stream_application_events(0);
+    let body = "x".repeat(1024 * 1024);
+    let events = (0..9)
+        .map(|index| {
+            ApplicationStoredEvent::Agent(StoredAgentEvent {
+                sequence: index + 1,
+                command_id: None,
+                event: AgentEvent {
+                    id: event_id(&format!("e{index}")),
+                    thread_id: thread_id("t"),
+                    event_type: "message.updated".into(),
+                    occurred_at: at(NOW),
+                    payload: serde_json::json!({ "body": body }),
+                    run_id: None,
+                    node_id: None,
+                    driver: None,
+                    provider_instance_id: None,
+                    raw_event_id: None,
+                },
+            })
+        })
+        .collect();
+    store.publish_committed(events);
+    let mut saw_error = false;
+    for _ in 0..10 {
+        let next = tokio::time::timeout(Duration::from_secs(5), subscription.rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match next {
+            Ok(_) => continue,
+            Err(err) => {
+                let message = err.to_string();
+                assert!(
+                    message.contains("streamApplicationEvents:buffer"),
+                    "{message}"
+                );
+                assert!(!message.contains("SQLITE"), "{message}");
+                saw_error = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_error);
+}
+
+#[tokio::test]
+async fn dropping_a_subscription_removes_it_from_the_live_hub() {
+    let store = memory_store().await;
+    let subscription = store.stream_application_events(0);
+    assert_eq!(store.live_subscriber_count(), 1);
+    drop(subscription);
+    assert_eq!(store.live_subscriber_count(), 0);
+}
+
+#[tokio::test]
 async fn live_stream_replays_then_delivers_a_committed_publish() {
     let store = memory_store().await;
     store
         .append_project_event(ProjectEventInput {
-            event_id: "live-seed".into(),
+            event_id: event_id("live-seed"),
             aggregate_id: "project".into(),
             event_type: "project.created".into(),
             occurred_at: NOW.into(),
@@ -752,10 +891,10 @@ async fn live_stream_replays_then_delivers_a_committed_publish() {
         .append_agent_events(AppendAgentEvents {
             command_id: None,
             events: vec![AgentEvent {
-                id: "live-after".into(),
-                thread_id: "target".into(),
+                id: event_id("live-after"),
+                thread_id: thread_id("target"),
                 event_type: "provider-session.detached".into(),
-                occurred_at: NOW.into(),
+                occurred_at: at(NOW),
                 payload: serde_json::json!({
                     "providerSessionId": "live-session",
                     "detachedAt": NOW,
@@ -788,7 +927,7 @@ async fn live_stream_replays_then_delivers_a_committed_publish() {
 async fn command_receipts_insert_once_and_upsert() {
     let db = memory_db().await;
     let receipt = OrchestrationCommandReceipt {
-        command_id: "cmd".into(),
+        command_id: command_id("cmd"),
         aggregate_kind: AggregateKind::Thread,
         aggregate_id: "thread".into(),
         command_type: "turn.start".into(),
@@ -813,7 +952,7 @@ async fn command_receipts_insert_once_and_upsert() {
         rejected.error = Some("no".into());
         move |tx| {
             upsert(tx, &rejected)?;
-            let loaded = get_by_command_id(tx, "cmd")?.unwrap();
+            let loaded = get_by_command_id(tx, &command_id("cmd"))?.unwrap();
             assert_eq!(loaded.status, ReceiptStatus::Rejected);
             assert_eq!(loaded.error.as_deref(), Some("no"));
             Ok(())
@@ -828,7 +967,7 @@ async fn provider_runtime_keeps_imported_transcripts_and_skips_bad_rows() {
     let db = memory_db().await;
     db.write(|tx| {
         let runtime = ProviderSessionRuntime {
-            thread_id: "thread-1".into(),
+            thread_id: thread_id("thread-1"),
             provider_name: "codex".into(),
             provider_instance_id: Some("codex".into()),
             adapter_key: "codex".into(),
@@ -841,14 +980,14 @@ async fn provider_runtime_keeps_imported_transcripts_and_skips_bad_rows() {
         upsert_runtime(tx, &runtime, UpsertConflict::Update)?;
         record_imported_transcript(
             tx,
-            "thread-1",
+            &thread_id("thread-1"),
             &serde_json::json!({"providerInstanceId": "codex", "filePath": "/tmp/a.jsonl"}),
         )?;
         let mut next = runtime.clone();
         next.runtime_payload = Some(serde_json::json!({"cwd": "/work"}));
         next.last_seen_at = "2026-01-02T03:04:06.000Z".into();
         upsert_runtime(tx, &next, UpsertConflict::Update)?;
-        let loaded = get_by_thread_id(tx, "thread-1")?.unwrap();
+        let loaded = get_by_thread_id(tx, &thread_id("thread-1"))?.unwrap();
         assert_eq!(loaded.runtime_payload.as_ref().unwrap()["cwd"], "/work");
         assert_eq!(
             loaded.runtime_payload.as_ref().unwrap()["importedTranscripts"][0]["filePath"],
@@ -866,7 +1005,24 @@ async fn provider_runtime_keeps_imported_transcripts_and_skips_bad_rows() {
         .map_err(sql_err)?;
         let listed = list(tx, false)?;
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].thread_id, "thread-1");
+        assert_eq!(listed[0].thread_id.as_str(), "thread-1");
+
+        tx.execute(
+            "
+            INSERT INTO provider_session_runtime (
+              thread_id, provider_name, adapter_key, runtime_mode, status, last_seen_at,
+              provider_instance_id
+            ) VALUES
+              ('thread-yolo', 'codex', 'codex', 'yolo', 'running', ?1, 'codex'),
+              ('thread-slug', 'codex', 'codex', 'full-access', 'running', ?1, '1bad'),
+              ('thread-stamp', 'codex', 'codex', 'full-access', 'running', X'01', 'codex')
+            ",
+            [NOW],
+        )
+        .map_err(sql_err)?;
+        let listed = list(tx, false)?;
+        assert_eq!(listed.len(), 1);
+        assert!(get_by_thread_id(tx, &thread_id("thread-yolo")).is_err());
         Ok(())
     })
     .await
@@ -907,4 +1063,95 @@ async fn files_viewed_and_review_guides_round_trip() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn checkpoint_worker_starts_on_a_file_database() {
+    let memory = memory_db().await;
+    assert_eq!(
+        memory.writer_autocheckpoint().await.unwrap(),
+        CHECKPOINT_FRAMES
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(dir.path().join("turin.sqlite")).await.unwrap();
+    let version: String = db
+        .read(|conn| {
+            conn.query_row("SELECT sqlite_version()", [], |row| row.get(0))
+                .map_err(|err| PersistenceError::sql("sqlite.version", &err))
+        })
+        .await
+        .unwrap();
+    let mut parts = version.split('.');
+    let major: u32 = parts.next().unwrap().parse().unwrap();
+    let minor: u32 = parts.next().unwrap().parse().unwrap();
+    assert!(major > 3 || (major == 3 && minor >= 51), "{version}");
+    assert_eq!(
+        db.writer_autocheckpoint().await.unwrap(),
+        WRITER_BACKSTOP_FRAMES
+    );
+}
+
+#[tokio::test]
+async fn unknown_event_types_are_rejected_before_insert() {
+    let store = memory_store().await;
+    let err = store
+        .append_project_event(ProjectEventInput {
+            event_id: event_id("evt-unknown"),
+            aggregate_id: "project-unknown".into(),
+            event_type: "project.nope".into(),
+            occurred_at: NOW.into(),
+            command_id: None,
+            causation_event_id: None,
+            correlation_id: None,
+            payload: serde_json::json!({"title": "Nope"}),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("appendProjectEvent:decode"), "{message}");
+    assert!(message.contains("unknown event type"));
+    let count: i64 = store
+        .db()
+        .read(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM orchestration_events", [], |row| {
+                row.get(0)
+            })
+            .map_err(sql_err)
+        })
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+
+    let err = store
+        .append_agent_events(AppendAgentEvents {
+            command_id: None,
+            events: vec![AgentEvent {
+                id: event_id("evt-agent-unknown"),
+                thread_id: thread_id("thread-unknown"),
+                event_type: "thread.nope".into(),
+                occurred_at: at(NOW),
+                payload: serde_json::json!({"title": "Nope"}),
+                run_id: None,
+                node_id: None,
+                driver: None,
+                provider_instance_id: None,
+                raw_event_id: None,
+            }],
+        })
+        .await
+        .unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("appendAgentEvents:decode"), "{message}");
+}
+
+#[tokio::test]
+async fn agent_replay_stats_accepts_a_huge_event_cap() {
+    let store = memory_store().await;
+    let stats = store
+        .get_agent_replay_stats("thread".into(), 0, 1, u64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(stats.event_count, 0);
 }

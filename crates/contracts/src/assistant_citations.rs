@@ -3,7 +3,7 @@
 //! Positions are UTF-16 offsets, not Markdown offsets. The whole-struct check
 //! (`end > start`, non-blank text) is enforced on deserialize.
 
-use crate::base_schemas::{EnvironmentId, MessageId, NonNegativeInt, ThreadId, js_trim};
+use crate::base_schemas::{EnvironmentId, MessageId, NonNegativeInt, ThreadId, js_len, js_trim};
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub const ASSISTANT_CITATION_MAX_TEXT_LENGTH: usize = 8_000;
@@ -12,11 +12,6 @@ pub const ASSISTANT_CITATION_CONTEXT_LENGTH: usize = 32;
 
 /// `Number.MAX_SAFE_INTEGER`.
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
-
-/// JS `string.length`: UTF-16 code units, which is what `isMaxLength` counts.
-fn utf16_len(value: &str) -> usize {
-    value.encode_utf16().count()
-}
 
 /// A quote of rendered assistant text with an optional user comment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -77,25 +72,25 @@ impl<'de> Deserialize<'de> for AssistantCitation {
             raw.message_id.as_str(),
         ]
         .iter()
-        .any(|id| utf16_len(id) > 512)
+        .any(|id| js_len(id) > 512)
         {
             return Err(err("citation ids must be at most 512 characters"));
         }
-        if utf16_len(&raw.text) > ASSISTANT_CITATION_MAX_TEXT_LENGTH {
+        if js_len(&raw.text) > ASSISTANT_CITATION_MAX_TEXT_LENGTH {
             return Err(err("citation text is too long"));
         }
         if raw
             .comment
             .as_deref()
-            .is_some_and(|comment| utf16_len(comment) > ASSISTANT_CITATION_MAX_COMMENT_LENGTH)
+            .is_some_and(|comment| js_len(comment) > ASSISTANT_CITATION_MAX_COMMENT_LENGTH)
         {
             return Err(err("citation comment is too long"));
         }
         if raw.start > MAX_SAFE_INTEGER || raw.end > MAX_SAFE_INTEGER {
             return Err(err("citation offsets must be safe integers"));
         }
-        if utf16_len(&raw.prefix) > ASSISTANT_CITATION_CONTEXT_LENGTH
-            || utf16_len(&raw.suffix) > ASSISTANT_CITATION_CONTEXT_LENGTH
+        if js_len(&raw.prefix) > ASSISTANT_CITATION_CONTEXT_LENGTH
+            || js_len(&raw.suffix) > ASSISTANT_CITATION_CONTEXT_LENGTH
         {
             return Err(err("citation context is too long"));
         }

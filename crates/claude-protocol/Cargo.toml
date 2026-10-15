@@ -10,4 +10,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+futures.workspace = true
 tracing.workspace = true
+uuid.workspace = true
+tokio-util.workspace = true
+libc = "0.2"
+chrono.workspace = true
+indexmap = { version = "2", features = ["serde"] }
+unicode-normalization = "0.1"

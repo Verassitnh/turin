@@ -70,3 +70,37 @@ impl<K: Hash + Eq + Clone, V: Clone> TtlCache<K, V> {
         self.entries.lock().shift_remove(key);
     }
 }
+
+#[cfg(test)]
+pub mod test_support {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use parking_lot::Mutex;
+
+    use super::Clock;
+
+    /// Upstream `TestClock`: time only moves when a test adjusts it.
+    pub struct TestClock {
+        base: Instant,
+        offset: Mutex<Duration>,
+    }
+
+    impl TestClock {
+        pub fn new() -> Arc<Self> {
+            Arc::new(Self {
+                base: Instant::now(),
+                offset: Mutex::new(Duration::ZERO),
+            })
+        }
+
+        pub fn adjust(&self, by: Duration) {
+            *self.offset.lock() += by;
+        }
+
+        pub fn clock(self: &Arc<Self>) -> Clock {
+            let this = Arc::clone(self);
+            Arc::new(move || this.base + *this.offset.lock())
+        }
+    }
+}

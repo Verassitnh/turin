@@ -292,7 +292,7 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use futures::future::BoxFuture;
@@ -308,30 +308,7 @@ mod tests {
         RepositoryIdentityResolverOptions, ResolveOptions,
     };
     use crate::ttl_cache::Clock;
-
-    /// Upstream `TestClock`: time only moves when a test adjusts it.
-    struct TestClock {
-        base: Instant,
-        offset: Mutex<Duration>,
-    }
-
-    impl TestClock {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                base: Instant::now(),
-                offset: Mutex::new(Duration::ZERO),
-            })
-        }
-
-        fn adjust(&self, by: Duration) {
-            *self.offset.lock() += by;
-        }
-
-        fn clock(self: &Arc<Self>) -> Clock {
-            let this = Arc::clone(self);
-            Arc::new(move || this.base + *this.offset.lock())
-        }
-    }
+    use crate::ttl_cache::test_support::TestClock;
 
     type Responder = Box<dyn Fn(&ProcessRunInput) -> ProcessRunOutput + Send + Sync>;
 

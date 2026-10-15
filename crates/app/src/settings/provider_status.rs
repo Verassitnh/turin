@@ -53,7 +53,9 @@ pub fn get_provider_summary(provider: Option<&ServerProvider>) -> ProviderSummar
     let Some(provider) = provider else {
         return summary(
             "Checking provider status",
-            Some("Waiting for the server to report installation and authentication details.".into()),
+            Some(
+                "Waiting for the server to report installation and authentication details.".into(),
+            ),
         );
     };
     let message = provider.message.as_ref().map(|m| m.as_str().to_owned());
@@ -221,7 +223,10 @@ pub fn get_provider_version_advisory_presentation(
                 Some(version_label) => format!("{label}: install {version_label}."),
                 None => format!("{label}: install the latest provider version."),
             }),
-        update_command: advisory.update_command.as_ref().map(|c| c.as_str().to_owned()),
+        update_command: advisory
+            .update_command
+            .as_ref()
+            .map(|c| c.as_str().to_owned()),
         emphasis: AdvisoryEmphasis::Normal,
         target_version: None,
     })
@@ -334,7 +339,10 @@ mod tests {
 
     #[test]
     fn waits_for_the_first_probe() {
-        assert_eq!(get_provider_summary(None).headline, "Checking provider status");
+        assert_eq!(
+            get_provider_summary(None).headline,
+            "Checking provider status"
+        );
     }
 
     fn advisory(status: &str, current: &str, latest: &str) -> ServerProviderVersionAdvisory {
@@ -431,8 +439,14 @@ mod tests {
 
     #[test]
     fn labels_versions() {
-        assert_eq!(get_provider_version_label(Some("1.2.3")).as_deref(), Some("v1.2.3"));
-        assert_eq!(get_provider_version_label(Some("nightly")).as_deref(), Some("nightly"));
+        assert_eq!(
+            get_provider_version_label(Some("1.2.3")).as_deref(),
+            Some("v1.2.3")
+        );
+        assert_eq!(
+            get_provider_version_label(Some("nightly")).as_deref(),
+            Some("nightly")
+        );
         assert_eq!(get_provider_version_label(None), None);
     }
 }

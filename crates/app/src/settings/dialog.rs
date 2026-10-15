@@ -5,9 +5,9 @@
 use std::rc::Rc;
 
 use gpui_kit::{
-    AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, MouseButton, StatefulInteractiveElement as _,
-    ParentElement as _, Rems, SharedString, Styled as _, Window, deferred, div, px, relative,
-    rems,
+    AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, Rems, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    deferred, div, px, relative, rems,
 };
 
 use super::view::SettingsView;
@@ -67,7 +67,9 @@ pub fn dialog_frame(
             .justify_center()
             .p_4()
             .bg(backdrop)
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| on_dismiss(window, cx))
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                on_dismiss(window, cx)
+            })
             .child(
                 div()
                     .relative()
@@ -105,7 +107,11 @@ pub fn dialog_panel(id: &'static str, child: impl IntoElement) -> AnyElement {
         .into_any_element()
 }
 
-pub fn dialog_header(title: impl Into<SharedString>, description: Option<SharedString>, theme: &AppTheme) -> AnyElement {
+pub fn dialog_header(
+    title: impl Into<SharedString>,
+    description: Option<SharedString>,
+    theme: &AppTheme,
+) -> AnyElement {
     div()
         .flex()
         .flex_col()
@@ -146,7 +152,11 @@ pub fn dialog_footer(theme: &AppTheme, children: Vec<AnyElement>) -> AnyElement 
 }
 
 impl SettingsView {
-    pub(super) fn render_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let theme = cx.app_theme().clone();
         if matches!(self.dialog, Some(Dialog::AddHub)) {
             return Some(self.render_add_hub_dialog(window, cx));
@@ -208,7 +218,6 @@ impl SettingsView {
     }
 }
 
-
 /// `sourceIdFromUrl`: stable per hub; dots and dashes in the host are kept.
 pub fn usage_source_id_from_url(url: &str) -> String {
     let host = url
@@ -243,16 +252,31 @@ impl SettingsView {
                 .text_color(theme.foreground)
                 .child(text)
         };
-        let url = self.input("hub-url", "", "https://hub.example.ts.net:8318", window, cx, |_, _, _, _| {});
+        let url = self.input(
+            "hub-url",
+            "",
+            "https://hub.example.ts.net:8318",
+            window,
+            cx,
+            |_, _, _, _| {},
+        );
         let key = self.input("hub-key", "", "", window, cx, |_, _, _, _| {});
-        let label = self.input("hub-label", "", "Defaults to the hub's host name", window, cx, |_, _, _, _| {});
+        let label = self.input(
+            "hub-label",
+            "",
+            "Defaults to the hub's host name",
+            window,
+            cx,
+            |_, _, _, _| {},
+        );
         let read = |this: &Self, name: &str, cx: &gpui_kit::App| {
             this.inputs
                 .get(&SharedString::from(name.to_owned()))
                 .map(|state| state.read(cx).value().trim().to_owned())
                 .unwrap_or_default()
         };
-        let can_save = !read(self, "hub-url", cx).is_empty() && !read(self, "hub-key", cx).is_empty();
+        let can_save =
+            !read(self, "hub-url", cx).is_empty() && !read(self, "hub-key", cx).is_empty();
         let close = |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
             for name in ["hub-url", "hub-key", "hub-label"] {
                 if let Some(state) = this.inputs.get(&SharedString::from(name)) {
@@ -264,14 +288,22 @@ impl SettingsView {
         };
         let dismiss = self.cb(cx, move |this, window, cx| close(this, window, cx));
         let environment = self.vm(cx).environment.label.clone();
-        let field = |name: &'static str, input: &gpui_kit::Entity<gpui_kit::component::input::InputState>| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(label_text(name))
-                .child(super::controls::text_field(input, None, super::controls::FieldSize::Default, false, cx))
-        };
+        let field =
+            |name: &'static str,
+             input: &gpui_kit::Entity<gpui_kit::component::input::InputState>| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(label_text(name))
+                    .child(super::controls::text_field(
+                        input,
+                        None,
+                        super::controls::FieldSize::Default,
+                        false,
+                        cx,
+                    ))
+            };
         let body = div()
             .flex()
             .flex_col()
@@ -340,8 +372,14 @@ mod tests {
 
     #[test]
     fn derives_a_stable_id_from_the_host() {
-        assert_eq!(usage_source_id_from_url("https://hub.example.ts.net:8318/x"), "cliproxy-hub.example.ts.net-8318");
-        assert_eq!(usage_source_id_from_url("Foo-Bar.com"), "cliproxy-foo-bar.com");
+        assert_eq!(
+            usage_source_id_from_url("https://hub.example.ts.net:8318/x"),
+            "cliproxy-hub.example.ts.net-8318"
+        );
+        assert_eq!(
+            usage_source_id_from_url("Foo-Bar.com"),
+            "cliproxy-foo-bar.com"
+        );
         assert_eq!(usage_source_id_from_url("://"), "cliproxy-hub");
     }
 }

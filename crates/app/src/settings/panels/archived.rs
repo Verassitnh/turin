@@ -17,16 +17,28 @@ use crate::theme::ActiveAppTheme;
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 
 impl SettingsView {
-    pub(super) fn render_archived(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_archived(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let theme = cx.app_theme().clone();
         let vm = self.vm(cx);
         let (id, title) = searchable_setting("archive");
         let now = chrono::Utc::now();
 
         // Groups in the order the projects first appear; threads newest first.
-        let mut groups: Vec<(String, String, u32, Vec<&super::super::view_model::ArchivedThread>)> = Vec::new();
+        let mut groups: Vec<(
+            String,
+            String,
+            u32,
+            Vec<&super::super::view_model::ArchivedThread>,
+        )> = Vec::new();
         for thread in &vm.archived_threads {
-            match groups.iter_mut().find(|(name, ..)| *name == thread.project_name) {
+            match groups
+                .iter_mut()
+                .find(|(name, ..)| *name == thread.project_name)
+            {
                 Some((_, _, _, threads)) => threads.push(thread),
                 None => groups.push((
                     thread.project_name.clone(),
@@ -46,7 +58,11 @@ impl SettingsView {
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .child(Icon::new(IconName::Archive).size(rems(0.875)).color(theme.muted_foreground))
+                                .child(
+                                    Icon::new(IconName::Archive)
+                                        .size(rems(0.875))
+                                        .color(theme.muted_foreground),
+                                )
                                 .child("No archived threads"),
                         )
                         .description("Archived threads will appear here."),
@@ -55,20 +71,36 @@ impl SettingsView {
             ];
         }
         let mut sections = Vec::new();
-        for (index, (project, monogram, project_color, mut threads)) in groups.into_iter().enumerate() {
+        for (index, (project, monogram, project_color, mut threads)) in
+            groups.into_iter().enumerate()
+        {
             threads.sort_by(|left, right| {
-                let left_key = if left.archived_at.is_empty() { &left.created_at } else { &left.archived_at };
-                let right_key = if right.archived_at.is_empty() { &right.created_at } else { &right.archived_at };
+                let left_key = if left.archived_at.is_empty() {
+                    &left.created_at
+                } else {
+                    &left.archived_at
+                };
+                let right_key = if right.archived_at.is_empty() {
+                    &right.created_at
+                } else {
+                    &right.archived_at
+                };
                 right_key.cmp(left_key).then_with(|| right.id.cmp(&left.id))
             });
-            let mut section = SettingsSection::new(project)
-                .icon(ProjectMonogram::new(monogram, gpui_kit::rgb(project_color).into()));
+            let mut section = SettingsSection::new(project).icon(ProjectMonogram::new(
+                monogram,
+                gpui_kit::rgb(project_color).into(),
+            ));
             if index == 0 {
                 section = section.id(id);
             }
             for thread in threads {
                 let archived = format_relative_time_label(
-                    if thread.archived_at.is_empty() { &thread.created_at } else { &thread.archived_at },
+                    if thread.archived_at.is_empty() {
+                        &thread.created_at
+                    } else {
+                        &thread.archived_at
+                    },
                     now,
                 );
                 let created = format_relative_time_label(&thread.created_at, now);

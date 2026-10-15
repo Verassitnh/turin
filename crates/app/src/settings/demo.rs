@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use gpui_kit::{AppContext as _, App, WindowOptions};
+use gpui_kit::{App, AppContext as _, WindowOptions};
 
 use super::mock_source::MockSettingsSource;
 use super::view::{SettingsRoute, SettingsView};
@@ -32,7 +32,11 @@ pub fn open_if_requested(options: WindowOptions, cx: &mut App) -> bool {
         let view = cx.new(|cx| SettingsView::new(store, window, cx));
         view.update(cx, |view, cx| {
             view.set_route(route, cx);
-            for menu in open_menu.iter().flat_map(|menus| menus.split(',')).filter(|menu| !menu.is_empty()) {
+            for menu in open_menu
+                .iter()
+                .flat_map(|menus| menus.split(','))
+                .filter(|menu| !menu.is_empty())
+            {
                 view.open_menu_for_demo(menu.to_owned(), cx);
             }
             if let Some(query) = &query {
@@ -44,7 +48,9 @@ pub fn open_if_requested(options: WindowOptions, cx: &mut App) -> bool {
     .expect("failed to open window");
     if let Ok(path) = std::env::var("TURIN_SETTINGS_SHOT") {
         cx.spawn(async move |cx| {
-            cx.background_executor().timer(Duration::from_millis(3500)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(3500))
+                .await;
             let _ = &handle;
             // Capture only this window (never the screen): `TURIN_SETTINGS_WINID`
             // names a helper that prints the CGWindowID of a pid's window.

@@ -9,8 +9,8 @@
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Div, ElementId, FontWeight, Global, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, RenderOnce, SharedString, Stateful,
-    Styled as _, Window, div, px, rems,
+    IntoElement, ParentElement as _, RenderOnce, SharedString, Stateful, Styled as _, Window, div,
+    px, rems,
 };
 
 use crate::theme::color::with_alpha;
@@ -201,7 +201,10 @@ impl RenderOnce for SettingsSection {
                             .children(self.header_action),
                     );
                 if pulsing {
-                    header = header.rounded(RADIUS_XL).border_2().border_color(pulse_ring(theme));
+                    header = header
+                        .rounded(RADIUS_XL)
+                        .border_2()
+                        .border_color(pulse_ring(theme));
                 }
                 this.child(header)
             })
@@ -374,7 +377,12 @@ impl RenderOnce for SettingsRow {
                 .child(left)
                 .children(control)
         } else {
-            div().flex().flex_col().gap_3().child(left).children(control)
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(left)
+                .children(control)
         };
 
         div()

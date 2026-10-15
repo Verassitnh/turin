@@ -14,7 +14,7 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use super::super::controls::{FieldSize, SelectWidth, switch, text_field};
-use super::super::layout::{SettingsRow, SettingsSection, settings_group, setting_reset_button};
+use super::super::layout::{SettingsRow, SettingsSection, setting_reset_button, settings_group};
 use super::super::search::searchable_setting;
 use super::super::time_format::format_relative_time_label;
 use super::super::view::{SettingsView, Which};
@@ -38,7 +38,13 @@ pub fn format_bytes(value: f64) -> String {
             break;
         }
     }
-    let precision = if next >= 100. { 0 } else if next >= 10. { 1 } else { 2 };
+    let precision = if next >= 100. {
+        0
+    } else if next >= 10. {
+        1
+    } else {
+        2
+    };
     format!("{next:.precision$} {}", units[index as usize])
 }
 
@@ -49,7 +55,11 @@ pub struct StorageState {
 }
 
 impl SettingsView {
-    pub(super) fn render_storage(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_storage(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let json = self.json(cx);
         let storage = json.get(Which::Server, "storageCleanup").clone();
         let default_storage = json.default_of(Which::Server, "storageCleanup").clone();
@@ -87,29 +97,54 @@ impl SettingsView {
             get_bool("worktreeUnchanged"),
             cx,
         ));
-        let keep_when = storage.get("worktreeKeepWhen").and_then(Value::as_str).unwrap_or("uncommitted-changes").to_owned();
+        let keep_when = storage
+            .get("worktreeKeepWhen")
+            .and_then(Value::as_str)
+            .unwrap_or("uncommitted-changes")
+            .to_owned();
         let keep_options: [(&str, &str); 3] = [
             ("any-local-files", "Any local files"),
             ("uncommitted-changes", "Uncommitted changes"),
             ("tracked-changes", "Edited tracked files"),
         ];
-        let keep_label = keep_options.iter().find(|(v, _)| *v == keep_when).map(|(_, l)| *l).unwrap_or("");
+        let keep_label = keep_options
+            .iter()
+            .find(|(v, _)| *v == keep_when)
+            .map(|(_, l)| *l)
+            .unwrap_or("");
         let keep_control = self.select_control(
             cx,
             "storage-worktree-keep-when",
             keep_label.into(),
-            keep_options.iter().map(|(v, l)| (json!(v), SharedString::from(*l), *v == keep_when)).collect(),
+            keep_options
+                .iter()
+                .map(|(v, l)| (json!(v), SharedString::from(*l), *v == keep_when))
+                .collect(),
             SelectWidth::Auto,
             false,
-            |this, value, _, cx| this.update_server(json!({ "storageCleanup": { "worktreeKeepWhen": value } }), cx),
+            |this, value, _, cx| {
+                this.update_server(
+                    json!({ "storageCleanup": { "worktreeKeepWhen": value } }),
+                    cx,
+                )
+            },
         );
         let keep_dirty = storage.get("worktreeKeepWhen") != default_storage.get("worktreeKeepWhen");
         let keep_reset = keep_dirty.then(|| {
-            let default = default_storage.get("worktreeKeepWhen").cloned().unwrap_or(Value::Null);
+            let default = default_storage
+                .get("worktreeKeepWhen")
+                .cloned()
+                .unwrap_or(Value::Null);
             let action = self.cb(cx, move |this, _, cx| {
-                this.update_server(json!({ "storageCleanup": { "worktreeKeepWhen": default } }), cx)
+                this.update_server(
+                    json!({ "storageCleanup": { "worktreeKeepWhen": default } }),
+                    cx,
+                )
             });
-            setting_reset_button("reset-keep-when", "Reset to default", move |w, c| action(w, c)).into_any_element()
+            setting_reset_button("reset-keep-when", "Reset to default", move |w, c| {
+                action(w, c)
+            })
+            .into_any_element()
         });
         worktrees = worktrees.child(
             Self::base_row("storage-worktree-keep-when")
@@ -122,22 +157,40 @@ impl SettingsView {
                 .control(keep_control),
         );
 
-        let logs = SettingsSection::new("Artifacts and logs").id("storage-artifacts").child(self.storage_retention_row(
-            "Delete old rotated logs",
-            "Delete inactive rotated log files after this many days. Current logs are kept.",
-            "logsAfterDays",
-            get_days("logsAfterDays"),
-            window,
-            cx,
-        ));
-        vec![worktrees.into_any_element(), logs.into_any_element(), self.cleanup_section(&storage, cx)]
+        let logs = SettingsSection::new("Artifacts and logs")
+            .id("storage-artifacts")
+            .child(self.storage_retention_row(
+                "Delete old rotated logs",
+                "Delete inactive rotated log files after this many days. Current logs are kept.",
+                "logsAfterDays",
+                get_days("logsAfterDays"),
+                window,
+                cx,
+            ));
+        vec![
+            worktrees.into_any_element(),
+            logs.into_any_element(),
+            self.cleanup_section(&storage, cx),
+        ]
     }
 
-    fn worktrees_directory_row(&mut self, json: &super::super::rows::Json, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn worktrees_directory_row(
+        &mut self,
+        json: &super::super::rows::Json,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let value = json.str(Which::Server, "worktreesDirectory").to_owned();
-        let input = self.input("storage-worktrees-directory", &value, "Default", window, cx, |this, text, _, cx| {
-            this.update_server(json!({ "worktreesDirectory": text.trim() }), cx);
-        });
+        let input = self.input(
+            "storage-worktrees-directory",
+            &value,
+            "Default",
+            window,
+            cx,
+            |this, text, _, cx| {
+                this.update_server(json!({ "worktreesDirectory": text.trim() }), cx);
+            },
+        );
         Self::base_row("storage-worktrees-location")
             .description("Folder where new worktrees are created, on any drive, such as D:\\worktrees or ~/worktrees. Existing worktrees stay where they are. Leave empty to use the T3 home folder.")
             .reset_action(self.reset_button(cx, json, Which::Server, "worktreesDirectory", "worktree location"))
@@ -156,9 +209,17 @@ impl SettingsView {
         let entity = cx.entity();
         SettingsRow::new(title)
             .description(description)
-            .control(switch(SharedString::from(format!("storage-{key}")), checked, false, cx, move |next, _, cx| {
-                entity.update(cx, |this, cx| this.update_server(json!({ "storageCleanup": { key: next } }), cx));
-            }))
+            .control(switch(
+                SharedString::from(format!("storage-{key}")),
+                checked,
+                false,
+                cx,
+                move |next, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.update_server(json!({ "storageCleanup": { key: next } }), cx)
+                    });
+                },
+            ))
             .into_any_element()
     }
 
@@ -188,20 +249,39 @@ impl SettingsView {
                         this.update_server(json!({ "storageCleanup": { key: days } }), cx);
                     },
                 );
-                control = control
-                    .child(field)
-                    .child(div().text_size(TEXT_XS.size).text_color(theme.foreground).child("days"));
+                control = control.child(field).child(
+                    div()
+                        .text_size(TEXT_XS.size)
+                        .text_color(theme.foreground)
+                        .child("days"),
+                );
             }
             None => {
-                control = control.child(div().text_size(TEXT_XS.size).text_color(theme.muted_foreground).child("Off"));
+                control = control.child(
+                    div()
+                        .text_size(TEXT_XS.size)
+                        .text_color(theme.muted_foreground)
+                        .child("Off"),
+                );
             }
         }
         let entity = cx.entity();
-        control = control.child(switch(SharedString::from(format!("storage-{key}-switch")), value.is_some(), false, cx, move |next, _, cx| {
-            let days = if next { json!(8) } else { Value::Null };
-            entity.update(cx, |this, cx| this.update_server(json!({ "storageCleanup": { key: days } }), cx));
-        }));
-        SettingsRow::new(title).description(description).control(control).into_any_element()
+        control = control.child(switch(
+            SharedString::from(format!("storage-{key}-switch")),
+            value.is_some(),
+            false,
+            cx,
+            move |next, _, cx| {
+                let days = if next { json!(8) } else { Value::Null };
+                entity.update(cx, |this, cx| {
+                    this.update_server(json!({ "storageCleanup": { key: days } }), cx)
+                });
+            },
+        ));
+        SettingsRow::new(title)
+            .description(description)
+            .control(control)
+            .into_any_element()
     }
 
     fn cleanup_section(&mut self, storage: &Value, cx: &mut Context<Self>) -> AnyElement {
@@ -236,7 +316,11 @@ impl SettingsView {
         let delete_now = Button::new("storage-delete-now")
             .variant(ButtonVariant::Outline)
             .size(ButtonSize::Sm)
-            .label(if self.panels.storage.running { "Deleting…" } else { "Delete now" })
+            .label(if self.panels.storage.running {
+                "Deleting…"
+            } else {
+                "Delete now"
+            })
             .disabled(self.panels.storage.running || !has_rules)
             .on_click(cx.listener(|this, _, _, cx| {
                 let source = this.store.read(cx).source();
@@ -244,21 +328,34 @@ impl SettingsView {
             }));
         let (id, _) = searchable_setting("storage-delete-now");
         let main = settings_group(
-            vec![SettingsRow::new(searchable_setting("storage-delete-now").1)
-                .id(id)
-                .description(if has_rules { description } else { "Turn on a cleanup rule to use this.".to_owned() })
-                .control(delete_now)
-                .into_any_element()],
+            vec![
+                SettingsRow::new(searchable_setting("storage-delete-now").1)
+                    .id(id)
+                    .description(if has_rules {
+                        description
+                    } else {
+                        "Turn on a cleanup rule to use this.".to_owned()
+                    })
+                    .control(delete_now)
+                    .into_any_element(),
+            ],
             cx,
         );
-        let mut section = SettingsSection::new("Cleanup").id("storage-cleanup").plain().child(main);
+        let mut section = SettingsSection::new("Cleanup")
+            .id("storage-cleanup")
+            .plain()
+            .child(main);
         if let Some(report) = report {
             let open = self.panels.storage.last_run_open;
             let summary = format!(
                 "{} removed, {} kept{}",
                 report.removed,
                 report.kept,
-                if report.failed > 0 { format!(", {} failed", report.failed) } else { String::new() }
+                if report.failed > 0 {
+                    format!(", {} failed", report.failed)
+                } else {
+                    String::new()
+                }
             );
             let header = div()
                 .id("storage-last-run-toggle")
@@ -282,11 +379,21 @@ impl SettingsView {
                         .py_2()
                         .child(
                             // GPUI svgs cannot rotate: an open fold swaps to the down chevron.
-                            Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
-                                .size(rems(1.))
-                                .color(theme.muted_foreground),
+                            Icon::new(if open {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size(rems(1.))
+                            .color(theme.muted_foreground),
                         )
-                        .child(div().flex_shrink_0().text_size(TEXT_SM.size).font_weight(FontWeight::MEDIUM).child("Last run"))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(TEXT_SM.size)
+                                .font_weight(FontWeight::MEDIUM)
+                                .child("Last run"),
+                        )
                         .child(
                             div()
                                 .min_w_0()
@@ -298,7 +405,9 @@ impl SettingsView {
                 );
             let mut body = div().flex().flex_col();
             if open {
-                body = body.border_t_1().border_color(with_alpha(theme.border, 0.5));
+                body = body
+                    .border_t_1()
+                    .border_color(with_alpha(theme.border, 0.5));
                 for (index, entry) in report.entries.iter().enumerate() {
                     let mut text = String::new();
                     if let Some(title) = &entry.thread_title
@@ -308,7 +417,10 @@ impl SettingsView {
                     }
                     text.push_str(&entry.reason);
                     let size = [
-                        entry.files.filter(|_| entry.name == "Rotated logs").map(|f| format!("{f} {}", if f == 1 { "file" } else { "files" })),
+                        entry
+                            .files
+                            .filter(|_| entry.name == "Rotated logs")
+                            .map(|f| format!("{f} {}", if f == 1 { "file" } else { "files" })),
                         entry.bytes.map(|b| format_bytes(b as f64)),
                     ]
                     .into_iter()
@@ -317,15 +429,27 @@ impl SettingsView {
                     .join(" · ");
                     let mut row = SettingsRow::new(entry.name.clone()).description(
                         div()
-                            .text_color(if entry.failed { theme.destructive } else { theme.muted_foreground })
+                            .text_color(if entry.failed {
+                                theme.destructive
+                            } else {
+                                theme.muted_foreground
+                            })
                             .child(text),
                     );
                     if entry.removed {
-                        row = row.control(div().text_size(TEXT_XS.size).text_color(theme.muted_foreground).child(size));
+                        row = row.control(
+                            div()
+                                .text_size(TEXT_XS.size)
+                                .text_color(theme.muted_foreground)
+                                .child(size),
+                        );
                     }
                     body = body.child(
                         div()
-                            .when(index > 0, |this| this.border_t_1().border_color(with_alpha(theme.border, 0.5)))
+                            .when(index > 0, |this| {
+                                this.border_t_1()
+                                    .border_color(with_alpha(theme.border, 0.5))
+                            })
                             .child(row),
                     );
                 }
@@ -350,7 +474,10 @@ impl SettingsView {
                     );
                 }
             }
-            section = section.child(settings_group(vec![header.into_any_element(), body.into_any_element()], cx));
+            section = section.child(settings_group(
+                vec![header.into_any_element(), body.into_any_element()],
+                cx,
+            ));
         }
         section.into_any_element()
     }
@@ -366,6 +493,9 @@ mod tests {
         assert_eq!(format_bytes(1_536.), "1.50 KB");
         assert_eq!(format_bytes(15_728_640.), "15.0 MB");
         assert_eq!(format_bytes(482_344_960.), "460 MB");
-        assert_eq!(format_bytes(5. * 1_024. * 1_024. * 1_024. * 1_024. * 1_024.), "5120 TB");
+        assert_eq!(
+            format_bytes(5. * 1_024. * 1_024. * 1_024. * 1_024. * 1_024.),
+            "5120 TB"
+        );
     }
 }

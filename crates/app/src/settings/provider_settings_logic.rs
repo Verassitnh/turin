@@ -114,7 +114,8 @@ mod tests {
 
     #[test]
     fn writes_the_same_choice_to_every_checkout_of_the_project() {
-        let settings = settings(json!({ "project-a-worktree": { "newWorktreesStartFromOrigin": true } }));
+        let settings =
+            settings(json!({ "project-a-worktree": { "newWorktreesStartFromOrigin": true } }));
         let patch = build_provider_instance_override_patch(
             &settings,
             &[project("project-a"), project("project-a-worktree")],
@@ -124,7 +125,10 @@ mod tests {
         assert_eq!(
             patch,
             IndexMap::from([
-                entry("project-a", json!({ "providerInstances": { "codex_work": { "enabled": false } } })),
+                entry(
+                    "project-a",
+                    json!({ "providerInstances": { "codex_work": { "enabled": false } } })
+                ),
                 entry(
                     "project-a-worktree",
                     json!({
@@ -226,8 +230,8 @@ mod tests {
     }
 
     #[test]
-    fn sends_provider_instances_empty_explicitly_when_clearing_the_last_instance_override_leaves_other_keys(
-    ) {
+    fn sends_provider_instances_empty_explicitly_when_clearing_the_last_instance_override_leaves_other_keys()
+     {
         // The server keeps a stored providerInstances map when an incoming entry
         // omits the key (so older clients cannot wipe it by editing another
         // setting). This clear must say so explicitly, or the server would put

@@ -69,7 +69,9 @@ impl SettingsPath {
     }
 
     pub fn from_path(path: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|candidate| candidate.path() == path)
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.path() == path)
     }
 }
 
@@ -443,7 +445,9 @@ fn category_scope(path: SettingsPath) -> Option<SettingsSearchScope> {
         // Providers shows the representative environment at any selection.
         SettingsPath::Providers => None,
         SettingsPath::SourceControl => Some(SettingsSearchScope::EnvironmentDefaults),
-        SettingsPath::Storage | SettingsPath::Archived => Some(SettingsSearchScope::ProjectDefaults),
+        SettingsPath::Storage | SettingsPath::Archived => {
+            Some(SettingsSearchScope::ProjectDefaults)
+        }
     }
 }
 
@@ -460,7 +464,11 @@ pub fn get_settings_search_target_scope(target_id: &str) -> Option<SettingsSearc
     let item = items
         .iter()
         .find(|candidate| candidate.id == target_id)
-        .or_else(|| items.iter().find(|candidate| candidate.target_id.as_deref() == Some(target_id)))?;
+        .or_else(|| {
+            items
+                .iter()
+                .find(|candidate| candidate.target_id.as_deref() == Some(target_id))
+        })?;
     Some(SettingsSearchTargetScope {
         title: item.title.clone(),
         scope: item.scope.or_else(|| category_scope(item.to)),
@@ -487,7 +495,10 @@ pub fn is_settings_search_scope_available(
 
 /// `isSettingsOverviewVisible`: the Project page appears only for project targets.
 pub fn is_settings_overview_visible(kind: SettingsScopeKind) -> bool {
-    matches!(kind, SettingsScopeKind::Project | SettingsScopeKind::Checkout)
+    matches!(
+        kind,
+        SettingsScopeKind::Project | SettingsScopeKind::Checkout
+    )
 }
 
 /// `id` and `title` for the element a search item anchors to. Panels use this
@@ -512,7 +523,8 @@ pub fn filter_available_settings_search_items(
         .iter()
         .filter(|item| {
             (!item.mac_provider_settings_only || availability.has_mac_provider_settings_environment)
-                && (!item.requires_thread_auto_settlement || availability.has_thread_auto_settlement)
+                && (!item.requires_thread_auto_settlement
+                    || availability.has_thread_auto_settlement)
         })
         .cloned()
         .collect()
@@ -544,7 +556,11 @@ pub fn search_settings(
             let title = normalize_search_text(&item.title);
             let fields: Vec<String> = [title.clone(), normalize_search_text(item.to.label())]
                 .into_iter()
-                .chain(item.search_terms.iter().map(|term| normalize_search_text(term)))
+                .chain(
+                    item.search_terms
+                        .iter()
+                        .map(|term| normalize_search_text(term)),
+                )
                 .collect();
             if !query_tokens
                 .iter()
@@ -576,7 +592,10 @@ pub fn search_settings(
             .then(right.rank.cmp(&left.rank))
             .then(left.index.cmp(&right.index))
     });
-    matches.into_iter().map(|ranked| ranked.item.clone()).collect()
+    matches
+        .into_iter()
+        .map(|ranked| ranked.item.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -612,7 +631,10 @@ mod tests {
     #[test]
     fn finds_send_shortcut() {
         for query in ["send shortcut", "multiline", "new line"] {
-            assert!(catalog_ids(query).contains(&"send-shortcut".to_owned()), "{query}");
+            assert!(
+                catalog_ids(query).contains(&"send-shortcut".to_owned()),
+                "{query}"
+            );
         }
     }
 
@@ -656,7 +678,10 @@ mod tests {
 
     #[test]
     fn finds_settings_that_used_to_be_reachable_only_through_their_section() {
-        assert_eq!(catalog_ids("pull request template")[0], "follow-change-request-templates");
+        assert_eq!(
+            catalog_ids("pull request template")[0],
+            "follow-change-request-templates"
+        );
         assert_eq!(catalog_ids("git security keys")[0], "git-fetch-interval");
         assert_eq!(catalog_ids("battery saver")[0], "background-activity");
         assert_eq!(catalog_ids("binary path")[0], "providers");
@@ -679,7 +704,12 @@ mod tests {
 
     #[test]
     fn finds_usage_provider_management() {
-        for query in ["usage providers", "CLIProxyAPI", "CLI proxy hub", "management key"] {
+        for query in [
+            "usage providers",
+            "CLIProxyAPI",
+            "CLI proxy hub",
+            "management key",
+        ] {
             let first = &search_settings(query, &SETTINGS_SEARCH_ITEMS, "MacIntel")[0];
             assert_eq!(first.id, "usage-providers", "{query}");
             assert_eq!(first.to, SettingsPath::Providers);
@@ -693,9 +723,7 @@ mod tests {
 
     #[test]
     fn hides_macos_only_settings_on_other_platforms() {
-        assert!(
-            search_settings("font smoothing", &SETTINGS_SEARCH_ITEMS, "Win32").is_empty()
-        );
+        assert!(search_settings("font smoothing", &SETTINGS_SEARCH_ITEMS, "Win32").is_empty());
         assert!(!search_settings("font smoothing", &SETTINGS_SEARCH_ITEMS, "MacIntel").is_empty());
     }
 
@@ -711,12 +739,20 @@ mod tests {
             "auto-settle-merged-threads",
             "days-before-auto-settle",
         ];
-        assert!(!available.iter().any(|item| gated.contains(&item.id.as_str())));
+        assert!(
+            !available
+                .iter()
+                .any(|item| gated.contains(&item.id.as_str()))
+        );
         let with_mac = filter_available_settings_search_items(&SettingsSearchAvailability {
             has_mac_provider_settings_environment: true,
             has_thread_auto_settlement: false,
         });
-        assert!(with_mac.iter().any(|item| item.id == "cursor-keychain-usage"));
+        assert!(
+            with_mac
+                .iter()
+                .any(|item| item.id == "cursor-keychain-usage")
+        );
     }
 
     #[test]
@@ -737,8 +773,14 @@ mod tests {
 
     #[test]
     fn finds_keybinding_commands_by_label_command_id_and_default_key() {
-        assert_eq!(catalog_ids("toggle sidebar")[0], "keybinding-sidebar.toggle");
-        assert_eq!(catalog_ids("sidebar.toggle")[0], "keybinding-sidebar.toggle");
+        assert_eq!(
+            catalog_ids("toggle sidebar")[0],
+            "keybinding-sidebar.toggle"
+        );
+        assert_eq!(
+            catalog_ids("sidebar.toggle")[0],
+            "keybinding-sidebar.toggle"
+        );
         assert_eq!(catalog_ids("mod+b")[0], "keybinding-sidebar.toggle");
         let copy = &search_settings("copy link", &SETTINGS_SEARCH_ITEMS, "MacIntel")[0];
         assert_eq!(copy.id, "keybinding-thread.copyReference");
@@ -775,19 +817,26 @@ mod tests {
     #[test]
     fn serves_anchor_props_to_panels_from_the_catalog() {
         assert_eq!(searchable_setting("word-wrap"), ("word-wrap", "Word wrap"));
-        assert_eq!(searchable_setting("archive"), ("archive", "Archived threads"));
+        assert_eq!(
+            searchable_setting("archive"),
+            ("archive", "Archived threads")
+        );
     }
 
     #[test]
     fn routes_appearance_settings_to_their_current_section() {
-        let first = |query: &str| search_settings(query, &SETTINGS_SEARCH_ITEMS, "MacIntel")[0].clone();
+        let first =
+            |query: &str| search_settings(query, &SETTINGS_SEARCH_ITEMS, "MacIntel")[0].clone();
         assert_eq!(first("theme").id, "theme");
         assert_eq!(first("theme").to, SettingsPath::Appearance);
         assert_eq!(first("word wrap").to, SettingsPath::Appearance);
         assert_eq!(first("composer context").id, "composer-context");
         let environment = first("environment identification");
         assert_eq!(environment.to, SettingsPath::Appearance);
-        assert_eq!(environment.target_id.as_deref(), Some("appearance-interface"));
+        assert_eq!(
+            environment.target_id.as_deref(),
+            Some("appearance-interface")
+        );
     }
 
     #[test]
@@ -795,9 +844,17 @@ mod tests {
         for (query, id, to) in [
             ("default model", "default-model", SettingsPath::General),
             ("new threads", "new-threads", SettingsPath::General),
-            ("automatically pull", "automatic-pull", SettingsPath::SourceControl),
+            (
+                "automatically pull",
+                "automatic-pull",
+                SettingsPath::SourceControl,
+            ),
             ("actions", "project-actions", SettingsPath::Projects),
-            ("project overview", "project-overview", SettingsPath::Projects),
+            (
+                "project overview",
+                "project-overview",
+                SettingsPath::Projects,
+            ),
         ] {
             let first = &search_settings(query, &SETTINGS_SEARCH_ITEMS, "MacIntel")[0];
             assert_eq!((first.id.as_str(), first.to), (id, to), "{query}");
@@ -838,42 +895,88 @@ mod tests {
                 requires_thread_auto_settlement: false
             }
         );
-        assert!(is_settings_search_scope_available(setting.scope, SettingsScopeKind::Project));
-        assert!(is_settings_search_scope_available(setting.scope, SettingsScopeKind::All));
-        assert_eq!(get_settings_search_target_scope("appearance").unwrap().scope, None);
+        assert!(is_settings_search_scope_available(
+            setting.scope,
+            SettingsScopeKind::Project
+        ));
+        assert!(is_settings_search_scope_available(
+            setting.scope,
+            SettingsScopeKind::All
+        ));
+        assert_eq!(
+            get_settings_search_target_scope("appearance")
+                .unwrap()
+                .scope,
+            None
+        );
         assert_eq!(get_settings_search_target_scope("missing-setting"), None);
     }
 
     #[test]
     fn lets_project_scopable_rows_resolve_at_every_server_backed_scope() {
         let model = get_settings_search_target_scope("text-generation-model").unwrap();
-        for kind in [SettingsScopeKind::All, SettingsScopeKind::Environment, SettingsScopeKind::Project] {
+        for kind in [
+            SettingsScopeKind::All,
+            SettingsScopeKind::Environment,
+            SettingsScopeKind::Project,
+        ] {
             assert!(is_settings_search_scope_available(model.scope, kind));
         }
-        assert!(!is_settings_search_scope_available(model.scope, SettingsScopeKind::Unavailable));
+        assert!(!is_settings_search_scope_available(
+            model.scope,
+            SettingsScopeKind::Unavailable
+        ));
     }
 
     #[test]
     fn reaches_source_control_discovery_and_git_fetch_interval_from_the_default_scope() {
         for id in ["source-control", "git-fetch-interval"] {
             let item = get_settings_search_target_scope(id).unwrap();
-            assert!(is_settings_search_scope_available(item.scope, SettingsScopeKind::All));
-            assert!(is_settings_search_scope_available(item.scope, SettingsScopeKind::Environment));
-            assert!(!is_settings_search_scope_available(item.scope, SettingsScopeKind::Project));
+            assert!(is_settings_search_scope_available(
+                item.scope,
+                SettingsScopeKind::All
+            ));
+            assert!(is_settings_search_scope_available(
+                item.scope,
+                SettingsScopeKind::Environment
+            ));
+            assert!(!is_settings_search_scope_available(
+                item.scope,
+                SettingsScopeKind::Project
+            ));
         }
     }
 
     #[test]
     fn keeps_environment_wide_settings_out_of_project_scopes() {
         let updates = get_settings_search_target_scope("provider-update-checks").unwrap();
-        assert_eq!(updates.scope, Some(SettingsSearchScope::EnvironmentDefaults));
-        assert!(is_settings_search_scope_available(updates.scope, SettingsScopeKind::Environment));
-        assert!(is_settings_search_scope_available(updates.scope, SettingsScopeKind::All));
-        assert!(!is_settings_search_scope_available(updates.scope, SettingsScopeKind::Project));
+        assert_eq!(
+            updates.scope,
+            Some(SettingsSearchScope::EnvironmentDefaults)
+        );
+        assert!(is_settings_search_scope_available(
+            updates.scope,
+            SettingsScopeKind::Environment
+        ));
+        assert!(is_settings_search_scope_available(
+            updates.scope,
+            SettingsScopeKind::All
+        ));
+        assert!(!is_settings_search_scope_available(
+            updates.scope,
+            SettingsScopeKind::Project
+        ));
         let streaming = get_settings_search_target_scope("response-streaming").unwrap();
         assert_eq!(streaming.scope, Some(SettingsSearchScope::ProjectDefaults));
-        assert!(is_settings_search_scope_available(streaming.scope, SettingsScopeKind::Project));
-        for id in ["legacy-plan-mode", "legacy-context-window-indicator", "legacy-sidebar"] {
+        assert!(is_settings_search_scope_available(
+            streaming.scope,
+            SettingsScopeKind::Project
+        ));
+        for id in [
+            "legacy-plan-mode",
+            "legacy-context-window-indicator",
+            "legacy-sidebar",
+        ] {
             assert_eq!(get_settings_search_target_scope(id).unwrap().scope, None);
         }
     }
@@ -881,7 +984,9 @@ mod tests {
     #[test]
     fn shows_overview_only_for_project_and_checkout_targets() {
         assert!(!is_settings_overview_visible(SettingsScopeKind::All));
-        assert!(!is_settings_overview_visible(SettingsScopeKind::Environment));
+        assert!(!is_settings_overview_visible(
+            SettingsScopeKind::Environment
+        ));
         assert!(is_settings_overview_visible(SettingsScopeKind::Project));
         assert!(is_settings_overview_visible(SettingsScopeKind::Checkout));
     }

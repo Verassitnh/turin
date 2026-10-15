@@ -32,11 +32,7 @@ fn first_usage_command() -> &'static str {
 /// Orders commands by `key`, except Usage page commands, which sort as one
 /// block in page order where the first of them would sort. A total order, so
 /// adding a binding elsewhere cannot reshuffle the Usage rows.
-fn compare_commands(
-    left: &str,
-    right: &str,
-    key: impl Fn(&str) -> String,
-) -> std::cmp::Ordering {
+fn compare_commands(left: &str, right: &str, key: impl Fn(&str) -> String) -> std::cmp::Ordering {
     let left_rank = USAGE_COMMAND_ORDER.get(left);
     let right_rank = USAGE_COMMAND_ORDER.get(right);
     if let (Some(l), Some(r)) = (left_rank, right_rank) {
@@ -200,7 +196,7 @@ pub fn parse_when_expression_draft(expression: &str) -> WhenExpressionDraft {
     if trimmed.is_empty() {
         return WhenExpressionDraft::Ok(None);
     }
-    match parse_keybinding_when_expression(&trimmed) {
+    match parse_keybinding_when_expression(trimmed) {
         Some(ast) => WhenExpressionDraft::Ok(Some(ast)),
         None => WhenExpressionDraft::Err {
             message: "Use variables with !, &&, ||, and parentheses.".to_owned(),
@@ -270,7 +266,9 @@ pub fn keybinding_conflict_labels(
     let conflicts: BTreeSet<String> = rows
         .iter()
         .filter(|candidate| {
-            candidate.id != row_id && candidate.key == key && conflicts_with_when(&candidate.when, when)
+            candidate.id != row_id
+                && candidate.key == key
+                && conflicts_with_when(&candidate.when, when)
         })
         .map(|candidate| command_label(&candidate.command))
         .collect();
@@ -362,7 +360,9 @@ pub fn group_keybinding_rows(rows: &[KeybindingRow]) -> Vec<KeybindingGroup> {
         .map(|group| (group.id, group.title))
         .chain(std::iter::once(OTHER_GROUP))
         .filter_map(|(id, title)| {
-            by_group.remove(id).map(|rows| KeybindingGroup { id, title, rows })
+            by_group
+                .remove(id)
+                .map(|rows| KeybindingGroup { id, title, rows })
         })
         .collect()
 }
@@ -427,7 +427,11 @@ pub fn build_keybinding_rows(
                     .contains(&normalized_query)
                 || row.key.to_lowercase().contains(&normalized_query)
                 || row.when.to_lowercase().contains(&normalized_query)
-                || row.source.label().to_lowercase().contains(&normalized_query)
+                || row
+                    .source
+                    .label()
+                    .to_lowercase()
+                    .contains(&normalized_query)
         })
         .collect()
 }
@@ -457,7 +461,9 @@ fn collect_when_identifiers_from_node(
 }
 
 pub fn is_known_when_variable(identifier: &str) -> bool {
-    DEFAULT_WHEN_VARIABLES.iter().any(|known| known == identifier)
+    DEFAULT_WHEN_VARIABLES
+        .iter()
+        .any(|known| known == identifier)
 }
 
 pub fn unknown_when_variables(node: Option<&KeybindingWhenNode>) -> Vec<String> {
@@ -493,7 +499,11 @@ pub fn build_keybinding_command_options(keybindings: &[ResolvedKeybindingRule]) 
     for command in STATIC_KEYBINDING_COMMANDS
         .iter()
         .map(|command| (*command).to_owned())
-        .chain(keybindings.iter().map(|binding| binding.command.as_str().to_owned()))
+        .chain(
+            keybindings
+                .iter()
+                .map(|binding| binding.command.as_str().to_owned()),
+        )
     {
         if seen.insert(command.clone()) {
             commands.push(command);
@@ -517,10 +527,16 @@ pub fn command_label(command: &str) -> String {
         "thread.copyReference" => return "Pull Request: Copy Link or Thread ID".to_owned(),
         _ => {}
     }
-    if let Some(metric) = METRIC_OPTIONS.iter().find(|option| option.command == command) {
+    if let Some(metric) = METRIC_OPTIONS
+        .iter()
+        .find(|option| option.command == command)
+    {
         return format!("Usage: {}", metric.label);
     }
-    if let Some(period) = WINDOW_OPTIONS.iter().find(|option| option.command == command) {
+    if let Some(period) = WINDOW_OPTIONS
+        .iter()
+        .find(|option| option.command == command)
+    {
         return format!("Usage: Period: {}", period.label);
     }
     match command {
@@ -673,7 +689,9 @@ mod tests {
     }
 
     fn not(node: KeybindingWhenNode) -> KeybindingWhenNode {
-        KeybindingWhenNode::Not { node: Box::new(node) }
+        KeybindingWhenNode::Not {
+            node: Box::new(node),
+        }
     }
 
     fn commands(rows: &[KeybindingRow]) -> Vec<&str> {
@@ -711,8 +729,11 @@ mod tests {
     #[test]
     fn finds_the_editable_shortcut_for_sending_the_first_queued_message() {
         let rows = build_keybinding_rows(&DEFAULT_RESOLVED_KEYBINDINGS, "first queued");
-        assert!(rows.iter().any(|row| row.command == "thread.steerQueuedMessage"
-            && row.key == "mod+shift+enter"));
+        assert!(
+            rows.iter()
+                .any(|row| row.command == "thread.steerQueuedMessage"
+                    && row.key == "mod+shift+enter")
+        );
     }
 
     #[test]
@@ -747,7 +768,10 @@ mod tests {
         let composer_commands = commands(&composer.rows);
         assert!(composer_commands.contains(&"composer.host"));
         assert!(composer_commands.contains(&"modelPicker.toggle"));
-        let split = group_keybinding_rows(&build_keybinding_rows(&DEFAULT_RESOLVED_KEYBINDINGS, "split"));
+        let split = group_keybinding_rows(&build_keybinding_rows(
+            &DEFAULT_RESOLVED_KEYBINDINGS,
+            "split",
+        ));
         assert_eq!(split.len(), 1);
         assert_eq!(split[0].id, "terminal");
     }
@@ -787,7 +811,11 @@ mod tests {
     #[test]
     fn builds_searchable_rows_with_readable_key_and_when_values() {
         let rows = build_keybinding_rows(
-            &[rule("terminal.toggle", "mod+j", Some(not(ident("terminalFocus"))))],
+            &[rule(
+                "terminal.toggle",
+                "mod+j",
+                Some(not(ident("terminalFocus"))),
+            )],
             "terminal",
         );
         assert_eq!(rows.len(), 1);
@@ -824,7 +852,11 @@ mod tests {
 
     #[test]
     fn captures_keys_without_a_modifier() {
-        for (key, code, expected) in [("k", "KeyK", "k"), ("Tab", "Tab", "tab"), ("F5", "F5", "f5")] {
+        for (key, code, expected) in [
+            ("k", "KeyK", "k"),
+            ("Tab", "Tab", "tab"),
+            ("F5", "F5", "f5"),
+        ] {
             assert_eq!(
                 keybinding_from_keyboard_event(&event(key, code, false, false, false), "MacIntel"),
                 Some(expected.into())
@@ -835,7 +867,10 @@ mod tests {
     #[test]
     fn waits_for_a_key_when_only_a_modifier_is_pressed() {
         assert_eq!(
-            keybinding_from_keyboard_event(&event("Meta", "MetaLeft", true, false, false), "MacIntel"),
+            keybinding_from_keyboard_event(
+                &event("Meta", "MetaLeft", true, false, false),
+                "MacIntel"
+            ),
             None
         );
     }
@@ -858,7 +893,10 @@ mod tests {
     #[test]
     fn captures_latin_layout_keys_instead_of_their_punctuation_position() {
         assert_eq!(
-            keybinding_from_keyboard_event(&event("m", "Semicolon", true, false, false), "MacIntel"),
+            keybinding_from_keyboard_event(
+                &event("m", "Semicolon", true, false, false),
+                "MacIntel"
+            ),
             Some("mod+m".into())
         );
     }
@@ -923,7 +961,10 @@ mod tests {
 
         assert_eq!(when_node_remove_label(&group, 0), "Clear all conditions");
         assert_eq!(when_node_remove_label(&condition, 1), "Remove condition");
-        assert_eq!(when_node_remove_label(&negated_condition, 1), "Remove condition");
+        assert_eq!(
+            when_node_remove_label(&negated_condition, 1),
+            "Remove condition"
+        );
         assert_eq!(
             when_node_remove_label(&group, 1),
             "Remove group and its conditions"
@@ -936,7 +977,10 @@ mod tests {
 
     #[test]
     fn formats_static_and_project_script_command_labels() {
-        assert_eq!(command_label("commandPalette.toggle"), "Command Palette: Toggle");
+        assert_eq!(
+            command_label("commandPalette.toggle"),
+            "Command Palette: Toggle"
+        );
         assert_eq!(command_label("themeEditor.toggle"), "Theme Editor: Toggle");
         assert_eq!(command_label("view.reopenClosed"), "Reopen Closed Tab");
         assert_eq!(command_label("preview.focusUrl"), "Preview: Focus URL");
@@ -955,7 +999,10 @@ mod tests {
             "true",
             "false",
         ] {
-            assert!(options.iter().any(|option| option == expected), "{expected}");
+            assert!(
+                options.iter().any(|option| option == expected),
+                "{expected}"
+            );
         }
         assert!(!options.iter().any(|option| option == "customModeActive"));
     }
@@ -973,7 +1020,10 @@ mod tests {
             "usage.open",
             "script.setup-db.run",
         ] {
-            assert!(options.iter().any(|option| option == expected), "{expected}");
+            assert!(
+                options.iter().any(|option| option == expected),
+                "{expected}"
+            );
         }
         for command in ["thread.stop", "composer.cycleHost"] {
             assert!(

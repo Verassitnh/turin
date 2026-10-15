@@ -4,8 +4,8 @@
 
 mod add_provider;
 mod appearance;
-mod background_activity;
 mod archived;
+mod background_activity;
 mod general;
 mod keybindings;
 mod licenses;
@@ -15,8 +15,7 @@ mod source_control;
 mod storage;
 
 use gpui_kit::{
-    AnyElement, Context, IntoElement, ParentElement as _,
-    Styled as _, Window, div, px,
+    AnyElement, Context, IntoElement, ParentElement as _, Styled as _, Window, div, px,
 };
 
 use super::search::SettingsPath;
@@ -43,29 +42,43 @@ pub struct PanelState {
 const READABLE_WIDTH: f32 = 896.;
 
 impl SettingsView {
-    pub(super) fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_page(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if let Some((offset, frames)) = self.panels.demo_scroll {
-            self.panels.page_scroll.set_offset(gpui_kit::point(px(0.), px(-offset)));
+            self.panels
+                .page_scroll
+                .set_offset(gpui_kit::point(px(0.), px(-offset)));
             self.panels.demo_scroll = (frames > 1).then_some((offset, frames - 1));
             cx.notify();
         }
         let sections: Vec<AnyElement> = match self.route {
             SettingsRoute::Section(SettingsPath::General) => self.render_general(window, cx),
             SettingsRoute::Section(SettingsPath::Appearance) => self.render_appearance(window, cx),
-            SettingsRoute::Section(SettingsPath::Keybindings) => self.render_keybindings(window, cx),
+            SettingsRoute::Section(SettingsPath::Keybindings) => {
+                self.render_keybindings(window, cx)
+            }
             SettingsRoute::Section(SettingsPath::Providers) => self.render_providers(window, cx),
             SettingsRoute::Section(SettingsPath::Archived) => self.render_archived(window, cx),
             SettingsRoute::Section(SettingsPath::Storage) => self.render_storage(window, cx),
             SettingsRoute::OpenSourceLicenses => self.render_licenses(window, cx),
             SettingsRoute::Section(SettingsPath::Projects) => self.render_projects(window, cx),
-            SettingsRoute::Section(SettingsPath::SourceControl) => self.render_source_control(window, cx),
+            SettingsRoute::Section(SettingsPath::SourceControl) => {
+                self.render_source_control(window, cx)
+            }
         };
         self.page_container(sections, cx)
     }
 
     /// `SettingsPageContainer` + `WorkspacePageContainer`: a scrolling column,
     /// `mx-auto max-w-4xl gap-8 px-6 pt-6 pb-12`.
-    pub(super) fn page_container(&mut self, children: Vec<AnyElement>, _cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn page_container(
+        &mut self,
+        children: Vec<AnyElement>,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
         use gpui_kit::component::scroll::ScrollableElement as _;
         use gpui_kit::{InteractiveElement as _, StatefulInteractiveElement as _};
         let handle = self.panels.page_scroll.clone();
@@ -145,7 +158,12 @@ impl SettingsView {
             };
             target.insert((*key).to_owned(), json.default_of(*which, key).clone());
         }
-        for key in ["backgroundActivity", "backgroundActivityProfile", "automaticGitFetchInterval", "providerHealthRefreshInterval"] {
+        for key in [
+            "backgroundActivity",
+            "backgroundActivityProfile",
+            "automaticGitFetchInterval",
+            "providerHealthRefreshInterval",
+        ] {
             server.insert(key.to_owned(), json.default_of(Which::Server, key).clone());
         }
         self.update_client(serde_json::Value::Object(client), cx);
@@ -163,7 +181,11 @@ const RESTORABLE: &[(&str, Which, &str)] = &[
     ("Diff colors", Client, "diffColorScheme"),
     ("Chat width", Client, "chatWidth"),
     ("Panel animations", Client, "panelAnimationDurationMs"),
-    ("Environment identification", Client, "environmentIdentificationMode"),
+    (
+        "Environment identification",
+        Client,
+        "environmentIdentificationMode",
+    ),
     ("Time format", Client, "timestampFormat"),
     ("Thread notifications", Client, "notificationMode"),
     ("In-app notifications", Client, "inAppNotificationsEnabled"),
@@ -171,10 +193,26 @@ const RESTORABLE: &[(&str, Which, &str)] = &[
     ("Project Grouping", Client, "sidebarProjectGroupingMode"),
     ("Project order", Client, "sidebarProjectSortOrder"),
     ("Working section", Client, "sidebarWorkingShelfEnabled"),
-    ("Auto-settle inactive threads", Server, "sidebarAutoSettleAfterDays"),
-    ("Keep threads with a PR", Server, "sidebarAutoSettleKeepPullRequests"),
-    ("Auto-settle merged threads", Server, "sidebarAutoSettleOnMerge"),
-    ("Auto-resume limited threads", Server, "autoResumeLimitedThreads"),
+    (
+        "Auto-settle inactive threads",
+        Server,
+        "sidebarAutoSettleAfterDays",
+    ),
+    (
+        "Keep threads with a PR",
+        Server,
+        "sidebarAutoSettleKeepPullRequests",
+    ),
+    (
+        "Auto-settle merged threads",
+        Server,
+        "sidebarAutoSettleOnMerge",
+    ),
+    (
+        "Auto-resume limited threads",
+        Server,
+        "autoResumeLimitedThreads",
+    ),
     ("Snooze limited threads", Server, "snoozeLimitedThreads"),
     ("Word wrap", Client, "wordWrap"),
     ("Composer context", Client, "persistComposerContextStrip"),
@@ -183,22 +221,50 @@ const RESTORABLE: &[(&str, Which, &str)] = &[
     ("Diff layout", Client, "diffLayout"),
     ("Proactive panels", Client, "proactivePanelsEnabled"),
     ("Show skills in slash menu", Client, "showSkillsInSlashMenu"),
-    ("Collapse composer on scroll", Client, "composerCollapseOnScroll"),
+    (
+        "Collapse composer on scroll",
+        Client,
+        "composerCollapseOnScroll",
+    ),
     ("Rich text composer", Client, "composerRichTextEnabled"),
     ("Send shortcut", Client, "sendShortcut"),
     ("Follow-up behavior", Client, "followUpBehavior"),
-    ("Context window indicator", Client, "contextWindowMeterEnabled"),
+    (
+        "Context window indicator",
+        Client,
+        "contextWindowMeterEnabled",
+    ),
     ("Response streaming", Server, "responseStreamingMode"),
-    ("Provider update checks", Server, "enableProviderUpdateChecks"),
-    ("Continue threads after restarts", Server, "continueThreadsAfterServerUpdate"),
+    (
+        "Provider update checks",
+        Server,
+        "enableProviderUpdateChecks",
+    ),
+    (
+        "Continue threads after restarts",
+        Server,
+        "continueThreadsAfterServerUpdate",
+    ),
     ("New thread mode", Server, "defaultThreadEnvMode"),
-    ("New worktrees start from origin", Server, "newWorktreesStartFromOrigin"),
-    ("Add project base directory", Server, "addProjectBaseDirectory"),
+    (
+        "New worktrees start from origin",
+        Server,
+        "newWorktreesStartFromOrigin",
+    ),
+    (
+        "Add project base directory",
+        Server,
+        "addProjectBaseDirectory",
+    ),
     ("Unpin confirmation", Client, "confirmThreadUnpin"),
     ("Archive confirmation", Client, "confirmThreadArchive"),
     ("Delete confirmation", Client, "confirmThreadDelete"),
     ("Quit shortcut", Client, "confirmQuit"),
-    ("Text generation model", Server, "textGenerationModelSelection"),
+    (
+        "Text generation model",
+        Server,
+        "textGenerationModelSelection",
+    ),
 ];
 
 /// Reset together with the restore button; labelled by `getChangedTypographySettingLabels`.

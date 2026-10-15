@@ -23,7 +23,6 @@ use turin_contracts::source_control::{
     SourceControlDiscoveryStatus, SourceControlProviderAuth, SourceControlProviderAuthStatus,
     SourceControlProviderDiscoveryItem, VcsDiscoveryItem,
 };
-use turin_contracts::vcs::VcsDriverKind;
 
 use super::super::controls::{FieldSize, SelectWidth, switch, text_field, textarea_field};
 use super::super::github_account_logic::{
@@ -130,7 +129,9 @@ impl Item {
                 item.status == SourceControlDiscoveryStatus::Available
                     && item.auth.status == SourceControlProviderAuthStatus::Authenticated
             }
-            Item::Vcs(item) => item.status == SourceControlDiscoveryStatus::Available && item.implemented,
+            Item::Vcs(item) => {
+                item.status == SourceControlDiscoveryStatus::Available && item.implemented
+            }
         }
     }
 }
@@ -165,7 +166,11 @@ fn redacted_placeholder(value: &str) -> String {
 }
 
 impl SettingsView {
-    pub(super) fn render_source_control(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_source_control(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let theme = cx.app_theme().clone();
         let vm = self.vm(cx);
         let json = self.json(cx);
@@ -192,12 +197,18 @@ impl SettingsView {
                     .header_action(scan);
                 for item in &result.version_control_systems {
                     let item = Item::Vcs(item.clone());
-                    let details = (item.kind() == "git").then(|| self.git_fetch_interval_settings(window, cx));
+                    let details = (item.kind() == "git")
+                        .then(|| self.git_fetch_interval_settings(window, cx));
                     section = section.child(self.discovery_item_row(&item, details, cx));
                 }
                 sections.push(section.into_any_element());
                 if has_providers {
-                    sections.push(self.providers_discovery_section("Source Control Providers", None, window, cx));
+                    sections.push(self.providers_discovery_section(
+                        "Source Control Providers",
+                        None,
+                        window,
+                        cx,
+                    ));
                 }
             } else {
                 sections.push(self.providers_discovery_section(
@@ -284,7 +295,8 @@ impl SettingsView {
         }
         for item in &vm.source_control.source_control_providers {
             let item = Item::Provider(item.clone());
-            let details = (item.kind() == "github").then(|| self.github_settings(&item, window, cx));
+            let details =
+                (item.kind() == "github").then(|| self.github_settings(&item, window, cx));
             section = section.child(self.discovery_item_row(&item, details, cx));
         }
         section.into_any_element()
@@ -320,11 +332,19 @@ impl SettingsView {
             },
         );
         let opts = |items: &[(&str, &str)]| -> Vec<(Value, SharedString)> {
-            items.iter().map(|(value, label)| (json!(value), SharedString::from((*label).to_owned()))).collect()
+            items
+                .iter()
+                .map(|(value, label)| (json!(value), SharedString::from((*label).to_owned())))
+                .collect()
         };
         // `pullRequestMergeMethod: null` is "Last selected".
         let current = json.get(Which::Server, "pullRequestMergeMethod").clone();
-        let options = opts(&[("last", "Last selected"), ("merge", "Create merge commit"), ("squash", "Squash and merge"), ("rebase", "Rebase and merge")]);
+        let options = opts(&[
+            ("last", "Last selected"),
+            ("merge", "Create merge commit"),
+            ("squash", "Squash and merge"),
+            ("rebase", "Rebase and merge"),
+        ]);
         let current_key = current.as_str().unwrap_or("last").to_owned();
         let label = options
             .iter()
@@ -337,7 +357,13 @@ impl SettingsView {
             label,
             options
                 .iter()
-                .map(|(value, label)| (value.clone(), label.clone(), value.as_str() == Some(current_key.as_str())))
+                .map(|(value, label)| {
+                    (
+                        value.clone(),
+                        label.clone(),
+                        value.as_str() == Some(current_key.as_str()),
+                    )
+                })
                 .collect(),
             SelectWidth::Auto,
             false,
@@ -353,7 +379,12 @@ impl SettingsView {
             let action = self.cb(cx, |this, _, cx| {
                 this.update_server(json!({ "pullRequestMergeMethod": Value::Null }), cx)
             });
-            setting_reset_button("reset-merge-method", "Reset to last selected", move |w, c| action(w, c)).into_any_element()
+            setting_reset_button(
+                "reset-merge-method",
+                "Reset to last selected",
+                move |w, c| action(w, c),
+            )
+            .into_any_element()
         });
         let merge = Self::base_row("pull-request-merge-method")
             .description("Pull requests start with this method. Last selected reuses whatever you chose most recently on this device.")
@@ -370,9 +401,22 @@ impl SettingsView {
 
     // ── discovery rows ──────────────────────────────────────────────────
 
-    fn discovery_item_row(&mut self, item: &Item, details: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
+    fn discovery_item_row(
+        &mut self,
+        item: &Item,
+        details: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
-        let kind = format!("{}:{}", if matches!(item, Item::Vcs(_)) { "vcs" } else { "provider" }, item.kind());
+        let kind = format!(
+            "{}:{}",
+            if matches!(item, Item::Vcs(_)) {
+                "vcs"
+            } else {
+                "provider"
+            },
+            item.kind()
+        );
         let expanded = self.panels.source_control.expanded.contains(&kind);
         let auth = item.auth();
         let (auth_label, auth_warn) = auth.map(auth_presentation).unzip();
@@ -390,7 +434,11 @@ impl SettingsView {
                 .flex_shrink_0()
                 .items_center()
                 .justify_center()
-                .child(Icon::new(icon).size(rems(1.125)).color(with_alpha(theme.foreground, 0.8).into()))
+                .child(
+                    Icon::new(icon)
+                        .size(rems(1.125))
+                        .color(with_alpha(theme.foreground, 0.8).into()),
+                )
                 .child(
                     div()
                         .absolute()
@@ -403,7 +451,12 @@ impl SettingsView {
                         .bg(dot),
                 )
                 .into_any_element(),
-            None => div().size_2().flex_shrink_0().rounded_full().bg(dot).into_any_element(),
+            None => div()
+                .size_2()
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(dot)
+                .into_any_element(),
         };
 
         let summary = self.item_summary(item, &theme);
@@ -413,7 +466,11 @@ impl SettingsView {
             Button::new(SharedString::from(format!("toggle-details-{kind}")))
                 .variant(ButtonVariant::GhostMuted)
                 .size(ButtonSize::IconXs)
-                .icon(if expanded { IconName::ChevronUp } else { IconName::ChevronDown })
+                .icon(if expanded {
+                    IconName::ChevronUp
+                } else {
+                    IconName::ChevronDown
+                })
                 .icon_size(rems(0.875))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let expanded = &mut this.panels.source_control.expanded;
@@ -426,7 +483,13 @@ impl SettingsView {
         let label = item.label();
         let enabled = item.enabled();
         let availability = (!item.not_ready()).then(|| {
-            switch(SharedString::from(format!("availability-{kind}")), enabled, true, cx, |_, _, _| {})
+            switch(
+                SharedString::from(format!("availability-{kind}")),
+                enabled,
+                true,
+                cx,
+                |_, _, _| {},
+            )
         });
         div()
             .flex()
@@ -471,7 +534,11 @@ impl SettingsView {
                                             .child(version)
                                     }))
                                     .when(item.not_ready(), |this| {
-                                        this.child(Badge::label("Coming Soon").variant(BadgeVariant::Warning).size(BadgeSize::Sm))
+                                        this.child(
+                                            Badge::label("Coming Soon")
+                                                .variant(BadgeVariant::Warning)
+                                                .size(BadgeSize::Sm),
+                                        )
                                     })
                                     .when(auth_warn == Some(true), |this| {
                                         this.child(
@@ -494,7 +561,15 @@ impl SettingsView {
                                     .children(summary),
                             ),
                     )
-                    .child(div().flex().flex_shrink_0().items_center().gap_2().children(chevron).children(availability)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap_2()
+                            .children(chevron)
+                            .children(availability),
+                    ),
             )
             .when(expanded, |this| {
                 this.children(details.map(|details| div().px_4().pb_4().pt_1().child(details)))
@@ -506,10 +581,16 @@ impl SettingsView {
     fn item_summary(&self, item: &Item, theme: &AppTheme) -> Vec<AnyElement> {
         let text = |value: String| div().child(value).into_any_element();
         if item.not_ready() {
-            return vec![text(format!("Support for {} is coming soon.", item.label()))];
+            return vec![text(format!(
+                "Support for {} is coming soon.",
+                item.label()
+            ))];
         }
         if !item.available() {
-            return vec![text(format!("Not available on this server: {}", item.install_hint()))];
+            return vec![text(format!(
+                "Not available on this server: {}",
+                item.install_hint()
+            ))];
         }
         let Some(auth) = item.auth() else {
             return vec![text("Available".into())];
@@ -543,39 +624,62 @@ impl SettingsView {
                 if executable.is_none() {
                     return vec![text(format!("Available. {}", item.install_hint()))];
                 }
-                if auth.accounts.as_ref().is_some_and(|accounts| accounts.iter().any(|a| a.authenticated)) {
-                    return vec![text(detail.unwrap_or_else(|| format!("Every {} host is turned off.", item.label())))];
+                if auth
+                    .accounts
+                    .as_ref()
+                    .is_some_and(|accounts| accounts.iter().any(|a| a.authenticated))
+                {
+                    return vec![text(detail.unwrap_or_else(|| {
+                        format!("Every {} host is turned off.", item.label())
+                    }))];
                 }
                 vec![
-                    text(format!("{} is not authenticated on this server. Sign in or configure credentials using the", item.label())),
+                    text(format!(
+                        "{} is not authenticated on this server. Sign in or configure credentials using the",
+                        item.label()
+                    )),
                     code(executable.unwrap_or_default(), theme).into_any_element(),
                     text("tool on the server host to enable change request features.".into()),
                 ]
             }
             SourceControlProviderAuthStatus::Unknown => {
-                vec![text(format!("Could not verify {}. {}", item.label(), detail.unwrap_or_else(|| item.install_hint())))]
+                vec![text(format!(
+                    "Could not verify {}. {}",
+                    item.label(),
+                    detail.unwrap_or_else(|| item.install_hint())
+                ))]
             }
         }
     }
 
     // ── git fetch interval ──────────────────────────────────────────────
 
-    fn git_fetch_interval_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn git_fetch_interval_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let vm = self.vm(cx);
-        let resolved = turin_shared::server_settings::resolve_server_background_activity_settings(&vm.server);
-        let base = turin_shared::server_settings::get_background_activity_base_profile(&vm.server.background_activity);
+        let resolved =
+            turin_shared::server_settings::resolve_server_background_activity_settings(&vm.server);
+        let base = turin_shared::server_settings::get_background_activity_base_profile(
+            &vm.server.background_activity,
+        );
         let preset = turin_shared::server_settings::get_background_activity_preset_settings(base);
         let seconds = duration_to_seconds(resolved.automatic_git_fetch_interval);
         let default_seconds = duration_to_seconds(preset.automatic_git_fetch_interval);
         let can_reset = seconds != default_seconds;
         let current = vm.server.background_activity.clone();
-        let resolved_for_write = resolved.clone();
+        let resolved_for_write = resolved;
         let reset = {
             let current = current.clone();
-            let resolved = resolved.clone();
             let action = self.cb(cx, move |this, _, cx| {
-                let next = background_activity_override_settings(&current, &resolved, BackgroundActivityOverridePatch::default());
+                let next = background_activity_override_settings(
+                    &current,
+                    &resolved,
+                    BackgroundActivityOverridePatch::default(),
+                );
                 let mut value = serde_json::to_value(next).unwrap_or(Value::Null);
                 if let Some(overrides) = value.get_mut("overrides").and_then(Value::as_object_mut) {
                     overrides.remove("automaticGitFetchInterval");
@@ -590,7 +694,11 @@ impl SettingsView {
                 .justify_center()
                 .when(!can_reset, |this| this.opacity(0.))
                 .when(can_reset, |this| {
-                    this.child(setting_reset_button("reset-git-fetch-interval", "Reset to default", move |w, c| action(w, c)))
+                    this.child(setting_reset_button(
+                        "reset-git-fetch-interval",
+                        "Reset to default",
+                        move |w, c| action(w, c),
+                    ))
                 })
         };
         let field = self.number_field(
@@ -671,7 +779,9 @@ impl SettingsView {
             .and_then(Value::as_object)
             .map(|map| {
                 map.iter()
-                    .filter_map(|(host, value)| value.as_str().map(|v| (host.clone(), v.to_owned())))
+                    .filter_map(|(host, value)| {
+                        value.as_str().map(|v| (host.clone(), v.to_owned()))
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -684,8 +794,14 @@ impl SettingsView {
                         (
                             host.clone(),
                             GitHubHostChoice {
-                                enabled: choice.get("enabled").and_then(Value::as_bool).unwrap_or(true),
-                                account: choice.get("account").and_then(Value::as_str).map(str::to_owned),
+                                enabled: choice
+                                    .get("enabled")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(true),
+                                account: choice
+                                    .get("account")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
                             },
                         )
                     })
@@ -695,16 +811,23 @@ impl SettingsView {
         (tokens, hosts)
     }
 
-    fn github_settings(&mut self, item: &Item, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn github_settings(
+        &mut self,
+        item: &Item,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut column = div().flex().flex_col().gap_6();
         column = column.child(self.github_token_settings(window, cx));
-        if item.available() {
-            if let Some(auth) = item.auth() {
-                column = column.child(self.github_account_settings(auth, cx));
-            }
+        if item.available()
+            && let Some(auth) = item.auth()
+        {
+            column = column.child(self.github_account_settings(auth, cx));
         }
         let (id, _) = searchable_setting("github-accounts");
-        column.id(SharedString::from(id.to_owned())).into_any_element()
+        column
+            .id(SharedString::from(id.to_owned()))
+            .into_any_element()
     }
 
     fn github_token_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -718,7 +841,11 @@ impl SettingsView {
             .unwrap_or_else(|| DEFAULT_HOST.to_owned());
         let normalized = host_value.trim().to_lowercase();
         let is_saved = tokens.get(&normalized).is_some_and(|t| !t.is_empty());
-        let saved_hosts: Vec<String> = tokens.iter().filter(|(_, v)| !v.is_empty()).map(|(k, _)| k.clone()).collect();
+        let saved_hosts: Vec<String> = tokens
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect();
 
         let host_input = self.input_live(
             "github-token-host",
@@ -754,7 +881,10 @@ impl SettingsView {
                 }
                 let mut next: IndexMap<String, String> = save_tokens.clone();
                 next.insert(save_host.clone(), value);
-                this.update_server(json!({ "sourceControlHosts": { "github": { "tokens": next } } }), cx);
+                this.update_server(
+                    json!({ "sourceControlHosts": { "github": { "tokens": next } } }),
+                    cx,
+                );
                 save_token_input.update(cx, |state, cx| state.set_value("", window, cx));
                 let source = this.store.read(cx).source();
                 source.rescan_source_control(cx);
@@ -767,7 +897,10 @@ impl SettingsView {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let mut next: IndexMap<String, String> = remove_tokens.clone();
                     next.insert(remove_host.clone(), String::new());
-                    this.update_server(json!({ "sourceControlHosts": { "github": { "tokens": next } } }), cx);
+                    this.update_server(
+                        json!({ "sourceControlHosts": { "github": { "tokens": next } } }),
+                        cx,
+                    );
                     let source = this.store.read(cx).source();
                     source.rescan_source_control(cx);
                 }))
@@ -779,7 +912,14 @@ impl SettingsView {
                 .text_color(theme.foreground)
                 .child(text)
         };
-        let token_url = format!("https://{}/settings/personal-access-tokens/new", if normalized.is_empty() { DEFAULT_HOST } else { &normalized });
+        let token_url = format!(
+            "https://{}/settings/personal-access-tokens/new",
+            if normalized.is_empty() {
+                DEFAULT_HOST
+            } else {
+                &normalized
+            }
+        );
         div()
             .flex()
             .flex_col()
@@ -859,7 +999,11 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn github_account_settings(&mut self, auth: &SourceControlProviderAuth, cx: &mut Context<Self>) -> AnyElement {
+    fn github_account_settings(
+        &mut self,
+        auth: &SourceControlProviderAuth,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let (_, hosts) = self.github_hosts_state(cx);
         let groups = group_github_accounts(auth.accounts.as_deref().unwrap_or_default());
@@ -884,17 +1028,30 @@ impl SettingsView {
                 .truncate()
                 .font_family(theme_mono(&login_theme))
                 .text_size(TEXT_2XS.size)
-                .child(if revealed { account.to_owned() } else { redacted_placeholder(account) })
+                .child(if revealed {
+                    account.to_owned()
+                } else {
+                    redacted_placeholder(account)
+                })
                 .into_any_element()
         };
         let reveal = Button::new("reveal-github-accounts")
             .variant(ButtonVariant::GhostMuted)
             .size(ButtonSize::IconXs)
-            .icon(if revealed { IconName::EyeOff } else { IconName::Eye })
+            .icon(if revealed {
+                IconName::EyeOff
+            } else {
+                IconName::Eye
+            })
             .pressed(revealed)
-            .tooltip(Tooltip::new(if revealed { "Hide GitHub accounts" } else { "Reveal GitHub accounts" }))
+            .tooltip(Tooltip::new(if revealed {
+                "Hide GitHub accounts"
+            } else {
+                "Reveal GitHub accounts"
+            }))
             .on_click(cx.listener(|this, _, _, cx| {
-                this.panels.source_control.revealed_accounts = !this.panels.source_control.revealed_accounts;
+                this.panels.source_control.revealed_accounts =
+                    !this.panels.source_control.revealed_accounts;
                 cx.notify();
             }));
         let mut column = div().flex().flex_col().gap_4().child(
@@ -942,7 +1099,15 @@ impl SettingsView {
                     let hosts = hosts_for_toggle.clone();
                     let host = host_for_toggle.clone();
                     entity.update(cx, |this, cx| {
-                        this.save_github_hosts(&hosts, &host, GitHubHostChange { enabled: Some(next), account: None }, cx);
+                        this.save_github_hosts(
+                            &hosts,
+                            &host,
+                            GitHubHostChange {
+                                enabled: Some(next),
+                                account: None,
+                            },
+                            cx,
+                        );
                     });
                 },
             );
@@ -983,7 +1148,12 @@ impl SettingsView {
             );
             if group.selectable.len() > 1 {
                 let active_label = |account: &Option<String>| -> AnyElement {
-                    let mut row = div().flex().min_w_0().items_center().gap_1().child("Active gh account");
+                    let mut row = div()
+                        .flex()
+                        .min_w_0()
+                        .items_center()
+                        .gap_1()
+                        .child("Active gh account");
                     if let Some(account) = account {
                         row = row.child("(").child(login(account)).child(")");
                     }
@@ -997,7 +1167,11 @@ impl SettingsView {
                 for account in &group.selectable {
                     options.push((json!(account), login(account), *account == pinned));
                 }
-                let label = if pinned == ACTIVE_ACCOUNT { active_label(&group.active_account) } else { login(&pinned) };
+                let label = if pinned == ACTIVE_ACCOUNT {
+                    active_label(&group.active_account)
+                } else {
+                    login(&pinned)
+                };
                 let pick_hosts = hosts.clone();
                 let pick_host = host.clone();
                 let control = self.select_control_rich(
@@ -1008,8 +1182,20 @@ impl SettingsView {
                     SelectWidth::Fixed(16.),
                     move |this, value, _, cx| {
                         let Some(value) = value.as_str() else { return };
-                        let account = if value == ACTIVE_ACCOUNT { None } else { Some(value.to_owned()) };
-                        this.save_github_hosts(&pick_hosts, &pick_host, GitHubHostChange { enabled: None, account: Some(account) }, cx);
+                        let account = if value == ACTIVE_ACCOUNT {
+                            None
+                        } else {
+                            Some(value.to_owned())
+                        };
+                        this.save_github_hosts(
+                            &pick_hosts,
+                            &pick_host,
+                            GitHubHostChange {
+                                enabled: None,
+                                account: Some(account),
+                            },
+                            cx,
+                        );
                     },
                 );
                 block = block.child(
@@ -1019,7 +1205,12 @@ impl SettingsView {
                         .justify_between()
                         .gap_3()
                         .when(!enabled, |this| this.opacity(0.64))
-                        .child(div().text_size(TEXT_XS.size).text_color(theme.muted_foreground).child("Account"))
+                        .child(
+                            div()
+                                .text_size(TEXT_XS.size)
+                                .text_color(theme.muted_foreground)
+                                .child("Account"),
+                        )
                         .child(control),
                 );
             }
@@ -1067,7 +1258,11 @@ impl SettingsView {
                         .child(login(entry.account.as_str()))
                         .child(format!(
                             "can't be used: {}",
-                            entry.error.as_ref().map(|e| e.as_str()).unwrap_or("gh reports this login as invalid.")
+                            entry
+                                .error
+                                .as_ref()
+                                .map(|e| e.as_str())
+                                .unwrap_or("gh reports this login as invalid.")
                         )),
                 );
             }
@@ -1084,7 +1279,13 @@ impl SettingsView {
         column.into_any_element()
     }
 
-    fn save_github_hosts(&mut self, hosts: &GitHubHosts, host: &str, change: GitHubHostChange, cx: &mut Context<Self>) {
+    fn save_github_hosts(
+        &mut self,
+        hosts: &GitHubHosts,
+        host: &str,
+        change: GitHubHostChange,
+        cx: &mut Context<Self>,
+    ) {
         let next = next_github_hosts(hosts, host, change);
         let value: serde_json::Map<String, Value> = next
             .iter()
@@ -1097,21 +1298,34 @@ impl SettingsView {
                 (host.clone(), Value::Object(entry))
             })
             .collect();
-        self.update_server(json!({ "sourceControlHosts": { "github": { "hosts": value } } }), cx);
+        self.update_server(
+            json!({ "sourceControlHosts": { "github": { "hosts": value } } }),
+            cx,
+        );
         let source = self.store.read(cx).source();
         source.rescan_source_control(cx);
     }
 
     // ── text generation ─────────────────────────────────────────────────
 
-    fn source_control_text_generation_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.app_theme().clone();
+    fn source_control_text_generation_section(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let vm = self.vm(cx);
         let json = self.json(cx);
-        let text_providers: Vec<_> = vm.providers.iter().filter(|p| p.is_text_generation_capable()).cloned().collect();
+        let text_providers: Vec<_> = vm
+            .providers
+            .iter()
+            .filter(|p| p.is_text_generation_capable())
+            .cloned()
+            .collect();
         let can_enable_dedicated = text_providers.iter().any(provider_is_selectable);
         let default_selection = {
-            let configured = json.get(Which::Server, "textGenerationModelSelection").clone();
+            let configured = json
+                .get(Which::Server, "textGenerationModelSelection")
+                .clone();
             if configured.is_object() {
                 configured
             } else {
@@ -1121,7 +1335,8 @@ impl SettingsView {
             }
         };
 
-        let mut section = SettingsSection::new("Text generation").id("source-control-text-generation");
+        let mut section =
+            SettingsSection::new("Text generation").id("source-control-text-generation");
         section = section.child(self.branch_naming_row(&json, window, cx));
         for row in self.branch_naming_detail_rows(&json, window, cx) {
             section = section.child(row);
@@ -1129,15 +1344,41 @@ impl SettingsView {
 
         // Writing style.
         let style = json.get(Which::Server, "sourceControlWritingStyle").clone();
-        let default_style = json.default_of(Which::Server, "sourceControlWritingStyle").clone();
-        let mode = style.get("mode").and_then(Value::as_str).unwrap_or("repo_conventions").to_owned();
-        let custom_instructions = style.get("customInstructions").and_then(Value::as_str).unwrap_or("").to_owned();
+        let default_style = json
+            .default_of(Which::Server, "sourceControlWritingStyle")
+            .clone();
+        let mode = style
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("repo_conventions")
+            .to_owned();
+        let custom_instructions = style
+            .get("customInstructions")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
         let modes: [(&str, &str, &str); 3] = [
-            ("repo_conventions", "Repository conventions", "In each project, matches recent change descriptions and change request titles."),
-            ("conventional_commits", "Conventional Commits", "Use Conventional Commit prefixes and keep change request text concise."),
-            ("custom", "Custom instructions", "Use your instructions for change descriptions and change requests in every project."),
+            (
+                "repo_conventions",
+                "Repository conventions",
+                "In each project, matches recent change descriptions and change request titles.",
+            ),
+            (
+                "conventional_commits",
+                "Conventional Commits",
+                "Use Conventional Commit prefixes and keep change request text concise.",
+            ),
+            (
+                "custom",
+                "Custom instructions",
+                "Use your instructions for change descriptions and change requests in every project.",
+            ),
         ];
-        let (_, mode_label, mode_description) = modes.iter().find(|(m, _, _)| *m == mode).copied().unwrap_or(modes[0]);
+        let (_, mode_label, mode_description) = modes
+            .iter()
+            .find(|(m, _, _)| *m == mode)
+            .copied()
+            .unwrap_or(modes[0]);
         let dirty = style.get("mode") != default_style.get("mode")
             || style.get("customInstructions") != default_style.get("customInstructions");
         let reset = dirty.then(|| {
@@ -1155,11 +1396,17 @@ impl SettingsView {
             cx,
             "source-control-writing-style",
             mode_label.into(),
-            modes.iter().map(|(m, label, _)| (json!(m), SharedString::from(*label), *m == mode)).collect(),
+            modes
+                .iter()
+                .map(|(m, label, _)| (json!(m), SharedString::from(*label), *m == mode))
+                .collect(),
             SelectWidth::Fixed(14.),
             false,
             |this, value, _, cx| {
-                this.update_server(json!({ "sourceControlWritingStyle": { "mode": value } }), cx);
+                this.update_server(
+                    json!({ "sourceControlWritingStyle": { "mode": value } }),
+                    cx,
+                );
             },
         );
         let mut style_row = Self::base_row("source-control-writing-style")
@@ -1176,16 +1423,31 @@ impl SettingsView {
                 cx,
                 |this, text, _, cx| {
                     let text = text.trim().to_owned();
-                    this.update_server(json!({ "sourceControlWritingStyle": { "customInstructions": text } }), cx);
+                    this.update_server(
+                        json!({ "sourceControlWritingStyle": { "customInstructions": text } }),
+                        cx,
+                    );
                 },
             );
-            style_row = style_row.child(div().mt_3().max_w(rems(42.)).pb(px(14.)).child(textarea_field(&area, 4, cx)));
+            style_row = style_row.child(
+                div()
+                    .mt_3()
+                    .max_w(rems(42.))
+                    .pb(px(14.))
+                    .child(textarea_field(&area, 4, cx)),
+            );
         }
         section = section.child(style_row);
 
         // Follow change request templates.
-        let templates = style.get("followChangeRequestTemplates").and_then(Value::as_bool).unwrap_or(true);
-        let default_templates = default_style.get("followChangeRequestTemplates").and_then(Value::as_bool).unwrap_or(true);
+        let templates = style
+            .get("followChangeRequestTemplates")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let default_templates = default_style
+            .get("followChangeRequestTemplates")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
         let templates_reset = (templates != default_templates).then(|| {
             let action = self.cb(cx, move |this, _, cx| {
                 this.update_server(json!({ "sourceControlWritingStyle": { "followChangeRequestTemplates": default_templates } }), cx);
@@ -1228,8 +1490,14 @@ impl SettingsView {
                 })),
         );
         if enabled {
-            let writer = json.get(Which::Server, "sourceControlWriterModelSelection").clone();
-            let guide_default = if writer.is_object() { writer } else { default_selection.clone() };
+            let writer = json
+                .get(Which::Server, "sourceControlWriterModelSelection")
+                .clone();
+            let guide_default = if writer.is_object() {
+                writer
+            } else {
+                default_selection.clone()
+            };
             section = section.child(self.dedicated_model_row(
                 "review-guide-model",
                 "Model that reads a pull request to write its review guide. It reads the change itself over many steps, so a stronger model helps. Off uses the source control writer model.",
@@ -1241,7 +1509,9 @@ impl SettingsView {
                 &json,
                 cx,
             ));
-            let instructions = json.str(Which::Server, "reviewGuideInstructions").to_owned();
+            let instructions = json
+                .str(Which::Server, "reviewGuideInstructions")
+                .to_owned();
             let area = self.textarea(
                 "review-guide-instructions",
                 &instructions,
@@ -1255,8 +1525,15 @@ impl SettingsView {
                 },
             );
             let reset = (!instructions.is_empty()).then(|| {
-                let action = self.cb(cx, |this, _, cx| this.update_server(json!({ "reviewGuideInstructions": "" }), cx));
-                setting_reset_button("reset-review-guide-instructions", "Reset to default", move |w, c| action(w, c)).into_any_element()
+                let action = self.cb(cx, |this, _, cx| {
+                    this.update_server(json!({ "reviewGuideInstructions": "" }), cx)
+                });
+                setting_reset_button(
+                    "reset-review-guide-instructions",
+                    "Reset to default",
+                    move |w, c| action(w, c),
+                )
+                .into_any_element()
             });
             section = section.child(
                 Self::base_row("review-guide-instructions")
@@ -1265,7 +1542,6 @@ impl SettingsView {
                     .child(div().mt_3().max_w(rems(42.)).pb(px(14.)).child(textarea_field(&area, 4, cx))),
             );
         }
-        let _ = theme;
         section.into_any_element()
     }
 
@@ -1286,16 +1562,28 @@ impl SettingsView {
         let theme = cx.app_theme().clone();
         let selection = json.get(Which::Server, key).clone();
         let uses = !selection.is_null();
-        let mut control = div().flex().flex_wrap().items_center().justify_end().gap_2();
+        let mut control = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_end()
+            .gap_2();
         if uses && !can_enable {
             control = control.child(
-                div().text_size(TEXT_SM.size).text_color(theme.muted_foreground).child("No text generation providers available."),
+                div()
+                    .text_size(TEXT_SM.size)
+                    .text_color(theme.muted_foreground)
+                    .child("No text generation providers available."),
             );
         }
         if uses && can_enable {
-            control = control.child(self.model_selection_control(cx, menu_id, providers, &selection, move |this, value, cx| {
-                this.update_server(json!({ key: value }), cx)
-            }));
+            control = control.child(self.model_selection_control(
+                cx,
+                menu_id,
+                providers,
+                &selection,
+                move |this, value, cx| this.update_server(json!({ key: value }), cx),
+            ));
         }
         let entity = cx.entity();
         control = control.child(switch(
@@ -1304,18 +1592,31 @@ impl SettingsView {
             !uses && !can_enable,
             cx,
             move |next, _, cx| {
-                let value = if next { enable_with.clone() } else { Value::Null };
+                let value = if next {
+                    enable_with.clone()
+                } else {
+                    Value::Null
+                };
                 entity.update(cx, |this, cx| this.update_server(json!({ key: value }), cx));
             },
         ));
-        Self::base_row(search_id).description(description).control(control).into_any_element()
+        Self::base_row(search_id)
+            .description(description)
+            .control(control)
+            .into_any_element()
     }
 
-    fn branch_naming_row(&mut self, json: &Json, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn branch_naming_row(
+        &mut self,
+        json: &Json,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mode = json.str(Which::Server, "branchNamingMode").to_owned();
-        let mut row = SelectRowSpec {
+        let row = SelectRowSpec {
             search_id: "worktree-branch-naming",
-            description: "Choose how new worktree branches are named from your first message.".into(),
+            description: "Choose how new worktree branches are named from your first message."
+                .into(),
             which: Which::Server,
             key: "branchNamingMode",
             reset_label: "branch naming",
@@ -1327,7 +1628,6 @@ impl SettingsView {
             width: SelectWidth::Auto,
             check: false,
         };
-        let _ = &mut row;
         let element = self.select_row(cx, json, row);
         // `status` is a SettingsRow field; the semantic hint is rendered under the row.
         if mode == "semantic" {
@@ -1349,7 +1649,12 @@ impl SettingsView {
         element
     }
 
-    fn branch_naming_detail_rows(&mut self, json: &Json, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn branch_naming_detail_rows(
+        &mut self,
+        json: &Json,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let mode = json.str(Which::Server, "branchNamingMode").to_owned();
         let mut rows = Vec::new();
         if mode == "static" {
@@ -1366,9 +1671,23 @@ impl SettingsView {
             );
             rows.push(
                 SettingsRow::new("Branch prefix")
-                    .description("For example, t3 or t3/ produces t3/add-search. Leave empty for no prefix.")
-                    .reset_action(self.reset_button(cx, json, Which::Server, "branchNamePrefix", "branch prefix"))
-                    .control(div().w(rems(14.)).child(text_field(&input, None, FieldSize::Sm, false, cx)))
+                    .description(
+                        "For example, t3 or t3/ produces t3/add-search. Leave empty for no prefix.",
+                    )
+                    .reset_action(self.reset_button(
+                        cx,
+                        json,
+                        Which::Server,
+                        "branchNamePrefix",
+                        "branch prefix",
+                    ))
+                    .control(div().w(rems(14.)).child(text_field(
+                        &input,
+                        None,
+                        FieldSize::Sm,
+                        false,
+                        cx,
+                    )))
                     .into_any_element(),
             );
         }
@@ -1400,6 +1719,3 @@ impl SettingsView {
 fn theme_mono(theme: &AppTheme) -> SharedString {
     theme.fonts.mono.clone().into()
 }
-
-#[allow(dead_code)]
-fn _unused(_: VcsDriverKind) {}

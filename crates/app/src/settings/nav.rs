@@ -3,9 +3,9 @@
 use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, CursorStyle, ElementId, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, px, rems,
+    AnyElement, Context, CursorStyle, ElementId, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    px, rems,
 };
 
 use super::search::{
@@ -14,11 +14,12 @@ use super::search::{
 };
 use super::view::{SettingsRoute, SettingsView};
 use crate::theme::color::with_alpha;
-use crate::theme::tokens::{CONTROL_RADIUS, RADIUS_LG, SIDEBAR_CONTENT_INSET, SIDEBAR_ROW_CONTENT_INSET, TEXT_2XS, TEXT_SM, TEXT_XS};
-use crate::theme::{ActiveAppTheme, AppTheme};
-use crate::ui::{
-    Button, ButtonSize, ButtonVariant, Icon, IconName, Kbd, scroll_area_hidden,
+use crate::theme::tokens::{
+    CONTROL_RADIUS, RADIUS_LG, SIDEBAR_CONTENT_INSET, SIDEBAR_ROW_CONTENT_INSET, TEXT_2XS, TEXT_SM,
+    TEXT_XS,
 };
+use crate::theme::{ActiveAppTheme, AppTheme};
+use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Kbd, scroll_area_hidden};
 
 fn section_icon(path: SettingsPath) -> IconName {
     match path {
@@ -37,7 +38,11 @@ fn section_icon(path: SettingsPath) -> IconName {
 /// px-[var(--sidebar-row-content-inset)] py-1.5 text-sm`, `font-medium
 /// text-sidebar-muted-foreground/80`; selected rows `bg-sidebar-row-selected
 /// text-sidebar-foreground`.
-fn menu_button(id: impl Into<ElementId>, active: bool, theme: &AppTheme) -> gpui_kit::Stateful<gpui_kit::Div> {
+fn menu_button(
+    id: impl Into<ElementId>,
+    active: bool,
+    theme: &AppTheme,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     div()
         .id(id)
         .flex()
@@ -65,11 +70,19 @@ fn menu_button(id: impl Into<ElementId>, active: bool, theme: &AppTheme) -> gpui
                     .text_color(theme.sidebar_foreground)
             })
         })
-        .active(|style| style.bg(theme.sidebar_row_active).text_color(theme.sidebar_foreground))
+        .active(|style| {
+            style
+                .bg(theme.sidebar_row_active)
+                .text_color(theme.sidebar_foreground)
+        })
 }
 
 impl SettingsView {
-    pub(super) fn render_nav(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_nav(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let query = self.nav_query.clone();
         let searching = !query.trim().is_empty();
@@ -92,7 +105,11 @@ impl SettingsView {
             .text_size(TEXT_SM.size)
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.sidebar_muted_foreground)
-            .hover(|style| style.bg(theme.sidebar_row_hover).text_color(theme.sidebar_foreground))
+            .hover(|style| {
+                style
+                    .bg(theme.sidebar_row_hover)
+                    .text_color(theme.sidebar_foreground)
+            })
             .child(
                 Icon::new(IconName::Search)
                     .size(rems(1.))
@@ -110,7 +127,8 @@ impl SettingsView {
             .child(if searching {
                 let clear = cx.listener(|this, _, window, cx| {
                     this.nav_query.clear();
-                    this.nav_search.update(cx, |state, cx| state.set_value("", window, cx));
+                    this.nav_search
+                        .update(cx, |state, cx| state.set_value("", window, cx));
                     cx.notify();
                 });
                 Button::new("clear-settings-search")
@@ -142,43 +160,50 @@ impl SettingsView {
                     .children(results.into_iter().enumerate().map(|(index, item)| {
                         let target = item.target_id.clone().unwrap_or_else(|| item.id.clone());
                         let route = SettingsRoute::Section(item.to);
-                        menu_button(SharedString::from(format!("settings-result-{}", item.id)), index == 0, &theme)
-                            .h_auto()
-                            .min_h_10()
-                            .items_start()
-                            .rounded_lg()
-                            .p_2()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_search_target(route, target.clone(), cx);
-                            }))
-                            .child(
-                                div().mt(px(2.)).child(
-                                    Icon::new(section_icon(item.to))
-                                        .size(rems(0.875))
-                                        .color(with_alpha(theme.sidebar_muted_foreground, 0.6).into()),
+                        menu_button(
+                            SharedString::from(format!("settings-result-{}", item.id)),
+                            index == 0,
+                            &theme,
+                        )
+                        .h_auto()
+                        .min_h_10()
+                        .items_start()
+                        .rounded_lg()
+                        .p_2()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_search_target(route, target.clone(), cx);
+                        }))
+                        .child(
+                            div().mt(px(2.)).child(
+                                Icon::new(section_icon(item.to))
+                                    .size(rems(0.875))
+                                    .color(with_alpha(theme.sidebar_muted_foreground, 0.6).into()),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(TEXT_SM.size)
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.sidebar_foreground)
+                                        .child(item.title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(TEXT_2XS.size)
+                                        .font_weight(FontWeight::NORMAL)
+                                        .text_color(with_alpha(
+                                            theme.sidebar_muted_foreground,
+                                            0.75,
+                                        ))
+                                        .child(item.to.label()),
                                 ),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(TEXT_SM.size)
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(theme.sidebar_foreground)
-                                            .child(item.title.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(TEXT_2XS.size)
-                                            .font_weight(FontWeight::NORMAL)
-                                            .text_color(with_alpha(theme.sidebar_muted_foreground, 0.75))
-                                            .child(item.to.label()),
-                                    ),
-                            )
+                        )
                     }))
                     .into_any_element()
             }
@@ -187,28 +212,28 @@ impl SettingsView {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .children(
-                    SettingsPath::ALL
-                        .into_iter()
-                        .map(|path| {
-                            let route = SettingsRoute::Section(path);
-                            let active = self.route == route
-                                || (path == SettingsPath::General
-                                    && self.route == SettingsRoute::OpenSourceLicenses);
-                            menu_button(SharedString::from(format!("settings-nav-{}", path.path())), active, &theme)
-                                .on_click(cx.listener(move |this, _, _, cx| this.set_route(route, cx)))
-                                .child(
-                                    Icon::new(section_icon(path))
-                                        .size(rems(1.))
-                                        .color(if active {
-                                            theme.sidebar_foreground
-                                        } else {
-                                            theme.sidebar_icon_color
-                                        }),
-                                )
-                                .child(div().truncate().child(path.label()))
-                        }),
-                )
+                .children(SettingsPath::ALL.into_iter().map(|path| {
+                    let route = SettingsRoute::Section(path);
+                    let active = self.route == route
+                        || (path == SettingsPath::General
+                            && self.route == SettingsRoute::OpenSourceLicenses);
+                    menu_button(
+                        SharedString::from(format!("settings-nav-{}", path.path())),
+                        active,
+                        &theme,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_route(route, cx)))
+                    .child(
+                        Icon::new(section_icon(path))
+                            .size(rems(1.))
+                            .color(if active {
+                                theme.sidebar_foreground
+                            } else {
+                                theme.sidebar_icon_color
+                            }),
+                    )
+                    .child(div().truncate().child(path.label()))
+                }))
                 .into_any_element()
         };
 

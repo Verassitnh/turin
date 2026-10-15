@@ -19,8 +19,9 @@ use turin_shared::keybindings::{
 use turin_shared::server_settings::apply_server_settings_patch;
 
 use super::view_model::{
-    ArchivedThread, LicenseEntry, CleanupEntry, CleanupReport, EnvironmentInfo, KeybindingsViewModel, RemoveKeybinding, SettingsProject,
-    SettingsSource, SettingsStore, SettingsViewModel, UpsertKeybinding,
+    ArchivedThread, CleanupEntry, CleanupReport, EnvironmentInfo, KeybindingsViewModel,
+    LicenseEntry, RemoveKeybinding, SettingsProject, SettingsSource, SettingsStore,
+    SettingsViewModel, UpsertKeybinding,
 };
 
 fn provider(value: Value) -> turin_provider_core::server_provider::ServerProvider {
@@ -122,21 +123,43 @@ fn mock_projects() -> Vec<SettingsProject> {
 }
 
 fn mock_archived_threads() -> Vec<ArchivedThread> {
-    let thread = |id: &str, title: &str, project: &str, monogram: &str, color: u32, archived: &str| {
-        ArchivedThread {
-            id: id.into(),
-            title: title.into(),
-            project_name: project.into(),
-            project_monogram: monogram.into(),
-            project_color: color,
-            archived_at: archived.into(),
-            created_at: "2026-10-01T09:00:00.000Z".into(),
-        }
-    };
+    let thread =
+        |id: &str, title: &str, project: &str, monogram: &str, color: u32, archived: &str| {
+            ArchivedThread {
+                id: id.into(),
+                title: title.into(),
+                project_name: project.into(),
+                project_monogram: monogram.into(),
+                project_color: color,
+                archived_at: archived.into(),
+                created_at: "2026-10-01T09:00:00.000Z".into(),
+            }
+        };
     vec![
-        thread("t1", "Port the sidebar search", "turin", "T", 0x155dfc, "2026-10-14T18:22:00.000Z"),
-        thread("t2", "Fix composer paste handling", "turin", "T", 0x155dfc, "2026-10-12T08:05:00.000Z"),
-        thread("t3", "Investigate flaky checkpoint test", "t3code", "T3", 0x009966, "2026-10-09T21:40:00.000Z"),
+        thread(
+            "t1",
+            "Port the sidebar search",
+            "turin",
+            "T",
+            0x155dfc,
+            "2026-10-14T18:22:00.000Z",
+        ),
+        thread(
+            "t2",
+            "Fix composer paste handling",
+            "turin",
+            "T",
+            0x155dfc,
+            "2026-10-12T08:05:00.000Z",
+        ),
+        thread(
+            "t3",
+            "Investigate flaky checkpoint test",
+            "t3code",
+            "T3",
+            0x009966,
+            "2026-10-09T21:40:00.000Z",
+        ),
     ]
 }
 
@@ -381,7 +404,10 @@ impl SettingsSource for MockSettingsSource {
         {
             let mut state = self.state.borrow_mut();
             // Standard-look preferences are named after the mode.
-            if matches!(state.vm.appearance.theme.as_str(), "system" | "light" | "dark") {
+            if matches!(
+                state.vm.appearance.theme.as_str(),
+                "system" | "light" | "dark"
+            ) {
                 state.vm.appearance.theme = mode.clone();
             }
             state.vm.appearance.mode = mode;
@@ -403,14 +429,25 @@ impl SettingsSource for MockSettingsSource {
     }
 
     fn rename_project(&self, project_id: &str, title: &str, cx: &mut App) {
-        if let Some(project) = self.state.borrow_mut().vm.projects.iter_mut().find(|p| p.id == project_id) {
+        if let Some(project) = self
+            .state
+            .borrow_mut()
+            .vm
+            .projects
+            .iter_mut()
+            .find(|p| p.id == project_id)
+        {
             project.display_name = title.to_owned();
         }
         self.publish(cx);
     }
 
     fn remove_project(&self, project_id: &str, cx: &mut App) {
-        self.state.borrow_mut().vm.projects.retain(|p| p.id != project_id);
+        self.state
+            .borrow_mut()
+            .vm
+            .projects
+            .retain(|p| p.id != project_id);
         self.publish(cx);
     }
 
@@ -517,9 +554,33 @@ fn mock_licenses() -> Vec<LicenseEntry> {
         notice_text: notice.into(),
     };
     vec![
-        entry("gpui", "0.3.9", "Apache-2.0", "https://github.com/zed-industries/zed", "Licensed under the Apache License, Version 2.0 (the \"License\"); you may not use this file except in compliance with the License."),
-        entry("serde", "1.0.228", "MIT OR Apache-2.0", "https://github.com/serde-rs/serde", &format!("Copyright (c) David Tolnay\n\n{MIT}")),
-        entry("serde_json", "1.0.145", "MIT OR Apache-2.0", "https://github.com/serde-rs/json", &format!("Copyright (c) David Tolnay\n\n{MIT}")),
-        entry("tokio", "1.48.0", "MIT", "https://github.com/tokio-rs/tokio", &format!("Copyright (c) Tokio Contributors\n\n{MIT}")),
+        entry(
+            "gpui",
+            "0.3.9",
+            "Apache-2.0",
+            "https://github.com/zed-industries/zed",
+            "Licensed under the Apache License, Version 2.0 (the \"License\"); you may not use this file except in compliance with the License.",
+        ),
+        entry(
+            "serde",
+            "1.0.228",
+            "MIT OR Apache-2.0",
+            "https://github.com/serde-rs/serde",
+            &format!("Copyright (c) David Tolnay\n\n{MIT}"),
+        ),
+        entry(
+            "serde_json",
+            "1.0.145",
+            "MIT OR Apache-2.0",
+            "https://github.com/serde-rs/json",
+            &format!("Copyright (c) David Tolnay\n\n{MIT}"),
+        ),
+        entry(
+            "tokio",
+            "1.48.0",
+            "MIT",
+            "https://github.com/tokio-rs/tokio",
+            &format!("Copyright (c) Tokio Contributors\n\n{MIT}"),
+        ),
     ]
 }

@@ -28,14 +28,19 @@ pub fn group_github_accounts(accounts: &[SourceControlProviderAccount]) -> Vec<G
     hosts
         .into_iter()
         .map(|host| {
-            let entries: Vec<&SourceControlProviderAccount> =
-                accounts.iter().filter(|entry| entry.host.as_str() == host).collect();
+            let entries: Vec<&SourceControlProviderAccount> = accounts
+                .iter()
+                .filter(|entry| entry.host.as_str() == host)
+                .collect();
             let stored: Vec<&&SourceControlProviderAccount> = entries
                 .iter()
                 .filter(|entry| entry.environment_variable.is_none())
                 .collect();
-            let selectable: Vec<&&SourceControlProviderAccount> =
-                stored.iter().copied().filter(|entry| entry.authenticated).collect();
+            let selectable: Vec<&&SourceControlProviderAccount> = stored
+                .iter()
+                .copied()
+                .filter(|entry| entry.authenticated)
+                .collect();
             GitHubHostGroup {
                 host: host.to_owned(),
                 active_account: selectable
@@ -79,7 +84,11 @@ pub struct GitHubHostChange {
 
 /// The full `hosts` map after one host changes. Hosts left on gh's defaults (enabled,
 /// no pinned account) are dropped so settings only hold real choices.
-pub fn next_github_hosts(current: &GitHubHosts, host: &str, change: GitHubHostChange) -> GitHubHosts {
+pub fn next_github_hosts(
+    current: &GitHubHosts,
+    host: &str,
+    change: GitHubHostChange,
+) -> GitHubHosts {
     let previous = current.get(host);
     let enabled = change
         .enabled
@@ -115,11 +124,19 @@ mod tests {
             json!({ "host": "github.com", "account": "old", "active": false, "authenticated": false, "error": "bad" }),
         );
         let groups = group_github_accounts(&[
-            account(json!({ "host": "github.com", "account": "personal", "active": true, "authenticated": true })),
-            account(json!({ "host": "github.com", "account": "work", "active": false, "authenticated": true })),
+            account(
+                json!({ "host": "github.com", "account": "personal", "active": true, "authenticated": true }),
+            ),
+            account(
+                json!({ "host": "github.com", "account": "work", "active": false, "authenticated": true }),
+            ),
             old.clone(),
-            account(json!({ "host": "github.com", "account": "bot", "active": false, "authenticated": true, "environmentVariable": "GH_TOKEN" })),
-            account(json!({ "host": "ghe.acme.test", "account": "jm", "active": false, "authenticated": true })),
+            account(
+                json!({ "host": "github.com", "account": "bot", "active": false, "authenticated": true, "environmentVariable": "GH_TOKEN" }),
+            ),
+            account(
+                json!({ "host": "ghe.acme.test", "account": "jm", "active": false, "authenticated": true }),
+            ),
         ]);
         assert_eq!(
             groups,

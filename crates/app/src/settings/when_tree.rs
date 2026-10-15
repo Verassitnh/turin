@@ -44,16 +44,19 @@ pub fn flatten_when_children(node: &Node, operator: BooleanOperator) -> Vec<Node
 /// `buildWhenExpressionGroup`: left-nested chain of `operator`.
 pub fn build_when_expression_group(children: &[Node], operator: BooleanOperator) -> Option<Node> {
     let (first, rest) = children.split_first()?;
-    Some(rest.iter().fold(first.clone(), |left, right| match operator {
-        BooleanOperator::And => Node::And {
-            left: Box::new(left),
-            right: Box::new(right.clone()),
-        },
-        BooleanOperator::Or => Node::Or {
-            left: Box::new(left),
-            right: Box::new(right.clone()),
-        },
-    }))
+    Some(
+        rest.iter()
+            .fold(first.clone(), |left, right| match operator {
+                BooleanOperator::And => Node::And {
+                    left: Box::new(left),
+                    right: Box::new(right.clone()),
+                },
+                BooleanOperator::Or => Node::Or {
+                    left: Box::new(left),
+                    right: Box::new(right.clone()),
+                },
+            }),
+    )
 }
 
 /// `conditionParts`: a bare identifier or a negated one.
@@ -144,7 +147,11 @@ mod tests {
 
     #[test]
     fn flattens_and_rebuilds_same_operator_chains() {
-        let chain = build_when_expression_group(&[ident("a"), ident("b"), ident("c")], BooleanOperator::And).unwrap();
+        let chain = build_when_expression_group(
+            &[ident("a"), ident("b"), ident("c")],
+            BooleanOperator::And,
+        )
+        .unwrap();
         assert_eq!(
             flatten_when_children(&chain, BooleanOperator::And),
             vec![ident("a"), ident("b"), ident("c")]
@@ -164,7 +171,10 @@ mod tests {
         // Groups are wrapped, not edited.
         let group = default_when_group(BooleanOperator::And);
         assert_eq!(condition_parts(&group), None);
-        assert!(matches!(set_condition_negated(&group, true), Node::Not { .. }));
+        assert!(matches!(
+            set_condition_negated(&group, true),
+            Node::Not { .. }
+        ));
     }
 
     #[test]

@@ -78,6 +78,9 @@ mod tests {
         assert_eq!(locale_compare("a", "B"), Ordering::Less);
         assert_eq!(locale_compare("a", "A"), Ordering::Less);
         assert_eq!(locale_compare("usage", "usage"), Ordering::Equal);
-        assert_eq!(locale_compare("sidebar.toggle", "script.a"), Ordering::Greater);
+        assert_eq!(
+            locale_compare("sidebar.toggle", "script.a"),
+            Ordering::Greater
+        );
     }
 }

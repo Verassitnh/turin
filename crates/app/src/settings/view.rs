@@ -11,9 +11,9 @@ use std::rc::Rc;
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, Focusable as _, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Subscription, Window, div, px, rems,
+    AnyElement, App, AppContext as _, Context, Entity, Focusable as _, FontWeight,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, Window, div, px, rems,
 };
 use serde_json::Value;
 
@@ -28,9 +28,11 @@ use crate::components::workspace_breadcrumb::{
     WorkspaceBreadcrumb, WorkspaceBreadcrumbItem, WorkspaceBreadcrumbSeparator,
     workspace_breadcrumb_text,
 };
-use crate::components::workspace_titlebar::{workspace_controls_left, workspace_titlebar_content_left};
+use crate::components::workspace_titlebar::{
+    workspace_controls_left, workspace_titlebar_content_left,
+};
 use crate::theme::ActiveAppTheme;
-use crate::theme::tokens::{WORKSPACE_TOPBAR_HEIGHT, TEXT_SM};
+use crate::theme::tokens::{TEXT_SM, WORKSPACE_TOPBAR_HEIGHT};
 use crate::ui::{Button, ButtonSize, ButtonVariant, IconName, Tooltip};
 
 /// `/settings/<section>` plus the General page's detail page.
@@ -104,7 +106,8 @@ pub struct SettingsView {
     pub(super) sidebar_open: bool,
     pub(super) panels: super::panels::PanelState,
     pub(super) dialog: Option<super::dialog::Dialog>,
-    pub(super) slider_bounds: HashMap<SharedString, Rc<std::cell::Cell<gpui_kit::Bounds<gpui_kit::Pixels>>>>,
+    pub(super) slider_bounds:
+        HashMap<SharedString, Rc<std::cell::Cell<gpui_kit::Bounds<gpui_kit::Pixels>>>>,
     pub(super) slider_drag: Option<SharedString>,
     /// Focus target of the keybinding recorder.
     pub(super) capture_focus: gpui_kit::FocusHandle,
@@ -116,12 +119,16 @@ impl SettingsView {
         let nav_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let subscriptions = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
-            cx.subscribe_in(&nav_search, window, |this, state, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.nav_query = state.read(cx).value().to_string();
-                    cx.notify();
-                }
-            }),
+            cx.subscribe_in(
+                &nav_search,
+                window,
+                |this, state, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.nav_query = state.read(cx).value().to_string();
+                        cx.notify();
+                    }
+                },
+            ),
         ];
         Self {
             store,
@@ -145,7 +152,9 @@ impl SettingsView {
 
     pub fn set_route(&mut self, route: SettingsRoute, cx: &mut Context<Self>) {
         self.route = route;
-        self.panels.page_scroll.set_offset(gpui_kit::point(px(0.), px(0.)));
+        self.panels
+            .page_scroll
+            .set_offset(gpui_kit::point(px(0.), px(0.)));
         self.menus.close();
         cx.notify();
     }
@@ -172,9 +181,17 @@ impl SettingsView {
             }
             "add-provider" => self.open_add_provider(cx),
             "bg-dialog" => self.dialog = Some(super::dialog::Dialog::BackgroundActivity),
+            other if other.starts_with("editor-scroll:") => {
+                if let Ok(offset) = other["editor-scroll:".len()..].parse::<f32>() {
+                    self.panels.providers.demo_editor_scroll = Some((offset, 30));
+                }
+            }
             "add-hub" => self.dialog = Some(super::dialog::Dialog::AddHub),
             other if other.starts_with("expand:") => {
-                self.panels.source_control.expanded.insert(other["expand:".len()..].to_owned());
+                self.panels
+                    .source_control
+                    .expanded
+                    .insert(other["expand:".len()..].to_owned());
             }
             other if other.starts_with("provider:") => {
                 self.panels.providers.selected = Some(other["provider:".len()..].to_owned());
@@ -275,7 +292,9 @@ impl SettingsView {
             let state = state.clone();
             let focused = state.read(cx).focus_handle(cx).is_focused(window);
             if !focused && state.read(cx).value() != value {
-                state.update(cx, |state, cx| state.set_value(value.to_owned(), window, cx));
+                state.update(cx, |state, cx| {
+                    state.set_value(value.to_owned(), window, cx)
+                });
             }
             return state;
         }
@@ -286,14 +305,18 @@ impl SettingsView {
                 .default_value(value.to_owned())
         });
         let subscription_key = key.clone();
-        let subscription = cx.subscribe_in(&state, window, move |this, state, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::Blur) {
-                let text = state.read(cx).value().to_string();
-                if let Some(commit) = this.input_commits.get(&subscription_key).cloned() {
-                    commit(this, text, window, cx);
+        let subscription = cx.subscribe_in(
+            &state,
+            window,
+            move |this, state, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Blur) {
+                    let text = state.read(cx).value().to_string();
+                    if let Some(commit) = this.input_commits.get(&subscription_key).cloned() {
+                        commit(this, text, window, cx);
+                    }
                 }
-            }
-        });
+            },
+        );
         self._subscriptions.push(subscription);
         self.textareas.insert(key, state.clone());
         state
@@ -312,7 +335,11 @@ impl SettingsView {
         if let Some(state) = self.inputs.get(&key) {
             return state.clone();
         }
-        let state = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(placeholder.to_owned()));
+        let state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder(placeholder.to_owned())
+        });
         self.inputs.insert(key, state.clone());
         state
     }
@@ -333,7 +360,9 @@ impl SettingsView {
             let state = state.clone();
             let focused = state.read(cx).focus_handle(cx).is_focused(window);
             if !focused && state.read(cx).value() != value {
-                state.update(cx, |state, cx| state.set_value(value.to_owned(), window, cx));
+                state.update(cx, |state, cx| {
+                    state.set_value(value.to_owned(), window, cx)
+                });
             }
             return state;
         }
@@ -343,16 +372,20 @@ impl SettingsView {
                 .default_value(value.to_owned())
         });
         let subscription_key = key.clone();
-        let subscription = cx.subscribe_in(&state, window, move |this, state, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur)
-                || (live && matches!(event, InputEvent::Change))
-            {
-                let text = state.read(cx).value().to_string();
-                if let Some(commit) = this.input_commits.get(&subscription_key).cloned() {
-                    commit(this, text, window, cx);
+        let subscription = cx.subscribe_in(
+            &state,
+            window,
+            move |this, state, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur)
+                    || (live && matches!(event, InputEvent::Change))
+                {
+                    let text = state.read(cx).value().to_string();
+                    if let Some(commit) = this.input_commits.get(&subscription_key).cloned() {
+                        commit(this, text, window, cx);
+                    }
                 }
-            }
-        });
+            },
+        );
         self._subscriptions.push(subscription);
         self.inputs.insert(key, state.clone());
         state
@@ -491,7 +524,14 @@ impl Render for SettingsView {
                                     .gap_3()
                                     .text_size(TEXT_SM.size)
                                     .child(breadcrumb)
-                                    .child(div().ml_auto().flex().flex_shrink_0().items_center().children(restore)),
+                                    .child(
+                                        div()
+                                            .ml_auto()
+                                            .flex()
+                                            .flex_shrink_0()
+                                            .items_center()
+                                            .children(restore),
+                                    ),
                             )
                             .drag_region(window, cx),
                     )

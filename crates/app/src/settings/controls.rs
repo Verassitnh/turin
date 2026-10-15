@@ -8,16 +8,15 @@ use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, App, Context, CursorStyle, Div, ElementId, FontWeight, Hsla,
-    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Pixels, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, anchored, deferred, div, point, px,
-    rems,
+    Anchor, AnyElement, App, Context, CursorStyle, Div, ElementId, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, Pixels, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, anchored, deferred, div, px, rems,
 };
 
 use crate::components::drag_region::no_drag;
+use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{self, RADIUS_LG, RADIUS_MD, RADIUS_SM, TEXT_SM, TEXT_XS};
-use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::tooltip::dropdown_glass_border;
 use crate::ui::{Icon, IconName};
 
@@ -186,7 +185,9 @@ pub fn select_trigger(
         .line_height(text.line_height)
         .text_color(theme.foreground)
         .cursor(CursorStyle::PointingHand)
-        .when(!open && !disabled, |this| this.shadow(tokens::shadow_xs(0.05)))
+        .when(!open && !disabled, |this| {
+            this.shadow(tokens::shadow_xs(0.05))
+        })
         .when(disabled, |this| {
             this.opacity(0.64).cursor(CursorStyle::OperationNotAllowed)
         });
@@ -199,18 +200,13 @@ pub fn select_trigger(
         SelectWidth::Auto => div().min_w_0().truncate(),
         _ => div().min_w_0().flex_1().truncate().text_left(),
     };
-    trigger
-        .child(label_box.child(label))
-        .child(
-            div()
-                .flex()
-                .flex_shrink_0()
-                .child(
-                    Icon::new(IconName::ChevronDown)
-                        .size(rems(0.75))
-                        .color(with_alpha(theme.foreground, 0.5).into()),
-                ),
-        )
+    trigger.child(label_box.child(label)).child(
+        div().flex().flex_shrink_0().child(
+            Icon::new(IconName::ChevronDown)
+                .size(rems(0.75))
+                .color(with_alpha(theme.foreground, 0.5).into()),
+        ),
+    )
 }
 
 pub struct SelectItem {
@@ -288,7 +284,9 @@ pub fn popup_list(
                 .py_1()
                 .text_size(TEXT_SM.size)
                 .line_height(TEXT_SM.line_height)
-                .when(item.selected, |this| this.bg(with_alpha(theme.foreground, 0.08)))
+                .when(item.selected, |this| {
+                    this.bg(with_alpha(theme.foreground, 0.08))
+                })
                 .when(item.disabled, |this| this.opacity(0.64))
                 .when(!item.disabled, |this| {
                     this.cursor(CursorStyle::PointingHand)
@@ -365,11 +363,6 @@ pub fn trigger_height(size: SelectSize) -> Pixels {
         SelectSize::Sm => rems(1.75).to_pixels(px(16.)),
         SelectSize::Xs => rems(1.5).to_pixels(px(16.)),
     }
-}
-
-#[allow(dead_code)]
-fn _unused(_: Hsla, _: &AppTheme, _: FontWeight, _: f32) {
-    let _ = point(px(0.), px(0.));
 }
 
 /// Field sizes of `Input` (`sm`: `h-6.5` inner at the `sm:` breakpoint).

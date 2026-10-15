@@ -11,6 +11,7 @@
 
 use std::rc::Rc;
 
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, ClipboardItem, Context, CursorStyle, FontWeight, Hsla, InteractiveElement as _,
@@ -19,19 +20,16 @@ use gpui_kit::{
 };
 use serde_json::{Map, Value, json};
 use turin_contracts::provider_instance::ProviderInstanceConfig;
-use turin_contracts::settings::{
-    ProviderSettingsFormControl, resolve_provider_instance_enabled,
+use turin_contracts::settings::{ProviderSettingsFormControl, resolve_provider_instance_enabled};
+use turin_provider_core::server_provider::{
+    ServerProvider, ServerProviderAuthStatus, ServerProviderState,
 };
-use turin_provider_core::server_provider::{ServerProvider, ServerProviderAuthStatus, ServerProviderState};
 
-use super::super::controls::{
-    FieldSize, PopupAlign, SelectWidth, switch, text_field,
-    with_popup,
-};
+use super::super::controls::{FieldSize, PopupAlign, SelectWidth, switch, text_field, with_popup};
 use super::super::layout::{SettingsRow, SettingsSection, setting_reset_button, settings_group};
 use super::super::panels_logic::{
-    PROVIDER_HEALTH_INTERVAL_STEP_SECONDS, background_activity_override_settings,
-    duration_to_seconds, normalize_interval_seconds, BackgroundActivityOverridePatch,
+    BackgroundActivityOverridePatch, PROVIDER_HEALTH_INTERVAL_STEP_SECONDS,
+    background_activity_override_settings, duration_to_seconds, normalize_interval_seconds,
 };
 use super::super::provider_form::{
     EnvironmentVariable, FieldValue, ProviderEnvironmentField, ProviderSettingsFieldModel,
@@ -54,10 +52,7 @@ use super::super::view::{SettingsView, Which};
 use crate::theme::color::{color, with_alpha};
 use crate::theme::tokens::{self, RADIUS_LG, RADIUS_MD, TEXT_2XS, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
-use crate::ui::{
-    Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip,
-    scroll_area,
-};
+use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip, scroll_area};
 use turin_shared::model::CustomModelDefinition;
 
 /// Per-page UI state of the Providers page.
@@ -65,12 +60,15 @@ use turin_shared::model::CustomModelDefinition;
 pub struct ProvidersState {
     pub selected: Option<String>,
     pub model_filter: String,
+    pub editor_scroll: gpui_kit::ScrollHandle,
+    pub demo_editor_scroll: Option<(f32, u8)>,
     pub adding_model: bool,
     pub model_input: String,
     pub model_error: Option<String>,
     pub editing_model: Option<String>,
     pub wizard: super::add_provider::AddProviderState,
-    pub env_drafts: std::collections::HashMap<String, Vec<super::super::provider_form::EnvironmentVariable>>,
+    pub env_drafts:
+        std::collections::HashMap<String, Vec<super::super::provider_form::EnvironmentVariable>>,
 }
 
 struct InstanceRow {
@@ -106,7 +104,10 @@ enum ProviderStatus {
 pub(super) fn provider_brand_icon(driver: &str, size: gpui_kit::Rems, tint: Hsla) -> AnyElement {
     match super::super::icons::provider_icon_path(driver) {
         Some(path) => Icon::path(path).size(size).color(tint).into_any_element(),
-        None => Icon::new(IconName::Bot).size(size).color(tint).into_any_element(),
+        None => Icon::new(IconName::Bot)
+            .size(size)
+            .color(tint)
+            .into_any_element(),
     }
 }
 
@@ -128,10 +129,15 @@ impl SettingsView {
             });
             // Cursor appears once the server reports its default instance.
             let has_default_slot = driver != "cursor"
-                || vm.providers.iter().any(|p| p.instance_id.as_str() == default_id)
+                || vm
+                    .providers
+                    .iter()
+                    .any(|p| p.instance_id.as_str() == default_id)
                 || is_dirty;
             let enabled = resolve_provider_instance_enabled(&effective);
-            if has_default_slot && (driver == "codex" || driver == "claudeAgent" || is_dirty || enabled) {
+            if has_default_slot
+                && (driver == "codex" || driver == "claudeAgent" || is_dirty || enabled)
+            {
                 rows.push(InstanceRow {
                     id: default_id.to_owned(),
                     driver: driver.to_owned(),
@@ -166,7 +172,11 @@ impl SettingsView {
         rows
     }
 
-    pub(super) fn render_providers(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_providers(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         vec![
             self.providers_section(window, cx),
             self.usage_providers_section(cx),
@@ -200,7 +210,10 @@ impl SettingsView {
         }
         let mut patch = json!({ "providerInstances": Value::Object(map) });
         if clear_text_generation {
-            let default = self.json(cx).default_of(Which::Server, "textGenerationModelSelection").clone();
+            let default = self
+                .json(cx)
+                .default_of(Which::Server, "textGenerationModelSelection")
+                .clone();
             patch["textGenerationModelSelection"] = default;
         }
         self.update_server(patch, cx);
@@ -211,7 +224,12 @@ impl SettingsView {
     }
 
     /// Replaces keys of an instance's envelope: `Some` sets, `None` removes.
-    fn update_instance(&mut self, row: &InstanceRow, patch: Vec<(&str, Option<Value>)>, cx: &mut Context<Self>) {
+    fn update_instance(
+        &mut self,
+        row: &InstanceRow,
+        patch: Vec<(&str, Option<Value>)>,
+        cx: &mut Context<Self>,
+    ) {
         let mut value = Self::instance_value(row);
         let was_enabled = instance_enabled(row);
         let mut disabling = false;
@@ -231,7 +249,12 @@ impl SettingsView {
             }
         }
         let vm = self.vm(cx);
-        let text_gen_uses_row = vm.server.text_generation_model_selection.instance_id.as_str() == row.id;
+        let text_gen_uses_row = vm
+            .server
+            .text_generation_model_selection
+            .instance_id
+            .as_str()
+            == row.id;
         self.write_provider_instance(&row.id, Some(value), disabling && text_gen_uses_row, cx);
     }
 
@@ -250,14 +273,15 @@ impl SettingsView {
             .or_else(|| rows.first().map(|row| row.id.clone()));
 
         let last_checked = vm.providers.iter().map(|p| p.checked_at.clone()).max();
-        let checked_label = match get_relative_time_state(last_checked.as_deref(), chrono::Utc::now()) {
-            RelativeTimeState::Missing => String::new(),
-            RelativeTimeState::Invalid => "Checked unavailable".to_owned(),
-            RelativeTimeState::Relative(parts) => match parts.suffix {
-                Some(suffix) => format!("Checked {} {suffix}", parts.value),
-                None => format!("Checked {}", parts.value),
-            },
-        };
+        let checked_label =
+            match get_relative_time_state(last_checked.as_deref(), chrono::Utc::now()) {
+                RelativeTimeState::Missing => String::new(),
+                RelativeTimeState::Invalid => "Checked unavailable".to_owned(),
+                RelativeTimeState::Relative(parts) => match parts.suffix {
+                    Some(suffix) => format!("Checked {} {suffix}", parts.value),
+                    None => format!("Checked {}", parts.value),
+                },
+            };
         let refresh = Button::new("refresh-providers")
             .variant(ButtonVariant::GhostMuted)
             .size(ButtonSize::Xs)
@@ -301,15 +325,26 @@ impl SettingsView {
                 .text_size(TEXT_SM.size)
                 .text_color(theme.muted_foreground)
                 .cursor(CursorStyle::PointingHand)
-                .hover(|style| style.bg(with_alpha(theme.muted, 0.25)).text_color(theme.foreground))
+                .hover(|style| {
+                    style
+                        .bg(with_alpha(theme.muted, 0.25))
+                        .text_color(theme.foreground)
+                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.open_add_provider(cx);
                 }))
-                .child(Icon::new(IconName::Plus).size(rems(1.)).color(theme.muted_foreground))
+                .child(
+                    Icon::new(IconName::Plus)
+                        .size(rems(1.))
+                        .color(theme.muted_foreground),
+                )
                 .child("Add provider"),
         );
 
-        let editor: AnyElement = match rows.iter().find(|row| Some(&row.id) == selected_id.as_ref()) {
+        let editor: AnyElement = match rows
+            .iter()
+            .find(|row| Some(&row.id) == selected_id.as_ref())
+        {
             Some(row) => self.provider_editor(row, &vm.providers, window, cx),
             None => div()
                 .p_6()
@@ -319,39 +354,60 @@ impl SettingsView {
                 .into_any_element(),
         };
 
+        let editor_scroll = self.panels.providers.editor_scroll.clone();
+        if let Some((offset, frames)) = self.panels.providers.demo_editor_scroll {
+            editor_scroll.set_offset(gpui_kit::point(px(0.), px(-offset)));
+            self.panels.providers.demo_editor_scroll = (frames > 1).then_some((offset, frames - 1));
+            cx.notify();
+        }
         // `@min-[48rem]/providers:grid grid-cols-[17rem_minmax(0,1fr)]`, height
         // `min(44rem, 100dvh - 11rem)` with a 32rem floor.
         let height = (f32::from(window.viewport_size().height) - 176.).clamp(512., 704.);
         let card = settings_group(
-            vec![div()
-                .flex()
-                .flex_row()
-                .h(px(height))
-                .overflow_hidden()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_shrink_0()
-                        .w(rems(17.))
-                        .h_full()
-                        .min_h_0()
-                        .border_r_1()
-                        .border_color(with_alpha(theme.border, 0.6))
-                        .bg(with_alpha(theme.muted, 0.1))
-                        .child(div().flex_1().min_h_0().child(scroll_area("providers-list").child(list))),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .min_h_0()
-                        .child(scroll_area("providers-editor").child(
-                            div().flex().flex_col().gap_6().p_4().child(editor),
-                        )),
-                )
-                .into_any_element()],
+            vec![
+                div()
+                    .flex()
+                    .flex_row()
+                    .h(px(height))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_shrink_0()
+                            .w(rems(17.))
+                            .h_full()
+                            .min_h_0()
+                            .border_r_1()
+                            .border_color(with_alpha(theme.border, 0.6))
+                            .bg(with_alpha(theme.muted, 0.1))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .child(scroll_area("providers-list").child(list)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .min_h_0()
+                            .relative()
+                            .child(
+                                div()
+                                    .id("providers-editor")
+                                    .size_full()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&editor_scroll)
+                                    .child(div().flex().flex_col().gap_6().p_4().child(editor))
+                                    .vertical_scrollbar(&editor_scroll),
+                            ),
+                    )
+                    .into_any_element(),
+            ],
             cx,
         );
         let (id, title) = searchable_setting("providers");
@@ -364,7 +420,11 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn provider_status_of(&self, row: &InstanceRow, live: Option<&ServerProvider>) -> (bool, ProviderStatus) {
+    fn provider_status_of(
+        &self,
+        row: &InstanceRow,
+        live: Option<&ServerProvider>,
+    ) -> (bool, ProviderStatus) {
         let enabled = instance_enabled(row);
         let status = if enabled {
             match live.map(|p| p.status) {
@@ -414,7 +474,8 @@ impl SettingsView {
                 }
             }
         };
-        let version = get_provider_version_label(live.and_then(|p| p.version.as_ref()).map(|v| v.as_str()));
+        let version =
+            get_provider_version_label(live.and_then(|p| p.version.as_ref()).map(|v| v.as_str()));
         let needs_attention = matches!(status, ProviderStatus::Warning | ProviderStatus::Error);
         let display_name = Self::display_name(row);
         let id = row.id.clone();
@@ -442,13 +503,25 @@ impl SettingsView {
                     move |window, cx| tooltip.clone().build(window, cx)
                 })
                 .child(
-                    Icon::new(if has_compat_warning { IconName::TriangleAlert } else { IconName::CircleArrowUp })
-                        .size(rems(0.875))
-                        .color(if has_compat_warning { theme.warning } else { theme.muted_foreground }),
+                    Icon::new(if has_compat_warning {
+                        IconName::TriangleAlert
+                    } else {
+                        IconName::CircleArrowUp
+                    })
+                    .size(rems(0.875))
+                    .color(if has_compat_warning {
+                        theme.warning
+                    } else {
+                        theme.muted_foreground
+                    }),
                 )
         });
 
-        let inline_detail = if needs_attention { summary.detail.clone() } else { None };
+        let inline_detail = if needs_attention {
+            summary.detail.clone()
+        } else {
+            None
+        };
         let status_line = div()
             .mt(px(2.))
             .flex()
@@ -464,7 +537,12 @@ impl SettingsView {
                         .h(rems(1.0))
                         .flex_shrink_0()
                         .items_center()
-                        .child(div().size(px(6.)).rounded_full().bg(status_dot_color(status, &theme))),
+                        .child(
+                            div()
+                                .size(px(6.))
+                                .rounded_full()
+                                .bg(status_dot_color(status, &theme)),
+                        ),
                 )
             })
             .child(div().min_w_0().child(match inline_detail {
@@ -484,7 +562,11 @@ impl SettingsView {
                     entity.update(cx, |this, cx| {
                         let rows = this.instance_rows(cx);
                         if let Some(row) = rows.iter().find(|row| row.id == row_id) {
-                            this.update_instance(row, vec![("enabled", Some(Value::Bool(next)))], cx);
+                            this.update_instance(
+                                row,
+                                vec![("enabled", Some(Value::Bool(next)))],
+                                cx,
+                            );
                         }
                     });
                 },
@@ -500,9 +582,14 @@ impl SettingsView {
             .px_4()
             .py_3()
             .cursor(CursorStyle::PointingHand)
-            .when(divided, |this| this.border_t_1().border_color(with_alpha(theme.border, 0.5)))
+            .when(divided, |this| {
+                this.border_t_1()
+                    .border_color(with_alpha(theme.border, 0.5))
+            })
             .when(selected, |this| this.bg(with_alpha(theme.muted, 0.45)))
-            .when(!selected, |this| this.hover(|style| style.bg(with_alpha(theme.muted, 0.25))))
+            .when(!selected, |this| {
+                this.hover(|style| style.bg(with_alpha(theme.muted, 0.25)))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.panels.providers.selected = Some(select_id.clone());
                 this.menus.close();
@@ -523,7 +610,11 @@ impl SettingsView {
                             .flex_shrink_0()
                             .items_center()
                             .justify_center()
-                            .child(provider_brand_icon(&row.driver, rems(1.), with_alpha(theme.foreground, 0.8).into())),
+                            .child(provider_brand_icon(
+                                &row.driver,
+                                rems(1.),
+                                with_alpha(theme.foreground, 0.8).into(),
+                            )),
                     )
                     .child(
                         div()
@@ -558,7 +649,15 @@ impl SettingsView {
                             .child(status_line),
                     ),
             )
-            .child(div().flex().h_5().flex_shrink_0().items_center().gap_1().child(toggle))
+            .child(
+                div()
+                    .flex()
+                    .h_5()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_1()
+                    .child(toggle),
+            )
             .into_any_element()
     }
 
@@ -572,12 +671,18 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.app_theme().clone();
-        let live = providers.iter().find(|p| p.instance_id.as_str() == row.id).cloned();
+        let live = providers
+            .iter()
+            .find(|p| p.instance_id.as_str() == row.id)
+            .cloned();
         let (enabled, status) = self.provider_status_of(row, live.as_ref());
         let display_name = Self::display_name(row);
-        let version = get_provider_version_label(live.as_ref().and_then(|p| p.version.as_ref()).map(|v| v.as_str()));
+        let version = get_provider_version_label(
+            live.as_ref()
+                .and_then(|p| p.version.as_ref())
+                .map(|v| v.as_str()),
+        );
         let config = row.instance.config.clone();
-        let row_id = row.id.clone();
 
         // Header action: version, advisory popover, delete.
         let advisory = live.as_ref().and_then(|provider| {
@@ -587,7 +692,8 @@ impl SettingsView {
                 enabled,
             )
         });
-        let advisory_node = advisory.map(|advisory| self.version_advisory_popover(&row.id, &display_name, advisory, cx));
+        let advisory_node = advisory
+            .map(|advisory| self.version_advisory_popover(&row.id, &display_name, advisory, cx));
         let delete = (!row.is_default).then(|| {
             let id = row.id.clone();
             Button::new(SharedString::from(format!("delete-instance-{id}")))
@@ -597,25 +703,36 @@ impl SettingsView {
                 .tooltip(Tooltip::new(format!("Delete instance {id}")))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let delete_id = id.clone();
-                    this.dialog = Some(super::super::dialog::Dialog::Confirm(super::super::dialog::ConfirmSpec {
-                        title: format!("Delete {delete_id}?").into(),
-                        description: "This removes the provider instance and its configuration.".into(),
-                        confirm_label: "Delete".into(),
-                        destructive: true,
-                        on_confirm: Rc::new(move |this, _, cx| this.write_provider_instance(&delete_id, None, false, cx)),
-                    }));
+                    this.dialog = Some(super::super::dialog::Dialog::Confirm(
+                        super::super::dialog::ConfirmSpec {
+                            title: format!("Delete {delete_id}?").into(),
+                            description:
+                                "This removes the provider instance and its configuration.".into(),
+                            confirm_label: "Delete".into(),
+                            destructive: true,
+                            on_confirm: Rc::new(move |this, _, cx| {
+                                this.write_provider_instance(&delete_id, None, false, cx)
+                            }),
+                        },
+                    ));
                     cx.notify();
                 }))
         });
         let reset = (row.is_default && row.is_dirty).then(|| {
             let id = row.id.clone();
-            let action = self.cb(cx, move |this, _, cx| this.write_provider_instance(&id, None, false, cx));
+            let action = self.cb(cx, move |this, _, cx| {
+                this.write_provider_instance(&id, None, false, cx)
+            });
             div()
                 .flex()
                 .size_5()
                 .items_center()
                 .justify_center()
-                .child(setting_reset_button("reset-provider-instance", "Reset to default", move |w, c| action(w, c)))
+                .child(setting_reset_button(
+                    "reset-provider-instance",
+                    "Reset to default",
+                    move |w, c| action(w, c),
+                ))
         });
         let header_action = div()
             .flex()
@@ -630,7 +747,14 @@ impl SettingsView {
                     .child(version)
             }))
             .children(advisory_node)
-            .child(div().flex().items_center().gap_1().children(reset).children(delete));
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .children(reset)
+                    .children(delete),
+            );
 
         // Display name row.
         let status_text = {
@@ -651,13 +775,23 @@ impl SettingsView {
                 .filter(|p| p.auth.status == ServerProviderAuthStatus::Authenticated)
                 .and_then(|p| p.auth.label.as_ref().or(p.auth.type_.as_ref()))
                 .map(|label| label.as_str().to_owned());
-            let mut parts = div().flex().flex_wrap().items_baseline().gap_x(rems(0.375)).min_w_0();
+            let mut parts = div()
+                .flex()
+                .flex_wrap()
+                .items_baseline()
+                .gap_x(rems(0.375))
+                .min_w_0();
             let needs_attention = matches!(status, ProviderStatus::Warning | ProviderStatus::Error);
             if needs_attention {
-                parts = parts.child(div().size(px(6.)).rounded_full().bg(status_dot_color(status, &theme)));
+                parts = parts.child(
+                    div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(status_dot_color(status, &theme)),
+                );
             }
-            match (email, ) {
-                (Some(email), ) => {
+            match (email,) {
+                (Some(email),) => {
                     parts = parts.child("Authenticated as").child(email);
                     if let Some(label) = label {
                         parts = parts.child(format!("· {label}"));
@@ -678,7 +812,12 @@ impl SettingsView {
             .as_ref()
             .map(|color| color.as_str().to_owned());
         let name_input = {
-            let row_value = row.instance.display_name.as_ref().map(|n| n.as_str().to_owned()).unwrap_or_default();
+            let row_value = row
+                .instance
+                .display_name
+                .as_ref()
+                .map(|n| n.as_str().to_owned())
+                .unwrap_or_default();
             let id = row.id.clone();
             self.input(
                 &format!("provider-name-{id}"),
@@ -692,14 +831,18 @@ impl SettingsView {
                         let trimmed = text.trim().to_owned();
                         this.update_instance(
                             row,
-                            vec![("displayName", (!trimmed.is_empty()).then(|| Value::String(trimmed)))],
+                            vec![(
+                                "displayName",
+                                (!trimmed.is_empty()).then(|| Value::String(trimmed)),
+                            )],
                             cx,
                         );
                     }
                 },
             )
         };
-        let accent_picker = self.accent_picker(&row.id, accent.as_deref(), &display_name, window, cx);
+        let accent_picker =
+            self.accent_picker(&row.id, accent.as_deref(), &display_name, window, cx);
         let name_control = div()
             .flex()
             .min_w_0()
@@ -707,11 +850,30 @@ impl SettingsView {
             .justify_end()
             .gap_2()
             .child(accent_picker)
-            .child(text_field(&name_input, Some(rems(14.).to_pixels(px(16.))), FieldSize::Sm, false, cx));
-        let display_row = SettingsRow::new("Display name").status(status_text).control(name_control);
-        let title_icon = provider_brand_icon(&row.driver, rems(1.), with_alpha(theme.foreground, 0.8).into());
+            .child(text_field(
+                &name_input,
+                Some(rems(14.).to_pixels(px(16.))),
+                FieldSize::Sm,
+                false,
+                cx,
+            ));
+        let display_row = SettingsRow::new("Display name")
+            .status(status_text)
+            .control(name_control);
+        let title_icon = provider_brand_icon(
+            &row.driver,
+            rems(1.),
+            with_alpha(theme.foreground, 0.8).into(),
+        );
         let header = SettingsSection::new(display_name.clone())
-            .icon(div().flex().size_5().items_center().justify_center().child(title_icon))
+            .icon(
+                div()
+                    .flex()
+                    .size_5()
+                    .items_center()
+                    .justify_center()
+                    .child(title_icon),
+            )
             .header_action(header_action)
             .child(display_row);
 
@@ -720,17 +882,30 @@ impl SettingsView {
         // Setup: account + dedicated environment fields.
         let env_fields = environment_fields_for_driver(&row.driver);
         let environment = environment_from_value(
-            serde_json::to_value(&row.instance).ok().and_then(|v| v.get("environment").cloned()).as_ref(),
+            serde_json::to_value(&row.instance)
+                .ok()
+                .and_then(|v| v.get("environment").cloned())
+                .as_ref(),
         );
-        let can_authenticate = live.as_ref().is_some_and(|p| p.setup.as_ref().is_some_and(|s| s.can_authenticate));
+        let can_authenticate = live
+            .as_ref()
+            .is_some_and(|p| p.setup.as_ref().is_some_and(|s| s.can_authenticate));
         if can_authenticate || !env_fields.is_empty() {
             let mut setup = SettingsSection::new("Setup");
             if can_authenticate {
                 setup = setup.child(self.account_row(row, live.as_ref(), cx));
             }
             for field in env_fields {
-                let variable = read_provider_environment_variable(&environment, field.name).cloned();
-                setup = setup.child(self.environment_field_row(row, field, variable.as_ref(), &environment, window, cx));
+                let variable =
+                    read_provider_environment_variable(&environment, field.name).cloned();
+                setup = setup.child(self.environment_field_row(
+                    row,
+                    field,
+                    variable.as_ref(),
+                    &environment,
+                    window,
+                    cx,
+                ));
             }
             sections.push(setup.into_any_element());
         }
@@ -740,24 +915,37 @@ impl SettingsView {
         if !fields.is_empty() {
             let mut runtime = SettingsSection::new("Runtime");
             for field in &fields {
-                runtime = runtime.child(self.provider_field_row(row, field, config.as_ref(), window, cx));
+                runtime =
+                    runtime.child(self.provider_field_row(row, field, config.as_ref(), window, cx));
             }
             sections.push(runtime.into_any_element());
         }
 
         // Environment.
-        let dedicated: std::collections::HashSet<&str> = env_fields.iter().map(|f| f.name).collect();
+        let dedicated: std::collections::HashSet<&str> =
+            env_fields.iter().map(|f| f.name).collect();
         let generic = provider_environment_without_names(&environment, &dedicated);
         sections.push(
             SettingsSection::new("Environment")
-                .child(self.environment_variables_row(row, &generic, &environment, &dedicated, window, cx))
+                .child(self.environment_variables_row(
+                    row,
+                    &generic,
+                    &environment,
+                    &dedicated,
+                    window,
+                    cx,
+                ))
                 .into_any_element(),
         );
 
         // Models.
         sections.push(self.models_section(row, live.as_ref(), config.as_ref(), window, cx));
-        let _ = row_id;
-        div().flex().flex_col().gap_6().children(sections).into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .children(sections)
+            .into_any_element()
     }
 
     fn version_advisory_popover(
@@ -775,7 +963,11 @@ impl SettingsView {
         let trigger = Button::new(SharedString::from(format!("advisory-trigger-{id}")))
             .variant(ButtonVariant::GhostMuted)
             .size(ButtonSize::IconXs)
-            .icon(if has_warning { IconName::TriangleAlert } else { IconName::CircleArrowUp })
+            .icon(if has_warning {
+                IconName::TriangleAlert
+            } else {
+                IconName::CircleArrowUp
+            })
             .tooltip(Tooltip::new(advisory.title.clone()))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.menus.toggle(toggle_id.clone());
@@ -783,7 +975,10 @@ impl SettingsView {
             }));
         let popup = open.then(|| {
             let update_label = match &advisory.target_version {
-                Some(version) => format!("Install {}", get_provider_version_label(Some(version)).unwrap_or_default()),
+                Some(version) => format!(
+                    "Install {}",
+                    get_provider_version_label(Some(version)).unwrap_or_default()
+                ),
                 None => "Update now".to_owned(),
             };
             let instance_id = id.to_owned();
@@ -819,7 +1014,11 @@ impl SettingsView {
                             div()
                                 .text_size(TEXT_XS.size)
                                 .line_height(rems(1.))
-                                .text_color(if has_warning { theme.warning } else { theme.muted_foreground })
+                                .text_color(if has_warning {
+                                    theme.warning
+                                } else {
+                                    theme.muted_foreground
+                                })
                                 .child(advisory.detail.clone()),
                         ),
                 )
@@ -865,13 +1064,21 @@ impl SettingsView {
                                 .icon_size(rems(0.75))
                                 .tooltip(Tooltip::new("Copy command"))
                                 .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        command.clone(),
+                                    ));
                                 }),
                         )
                 }))
                 .into_any_element()
         });
-        with_popup(trigger, popup, PopupAlign::End, rems(1.5).to_pixels(px(16.))).into_any_element()
+        with_popup(
+            trigger,
+            popup,
+            PopupAlign::End,
+            rems(1.5).to_pixels(px(16.)),
+        )
+        .into_any_element()
     }
 
     /// Accent colour: a swatch button opening preset swatches and a hex field.
@@ -897,7 +1104,9 @@ impl SettingsView {
             .rounded(RADIUS_MD)
             .cursor(CursorStyle::PointingHand)
             .when_some(swatch, |this, swatch| this.bg(swatch))
-            .when(swatch.is_none(), |this| this.hover(|style| style.bg(theme.accent)))
+            .when(swatch.is_none(), |this| {
+                this.hover(|style| style.bg(theme.accent))
+            })
             .tooltip({
                 let tooltip = Tooltip::new(format!(
                     "{} accent color for {display_name}",
@@ -910,11 +1119,16 @@ impl SettingsView {
                 cx.notify();
             }))
             .when(swatch.is_none(), |this| {
-                this.child(Icon::new(IconName::Plus).size(rems(1.)).color(theme.muted_foreground))
+                this.child(
+                    Icon::new(IconName::Plus)
+                        .size(rems(1.))
+                        .color(theme.muted_foreground),
+                )
             });
         let popup = open.then(|| {
             const PRESETS: [&str; 8] = [
-                "#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#ca8a04", "#16a34a", "#0d9488",
+                "#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#ca8a04", "#16a34a",
+                "#0d9488",
             ];
             let row_id = id.to_owned();
             let swatches = PRESETS.iter().map(|hex| {
@@ -927,11 +1141,19 @@ impl SettingsView {
                     .bg(color(&hex))
                     .cursor(CursorStyle::PointingHand)
                     .border_2()
-                    .border_color(if value.is_some_and(|v| v.eq_ignore_ascii_case(&hex)) { theme.ring } else { theme.popover })
+                    .border_color(if value.is_some_and(|v| v.eq_ignore_ascii_case(&hex)) {
+                        theme.ring
+                    } else {
+                        theme.popover
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let rows = this.instance_rows(cx);
                         if let Some(row) = rows.iter().find(|row| row.id == row_id) {
-                            this.update_instance(row, vec![("accentColor", Some(Value::String(hex.clone())))], cx);
+                            this.update_instance(
+                                row,
+                                vec![("accentColor", Some(Value::String(hex.clone())))],
+                                cx,
+                            );
                         }
                     }))
             });
@@ -970,11 +1192,23 @@ impl SettingsView {
                 .into_any_element()
         });
         let _ = window;
-        with_popup(trigger, popup, PopupAlign::Start, rems(1.75).to_pixels(px(16.))).into_any_element()
+        with_popup(
+            trigger,
+            popup,
+            PopupAlign::Start,
+            rems(1.75).to_pixels(px(16.)),
+        )
+        .into_any_element()
     }
 
-    fn account_row(&mut self, row: &InstanceRow, live: Option<&ServerProvider>, cx: &mut Context<Self>) -> AnyElement {
-        let signed_in = live.is_some_and(|p| p.auth.status == ServerProviderAuthStatus::Authenticated);
+    fn account_row(
+        &mut self,
+        row: &InstanceRow,
+        live: Option<&ServerProvider>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let signed_in =
+            live.is_some_and(|p| p.auth.status == ServerProviderAuthStatus::Authenticated);
         let id = row.id.clone();
         let button = if signed_in {
             Button::new(SharedString::from(format!("provider-signout-{id}")))
@@ -996,7 +1230,11 @@ impl SettingsView {
                 }))
         };
         SettingsRow::new("Account")
-            .description(if signed_in { "Signed in.".to_owned() } else { "Sign in on this device.".to_owned() })
+            .description(if signed_in {
+                "Signed in.".to_owned()
+            } else {
+                "Sign in on this device.".to_owned()
+            })
             .control(button)
             .into_any_element()
     }
@@ -1011,7 +1249,13 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let value = variable
-            .map(|v| if v.value_redacted == Some(true) { String::new() } else { v.value.clone() })
+            .map(|v| {
+                if v.value_redacted == Some(true) {
+                    String::new()
+                } else {
+                    v.value.clone()
+                }
+            })
             .unwrap_or_default();
         let configured = variable.is_some_and(|v| v.value_redacted == Some(true));
         let id = row.id.clone();
@@ -1019,13 +1263,21 @@ impl SettingsView {
         let input = self.input(
             &format!("provider-env-field-{id}-{}", field.name),
             &value,
-            if configured { "Configured" } else { field.placeholder },
+            if configured {
+                "Configured"
+            } else {
+                field.placeholder
+            },
             window,
             cx,
             move |this, text, _, cx| {
                 let rows = this.instance_rows(cx);
                 if let Some(row) = rows.iter().find(|row| row.id == id) {
-                    let next = next_provider_environment_with_field_value(&environment_snapshot, field, &text);
+                    let next = next_provider_environment_with_field_value(
+                        &environment_snapshot,
+                        field,
+                        &text,
+                    );
                     this.write_environment(row, &next, cx);
                 }
             },
@@ -1033,20 +1285,23 @@ impl SettingsView {
         let clear_id = row.id.clone();
         let clear_env = environment.to_vec();
         let clear = variable.is_some().then(|| {
-            Button::new(SharedString::from(format!("env-clear-{}-{}", row.id, field.name)))
-                .variant(ButtonVariant::GhostDestructive)
-                .size(ButtonSize::IconSm)
-                .icon(IconName::X)
-                .icon_size(rems(0.875))
-                .tooltip(Tooltip::new(format!("Clear {}", field.label)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let rows = this.instance_rows(cx);
-                    if let Some(row) = rows.iter().find(|row| row.id == clear_id) {
-                        let names: std::collections::HashSet<&str> = [field.name].into();
-                        let next = provider_environment_without_names(&clear_env, &names);
-                        this.write_environment(row, &next, cx);
-                    }
-                }))
+            Button::new(SharedString::from(format!(
+                "env-clear-{}-{}",
+                row.id, field.name
+            )))
+            .variant(ButtonVariant::GhostDestructive)
+            .size(ButtonSize::IconSm)
+            .icon(IconName::X)
+            .icon_size(rems(0.875))
+            .tooltip(Tooltip::new(format!("Clear {}", field.label)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let rows = this.instance_rows(cx);
+                if let Some(row) = rows.iter().find(|row| row.id == clear_id) {
+                    let names: std::collections::HashSet<&str> = [field.name].into();
+                    let next = provider_environment_without_names(&clear_env, &names);
+                    this.write_environment(row, &next, cx);
+                }
+            }))
         });
         SettingsRow::new(field.label)
             .description(field.description)
@@ -1055,13 +1310,24 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().w(rems(14.)).child(text_field(&input, None, FieldSize::Sm, false, cx)))
+                    .child(div().w(rems(14.)).child(text_field(
+                        &input,
+                        None,
+                        FieldSize::Sm,
+                        false,
+                        cx,
+                    )))
                     .children(clear),
             )
             .into_any_element()
     }
 
-    fn write_environment(&mut self, row: &InstanceRow, environment: &[EnvironmentVariable], cx: &mut Context<Self>) {
+    fn write_environment(
+        &mut self,
+        row: &InstanceRow,
+        environment: &[EnvironmentVariable],
+        cx: &mut Context<Self>,
+    ) {
         let cleaned: Vec<EnvironmentVariable> = environment
             .iter()
             .filter(|variable| !variable.name.trim().is_empty())
@@ -1084,7 +1350,11 @@ impl SettingsView {
         let write = move |this: &mut Self, value: FieldValue<'_>, cx: &mut Context<Self>| {
             let rows = this.instance_rows(cx);
             if let Some(row) = rows.iter().find(|row| row.id == id) {
-                let next = next_provider_config_with_field_value(row.instance.config.as_ref(), &field_for_commit, value);
+                let next = next_provider_config_with_field_value(
+                    row.instance.config.as_ref(),
+                    &field_for_commit,
+                    value,
+                );
                 this.update_instance(row, vec![("config", next)], cx);
             }
         };
@@ -1094,7 +1364,11 @@ impl SettingsView {
                 let entity = cx.entity();
                 switch(
                     SharedString::from(format!("provider-field-{}-{}", row.id, field.key)),
-                    read_provider_config_boolean(config, &field.key, field.default_boolean_value.unwrap_or(false)),
+                    read_provider_config_boolean(
+                        config,
+                        &field.key,
+                        field.default_boolean_value.unwrap_or(false),
+                    ),
                     false,
                     cx,
                     move |next, _, cx| {
@@ -1108,9 +1382,17 @@ impl SettingsView {
                 let fallback = options.first().map(|o| o.value.clone()).unwrap_or_default();
                 let current = {
                     let value = read_provider_config_string(config, &field.key);
-                    if value.is_empty() { fallback.clone() } else { value }
+                    if value.is_empty() {
+                        fallback.clone()
+                    } else {
+                        value
+                    }
                 };
-                let label = options.iter().find(|o| o.value == current).map(|o| o.label.clone()).unwrap_or(current.clone());
+                let label = options
+                    .iter()
+                    .find(|o| o.value == current)
+                    .map(|o| o.label.clone())
+                    .unwrap_or(current.clone());
                 let write = write.clone();
                 self.select_control_rich(
                     cx,
@@ -1118,7 +1400,13 @@ impl SettingsView {
                     div().child(label).into_any_element(),
                     options
                         .iter()
-                        .map(|o| (json!(o.value), div().child(o.label.clone()).into_any_element(), o.value == current))
+                        .map(|o| {
+                            (
+                                json!(o.value),
+                                div().child(o.label.clone()).into_any_element(),
+                                o.value == current,
+                            )
+                        })
                         .collect(),
                     SelectWidth::Fixed(14.),
                     move |this, value, _, cx| {
@@ -1142,7 +1430,10 @@ impl SettingsView {
                     cx,
                     move |this, text, _, cx| write(this, FieldValue::Text(&text), cx),
                 );
-                div().w(rems(14.)).child(text_field(&input, None, FieldSize::Sm, false, cx)).into_any_element()
+                div()
+                    .w(rems(14.))
+                    .child(text_field(&input, None, FieldSize::Sm, false, cx))
+                    .into_any_element()
             }
         };
         let mut settings_row = SettingsRow::new(field.label.clone()).control(control);
@@ -1163,7 +1454,11 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.app_theme().clone();
-        let dedicated_vars: Vec<EnvironmentVariable> = all.iter().filter(|v| dedicated.contains(v.name.as_str())).cloned().collect();
+        let dedicated_vars: Vec<EnvironmentVariable> = all
+            .iter()
+            .filter(|v| dedicated.contains(v.name.as_str()))
+            .cloned()
+            .collect();
         let add_id = row.id.clone();
         let add_dedicated = dedicated_vars.clone();
         let add_generic = generic.to_vec();
@@ -1177,14 +1472,26 @@ impl SettingsView {
                 // A blank sensitive row; it is published once it has a valid name.
                 let mut next = add_dedicated.clone();
                 next.extend(add_generic.clone());
-                next.push(EnvironmentVariable { name: String::new(), value: String::new(), sensitive: true, value_redacted: None });
-                this.panels.providers.env_drafts.insert(add_id.clone(), next);
+                next.push(EnvironmentVariable {
+                    name: String::new(),
+                    value: String::new(),
+                    sensitive: true,
+                    value_redacted: None,
+                });
+                this.panels
+                    .providers
+                    .env_drafts
+                    .insert(add_id.clone(), next);
                 cx.notify();
             }));
 
         let draft = self.panels.providers.env_drafts.get(&row.id).cloned();
         let rows_source: Vec<EnvironmentVariable> = match &draft {
-            Some(draft) => draft.iter().filter(|v| !dedicated.contains(v.name.as_str())).cloned().collect(),
+            Some(draft) => draft
+                .iter()
+                .filter(|v| !dedicated.contains(v.name.as_str()))
+                .cloned()
+                .collect(),
             None => generic.to_vec(),
         };
         // Dedicated (named-field) variables sit first in the published list.
@@ -1217,13 +1524,21 @@ impl SettingsView {
             let value_vars = all_vars.clone();
             let value_input = self.input(
                 &format!("env-value-{id}-{index}"),
-                if variable.value_redacted == Some(true) { "" } else { &variable.value },
-                if variable.value_redacted == Some(true) { "Configured" } else { "value" },
+                if variable.value_redacted == Some(true) {
+                    ""
+                } else {
+                    &variable.value
+                },
+                if variable.value_redacted == Some(true) {
+                    "Configured"
+                } else {
+                    "value"
+                },
                 window,
                 cx,
                 move |this, text, _, cx| {
                     let mut next = value_vars.clone();
-                                        if let Some(entry) = next.get_mut(offset + index) {
+                    if let Some(entry) = next.get_mut(offset + index) {
                         entry.value = text;
                         entry.value_redacted = Some(false);
                     }
@@ -1233,19 +1548,28 @@ impl SettingsView {
             let sensitive = variable.sensitive;
             let sens_id = id.clone();
             let sens_vars = all_vars.clone();
-            let sensitive_button = Button::new(SharedString::from(format!("env-sensitive-{id}-{index}")))
-                .variant(ButtonVariant::GhostMuted)
-                .size(ButtonSize::IconMicro)
-                .icon(if sensitive { IconName::Lock } else { IconName::LockOpen })
-                .pressed(sensitive)
-                .tooltip(Tooltip::new(if sensitive { "Sensitive, stored separately" } else { "Plain text" }))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let mut next = sens_vars.clone();
-                                        if let Some(entry) = next.get_mut(offset + index) {
-                        entry.sensitive = !entry.sensitive;
-                    }
-                    this.publish_environment_rows(&sens_id, next, cx);
-                }));
+            let sensitive_button =
+                Button::new(SharedString::from(format!("env-sensitive-{id}-{index}")))
+                    .variant(ButtonVariant::GhostMuted)
+                    .size(ButtonSize::IconMicro)
+                    .icon(if sensitive {
+                        IconName::Lock
+                    } else {
+                        IconName::LockOpen
+                    })
+                    .pressed(sensitive)
+                    .tooltip(Tooltip::new(if sensitive {
+                        "Sensitive, stored separately"
+                    } else {
+                        "Plain text"
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let mut next = sens_vars.clone();
+                        if let Some(entry) = next.get_mut(offset + index) {
+                            entry.sensitive = !entry.sensitive;
+                        }
+                        this.publish_environment_rows(&sens_id, next, cx);
+                    }));
             let rm_id = id.clone();
             let rm_vars = all_vars.clone();
             let remove = Button::new(SharedString::from(format!("env-remove-{id}-{index}")))
@@ -1254,7 +1578,7 @@ impl SettingsView {
                 .icon(IconName::X)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let mut next = rm_vars.clone();
-                                        if offset + index < next.len() {
+                    if offset + index < next.len() {
                         next.remove(offset + index);
                     }
                     this.publish_environment_rows(&rm_id, next, cx);
@@ -1265,9 +1589,26 @@ impl SettingsView {
                     .min_w_0()
                     .items_center()
                     .gap(rems(0.375))
-                    .child(div().w(rems(11.)).flex_shrink_0().child(text_field(&name_input, None, FieldSize::Sm, true, cx)))
-                    .child(div().text_size(TEXT_XS.size).text_color(theme.muted_foreground).child("="))
-                    .child(div().min_w_0().flex_1().child(text_field(&value_input, None, FieldSize::Sm, true, cx)))
+                    .child(div().w(rems(11.)).flex_shrink_0().child(text_field(
+                        &name_input,
+                        None,
+                        FieldSize::Sm,
+                        true,
+                        cx,
+                    )))
+                    .child(
+                        div()
+                            .text_size(TEXT_XS.size)
+                            .text_color(theme.muted_foreground)
+                            .child("="),
+                    )
+                    .child(div().min_w_0().flex_1().child(text_field(
+                        &value_input,
+                        None,
+                        FieldSize::Sm,
+                        true,
+                        cx,
+                    )))
                     .child(sensitive_button)
                     .child(remove)
                     .into_any_element(),
@@ -1287,7 +1628,14 @@ impl SettingsView {
             .control(add);
         if !children.is_empty() {
             settings_row = settings_row.child(
-                div().mt_3().flex().min_w_0().flex_col().gap_2().pb_2().children(children),
+                div()
+                    .mt_3()
+                    .flex()
+                    .min_w_0()
+                    .flex_col()
+                    .gap_2()
+                    .pb_2()
+                    .children(children),
             );
         }
         settings_row.into_any_element()
@@ -1295,13 +1643,25 @@ impl SettingsView {
 
     /// Publishes the rows with valid names (`publishRows`); an incomplete row
     /// keeps the draft without writing.
-    fn publish_environment_rows(&mut self, id: &str, rows: Vec<EnvironmentVariable>, cx: &mut Context<Self>) {
-        self.panels.providers.env_drafts.insert(id.to_owned(), rows.clone());
+    fn publish_environment_rows(
+        &mut self,
+        id: &str,
+        rows: Vec<EnvironmentVariable>,
+        cx: &mut Context<Self>,
+    ) {
+        self.panels
+            .providers
+            .env_drafts
+            .insert(id.to_owned(), rows.clone());
         let mut published = Vec::new();
         for row in &rows {
             let name = row.name.trim();
             if !is_valid_environment_variable_name(name) {
-                if !name.is_empty() || !row.value.is_empty() || !row.sensitive || row.value_redacted.is_some() {
+                if !name.is_empty()
+                    || !row.value.is_empty()
+                    || !row.sensitive
+                    || row.value_redacted.is_some()
+                {
                     cx.notify();
                     return;
                 }
@@ -1321,7 +1681,11 @@ impl SettingsView {
 impl SettingsView {
     // ── models ──────────────────────────────────────────────────────────
 
-    fn model_prefs(&self, instance: &str, cx: &gpui_kit::App) -> (Vec<String>, Vec<String>, Vec<String>) {
+    fn model_prefs(
+        &self,
+        instance: &str,
+        cx: &gpui_kit::App,
+    ) -> (Vec<String>, Vec<String>, Vec<String>) {
         let vm = self.vm(cx);
         let server = serde_json::to_value(&vm.server).unwrap_or(Value::Null);
         let favorites = server
@@ -1331,16 +1695,28 @@ impl SettingsView {
                 entries
                     .iter()
                     .filter(|entry| entry.get("provider").and_then(Value::as_str) == Some(instance))
-                    .filter_map(|entry| entry.get("model").and_then(Value::as_str).map(str::to_owned))
+                    .filter_map(|entry| {
+                        entry
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
                     .collect()
             })
             .unwrap_or_default();
-        let preference = server.get("providerModelPreferences").and_then(|prefs| prefs.get(instance));
+        let preference = server
+            .get("providerModelPreferences")
+            .and_then(|prefs| prefs.get(instance));
         let list = |key: &str| -> Vec<String> {
             preference
                 .and_then(|entry| entry.get(key))
                 .and_then(Value::as_array)
-                .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         (favorites, list("hiddenModels"), list("modelOrder"))
@@ -1365,10 +1741,19 @@ impl SettingsView {
         let hidden_set: HashSet<String> = hidden.iter().cloned().collect();
         let display = group_models_for_display(&models, &favorite_set, &hidden_set, &order);
         let is_hidden = |slug: &str, custom: bool| !custom && hidden_set.contains(slug);
-        let favorite_count = display.iter().filter(|m| favorite_set.contains(m.slug.as_str())).count();
-        let hidden_count = display.iter().filter(|m| is_hidden(m.slug.as_str(), m.is_custom)).count();
+        let favorite_count = display
+            .iter()
+            .filter(|m| favorite_set.contains(m.slug.as_str()))
+            .count();
+        let hidden_count = display
+            .iter()
+            .filter(|m| is_hidden(m.slug.as_str(), m.is_custom))
+            .count();
         let built_in: Vec<_> = models.iter().filter(|m| !m.is_custom).cloned().collect();
-        let all_hidden = !built_in.is_empty() && built_in.iter().all(|m| hidden_set.contains(m.slug.as_str()));
+        let all_hidden = !built_in.is_empty()
+            && built_in
+                .iter()
+                .all(|m| hidden_set.contains(m.slug.as_str()));
         let show_filter = models.len() > FILTER_THRESHOLD;
         let needle = self.panels.providers.model_filter.trim().to_lowercase();
         let filtering = show_filter && !needle.is_empty();
@@ -1405,7 +1790,13 @@ impl SettingsView {
                     cx.notify();
                 },
             );
-            div().w(rems(14.)).max_w_full().child(text_field(&input, None, FieldSize::Sm, false, cx))
+            div().w(rems(14.)).max_w_full().child(text_field(
+                &input,
+                None,
+                FieldSize::Sm,
+                false,
+                cx,
+            ))
         });
         let bulk = (!built_in.is_empty()).then(|| {
             let id = id.clone();
@@ -1432,7 +1823,10 @@ impl SettingsView {
         let plural = |n: usize| if n == 1 { "" } else { "s" };
         let mut counts = format!("{} model{}", models.len(), plural(models.len()));
         if favorite_count > 0 {
-            counts.push_str(&format!(" · {favorite_count} favorite{}", plural(favorite_count)));
+            counts.push_str(&format!(
+                " · {favorite_count} favorite{}",
+                plural(favorite_count)
+            ));
         }
         if hidden_count > 0 {
             counts.push_str(&format!(" · {hidden_count} hidden"));
@@ -1451,20 +1845,28 @@ impl SettingsView {
         });
         let header = div()
             .flex()
-            .flex_wrap()
+            .w_full()
             .items_center()
             .justify_between()
             .gap_2()
-            .children(filter_input)
             .child(
                 div()
                     .flex()
+                    .min_w_0()
+                    .flex_1()
                     .items_center()
                     .gap_2()
-                    .children(bulk)
-                    .child(div().text_size(TEXT_XS.size).text_color(theme.muted_foreground).child(counts)),
+                    .children(filter_input)
+                    .child(
+                        div().flex().items_center().gap_2().children(bulk).child(
+                            div()
+                                .text_size(TEXT_XS.size)
+                                .text_color(theme.muted_foreground)
+                                .child(counts),
+                        ),
+                    ),
             )
-            .children(add_button.map(|button| div().ml_auto().child(button)));
+            .children(add_button.map(|button| div().flex_shrink_0().child(button)));
 
         // Rows.
         let group_label = |label: &'static str, first: bool| {
@@ -1484,13 +1886,21 @@ impl SettingsView {
                     .py_2()
                     .text_size(TEXT_XS.size)
                     .text_color(theme.muted_foreground)
-                    .child(if filtering { "No models match." } else { "No models reported for this provider yet." }),
+                    .child(if filtering {
+                        "No models match."
+                    } else {
+                        "No models reported for this provider yet."
+                    }),
             );
         }
         for (index, model) in visible.iter().enumerate() {
             let slug = model.slug.as_str().to_owned();
             let group = group_of(&slug, model.is_custom);
-            let starts = index == 0 || group_of(visible[index - 1].slug.as_str(), visible[index - 1].is_custom) != group;
+            let starts = index == 0
+                || group_of(
+                    visible[index - 1].slug.as_str(),
+                    visible[index - 1].is_custom,
+                ) != group;
             if starts && favorite_count > 0 && group == 0 {
                 list = list.child(group_label("Favorites", index == 0));
             }
@@ -1501,13 +1911,22 @@ impl SettingsView {
                 list = list.child(group_label("Hidden from picker", index == 0));
             }
             let hidden_now = is_hidden(&slug, model.is_custom);
-            let position = display.iter().position(|m| m.slug.as_str() == slug).unwrap_or(0);
+            let position = display
+                .iter()
+                .position(|m| m.slug.as_str() == slug)
+                .unwrap_or(0);
             let can_up = !filtering
                 && position > 0
-                && group_of(display[position - 1].slug.as_str(), display[position - 1].is_custom) == group;
+                && group_of(
+                    display[position - 1].slug.as_str(),
+                    display[position - 1].is_custom,
+                ) == group;
             let can_down = !filtering
                 && position + 1 < display.len()
-                && group_of(display[position + 1].slug.as_str(), display[position + 1].is_custom) == group;
+                && group_of(
+                    display[position + 1].slug.as_str(),
+                    display[position + 1].is_custom,
+                ) == group;
             let caps = describe_model_capabilities(model).join(" · ");
             let name = model.name.as_str().to_owned();
             let is_favorite = group == 0;
@@ -1515,7 +1934,11 @@ impl SettingsView {
             let star = {
                 let id = id.clone();
                 let slug = slug.clone();
-                let tooltip = Tooltip::new(if is_favorite { "Remove from favorites" } else { "Add to favorites" });
+                let tooltip = Tooltip::new(if is_favorite {
+                    "Remove from favorites"
+                } else {
+                    "Add to favorites"
+                });
                 div()
                     .id(SharedString::from(format!("model-star-{id}-{slug}")))
                     .flex()
@@ -1538,14 +1961,22 @@ impl SettingsView {
                         );
                     }))
             };
-            let mut actions = div().flex().flex_shrink_0().items_center().justify_end().gap(px(2.)).min_w(rems(5.5));
+            let mut actions = div()
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_end()
+                .gap(px(2.))
+                .min_w(rems(5.5));
             if !hidden_now && !filtering {
-                for (direction, icon, label, enabled) in
-                    [(-1i32, IconName::ArrowUp, "Move up", can_up), (1, IconName::ArrowDown, "Move down", can_down)]
-                {
+                for (direction, icon, label, enabled) in [
+                    (-1i32, IconName::ArrowUp, "Move up", can_up),
+                    (1, IconName::ArrowDown, "Move down", can_down),
+                ] {
                     let id = id.clone();
                     let slug = slug.clone();
-                    let order_all: Vec<String> = display.iter().map(|m| m.slug.as_str().to_owned()).collect();
+                    let order_all: Vec<String> =
+                        display.iter().map(|m| m.slug.as_str().to_owned()).collect();
                     actions = actions.child(
                         Button::new(SharedString::from(format!("model-move-{direction}-{id}-{slug}")))
                             .variant(ButtonVariant::GhostMuted)
@@ -1579,7 +2010,8 @@ impl SettingsView {
                     .filter(|entry| entry.slug != slug)
                     .map(|entry| json!({ "slug": entry.slug, "name": entry.name, "capabilities": entry.capabilities }))
                     .collect();
-                let order_without: Vec<String> = order.iter().filter(|s| **s != slug).cloned().collect();
+                let order_without: Vec<String> =
+                    order.iter().filter(|s| **s != slug).cloned().collect();
                 let had_favorite = favorite_set.contains(&slug);
                 actions = actions.child(
                     Button::new(SharedString::from(format!("model-remove-{id}-{slug}")))
@@ -1687,7 +2119,13 @@ impl SettingsView {
                             .child(caps),
                     )
                     .child(actions)
-                    .child(div().flex().flex_shrink_0().items_center().child(picker_switch)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .child(picker_switch),
+                    ),
             );
         }
 
@@ -1696,7 +2134,10 @@ impl SettingsView {
             let id = id.clone();
             let driver = row.driver.clone();
             let row_id = row.id.clone();
-            let builtin_slugs: Vec<String> = built_in.iter().map(|m| m.slug.as_str().to_owned()).collect();
+            let builtin_slugs: Vec<String> = built_in
+                .iter()
+                .map(|m| m.slug.as_str().to_owned())
+                .collect();
             let existing = custom_models.clone();
             let input = self.input(
                 &format!("custom-model-{id}"),
@@ -1710,13 +2151,22 @@ impl SettingsView {
                 },
             );
             let add_row = row.id.clone();
-            let builtin_slugs2: Vec<String> = built_in.iter().map(|m| m.slug.as_str().to_owned()).collect();
+            let builtin_slugs2: Vec<String> = built_in
+                .iter()
+                .map(|m| m.slug.as_str().to_owned())
+                .collect();
             let existing2 = custom_models.clone();
             div()
                 .mt_3()
                 .flex()
                 .gap_2()
-                .child(div().min_w_0().flex_1().child(text_field(&input, None, FieldSize::Sm, false, cx)))
+                .child(div().min_w_0().flex_1().child(text_field(
+                    &input,
+                    None,
+                    FieldSize::Sm,
+                    false,
+                    cx,
+                )))
                 .child(
                     Button::new("add-custom-model-confirm")
                         .variant(ButtonVariant::Outline)
@@ -1746,12 +2196,13 @@ impl SettingsView {
                         })),
                 )
         });
-        let error = self
-            .panels
-            .providers
-            .model_error
-            .clone()
-            .map(|error| div().mt_2().text_size(TEXT_XS.size).text_color(theme.destructive).child(error));
+        let error = self.panels.providers.model_error.clone().map(|error| {
+            div()
+                .mt_2()
+                .text_size(TEXT_XS.size)
+                .text_color(theme.destructive)
+                .child(error)
+        });
 
         SettingsSection::new("Models")
             .child(
@@ -1777,7 +2228,8 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         let input = std::mem::take(&mut self.panels.providers.model_input);
-        let Some(normalized) = turin_shared::model::normalize_custom_model_slug(Some(&input)) else {
+        let Some(normalized) = turin_shared::model::normalize_custom_model_slug(Some(&input))
+        else {
             self.panels.providers.model_error = Some("Enter a model slug.".into());
             cx.notify();
             return;
@@ -1785,7 +2237,9 @@ impl SettingsView {
         let error = if built_in.contains(&normalized) {
             Some("That model is already built in.".to_owned())
         } else if normalized.chars().count() > MAX_CUSTOM_MODEL_LENGTH {
-            Some(format!("Model slugs must be {MAX_CUSTOM_MODEL_LENGTH} characters or less."))
+            Some(format!(
+                "Model slugs must be {MAX_CUSTOM_MODEL_LENGTH} characters or less."
+            ))
         } else if existing.iter().any(|entry| entry.slug == normalized) {
             Some("That custom model is already saved.".to_owned())
         } else {
@@ -1804,7 +2258,11 @@ impl SettingsView {
         next.push(json!({ "slug": normalized, "name": normalized, "capabilities": Value::Null }));
         let rows = self.instance_rows(cx);
         if let Some(row) = rows.iter().find(|row| row.id == row_id) {
-            let config = next_config_blob_with_value(row.instance.config.as_ref(), "customModels", Value::Array(next));
+            let config = next_config_blob_with_value(
+                row.instance.config.as_ref(),
+                "customModels",
+                Value::Array(next),
+            );
             self.update_instance(row, vec![("config", Some(config))], cx);
         }
         self.panels.providers.model_filter.clear();
@@ -1816,7 +2274,6 @@ impl SettingsView {
     // ── usage providers ─────────────────────────────────────────────────
 
     fn usage_providers_section(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.app_theme().clone();
         let vm = self.vm(cx);
         let (id, title) = searchable_setting("usage-providers");
         let sources: Vec<(String, Value)> = serde_json::to_value(&vm.server.usage_limit_sources)
@@ -1855,7 +2312,11 @@ impl SettingsView {
             section = section.child(SettingsRow::new("No hubs configured."));
         }
         for (key, source) in sources {
-            let url = source.get("url").and_then(Value::as_str).unwrap_or("").to_owned();
+            let url = source
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
             let label = source
                 .get("label")
                 .and_then(Value::as_str)
@@ -1863,7 +2324,10 @@ impl SettingsView {
                 .filter(|label| !label.is_empty())
                 .unwrap_or(&url)
                 .to_owned();
-            let enabled = source.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+            let enabled = source
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             let mut description = String::from("CLI Proxy");
             if !enabled {
                 description.push_str(" · Disabled");
@@ -1895,46 +2359,58 @@ impl SettingsView {
                 ),
             );
         }
-        let _ = theme;
         section.into_any_element()
     }
 
     // ── advanced ────────────────────────────────────────────────────────
 
-    fn provider_advanced_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn provider_advanced_section(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let vm = self.vm(cx);
-        let resolved = turin_shared::server_settings::resolve_server_background_activity_settings(&vm.server);
-        let base = turin_shared::server_settings::get_background_activity_base_profile(&vm.server.background_activity);
+        let resolved =
+            turin_shared::server_settings::resolve_server_background_activity_settings(&vm.server);
+        let base = turin_shared::server_settings::get_background_activity_base_profile(
+            &vm.server.background_activity,
+        );
         let defaults = turin_shared::server_settings::get_background_activity_preset_settings(base);
         let seconds = duration_to_seconds(resolved.provider_health_refresh_interval);
         let default_seconds = duration_to_seconds(defaults.provider_health_refresh_interval);
         let (id, title) = searchable_setting("provider-health-check-interval");
         let reset = (seconds != default_seconds).then(|| {
             let current = vm.server.background_activity.clone();
-            let resolved = resolved.clone();
-            div().flex().size_5().items_center().justify_center().child(setting_reset_button(
-                "reset-provider-health-interval",
-                "Reset to default",
-                self.cb(cx, move |this, _, cx| {
-                    let next = background_activity_override_settings(
-                        &current,
-                        &resolved,
-                        BackgroundActivityOverridePatch {
-                            provider_health_refresh_interval: None,
-                            ..Default::default()
-                        },
-                    );
-                    // Clearing the override falls back to the preset.
-                    let mut value = serde_json::to_value(next).unwrap_or(Value::Null);
-                    if let Some(overrides) = value.get_mut("overrides").and_then(Value::as_object_mut) {
-                        overrides.remove("providerHealthRefreshInterval");
-                    }
-                    this.update_server(json!({ "backgroundActivity": value }), cx);
-                }),
-            ))
+            div()
+                .flex()
+                .size_5()
+                .items_center()
+                .justify_center()
+                .child(setting_reset_button(
+                    "reset-provider-health-interval",
+                    "Reset to default",
+                    self.cb(cx, move |this, _, cx| {
+                        let next = background_activity_override_settings(
+                            &current,
+                            &resolved,
+                            BackgroundActivityOverridePatch {
+                                provider_health_refresh_interval: None,
+                                ..Default::default()
+                            },
+                        );
+                        // Clearing the override falls back to the preset.
+                        let mut value = serde_json::to_value(next).unwrap_or(Value::Null);
+                        if let Some(overrides) =
+                            value.get_mut("overrides").and_then(Value::as_object_mut)
+                        {
+                            overrides.remove("providerHealthRefreshInterval");
+                        }
+                        this.update_server(json!({ "backgroundActivity": value }), cx);
+                    }),
+                ))
         });
         let current = vm.server.background_activity.clone();
-        let resolved_for_write = resolved.clone();
+        let resolved_for_write = resolved;
         let control = self.number_field("provider-health-interval", seconds, 0, PROVIDER_HEALTH_INTERVAL_STEP_SECONDS, window, cx, move |this, value, cx| {
             let next = background_activity_override_settings(
                 &current,
@@ -1983,7 +2459,11 @@ impl SettingsView {
                 }
             },
         );
-        let step_button = |name: &'static str, icon: IconName, delta: i64, on_commit: Rc<dyn Fn(&mut Self, u64, &mut Context<Self>)>, cx: &mut Context<Self>| {
+        let step_button = |name: &'static str,
+                           icon: IconName,
+                           delta: i64,
+                           on_commit: Rc<dyn Fn(&mut Self, u64, &mut Context<Self>)>,
+                           cx: &mut Context<Self>| {
             div()
                 .id(SharedString::from(format!("{id}-{name}")))
                 .flex()
@@ -2001,7 +2481,13 @@ impl SettingsView {
                     on_commit(this, next, cx);
                 }))
         };
-        let dec = step_button("dec", IconName::Minus, -(step as i64), on_commit.clone(), cx);
+        let dec = step_button(
+            "dec",
+            IconName::Minus,
+            -(step as i64),
+            on_commit.clone(),
+            cx,
+        );
         let inc = step_button("inc", IconName::Plus, step as i64, on_commit.clone(), cx);
         div()
             .flex()
@@ -2013,7 +2499,11 @@ impl SettingsView {
             .rounded(RADIUS_LG)
             .border_1()
             .border_color(theme.input)
-            .bg(if theme.is_dark() { with_alpha(theme.input, 0.32).into() } else { theme.background })
+            .bg(if theme.is_dark() {
+                with_alpha(theme.input, 0.32).into()
+            } else {
+                theme.background
+            })
             .child(dec)
             .child(
                 div()

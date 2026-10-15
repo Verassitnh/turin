@@ -17,7 +17,9 @@ pub enum RelativeTimeState {
 }
 
 fn parse(iso: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(iso).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(iso)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 /// `formatRelativeTime` against an explicit `now`.
@@ -37,20 +39,35 @@ pub fn format_relative_time(iso: &str, now: DateTime<Utc>) -> Option<RelativeTim
     }
     let minutes = seconds / 60;
     if minutes < 60 {
-        return Some(RelativeTimeParts { value: format!("{minutes}m"), suffix: Some("ago") });
+        return Some(RelativeTimeParts {
+            value: format!("{minutes}m"),
+            suffix: Some("ago"),
+        });
     }
     let hours = minutes / 60;
     if hours < 24 {
-        return Some(RelativeTimeParts { value: format!("{hours}h"), suffix: Some("ago") });
+        return Some(RelativeTimeParts {
+            value: format!("{hours}h"),
+            suffix: Some("ago"),
+        });
     }
-    Some(RelativeTimeParts { value: format!("{}d", hours / 24), suffix: Some("ago") })
+    Some(RelativeTimeParts {
+        value: format!("{}d", hours / 24),
+        suffix: Some("ago"),
+    })
 }
 
 pub fn format_relative_time_label(iso: &str, now: DateTime<Utc>) -> String {
     match format_relative_time(iso, now) {
         None => String::new(),
-        Some(RelativeTimeParts { value, suffix: Some(suffix) }) => format!("{value} {suffix}"),
-        Some(RelativeTimeParts { value, suffix: None }) => value,
+        Some(RelativeTimeParts {
+            value,
+            suffix: Some(suffix),
+        }) => format!("{value} {suffix}"),
+        Some(RelativeTimeParts {
+            value,
+            suffix: None,
+        }) => value,
     }
 }
 
@@ -87,7 +104,13 @@ mod tests {
         // A future instant reads as just now.
         assert_eq!(format_relative_time_label(iso, at(9, 0, 0)), "just now");
         assert_eq!(format_relative_time_label("nope", at(9, 0, 0)), "");
-        assert_eq!(get_relative_time_state(None, at(9, 0, 0)), RelativeTimeState::Missing);
-        assert_eq!(get_relative_time_state(Some("nope"), at(9, 0, 0)), RelativeTimeState::Invalid);
+        assert_eq!(
+            get_relative_time_state(None, at(9, 0, 0)),
+            RelativeTimeState::Missing
+        );
+        assert_eq!(
+            get_relative_time_state(Some("nope"), at(9, 0, 0)),
+            RelativeTimeState::Invalid
+        );
     }
 }

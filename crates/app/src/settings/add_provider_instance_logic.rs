@@ -190,12 +190,18 @@ mod tests {
 
     #[test]
     fn blocks_next_from_identity_to_config_while_the_instance_id_is_invalid() {
-        assert_eq!(resolve_wizard_navigation(1, 2, 3, &invalid_id()), blocked(1));
+        assert_eq!(
+            resolve_wizard_navigation(1, 2, 3, &invalid_id()),
+            blocked(1)
+        );
     }
 
     #[test]
     fn stops_a_direct_driver_to_config_skip_at_identity_and_surfaces_its_error() {
-        assert_eq!(resolve_wizard_navigation(0, 2, 3, &invalid_id()), blocked(1));
+        assert_eq!(
+            resolve_wizard_navigation(0, 2, 3, &invalid_id()),
+            blocked(1)
+        );
     }
 
     #[test]
@@ -254,8 +260,7 @@ mod tests {
     #[test]
     fn derives_a_collision_free_instance_id_without_exceeding_the_slug_limit() {
         let derive = |label: &str| format!("codex_{label}");
-        let existing: HashSet<String> =
-            ["codex_work".to_owned(), "codex_work_2".to_owned()].into();
+        let existing: HashSet<String> = ["codex_work".to_owned(), "codex_work_2".to_owned()].into();
         assert_eq!(
             derive_available_instance_id(derive, "work", &existing),
             "codex_work_3"
@@ -295,7 +300,10 @@ mod tests {
         );
         let claude = get_provider_identity_draft(&drafts, "claudeAgent");
         assert_eq!(claude.label, "Work");
-        assert_eq!(claude.instance_id_override.as_deref(), Some("claudeAgent_work"));
+        assert_eq!(
+            claude.instance_id_override.as_deref(),
+            Some("claudeAgent_work")
+        );
     }
 
     #[test]
@@ -304,7 +312,10 @@ mod tests {
             read_codex_setup_mode(Some(&json!({ "setupMode": "managed" }))),
             CodexSetupMode::Managed
         );
-        assert_eq!(read_codex_setup_mode(Some(&json!({}))), CodexSetupMode::Existing);
+        assert_eq!(
+            read_codex_setup_mode(Some(&json!({}))),
+            CodexSetupMode::Existing
+        );
         assert_eq!(read_codex_setup_mode(None), CodexSetupMode::Existing);
     }
 }

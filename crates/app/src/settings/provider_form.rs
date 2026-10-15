@@ -11,9 +11,9 @@ use std::collections::HashSet;
 
 use serde_json::{Map, Value};
 use turin_contracts::settings::{
-    ClearWhenEmpty, ProviderSettingsFormControl, ProviderSettingsFormOption,
-    claude_settings_form_fields, codex_settings_form_fields, CLAUDE_SETTINGS_FORM_ORDER,
-    CODEX_SETTINGS_FORM_ORDER,
+    CLAUDE_SETTINGS_FORM_ORDER, CODEX_SETTINGS_FORM_ORDER, ClearWhenEmpty,
+    ProviderSettingsFormControl, ProviderSettingsFormOption, claude_settings_form_fields,
+    codex_settings_form_fields,
 };
 use turin_provider_core::server_provider::ServerProviderModel;
 use turin_shared::model::{CustomModelDefinition, read_custom_model_entries};
@@ -91,7 +91,9 @@ fn field_from_contract(
     }
     Some(ProviderSettingsFieldModel {
         key: contract.field.to_owned(),
-        control: annotation.control.unwrap_or(ProviderSettingsFormControl::Text),
+        control: annotation
+            .control
+            .unwrap_or(ProviderSettingsFormControl::Text),
         label: contract
             .title
             .map(str::to_owned)
@@ -371,8 +373,11 @@ pub fn derive_provider_models_for_display(
     custom_models: &[CustomModelDefinition],
 ) -> Vec<ServerProviderModel> {
     let live = live_models.unwrap_or_default();
-    let server_models: Vec<ServerProviderModel> =
-        live.iter().filter(|model| !model.is_custom).cloned().collect();
+    let server_models: Vec<ServerProviderModel> = live
+        .iter()
+        .filter(|model| !model.is_custom)
+        .cloned()
+        .collect();
     let server_slugs: HashSet<&str> = server_models.iter().map(|m| m.slug.as_str()).collect();
     let mut models = server_models.clone();
     for entry in custom_models {
@@ -442,8 +447,16 @@ pub fn group_models_for_display(
     ordered
         .iter()
         .filter(|model| is_favorite(model))
-        .chain(ordered.iter().filter(|model| !is_favorite(model) && !is_hidden(model)))
-        .chain(ordered.iter().filter(|model| !is_favorite(model) && is_hidden(model)))
+        .chain(
+            ordered
+                .iter()
+                .filter(|model| !is_favorite(model) && !is_hidden(model)),
+        )
+        .chain(
+            ordered
+                .iter()
+                .filter(|model| !is_favorite(model) && is_hidden(model)),
+        )
         .map(|model| (*model).clone())
         .collect()
 }
@@ -499,7 +512,10 @@ pub fn describe_model_capabilities(model: &ServerProviderModel) -> Vec<&'static 
     if has_fast {
         labels.push("Fast mode");
     }
-    if descriptors.iter().any(|descriptor| id_of(descriptor) == "thinking") {
+    if descriptors
+        .iter()
+        .any(|descriptor| id_of(descriptor) == "thinking")
+    {
         labels.push("Thinking");
     }
     if descriptors.iter().any(|descriptor| {
@@ -569,7 +585,10 @@ mod tests {
             .find(|field| field.key == "serverPassword")
             .unwrap();
         assert_eq!(field.label, "Server password");
-        assert_eq!(field.description.as_deref(), Some("Stored in plain text on disk."));
+        assert_eq!(
+            field.description.as_deref(),
+            Some("Stored in plain text on disk.")
+        );
         assert_eq!(field.control, ProviderSettingsFormControl::Password);
     }
 
@@ -706,8 +725,16 @@ mod tests {
     fn custom_rows_come_from_settings_and_skip_built_in_slugs() {
         let live = vec![model("a", false), model("live-custom", true)];
         let custom = vec![
-            CustomModelDefinition { slug: "a".into(), name: "Renamed".into(), capabilities: None },
-            CustomModelDefinition { slug: "mine".into(), name: "mine".into(), capabilities: None },
+            CustomModelDefinition {
+                slug: "a".into(),
+                name: "Renamed".into(),
+                capabilities: None,
+            },
+            CustomModelDefinition {
+                slug: "mine".into(),
+                name: "mine".into(),
+                capabilities: None,
+            },
         ];
         let display = derive_provider_models_for_display(Some(&live), &custom);
         assert_eq!(slugs(&display), vec!["a", "mine"]);

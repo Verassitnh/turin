@@ -5,9 +5,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::{
-    AnyElement, Bounds, Context, CursorStyle, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels, SharedString,
-    Styled as _, canvas, div, px, relative,
+    AnyElement, Bounds, Context, CursorStyle, InteractiveElement as _, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels, SharedString, Styled as _, canvas,
+    div, px, relative,
 };
 
 use super::view::SettingsView;

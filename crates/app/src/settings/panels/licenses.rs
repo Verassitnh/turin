@@ -27,7 +27,10 @@ pub struct LicensesState {
 }
 
 /// `filterThirdPartyLicenseEntries`.
-pub fn filter_license_entries<'a>(entries: &'a [LicenseEntry], query: &str) -> Vec<&'a LicenseEntry> {
+pub fn filter_license_entries<'a>(
+    entries: &'a [LicenseEntry],
+    query: &str,
+) -> Vec<&'a LicenseEntry> {
     let lowered = query.trim().to_lowercase();
     let terms: Vec<&str> = lowered.split_whitespace().collect();
     if terms.is_empty() {
@@ -67,11 +70,20 @@ pub fn format_license_bundles(bundles: &[String]) -> String {
 
 /// `thirdPartyLicenseEntryKey`.
 fn entry_key(entry: &LicenseEntry) -> String {
-    format!("{}:{}:{}", entry.kind, entry.name, entry.version.as_deref().unwrap_or(""))
+    format!(
+        "{}:{}:{}",
+        entry.kind,
+        entry.name,
+        entry.version.as_deref().unwrap_or("")
+    )
 }
 
 impl SettingsView {
-    pub(super) fn render_licenses(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_licenses(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let theme = cx.app_theme().clone();
         let vm = self.vm(cx);
         let state = &self.panels.licenses;
@@ -107,23 +119,37 @@ impl SettingsView {
                 .into_any_element()
         } else {
             let query = self.panels.licenses.query.clone();
-            let input = self.input_live("licenses-query", &query, "Search licenses", window, cx, |this, text, _, cx| {
-                this.panels.licenses.query = text;
-                cx.notify();
-            });
+            let input = self.input_live(
+                "licenses-query",
+                &query,
+                "Search licenses",
+                window,
+                cx,
+                |this, text, _, cx| {
+                    this.panels.licenses.query = text;
+                    cx.notify();
+                },
+            );
             div()
                 .flex()
                 .items_center()
                 .gap_2()
                 .child(count)
-                .child(div().w(rems(11.)).child(text_field_leading(
-                    &input,
-                    None,
-                    FieldSize::Sm,
-                    false,
-                    Some(Icon::new(IconName::Search).size(rems(0.75)).color(theme.muted_foreground).into_any_element()),
-                    cx,
-                )))
+                .child(
+                    div().w(rems(11.)).child(text_field_leading(
+                        &input,
+                        None,
+                        FieldSize::Sm,
+                        false,
+                        Some(
+                            Icon::new(IconName::Search)
+                                .size(rems(0.75))
+                                .color(theme.muted_foreground)
+                                .into_any_element(),
+                        ),
+                        cx,
+                    )),
+                )
                 .into_any_element()
         };
 
@@ -163,13 +189,21 @@ impl SettingsView {
                         .cursor(CursorStyle::PointingHand)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let current = &mut this.panels.licenses.open_entry;
-                            *current = if current.as_deref() == Some(toggle_key.as_str()) { None } else { Some(toggle_key.clone()) };
+                            *current = if current.as_deref() == Some(toggle_key.as_str()) {
+                                None
+                            } else {
+                                Some(toggle_key.clone())
+                            };
                             cx.notify();
                         }))
                         .child(
-                            Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
-                                .size(rems(0.875))
-                                .color(theme.muted_foreground),
+                            Icon::new(if open {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size(rems(0.875))
+                            .color(theme.muted_foreground),
                         )
                         .child(
                             div()
@@ -202,7 +236,11 @@ impl SettingsView {
                                 .truncate()
                                 .text_size(TEXT_XS.size)
                                 .text_color(theme.muted_foreground)
-                                .child(format!("{} · {}", entry.license, format_license_bundles(&entry.bundles))),
+                                .child(format!(
+                                    "{} · {}",
+                                    entry.license,
+                                    format_license_bundles(&entry.bundles)
+                                )),
                         ),
                 )
                 .children(source.map(|url| {
@@ -216,21 +254,19 @@ impl SettingsView {
                             .on_click(move |_, _, cx| cx.open_url(&url)),
                     )
                 }));
-            section = section.child(
-                div().flex().flex_col().child(row).when(open, |this| {
-                    this.child(
-                        div().px(rems(2.5)).pt_1().pb_4().child(
-                            div()
-                                .max_w(rems(42.))
-                                .font_family(theme.fonts.mono.clone())
-                                .text_size(TEXT_XS.size)
-                                .line_height(rems(1.25))
-                                .text_color(with_alpha(theme.foreground, 0.8))
-                                .child(entry.notice_text.clone()),
-                        ),
-                    )
-                }),
-            );
+            section = section.child(div().flex().flex_col().child(row).when(open, |this| {
+                this.child(
+                    div().px(rems(2.5)).pt_1().pb_4().child(
+                        div()
+                            .max_w(rems(42.))
+                            .font_family(theme.fonts.mono.clone())
+                            .text_size(TEXT_XS.size)
+                            .line_height(rems(1.25))
+                            .text_color(with_alpha(theme.foreground, 0.8))
+                            .child(entry.notice_text.clone()),
+                    ),
+                )
+            }));
         }
         vec![section.into_any_element()]
     }
@@ -260,13 +296,23 @@ mod tests {
         ];
         assert_eq!(filter_license_entries(&entries, "  ").len(), 2);
         assert_eq!(filter_license_entries(&entries, "MIT")[0].name, "tokio");
-        assert_eq!(filter_license_entries(&entries, "apache desktop")[0].name, "gpui");
+        assert_eq!(
+            filter_license_entries(&entries, "apache desktop")[0].name,
+            "gpui"
+        );
         assert!(filter_license_entries(&entries, "tokio desktop").is_empty());
     }
 
     #[test]
     fn labels_known_bundles_and_keeps_unknown_ones() {
-        let bundles = vec!["ios".to_owned(), "device-tools".to_owned(), "custom".to_owned()];
-        assert_eq!(format_license_bundles(&bundles), "iOS, Device tools, custom");
+        let bundles = vec![
+            "ios".to_owned(),
+            "device-tools".to_owned(),
+            "custom".to_owned(),
+        ];
+        assert_eq!(
+            format_license_bundles(&bundles),
+            "iOS, Device tools, custom"
+        );
     }
 }

@@ -6,13 +6,13 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use turin_contracts::model_selection::ModelSelection;
 use turin_contracts::provider_instance::{ProviderInstanceConfig, ProviderInstanceId};
 use turin_contracts::settings::{
-    BackgroundActivityOverrides, BackgroundActivityProfile, BackgroundActivitySchemaVersion, BackgroundActivityProfileSelection,
-    BackgroundActivitySettings, ClientSettings, ServerSettings, ServerSettingsPatch,
-    SidebarProjectGroupingMode, UnifiedSettings, default_unified_settings,
+    BackgroundActivityOverrides, BackgroundActivityProfile, BackgroundActivityProfileSelection,
+    BackgroundActivitySchemaVersion, BackgroundActivitySettings, ClientSettings, ServerSettings,
+    ServerSettingsPatch, SidebarProjectGroupingMode, UnifiedSettings, default_unified_settings,
 };
-use turin_contracts::model_selection::ModelSelection;
 use turin_shared::server_settings::{
     ResolvedBackgroundActivity, normalize_background_activity_settings,
     normalize_server_background_activity_settings, resolve_server_background_activity_settings,
@@ -193,9 +193,7 @@ pub fn format_diagnostics_description(input: &DiagnosticsDescriptionInput<'_>) -
     match (traces_url, metrics_url) {
         (Some(traces), Some(metrics)) => match collapse_otel_signals_url(traces, metrics) {
             Some(collapsed) => format!("{mode}. Exporting OTEL to {collapsed}."),
-            None => format!(
-                "{mode}. Exporting OTEL traces to {traces} and metrics to {metrics}."
-            ),
+            None => format!("{mode}. Exporting OTEL traces to {traces} and metrics to {metrics}."),
         },
         (Some(traces), None) => format!("{mode}. Exporting OTEL traces to {traces}."),
         (None, Some(metrics)) => format!("{mode}. Exporting OTEL metrics to {metrics}."),
@@ -214,8 +212,9 @@ pub fn build_provider_instance_update_patch(
     provider_instances.insert(instance_id.clone(), instance);
     ServerSettingsPatch {
         provider_instances: Some(provider_instances),
-        text_generation_model_selection: text_generation_model_selection
-            .map(|selection| serde_json::from_value(serde_json::to_value(selection).unwrap()).unwrap()),
+        text_generation_model_selection: text_generation_model_selection.map(|selection| {
+            serde_json::from_value(serde_json::to_value(selection).unwrap()).unwrap()
+        }),
         ..Default::default()
     }
 }
@@ -295,7 +294,9 @@ pub fn background_activity_override_settings(
     }
 }
 
-fn background_activity_base_profile(settings: &BackgroundActivitySettings) -> BackgroundActivityProfile {
+fn background_activity_base_profile(
+    settings: &BackgroundActivitySettings,
+) -> BackgroundActivityProfile {
     turin_shared::server_settings::get_background_activity_base_profile(settings)
 }
 
@@ -318,7 +319,10 @@ mod tests {
     #[test]
     fn typography_settings_restore_detects_family_and_size_changes_by_font_row() {
         let defaults = default_unified_settings().client;
-        assert_eq!(get_changed_typography_setting_labels(&defaults), Vec::<&str>::new());
+        assert_eq!(
+            get_changed_typography_setting_labels(&defaults),
+            Vec::<&str>::new()
+        );
         let mut changed = defaults.clone();
         changed.font_size_interface = InterfaceFontSize::new(18).unwrap();
         changed.font_family_code = FontFamilyPreference::new("Fira Code").unwrap();
@@ -338,7 +342,9 @@ mod tests {
         settings.provider_health_refresh_interval = 7 * 60_000;
         assert!(has_changed_background_activity_settings(&settings));
 
-        assert!(!has_changed_background_activity_settings(&default_server_settings()));
+        assert!(!has_changed_background_activity_settings(
+            &default_server_settings()
+        ));
     }
 
     #[test]
@@ -350,7 +356,8 @@ mod tests {
 
     #[test]
     fn shows_the_effective_legacy_preset_and_marks_custom_legacy_intervals_as_advanced() {
-        let performance = get_background_activity_preset_settings(BackgroundActivityProfile::Performance);
+        let performance =
+            get_background_activity_preset_settings(BackgroundActivityProfile::Performance);
         let mut settings = default_server_settings();
         settings.background_activity_profile = BackgroundActivityProfile::Performance;
         settings.automatic_git_fetch_interval = performance.automatic_git_fetch_interval;
@@ -426,14 +433,23 @@ mod tests {
         assert!(is_project_grouping_enabled(Repository));
         assert!(is_project_grouping_enabled(RepositoryPath));
         assert!(!is_project_grouping_enabled(Separate));
-        assert_eq!(project_grouping_mode_from_toggle(true, Repository), Repository);
-        assert_eq!(project_grouping_mode_from_toggle(false, Repository), Separate);
+        assert_eq!(
+            project_grouping_mode_from_toggle(true, Repository),
+            Repository
+        );
+        assert_eq!(
+            project_grouping_mode_from_toggle(false, Repository),
+            Separate
+        );
     }
 
     #[test]
     fn project_grouping_toggle_restores_repository_path_grouping_when_cycled() {
         use SidebarProjectGroupingMode::*;
-        assert_eq!(project_grouping_mode_from_toggle(false, RepositoryPath), Separate);
+        assert_eq!(
+            project_grouping_mode_from_toggle(false, RepositoryPath),
+            Separate
+        );
         assert_eq!(
             project_grouping_mode_from_toggle(true, RepositoryPath),
             RepositoryPath
@@ -498,7 +514,9 @@ mod tests {
         }))
         .unwrap();
         let mut settings = default_server_settings();
-        settings.provider_instances.insert(other_id.clone(), other.clone());
+        settings
+            .provider_instances
+            .insert(other_id.clone(), other.clone());
 
         let patch = build_provider_instance_update_patch(
             &settings,

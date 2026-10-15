@@ -9,18 +9,16 @@
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, CursorStyle, ElementId, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    div, px, rems,
+    AnyElement, Context, CursorStyle, ElementId, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px, rems,
 };
 use serde_json::{Value, json};
 use turin_contracts::model::ProviderOptionDescriptor;
 use turin_provider_core::server_provider::{ServerProvider, ServerProviderState};
 
-use super::controls::{MenuState, PopupAlign, SelectItem, popup_list, with_popup};
+use super::controls::{PopupAlign, SelectItem, popup_list, with_popup};
 use super::provider_meta::instance_label;
 use super::view::{SettingsView, Which};
-use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_MD, TEXT_SM};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Icon, IconName};
@@ -115,7 +113,9 @@ fn picker_trigger(
         .text_size(TEXT_SM.size)
         .font_weight(FontWeight::MEDIUM)
         .cursor(CursorStyle::PointingHand)
-        .when(open, |this| this.bg(theme.accent).text_color(theme.accent_foreground))
+        .when(open, |this| {
+            this.bg(theme.accent).text_color(theme.accent_foreground)
+        })
         .when(!open, |this| {
             this.text_color(theme.secondary_label)
                 .hover(|style| style.bg(theme.accent).text_color(theme.foreground))
@@ -146,8 +146,7 @@ impl SettingsView {
     ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let options = model_options(providers);
-        let current = selection_fields(selection)
-            .or_else(|| resolve_default_selection(providers));
+        let current = selection_fields(selection).or_else(|| resolve_default_selection(providers));
         let Some((instance_id, model)) = current else {
             return div()
                 .text_size(TEXT_SM.size)
@@ -228,7 +227,12 @@ impl SettingsView {
             )
             .into_any_element()
         });
-        let picker = with_popup(trigger, popup, PopupAlign::End, rems(1.75).to_pixels(px(16.)));
+        let picker = with_popup(
+            trigger,
+            popup,
+            PopupAlign::End,
+            rems(1.75).to_pixels(px(16.)),
+        );
 
         // TraitsPicker: the selected model's option descriptors.
         let traits = active.and_then(|option| {
@@ -272,7 +276,9 @@ impl SettingsView {
                             );
                             let current = selected_value(&selected_options, select.id.as_str())
                                 .and_then(|value| value.as_str().map(str::to_owned))
-                                .or_else(|| select.current_value.as_ref().map(|v| v.as_str().to_owned()))
+                                .or_else(|| {
+                                    select.current_value.as_ref().map(|v| v.as_str().to_owned())
+                                })
                                 .or_else(|| {
                                     select
                                         .options
@@ -283,7 +289,11 @@ impl SettingsView {
                             for choice in &select.options {
                                 items.push(
                                     SelectItem::new(
-                                        format!("{}\u{1}{}", select.id.as_str(), choice.id.as_str()),
+                                        format!(
+                                            "{}\u{1}{}",
+                                            select.id.as_str(),
+                                            choice.id.as_str()
+                                        ),
                                         div().pl_2().child(choice.label.as_str().to_owned()),
                                     )
                                     .selected(current.as_deref() == Some(choice.id.as_str())),
@@ -313,29 +323,30 @@ impl SettingsView {
                 let on_change = on_change.clone();
                 let base = json!({ "instanceId": instance_id, "model": model });
                 let previous = selected_options.clone();
-                let pick: std::rc::Rc<dyn Fn(SharedString, &mut gpui_kit::Window, &mut gpui_kit::App)> =
-                    std::rc::Rc::new(move |item_id, _, cx| {
-                        let Some((id, value)) = item_id.split_once('\u{1}') else {
-                            return;
-                        };
-                        let value = match value {
-                            "true" => json!(true),
-                            "false" => json!(false),
-                            other => json!(other),
-                        };
-                        let mut next: Vec<Value> = previous
-                            .iter()
-                            .filter(|selection| selection.get("id").and_then(Value::as_str) != Some(id))
-                            .cloned()
-                            .collect();
-                        next.push(json!({ "id": id, "value": value }));
-                        let mut selection = base.clone();
-                        selection["options"] = Value::Array(next);
-                        entity.update(cx, |this, cx| {
-                            on_change(this, selection, cx);
-                            cx.notify();
-                        });
+                let pick: std::rc::Rc<
+                    dyn Fn(SharedString, &mut gpui_kit::Window, &mut gpui_kit::App),
+                > = std::rc::Rc::new(move |item_id, _, cx| {
+                    let Some((id, value)) = item_id.split_once('\u{1}') else {
+                        return;
+                    };
+                    let value = match value {
+                        "true" => json!(true),
+                        "false" => json!(false),
+                        other => json!(other),
+                    };
+                    let mut next: Vec<Value> = previous
+                        .iter()
+                        .filter(|selection| selection.get("id").and_then(Value::as_str) != Some(id))
+                        .cloned()
+                        .collect();
+                    next.push(json!({ "id": id, "value": value }));
+                    let mut selection = base.clone();
+                    selection["options"] = Value::Array(next);
+                    entity.update(cx, |this, cx| {
+                        on_change(this, selection, cx);
+                        cx.notify();
                     });
+                });
                 popup_list(
                     SharedString::from(format!("popup-{traits_menu}")),
                     items,
@@ -345,7 +356,12 @@ impl SettingsView {
                 )
                 .into_any_element()
             });
-            Some(with_popup(trigger, popup, PopupAlign::End, rems(1.75).to_pixels(px(16.))))
+            Some(with_popup(
+                trigger,
+                popup,
+                PopupAlign::End,
+                rems(1.75).to_pixels(px(16.)),
+            ))
         });
 
         div()
@@ -360,7 +376,12 @@ impl SettingsView {
             .into_any_element()
     }
 
-    pub(super) fn default_model_row(&mut self, json: &super::rows::Json, description: &'static str, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn default_model_row(
+        &mut self,
+        json: &super::rows::Json,
+        description: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let vm = self.vm(cx);
         let selection = json.get(Which::Server, "defaultModelSelection").clone();
         let is_automatic = selection.is_null();
@@ -375,8 +396,12 @@ impl SettingsView {
             let action = self.cb(cx, |this, _, cx| {
                 this.update_server(json!({ "defaultModelSelection": Value::Null }), cx)
             });
-            super::layout::setting_reset_button("reset-default-model", "Reset to default", move |w, c| action(w, c))
-                .into_any_element()
+            super::layout::setting_reset_button(
+                "reset-default-model",
+                "Reset to default",
+                move |w, c| action(w, c),
+            )
+            .into_any_element()
         });
         let mut row = super::layout::SettingsRow::new("Model")
             .id("default-model")
@@ -392,7 +417,9 @@ impl SettingsView {
     pub(super) fn text_generation_model_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let vm = self.vm(cx);
         let json = self.json(cx);
-        let selection = json.get(Which::Server, "textGenerationModelSelection").clone();
+        let selection = json
+            .get(Which::Server, "textGenerationModelSelection")
+            .clone();
         let text_providers: Vec<ServerProvider> = vm
             .providers
             .iter()
@@ -468,9 +495,4 @@ fn traits_summary(descriptors: &[ProviderOptionDescriptor], selected: &[Value]) 
         }
     }
     parts.join(" · ")
-}
-
-#[allow(dead_code)]
-fn _unused(_: &MenuState, _: f32) {
-    let _ = with_alpha(crate::theme::tokens::tw::BLACK, 0.);
 }

@@ -126,18 +126,17 @@ impl SettingsView {
             )
             .into_any_element(),
         )
-        .map(|element| {
-            let _ = label;
-            element
-        })
     }
 
-    pub(super) fn bool_row(&mut self, cx: &mut Context<Self>, json: &Json, spec: BoolRow) -> AnyElement {
+    pub(super) fn bool_row(
+        &mut self,
+        cx: &mut Context<Self>,
+        json: &Json,
+        spec: BoolRow,
+    ) -> AnyElement {
         let checked = json.bool(spec.which, spec.key);
         let key = spec.key;
         let which = spec.which;
-        let toggle = self.cb(cx, |_, _, _| {});
-        let _ = toggle;
         let entity = cx.entity();
         let control = switch(
             SharedString::from(format!("switch-{}", spec.search_id)),
@@ -209,7 +208,16 @@ impl SettingsView {
             .into_iter()
             .map(|(value, label, selected)| (value, label.into_any_element(), selected))
             .collect();
-        self.select_control_sized(cx, menu_id, label.into_any_element(), options, width, SelectSize::Sm, check, on_pick)
+        self.select_control_sized(
+            cx,
+            menu_id,
+            label.into_any_element(),
+            options,
+            width,
+            SelectSize::Sm,
+            check,
+            on_pick,
+        )
     }
 
     /// [`Self::select_control`] with element labels (icons, descriptions).
@@ -222,7 +230,16 @@ impl SettingsView {
         width: SelectWidth,
         on_pick: impl Fn(&mut Self, Value, &mut Window, &mut Context<Self>) + 'static,
     ) -> AnyElement {
-        self.select_control_sized(cx, menu_id, label, options, width, SelectSize::Sm, false, on_pick)
+        self.select_control_sized(
+            cx,
+            menu_id,
+            label,
+            options,
+            width,
+            SelectSize::Sm,
+            false,
+            on_pick,
+        )
     }
 
     pub(super) fn select_control_sized(
@@ -312,8 +329,12 @@ impl SettingsView {
             .flex_wrap()
             .items_center()
             .justify_end()
-            .child(with_popup(trigger, popup, PopupAlign::End, trigger_height(size)))
+            .child(with_popup(
+                trigger,
+                popup,
+                PopupAlign::End,
+                trigger_height(size),
+            ))
             .into_any_element()
     }
 }
-

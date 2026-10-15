@@ -86,7 +86,10 @@ const CODEX_PRESETS: &[DescriptorPreset] = &[
         id: "serviceTier",
         label: "Speed",
         type_: EditorDescriptorType::Select,
-        choices: &[choice("default", "Standard", true), choice("fast", "Fast", false)],
+        choices: &[
+            choice("default", "Standard", true),
+            choice("fast", "Fast", false),
+        ],
     },
 ];
 
@@ -149,7 +152,10 @@ const OPENCODE_PRESETS: &[DescriptorPreset] = &[
         id: "agent",
         label: "Agent",
         type_: EditorDescriptorType::Select,
-        choices: &[choice("build", "Build", true), choice("plan", "Plan", false)],
+        choices: &[
+            choice("build", "Build", true),
+            choice("plan", "Plan", false),
+        ],
     },
 ];
 
@@ -244,7 +250,11 @@ fn descriptor_to_editor(descriptor: &ProviderOptionDescriptor) -> EditorDescript
                 .position(|option| {
                     select.current_value.as_ref().map(|v| v.as_str()) == Some(option.id.as_str())
                 })
-                .or_else(|| choices.iter().position(|option| option.is_default == Some(true)));
+                .or_else(|| {
+                    choices
+                        .iter()
+                        .position(|option| option.is_default == Some(true))
+                });
             EditorDescriptor {
                 key: new_editor_key(),
                 type_: EditorDescriptorType::Select,
@@ -532,7 +542,11 @@ mod tests {
         let reopened = draft_from_definition(&definition);
         assert_eq!(reopened.name, "My Model");
         assert_eq!(
-            reopened.descriptors.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+            reopened
+                .descriptors
+                .iter()
+                .map(|d| d.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["reasoningEffort", "fastMode"]
         );
         assert_eq!(
@@ -560,7 +574,11 @@ mod tests {
             Some("claudeAgent"),
         );
         assert_eq!(
-            descriptors[0].choices.iter().map(|c| c.is_default).collect::<Vec<_>>(),
+            descriptors[0]
+                .choices
+                .iter()
+                .map(|c| c.is_default)
+                .collect::<Vec<_>>(),
             vec![false, true]
         );
         let definition = definition_from_draft(&draft(|d| d.descriptors = descriptors));
@@ -586,7 +604,11 @@ mod tests {
             Some("claudeAgent"),
         );
         assert_eq!(
-            copied[0].choices.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            copied[0]
+                .choices
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["high"]
         );
     }
@@ -594,7 +616,8 @@ mod tests {
     #[test]
     fn preserves_boolean_values_through_copy_and_edit() {
         for current_value in [Some(true), Some(false), None] {
-            let mut descriptor = json!({ "id": "thinking", "label": "Thinking", "type": "boolean" });
+            let mut descriptor =
+                json!({ "id": "thinking", "label": "Thinking", "type": "boolean" });
             if let Some(value) = current_value {
                 descriptor["currentValue"] = json!(value);
             }
@@ -613,8 +636,8 @@ mod tests {
     }
 
     #[test]
-    fn excludes_claude_context_choices_from_presets_and_copies_without_changing_other_providers_or_authored_entries(
-    ) {
+    fn excludes_claude_context_choices_from_presets_and_copies_without_changing_other_providers_or_authored_entries()
+     {
         let capabilities = caps(json!({
             "optionDescriptors": [
                 { "id": "contextWindow", "label": "Context", "type": "select",
@@ -644,7 +667,10 @@ mod tests {
         );
         let cursor_copy = descriptors_from_capabilities(Some(&capabilities), Some("cursor"));
         assert_eq!(
-            cursor_copy.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+            cursor_copy
+                .iter()
+                .map(|o| o.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["contextWindow", "thinking"]
         );
         let authored = CustomModelDefinition {
@@ -736,7 +762,9 @@ mod tests {
             Some("Option 1 needs at least one choice.".into())
         );
         assert_eq!(
-            validate_draft(&draft(|d| d.descriptors = vec![select("effort", &["a", "a"])])),
+            validate_draft(&draft(
+                |d| d.descriptors = vec![select("effort", &["a", "a"])]
+            )),
             Some("Option 1: choice \"a\" is used twice.".into())
         );
         assert_eq!(

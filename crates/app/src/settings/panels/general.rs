@@ -1,7 +1,10 @@
 //! Port of `GeneralSettingsPanel` (upstream SettingsPanels.tsx) and
 //! ProjectDefaultsSettings.tsx / NotificationSettings.tsx.
 
-use gpui_kit::{AnyElement, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div, rems};
+use gpui_kit::{
+    AnyElement, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
+    rems,
+};
 use serde_json::{Value, json};
 
 use super::super::controls::{SelectWidth, switch};
@@ -28,7 +31,11 @@ fn opts(items: &[(&str, &str)]) -> Opts {
 }
 
 impl SettingsView {
-    pub(super) fn render_general(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_general(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let json = self.json(cx);
         let vm = self.vm(cx);
         let modifier = vm.modifier_label();
@@ -49,10 +56,26 @@ impl SettingsView {
     fn new_threads_section(&mut self, json: &Json, cx: &mut Context<Self>) -> AnyElement {
         let runtime_mode = json.str(Which::Server, "defaultRuntimeMode").to_owned();
         let modes: [(&str, &str, &str); 4] = [
-            ("approval-required", "Supervised", "Ask before commands and file changes."),
-            ("auto-accept-edits", "Auto-accept edits", "Auto-approve edits, ask before other actions."),
-            ("auto", "Auto", "Supported providers approve routine actions; others still ask."),
-            ("full-access", "Full access", "Allow commands and edits without prompts."),
+            (
+                "approval-required",
+                "Supervised",
+                "Ask before commands and file changes.",
+            ),
+            (
+                "auto-accept-edits",
+                "Auto-accept edits",
+                "Auto-approve edits, ask before other actions.",
+            ),
+            (
+                "auto",
+                "Auto",
+                "Supported providers approve routine actions; others still ask.",
+            ),
+            (
+                "full-access",
+                "Full access",
+                "Allow commands and edits without prompts.",
+            ),
         ];
         let theme = cx.app_theme().clone();
         let mode_icon = |value: &str| match value {
@@ -113,7 +136,11 @@ impl SettingsView {
             |this, value, _, cx| this.update_server(json!({ "defaultRuntimeMode": value }), cx),
         );
 
-        let workspace = self.workspace_row(json, "Where new threads start. Projects and their t3.json can override it.", cx);
+        let workspace = self.workspace_row(
+            json,
+            "Where new threads start. Projects and their t3.json can override it.",
+            cx,
+        );
         let submodules = self.select_row(
             cx,
             json,
@@ -130,20 +157,35 @@ impl SettingsView {
         );
         let permissions_row = Self::base_row("default-permissions")
             .description("Default permissions for new threads. Projects can override them.")
-            .reset_action(self.reset_button(cx, json, Which::Server, "defaultRuntimeMode", "default permissions"))
+            .reset_action(self.reset_button(
+                cx,
+                json,
+                Which::Server,
+                "defaultRuntimeMode",
+                "default permissions",
+            ))
             .control(permissions)
             .into_any_element();
 
         SettingsSection::new("New threads")
             .id("project-defaults")
-            .child(self.default_model_row(json, "Default model for new threads. Projects can override it.", cx))
+            .child(self.default_model_row(
+                json,
+                "Default model for new threads. Projects can override it.",
+                cx,
+            ))
             .child(permissions_row)
             .child(workspace)
             .child(submodules)
             .into_any_element()
     }
 
-    pub(super) fn workspace_row(&mut self, json: &Json, description: &'static str, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn workspace_row(
+        &mut self,
+        json: &Json,
+        description: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let current = json.get(Which::Server, "defaultThreadEnvMode").clone();
         let label = match current.as_str() {
             Some("worktree") => "New worktree",
@@ -157,8 +199,16 @@ impl SettingsView {
             "default-workspace",
             label.into(),
             vec![
-                (json!("local"), "Current checkout".into(), selected == "local"),
-                (json!("worktree"), "New worktree".into(), selected == "worktree"),
+                (
+                    json!("local"),
+                    "Current checkout".into(),
+                    selected == "local",
+                ),
+                (
+                    json!("worktree"),
+                    "New worktree".into(),
+                    selected == "worktree",
+                ),
             ],
             SelectWidth::Auto,
             false,
@@ -167,7 +217,13 @@ impl SettingsView {
         let reset = if current.is_null() {
             None
         } else {
-            self.reset_button(cx, json, Which::Server, "defaultThreadEnvMode", "default workspace")
+            self.reset_button(
+                cx,
+                json,
+                Which::Server,
+                "defaultThreadEnvMode",
+                "default workspace",
+            )
         };
         // `title="Workspace"` with the catalog id.
         SettingsRow::new("Workspace")
@@ -178,25 +234,47 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn organization_section(&mut self, json: &Json, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let mode_value = json.get(Which::Client, "sidebarProjectGroupingMode").clone();
+    fn organization_section(
+        &mut self,
+        json: &Json,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mode_value = json
+            .get(Which::Client, "sidebarProjectGroupingMode")
+            .clone();
         let mode: SidebarProjectGroupingMode =
             serde_json::from_value(mode_value).unwrap_or(SidebarProjectGroupingMode::Repository);
         let grouping_switch = {
             let entity = cx.entity();
-            switch("switch-project-grouping", is_project_grouping_enabled(mode), false, cx, move |checked, _, cx| {
-                entity.update(cx, |this, cx| {
-                    if !checked && mode != SidebarProjectGroupingMode::Separate {
-                        remember_enabled_project_grouping_mode(mode);
-                    }
-                    let next = project_grouping_mode_from_toggle(checked, read_last_enabled_project_grouping_mode());
-                    this.update_client(json!({ "sidebarProjectGroupingMode": next }), cx);
-                });
-            })
+            switch(
+                "switch-project-grouping",
+                is_project_grouping_enabled(mode),
+                false,
+                cx,
+                move |checked, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        if !checked && mode != SidebarProjectGroupingMode::Separate {
+                            remember_enabled_project_grouping_mode(mode);
+                        }
+                        let next = project_grouping_mode_from_toggle(
+                            checked,
+                            read_last_enabled_project_grouping_mode(),
+                        );
+                        this.update_client(json!({ "sidebarProjectGroupingMode": next }), cx);
+                    });
+                },
+            )
         };
         let grouping = Self::base_row("project-grouping")
             .description("Combine matching repositories across environments.")
-            .reset_action(self.reset_button(cx, json, Which::Client, "sidebarProjectGroupingMode", "project grouping"))
+            .reset_action(self.reset_button(
+                cx,
+                json,
+                Which::Client,
+                "sidebarProjectGroupingMode",
+                "project grouping",
+            ))
             .control(grouping_switch)
             .into_any_element();
 
@@ -205,11 +283,16 @@ impl SettingsView {
             json,
             SelectRowSpec {
                 search_id: "project-order",
-                description: "Order of projects in the sidebar project picker and command palette.".into(),
+                description: "Order of projects in the sidebar project picker and command palette."
+                    .into(),
                 which: Which::Client,
                 key: "sidebarProjectSortOrder",
                 reset_label: "project order",
-                options: opts(&[("updated_at", "Last user message"), ("created_at", "Created at"), ("manual", "Manual")]),
+                options: opts(&[
+                    ("updated_at", "Last user message"),
+                    ("created_at", "Created at"),
+                    ("manual", "Manual"),
+                ]),
                 width: SelectWidth::Fixed(11.),
                 check: false,
             },
@@ -256,23 +339,32 @@ impl SettingsView {
                 reset_label: "auto-settle on merge",
             }));
 
-        let auto_settle_days = json.get(Which::Server, "sidebarAutoSettleAfterDays").clone();
+        let auto_settle_days = json
+            .get(Which::Server, "sidebarAutoSettleAfterDays")
+            .clone();
         let auto_settle_on = !auto_settle_days.is_null();
         let days_text = match &auto_settle_days {
             Value::Number(n) => n.to_string(),
             _ => String::new(),
         };
-        let days_input = self.input("auto-settle-days", &days_text, "", window, cx, |this, text, _, cx| {
-            // Number(), not parseInt: "3.5" must be rejected; the field snaps back on blur.
-            if let Ok(days) = text.trim().parse::<f64>()
-                && days.fract() == 0.
-                && (1.0..=90.0).contains(&days)
-            {
-                this.update_server(json!({ "sidebarAutoSettleAfterDays": days }), cx);
-            } else {
-                cx.notify();
-            }
-        });
+        let days_input = self.input(
+            "auto-settle-days",
+            &days_text,
+            "",
+            window,
+            cx,
+            |this, text, _, cx| {
+                // Number(), not parseInt: "3.5" must be rejected; the field snaps back on blur.
+                if let Ok(days) = text.trim().parse::<f64>()
+                    && days.fract() == 0.
+                    && (1.0..=90.0).contains(&days)
+                {
+                    this.update_server(json!({ "sidebarAutoSettleAfterDays": days }), cx);
+                } else {
+                    cx.notify();
+                }
+            },
+        );
         let days_control = super::super::controls::text_field(
             &days_input,
             Some(rems(6.).to_pixels(gpui_kit::px(16.))),
@@ -281,16 +373,31 @@ impl SettingsView {
             cx,
         );
         let entity = cx.entity();
-        let default_days = json.default_of(Which::Server, "sidebarAutoSettleAfterDays").as_f64().unwrap_or(3.);
-        let inactive_switch = switch("switch-auto-settle-inactive-threads", auto_settle_on, false, cx, move |checked, _, cx| {
-            entity.update(cx, |this, cx| {
+        let default_days = json
+            .default_of(Which::Server, "sidebarAutoSettleAfterDays")
+            .as_f64()
+            .unwrap_or(3.);
+        let inactive_switch = switch(
+            "switch-auto-settle-inactive-threads",
+            auto_settle_on,
+            false,
+            cx,
+            move |checked, _, cx| {
+                entity.update(cx, |this, cx| {
                 this.update_server(json!({ "sidebarAutoSettleAfterDays": if checked { json!(default_days) } else { Value::Null } }), cx)
             });
-        });
+            },
+        );
         section = section.child(
             Self::base_row("auto-settle-inactive-threads")
                 .description("Sidebar threads with no activity for this long settle automatically.")
-                .reset_action(self.reset_button(cx, json, Which::Server, "sidebarAutoSettleAfterDays", "auto-settle"))
+                .reset_action(self.reset_button(
+                    cx,
+                    json,
+                    Which::Server,
+                    "sidebarAutoSettleAfterDays",
+                    "auto-settle",
+                ))
                 .control(inactive_switch),
         );
         if auto_settle_on {
@@ -313,16 +420,27 @@ impl SettingsView {
         section.into_any_element()
     }
 
-    fn behavior_section(&mut self, json: &Json, modifier: &'static str, cx: &mut Context<Self>) -> AnyElement {
+    fn behavior_section(
+        &mut self,
+        json: &Json,
+        modifier: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let send_shortcut = json.str(Which::Client, "sendShortcut").to_owned();
         let follow_up = format!(
             "Queue follow-ups while the agent runs or steer the current run. {}",
             if send_shortcut == "mod-enter-multiline" {
-                format!("Press {modifier} + Enter for single-line prompts or {modifier} + Shift + Enter for multiline prompts to do the opposite for one message.")
+                format!(
+                    "Press {modifier} + Enter for single-line prompts or {modifier} + Shift + Enter for multiline prompts to do the opposite for one message."
+                )
             } else {
                 format!(
                     "Press {modifier}{} + Enter to do the opposite for one message.",
-                    if send_shortcut == "mod-enter" { " + Shift" } else { "" }
+                    if send_shortcut == "mod-enter" {
+                        " + Shift"
+                    } else {
+                        ""
+                    }
                 )
             }
         );
@@ -359,12 +477,19 @@ impl SettingsView {
                 ("sound", "Sound only"),
                 ("notifications-and-sound", "Notifications with sound"),
             ];
-            let label = options.iter().find(|(v, _)| *v == current).map(|(_, l)| *l).unwrap_or("");
+            let label = options
+                .iter()
+                .find(|(v, _)| *v == current)
+                .map(|(_, l)| *l)
+                .unwrap_or("");
             let control = self.select_control(
                 cx,
                 "thread-notifications",
                 label.into(),
-                options.iter().map(|(v, l)| (json!(v), SharedString::from(*l), *v == current)).collect(),
+                options
+                    .iter()
+                    .map(|(v, l)| (json!(v), SharedString::from(*l), *v == current))
+                    .collect(),
                 SelectWidth::Fixed(14.),
                 false,
                 |this, value, _, cx| this.update_client(json!({ "notificationMode": value }), cx),
@@ -525,24 +650,38 @@ impl SettingsView {
     fn background_activity_row(&mut self, json: &Json, cx: &mut Context<Self>) -> AnyElement {
         let vm = self.vm(cx);
         let option = resolve_background_activity_profile_option(&vm.server);
-        let resolved = turin_shared::server_settings::resolve_server_background_activity_settings(&vm.server);
-        let label_of = |profile: turin_contracts::settings::BackgroundActivityProfile| match profile {
+        let resolved =
+            turin_shared::server_settings::resolve_server_background_activity_settings(&vm.server);
+        let label_of = |profile: turin_contracts::settings::BackgroundActivityProfile| match profile
+        {
             turin_contracts::settings::BackgroundActivityProfile::Balanced => "Balanced",
             turin_contracts::settings::BackgroundActivityProfile::Performance => "Performance",
             turin_contracts::settings::BackgroundActivityProfile::BatterySaver => "Battery saver",
         };
         let description = match option {
-            BackgroundActivityProfileOption::Advanced => format!("Uses custom intervals. Shared policy: {}.", label_of(resolved.profile)),
+            BackgroundActivityProfileOption::Advanced => format!(
+                "Uses custom intervals. Shared policy: {}.",
+                label_of(resolved.profile)
+            ),
             BackgroundActivityProfileOption::Profile(profile) => match profile {
-                turin_contracts::settings::BackgroundActivityProfile::Balanced => "Pauses probes for idle clients, locked hosts, or low power mode.",
-                turin_contracts::settings::BackgroundActivityProfile::Performance => "Allows scoped background probes while any subscribed client remains connected.",
-                turin_contracts::settings::BackgroundActivityProfile::BatterySaver => "Also pauses background probes when the host or client is on battery.",
+                turin_contracts::settings::BackgroundActivityProfile::Balanced => {
+                    "Pauses probes for idle clients, locked hosts, or low power mode."
+                }
+                turin_contracts::settings::BackgroundActivityProfile::Performance => {
+                    "Allows scoped background probes while any subscribed client remains connected."
+                }
+                turin_contracts::settings::BackgroundActivityProfile::BatterySaver => {
+                    "Also pauses background probes when the host or client is on battery."
+                }
             }
             .to_owned(),
         };
         let selected = match option {
             BackgroundActivityProfileOption::Advanced => "advanced".to_owned(),
-            BackgroundActivityProfileOption::Profile(profile) => serde_json::to_value(profile).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default(),
+            BackgroundActivityProfileOption::Profile(profile) => serde_json::to_value(profile)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default(),
         };
         let current_label = match option {
             BackgroundActivityProfileOption::Advanced => "Advanced",
@@ -583,15 +722,28 @@ impl SettingsView {
                     cx.notify();
                 }))
         });
-        let control = div().flex().items_center().gap_2().child(control).children(configure);
-        let changed = super::super::panels_logic::has_changed_background_activity_settings(&vm.server);
+        let control = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(control)
+            .children(configure);
+        let changed =
+            super::super::panels_logic::has_changed_background_activity_settings(&vm.server);
         let reset = changed.then(|| {
             let action = self.cb(cx, |this, _, cx| {
-                let default = this.json(cx).default_of(Which::Server, "backgroundActivity").clone();
+                let default = this
+                    .json(cx)
+                    .default_of(Which::Server, "backgroundActivity")
+                    .clone();
                 this.update_server(json!({ "backgroundActivity": default }), cx);
             });
-            super::super::layout::setting_reset_button("reset-background-activity", "Reset to default", move |w, c| action(w, c))
-                .into_any_element()
+            super::super::layout::setting_reset_button(
+                "reset-background-activity",
+                "Reset to default",
+                move |w, c| action(w, c),
+            )
+            .into_any_element()
         });
         let _ = json;
         let (id, title) = searchable_setting("background-activity");
@@ -603,11 +755,25 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn projects_and_threads_section(&mut self, json: &Json, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let base_dir = json.str(Which::Server, "addProjectBaseDirectory").to_owned();
-        let input = self.input("add-project-base-directory", &base_dir, "~/", window, cx, |this, text, _, cx| {
-            this.update_server(json!({ "addProjectBaseDirectory": text.trim() }), cx);
-        });
+    fn projects_and_threads_section(
+        &mut self,
+        json: &Json,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let base_dir = json
+            .str(Which::Server, "addProjectBaseDirectory")
+            .to_owned();
+        let input = self.input(
+            "add-project-base-directory",
+            &base_dir,
+            "~/",
+            window,
+            cx,
+            |this, text, _, cx| {
+                this.update_server(json!({ "addProjectBaseDirectory": text.trim() }), cx);
+            },
+        );
         let input_control = super::super::controls::text_field(
             &input,
             Some(rems(18.).to_pixels(gpui_kit::px(16.))),
@@ -636,16 +802,24 @@ impl SettingsView {
     }
 
     fn confirmations_section(&mut self, json: &Json, cx: &mut Context<Self>) -> AnyElement {
-        let quit = self.select_row(cx, json, SelectRowSpec {
-            search_id: "quit-confirmation",
-            description: "Hold mode also quits on two quick presses.".into(),
-            which: Which::Client,
-            key: "confirmQuit",
-            reset_label: "quit shortcut behavior",
-            options: opts(&[("direct", "Direct"), ("hold", "Hold"), ("double-click", "Double press")]),
-            width: SelectWidth::Fixed(10.),
-            check: false,
-        });
+        let quit = self.select_row(
+            cx,
+            json,
+            SelectRowSpec {
+                search_id: "quit-confirmation",
+                description: "Hold mode also quits on two quick presses.".into(),
+                which: Which::Client,
+                key: "confirmQuit",
+                reset_label: "quit shortcut behavior",
+                options: opts(&[
+                    ("direct", "Direct"),
+                    ("hold", "Hold"),
+                    ("double-click", "Double press"),
+                ]),
+                width: SelectWidth::Fixed(10.),
+                check: false,
+            },
+        );
         SettingsSection::new("Confirmations")
             .id("confirmations")
             .child(self.bool_row(cx, json, BoolRow {
@@ -692,30 +866,30 @@ impl SettingsView {
         let vm = self.vm(cx);
         let version = vm.environment.app_version.clone();
         let (id, title) = searchable_setting("app-version");
-        let title = div()
-            .flex()
-            .items_baseline()
-            .gap_2()
-            .child(title)
-            .child(
-                div()
-                    .font_family(theme.fonts.mono.clone())
-                    .text_size(crate::theme::tokens::TEXT_2XS.size)
-                    .font_weight(gpui_kit::FontWeight::MEDIUM)
-                    .text_color(theme.muted_foreground)
-                    .child(version),
-            );
+        let title = div().flex().items_baseline().gap_2().child(title).child(
+            div()
+                .font_family(theme.fonts.mono.clone())
+                .text_size(crate::theme::tokens::TEXT_2XS.size)
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                .text_color(theme.muted_foreground)
+                .child(version),
+        );
         let licenses = {
             use crate::ui::{Button, ButtonSize, ButtonVariant};
             Self::base_row("open-source-licenses")
-                .description("Notices for dependencies, assets, and optional tools used by T3 Code.")
+                .description(
+                    "Notices for dependencies, assets, and optional tools used by T3 Code.",
+                )
                 .control(
                     Button::new("view-licenses")
                         .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Sm)
                         .label("View licenses")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_route(super::super::view::SettingsRoute::OpenSourceLicenses, cx)
+                            this.set_route(
+                                super::super::view::SettingsRoute::OpenSourceLicenses,
+                                cx,
+                            )
                         })),
                 )
         };
@@ -752,8 +926,13 @@ impl SettingsView {
                 .child(
                     div()
                         .text_size(TEXT_SM.size)
-                        .text_color(gpui_kit::Hsla::from(crate::theme::color::with_alpha(theme.foreground, 0.7)))
-                        .group_hover("legacy-features", |style| style.text_color(theme.foreground))
+                        .text_color(gpui_kit::Hsla::from(crate::theme::color::with_alpha(
+                            theme.foreground,
+                            0.7,
+                        )))
+                        .group_hover("legacy-features", |style| {
+                            style.text_color(theme.foreground)
+                        })
                         .child("Legacy features"),
                 )
                 .child(

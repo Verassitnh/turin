@@ -10,9 +10,9 @@ use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, CursorStyle, ElementId, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, px, rems,
+    AnyElement, Context, CursorStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    KeyDownEvent, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Window, div, px, rems,
 };
 use turin_contracts::keybindings::KeybindingWhenNode as Node;
 
@@ -139,7 +139,11 @@ fn warning_icon(label: String, cx: &gpui_kit::App) -> AnyElement {
             let tooltip = Tooltip::new(label);
             move |window, cx| tooltip.clone().build(window, cx)
         })
-        .child(Icon::new(IconName::TriangleAlert).size(rems(0.875)).color(theme.warning))
+        .child(
+            Icon::new(IconName::TriangleAlert)
+                .size(rems(0.875))
+                .color(theme.warning),
+        )
         .into_any_element()
 }
 
@@ -152,17 +156,26 @@ fn conflict_warning(labels: &[String], cx: &gpui_kit::App) -> Option<AnyElement>
     } else {
         format!(
             "Conflicts with {}{}.",
-            labels.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
+            labels
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
             if labels.len() > 3 { ", and more" } else { "" }
         )
     };
     Some(warning_icon(
-        format!("{description} The most recent matching binding wins when both conditions can apply."),
+        format!(
+            "{description} The most recent matching binding wins when both conditions can apply."
+        ),
         cx,
     ))
 }
 
-fn as_handler<F>(handler: &Rc<F>) -> impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static
+fn as_handler<F>(
+    handler: &Rc<F>,
+) -> impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static
 where
     F: Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
 {
@@ -191,7 +204,11 @@ fn gpui_to_keyboard_event(event: &KeyDownEvent) -> KeyboardEvent {
 }
 
 impl SettingsView {
-    pub(super) fn render_keybindings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_keybindings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let vm = self.vm(cx);
         let query = self.panels.keybindings.query.clone();
         let rows = build_keybinding_rows(&vm.keybindings.rules, &query);
@@ -207,8 +224,12 @@ impl SettingsView {
             }
         }
         // Forget drafts of rows that no longer exist (ids carry the index).
-        let live: std::collections::HashSet<&str> = rows.iter().map(|row| row.id.as_str()).collect();
-        self.panels.keybindings.drafts.retain(|id, _| live.contains(id.as_str()));
+        let live: std::collections::HashSet<&str> =
+            rows.iter().map(|row| row.id.as_str()).collect();
+        self.panels
+            .keybindings
+            .drafts
+            .retain(|id, _| live.contains(id.as_str()));
         let mac = vm.is_mac();
 
         let toolbar = self.keybindings_toolbar(&vm.keybindings.config_path, window, cx);
@@ -216,60 +237,101 @@ impl SettingsView {
         let (id, _) = searchable_setting("keybindings");
 
         let mut sections: Vec<AnyElement> = vec![
-            SettingsSection::new(title).id(id).child(toolbar).into_any_element(),
+            SettingsSection::new(title)
+                .id(id)
+                .child(toolbar)
+                .into_any_element(),
         ];
 
         let mut body: Vec<AnyElement> = Vec::new();
         if self.panels.keybindings.adding {
-            let new_row = self.new_keybinding_row(&rows, &command_options, &when_variables, mac, window, cx);
+            let new_row =
+                self.new_keybinding_row(&rows, &command_options, &when_variables, mac, window, cx);
             body.push(settings_group(vec![new_row], cx).into_any_element());
         }
         if groups.is_empty() {
             let theme = cx.app_theme().clone();
             body.push(
                 settings_group(
-                    vec![div()
-                        .px_4()
-                        .py(rems(3.))
-                        .text_center()
-                        .text_size(TEXT_SM.size)
-                        .text_color(theme.muted_foreground)
-                        .child("No keybindings match your search.")
-                        .into_any_element()],
+                    vec![
+                        div()
+                            .px_4()
+                            .py(rems(3.))
+                            .text_center()
+                            .text_size(TEXT_SM.size)
+                            .text_color(theme.muted_foreground)
+                            .child("No keybindings match your search.")
+                            .into_any_element(),
+                    ],
                     cx,
                 )
                 .into_any_element(),
             );
         } else {
             for group in &groups {
-                body.push(self.keybindings_group(group, &rows, &anchors, &when_variables, mac, window, cx));
+                body.push(self.keybindings_group(
+                    group,
+                    &rows,
+                    &anchors,
+                    &when_variables,
+                    mac,
+                    window,
+                    cx,
+                ));
             }
         }
-        sections.push(div().flex().flex_col().gap_8().children(body).into_any_element());
+        sections.push(
+            div()
+                .flex()
+                .flex_col()
+                .gap_8()
+                .children(body)
+                .into_any_element(),
+        );
         sections
     }
 
-    fn keybindings_toolbar(&mut self, config_path: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn keybindings_toolbar(
+        &mut self,
+        config_path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let query = self.panels.keybindings.query.clone();
-        let input = self.input_live("keybindings-search", &query, "Search keybindings", window, cx, |this, text, _, cx| {
-            this.panels.keybindings.query = text;
-            cx.notify();
-        });
-        let search = div().flex_1().min_w(rems(12.)).child(super::super::controls::text_field_leading(
-            &input,
-            None,
-            FieldSize::Sm,
-            false,
-            Some(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .child(Icon::new(IconName::Search).size(rems(0.875)).color(theme.muted_foreground))
-                    .into_any_element(),
-            ),
+        let input = self.input_live(
+            "keybindings-search",
+            &query,
+            "Search keybindings",
+            window,
             cx,
-        ));
+            |this, text, _, cx| {
+                this.panels.keybindings.query = text;
+                cx.notify();
+            },
+        );
+        let search =
+            div()
+                .flex_1()
+                .min_w(rems(12.))
+                .child(super::super::controls::text_field_leading(
+                    &input,
+                    None,
+                    FieldSize::Sm,
+                    false,
+                    Some(
+                        div()
+                            .flex()
+                            .flex_shrink_0()
+                            .child(
+                                Icon::new(IconName::Search)
+                                    .size(rems(0.875))
+                                    .color(theme.muted_foreground),
+                            )
+                            .into_any_element(),
+                    ),
+                    cx,
+                ));
         let adding = self.panels.keybindings.adding;
         let add = Button::new("add-keybinding")
             .variant(ButtonVariant::Outline)
@@ -308,7 +370,9 @@ impl SettingsView {
     /// Demo hook: the first row's id.
     pub(in super::super) fn first_keybinding_row_id(&self, cx: &gpui_kit::App) -> Option<String> {
         let vm = self.vm(cx);
-        build_keybinding_rows(&vm.keybindings.rules, "").first().map(|row| row.id.clone())
+        build_keybinding_rows(&vm.keybindings.rules, "")
+            .first()
+            .map(|row| row.id.clone())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -324,7 +388,15 @@ impl SettingsView {
     ) -> AnyElement {
         let mut section = SettingsSection::new(group.title).id(format!("keybindings-{}", group.id));
         for row in &group.rows {
-            section = section.child(self.keybinding_row(row, all_rows, anchors.get(&row.id).cloned(), variables, mac, window, cx));
+            section = section.child(self.keybinding_row(
+                row,
+                all_rows,
+                anchors.get(&row.id).cloned(),
+                variables,
+                mac,
+                window,
+                cx,
+            ));
         }
         section.into_any_element()
     }
@@ -401,7 +473,15 @@ impl SettingsView {
                 move |window, cx| tooltip.clone().build(window, cx)
             });
 
-        let when_control = self.when_clause_control(&target, &label, &when_expr, draft.when.as_ref(), variables, window, cx);
+        let when_control = self.when_clause_control(
+            &target,
+            &label,
+            &when_expr,
+            draft.when.as_ref(),
+            variables,
+            window,
+            cx,
+        );
         let description = div()
             .flex()
             .h_6()
@@ -420,7 +500,8 @@ impl SettingsView {
         let row_group: SharedString = format!("kb-row-{}", row.id).into();
         let can_reset = row.source == KeybindingSource::Custom && row.default_key.is_some();
         let can_remove = row.source != KeybindingSource::Default;
-        let menu = (can_reset || can_remove).then(|| self.row_menu(row, can_reset, can_remove, &row_group, cx));
+        let menu = (can_reset || can_remove)
+            .then(|| self.row_menu(row, can_reset, can_remove, &row_group, cx));
 
         let key_control = self.key_control(row, &draft, is_dirty, recording, mac, &label, cx);
         let control = div()
@@ -433,11 +514,16 @@ impl SettingsView {
             .children(menu)
             .child(key_control);
 
-        let mut settings_row = SettingsRow::new(title).description(description).control(control);
+        let mut settings_row = SettingsRow::new(title)
+            .description(description)
+            .control(control);
         if let Some(anchor) = anchor {
             settings_row = settings_row.id(anchor);
         }
-        div().group(row_group).child(settings_row).into_any_element()
+        div()
+            .group(row_group)
+            .child(settings_row)
+            .into_any_element()
     }
 
     fn row_menu(
@@ -487,14 +573,8 @@ impl SettingsView {
                         cx.notify();
                     });
                 });
-            popup_list(
-                popup_id,
-                items,
-                Some(rems(9.).to_pixels(px(16.))),
-                cx,
-                pick,
-            )
-            .into_any_element()
+            popup_list(popup_id, items, Some(rems(9.).to_pixels(px(16.))), cx, pick)
+                .into_any_element()
         });
         // Hidden until the row is hovered or the menu is open.
         let hover_group = row_group.clone();
@@ -503,7 +583,12 @@ impl SettingsView {
             .items_center()
             .opacity(if open { 1. } else { 0. })
             .group_hover(hover_group, |style| style.opacity(1.))
-            .child(with_popup(trigger, popup, PopupAlign::End, rems(1.75).to_pixels(px(16.))))
+            .child(with_popup(
+                trigger,
+                popup,
+                PopupAlign::End,
+                rems(1.75).to_pixels(px(16.)),
+            ))
             .into_any_element()
     }
 
@@ -542,7 +627,10 @@ impl SettingsView {
         let source = self.store.read(cx).source();
         let input = UpsertKeybinding {
             key: input.key.trim().to_owned(),
-            when: input.when.map(|when| when.trim().to_owned()).filter(|when| !when.is_empty()),
+            when: input
+                .when
+                .map(|when| when.trim().to_owned())
+                .filter(|when| !when.is_empty()),
             ..input
         };
         source.upsert_keybinding(input, cx);
@@ -603,12 +691,18 @@ impl SettingsView {
                 .border_1()
                 .border_color(gpui_kit::transparent_black())
                 .cursor(CursorStyle::PointingHand)
-                .hover(|style| style.border_color(with_alpha(theme.border, 0.7)).bg(theme.accent))
+                .hover(|style| {
+                    style
+                        .border_color(with_alpha(theme.border, 0.7))
+                        .bg(theme.accent)
+                })
                 .tooltip({
                     let tooltip = Tooltip::new(format!("Edit shortcut for {label}"));
                     move |window, cx| tooltip.clone().build(window, cx)
                 })
-                .on_click(cx.listener(move |this, _, window, cx| this.start_capture(id.clone(), window, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.start_capture(id.clone(), window, cx)
+                }))
                 .child(keybinding_pill(&row.key, mac))
                 .into_any_element()
         } else {
@@ -637,9 +731,15 @@ impl SettingsView {
         let id_owned = id.to_owned();
         let original = original_key.to_owned();
         let text: AnyElement = if recording {
-            div().text_color(theme.placeholder).child("Press shortcut").into_any_element()
+            div()
+                .text_color(theme.placeholder)
+                .child("Press shortcut")
+                .into_any_element()
         } else if draft_key.is_empty() {
-            div().text_color(theme.placeholder).child("Unassigned").into_any_element()
+            div()
+                .text_color(theme.placeholder)
+                .child("Unassigned")
+                .into_any_element()
         } else {
             div().child(draft_key.to_owned()).into_any_element()
         };
@@ -653,19 +753,28 @@ impl SettingsView {
             .rounded(RADIUS_LG)
             .border_1()
             .border_color(if recording { theme.ring } else { theme.input })
-            .bg(if dark { with_alpha(theme.input, 0.32).into() } else { theme.background })
+            .bg(if dark {
+                with_alpha(theme.input, 0.32).into()
+            } else {
+                theme.background
+            })
             .font_family(theme.fonts.mono.clone())
             .text_size(TEXT_SM.size)
             .text_color(theme.foreground)
             .cursor(CursorStyle::IBeam)
             .child(text);
         if recording {
-            field = field.track_focus(&self.capture_focus).on_key_down(cx.listener(
-                move |this, event: &KeyDownEvent, _, cx| {
+            field = field
+                .track_focus(&self.capture_focus)
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                     let key = event.keystroke.key.as_str();
                     cx.stop_propagation();
                     if key == "escape" {
-                        let restore = if id_owned == "new" { String::new() } else { original.clone() };
+                        let restore = if id_owned == "new" {
+                            String::new()
+                        } else {
+                            original.clone()
+                        };
                         this.set_draft_key(&id_owned, restore);
                         this.panels.keybindings.capture = None;
                         cx.notify();
@@ -678,8 +787,7 @@ impl SettingsView {
                         this.panels.keybindings.capture = None;
                         cx.notify();
                     }
-                },
-            ));
+                }));
         } else {
             let id_owned = id.to_owned();
             field = field.on_click(cx.listener(move |this, _, window, cx| {
@@ -729,7 +837,11 @@ impl SettingsView {
             .text_size(TEXT_2XS.size)
             .font_weight(FontWeight::MEDIUM)
             .cursor(CursorStyle::PointingHand)
-            .text_color(if expression.is_empty() { theme.muted_foreground } else { theme.foreground })
+            .text_color(if expression.is_empty() {
+                theme.muted_foreground
+            } else {
+                theme.foreground
+            })
             .when(open, |this| this.bg(theme.accent))
             .hover(|style| style.bg(theme.accent).text_color(theme.foreground))
             .tooltip({
@@ -745,17 +857,28 @@ impl SettingsView {
                     .min_w_0()
                     .truncate()
                     .font_family(theme.fonts.mono.clone())
-                    .child(if expression.is_empty() { "Always".to_owned() } else { expression.to_owned() }),
+                    .child(if expression.is_empty() {
+                        "Always".to_owned()
+                    } else {
+                        expression.to_owned()
+                    }),
             )
             .child(
                 div().opacity(0.6).child(
-                    Icon::new(IconName::ChevronDown).size(rems(0.875)).color(theme.foreground),
+                    Icon::new(IconName::ChevronDown)
+                        .size(rems(0.875))
+                        .color(theme.foreground),
                 ),
             );
         let popup = open.then(|| self.when_builder(target, value, variables, window, cx));
         div()
             .min_w_0()
-            .child(with_popup(trigger, popup, PopupAlign::Start, rems(1.25).to_pixels(px(16.))))
+            .child(with_popup(
+                trigger,
+                popup,
+                PopupAlign::Start,
+                rems(1.25).to_pixels(px(16.)),
+            ))
             .into_any_element()
     }
 
@@ -864,27 +987,32 @@ impl SettingsView {
                     .flex_shrink_0()
                     .items_center()
                     .gap_2()
-                    .child(plus_button("when-add-condition", "Condition", ButtonVariant::Outline).on_click(as_handler(&root_condition)))
-                    .child(plus_button("when-add-group", "Group", ButtonVariant::Outline).on_click(as_handler(&root_group))),
+                    .child(
+                        plus_button("when-add-condition", "Condition", ButtonVariant::Outline)
+                            .on_click(as_handler(&root_condition)),
+                    )
+                    .child(
+                        plus_button("when-add-group", "Group", ButtonVariant::Outline)
+                            .on_click(as_handler(&root_group)),
+                    ),
             );
 
         let expression_field = {
-            let mut field = div().relative().child(text_field(&input, None, FieldSize::Sm, true, cx));
+            let mut field =
+                div()
+                    .relative()
+                    .child(text_field(&input, None, FieldSize::Sm, true, cx));
             if !unknown.is_empty() {
-                field = field.child(
-                    div()
-                        .absolute()
-                        .right(px(6.))
-                        .top(px(4.))
-                        .child(warning_icon(
-                            if unknown.len() == 1 {
-                                format!("Unknown condition: {}", unknown[0])
-                            } else {
-                                format!("Unknown conditions: {}", unknown.join(", "))
-                            },
-                            cx,
-                        )),
-                );
+                field = field.child(div().absolute().right(px(6.)).top(px(4.)).child(
+                    warning_icon(
+                        if unknown.len() == 1 {
+                            format!("Unknown condition: {}", unknown[0])
+                        } else {
+                            format!("Unknown conditions: {}", unknown.join(", "))
+                        },
+                        cx,
+                    ),
+                ));
             }
             div()
                 .flex()
@@ -898,7 +1026,11 @@ impl SettingsView {
                         .gap(rems(0.375))
                         .text_size(TEXT_2XS.size)
                         .text_color(theme.destructive)
-                        .child(Icon::new(IconName::CircleX).size(rems(0.875)).color(theme.destructive))
+                        .child(
+                            Icon::new(IconName::CircleX)
+                                .size(rems(0.875))
+                                .color(theme.destructive),
+                        )
                         .child(message)
                 }))
         };
@@ -910,8 +1042,18 @@ impl SettingsView {
                     this.set_when_value(&change_target, Some(next), cx)
                 });
                 let remove_target = target.clone();
-                let on_remove: NodeRemove = Rc::new(move |this, cx| this.set_when_value(&remove_target, None, cx));
-                self.when_node_editor(target, node, variables, 0, "r".to_owned(), on_change, Some(on_remove), cx)
+                let on_remove: NodeRemove =
+                    Rc::new(move |this, cx| this.set_when_value(&remove_target, None, cx));
+                self.when_node_editor(
+                    target,
+                    node,
+                    variables,
+                    0,
+                    "r".to_owned(),
+                    on_change,
+                    Some(on_remove),
+                    cx,
+                )
             }
             None => div()
                 .rounded_md()
@@ -924,8 +1066,18 @@ impl SettingsView {
                         .flex()
                         .flex_wrap()
                         .gap_2()
-                        .child(plus_button("when-empty-condition", "Condition", ButtonVariant::Default).on_click(as_handler(&root_condition)))
-                        .child(plus_button("when-empty-group", "Group", ButtonVariant::Outline).on_click(as_handler(&root_group))),
+                        .child(
+                            plus_button(
+                                "when-empty-condition",
+                                "Condition",
+                                ButtonVariant::Default,
+                            )
+                            .on_click(as_handler(&root_condition)),
+                        )
+                        .child(
+                            plus_button("when-empty-group", "Group", ButtonVariant::Outline)
+                                .on_click(as_handler(&root_group)),
+                        ),
                 )
                 .into_any_element(),
         };
@@ -989,31 +1141,42 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.app_theme().clone();
-        let remove_button = |this_path: &str, node: &Node, on_remove: &NodeRemove, ml_auto: bool, cx: &mut Context<Self>| {
+        let remove_button = |this_path: &str,
+                             node: &Node,
+                             on_remove: &NodeRemove,
+                             ml_auto: bool,
+                             cx: &mut Context<Self>| {
             let on_remove = on_remove.clone();
             let label = when_node_remove_label(node, depth);
             div()
                 .when(ml_auto, |this| this.ml_auto())
                 .child(
-                    Button::new(SharedString::from(format!("when-remove-{}-{this_path}", target.key())))
-                        .variant(ButtonVariant::Ghost)
-                        .size(ButtonSize::IconSm)
-                        .icon(IconName::Minus)
-                        .icon_size(rems(0.875))
-                        .tooltip(Tooltip::new(label))
-                        .on_click(cx.listener(move |this, _, _, cx| on_remove(this, cx))),
+                    Button::new(SharedString::from(format!(
+                        "when-remove-{}-{this_path}",
+                        target.key()
+                    )))
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::IconSm)
+                    .icon(IconName::Minus)
+                    .icon_size(rems(0.875))
+                    .tooltip(Tooltip::new(label))
+                    .on_click(cx.listener(move |this, _, _, cx| on_remove(this, cx))),
                 )
                 .into_any_element()
         };
-        let not_toggle = |id: String, pressed: bool, on_toggle: Rc<dyn Fn(&mut SettingsView, bool, &mut Context<SettingsView>)>, cx: &mut Context<Self>| {
-            Button::new(SharedString::from(id))
-                .variant(ButtonVariant::Outline)
-                .size(ButtonSize::Compact)
-                .label("Not")
-                .pressed(pressed)
-                .min_w(rems(2.5))
-                .on_click(cx.listener(move |this, _, _, cx| on_toggle(this, !pressed, cx)))
-        };
+        let not_toggle =
+            |id: String,
+             pressed: bool,
+             on_toggle: Rc<dyn Fn(&mut SettingsView, bool, &mut Context<SettingsView>)>,
+             cx: &mut Context<Self>| {
+                Button::new(SharedString::from(id))
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::Compact)
+                    .label("Not")
+                    .pressed(pressed)
+                    .min_w(rems(2.5))
+                    .on_click(cx.listener(move |this, _, _, cx| on_toggle(this, !pressed, cx)))
+            };
 
         // A condition: `[Not] [variable ▾] [−]`.
         if let Some((identifier, negated)) = condition_parts(node) {
@@ -1023,11 +1186,13 @@ impl SettingsView {
             let toggle = not_toggle(
                 format!("when-not-{}-{path}", target.key()),
                 negated,
-                Rc::new(move |this, pressed, cx| change(this, set_condition_negated(&node_for_negate, pressed), cx)),
+                Rc::new(move |this, pressed, cx| {
+                    change(this, set_condition_negated(&node_for_negate, pressed), cx)
+                }),
                 cx,
             );
             let mut options: Vec<String> = variables.to_vec();
-            if !options.iter().any(|option| *option == identifier) {
+            if !options.contains(&identifier) {
                 options.insert(0, identifier.clone());
             }
             let node_for_ident = node.clone();
@@ -1041,12 +1206,22 @@ impl SettingsView {
                     .gap_1()
                     .child(identifier.clone())
                     .when(unknown, |this| {
-                        this.child(Icon::new(IconName::TriangleAlert).size(rems(0.875)).color(theme.warning))
+                        this.child(
+                            Icon::new(IconName::TriangleAlert)
+                                .size(rems(0.875))
+                                .color(theme.warning),
+                        )
                     })
                     .into_any_element(),
                 options
                     .iter()
-                    .map(|option| (serde_json::json!(option), div().child(option.clone()).into_any_element(), *option == identifier))
+                    .map(|option| {
+                        (
+                            serde_json::json!(option),
+                            div().child(option.clone()).into_any_element(),
+                            *option == identifier,
+                        )
+                    })
                     .collect(),
                 SelectWidth::Full,
                 SelectSize::Compact,
@@ -1069,7 +1244,11 @@ impl SettingsView {
                 .py_2()
                 .child(toggle)
                 .child(div().min_w_0().flex_1().child(select))
-                .children(on_remove.as_ref().map(|remove| remove_button(&path, node, remove, false, cx)))
+                .children(
+                    on_remove
+                        .as_ref()
+                        .map(|remove| remove_button(&path, node, remove, false, cx)),
+                )
                 .into_any_element();
         }
 
@@ -1090,15 +1269,38 @@ impl SettingsView {
                 format!("when-not-{}-{path}", target.key()),
                 true,
                 Rc::new(move |this, pressed, cx| {
-                    change(this, if pressed { node_clone.clone() } else { inner_clone.clone() }, cx)
+                    change(
+                        this,
+                        if pressed {
+                            node_clone.clone()
+                        } else {
+                            inner_clone.clone()
+                        },
+                        cx,
+                    )
                 }),
                 cx,
             );
             let change = on_change.clone();
             let child_change: NodeChange = Rc::new(move |this, next, cx| {
-                change(this, Node::Not { node: Box::new(next) }, cx)
+                change(
+                    this,
+                    Node::Not {
+                        node: Box::new(next),
+                    },
+                    cx,
+                )
             });
-            let child = self.when_node_editor(target, inner, variables, depth + 1, format!("{path}n"), child_change, None, cx);
+            let child = self.when_node_editor(
+                target,
+                inner,
+                variables,
+                depth + 1,
+                format!("{path}n"),
+                child_change,
+                None,
+                cx,
+            );
             let line = with_alpha(theme.border, 0.7);
             return div()
                 .flex()
@@ -1107,22 +1309,41 @@ impl SettingsView {
                 .rounded_lg()
                 .border_1()
                 .border_color(with_alpha(theme.border, 0.7))
-                .bg(if depth > 0 { with_alpha(theme.background, 0.5) } else { with_alpha(theme.muted, 0.2) })
+                .bg(if depth > 0 {
+                    with_alpha(theme.background, 0.5)
+                } else {
+                    with_alpha(theme.muted, 0.2)
+                })
                 .p_2()
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(toggle)
-                        .children(on_remove.as_ref().map(|remove| remove_button(&path, node, remove, true, cx))),
+                    div().flex().items_center().gap_2().child(toggle).children(
+                        on_remove
+                            .as_ref()
+                            .map(|remove| remove_button(&path, node, remove, true, cx)),
+                    ),
                 )
                 .child(
                     div()
                         .relative()
                         .pl_4()
-                        .child(div().absolute().top_0().bottom_0().left(px(6.)).w(px(1.)).bg(line))
-                        .child(div().absolute().top_4().left(px(6.)).h(px(1.)).w(px(10.)).bg(line))
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(px(6.))
+                                .w(px(1.))
+                                .bg(line),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top_4()
+                                .left(px(6.))
+                                .h(px(1.))
+                                .w(px(10.))
+                                .bg(line),
+                        )
                         .child(child),
                 )
                 .into_any_element();
@@ -1142,13 +1363,23 @@ impl SettingsView {
                 div().child(operator.label()).into_any_element(),
                 [BooleanOperator::And, BooleanOperator::Or]
                     .into_iter()
-                    .map(|op| (serde_json::json!(op.label()), div().child(op.label()).into_any_element(), op == operator))
+                    .map(|op| {
+                        (
+                            serde_json::json!(op.label()),
+                            div().child(op.label()).into_any_element(),
+                            op == operator,
+                        )
+                    })
                     .collect(),
                 SelectWidth::Fixed(6.),
                 SelectSize::Compact,
                 false,
                 move |this, value, _, cx| {
-                    let next = if value == serde_json::json!("or") { BooleanOperator::Or } else { BooleanOperator::And };
+                    let next = if value == serde_json::json!("or") {
+                        BooleanOperator::Or
+                    } else {
+                        BooleanOperator::And
+                    };
                     if next == operator {
                         return;
                     }
@@ -1161,37 +1392,47 @@ impl SettingsView {
         let add_condition = {
             let children = children.clone();
             let change = on_change.clone();
-            Button::new(SharedString::from(format!("when-add-c-{}-{path}", target.key())))
-                .variant(ButtonVariant::Outline)
-                .size(ButtonSize::Compact)
-                .icon(IconName::Plus)
-                .icon_size(rems(0.875))
-                .label("Condition")
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let mut next = children.clone();
-                    next.push(default_when_condition());
-                    if let Some(node) = build_when_expression_group(&next, operator) {
-                        change(this, node, cx);
-                    }
-                }))
+            Button::new(SharedString::from(format!(
+                "when-add-c-{}-{path}",
+                target.key()
+            )))
+            .variant(ButtonVariant::Outline)
+            .size(ButtonSize::Compact)
+            .icon(IconName::Plus)
+            .icon_size(rems(0.875))
+            .label("Condition")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let mut next = children.clone();
+                next.push(default_when_condition());
+                if let Some(node) = build_when_expression_group(&next, operator) {
+                    change(this, node, cx);
+                }
+            }))
         };
         let add_group = {
             let children = children.clone();
             let change = on_change.clone();
-            Button::new(SharedString::from(format!("when-add-g-{}-{path}", target.key())))
-                .variant(ButtonVariant::Outline)
-                .size(ButtonSize::Compact)
-                .icon(IconName::Plus)
-                .icon_size(rems(0.875))
-                .label("Group")
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let nested = if operator == BooleanOperator::And { BooleanOperator::Or } else { BooleanOperator::And };
-                    let mut next = children.clone();
-                    next.push(default_when_group(nested));
-                    if let Some(node) = build_when_expression_group(&next, operator) {
-                        change(this, node, cx);
-                    }
-                }))
+            Button::new(SharedString::from(format!(
+                "when-add-g-{}-{path}",
+                target.key()
+            )))
+            .variant(ButtonVariant::Outline)
+            .size(ButtonSize::Compact)
+            .icon(IconName::Plus)
+            .icon_size(rems(0.875))
+            .label("Group")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let nested = if operator == BooleanOperator::And {
+                    BooleanOperator::Or
+                } else {
+                    BooleanOperator::And
+                };
+                let mut next = children.clone();
+                next.push(default_when_group(nested));
+                if let Some(node) = build_when_expression_group(&next, operator) {
+                    change(this, node, cx);
+                }
+            }))
         };
 
         let mut child_elements: Vec<AnyElement> = Vec::new();
@@ -1229,8 +1470,24 @@ impl SettingsView {
                 div()
                     .relative()
                     .pl_4()
-                    .child(div().absolute().top_0().bottom_0().left(px(6.)).w(px(1.)).bg(line))
-                    .child(div().absolute().top_4().left(px(6.)).h(px(1.)).w(px(10.)).bg(line))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(px(6.))
+                            .w(px(1.))
+                            .bg(line),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top_4()
+                            .left(px(6.))
+                            .h(px(1.))
+                            .w(px(10.))
+                            .bg(line),
+                    )
                     .child(editor)
                     .into_any_element(),
             );
@@ -1242,8 +1499,16 @@ impl SettingsView {
             .gap_2()
             .rounded_lg()
             .border_1()
-            .border_color(if depth > 0 { with_alpha(theme.border, 0.7) } else { with_alpha(theme.border, 0.6) })
-            .bg(if depth > 0 { with_alpha(theme.background, 0.55) } else { with_alpha(theme.muted, 0.1) })
+            .border_color(if depth > 0 {
+                with_alpha(theme.border, 0.7)
+            } else {
+                with_alpha(theme.border, 0.6)
+            })
+            .bg(if depth > 0 {
+                with_alpha(theme.background, 0.55)
+            } else {
+                with_alpha(theme.muted, 0.1)
+            })
             .p_2()
             .child(
                 div()
@@ -1254,7 +1519,11 @@ impl SettingsView {
                     .child(operator_select)
                     .child(add_condition)
                     .child(add_group)
-                    .children(on_remove.as_ref().map(|remove| remove_button(&path, node, remove, true, cx))),
+                    .children(
+                        on_remove
+                            .as_ref()
+                            .map(|remove| remove_button(&path, node, remove, true, cx)),
+                    ),
             )
             .child(div().flex().flex_col().gap_2().children(child_elements))
             .into_any_element()
@@ -1282,11 +1551,23 @@ impl SettingsView {
         let when_expr = when_ast_to_expression(draft.when.as_ref());
         let conflicts = keybinding_conflict_labels(all_rows, "new", &draft.key, &when_expr);
         let recording = self.panels.keybindings.capture.as_deref() == Some("new");
-        let label_text = if command.is_empty() { "new keybinding".to_owned() } else { command_label(&command) };
+        let label_text = if command.is_empty() {
+            "new keybinding".to_owned()
+        } else {
+            command_label(&command)
+        };
         let can_save = !command.is_empty() && !draft.key.trim().is_empty() && draft.when_valid;
         let _ = mac;
 
-        let when_control = self.when_clause_control(&WhenTarget::New, &label_text, &when_expr, draft.when.as_ref(), variables, window, cx);
+        let when_control = self.when_clause_control(
+            &WhenTarget::New,
+            &label_text,
+            &when_expr,
+            draft.when.as_ref(),
+            variables,
+            window,
+            cx,
+        );
         let description = div()
             .flex()
             .h_6()
@@ -1305,13 +1586,22 @@ impl SettingsView {
             cx,
             "kb-new-command",
             if command.is_empty() {
-                div().text_color(theme.placeholder).child("Command").into_any_element()
+                div()
+                    .text_color(theme.placeholder)
+                    .child("Command")
+                    .into_any_element()
             } else {
                 div().child(command_label(&command)).into_any_element()
             },
             command_options
                 .iter()
-                .map(|option| (serde_json::json!(option), div().child(command_label(option)).into_any_element(), *option == command))
+                .map(|option| {
+                    (
+                        serde_json::json!(option),
+                        div().child(command_label(option)).into_any_element(),
+                        *option == command,
+                    )
+                })
                 .collect(),
             SelectWidth::Fixed(14.),
             SelectSize::Sm,
@@ -1367,10 +1657,11 @@ impl SettingsView {
             .child(cancel);
         div()
             .bg(with_alpha(theme.muted, 0.15))
-            .child(SettingsRow::new("New keybinding").description(description).control(control))
+            .child(
+                SettingsRow::new("New keybinding")
+                    .description(description)
+                    .control(control),
+            )
             .into_any_element()
     }
 }
-
-#[allow(dead_code)]
-fn _unused(_: ElementId) {}

@@ -2,7 +2,7 @@
 
 use gpui_kit::{
     AnyElement, Context, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _,
-    Window, div, px, rems,
+    Window, div, rems,
 };
 use serde_json::{Value, json};
 use turin_contracts::settings::BackgroundActivityProfile;
@@ -23,11 +23,20 @@ use crate::ui::{Button, ButtonVariant};
 type Patch = fn(u64) -> BackgroundActivityOverridePatch;
 
 impl SettingsView {
-    fn write_background_override(&mut self, patch: BackgroundActivityOverridePatch, cx: &mut Context<Self>) {
+    fn write_background_override(
+        &mut self,
+        patch: BackgroundActivityOverridePatch,
+        cx: &mut Context<Self>,
+    ) {
         let vm = self.vm(cx);
-        let resolved = turin_shared::server_settings::resolve_server_background_activity_settings(&vm.server);
-        let next = background_activity_override_settings(&vm.server.background_activity, &resolved, patch);
-        self.update_server(json!({ "backgroundActivity": serde_json::to_value(next).unwrap_or(Value::Null) }), cx);
+        let resolved =
+            turin_shared::server_settings::resolve_server_background_activity_settings(&vm.server);
+        let next =
+            background_activity_override_settings(&vm.server.background_activity, &resolved, patch);
+        self.update_server(
+            json!({ "backgroundActivity": serde_json::to_value(next).unwrap_or(Value::Null) }),
+            cx,
+        );
     }
 
     pub(in crate::settings) fn render_background_activity_dialog(
@@ -37,14 +46,18 @@ impl SettingsView {
     ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let vm = self.vm(cx);
-        let resolved = turin_shared::server_settings::resolve_server_background_activity_settings(&vm.server);
+        let resolved =
+            turin_shared::server_settings::resolve_server_background_activity_settings(&vm.server);
         let profile_label = |profile: BackgroundActivityProfile| match profile {
             BackgroundActivityProfile::Balanced => "Balanced",
             BackgroundActivityProfile::Performance => "Performance",
             BackgroundActivityProfile::BatterySaver => "Battery saver",
         };
 
-        let row = |title: &'static str, description: &'static str, control: AnyElement, bordered: bool| {
+        let row = |title: &'static str,
+                   description: &'static str,
+                   control: AnyElement,
+                   bordered: bool| {
             div()
                 .flex()
                 .items_center()
@@ -59,7 +72,12 @@ impl SettingsView {
                         .flex_col()
                         .gap_1()
                         .min_w_0()
-                        .child(div().text_size(TEXT_SM.size).font_weight(FontWeight::MEDIUM).child(title))
+                        .child(
+                            div()
+                                .text_size(TEXT_SM.size)
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(title),
+                        )
                         .child(
                             div()
                                 .text_size(TEXT_XS.size)
@@ -109,35 +127,129 @@ impl SettingsView {
                         window: &mut Window,
                         cx: &mut Context<Self>|
          -> AnyElement {
-            let field = this.number_field(id, duration_to_seconds(value_ms), min, step, window, cx, move |this, value, cx| {
-                this.write_background_override(patch(normalize_interval_seconds(Some(value as f64), min) * 1_000), cx);
-            });
+            let field = this.number_field(
+                id,
+                duration_to_seconds(value_ms),
+                min,
+                step,
+                window,
+                cx,
+                move |this, value, cx| {
+                    this.write_background_override(
+                        patch(normalize_interval_seconds(Some(value as f64), min) * 1_000),
+                        cx,
+                    );
+                },
+            );
             div()
                 .flex()
                 .flex_shrink_0()
                 .items_center()
                 .gap_2()
                 .child(field)
-                .child(div().text_size(TEXT_XS.size).text_color(theme.muted_foreground).child("seconds"))
+                .child(
+                    div()
+                        .text_size(TEXT_XS.size)
+                        .text_color(theme.muted_foreground)
+                        .child("seconds"),
+                )
                 .into_any_element()
         };
 
-        let git = interval(self, "bg-git", resolved.automatic_git_fetch_interval, 0, 5,
-            |ms| BackgroundActivityOverridePatch { automatic_git_fetch_interval: Some(ms), ..Default::default() }, window, cx);
-        let health = interval(self, "bg-health", resolved.provider_health_refresh_interval, 0, PROVIDER_HEALTH_INTERVAL_STEP_SECONDS,
-            |ms| BackgroundActivityOverridePatch { provider_health_refresh_interval: Some(ms), ..Default::default() }, window, cx);
-        let active = interval(self, "bg-host-active", resolved.host_power_monitor_active_interval, 5, 5,
-            |ms| BackgroundActivityOverridePatch { host_power_monitor_active_interval: Some(ms), ..Default::default() }, window, cx);
-        let idle = interval(self, "bg-host-idle", resolved.host_power_monitor_idle_interval, 5, 30,
-            |ms| BackgroundActivityOverridePatch { host_power_monitor_idle_interval: Some(ms), ..Default::default() }, window, cx);
+        let git = interval(
+            self,
+            "bg-git",
+            resolved.automatic_git_fetch_interval,
+            0,
+            5,
+            |ms| BackgroundActivityOverridePatch {
+                automatic_git_fetch_interval: Some(ms),
+                ..Default::default()
+            },
+            window,
+            cx,
+        );
+        let health = interval(
+            self,
+            "bg-health",
+            resolved.provider_health_refresh_interval,
+            0,
+            PROVIDER_HEALTH_INTERVAL_STEP_SECONDS,
+            |ms| BackgroundActivityOverridePatch {
+                provider_health_refresh_interval: Some(ms),
+                ..Default::default()
+            },
+            window,
+            cx,
+        );
+        let active = interval(
+            self,
+            "bg-host-active",
+            resolved.host_power_monitor_active_interval,
+            5,
+            5,
+            |ms| BackgroundActivityOverridePatch {
+                host_power_monitor_active_interval: Some(ms),
+                ..Default::default()
+            },
+            window,
+            cx,
+        );
+        let idle = interval(
+            self,
+            "bg-host-idle",
+            resolved.host_power_monitor_idle_interval,
+            5,
+            30,
+            |ms| BackgroundActivityOverridePatch {
+                host_power_monitor_idle_interval: Some(ms),
+                ..Default::default()
+            },
+            window,
+            cx,
+        );
 
-        let toggles: [(&'static str, bool, fn(bool) -> BackgroundActivityOverridePatch); 4] = [
-            ("Pause when host is locked", resolved.pause_when_host_locked, |v| BackgroundActivityOverridePatch { pause_when_host_locked: Some(v), ..Default::default() }),
-            ("Pause on host low power", resolved.pause_when_host_low_power, |v| BackgroundActivityOverridePatch { pause_when_host_low_power: Some(v), ..Default::default() }),
-            ("Pause on client low power", resolved.pause_when_client_low_power, |v| BackgroundActivityOverridePatch { pause_when_client_low_power: Some(v), ..Default::default() }),
-            ("Pause on battery", resolved.pause_when_on_battery, |v| BackgroundActivityOverridePatch { pause_when_on_battery: Some(v), ..Default::default() }),
+        let toggles: [(
+            &'static str,
+            bool,
+            fn(bool) -> BackgroundActivityOverridePatch,
+        ); 4] = [
+            (
+                "Pause when host is locked",
+                resolved.pause_when_host_locked,
+                |v| BackgroundActivityOverridePatch {
+                    pause_when_host_locked: Some(v),
+                    ..Default::default()
+                },
+            ),
+            (
+                "Pause on host low power",
+                resolved.pause_when_host_low_power,
+                |v| BackgroundActivityOverridePatch {
+                    pause_when_host_low_power: Some(v),
+                    ..Default::default()
+                },
+            ),
+            (
+                "Pause on client low power",
+                resolved.pause_when_client_low_power,
+                |v| BackgroundActivityOverridePatch {
+                    pause_when_client_low_power: Some(v),
+                    ..Default::default()
+                },
+            ),
+            ("Pause on battery", resolved.pause_when_on_battery, |v| {
+                BackgroundActivityOverridePatch {
+                    pause_when_on_battery: Some(v),
+                    ..Default::default()
+                }
+            }),
         ];
-        let mut grid = div().flex().flex_wrap().border_t_1().border_color(theme.border);
+        let mut grid = div()
+            .flex()
+            .flex_wrap()
+            .border_t_1()
+            .border_color(theme.border);
         for (index, (label, checked, patch)) in toggles.into_iter().enumerate() {
             let entity = cx.entity();
             grid = grid.child(
@@ -151,14 +263,21 @@ impl SettingsView {
                     .py_3()
                     .border_b_1()
                     .when_bordered_right(index % 2 == 0, theme.border)
-                    .child(div().text_size(TEXT_SM.size).font_weight(FontWeight::MEDIUM).child(label))
+                    .child(
+                        div()
+                            .text_size(TEXT_SM.size)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(label),
+                    )
                     .child(super::super::controls::switch(
                         SharedString::from(format!("bg-toggle-{index}")),
                         checked,
                         false,
                         cx,
                         move |next, _, cx| {
-                            entity.update(cx, |this, cx| this.write_background_override(patch(next), cx));
+                            entity.update(cx, |this, cx| {
+                                this.write_background_override(patch(next), cx)
+                            });
                         },
                     )),
             );
@@ -191,7 +310,10 @@ impl SettingsView {
             vec![
                 dialog_header(
                     "Background Activity",
-                    Some("Tune the shared power policy and the background intervals that feed it.".into()),
+                    Some(
+                        "Tune the shared power policy and the background intervals that feed it."
+                            .into(),
+                    ),
                     &theme,
                 ),
                 dialog_panel("bg-body", card),
@@ -202,7 +324,10 @@ impl SettingsView {
                             .variant(ButtonVariant::Outline)
                             .label("Reset all")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                let default = this.json(cx).default_of(Which::Server, "backgroundActivity").clone();
+                                let default = this
+                                    .json(cx)
+                                    .default_of(Which::Server, "backgroundActivity")
+                                    .clone();
                                 this.update_server(json!({ "backgroundActivity": default }), cx);
                             }))
                             .into_any_element(),
@@ -224,16 +349,19 @@ impl SettingsView {
 /// Border helpers for the dialog's card rows.
 trait CardBorders: gpui_kit::Styled + Sized {
     fn when_bordered(self, bordered: bool, color: impl Into<gpui_kit::Hsla>) -> Self {
-        if bordered { self.border_t_1().border_color(color) } else { self }
+        if bordered {
+            self.border_t_1().border_color(color)
+        } else {
+            self
+        }
     }
     fn when_bordered_right(self, bordered: bool, color: impl Into<gpui_kit::Hsla>) -> Self {
-        if bordered { self.border_r_1().border_color(color) } else { self }
+        if bordered {
+            self.border_r_1().border_color(color)
+        } else {
+            self
+        }
     }
 }
 
 impl CardBorders for gpui_kit::Div {}
-
-#[allow(dead_code)]
-fn _unused() -> gpui_kit::Pixels {
-    px(0.)
-}

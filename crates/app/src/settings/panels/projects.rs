@@ -10,14 +10,16 @@
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, FontWeight, IntoElement, ParentElement as _, SharedString,
-    Styled as _, Window, div, px, rems,
+    AnyElement, Context, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _,
+    Window, div, px, rems,
 };
 use serde_json::{Value, json};
 use turin_contracts::project::ProjectScript;
 
 use super::super::controls::{FieldSize, SelectWidth, switch, text_field};
-use super::super::dialog::{ConfirmSpec, Dialog, dialog_footer, dialog_frame, dialog_header, dialog_panel};
+use super::super::dialog::{
+    ConfirmSpec, Dialog, dialog_footer, dialog_frame, dialog_header, dialog_panel,
+};
 use super::super::layout::{SettingsRow, SettingsSection};
 use super::super::project_scripts::{command_for_project_script, next_project_script_id};
 use super::super::project_settings_logic::project_group_title_needs_update;
@@ -58,7 +60,11 @@ impl SettingsView {
         self.vm(cx).server.default_project_scripts.clone()
     }
 
-    pub(super) fn render_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_projects(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let theme = cx.app_theme().clone();
         let vm = self.vm(cx);
         let json = self.json(cx);
@@ -71,16 +77,18 @@ impl SettingsView {
             .or_else(|| vm.projects.first())
             .cloned()
         else {
-            return vec![div()
-                .flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .p_8()
-                .text_size(TEXT_SM.size)
-                .text_color(theme.muted_foreground)
-                .child("Add a project from the sidebar to configure it here.")
-                .into_any_element()];
+            return vec![
+                div()
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .p_8()
+                    .text_size(TEXT_SM.size)
+                    .text_color(theme.muted_foreground)
+                    .child("Add a project from the sidebar to configure it here.")
+                    .into_any_element(),
+            ];
         };
 
         // Project picker (the scope picker of upstream's settings header).
@@ -91,7 +99,13 @@ impl SettingsView {
             project.display_name.clone().into(),
             vm.projects
                 .iter()
-                .map(|p| (json!(p.id), SharedString::from(p.display_name.clone()), p.id == current))
+                .map(|p| {
+                    (
+                        json!(p.id),
+                        SharedString::from(p.display_name.clone()),
+                        p.id == current,
+                    )
+                })
                 .collect(),
             SelectWidth::Fixed(14.),
             false,
@@ -136,15 +150,26 @@ impl SettingsView {
             .hide_title()
             .child(
                 SettingsRow::new("Name")
-                    .description("The shared name for this project group in the sidebar and thread lists.")
-                    .control(div().w(rems(16.)).child(text_field(&name_input, None, FieldSize::Sm, false, cx))),
+                    .description(
+                        "The shared name for this project group in the sidebar and thread lists.",
+                    )
+                    .control(div().w(rems(16.)).child(text_field(
+                        &name_input,
+                        None,
+                        FieldSize::Sm,
+                        false,
+                        cx,
+                    ))),
             )
             .child(
                 SettingsRow::new("Project icon")
                     .description(format!("{} · Automatic", project.monogram))
                     .control(
-                        ProjectMonogram::new(project.monogram.clone(), gpui_kit::rgb(project.favicon_color).into())
-                            .size(rems(1.5)),
+                        ProjectMonogram::new(
+                            project.monogram.clone(),
+                            gpui_kit::rgb(project.favicon_color).into(),
+                        )
+                        .size(rems(1.5)),
                     ),
             );
 
@@ -190,7 +215,10 @@ impl SettingsView {
                 ),
         );
         vec![
-            SettingsSection::new("Project picker").hide_title().child(picker_row).into_any_element(),
+            SettingsSection::new("Project picker")
+                .hide_title()
+                .child(picker_row)
+                .into_any_element(),
             overview.into_any_element(),
             new_threads.into_any_element(),
             actions,
@@ -229,12 +257,19 @@ impl SettingsView {
         for script in scripts {
             let id = script.id.as_str().to_owned();
             let command = command_for_project_script(&id);
-            let shortcut = vm.keybindings.rules.iter().find(|rule| rule.command.as_str() == command).map(|rule| {
-                super::keybindings::keybinding_pill(
-                    &super::super::keybindings_logic::shortcut_to_keybinding_input(&rule.shortcut),
-                    mac,
-                )
-            });
+            let shortcut = vm
+                .keybindings
+                .rules
+                .iter()
+                .find(|rule| rule.command.as_str() == command)
+                .map(|rule| {
+                    super::keybindings::keybinding_pill(
+                        &super::super::keybindings_logic::shortcut_to_keybinding_input(
+                            &rule.shortcut,
+                        ),
+                        mac,
+                    )
+                });
             let icon = serde_json::to_value(script.icon)
                 .ok()
                 .and_then(|v| v.as_str().map(str::to_owned))
@@ -257,10 +292,23 @@ impl SettingsView {
                 .min_w_0()
                 .items_center()
                 .gap_2()
-                .child(Icon::new(script_icon(&icon)).size(rems(1.)).color(theme.muted_foreground))
-                .child(div().min_w_0().truncate().child(script.name.as_str().to_owned()))
-                .when(script.run_on_worktree_create, |this| this.child(tag("setup")))
-                .when(script.run_on_settle == Some(true), |this| this.child(tag("on settle")));
+                .child(
+                    Icon::new(script_icon(&icon))
+                        .size(rems(1.))
+                        .color(theme.muted_foreground),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(script.name.as_str().to_owned()),
+                )
+                .when(script.run_on_worktree_create, |this| {
+                    this.child(tag("setup"))
+                })
+                .when(script.run_on_settle == Some(true), |this| {
+                    this.child(tag("on settle"))
+                });
             let edit_id = id.clone();
             let name = script.name.as_str().to_owned();
             section = section.child(
@@ -295,14 +343,33 @@ impl SettingsView {
         section.into_any_element()
     }
 
-    fn open_script_editor(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_script_editor(
+        &mut self,
+        id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let scripts = self.project_scripts(cx);
-        let existing = id.as_ref().and_then(|id| scripts.iter().find(|s| s.id.as_str() == id));
+        let existing = id
+            .as_ref()
+            .and_then(|id| scripts.iter().find(|s| s.id.as_str() == id));
         let (name, command, setup) = existing
-            .map(|s| (s.name.as_str().to_owned(), s.command.as_str().to_owned(), s.run_on_worktree_create))
+            .map(|s| {
+                (
+                    s.name.as_str().to_owned(),
+                    s.command.as_str().to_owned(),
+                    s.run_on_worktree_create,
+                )
+            })
             .unwrap_or_default();
-        self.panels.projects.script = ScriptDraft { id, run_on_worktree_create: setup };
-        for (key, placeholder, value) in [("script-name", "Test", name), ("script-command", "bun test", command)] {
+        self.panels.projects.script = ScriptDraft {
+            id,
+            run_on_worktree_create: setup,
+        };
+        for (key, placeholder, value) in [
+            ("script-name", "Test", name),
+            ("script-command", "bun test", command),
+        ] {
             let state = self.input(key, &value, placeholder, window, cx, |_, _, _, _| {});
             state.update(cx, |state, cx| state.set_value(value, window, cx));
         }
@@ -316,29 +383,51 @@ impl SettingsView {
     }
 
     /// `ProjectScriptEditorDialog`, reduced to name, command and the setup toggle.
-    pub(in crate::settings) fn render_script_editor_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(in crate::settings) fn render_script_editor_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let draft = self.panels.projects.script.clone();
         let editing = draft.id.is_some();
         let name = self.input("script-name", "", "Test", window, cx, |_, _, _, _| {});
-        let command = self.input("script-command", "", "bun test", window, cx, |_, _, _, _| {});
+        let command = self.input(
+            "script-command",
+            "",
+            "bun test",
+            window,
+            cx,
+            |_, _, _, _| {},
+        );
         let read = |this: &Self, key: &str, cx: &gpui_kit::App| {
             this.inputs
                 .get(&SharedString::from(key.to_owned()))
                 .map(|state| state.read(cx).value().trim().to_owned())
                 .unwrap_or_default()
         };
-        let can_save = !read(self, "script-name", cx).is_empty() && !read(self, "script-command", cx).is_empty();
+        let can_save = !read(self, "script-name", cx).is_empty()
+            && !read(self, "script-command", cx).is_empty();
         let label = |text: &'static str| {
-            div().text_size(TEXT_SM.size).font_weight(FontWeight::MEDIUM).text_color(theme.foreground).child(text)
+            div()
+                .text_size(TEXT_SM.size)
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.foreground)
+                .child(text)
         };
         let entity = cx.entity();
-        let setup_switch = switch("script-setup", draft.run_on_worktree_create, false, cx, move |next, _, cx| {
-            entity.update(cx, |this, cx| {
-                this.panels.projects.script.run_on_worktree_create = next;
-                cx.notify();
-            });
-        });
+        let setup_switch = switch(
+            "script-setup",
+            draft.run_on_worktree_create,
+            false,
+            cx,
+            move |next, _, cx| {
+                entity.update(cx, |this, cx| {
+                    this.panels.projects.script.run_on_worktree_create = next;
+                    cx.notify();
+                });
+            },
+        );
         let body = div()
             .flex()
             .flex_col()
@@ -372,8 +461,11 @@ impl SettingsView {
                 .variant(ButtonVariant::DestructiveOutline)
                 .label("Delete")
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    let remaining: Vec<ProjectScript> =
-                        this.project_scripts(cx).into_iter().filter(|s| s.id.as_str() != delete_id).collect();
+                    let remaining: Vec<ProjectScript> = this
+                        .project_scripts(cx)
+                        .into_iter()
+                        .filter(|s| s.id.as_str() != delete_id)
+                        .collect();
                     this.save_scripts(remaining, cx);
                     this.dialog = None;
                     cx.notify();
@@ -390,7 +482,11 @@ impl SettingsView {
         );
         footer.push(
             Button::new("script-save")
-                .label(if editing { "Save changes" } else { "Add action" })
+                .label(if editing {
+                    "Save changes"
+                } else {
+                    "Add action"
+                })
                 .disabled(!can_save)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let name = read(this, "script-name", cx);
@@ -414,7 +510,8 @@ impl SettingsView {
                             }
                         }
                         None => {
-                            let ids: Vec<String> = scripts.iter().map(|s| s.id.as_str().to_owned()).collect();
+                            let ids: Vec<String> =
+                                scripts.iter().map(|s| s.id.as_str().to_owned()).collect();
                             let id = next_project_script_id(&name, &ids);
                             if let Ok(script) = serde_json::from_value::<ProjectScript>(json!({
                                 "id": id,

@@ -454,3 +454,407 @@ pub fn decide_message_dispatch(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::test_support::{default_capabilities, projection, run_json};
+    use serde_json::json;
+    use turin_contracts::orchestration_v2::{
+        OrchestrationV2ProviderCapabilities, OrchestrationV2ThreadProjection,
+    };
+
+    const PROJECT: &str = "project:command-policy";
+    const THREAD: &str = "thread:command-policy";
+    const ACTIVE_RUN: &str = "run:command-policy-active";
+    const FALLBACK: &str =
+        "providerInstanceId cannot steer active turns directly or by interrupt-and-restart";
+    const FORCED: &str = "providerInstanceId cannot satisfy a required interrupt-and-restart";
+    type Expected = Result<SteeringExecutionPolicy, (Capability, &'static str)>;
+    type Case = ((bool, bool, bool, bool), Expected);
+
+    /// Codex as `CodexProviderCapabilitiesV2`: forks natively and steers live.
+    fn codex() -> OrchestrationV2ProviderCapabilities {
+        let mut caps = default_capabilities();
+        caps.turns.supports_active_steering = true;
+        caps.threads.can_fork_thread = true;
+        caps.threads.can_fork_from_turn = true;
+        caps
+    }
+
+    /// Grok ACP: no live steering and no native fork; restarts to steer.
+    fn grok() -> OrchestrationV2ProviderCapabilities {
+        let mut caps = codex();
+        caps.turns.supports_active_steering = false;
+        caps.threads.can_fork_thread = false;
+        caps
+    }
+
+    /// Cursor: no native fork. Its handoff summaries stay supported.
+    fn cursor() -> OrchestrationV2ProviderCapabilities {
+        let mut caps = codex();
+        caps.threads.can_fork_thread = false;
+        caps
+    }
+
+    fn check<'a>(
+        command_id: &'a CommandId,
+        thread_id: &'a ThreadId,
+        provider_instance_id: &'a ProviderInstanceId,
+        capabilities: &'a OrchestrationV2ProviderCapabilities,
+    ) -> CapabilityCheck<'a> {
+        CapabilityCheck {
+            command_id,
+            thread_id,
+            provider_instance_id,
+            capabilities,
+        }
+    }
+
+    /// A thread whose active run is bound to a provider session with `capabilities`.
+    /// Without capabilities the thread has no runs.
+    fn dispatch_projection(
+        capabilities: Option<&OrchestrationV2ProviderCapabilities>,
+        status: &str,
+    ) -> OrchestrationV2ThreadProjection {
+        let Some(capabilities) = capabilities else {
+            return projection(THREAD, PROJECT, json!({}));
+        };
+        let mut run = run_json(ACTIVE_RUN, THREAD, 1, status);
+        run["providerThreadId"] = json!("provider-thread:command-policy");
+        let provider_thread = json!({
+            "id": "provider-thread:command-policy", "driver": "codex",
+            "providerInstanceId": "codex", "providerSessionId": "provider-session:command-policy",
+            "appThreadId": THREAD, "ownerNodeId": null,
+            "nativeThreadRef": {"driver": "codex", "nativeId": "native-thread", "strength": "strong"},
+            "nativeConversationHeadRef": null, "status": "idle", "firstRunOrdinal": 1,
+            "lastRunOrdinal": 1, "handoffIds": [], "forkedFrom": null,
+            "pendingBackgroundTasks": [], "contextUsage": null, "nativeMetadata": null,
+            "createdAt": "2026-06-21T00:00:00.000Z", "updatedAt": "2026-06-21T00:00:00.000Z",
+        });
+        let session = json!({
+            "id": "provider-session:command-policy", "driver": "codex",
+            "providerInstanceId": "codex", "status": "running", "cwd": "/workspace",
+            "model": null, "capabilities": serde_json::to_value(capabilities).unwrap(),
+            "createdAt": "2026-06-21T00:00:00.000Z", "updatedAt": "2026-06-21T00:00:00.000Z",
+            "lastError": null,
+        });
+        projection(
+            THREAD,
+            PROJECT,
+            json!({
+                "runs": [run],
+                "providerThreads": [provider_thread],
+                "providerSessions": [session],
+            }),
+        )
+    }
+
+    fn active_run() -> RunId {
+        RunId::new(ACTIVE_RUN).unwrap()
+    }
+
+    fn unsupported(error: CommandPolicyError) -> (Capability, &'static str) {
+        match error {
+            CommandPolicyError::CapabilityUnsupported {
+                capability, detail, ..
+            } => (capability, detail),
+            other => panic!("expected a capability rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolves_automatic_message_delivery_from_authoritative_capabilities() {
+        let resolve = |projection: &OrchestrationV2ThreadProjection| {
+            resolve_message_dispatch_intent(
+                projection,
+                RequestedDispatchMode::StartImmediately,
+                Some(DeliveryIntent::Auto),
+            )
+        };
+
+        assert_eq!(
+            resolve(&dispatch_projection(None, "running")),
+            RequestedDispatchMode::StartImmediately
+        );
+        assert_eq!(
+            resolve(&dispatch_projection(Some(&codex()), "running")),
+            RequestedDispatchMode::SteerActive {
+                target_run_id: active_run()
+            }
+        );
+
+        let mut queued = codex();
+        queued.turns.supports_active_steering = false;
+        assert_eq!(
+            resolve(&dispatch_projection(Some(&queued), "running")),
+            RequestedDispatchMode::QueueAfterActive
+        );
+
+        let mut restart = queued;
+        restart.turns.supports_queued_messages = false;
+        assert_eq!(
+            resolve(&dispatch_projection(Some(&restart), "running")),
+            RequestedDispatchMode::RestartActive {
+                target_run_id: active_run()
+            }
+        );
+    }
+
+    #[test]
+    fn queues_an_automatic_message_while_the_handoff_run_is_preparing_or_starting() {
+        for status in ["preparing", "starting"] {
+            let projection = dispatch_projection(Some(&codex()), status);
+            assert_eq!(
+                resolve_message_dispatch_intent(
+                    &projection,
+                    RequestedDispatchMode::StartImmediately,
+                    Some(DeliveryIntent::Auto),
+                ),
+                RequestedDispatchMode::QueueAfterActive,
+                "status {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn targets_the_latest_active_run_for_explicit_steer_and_restart_intent() {
+        let projection = dispatch_projection(Some(&codex()), "running");
+        assert_eq!(
+            resolve_message_dispatch_intent(
+                &projection,
+                RequestedDispatchMode::StartImmediately,
+                Some(DeliveryIntent::Steer),
+            ),
+            RequestedDispatchMode::SteerActive {
+                target_run_id: active_run()
+            }
+        );
+        assert_eq!(
+            resolve_message_dispatch_intent(
+                &projection,
+                RequestedDispatchMode::StartImmediately,
+                Some(DeliveryIntent::Restart),
+            ),
+            RequestedDispatchMode::RestartActive {
+                target_run_id: active_run()
+            }
+        );
+        assert_eq!(
+            resolve_message_dispatch_intent(
+                &dispatch_projection(None, "running"),
+                RequestedDispatchMode::StartImmediately,
+                Some(DeliveryIntent::Steer),
+            ),
+            RequestedDispatchMode::StartImmediately
+        );
+    }
+
+    #[test]
+    fn prefers_direct_active_steering_when_the_provider_supports_it() {
+        let command_id = CommandId::new("command-policy-test").unwrap();
+        let thread_id = ThreadId::new(THREAD).unwrap();
+        let instance = ProviderInstanceId::new("codex").unwrap();
+        let caps = codex();
+        assert_eq!(
+            decide_steering_execution(&check(&command_id, &thread_id, &instance, &caps), false)
+                .unwrap(),
+            SteeringExecutionPolicy::ActiveSteering
+        );
+    }
+
+    #[test]
+    fn uses_interrupt_restart_steering_for_grok_acp() {
+        let command_id = CommandId::new("command-policy-test").unwrap();
+        let thread_id = ThreadId::new(THREAD).unwrap();
+        let instance = ProviderInstanceId::new("grok").unwrap();
+        let caps = grok();
+        assert_eq!(
+            decide_steering_execution(&check(&command_id, &thread_id, &instance, &caps), false)
+                .unwrap(),
+            SteeringExecutionPolicy::InterruptRestart
+        );
+    }
+
+    #[test]
+    fn reports_the_actually_missing_capability_across_the_steering_matrix() {
+        let command_id = CommandId::new("command-policy-test").unwrap();
+        let thread_id = ThreadId::new(THREAD).unwrap();
+        let instance = ProviderInstanceId::new("codex").unwrap();
+        use Capability::{ActiveSteering, InterruptRestartSteering};
+        use SteeringExecutionPolicy::{ActiveSteering as Active, InterruptRestart as Restart};
+
+        // (force_restart, active, interrupt, restart) -> expected
+        let cases: [Case; 16] = [
+            ((false, true, false, false), Ok(Active)),
+            ((false, true, false, true), Ok(Active)),
+            ((false, true, true, false), Ok(Active)),
+            ((false, true, true, true), Ok(Active)),
+            ((false, false, true, true), Ok(Restart)),
+            (
+                (false, false, true, false),
+                Err((InterruptRestartSteering, FALLBACK)),
+            ),
+            ((false, false, false, true), Err((ActiveSteering, FALLBACK))),
+            (
+                (false, false, false, false),
+                Err((ActiveSteering, FALLBACK)),
+            ),
+            ((true, true, true, true), Ok(Restart)),
+            ((true, false, true, true), Ok(Restart)),
+            (
+                (true, true, true, false),
+                Err((InterruptRestartSteering, FORCED)),
+            ),
+            (
+                (true, false, true, false),
+                Err((InterruptRestartSteering, FORCED)),
+            ),
+            (
+                (true, true, false, true),
+                Err((InterruptRestartSteering, FORCED)),
+            ),
+            (
+                (true, false, false, true),
+                Err((InterruptRestartSteering, FORCED)),
+            ),
+            (
+                (true, true, false, false),
+                Err((InterruptRestartSteering, FORCED)),
+            ),
+            (
+                (true, false, false, false),
+                Err((InterruptRestartSteering, FORCED)),
+            ),
+        ];
+
+        for ((force, active, interrupt, restart), expected) in cases {
+            let mut caps = codex();
+            caps.turns.supports_active_steering = active;
+            caps.turns.supports_interrupt = interrupt;
+            caps.turns.supports_steering_by_interrupt_restart = restart;
+            let input = check(&command_id, &thread_id, &instance, &caps);
+            let actual = decide_steering_execution(&input, force);
+            match expected {
+                Ok(policy) => assert_eq!(
+                    actual.unwrap(),
+                    policy,
+                    "{force} {active} {interrupt} {restart}"
+                ),
+                Err((capability, detail)) => assert_eq!(
+                    unsupported(actual.unwrap_err()),
+                    (capability, detail),
+                    "{force} {active} {interrupt} {restart}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn guards_native_fork_behind_fork_and_identity_capabilities() {
+        let command_id = CommandId::new("command-policy-test").unwrap();
+        let thread_id = ThreadId::new(THREAD).unwrap();
+        let instance = ProviderInstanceId::new("codex").unwrap();
+        let mut caps = codex();
+        caps.identity.native_thread_ids = OrchestrationV2NativeRefStrength::Weak;
+        let error = ensure_native_fork(&check(&command_id, &thread_id, &instance, &caps), true)
+            .unwrap_err();
+        assert_eq!(unsupported(error).0, Capability::NativeFork);
+    }
+
+    #[test]
+    fn uses_a_native_fork_when_the_provider_supports_the_requested_source_point() {
+        let command_id = CommandId::new("command-policy-test").unwrap();
+        let thread_id = ThreadId::new(THREAD).unwrap();
+        let instance = ProviderInstanceId::new("codex").unwrap();
+        let caps = codex();
+        assert_eq!(
+            decide_fork_execution(
+                &check(&command_id, &thread_id, &instance, &caps),
+                true,
+                true,
+                OrchestrationV2RunStatus::Completed,
+                true,
+            )
+            .unwrap(),
+            ForkExecutionPolicy::NativeFork
+        );
+    }
+
+    #[test]
+    fn falls_back_to_portable_context_when_cursor_or_grok_cannot_fork_natively() {
+        let command_id = CommandId::new("command-policy-test").unwrap();
+        let thread_id = ThreadId::new(THREAD).unwrap();
+        for (name, caps) in [("cursor", cursor()), ("grok", grok())] {
+            let instance = ProviderInstanceId::new(name).unwrap();
+            assert_eq!(
+                decide_fork_execution(
+                    &check(&command_id, &thread_id, &instance, &caps),
+                    true,
+                    true,
+                    OrchestrationV2RunStatus::Completed,
+                    true,
+                )
+                .unwrap(),
+                ForkExecutionPolicy::PortableContext,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn returns_a_typed_error_when_neither_native_nor_portable_fork_is_available() {
+        let command_id = CommandId::new("command-policy-test").unwrap();
+        let thread_id = ThreadId::new(THREAD).unwrap();
+        let instance = ProviderInstanceId::new("cursor").unwrap();
+        let mut caps = cursor();
+        caps.context.can_consume_handoff_summaries = false;
+        let error = decide_fork_execution(
+            &check(&command_id, &thread_id, &instance, &caps),
+            true,
+            true,
+            OrchestrationV2RunStatus::Completed,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(unsupported(error).0, Capability::ContextHandoff);
+    }
+
+    #[test]
+    fn guards_rollback_behind_provider_rollback_snapshot_support() {
+        let command_id = CommandId::new("command-policy-test").unwrap();
+        let thread_id = ThreadId::new(THREAD).unwrap();
+        let instance = ProviderInstanceId::new("codex").unwrap();
+        let mut caps = codex();
+        caps.checkpointing.provider_rollback_returns_snapshot = false;
+        let error = ensure_rollback(&check(&command_id, &thread_id, &instance, &caps)).unwrap_err();
+        assert_eq!(unsupported(error).0, Capability::RollbackSnapshot);
+    }
+
+    #[test]
+    fn guards_fork_delta_handoff_behind_context_handoff_capabilities() {
+        let command_id = CommandId::new("command-policy-test").unwrap();
+        let thread_id = ThreadId::new(THREAD).unwrap();
+        let instance = ProviderInstanceId::new("codex").unwrap();
+        let mut caps = codex();
+        caps.context.supports_delta_handoff = false;
+        let error = ensure_context_handoff(
+            &check(&command_id, &thread_id, &instance, &caps),
+            HandoffStrategy::ForkDeltaContext,
+        )
+        .unwrap_err();
+        assert_eq!(unsupported(error).0, Capability::ContextHandoff);
+    }
+
+    #[test]
+    fn guards_queued_turns_behind_queued_message_support() {
+        let command_id = CommandId::new("command-policy-test").unwrap();
+        let thread_id = ThreadId::new(THREAD).unwrap();
+        let instance = ProviderInstanceId::new("codex").unwrap();
+        let mut caps = codex();
+        caps.turns.supports_queued_messages = false;
+        let error =
+            ensure_queued_messages(&check(&command_id, &thread_id, &instance, &caps)).unwrap_err();
+        assert_eq!(unsupported(error).0, Capability::QueuedMessages);
+    }
+}

@@ -350,7 +350,7 @@ pub struct ThreadMetadataUpdatedPayload {
 pub struct ThreadTokenUsageCost {
     #[serde(with = "crate::base_schemas::js_number")]
     pub amount: f64,
-    #[serde(deserialize_with = "token_usage_currency::deserialize")]
+    #[serde(deserialize_with = "max_32::required")]
     pub currency: TrimmedNonEmptyString,
 }
 
@@ -578,22 +578,13 @@ pub enum ToolActivitySurface {
     Computer,
 }
 
-/// Field-level bound helpers for the tool-activity shapes (upstream
-/// `.check(Schema.isMaxLength(n))` / `.check(Schema.isPattern(...))` on
-/// individual `TrimmedNonEmptyString` fields).
-fn trimmed_non_empty_at_most(
-    value: TrimmedNonEmptyString,
-    max_chars: usize,
-) -> Result<TrimmedNonEmptyString, String> {
-    // `Schema.isMaxLength` counts UTF-16 code units.
-    if value.as_str().encode_utf16().count() > max_chars {
-        Err(format!(
-            "a trimmed, non-empty string of at most {max_chars} chars"
-        ))
-    } else {
-        Ok(value)
-    }
-}
+// Field-level bounds for the tool-activity and token-usage shapes (upstream
+// `TrimmedNonEmptyString.check(Schema.isMaxLength(n))`). Lengths are UTF-16
+// code units, counted after trimming.
+crate::max_len!(max_32, 32);
+crate::max_len!(max_160, 160);
+crate::max_len!(max_512, 512);
+crate::max_len!(max_4096, 4096);
 
 mod tool_activity_app_id {
     use super::*;
@@ -602,8 +593,7 @@ mod tool_activity_app_id {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<TrimmedNonEmptyString, D::Error> {
         let value = TrimmedNonEmptyString::deserialize(d)?;
         let raw = value.as_str();
-        if raw.encode_utf16().count() > 512
-            || raw.is_empty()
+        if crate::base_schemas::js_len(raw) > 512
             || !raw
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
@@ -613,63 +603,6 @@ mod tool_activity_app_id {
             ));
         }
         Ok(value)
-    }
-}
-
-mod tool_activity_name {
-    use super::*;
-
-    /// `displayName` / `name`: at most 160 chars.
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<TrimmedNonEmptyString, D::Error> {
-        super::trimmed_non_empty_at_most(TrimmedNonEmptyString::deserialize(d)?, 160)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-mod tool_activity_key {
-    use super::*;
-
-    /// `key`: at most 512 chars.
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<TrimmedNonEmptyString, D::Error> {
-        super::trimmed_non_empty_at_most(TrimmedNonEmptyString::deserialize(d)?, 512)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-mod tool_activity_url {
-    use super::*;
-
-    /// `pageUrl` / `logoUrl`: at most 4096 chars.
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<TrimmedNonEmptyString, D::Error> {
-        super::trimmed_non_empty_at_most(TrimmedNonEmptyString::deserialize(d)?, 4096)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-mod tool_activity_optional_url {
-    use super::*;
-
-    /// `faviconUrl` / `faviconUrlDark` / `logoUrlDark`: optional, at most
-    /// 4096 chars.
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<Option<TrimmedNonEmptyString>, D::Error> {
-        match Option::<TrimmedNonEmptyString>::deserialize(d)? {
-            Some(value) => Ok(Some(
-                super::trimmed_non_empty_at_most(value, 4096).map_err(serde::de::Error::custom)?,
-            )),
-            None => Ok(None),
-        }
-    }
-}
-
-mod token_usage_currency {
-    use super::*;
-
-    /// `cost.currency`: at most 32 chars.
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<TrimmedNonEmptyString, D::Error> {
-        super::trimmed_non_empty_at_most(TrimmedNonEmptyString::deserialize(d)?, 32)
-            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -683,7 +616,7 @@ pub enum ToolActivityNativeAppReference {
     },
     #[serde(rename = "display-name")]
     DisplayName {
-        #[serde(deserialize_with = "tool_activity_name::deserialize")]
+        #[serde(deserialize_with = "max_160::required")]
         display_name: TrimmedNonEmptyString,
     },
 }
@@ -693,18 +626,18 @@ pub enum ToolActivityNativeAppReference {
 pub enum ToolActivityIcon {
     #[serde(rename = "website")]
     Website {
-        #[serde(deserialize_with = "tool_activity_url::deserialize")]
+        #[serde(deserialize_with = "max_4096::required")]
         page_url: TrimmedNonEmptyString,
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            deserialize_with = "tool_activity_optional_url::deserialize"
+            deserialize_with = "max_4096::optional"
         )]
         favicon_url: Option<TrimmedNonEmptyString>,
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            deserialize_with = "tool_activity_optional_url::deserialize"
+            deserialize_with = "max_4096::optional"
         )]
         favicon_url_dark: Option<TrimmedNonEmptyString>,
     },
@@ -712,12 +645,12 @@ pub enum ToolActivityIcon {
     NativeApp { app: ToolActivityNativeAppReference },
     #[serde(rename = "themed-logo")]
     ThemedLogo {
-        #[serde(deserialize_with = "tool_activity_url::deserialize")]
+        #[serde(deserialize_with = "max_4096::required")]
         logo_url: TrimmedNonEmptyString,
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            deserialize_with = "tool_activity_optional_url::deserialize"
+            deserialize_with = "max_4096::optional"
         )]
         logo_url_dark: Option<TrimmedNonEmptyString>,
     },
@@ -734,9 +667,9 @@ pub enum ToolActivitySourceKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolActivitySource {
-    #[serde(deserialize_with = "tool_activity_key::deserialize")]
+    #[serde(deserialize_with = "max_512::required")]
     pub key: TrimmedNonEmptyString,
-    #[serde(deserialize_with = "tool_activity_name::deserialize")]
+    #[serde(deserialize_with = "max_160::required")]
     pub name: TrimmedNonEmptyString,
     pub kind: ToolActivitySourceKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2580,5 +2513,141 @@ mod tests {
             lifecycle,
             ProviderRuntimeEvent::ItemCompleted { .. }
         ));
+    }
+
+    #[test]
+    fn whole_numbers_encode_without_a_fraction() {
+        // `Schema.Number` fields go through JSON.stringify upstream: `2`, not `2.0`.
+        let completed = decode(event(
+            "turn.completed",
+            json!({"state": "completed", "totalCostUsd": 2}),
+        ))
+        .unwrap();
+        let encoded = serde_json::to_string(&completed).unwrap();
+        assert!(encoded.contains(r#""totalCostUsd":2}"#), "{encoded}");
+
+        let tool = decode(event("tool.progress", json!({"elapsedSeconds": 7}))).unwrap();
+        assert!(
+            serde_json::to_string(&tool)
+                .unwrap()
+                .contains(r#""elapsedSeconds":7}"#)
+        );
+
+        let usage = decode(event(
+            "thread.token-usage.updated",
+            json!({"usage": {"usedTokens": 1, "cost": {"amount": 3, "currency": "USD"}}}),
+        ))
+        .unwrap();
+        assert!(
+            serde_json::to_string(&usage)
+                .unwrap()
+                .contains(r#""amount":3,"#)
+        );
+    }
+
+    #[test]
+    fn tool_lifecycle_item_types_stay_in_sync_with_the_enums() {
+        let all = [
+            ToolLifecycleItemType::CommandExecution,
+            ToolLifecycleItemType::FileChange,
+            ToolLifecycleItemType::McpToolCall,
+            ToolLifecycleItemType::DynamicToolCall,
+            ToolLifecycleItemType::CollabAgentToolCall,
+            ToolLifecycleItemType::WebSearch,
+            ToolLifecycleItemType::ImageView,
+        ];
+        let wire: Vec<String> = all
+            .iter()
+            .map(|kind| {
+                serde_json::to_value(kind)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(wire, TOOL_LIFECYCLE_ITEM_TYPES);
+        // Canonical item types: user/assistant/reasoning/plan come first, the
+        // tool lifecycle types follow in order (upstream spreads the array).
+        let canonical = [
+            "user_message",
+            "assistant_message",
+            "reasoning",
+            "plan",
+            "command_execution",
+            "file_change",
+            "mcp_tool_call",
+            "dynamic_tool_call",
+            "collab_agent_tool_call",
+            "web_search",
+            "image_view",
+            "review_entered",
+            "review_exited",
+            "context_compaction",
+            "error",
+            "unknown",
+        ];
+        for kind in canonical {
+            let parsed: CanonicalItemType = serde_json::from_value(json!(kind)).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), json!(kind));
+        }
+    }
+
+    #[test]
+    fn raw_event_keeps_every_declared_key() {
+        let raw = json!({
+            "source": "claude.sdk.permission",
+            "method": "can_use_tool",
+            "messageType": "control_request",
+            "payload": {"b": 1, "a": [null]},
+        });
+        let parsed: RuntimeEventRaw = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), raw);
+        assert!(
+            serde_json::to_string(&parsed)
+                .unwrap()
+                .contains(r#""b":1,"a""#)
+        );
+        assert!(
+            serde_json::from_value::<RuntimeEventRaw>(json!({
+                "source": "codex.eventmsg", "method": "  ", "payload": 1,
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn app_id_bounds_count_utf16_and_pattern() {
+        let app_id = |value: String| {
+            serde_json::from_value::<ToolActivityNativeAppReference>(
+                json!({"_tag": "app-id", "appId": value}),
+            )
+        };
+        assert!(app_id("a".repeat(512)).is_ok());
+        assert!(app_id("a".repeat(513)).is_err());
+        assert!(app_id("a.b_c-d".into()).is_ok());
+        assert!(app_id("a/b".into()).is_err());
+        assert!(app_id("caf\u{e9}".into()).is_err());
+        // Surrounding whitespace is trimmed before the pattern check.
+        assert!(app_id("  com.example  ".into()).is_ok());
+    }
+
+    #[test]
+    fn tool_source_icon_round_trips_all_variants() {
+        for icon in [
+            json!({"_tag": "website", "pageUrl": "https://a", "faviconUrl": "f", "faviconUrlDark": "d"}),
+            json!({"_tag": "native-app", "app": {"_tag": "app-id", "appId": "com.a.B"}}),
+            json!({"_tag": "themed-logo", "logoUrl": "l", "logoUrlDark": "d"}),
+        ] {
+            let source = json!({"key": "k", "name": "n", "kind": "computer", "icon": icon});
+            let parsed: ToolActivitySource = serde_json::from_value(source.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), source);
+        }
+        assert!(
+            serde_json::from_value::<ToolActivitySource>(
+                json!({"key": "k", "name": "n", "kind": "other"})
+            )
+            .is_err()
+        );
     }
 }

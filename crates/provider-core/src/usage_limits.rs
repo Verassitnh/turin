@@ -147,13 +147,13 @@ pub fn resolve_usage_limits_after_probe(
     published: Option<&ServerProviderUsageLimits>,
     probed: Option<&ServerProviderUsageLimits>,
 ) -> Option<ServerProviderUsageLimits> {
-    if let (Some(probed), Some(published)) = (probed, published) {
-        if probed.unavailable.as_ref().is_some_and(|unavailable| {
+    if let (Some(probed), Some(published)) = (probed, published)
+        && probed.unavailable.as_ref().is_some_and(|unavailable| {
             unavailable.reason == ServerProviderUsageUnavailableReason::ProbeFailed
-        }) && published.unavailable.is_none()
-        {
-            return Some(published.clone());
-        }
+        })
+        && published.unavailable.is_none()
+    {
+        return Some(published.clone());
     }
     probed.cloned()
 }

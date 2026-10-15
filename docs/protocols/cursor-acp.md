@@ -59,9 +59,9 @@ Result, one of:
 
 Any other value counts as cancelled. Map it to plan approval. If a plan is accepted without `planUri`, the CLI writes a local plan file and uses its path. Before `create_plan`, the CLI sends a standard ACP `plan` session/update with entries `{content, priority, status}`.
 
-> UNVERIFIED: the QC report does not re-verify the older claim that `create_plan` on -32601 writes a local plan and auto-accepts. The unsupported-error rule above is documented only for ask_question. Confirm against `2698.index.js` before relying on it.
+`create_plan` fallback (verified in cursor-agent 2026.09.15-d2fe57e, `2698.index.js`): on a `create_plan` error that matches the unsupported test used for ask_question (Unimplemented, "method not supported", "methodname(name=cursor/create_plan)", or -32601), the CLI writes a local plan and returns success even if the write fails (`planUri` may be `""`). For other errors it returns success only if the write produced a `planUri`; otherwise it returns "Failed to create plan: client extension failed and local fallback artifact could not be created."
 
-Both request handlers are required for faithful UI behavior; without them the CLI's own fallbacks replace Turin's cards.
+Both request handlers are required for faithful UI behavior. If Turin does not register the `create_plan` handler, the CLI **auto-accepts** the plan through its local-file fallback, so no plan approval card is shown.
 
 ### `cursor/update_todos`, `cursor/task`, `cursor/generate_image` (requests, fire-and-forget)
 
@@ -145,3 +145,4 @@ The upstream `@cursor/sdk@1.0.35` runs a local JS executor in the Node process. 
 - Item 11 (MEDIUM): `allow-always` persists to global Cursor allowlist; Permission outcomes subsection; never `--force`/`--yolo`.
 - Item 15 (LOW): parameterized mode clears (does not write) `acp-config.json selectedModelVariantId`; session/new and session/load migrate it; snapshot/restore must wrap session/new, session/load and setters.
 - PORTING.md Deviations rows needed (not edited here, per brief): Cursor credential-store side effect; Cursor permission outcome choice; Cursor acp-config snapshot/restore.
+- QC wf_6497dded-82d item 1 (LOW): UNVERIFIED create_plan note replaced with the verified fallback rule; auto-accept named explicitly.

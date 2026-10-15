@@ -25,7 +25,7 @@ Scope under review: ${SCOPE}
 Upstream counterpart: ${UPSTREAM}
 ${CONTEXT}
 You may run read-only commands (cargo build/test/clippy with PATH=$HOME/.cargo/bin:$PATH DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer, small throwaway test programs, node one-liners to check upstream behaviour). Never modify files in the checkout.
-STORAGE (disk is nearly full): put throwaway crates under /tmp/turin-scratch-qc-<your-label>/, build them with CARGO_TARGET_DIR=/tmp/turin-scratch-target (shared, do not create other target dirs), and run rm -rf on your scratch dir before you finish. Never copy user databases (~/.t3/userdata/*.sqlite) anywhere.
+STORAGE (disk is nearly full): put throwaway crates under /tmp/turin-scratch-qc-<your-label>/, build them with CARGO_TARGET_DIR=/tmp/turin-scratch-target (shared, do not create other target dirs), and run rm -rf on your scratch dir before you finish. Never copy user databases (~/.t3/userdata/*.sqlite) anywhere. Never search the whole disk (no find / or recursive grep over / or $HOME; a watchdog kills such scans): upstream npm dependency sources are in per-workspace node_modules (e.g. ./upstream/apps/server/node_modules/effect/src, ./upstream/apps/web/node_modules/@pierre/diffs) and ./upstream/node_modules/.pnpm/<name>@<ver>/node_modules/<name>, Rust crate sources in ~/.cargo/registry/src.
 Report only concrete, evidenced problems with file:line. No style nits unless they violate PORTING.md. If nothing is wrong in your dimension, return an empty list.`
 
 const DIMENSIONS = A.dimensions || [

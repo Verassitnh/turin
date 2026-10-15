@@ -22,9 +22,13 @@ pub struct AgentSessionImportSource {
     pub provider_session_id: TrimmedNonEmptyString,
     pub file_path: TrimmedNonEmptyString,
     pub size: NonNegativeInt,
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub mtime_ms: Option<f64>,
+    #[serde(with = "crate::base_schemas::js_number")]
     pub device: f64,
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub inode: Option<f64>,
+    #[serde(with = "crate::base_schemas::js_number_nullable")]
     pub birthtime_ms: Option<f64>,
 }
 
@@ -214,7 +218,7 @@ mod tests {
             "filePath": "/tmp/a.jsonl",
             "size": 10,
             "mtimeMs": 1.5,
-            "device": 7.0,
+            "device": 7,
             "inode": null,
             "birthtimeMs": null,
         });

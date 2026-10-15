@@ -90,9 +90,9 @@ Then `thread/revert {threadId,beforeTurnId}` (or `thread/read` when no revert is
 
 Provider probing starts with `account/read`. Return early only when there is **no** `account` AND `requiresOpenaiAuth` (`CodexProvider.ts:495-503`). Logged-in ChatGPT accounts also report `requiresOpenaiAuth:true`; a literal early return on that flag gives them no models, skills or rate limits. Otherwise run `skills/list {cwds}`, paginated `model/list`, and `account/rateLimits/read null` concurrently, with a degrading timeout on rate limits (`CodexProvider.ts:495-559`).
 
-For `account.type==="chatgpt"`, upstream calls `requestCodexChatGptModels({client, codexHome, spawnedAtMs})` (`CodexProvider.ts:369-389`, `:509-511`) instead of paginated `model/list`. It runs `model/list`, polls `<codexHome>/models_cache.json` until its fetch time is at or after spawn time (with a timeout), then lists again.
+For `account.type==="chatgpt"`, upstream calls `requestCodexChatGptModels({client, codexHome, spawnedAtMs})` (`CodexProvider.ts:369-389`, `:509-511`) instead of paginated `model/list`. It runs `model/list`, polls `<codexHome>/models_cache.json` until its `fetched_at` is at or after spawn time, then lists again.
 
-> UNVERIFIED: the timeout value and the name of the fetch-time field in `models_cache.json` are not in the QC report. Read `CodexProvider.ts:369-389` before implementing.
+Cache-refresh timing (`CodexProvider.ts:72-73,339,352,380-389`): poll every **100 ms** (`CODEX_CATALOG_REFRESH_POLL = "100 millis"`) and time out after **3 s** (`CODEX_CATALOG_REFRESH_TIMEOUT = "3 seconds"`). `models_cache.json` `fetched_at` is decoded as a String (`:339`) and parsed as a DateTime (`:352`). On timeout, upstream keeps the first model list and logs a warning (`:380-389`).
 
 The version is parsed from `initialize.userAgent` with `/\/([^\s]+)/`.
 
@@ -111,5 +111,6 @@ The protocol reader terminates on **every** undecodable or unroutable line and f
 ## Changelog (QC wf_9dc37bfd-861)
 
 - Item 5 (MEDIUM): rollback uses the `thread` from the `thread/revert` or `thread/read` response; `thread/reverted` is informational and not awaited; `beforeTurnId` defined as the Nth-newest turn (oldest found if fewer); exact `thread/turns/list` params; `loaded` derived from `thread.status.type`.
-- Item 6 (MEDIUM): provider early return is "no account AND requiresOpenaiAuth"; ChatGPT account path via `requestCodexChatGptModels` with `models_cache.json` polling (timeout value UNVERIFIED); version parsed from `initialize.userAgent`.
+- Item 6 (MEDIUM): provider early return is "no account AND requiresOpenaiAuth"; ChatGPT account path via `requestCodexChatGptModels` with `models_cache.json` polling (3 s timeout, 100 ms poll); version parsed from `initialize.userAgent`.
 - Item 7 (MEDIUM): `config` request parameter (not an env var) on thread/start, resume and fork; sandboxPolicy as `{type:...}` objects on turn/start; legacy approval replies wrapped in `{decision}` (decline shown as the ReviewDecision value); archived-resume regex is case-insensitive.
+- QC wf_6497dded-82d item 3 (LOW): UNVERIFIED timeout note replaced with 100 ms poll, 3 s timeout, `fetched_at` String/DateTime parse, and keep-first-catalog on timeout; citations `CodexProvider.ts:72-73,339,352,380-389`.

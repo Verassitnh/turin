@@ -716,7 +716,7 @@ mod tests {
             .map(|_| SnapShotAccessibilityNode {
                 role: TrimmedNonEmptyString::new("text").unwrap(),
                 name: None,
-                value: Some(TrimmedNonEmptyString::new(&"x".repeat(8_000)).unwrap()),
+                value: Some(TrimmedNonEmptyString::new("x".repeat(8_000)).unwrap()),
                 description: None,
                 bounds: None,
                 state: None,

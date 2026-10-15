@@ -110,6 +110,9 @@ icon_assets!(
 
 /// The composer's send arrow (ComposerPrimaryActions.tsx).
 pub const SEND_ARROW: &str = "brand/send-arrow.svg";
+/// Lucide `chevron-down` at `stroke-width` 2.25 (ComposerControl.tsx); the
+/// stock `IconName::ChevronDown` is stroke 2.
+pub const CHEVRON_DOWN: &str = "brand/chevron-down.svg";
 
 /// Provider marks (components/Icons.tsx), keyed by driver kind in
 /// [`provider_icon_path`].
@@ -129,6 +132,10 @@ pub fn provider_icon_path(driver_kind: &str) -> Option<&'static str> {
 
 const BRAND: &[(&str, &[u8])] = &[
     (SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg")),
+    (
+        CHEVRON_DOWN,
+        include_bytes!("../assets/brand/chevron-down.svg"),
+    ),
     (
         PROVIDER_OPENAI,
         include_bytes!("../assets/brand/openai.svg"),

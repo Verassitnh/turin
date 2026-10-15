@@ -7,6 +7,10 @@ mod components;
 #[allow(dead_code)]
 mod composer;
 mod hooks;
+// The view-model layer is a library until the orchestrator and views are wired
+// to it; every upstream selector is ported ahead of its callers.
+#[allow(dead_code)]
+mod state;
 mod theme;
 // The ui primitives are a library: every upstream variant and size is ported
 // ahead of its callers.
@@ -57,11 +61,22 @@ fn dev_overrides(cx: &mut App) -> bool {
 
 fn main() {
     tracing_subscriber::fmt::init();
+    // The view-model reducers run on tokio, off the UI thread. The orchestrator
+    // feeds `state::store::ClientStateRuntime::sender` and drains `requests`;
+    // until it is wired in, the store simply stays empty.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let client_state =
+        state::store::spawn_client_state(runtime.handle(), state::local_environment_id());
     gpui_kit::application()
         .with_assets(assets::AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             theme::init(cx);
+            let store = state::store::bind_client_store(client_state.handle.clone(), cx);
+            cx.set_global(state::store::ClientStoreGlobal(store));
             app_sidebar_layout::bind_keys(cx);
             let right_panel = dev_overrides(cx);
             gpui_kit::open_window(window_options(cx), cx, |window, cx| {

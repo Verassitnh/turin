@@ -337,14 +337,15 @@ fn client_capabilities_value(caps: &ClientCapabilities) -> Value {
 }
 
 fn normalize_v2_initialize(response: &Value) -> InitializeResponse {
-    let session = response.pointer("/capabilities/session");
+    // A missing or null `capabilities.session` means no session capabilities.
+    // Filtering once keeps the branches below free of unwraps.
+    let session = response
+        .pointer("/capabilities/session")
+        .filter(|session| !session.is_null());
     let prompt = session.and_then(|session| session.get("prompt"));
     let mcp = session.and_then(|session| session.get("mcp"));
     let mut agent_capabilities = Map::new();
-    agent_capabilities.insert(
-        "loadSession".to_owned(),
-        json!(session.is_some() && !session.unwrap().is_null()),
-    );
+    agent_capabilities.insert("loadSession".to_owned(), json!(session.is_some()));
     agent_capabilities.insert(
         "promptCapabilities".to_owned(),
         json!({
@@ -361,27 +362,18 @@ fn normalize_v2_initialize(response: &Value) -> InitializeResponse {
             "acp": mcp.and_then(|mcp| mcp.get("acp")).is_some_and(|value| !value.is_null()),
         }),
     );
-    if session.is_some_and(|session| !session.is_null()) {
+    if let Some(session) = session {
         let mut session_capabilities = Map::new();
         session_capabilities.insert("list".to_owned(), json!({}));
         session_capabilities.insert("resume".to_owned(), json!({}));
         session_capabilities.insert("close".to_owned(), json!({}));
-        if session
-            .unwrap()
-            .get("delete")
-            .is_some_and(|value| !value.is_null())
-        {
+        if session.get("delete").is_some_and(|value| !value.is_null()) {
             session_capabilities.insert("delete".to_owned(), json!({}));
         }
-        if session
-            .unwrap()
-            .get("fork")
-            .is_some_and(|value| !value.is_null())
-        {
+        if session.get("fork").is_some_and(|value| !value.is_null()) {
             session_capabilities.insert("fork".to_owned(), json!({}));
         }
         if session
-            .unwrap()
             .get("additionalDirectories")
             .is_some_and(|value| !value.is_null())
         {
@@ -658,4 +650,42 @@ fn normalize_v1_session(value: Value) -> Value {
     let mut value = value;
     value["update"]["availableCommands"] = Value::Array(commands);
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v2_initialize_without_session_capabilities_does_not_panic() {
+        for response in [
+            json!({"protocolVersion": 2, "info": {"name": "mock", "version": "0"}, "capabilities": {}}),
+            json!({"protocolVersion": 2, "info": {"name": "mock", "version": "0"}, "capabilities": {"session": null}}),
+            json!({"protocolVersion": 2, "info": {"name": "mock", "version": "0"}}),
+        ] {
+            let normalized = normalize_initialize_response(response);
+            assert_eq!(normalized.generation, ProtocolGeneration::V2);
+            assert_eq!(normalized.agent_capabilities["loadSession"], false);
+            assert!(
+                normalized
+                    .agent_capabilities
+                    .get("sessionCapabilities")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn v2_initialize_maps_optional_session_capabilities() {
+        let normalized = normalize_initialize_response(json!({
+            "protocolVersion": 2,
+            "info": {"name": "mock", "version": "0"},
+            "capabilities": {"session": {"delete": {}, "fork": {}}}
+        }));
+        assert_eq!(normalized.agent_capabilities["loadSession"], true);
+        let session = &normalized.agent_capabilities["sessionCapabilities"];
+        assert!(session.get("delete").is_some());
+        assert!(session.get("fork").is_some());
+        assert!(session.get("additionalDirectories").is_none());
+    }
 }

@@ -14,12 +14,6 @@ use std::rc::Rc;
 use gpui_kit::{App, AppContext as _, Entity, Task, WeakEntity};
 use turin_contracts::{EnvironmentId, ProjectId, RunId, ThreadId};
 
-use crate::state::models::{
-    BackgroundTaskKind, DiffStat, EnvironmentProject, EnvironmentThreadShell, GoalStatus,
-    InteractionMode, ModelSelection, PendingBackgroundTask, ProjectIcon, ProjectIconColor,
-    ProviderFailureClass, PullRequestState, RunStatus, SettledOverride, ThreadPullRequestLink,
-    ThreadRunSummary, ThreadRuntimeSummary, TitleRegeneration,
-};
 use super::runtime::thread_sort::pin_order_key_between;
 use super::sidebar_logic::CommandOutcome;
 use super::view_model::{
@@ -28,6 +22,12 @@ use super::view_model::{
     ThreadRef, ThreadSearchMatch,
 };
 use crate::components::thread_search_match::SearchMatchSource;
+use crate::state::models::{
+    BackgroundTaskKind, DiffStat, EnvironmentProject, EnvironmentThreadShell, GoalStatus,
+    InteractionMode, ModelSelection, PendingBackgroundTask, ProjectIcon, ProjectIconColor,
+    ProviderFailureClass, PullRequestState, RunStatus, SettledOverride, ThreadPullRequestLink,
+    ThreadRunSummary, ThreadRuntimeSummary, TitleRegeneration,
+};
 use crate::timestamp_format::{now_ms, to_iso_string};
 
 const MINUTE: i64 = 60_000;
@@ -155,6 +155,8 @@ pub fn mock_snapshot() -> SidebarSnapshot {
         .map(|project| SidebarProjectGroup {
             project_key: project.key(),
             display_name: project.title.clone(),
+            created_at: project.created_at.clone(),
+            updated_at: project.updated_at.clone(),
             member_project_keys: vec![project.key()],
         })
         .collect();
@@ -373,7 +375,7 @@ pub fn mock_snapshot() -> SidebarSnapshot {
     t.lineage.relationship_to_parent = Some(crate::state::models::ThreadRelationship::Subagent);
     threads.push(t);
 
-    SidebarSnapshot {
+    let mut snapshot = SidebarSnapshot {
         project_groups,
         projects,
         threads,
@@ -420,7 +422,9 @@ pub fn mock_snapshot() -> SidebarSnapshot {
         settled_shelf_expanded: true,
         snoozed_shelf_expanded: false,
         working_shelf_expanded: false,
-    }
+    };
+    snapshot.sort_project_groups();
+    snapshot
 }
 
 fn provider(

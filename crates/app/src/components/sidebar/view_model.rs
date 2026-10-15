@@ -15,9 +15,11 @@ use std::rc::Rc;
 use gpui_kit::{App, Context, EventEmitter, Task};
 use turin_contracts::{EnvironmentId, ProjectId, ThreadId};
 
-use crate::state::models::{EnvironmentProject, EnvironmentThreadShell};
-use super::sidebar_logic::{CommandOutcome, ProjectSortOrder};
+use super::sidebar_logic::{
+    CommandOutcome, LogicalSidebarProject, ProjectSortOrder, sort_sidebar_v2_project_groups,
+};
 use crate::components::thread_search_match::SearchMatchSource;
+use crate::state::models::{EnvironmentProject, EnvironmentThreadShell};
 use crate::timestamp_format::TimestampFormat;
 
 /// `environment.capabilities` the sidebar gates on. A capability that is
@@ -79,6 +81,10 @@ pub struct ProviderEntry {
 pub struct SidebarProjectGroup {
     pub project_key: String,
     pub display_name: String,
+    /// The group's project timestamps; the activity sort falls back to them
+    /// for a project with no visible threads.
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
     /// `${environmentId}:${projectId}` of every member.
     pub member_project_keys: Vec<String>,
 }
@@ -183,6 +189,37 @@ impl SidebarSnapshot {
         self.provider_entries
             .iter()
             .find(|entry| entry.instance_id == instance_id)
+    }
+
+    /// The last step of upstream's `useSidebarProjectGroups`:
+    /// `sortSidebarV2ProjectGroups` reorders the grouped projects by thread
+    /// activity, and manual order keeps the saved order.
+    pub fn sort_project_groups(&mut self) {
+        let logical: Vec<LogicalSidebarProject> = self
+            .project_groups
+            .iter()
+            .map(|group| LogicalSidebarProject {
+                project_key: group.project_key.clone(),
+                title: group.display_name.clone(),
+                created_at: group.created_at.clone(),
+                updated_at: group.updated_at.clone(),
+                member_project_keys: group.member_project_keys.clone(),
+            })
+            .collect();
+        let sorted = sort_sidebar_v2_project_groups(
+            &logical,
+            &self.threads,
+            self.settings.project_sort_order,
+        );
+        let mut groups: HashMap<String, SidebarProjectGroup> =
+            std::mem::take(&mut self.project_groups)
+                .into_iter()
+                .map(|group| (group.project_key.clone(), group))
+                .collect();
+        self.project_groups = sorted
+            .iter()
+            .filter_map(|project| groups.remove(&project.project_key))
+            .collect();
     }
 }
 
@@ -303,3 +340,50 @@ pub enum Shelf {
 }
 
 pub type SharedSidebarBackend = Rc<dyn SidebarBackend>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::models::fixtures::{project_id, shell};
+
+    fn group(project: &str, title: &str) -> SidebarProjectGroup {
+        let key = format!("environment-local:{project}");
+        SidebarProjectGroup {
+            project_key: key.clone(),
+            display_name: title.into(),
+            created_at: Some("2026-03-09T10:00:00.000Z".into()),
+            updated_at: Some("2026-03-09T10:00:00.000Z".into()),
+            member_project_keys: vec![key],
+        }
+    }
+
+    #[test]
+    fn sorts_project_groups_by_thread_activity_unless_the_order_is_manual() {
+        let mut thread = shell("thread-newer");
+        thread.project_id = project_id("project-newer");
+        thread.updated_at = "2026-03-09T10:05:00.000Z".into();
+        let mut snapshot = SidebarSnapshot {
+            project_groups: vec![
+                group("project-older", "Older"),
+                group("project-newer", "Newer"),
+            ],
+            threads: vec![thread],
+            ..Default::default()
+        };
+        let titles = |snapshot: &SidebarSnapshot| {
+            snapshot
+                .project_groups
+                .iter()
+                .map(|group| group.display_name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        snapshot.settings.project_sort_order = ProjectSortOrder::Manual;
+        snapshot.sort_project_groups();
+        assert_eq!(titles(&snapshot), vec!["Older", "Newer"]);
+
+        snapshot.settings.project_sort_order = ProjectSortOrder::UpdatedAt;
+        snapshot.sort_project_groups();
+        assert_eq!(titles(&snapshot), vec!["Newer", "Older"]);
+    }
+}

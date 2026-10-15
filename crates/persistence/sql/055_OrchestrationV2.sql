@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/055_OrchestrationV2.ts
 CREATE TABLE orchestration_v2_events (
       sequence INTEGER PRIMARY KEY AUTOINCREMENT,
       event_id TEXT NOT NULL UNIQUE,
@@ -243,6 +244,7 @@ CREATE TABLE orchestration_v2_projection_context_transfers (
 CREATE INDEX orchestration_v2_projection_context_transfers_source_thread_idx ON orchestration_v2_projection_context_transfers(source_thread_id);
 CREATE INDEX orchestration_v2_projection_context_transfers_target_thread_idx ON orchestration_v2_projection_context_transfers(target_thread_id, status);
 CREATE INDEX orchestration_v2_projection_context_transfers_target_run_idx ON orchestration_v2_projection_context_transfers(target_run_id);
+-- Port of upstream/apps/server/src/persistence/Migrations/OrchestrationV2/Subagents.ts
 CREATE TABLE orchestration_v2_projection_subagents (
       subagent_id TEXT PRIMARY KEY,
       thread_id TEXT NOT NULL,
@@ -262,6 +264,7 @@ CREATE INDEX orchestration_v2_projection_subagents_thread_idx ON orchestration_v
 CREATE INDEX orchestration_v2_projection_subagents_parent_node_idx ON orchestration_v2_projection_subagents(parent_node_id);
 CREATE INDEX orchestration_v2_projection_subagents_provider_thread_idx ON orchestration_v2_projection_subagents(provider_thread_id);
 CREATE INDEX orchestration_v2_projection_subagents_child_thread_idx ON orchestration_v2_projection_subagents(child_thread_id);
+-- Port of upstream/apps/server/src/persistence/Migrations/OrchestrationV2/Foundation.ts
 ALTER TABLE orchestration_v2_events ADD COLUMN driver TEXT;
 ALTER TABLE orchestration_v2_events ADD COLUMN provider_instance_id TEXT;
 UPDATE orchestration_v2_events
@@ -390,6 +393,7 @@ INSERT INTO orchestration_v2_projection_metadata (
       COALESCE((SELECT MAX(sequence) FROM orchestration_v2_events), 0),
       strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     );
+-- Port of upstream/apps/server/src/persistence/Migrations/OrchestrationV2/ProviderSessionBindings.ts
 CREATE TABLE orchestration_v2_projection_provider_session_bindings (
       provider_session_id TEXT NOT NULL,
       thread_id TEXT NOT NULL,
@@ -404,6 +408,7 @@ INSERT OR IGNORE INTO orchestration_v2_projection_provider_session_bindings (
     WHERE thread_id IS NOT NULL;
 CREATE INDEX orchestration_v2_projection_provider_session_bindings_thread_idx
     ON orchestration_v2_projection_provider_session_bindings(thread_id);
+-- Port of upstream/apps/server/src/persistence/Migrations/OrchestrationV2/ThreadLaunchWorkflows.ts
 CREATE TABLE IF NOT EXISTS orchestration_v2_thread_launch_workflows (
       command_id TEXT PRIMARY KEY,
       thread_id TEXT NOT NULL,
@@ -419,7 +424,9 @@ CREATE TABLE IF NOT EXISTS orchestration_v2_thread_launch_workflows (
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+-- Port of upstream/apps/server/src/persistence/Migrations/OrchestrationV2/ApplicationEventSource.ts
 -- TURIN_APPLICATION_EVENT_SOURCE --
+-- Port of upstream/apps/server/src/persistence/Migrations/OrchestrationV2/EffectCancellation.ts
 CREATE TABLE orchestration_v2_effect_outbox_next (
       effect_id TEXT PRIMARY KEY,
       command_id TEXT NOT NULL,
@@ -479,6 +486,7 @@ CREATE INDEX orchestration_v2_effect_outbox_command_idx
     ON orchestration_v2_effect_outbox(command_id, effect_id);
 CREATE INDEX orchestration_v2_effect_outbox_thread_status_idx
     ON orchestration_v2_effect_outbox(thread_id, status, effect_type);
+-- Port of upstream/apps/server/src/persistence/Migrations/OrchestrationV2/ScheduledTasks.ts
 CREATE TABLE IF NOT EXISTS scheduled_tasks (
       task_id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
@@ -506,6 +514,7 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due
     WHERE enabled = 1 AND next_run_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_project
     ON scheduled_tasks(project_id, updated_at);
+-- Port of upstream/apps/server/src/persistence/Migrations/OrchestrationV2/LegacyV1ImportState.ts
 CREATE TABLE orchestration_v2_legacy_imports (
       thread_id TEXT PRIMARY KEY,
       source_updated_at TEXT NOT NULL,
@@ -516,6 +525,7 @@ CREATE TABLE orchestration_v2_legacy_imports (
     );
 CREATE INDEX orchestration_v2_legacy_imports_pending_transcript_idx
     ON orchestration_v2_legacy_imports(transcript_imported_at, shell_imported_at, thread_id);
+-- Port of upstream/apps/server/src/persistence/Migrations/OrchestrationV2/ApplicationEventSequenceIndexes.ts
 CREATE INDEX idx_orchestration_events_application_high_water
     ON orchestration_events(sequence)
     WHERE aggregate_kind = 'project'
@@ -523,6 +533,7 @@ CREATE INDEX idx_orchestration_events_application_high_water
 CREATE INDEX idx_orchestration_events_agent_stream_sequence
     ON orchestration_events(stream_id, sequence)
     WHERE application_event_version = 2 AND aggregate_kind = 'thread';
+-- Port of upstream/apps/server/src/persistence/Migrations/OrchestrationV2/RecoveryIndexes.ts
 CREATE INDEX orchestration_events_v2_created_threads_idx
     ON orchestration_events(stream_id)
     WHERE application_event_version = 2
@@ -538,6 +549,7 @@ CREATE INDEX orchestration_v2_projection_turn_items_recovery_idx
     ON orchestration_v2_projection_turn_items(thread_id)
     WHERE type IN ('command_execution', 'dynamic_tool', 'subagent')
       AND status IN ('pending', 'running', 'waiting');
+-- Port of upstream/apps/server/src/persistence/Migrations/OrchestrationV2/ShellIndexes.ts
 CREATE INDEX orchestration_v2_projection_turn_items_thread_run_idx
     ON orchestration_v2_projection_turn_items(thread_id, run_id);
 CREATE INDEX orchestration_v2_projection_turn_items_shell_pending_idx

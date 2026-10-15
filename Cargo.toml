@@ -32,7 +32,7 @@ futures = "0.3"
 parking_lot = "0.12"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-rusqlite = { version = "0.37", features = ["bundled", "serde_json"] }
+rusqlite = { version = "0.40", features = ["bundled", "serde_json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
@@ -43,10 +43,18 @@ tokio-util = { version = "0.7", features = ["codec", "io"] }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
+unicode-ccc = "0.4"
+indexmap = { version = "2", features = ["serde"] }
 dirs = "6"
+libc = "0.2"
+notify = "8"
 tempfile = "3"
 pretty_assertions = "1"
+markdown = "1.0.0"
+percent-encoding = "2"
+unicode-normalization = "0.1"
 
 gpui-kit = "0.7.3"
 

@@ -1149,4 +1149,223 @@ mod service {
             selection
         );
     }
+
+    // Ports of upstream serverSettings.test.ts, lines 798-1015 (batch 4).
+
+    /// Stands in for upstream `undefined` provider statuses: every call here passes `None`.
+    struct NoProviderStatus;
+
+    impl turin_shared::server_settings::ProviderStatus for NoProviderStatus {
+        fn instance_id(&self) -> &turin_contracts::provider_instance::ProviderInstanceId {
+            unreachable!("no provider statuses are passed")
+        }
+        fn enabled(&self) -> bool {
+            unreachable!("no provider statuses are passed")
+        }
+        fn is_available(&self) -> bool {
+            unreachable!("no provider statuses are passed")
+        }
+        fn is_text_generation_capable(&self) -> bool {
+            unreachable!("no provider statuses are passed")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_disabled_default_instance_is_skipped_when_choosing_a_fallback() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let next = service
+            .update_settings(&patch(json!({
+                "providerInstances": {"codex": {"driver": "codex", "enabled": false, "config": {}}},
+            })))
+            .await
+            .unwrap();
+        let selection = &settings_value(&next)["textGenerationModelSelection"];
+        assert_eq!(selection["instanceId"], json!("claudeAgent"));
+        assert_eq!(selection["model"], json!("claude-haiku-5-5"));
+    }
+
+    #[tokio::test]
+    async fn a_custom_model_thread_default_is_used_for_the_fallback_but_a_built_in_one_is_not() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let providers = json!({
+            "codex": {"driver": "codex", "enabled": false, "config": {}},
+            "claudeAgent": {"driver": "claudeAgent", "config": {"customModels": ["z-ai/glm-5.3-flash"]}},
+        });
+        let custom = service
+            .update_settings(&patch(json!({
+                "providerInstances": providers,
+                "defaultModelSelection": {
+                    "instanceId": "claudeAgent",
+                    "model": "z-ai/glm-5.3-flash",
+                    "options": [{"id": "thinking", "value": false}],
+                },
+            })))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&custom)["textGenerationModelSelection"],
+            json!({
+                "instanceId": "claudeAgent",
+                "model": "z-ai/glm-5.3-flash",
+                "options": [{"id": "thinking", "value": false}],
+            })
+        );
+
+        let built_in = service
+            .update_settings(&patch(json!({
+                "defaultModelSelection": {"instanceId": "claudeAgent", "model": "claude-fable-5-1"},
+            })))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&built_in)["textGenerationModelSelection"]["model"],
+            json!("claude-haiku-5-5")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_built_in_driver_keeps_its_enabled_text_generation_selection() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let next = service
+            .update_settings(&patch(json!({
+                "providerInstances": {
+                    "openrouter_text": {
+                        "driver": "openrouter",
+                        "enabled": true,
+                        "config": {"customModels": ["openai/gpt-5.5"]},
+                    },
+                },
+                "textGenerationModelSelection": {"instanceId": "openrouter_text", "model": "openai/gpt-5.5"},
+            })))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&next)["textGenerationModelSelection"],
+            json!({"instanceId": "openrouter_text", "model": "openai/gpt-5.5"})
+        );
+    }
+
+    #[tokio::test]
+    async fn the_source_control_writer_selection_survives_its_instance_being_disabled() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let selection = json!({"instanceId": "codex_writer", "model": "gpt-5.4-mini"});
+        service
+            .update_settings(&patch(json!({
+                "providerInstances": {"codex_writer": {"driver": "codex", "enabled": true, "config": {}}},
+                "sourceControlWriterModelSelection": selection,
+            })))
+            .await
+            .unwrap();
+        let next = service
+            .update_settings(&patch(json!({
+                "providerInstances": {"codex_writer": {"driver": "codex", "enabled": false, "config": {}}},
+            })))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&next)["sourceControlWriterModelSelection"],
+            selection
+        );
+        assert_eq!(
+            turin_shared::server_settings::resolve_source_control_writer_model_selection(
+                &next,
+                None::<&[NoProviderStatus]>,
+                None
+            ),
+            next.text_generation_model_selection
+        );
+        assert_eq!(
+            settings_value(&service.get_settings().await.unwrap())["sourceControlWriterModelSelection"],
+            selection
+        );
+        assert_eq!(
+            read_file(&fx.path)["sourceControlWriterModelSelection"],
+            selection
+        );
+
+        let restored = service
+            .update_settings(&patch(json!({
+                "providerInstances": {"codex_writer": {"driver": "codex", "enabled": true, "config": {}}},
+            })))
+            .await
+            .unwrap();
+        assert_eq!(
+            turin_shared::server_settings::resolve_source_control_writer_model_selection(
+                &restored,
+                None::<&[NoProviderStatus]>,
+                None
+            ),
+            serde_json::from_value(selection).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn resetting_the_selection_drops_the_stale_options() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        let model = default_server_settings()
+            .text_generation_model_selection
+            .model
+            .to_string();
+        let instance = default_server_settings()
+            .text_generation_model_selection
+            .instance_id
+            .to_string();
+        service
+            .update_settings(&patch(json!({"textGenerationModelSelection": {
+                "instanceId": "codex",
+                "model": model,
+                "options": [
+                    {"id": "reasoningEffort", "value": "high"},
+                    {"id": "fastMode", "value": true},
+                ],
+            }})))
+            .await
+            .unwrap();
+        let next = service
+            .update_settings(&patch(json!({"textGenerationModelSelection": {
+                "instanceId": instance,
+                "model": model,
+            }})))
+            .await
+            .unwrap();
+        assert_eq!(
+            settings_value(&next)["textGenerationModelSelection"],
+            json!({"instanceId": instance, "model": model})
+        );
+    }
+
+    #[tokio::test]
+    async fn an_instance_map_entry_replaces_its_old_fields_so_omitted_ones_clear() {
+        let fx = fixture().await;
+        let service = ServerSettingsService::new(&fx.path, fx.secrets.clone(), fx.db.clone());
+        service
+            .update_settings(&patch(json!({"providerInstances": {"codex": {
+                "driver": "codex",
+                "displayName": "Codex Work",
+                "accentColor": "#7c3aed",
+                "enabled": true,
+                "config": {"homePath": "~/.codex"},
+            }}})))
+            .await
+            .unwrap();
+        let next = service
+            .update_settings(&patch(json!({"providerInstances": {"codex": {
+                "driver": "codex",
+                "displayName": "Codex Work",
+                "enabled": true,
+                "config": {"homePath": "~/.codex"},
+            }}})))
+            .await
+            .unwrap();
+        let instance = &settings_value(&next)["providerInstances"]["codex"];
+        assert_eq!(instance["displayName"], json!("Codex Work"));
+        assert_eq!(instance["enabled"], json!(true));
+        assert_eq!(instance["config"], json!({"homePath": "~/.codex"}));
+        assert!(instance.get("accentColor").map_or(true, Value::is_null));
+    }
 }

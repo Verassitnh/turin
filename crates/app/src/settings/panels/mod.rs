@@ -2,6 +2,7 @@
 //! the page's sections; [`SettingsView::render_page`] routes and frames them
 //! (`SettingsPageContainer`).
 
+mod appearance;
 mod general;
 mod keybindings;
 
@@ -19,6 +20,7 @@ use crate::ui::scroll_area;
 #[derive(Default)]
 pub struct PanelState {
     pub legacy_open: bool,
+    pub typography_advanced: bool,
     pub keybindings: keybindings::KeybindingsState,
 }
 
@@ -29,6 +31,7 @@ impl SettingsView {
     pub(super) fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let sections: Vec<AnyElement> = match self.route {
             SettingsRoute::Section(SettingsPath::General) => self.render_general(window, cx),
+            SettingsRoute::Section(SettingsPath::Appearance) => self.render_appearance(window, cx),
             SettingsRoute::Section(SettingsPath::Keybindings) => self.render_keybindings(window, cx),
             _ => vec![div()
                 .text_color(cx.app_theme().muted_foreground)

@@ -142,6 +142,7 @@ fn mock_archived_threads() -> Vec<ArchivedThread> {
 
 fn mock_view_model() -> SettingsViewModel {
     SettingsViewModel {
+        appearance: Default::default(),
         client: default_client_settings(),
         server: default_server_settings(),
         platform: "MacIntel".into(),
@@ -193,6 +194,7 @@ impl MockSettingsSource {
 
     fn publish(&self, cx: &mut App) {
         let vm = self.state.borrow().vm.clone();
+        apply_appearance(&vm, cx);
         if let Some(store) = self.store.borrow().clone() {
             store.update(cx, |store, cx| store.publish(vm, cx));
         }
@@ -207,6 +209,37 @@ impl MockSettingsSource {
             .collect();
         state.vm.keybindings.rules = merge_with_default_keybindings(&custom);
     }
+}
+
+/// What the live app does on every settings change: re-resolve the theme from
+/// the theme preference, contrast and font settings.
+pub fn apply_appearance(vm: &SettingsViewModel, cx: &mut App) {
+    use crate::theme::theme_palette::ThemePreferenceMode;
+    use crate::theme::{AppearancePreferences, appearance_fonts::AppearanceFontPreferences};
+    let client = &vm.client;
+    let fonts = AppearanceFontPreferences {
+        sans: client.font_family_sans.as_str().to_owned(),
+        code: client.font_family_code.as_str().to_owned(),
+        composer: client.font_family_composer.as_str().to_owned(),
+        size_interface: client.font_size_interface.get() as u32,
+        size_prompt: client.font_size_prompt.get() as u32,
+        size_code: client.font_size_code.get() as u32,
+        smoothing: client.font_smoothing,
+    };
+    let mode = match vm.appearance.mode.as_str() {
+        "light" => ThemePreferenceMode::Light,
+        "dark" => ThemePreferenceMode::Dark,
+        _ => ThemePreferenceMode::System,
+    };
+    crate::theme::set_preferences(
+        AppearancePreferences {
+            theme: vm.appearance.theme.clone(),
+            appearance_mode: Some(mode),
+            contrast: client.appearance_contrast.get() as u32,
+            fonts,
+        },
+        cx,
+    );
 }
 
 /// `{...target, ...patch}` over the settings' JSON, the way the client-settings
@@ -298,6 +331,23 @@ impl SettingsSource for MockSettingsSource {
             }
         }
         self.rebuild_keybindings();
+        self.publish(cx);
+    }
+
+    fn set_theme(&self, theme: String, cx: &mut App) {
+        self.state.borrow_mut().vm.appearance.theme = theme;
+        self.publish(cx);
+    }
+
+    fn set_appearance_mode(&self, mode: String, cx: &mut App) {
+        {
+            let mut state = self.state.borrow_mut();
+            // Standard-look preferences are named after the mode.
+            if matches!(state.vm.appearance.theme.as_str(), "system" | "light" | "dark") {
+                state.vm.appearance.theme = mode.clone();
+            }
+            state.vm.appearance.mode = mode;
+        }
         self.publish(cx);
     }
 

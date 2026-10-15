@@ -103,6 +103,8 @@ pub struct SettingsView {
     pub(super) sidebar_open: bool,
     pub(super) panels: super::panels::PanelState,
     pub(super) dialog: Option<super::dialog::Dialog>,
+    pub(super) slider_bounds: HashMap<SharedString, Rc<std::cell::Cell<gpui_kit::Bounds<gpui_kit::Pixels>>>>,
+    pub(super) slider_drag: Option<SharedString>,
     /// Focus target of the keybinding recorder.
     pub(super) capture_focus: gpui_kit::FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -132,6 +134,8 @@ impl SettingsView {
             sidebar_open: true,
             panels: Default::default(),
             dialog: None,
+            slider_bounds: HashMap::new(),
+            slider_drag: None,
             capture_focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }

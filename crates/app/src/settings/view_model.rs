@@ -67,8 +67,27 @@ pub struct EnvironmentInfo {
     pub worktrees_dir: String,
 }
 
+/// Device-local appearance (upstream `useTheme`: localStorage, not settings).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppearanceState {
+    /// `"system" | "light" | "dark"` (the standard look) or a theme id.
+    pub theme: String,
+    /// `"system" | "light" | "dark"`.
+    pub mode: String,
+}
+
+impl Default for AppearanceState {
+    fn default() -> Self {
+        Self {
+            theme: "system".into(),
+            mode: "system".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SettingsViewModel {
+    pub appearance: AppearanceState,
     pub client: ClientSettings,
     pub server: ServerSettings,
     /// `navigator.platform`.
@@ -116,6 +135,9 @@ pub trait SettingsSource {
     fn update_server(&self, patch: Value, cx: &mut App);
     fn upsert_keybinding(&self, input: UpsertKeybinding, cx: &mut App);
     fn remove_keybinding(&self, input: RemoveKeybinding, cx: &mut App);
+    /// `useTheme().setTheme` / `setAppearanceMode`.
+    fn set_theme(&self, theme: String, cx: &mut App);
+    fn set_appearance_mode(&self, mode: String, cx: &mut App);
     /// Opens `keybindings.json` in the preferred editor.
     fn open_keybindings_file(&self, cx: &mut App);
     fn unarchive_thread(&self, thread_id: &str, cx: &mut App);

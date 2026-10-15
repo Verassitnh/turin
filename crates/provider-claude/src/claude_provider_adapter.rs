@@ -4,14 +4,14 @@
 #![allow(clippy::result_large_err)]
 use crate::{
     claude_adapter_v2::{ClaudeAdapterEvent, ClaudeAdapterV2, ClaudeHostRequest},
-    claude_turn_items::{
-        ItemOrdinals, ToolCall, TurnScope, assistant_artifacts, item_ordinal, new_plan_id,
-        proposed_plan_artifact, tool_call_artifacts,
-    },
     claude_model_catalog::ClaudeModelCatalog,
     claude_model_options::{apply_claude_prompt_effort_prefix, compile_claude_model_selection},
     claude_permission::ApprovalDecision,
     claude_query_options::{ClaudeQueryOptionsInput, make_claude_query_options},
+    claude_turn_items::{
+        ItemOrdinals, ToolCall, TurnScope, assistant_artifacts, item_ordinal, new_plan_id,
+        proposed_plan_artifact, tool_call_artifacts,
+    },
     claude_turn_token_usage::normalize_claude_turn_token_usage,
 };
 use async_trait::async_trait;
@@ -28,15 +28,14 @@ use turin_contracts::{
     PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId, TrimmedNonEmptyString, UtcDateTime,
     model_selection::ModelSelection,
     orchestration_v2::{
-        OrchestrationV2ConversationMessage,
-        OrchestrationV2NativeRefStrength, OrchestrationV2ProviderCapabilities,
-        OrchestrationV2ProviderRef, OrchestrationV2ProviderSession,
-        OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
-        OrchestrationV2ProviderThreadDisposition, OrchestrationV2ProviderThreadForkedFrom,
-        OrchestrationV2ProviderThreadStatus, OrchestrationV2ProviderTurn,
-        OrchestrationV2ProviderTurnStatus, OrchestrationV2ResponseCapability,
-        OrchestrationV2RuntimeRequest, OrchestrationV2RuntimeRequestKind,
-        OrchestrationV2RuntimeRequestStatus,
+        OrchestrationV2ConversationMessage, OrchestrationV2NativeRefStrength,
+        OrchestrationV2ProviderCapabilities, OrchestrationV2ProviderRef,
+        OrchestrationV2ProviderSession, OrchestrationV2ProviderSessionStatus,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadDisposition,
+        OrchestrationV2ProviderThreadForkedFrom, OrchestrationV2ProviderThreadStatus,
+        OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus,
+        OrchestrationV2ResponseCapability, OrchestrationV2RuntimeRequest,
+        OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
     provider_policy::{ProviderApprovalDecision, ProviderInteractionMode},
@@ -63,7 +62,7 @@ use turin_provider_core::{
 pub fn claude_provider_capabilities_v2() -> OrchestrationV2ProviderCapabilities {
     serde_json::from_value(json!({
         "sessions":{"supportsMultipleProviderThreadsPerSession":false,"supportsModelSwitchInSession":true,"supportsProviderSwitchingViaHandoff":true,"supportsRuntimeModeSwitchInSession":false,"pendingRequestsSurviveRestart":false},
-        "threads":{"canCreateEmptyThread":true,"canReadThreadSnapshot":false,"canRollbackThread":true,"canForkThread":true,"canForkFromTurn":true,"canForkFromSubagentThread":false,"exposesNativeThreadId":true},
+        "threads":{"canCreateEmptyThread":true,"canReadThreadSnapshot":false,"canRollbackThread":false,"canForkThread":true,"canForkFromTurn":true,"canForkFromSubagentThread":false,"exposesNativeThreadId":true},
         "turns":{"exposesNativeTurnId":false,"emitsTurnStarted":true,"emitsTurnCompleted":true,"supportsInterrupt":true,"supportsActiveSteering":true,"activeSteeringInterruptsTools":true,"supportsSteeringByInterruptRestart":false,"supportsQueuedMessages":true,"terminalStatusQuality":"strong"},
         "streaming":{"streamsAssistantText":true,"streamsReasoning":true,"streamsToolOutput":false,"streamsPlanText":false,"emitsMessageCompleted":true},
         "tools":{"exposesToolItemIds":true,"emitsToolStarted":true,"emitsToolCompleted":true,"emitsToolOutput":true,"supportsMcpTools":true,"supportsDynamicToolCallbacks":true},
@@ -1130,7 +1129,10 @@ impl ClaudeActor {
 
 /// Assistant text blocks become a node, message, and turn item. `tool_use`
 /// blocks start a tool call. Thinking blocks are not ported yet.
-fn assistant_events(active: &mut ActiveTurn, frame: &turin_claude_protocol::Frame) -> Vec<ProviderAdapterV2Event> {
+fn assistant_events(
+    active: &mut ActiveTurn,
+    frame: &turin_claude_protocol::Frame,
+) -> Vec<ProviderAdapterV2Event> {
     let message_id = frame
         .raw
         .pointer("/message/id")
@@ -1149,25 +1151,49 @@ fn assistant_events(active: &mut ActiveTurn, frame: &turin_claude_protocol::Fram
     for (index, block) in blocks.iter().enumerate() {
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
-                let text = block.get("text").and_then(Value::as_str).unwrap_or_default();
+                let text = block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 if text.is_empty() {
                     continue;
                 }
                 let native = format!("{message_id}:text:{index}");
-                let ordinal = item_ordinal(&mut active.item_ordinals, active.input.provider_turn_ordinal, &native);
+                let ordinal = item_ordinal(
+                    &mut active.item_ordinals,
+                    active.input.provider_turn_ordinal,
+                    &native,
+                );
                 let artifacts = assistant_artifacts(&active.scope, &native, ordinal, text, now);
                 active.last_assistant = Some(artifacts.message.clone());
-                events.push(ProviderAdapterV2Event::NodeUpdated { driver: driver(), node: artifacts.node });
-                events.push(ProviderAdapterV2Event::MessageUpdated { driver: driver(), message: artifacts.message });
-                events.push(ProviderAdapterV2Event::TurnItemUpdated { driver: driver(), turn_item: artifacts.turn_item });
+                events.push(ProviderAdapterV2Event::NodeUpdated {
+                    driver: driver(),
+                    node: artifacts.node,
+                });
+                events.push(ProviderAdapterV2Event::MessageUpdated {
+                    driver: driver(),
+                    message: artifacts.message,
+                });
+                events.push(ProviderAdapterV2Event::TurnItemUpdated {
+                    driver: driver(),
+                    turn_item: artifacts.turn_item,
+                });
             }
             Some("tool_use") => {
                 let Some(native) = block.get("id").and_then(Value::as_str) else {
                     continue;
                 };
-                let name = block.get("name").and_then(Value::as_str).unwrap_or("tool").to_owned();
+                let name = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool")
+                    .to_owned();
                 let input = block.get("input").cloned().unwrap_or(Value::Null);
-                let ordinal = item_ordinal(&mut active.item_ordinals, active.input.provider_turn_ordinal, native);
+                let ordinal = item_ordinal(
+                    &mut active.item_ordinals,
+                    active.input.provider_turn_ordinal,
+                    native,
+                );
                 let call = ToolCall {
                     native_item_id: native,
                     tool_name: &name,
@@ -1179,11 +1205,23 @@ fn assistant_events(active: &mut ActiveTurn, frame: &turin_claude_protocol::Fram
                     updated_at: now,
                 };
                 let artifacts = tool_call_artifacts(&active.scope, &call);
-                events.push(ProviderAdapterV2Event::NodeUpdated { driver: driver(), node: artifacts.node });
-                events.push(ProviderAdapterV2Event::TurnItemUpdated { driver: driver(), turn_item: artifacts.turn_item });
+                events.push(ProviderAdapterV2Event::NodeUpdated {
+                    driver: driver(),
+                    node: artifacts.node,
+                });
+                events.push(ProviderAdapterV2Event::TurnItemUpdated {
+                    driver: driver(),
+                    turn_item: artifacts.turn_item,
+                });
                 active.tool_calls.insert(
                     native.to_owned(),
-                    TrackedTool { name, input, ordinal, started_at: now, finished: false },
+                    TrackedTool {
+                        name,
+                        input,
+                        ordinal,
+                        started_at: now,
+                        finished: false,
+                    },
                 );
             }
             _ => {}
@@ -1193,7 +1231,10 @@ fn assistant_events(active: &mut ActiveTurn, frame: &turin_claude_protocol::Fram
 }
 
 /// `tool_result` blocks finish the tracked tool call they answer.
-fn tool_result_events(active: &mut ActiveTurn, frame: &turin_claude_protocol::Frame) -> Vec<ProviderAdapterV2Event> {
+fn tool_result_events(
+    active: &mut ActiveTurn,
+    frame: &turin_claude_protocol::Frame,
+) -> Vec<ProviderAdapterV2Event> {
     let blocks = frame
         .raw
         .pointer("/message/content")
@@ -1202,7 +1243,10 @@ fn tool_result_events(active: &mut ActiveTurn, frame: &turin_claude_protocol::Fr
         .unwrap_or_default();
     let now = UtcDateTime::now();
     let mut events = Vec::new();
-    for block in blocks.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")) {
+    for block in blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+    {
         let Some(native) = block.get("tool_use_id").and_then(Value::as_str) else {
             continue;
         };
@@ -1213,7 +1257,10 @@ fn tool_result_events(active: &mut ActiveTurn, frame: &turin_claude_protocol::Fr
             continue;
         }
         tracked.finished = true;
-        let failed = block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+        let failed = block
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let output = block.get("content").cloned().unwrap_or(Value::Null);
         let call = ToolCall {
             native_item_id: native,
@@ -1226,15 +1273,24 @@ fn tool_result_events(active: &mut ActiveTurn, frame: &turin_claude_protocol::Fr
             updated_at: now,
         };
         let artifacts = tool_call_artifacts(&active.scope, &call);
-        events.push(ProviderAdapterV2Event::NodeUpdated { driver: driver(), node: artifacts.node });
-        events.push(ProviderAdapterV2Event::TurnItemUpdated { driver: driver(), turn_item: artifacts.turn_item });
+        events.push(ProviderAdapterV2Event::NodeUpdated {
+            driver: driver(),
+            node: artifacts.node,
+        });
+        events.push(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: driver(),
+            turn_item: artifacts.turn_item,
+        });
     }
     events
 }
 
 /// A turn that ends with tool calls still open closes them with the turn's
 /// outcome, so no item is left running.
-fn finish_running_tools(active: &mut ActiveTurn, status: &'static str) -> Vec<ProviderAdapterV2Event> {
+fn finish_running_tools(
+    active: &mut ActiveTurn,
+    status: &'static str,
+) -> Vec<ProviderAdapterV2Event> {
     let now = UtcDateTime::now();
     let mut events = Vec::new();
     let open: Vec<String> = active
@@ -1259,8 +1315,14 @@ fn finish_running_tools(active: &mut ActiveTurn, status: &'static str) -> Vec<Pr
             updated_at: now,
         };
         let artifacts = tool_call_artifacts(&active.scope, &call);
-        events.push(ProviderAdapterV2Event::NodeUpdated { driver: driver(), node: artifacts.node });
-        events.push(ProviderAdapterV2Event::TurnItemUpdated { driver: driver(), turn_item: artifacts.turn_item });
+        events.push(ProviderAdapterV2Event::NodeUpdated {
+            driver: driver(),
+            node: artifacts.node,
+        });
+        events.push(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: driver(),
+            turn_item: artifacts.turn_item,
+        });
     }
     events
 }

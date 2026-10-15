@@ -10,10 +10,9 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use turin_contracts::{
     model_selection::ModelSelection,
     orchestration_v2::{
-        OrchestrationV2AppThread, OrchestrationV2ExecutionNodeKind, OrchestrationV2ProviderThread,
-        OrchestrationV2PlanArtifact, OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus,
-        OrchestrationV2TurnItem,
-        OrchestrationV2TurnItemStatus,
+        OrchestrationV2AppThread, OrchestrationV2ExecutionNodeKind, OrchestrationV2PlanArtifact,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderTurn,
+        OrchestrationV2ProviderTurnStatus, OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
     },
     provider_instance::ProviderInstanceId,
     provider_policy::{ProviderInteractionMode, RuntimeMode},
@@ -450,7 +449,11 @@ async fn read_only_tool_fixture_emits_tool_items_and_completes() {
 
     let (seen, status) = until_terminal(&mut events).await;
     assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
-    assert!(assistant_texts(&seen).iter().any(|t| t == "read only tool fixture complete"));
+    assert!(
+        assistant_texts(&seen)
+            .iter()
+            .any(|t| t == "read only tool fixture complete")
+    );
 
     // Each Read starts running, then completes with its file content.
     let reads: Vec<_> = turn_items(&seen)
@@ -461,7 +464,9 @@ async fn read_only_tool_fixture_emits_tool_items_and_completes() {
                 status,
                 output,
                 ..
-            } if tool_name.as_ref().map(|name| name.as_str()) == Some("Read") => Some((status, output)),
+            } if tool_name.as_ref().map(|name| name.as_str()) == Some("Read") => {
+                Some((status, output))
+            }
             _ => None,
         })
         .collect();
@@ -475,8 +480,10 @@ async fn read_only_tool_fixture_emits_tool_items_and_completes() {
 
     let tool_nodes = seen
         .iter()
-        .filter(|event| matches!(event, ProviderAdapterV2Event::NodeUpdated { node, .. }
-            if node.kind == OrchestrationV2ExecutionNodeKind::ToolCall))
+        .filter(|event| {
+            matches!(event, ProviderAdapterV2Event::NodeUpdated { node, .. }
+            if node.kind == OrchestrationV2ExecutionNodeKind::ToolCall)
+        })
         .count();
     assert_eq!(tool_nodes, 4);
 }
@@ -515,7 +522,11 @@ async fn exit_plan_mode_capture_emits_the_plan_and_completes() {
         .expect("start turn");
 
     let (seen, status) = until_terminal(&mut events).await;
-    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed, "{seen:?}");
+    assert_eq!(
+        status,
+        ProviderAdapterV2TurnTerminalStatus::Completed,
+        "{seen:?}"
+    );
     let plans: Vec<_> = seen
         .iter()
         .filter_map(|event| match event {

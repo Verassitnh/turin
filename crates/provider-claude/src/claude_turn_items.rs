@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use turin_contracts::{
     NodeId, PlanId, ProviderThreadId, ProviderTurnId, RunId, ThreadId,
     orchestration_v2::{
-        OrchestrationV2ConversationMessage, OrchestrationV2ExecutionNode, OrchestrationV2PlanArtifact,
-        OrchestrationV2TurnItem,
+        OrchestrationV2ConversationMessage, OrchestrationV2ExecutionNode,
+        OrchestrationV2PlanArtifact, OrchestrationV2TurnItem,
     },
     provider_instance::ProviderDriverKind,
 };
@@ -23,7 +23,11 @@ pub type ItemOrdinals = HashMap<String, u64>;
 
 /// Upstream `resolveClaudeItemOrdinal`: `providerTurnOrdinal * 100 + size + 1`,
 /// allocated on first sight and reused afterwards.
-pub fn item_ordinal(ordinals: &mut ItemOrdinals, provider_turn_ordinal: i64, native_item_id: &str) -> u64 {
+pub fn item_ordinal(
+    ordinals: &mut ItemOrdinals,
+    provider_turn_ordinal: i64,
+    native_item_id: &str,
+) -> u64 {
     if let Some(existing) = ordinals.get(native_item_id) {
         return *existing;
     }
@@ -237,7 +241,11 @@ pub fn tool_call_artifacts(scope: &TurnScope, call: &ToolCall<'_>) -> ToolCallAr
 
 /// The ExitPlanMode plan as a plan artifact (`plan.updated`). Upstream keeps
 /// the plan as a draft until the user decides, so it is a draft here too.
-pub fn proposed_plan_artifact(scope: &TurnScope, plan_id: PlanId, markdown: &str) -> OrchestrationV2PlanArtifact {
+pub fn proposed_plan_artifact(
+    scope: &TurnScope,
+    plan_id: PlanId,
+    markdown: &str,
+) -> OrchestrationV2PlanArtifact {
     decode(json!({
         "kind": "proposed_plan", "id": plan_id, "threadId": scope.thread_id,
         "runId": scope.run_id, "nodeId": scope.root_node_id, "status": "draft",
@@ -300,7 +308,10 @@ mod tests {
         let at: UtcDateTime = serde_json::from_value(json!("2026-10-15T00:00:00.000Z")).unwrap();
         let scope = scope();
         let assistant = assistant_artifacts(&scope, "msg-1:0", 101, "hi", at);
-        assert!(matches!(assistant.turn_item, OrchestrationV2TurnItem::AssistantMessage { .. }));
+        assert!(matches!(
+            assistant.turn_item,
+            OrchestrationV2TurnItem::AssistantMessage { .. }
+        ));
 
         let input = json!({"command": "ls"});
         let tool = tool_call_artifacts(
@@ -316,6 +327,9 @@ mod tests {
                 updated_at: at,
             },
         );
-        assert!(matches!(tool.turn_item, OrchestrationV2TurnItem::CommandExecution { .. }));
+        assert!(matches!(
+            tool.turn_item,
+            OrchestrationV2TurnItem::CommandExecution { .. }
+        ));
     }
 }

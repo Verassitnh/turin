@@ -91,26 +91,26 @@ pub fn tne(value: &str) -> TrimmedNonEmptyString {
 /// `project({ id, title, workspaceRoot, repository, provider, host, remoteUrl })`
 #[derive(Clone)]
 pub struct ProjectSpec {
-    pub id: &'static str,
-    pub title: &'static str,
-    pub workspace_root: &'static str,
-    pub repository: Option<&'static str>,
-    pub provider: Option<&'static str>,
-    pub host: Option<&'static str>,
+    pub id: String,
+    pub title: String,
+    pub workspace_root: String,
+    pub repository: Option<String>,
+    pub provider: Option<String>,
+    pub host: Option<String>,
     pub remote_url: Option<String>,
 }
 
 pub fn project(
-    id: &'static str,
-    title: &'static str,
-    workspace_root: &'static str,
-    repository: &'static str,
+    id: impl Into<String>,
+    title: impl Into<String>,
+    workspace_root: impl Into<String>,
+    repository: impl Into<String>,
 ) -> ProjectSpec {
     ProjectSpec {
-        id,
-        title,
-        workspace_root,
-        repository: Some(repository),
+        id: id.into(),
+        title: title.into(),
+        workspace_root: workspace_root.into(),
+        repository: Some(repository.into()),
         provider: None,
         host: None,
         remote_url: None,
@@ -118,12 +118,12 @@ pub fn project(
 }
 
 impl ProjectSpec {
-    pub fn provider(mut self, provider: &'static str) -> Self {
-        self.provider = Some(provider);
+    pub fn provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = Some(provider.into());
         self
     }
-    pub fn host(mut self, host: &'static str) -> Self {
-        self.host = Some(host);
+    pub fn host(mut self, host: impl Into<String>) -> Self {
+        self.host = Some(host.into());
         self
     }
     pub fn remote_url(mut self, remote_url: &str) -> Self {
@@ -139,10 +139,12 @@ impl ProjectSpec {
     pub fn build(&self) -> OrchestrationProjectShell {
         // The host defaults from the provider, so a fixture only names one when the point of the
         // test is two hosts of the same kind.
-        let host = self.host.unwrap_or(if self.provider == Some("gitlab") {
-            "gitlab.com"
-        } else {
-            "github.com"
+        let host = self.host.clone().unwrap_or_else(|| {
+            if self.provider.as_deref() == Some("gitlab") {
+                "gitlab.com".to_owned()
+            } else {
+                "github.com".to_owned()
+            }
         });
         let mut shell = json!({
             "id": self.id,
@@ -153,7 +155,7 @@ impl ProjectSpec {
             "createdAt": "2026-07-01T00:00:00Z",
             "updatedAt": "2026-07-01T00:00:00Z",
         });
-        if let Some(repository) = self.repository {
+        if let Some(repository) = &self.repository {
             shell["repositoryIdentity"] = json!({
                 "canonicalKey": format!("{host}/{repository}"),
                 "locator": {
@@ -164,7 +166,7 @@ impl ProjectSpec {
                         .clone()
                         .unwrap_or_else(|| format!("https://{host}/{repository}.git")),
                 },
-                "provider": self.provider.unwrap_or("github"),
+                "provider": self.provider.clone().unwrap_or_else(|| "github".to_owned()),
                 "displayName": repository,
             });
         }

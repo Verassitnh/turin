@@ -22,7 +22,7 @@ use turin_contracts::{
         OrchestrationV2ProviderRef, OrchestrationV2ProviderSession,
         OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
         OrchestrationV2ProviderThreadForkedFrom, OrchestrationV2ProviderThreadStatus,
-        OrchestrationV2ProviderTurnStatus,
+        OrchestrationV2ProviderTurn, OrchestrationV2ProviderTurnStatus,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
     provider_policy::ProviderApprovalDecision,
@@ -460,6 +460,48 @@ fn turn_input(text: &str) -> Vec<Value> {
         vec![json!({"type":"text","text":text})]
     }
 }
+/// Upstream `isTerminalProviderTurn`: a turn with a native ref that has stopped.
+fn is_terminal_turn(turn: &OrchestrationV2ProviderTurn) -> bool {
+    turn.native_turn_ref.is_some()
+        && matches!(
+            turn.status,
+            OrchestrationV2ProviderTurnStatus::Completed
+                | OrchestrationV2ProviderTurnStatus::Interrupted
+                | OrchestrationV2ProviderTurnStatus::Failed
+                | OrchestrationV2ProviderTurnStatus::Cancelled
+        )
+}
+
+/// Upstream `resolveCodexRollbackTurnCount`: the stopped turns a rollback reverts.
+/// A turn boundary reverts the terminal turns after it, and the boundary must be
+/// in the thread's own history.
+fn rollback_turn_count(input: &ProviderAdapterV2RollbackThreadInput) -> Result<usize, String> {
+    let turns = &input.provider_thread_turns;
+    match &input.target {
+        ProviderAdapterV2RollbackTarget::ThreadStart { .. } => {
+            Ok(turns.iter().filter(|turn| is_terminal_turn(turn)).count())
+        }
+        ProviderAdapterV2RollbackTarget::ProviderTurn { provider_turn, .. } => {
+            if provider_turn.provider_thread_id != input.provider_thread.id {
+                return Err(format!(
+                    "Cannot roll back Codex thread {} to provider turn {}: target turn belongs to provider thread {}.",
+                    input.provider_thread.id, provider_turn.id, provider_turn.provider_thread_id,
+                ));
+            }
+            let Some(boundary) = turns.iter().find(|turn| turn.id == provider_turn.id) else {
+                return Err(format!(
+                    "Cannot roll back Codex thread {} to provider turn {}: target turn was not found in durable provider turn history.",
+                    input.provider_thread.id, provider_turn.id,
+                ));
+            };
+            Ok(turns
+                .iter()
+                .filter(|turn| turn.ordinal > boundary.ordinal && is_terminal_turn(turn))
+                .count())
+        }
+    }
+}
+
 fn snapshot(
     thread: OrchestrationV2ProviderThread,
     payload: Option<Value>,
@@ -780,35 +822,29 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
         input: ProviderAdapterV2RollbackThreadInput,
     ) -> Result<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error> {
         let native = native_id(&input.provider_thread)?.to_owned();
-        let count = match &input.target {
-            ProviderAdapterV2RollbackTarget::ThreadStart { .. } => input
-                .provider_thread_turns
-                .iter()
-                .filter(|t| {
-                    matches!(
-                        t.status,
-                        OrchestrationV2ProviderTurnStatus::Completed
-                            | OrchestrationV2ProviderTurnStatus::Interrupted
-                            | OrchestrationV2ProviderTurnStatus::Failed
-                            | OrchestrationV2ProviderTurnStatus::Cancelled
-                    )
-                })
-                .count(),
-            ProviderAdapterV2RollbackTarget::ProviderTurn { provider_turn, .. } => input
-                .provider_thread_turns
-                .iter()
-                .filter(|t| {
-                    t.ordinal > provider_turn.ordinal
-                        && matches!(
-                            t.status,
-                            OrchestrationV2ProviderTurnStatus::Completed
-                                | OrchestrationV2ProviderTurnStatus::Interrupted
-                                | OrchestrationV2ProviderTurnStatus::Failed
-                                | OrchestrationV2ProviderTurnStatus::Cancelled
-                        )
-                })
-                .count(),
+        let count = rollback_turn_count(&input).map_err(|cause| {
+            error(
+                ProviderAdapterErrorKind::RollbackThread {
+                    driver: self.driver.clone(),
+                    provider_thread_id: input.provider_thread.id.clone(),
+                    checkpoint_id: None,
+                },
+                cause,
+            )
+        })?;
+        let head_ref = match &input.target {
+            ProviderAdapterV2RollbackTarget::ProviderTurn { provider_turn, .. } => {
+                provider_turn.native_turn_ref.clone()
+            }
+            ProviderAdapterV2RollbackTarget::ThreadStart { .. } => None,
         };
+        // Upstream returns the idle thread without a request when nothing reverts.
+        if count == 0 {
+            let mut thread = input.provider_thread;
+            thread.status = OrchestrationV2ProviderThreadStatus::Idle;
+            thread.native_conversation_head_ref = head_ref;
+            return Ok(snapshot(thread, None));
+        }
         let native_thread = self
             .session
             .revert_thread(&native, count as u64)
@@ -826,12 +862,7 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
         let mut thread = input.provider_thread;
         thread.status = OrchestrationV2ProviderThreadStatus::Idle;
         thread.updated_at = time(native_thread.get("updatedAt"));
-        thread.native_conversation_head_ref = match input.target {
-            ProviderAdapterV2RollbackTarget::ProviderTurn { provider_turn, .. } => {
-                provider_turn.native_turn_ref
-            }
-            _ => None,
-        };
+        thread.native_conversation_head_ref = head_ref;
         Ok(snapshot(thread, Some(native_thread)))
     }
     async fn fork_thread(

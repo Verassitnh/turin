@@ -28,10 +28,11 @@ use turin_contracts::{
 use turin_provider_core::provider_adapter::{
     ProviderAdapterV2, ProviderAdapterV2EnsureThreadInput, ProviderAdapterV2Event,
     ProviderAdapterV2InterruptInput, ProviderAdapterV2OpenSessionInput,
-    ProviderAdapterV2RollbackTarget, ProviderAdapterV2RollbackThreadInput,
-    ProviderAdapterV2RuntimePolicy, ProviderAdapterV2RuntimeRequestResponseInput,
-    ProviderAdapterV2SteerInput, ProviderAdapterV2TurnInput, ProviderAdapterV2TurnMessage,
-    ProviderAdapterV2TurnTerminalStatus, ProviderEventStream, ProviderSessionRuntime,
+    ProviderAdapterV2ResumeThreadInput, ProviderAdapterV2RollbackTarget,
+    ProviderAdapterV2RollbackThreadInput, ProviderAdapterV2RuntimePolicy,
+    ProviderAdapterV2RuntimeRequestResponseInput, ProviderAdapterV2SteerInput,
+    ProviderAdapterV2TurnInput, ProviderAdapterV2TurnMessage, ProviderAdapterV2TurnTerminalStatus,
+    ProviderEventStream, ProviderSessionRuntime,
 };
 
 const CLIENT_VERSION: &str = "0.0.44";
@@ -147,6 +148,69 @@ struct Replay {
 }
 
 async fn open(transcript: ReplayTranscript) -> Replay {
+    let (model, runtime, events, driver) = open_session(transcript).await;
+    let thread = runtime
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: id("thread-1"),
+            title: None,
+            model_selection: selection(&model),
+            runtime_policy: policy(
+                RuntimeMode::FullAccess,
+                ProviderInteractionMode::Default,
+                None,
+                None,
+            ),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    Replay {
+        model,
+        runtime,
+        events,
+        driver,
+        thread,
+        runs: 0,
+    }
+}
+
+/// A second session on the rest of a transcript, after the first session's runtime
+/// exited. It reattaches to the first session's native thread instead of starting one.
+async fn open_restarted(transcript: ReplayTranscript, first: &Replay) -> Replay {
+    let (model, runtime, events, driver) = open_session(transcript).await;
+    let thread = runtime
+        .resume_thread(ProviderAdapterV2ResumeThreadInput {
+            provider_thread: first.thread.clone(),
+            thread_id: Some(id("thread-1")),
+            model_selection: Some(selection(&model)),
+            runtime_policy: Some(policy(
+                RuntimeMode::FullAccess,
+                ProviderInteractionMode::Default,
+                None,
+                None,
+            )),
+        })
+        .await
+        .unwrap();
+    Replay {
+        model,
+        runtime,
+        events,
+        driver,
+        thread,
+        runs: first.runs,
+    }
+}
+
+async fn open_session(
+    transcript: ReplayTranscript,
+) -> (
+    String,
+    Arc<dyn ProviderSessionRuntime>,
+    ProviderEventStream,
+    ReplayDriver,
+) {
     // The replay runs on the model the upstream recorder used for this scenario.
     let model = recorded_turn_params(&transcript, 0)["model"]
         .as_str()
@@ -184,30 +248,7 @@ async fn open(transcript: ReplayTranscript) -> Replay {
         .await
         .unwrap();
     let events = runtime.events();
-    let thread = runtime
-        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
-            thread_id: id("thread-1"),
-            title: None,
-            model_selection: selection(&model),
-            runtime_policy: policy(
-                RuntimeMode::FullAccess,
-                ProviderInteractionMode::Default,
-                None,
-                None,
-            ),
-            provider_session_id: None,
-            existing_provider_thread: None,
-        })
-        .await
-        .unwrap();
-    Replay {
-        model,
-        runtime,
-        events,
-        driver,
-        thread,
-        runs: 0,
-    }
+    (model, runtime, events, driver)
 }
 
 impl Replay {
@@ -708,6 +749,193 @@ async fn file_change_replay_maps_first_change_to_file_change_item() {
     )));
     assert_eq!(
         terminal_status(&after),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+/// Restart: the first session ends with `runtime_exit` after one turn. A second
+/// session runs `thread/resume` with `excludeTurns` on the same native thread,
+/// then a second turn on it.
+#[tokio::test]
+async fn provider_thread_resume_replays_second_turn_after_restart() {
+    let transcript = fixture("provider_thread_resume");
+    // Entry 32 is the first session's `runtime_exit`; entry 33 starts the second.
+    let mut first_transcript = transcript.clone();
+    let second_entries = first_transcript.entries.split_off(33);
+    let mut second_transcript = transcript.clone();
+    second_transcript.entries = second_entries;
+
+    let first_text = recorded_text(&transcript, 0);
+    let second_text = recorded_text(&transcript, 1);
+    let mut first = open(first_transcript).await;
+    first
+        .start(
+            &first_text,
+            recorded_policy(&transcript, RuntimeMode::FullAccess),
+        )
+        .await;
+    assert_eq!(
+        first.finish_turn().await,
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+
+    let mut second = open_restarted(second_transcript, &first).await;
+    second
+        .start(
+            &second_text,
+            recorded_policy(&transcript, RuntimeMode::FullAccess),
+        )
+        .await;
+    let seen = second.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    assert!(!assistant_texts(&seen).is_empty());
+    assert_eq!(
+        second.thread.native_thread_ref,
+        first.thread.native_thread_ref
+    );
+    second.driver.verify_complete().unwrap();
+}
+
+/// Restart, then rollback. The restarted session reads the thread, resumes it because
+/// it is not loaded, counts turns, and reverts. Upstream `ProviderSessionManager`
+/// then reattaches the thread with `thread/resume` before the next turn.
+#[tokio::test]
+async fn thread_rollback_after_restart_reverts_then_continues() {
+    let transcript = fixture("thread_rollback_after_restart");
+    // Entry 45 is the first session's `runtime_exit`; entry 46 starts the restarted one.
+    let mut first_transcript = transcript.clone();
+    let second_entries = first_transcript.entries.split_off(46);
+    let mut second_transcript = transcript.clone();
+    second_transcript.entries = second_entries;
+
+    let policy = recorded_policy(&transcript, RuntimeMode::FullAccess);
+    let mut first = open(first_transcript).await;
+    let mut turns = Vec::new();
+    for n in 0..2 {
+        first
+            .start(&recorded_text(&transcript, n), policy.clone())
+            .await;
+        turns.push(last_provider_turn(&first.next_until(is_terminal).await));
+    }
+
+    let (model, runtime, events, driver) = open_session(second_transcript).await;
+    let mut second = Replay {
+        model,
+        runtime,
+        events,
+        driver,
+        thread: first.thread.clone(),
+        runs: first.runs,
+    };
+    let snapshot = second
+        .runtime
+        .rollback_thread(ProviderAdapterV2RollbackThreadInput {
+            provider_thread: second.thread.clone(),
+            target: ProviderAdapterV2RollbackTarget::ProviderTurn {
+                checkpoint_id: id("checkpoint-1"),
+                app_run_ordinal: 1,
+                provider_turn: turns[0].clone(),
+            },
+            provider_thread_turns: turns,
+        })
+        .await
+        .unwrap();
+    second.thread = second
+        .runtime
+        .resume_thread(ProviderAdapterV2ResumeThreadInput {
+            provider_thread: snapshot.provider_thread,
+            thread_id: Some(id("thread-1")),
+            model_selection: Some(selection(&second.model)),
+            runtime_policy: Some(policy.clone()),
+        })
+        .await
+        .unwrap();
+
+    second.start(&recorded_text(&transcript, 2), policy).await;
+    assert_eq!(
+        second.finish_turn().await,
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    second.driver.verify_complete().unwrap();
+}
+
+/// Rollback to a stopped turn. The boundary is the interrupted turn, so the count is
+/// the one completed turn after it. `thread/turns/list` returns that turn, and
+/// `thread/revert` names it as the cut.
+#[tokio::test]
+async fn thread_rollback_to_stopped_turn_reverts_turns_after_boundary() {
+    let transcript = fixture("thread_rollback_to_stopped_turn");
+    let policy = recorded_policy(&transcript, RuntimeMode::FullAccess);
+    let mut replay = open(transcript.clone()).await;
+    let mut turns = Vec::new();
+
+    replay
+        .start(&recorded_text(&transcript, 0), policy.clone())
+        .await;
+    turns.push(last_provider_turn(&replay.next_until(is_terminal).await));
+
+    // The second turn runs a long command and is interrupted while it runs.
+    replay
+        .start(&recorded_text(&transcript, 1), policy.clone())
+        .await;
+    let native_turn = provider_turn_of(&replay.next_until(is_turn_running).await);
+    replay
+        .next_until(|event| {
+            matches!(
+                event,
+                ProviderAdapterV2Event::TurnItemUpdated {
+                    turn_item: OrchestrationV2TurnItem::CommandExecution {
+                        status: OrchestrationV2TurnItemStatus::Running,
+                        ..
+                    },
+                    ..
+                }
+            )
+        })
+        .await;
+    replay
+        .runtime
+        .interrupt_turn(ProviderAdapterV2InterruptInput {
+            provider_thread: replay.thread.clone(),
+            provider_turn_id: native_turn,
+            request_runtime_restart: None,
+        })
+        .await
+        .unwrap();
+    let stopped = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&stopped),
+        ProviderAdapterV2TurnTerminalStatus::Interrupted
+    );
+    turns.push(last_provider_turn(&stopped));
+
+    replay
+        .start(&recorded_text(&transcript, 2), policy.clone())
+        .await;
+    turns.push(last_provider_turn(&replay.next_until(is_terminal).await));
+
+    let snapshot = replay
+        .runtime
+        .rollback_thread(ProviderAdapterV2RollbackThreadInput {
+            provider_thread: replay.thread.clone(),
+            target: ProviderAdapterV2RollbackTarget::ProviderTurn {
+                checkpoint_id: id("checkpoint-1"),
+                app_run_ordinal: 2,
+                provider_turn: turns[1].clone(),
+            },
+            provider_thread_turns: turns,
+        })
+        .await
+        .unwrap();
+    assert_eq!(snapshot.provider_thread.id, replay.thread.id);
+
+    replay.start(&recorded_text(&transcript, 3), policy).await;
+    assert_eq!(
+        replay.finish_turn().await,
         ProviderAdapterV2TurnTerminalStatus::Completed
     );
     replay.driver.verify_complete().unwrap();

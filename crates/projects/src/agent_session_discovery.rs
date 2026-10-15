@@ -104,7 +104,7 @@ pub trait ScannerFileSystem: Send + Sync {
 
 /// An open file (upstream `FileSystem.File`).
 #[async_trait]
-pub trait ScannerFile: Send {
+pub trait ScannerFile: Send + Sync {
     async fn stat(&self) -> Option<FileStat>;
     /// Upstream `readAlloc(size)`: up to `size` bytes, `None` at end of file.
     async fn read_alloc(&mut self, size: usize) -> std::io::Result<Option<Vec<u8>>>;

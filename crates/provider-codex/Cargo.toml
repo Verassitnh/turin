@@ -8,6 +8,7 @@ license.workspace = true
 turin-contracts.workspace = true
 turin-codex-app-server = { path = "../codex-app-server" }
 turin-provider-core = { path = "../provider-core" }
+turin-shared = { path = "../shared" }
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

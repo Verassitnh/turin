@@ -7198,6 +7198,7 @@ dependencies = [
  "turin-codex-app-server",
  "turin-contracts",
  "turin-provider-core",
+ "turin-shared",
  "uuid",
 ]
 

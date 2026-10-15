@@ -119,7 +119,10 @@ pub struct OpenCodeServerProcess {
     exit_tx: watch::Sender<Option<i32>>,
     exit_rx: watch::Receiver<Option<i32>>,
     tasks: std::sync::Mutex<Vec<JoinHandle<()>>>,
-    stopped: AtomicBool,
+    /// Set once the group has been SIGKILLed and its bookkeeping released.
+    killed: AtomicBool,
+    /// Serialises `shutdown`: a second caller waits for the first to finish.
+    stopping: tokio::sync::Mutex<()>,
     shutdown_grace: Duration,
     lease: std::sync::Mutex<Option<ServerLease>>,
 }
@@ -189,14 +192,15 @@ impl OpenCodeServerProcess {
     }
 
     pub async fn shutdown(&self) {
-        if self.stopped.swap(true, Ordering::SeqCst) {
+        let _stopping = self.stopping.lock().await;
+        if self.killed.load(Ordering::SeqCst) {
             return;
         }
         let _ = signal_process_group(self.pid, SIGTERM);
+        // Declared after the lock, so it runs first on every exit from here. That
+        // includes the caller dropping this future during the grace period.
+        let _kill_on_exit = KillOnExit(self);
         tokio::time::sleep(self.shutdown_grace).await;
-        let _ = signal_process_group(self.pid, SIGKILL);
-        self.forget_lease();
-        self.finish_tasks();
     }
 
     fn forget_lease(&self) {
@@ -224,8 +228,9 @@ impl OpenCodeServerProcess {
     }
 
     /// SIGKILLs the process group without the grace period. For drop paths.
+    /// Safe to call while a `shutdown` is still in its grace period.
     pub fn kill(&self) {
-        if self.stopped.swap(true, Ordering::SeqCst) {
+        if self.killed.swap(true, Ordering::SeqCst) {
             return;
         }
         let _ = signal_process_group(self.pid, SIGKILL);
@@ -237,6 +242,14 @@ impl OpenCodeServerProcess {
 impl Drop for OpenCodeServerProcess {
     fn drop(&mut self) {
         self.kill();
+    }
+}
+
+struct KillOnExit<'a>(&'a OpenCodeServerProcess);
+
+impl Drop for KillOnExit<'_> {
+    fn drop(&mut self) {
+        self.0.kill();
     }
 }
 
@@ -371,7 +384,8 @@ pub async fn start_open_code_server_process(
         exit_tx,
         exit_rx,
         tasks: std::sync::Mutex::new(tasks),
-        stopped: AtomicBool::new(false),
+        killed: AtomicBool::new(false),
+        stopping: tokio::sync::Mutex::new(()),
         shutdown_grace,
         lease: std::sync::Mutex::new(lease),
     };
@@ -624,6 +638,9 @@ if [ -n "${TURIN_TEST_CHILD:-}" ]; then
   sleep 120 &
   echo $! > "$TURIN_TEST_CHILD"
 fi
+if [ "${TURIN_TEST_TRAP_TERM:-}" = "1" ]; then
+  trap '' TERM
+fi
 if [ "${TURIN_TEST_EXIT:-}" = "1" ]; then
   echo boom >&2
   exit 7
@@ -787,6 +804,49 @@ done
         process.shutdown().await;
         assert!(!alive(child_pid));
         assert!(!alive(process.pid()));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_shutdown_still_kills_the_group() {
+        let binary = write_fake_opencode();
+        let child_file = temp_file("trap-child");
+        let mut environment = BTreeMap::new();
+        environment.insert("TURIN_TEST_TRAP_TERM".into(), "1".into());
+        environment.insert("TURIN_TEST_CHILD".into(), child_file.display().to_string());
+        let process = start_open_code_server_process(
+            StartOpenCodeServer {
+                binary_path: binary.display().to_string(),
+                directory: "/work".into(),
+                server_password: None,
+                environment: Some(environment),
+                hostname: None,
+                port: Some(9),
+                timeout: Some(Duration::from_secs(2)),
+                shutdown_grace: Some(Duration::from_secs(3)),
+                ledger: None,
+            },
+            ok_verify(),
+        )
+        .await
+        .unwrap();
+        let pid = process.pid();
+        let child: u32 = std::fs::read_to_string(&child_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SIGTERM is trapped, so the grace period is still running when the caller gives up.
+        let _ = tokio::time::timeout(Duration::from_millis(300), process.shutdown()).await;
+        // The process is still held here, so only the cancelled shutdown can kill it.
+        for _ in 0..100 {
+            if !alive(pid) && !alive(child) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!alive(pid), "group {pid} survived a cancelled shutdown");
+        assert!(!alive(child), "child {child} survived a cancelled shutdown");
+        assert!(!process.is_running());
     }
 
     #[tokio::test]

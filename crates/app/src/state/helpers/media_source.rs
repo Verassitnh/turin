@@ -12,7 +12,7 @@ use super::shared_support::{
     media_mime_type, media_mime_type_from_extension, split_file_path_position,
     split_markdown_link_search_and_hash,
 };
-use crate::state::support::path::file_basename;
+use turin_shared::path::file_basename;
 
 /// `Extract<AssetResource, { _tag: "media-file" }>`. The `AssetResource` contract is on the
 /// cut list (`assets`), so only the one variant this helper builds exists.

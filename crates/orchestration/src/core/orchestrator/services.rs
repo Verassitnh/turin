@@ -20,7 +20,12 @@
 use async_trait::async_trait;
 use turin_contracts::{
     NodeId, ProviderSessionId, ProviderThreadId, ProviderTurnId, RunId, RuntimeRequestId, ThreadId,
-    UtcDateTime, orchestration_v2::OrchestrationV2Run, provider_policy::ProviderApprovalDecision,
+    UtcDateTime,
+    model_selection::ModelSelection,
+    orchestration_v2::{
+        OrchestrationV2CheckpointScope, OrchestrationV2Run, OrchestrationV2ThreadProjection,
+    },
+    provider_policy::ProviderApprovalDecision,
 };
 use turin_provider_core::provider_adapter::ProviderAdapterV2SubagentOutcome;
 
@@ -188,4 +193,90 @@ impl RestartRecovery for NoRestartRecovery {
     }
 
     async fn await_restart_continuation(&self, _run: &OrchestrationV2Run) {}
+}
+
+/// `checkpointService.prepareRootRunScope`: the scope a root run is
+/// checkpointed under. Message dispatch and restart continuation call it
+/// inside their decision. T06-git implements the trait.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrepareRootRunScope {
+    pub thread_id: ThreadId,
+    pub run_id: RunId,
+    pub root_node_id: NodeId,
+    pub provider_thread_id: ProviderThreadId,
+    pub cwd: String,
+    pub created_at: UtcDateTime,
+}
+
+#[async_trait]
+pub trait CheckpointScopes: Send + Sync {
+    async fn prepare_root_run_scope(
+        &self,
+        input: PrepareRootRunScope,
+    ) -> Result<OrchestrationV2CheckpointScope, BoxError>;
+
+    /// `checkpointService.ensureScope`: returns the scope as stored (its
+    /// checkpoint id may be filled in).
+    async fn ensure_scope(
+        &self,
+        scope: OrchestrationV2CheckpointScope,
+    ) -> Result<OrchestrationV2CheckpointScope, BoxError>;
+}
+
+/// [`CheckpointScopes`] before T06-git is wired. Every call fails, so message
+/// dispatch refuses rather than starting a run without a checkpoint scope.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UnwiredCheckpointScopes;
+
+#[async_trait]
+impl CheckpointScopes for UnwiredCheckpointScopes {
+    async fn prepare_root_run_scope(
+        &self,
+        _input: PrepareRootRunScope,
+    ) -> Result<OrchestrationV2CheckpointScope, BoxError> {
+        Err("checkpoint scopes are not wired (T06-git)".into())
+    }
+
+    async fn ensure_scope(
+        &self,
+        _scope: OrchestrationV2CheckpointScope,
+    ) -> Result<OrchestrationV2CheckpointScope, BoxError> {
+        Err("checkpoint scopes are not wired (T06-git)".into())
+    }
+}
+
+/// The provider-session part of a model or provider change, the
+/// `ProviderSwitchServiceV2.plan` output. Used by `thread.model-selection.set`
+/// and `provider.switch`. The transition type (`ProviderSessionTransition`) is
+/// not ported yet, so only the fields the decider reads are here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSwitchPlan {
+    pub instance_changed: bool,
+    pub model_changed: bool,
+    pub target_provider_thread_id: Option<ProviderThreadId>,
+    pub release_provider_session_ids: Vec<ProviderSessionId>,
+}
+
+#[async_trait]
+pub trait ProviderSwitchPlanner: Send + Sync {
+    async fn plan(
+        &self,
+        thread: &OrchestrationV2ThreadProjection,
+        target: &ModelSelection,
+    ) -> Result<ProviderSwitchPlan, BoxError>;
+}
+
+/// [`ProviderSwitchPlanner`] before the switch port lands. Refuses every plan.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UnwiredProviderSwitchPlanner;
+
+#[async_trait]
+impl ProviderSwitchPlanner for UnwiredProviderSwitchPlanner {
+    async fn plan(
+        &self,
+        _thread: &OrchestrationV2ThreadProjection,
+        _target: &ModelSelection,
+    ) -> Result<ProviderSwitchPlan, BoxError> {
+        Err("provider switching is not wired".into())
+    }
 }

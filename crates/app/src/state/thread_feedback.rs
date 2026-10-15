@@ -74,8 +74,8 @@ pub fn codex_feedback_notice(submission: &CodexFeedbackSubmission) -> Option<Cod
     }
 }
 
-/// Returns the release guard, or `None` while the thread already has an upload
-/// in flight. The caller calls `release` (here: [`Self::finish`]) when done.
+/// Claims the thread's upload slot. Returns `false` while the thread already has an upload in
+/// flight; the caller frees the slot by removing `thread_key` from the set once the upload settles.
 pub fn begin_codex_feedback_submission(
     submissions_in_flight: &mut HashSet<String>,
     thread_key: &str,
@@ -295,6 +295,60 @@ mod tests {
         assert_eq!(
             codex_feedback_notice(&last).unwrap().description.as_deref(),
             Some("Upload rejected.")
+        );
+    }
+
+    #[tokio::test]
+    async fn lets_another_feedback_submission_finish_while_the_first_remains_in_flight() {
+        let first_states = RefCell::new(Vec::new());
+        let second_states = RefCell::new(Vec::new());
+        let (release_first, first_released) = oneshot::channel::<()>();
+        let first = submit_codex_feedback::<String, _>(
+            details("feedback-message-1"),
+            || {},
+            |state| first_states.borrow_mut().push(state),
+            || async move {
+                let _ = first_released.await;
+                Ok(result("codex-thread-1"))
+            },
+        );
+        let second = async {
+            let outcome = submit_codex_feedback::<String, _>(
+                details("feedback-message-2"),
+                || {},
+                |state| second_states.borrow_mut().push(state),
+                || async { Ok(result("codex-thread-2")) },
+            )
+            .await;
+            // The first upload has not settled when the second one has.
+            assert_eq!(
+                first_states.borrow().last().map(|state| &state.status),
+                Some(&CodexFeedbackStatus::Uploading)
+            );
+            release_first.send(()).unwrap();
+            outcome
+        };
+        let (first_outcome, second_outcome) = futures::join!(first, second);
+        first_outcome.unwrap();
+        second_outcome.unwrap();
+
+        assert_eq!(
+            second_states
+                .borrow()
+                .last()
+                .map(|state| state.status.clone()),
+            Some(CodexFeedbackStatus::Sent {
+                feedback_id: "codex-thread-2".into()
+            })
+        );
+        assert_eq!(
+            first_states
+                .borrow()
+                .last()
+                .map(|state| state.status.clone()),
+            Some(CodexFeedbackStatus::Sent {
+                feedback_id: "codex-thread-1".into()
+            })
         );
     }
 

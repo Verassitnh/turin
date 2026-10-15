@@ -7,3 +7,4 @@ pub mod editor;
 pub mod external_launcher;
 pub mod host;
 pub mod icns;
+pub mod native_app_icon_resolver;

@@ -4,6 +4,8 @@ mod assets;
 mod branding;
 mod components;
 mod hooks;
+mod project_icon_colors;
+mod project_identity;
 mod theme;
 mod timestamp_format;
 // The ui primitives are a library: every upstream variant and size is ported

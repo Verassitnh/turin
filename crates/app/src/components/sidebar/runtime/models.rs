@@ -249,6 +249,17 @@ pub struct EnvironmentThreadShell {
     /// Server-tracked visited watermark; `None` = server predates tracking.
     pub last_visited_at: Option<Option<String>>,
     pub title_regeneration: Option<TitleRegeneration>,
+    /// Insertions/deletions of the latest run. Upstream shells don't carry
+    /// checkpoint summaries yet (`latestRunDiff` returns null); the row keeps
+    /// the slot as a seam, and so does this field.
+    pub latest_run_diff: Option<DiffStat>,
+}
+
+/// `{ insertions, deletions }`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiffStat {
+    pub insertions: u64,
+    pub deletions: u64,
 }
 
 impl EnvironmentThreadShell {
@@ -298,6 +309,7 @@ impl EnvironmentThreadShell {
             pull_requests: Vec::new(),
             last_visited_at: None,
             title_regeneration: None,
+            latest_run_diff: None,
         }
     }
 

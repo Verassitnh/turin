@@ -4,6 +4,7 @@ pub mod app_sidebar_layout;
 pub mod chat;
 pub mod chat_view;
 pub mod drag_region;
+pub mod project_favicon;
 pub mod project_monogram;
 pub mod right_panel_tabs;
 pub mod sidebar;

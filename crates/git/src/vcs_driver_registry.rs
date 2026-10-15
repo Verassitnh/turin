@@ -21,9 +21,7 @@ use turin_contracts::vcs::{
 
 use crate::git_vcs_driver::GitVcsDriver;
 use crate::vcs_driver::VcsDriver;
-use crate::vcs_project_config::{
-    RequestedVcsKind, VcsProjectConfig, VcsProjectConfigResolveInput,
-};
+use crate::vcs_project_config::{RequestedVcsKind, VcsProjectConfig, VcsProjectConfigResolveInput};
 
 const DETECTION_CACHE_CAPACITY: usize = 2_048;
 const DETECTION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -168,10 +166,7 @@ impl VcsDriverRegistry {
         let (kind, detail) = match requested {
             RequestedVcsKind::Auto => (
                 VcsDriverKind::Unknown,
-                format!(
-                    "No supported VCS repository was detected at {}.",
-                    input.cwd
-                ),
+                format!("No supported VCS repository was detected at {}.", input.cwd),
             ),
             RequestedVcsKind::Kind(kind) => (
                 kind,
@@ -497,7 +492,10 @@ mod tests {
         git_init(&middle);
         let second = registry.detect(&input).await.unwrap().unwrap();
         assert_ne!(first.repository.root_path, second.repository.root_path);
-        assert!(second.repository.root_path.as_str().ends_with("/a") || second.repository.root_path.as_str().ends_with("\\a"));
+        assert!(
+            second.repository.root_path.as_str().ends_with("/a")
+                || second.repository.root_path.as_str().ends_with("\\a")
+        );
     }
 
     #[tokio::test]
@@ -511,7 +509,13 @@ mod tests {
         assert!(registry.detect(&input).await.unwrap().is_none());
         git_init(dir.path());
         let detected = registry.detect(&input).await.unwrap().unwrap();
-        assert!(detected.repository.root_path.as_str().contains(dir.path().file_name().unwrap().to_str().unwrap()));
+        assert!(
+            detected
+                .repository
+                .root_path
+                .as_str()
+                .contains(dir.path().file_name().unwrap().to_str().unwrap())
+        );
     }
 
     #[tokio::test]

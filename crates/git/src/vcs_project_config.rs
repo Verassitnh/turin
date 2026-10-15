@@ -151,24 +151,22 @@ impl VcsProjectConfig {
         cwd: &str,
         config_path: &Path,
     ) -> Result<RequestedVcsKind, VcsProjectConfigError> {
-        let raw = tokio::fs::read_to_string(config_path).await.map_err(|error| {
-            VcsProjectConfigError {
+        let raw = tokio::fs::read_to_string(config_path)
+            .await
+            .map_err(|error| VcsProjectConfigError {
                 operation: VcsProjectConfigOperation::Read,
                 cwd: cwd.to_owned(),
                 config_path: config_path.display().to_string(),
                 cause_tag: "PlatformError",
                 cause: error.to_string(),
-            }
-        })?;
-        let parsed: ProjectVcsConfigFile =
-            serde_json::from_str(&strip_lenient_json(&raw)).map_err(|error| {
-                VcsProjectConfigError {
-                    operation: VcsProjectConfigOperation::Decode,
-                    cwd: cwd.to_owned(),
-                    config_path: config_path.display().to_string(),
-                    cause_tag: "SchemaError",
-                    cause: error.to_string(),
-                }
+            })?;
+        let parsed: ProjectVcsConfigFile = serde_json::from_str(&strip_lenient_json(&raw))
+            .map_err(|error| VcsProjectConfigError {
+                operation: VcsProjectConfigOperation::Decode,
+                cwd: cwd.to_owned(),
+                config_path: config_path.display().to_string(),
+                cause_tag: "SchemaError",
+                cause: error.to_string(),
             })?;
         Ok(configured_kind(&parsed))
     }
@@ -272,10 +270,7 @@ mod tests {
     use super::*;
     use parking_lot::Mutex;
 
-    fn recording() -> (
-        VcsProjectConfig,
-        Arc<Mutex<Vec<VcsProjectConfigError>>>,
-    ) {
+    fn recording() -> (VcsProjectConfig, Arc<Mutex<Vec<VcsProjectConfigError>>>) {
         let logs = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&logs);
         let config = VcsProjectConfig::with_warning_hook(Arc::new(move |error| {
@@ -357,7 +352,10 @@ mod tests {
         let error = logs.lock()[0].clone();
         assert_eq!(
             error.to_string(),
-            format!("Failed to inspect VCS project config at {}.", failed.display())
+            format!(
+                "Failed to inspect VCS project config at {}.",
+                failed.display()
+            )
         );
         assert_eq!(error.operation, VcsProjectConfigOperation::Inspect);
         assert_eq!(error.cwd, cwd.display().to_string());

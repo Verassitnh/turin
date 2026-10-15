@@ -145,7 +145,10 @@ fn parse_http_url(value: &str) -> Option<HttpUrl> {
     if authority.is_empty() {
         return None;
     }
-    let hostname = authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority);
+    let hostname = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
     let hostname = hostname.split(':').next().unwrap_or(hostname);
     if hostname.is_empty() {
         return None;
@@ -196,19 +199,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fallback.repository, "group/repo");
-        assert!(created_pull_request_key(
-            &step(GitPrStepStatus::SkippedNotRequested, None, None),
-            None
-        )
-        .is_none());
+        assert!(
+            created_pull_request_key(
+                &step(GitPrStepStatus::SkippedNotRequested, None, None),
+                None
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn parses_the_hosts_a_thread_link_can_read() {
-        let gitlab = parse_change_request_url(
-            "https://gitlab.example/group/sub/repo/-/merge_requests/42",
-        )
-        .unwrap();
+        let gitlab =
+            parse_change_request_url("https://gitlab.example/group/sub/repo/-/merge_requests/42")
+                .unwrap();
         assert_eq!(gitlab.repository, "group/sub/repo");
         assert!(parse_change_request_url("https://github.com/team/repository/issues/42").is_none());
     }

@@ -8,8 +8,8 @@
 
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, LazyLock,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -364,8 +364,7 @@ impl WorkspaceSearchIndex {
     pub async fn list(&self) -> Result<ProjectListEntriesResult, WorkspaceSearchIndexSearchFailed> {
         let incomplete_before_query = self.has_incomplete_initial_scan();
         let result = self.run_search("", WORKSPACE_INDEX_PAGE_SIZE, "mixedSearch", || {
-            self.finder
-                .mixed_search("", WORKSPACE_INDEX_PAGE_SIZE)
+            self.finder.mixed_search("", WORKSPACE_INDEX_PAGE_SIZE)
         })?;
         let mapped = map_mixed_search_result(&result, WORKSPACE_INDEX_MAX_ENTRIES);
         let mut sorted = with_directory_ancestors(&mapped.entries);
@@ -376,9 +375,7 @@ impl WorkspaceSearchIndex {
             .cloned()
             .collect();
         Ok(ProjectListEntriesResult {
-            truncated: incomplete_before_query
-                || mapped.truncated
-                || entries.len() < sorted.len(),
+            truncated: incomplete_before_query || mapped.truncated || entries.len() < sorted.len(),
             entries,
         })
     }
@@ -454,7 +451,9 @@ impl WorkspaceSearchIndex {
             for item in result.items {
                 let match_ranges = map_content_match_ranges(&item.line_content, &item.match_ranges)
                     .into_iter()
-                    .filter(|range| !input.whole_word || is_whole_word_range(&item.line_content, range))
+                    .filter(|range| {
+                        !input.whole_word || is_whole_word_range(&item.line_content, range)
+                    })
                     .collect::<Vec<_>>();
                 if match_ranges.is_empty() {
                     continue;
@@ -633,7 +632,8 @@ impl WorkspaceSearchIndexMap {
             return Ok(existing);
         }
         let (variant, cwd) = parse_workspace_search_index_key(key);
-        let created = Arc::new(WorkspaceSearchIndex::open(&cwd, variant, self.factory.as_ref()).await?);
+        let created =
+            Arc::new(WorkspaceSearchIndex::open(&cwd, variant, self.factory.as_ref()).await?);
         let mut slots = self.slots.lock().await;
         evict_idle(&mut slots);
         if let Some(existing) = slots.get_mut(key) {
@@ -665,7 +665,8 @@ impl WorkspaceSearchIndexMap {
 
 fn evict_idle(slots: &mut HashMap<String, IndexSlot>) {
     let now = Instant::now();
-    slots.retain(|_, slot| now.saturating_duration_since(slot.last_used) < WORKSPACE_INDEX_IDLE_TTL);
+    slots
+        .retain(|_, slot| now.saturating_duration_since(slot.last_used) < WORKSPACE_INDEX_IDLE_TTL);
 }
 
 fn to_posix_path(input: &str) -> String {
@@ -952,10 +953,8 @@ mod tests {
         let end = start + needle.len() as u64;
         let ranges = map_content_match_ranges(line, &[(start, end)]);
         let units: Vec<u16> = line.encode_utf16().collect();
-        let sliced = String::from_utf16(
-            &units[ranges[0].start as usize..ranges[0].end as usize],
-        )
-        .unwrap();
+        let sliced =
+            String::from_utf16(&units[ranges[0].start as usize..ranges[0].end as usize]).unwrap();
         assert_eq!(sliced, "wörld");
     }
 
@@ -1206,9 +1205,7 @@ mod tests {
         variant: WorkspaceSearchIndexVariant,
         finder: Arc<MockFinder>,
     ) -> Result<WorkspaceSearchIndex, WorkspaceSearchIndexOpenError> {
-        let factory = ScriptFactory::new(Ok(FinderResult::Ok(
-            finder as Arc<dyn FileFinderEngine>,
-        )));
+        let factory = ScriptFactory::new(Ok(FinderResult::Ok(finder as Arc<dyn FileFinderEngine>)));
         WorkspaceSearchIndex::open("/workspace/project", variant, &factory).await
     }
 
@@ -1295,9 +1292,8 @@ mod tests {
     async fn preserves_a_full_index_warmup_timeout_as_a_structured_error() {
         let finder = Arc::new(MockFinder::ready());
         *finder.wait.lock().unwrap() = Ok(FinderResult::Ok(false));
-        let error = open_error(
-            open_with(WorkspaceSearchIndexVariant::Content, Arc::clone(&finder)).await,
-        );
+        let error =
+            open_error(open_with(WorkspaceSearchIndexVariant::Content, Arc::clone(&finder)).await);
         let WorkspaceSearchIndexOpenError::ScanTimedOut(error) = error else {
             panic!("expected scan timeout");
         };
@@ -1377,7 +1373,8 @@ mod tests {
     #[tokio::test]
     async fn preserves_search_and_refresh_failures_with_operation_context() {
         let finder = Arc::new(MockFinder::ready());
-        *finder.mixed_search.lock().unwrap() = Some(Box::new(|_, _| Err("native search failed".into())));
+        *finder.mixed_search.lock().unwrap() =
+            Some(Box::new(|_, _| Err("native search failed".into())));
         *finder.grep.lock().unwrap() = Some(Box::new(|_, _| Err("native grep failed".into())));
         *finder.scan_files.lock().unwrap() = Some(Box::new(|| Err("native scan failed".into())));
         let index = open_with(WorkspaceSearchIndexVariant::Paths, finder)
@@ -1399,7 +1396,10 @@ mod tests {
         assert_eq!(search_error.cwd, "/workspace/project");
         assert_eq!(search_error.query_length, js_string_length(query));
         assert_eq!(search_error.page_size, 4);
-        assert_eq!(search_error.reason, "FileFinder.mixedSearch threw unexpectedly.");
+        assert_eq!(
+            search_error.reason,
+            "FileFinder.mixedSearch threw unexpectedly."
+        );
         assert_eq!(search_error.cause.as_deref(), Some("native search failed"));
         assert!(!search_error.to_string().contains("Bearer"));
         assert!(!format!("{search_error:?}").contains("secret-token"));
@@ -1412,17 +1412,22 @@ mod tests {
             panic!("expected refresh failure");
         };
         assert_eq!(refresh_error.cwd, "/workspace/project");
-        assert_eq!(refresh_error.reason, "FileFinder.scanFiles threw unexpectedly.");
+        assert_eq!(
+            refresh_error.reason,
+            "FileFinder.scanFiles threw unexpectedly."
+        );
         assert_eq!(refresh_error.cause.as_deref(), Some("native scan failed"));
     }
 
     #[tokio::test]
     async fn keeps_returned_search_diagnostics_out_of_the_cause_chain() {
         let finder = Arc::new(MockFinder::ready());
-        *finder.mixed_search.lock().unwrap() =
-            Some(Box::new(|_, _| Ok(FinderResult::Err("native query rejected".into()))));
-        *finder.scan_files.lock().unwrap() =
-            Some(Box::new(|| Ok(FinderResult::Err("native refresh rejected".into()))));
+        *finder.mixed_search.lock().unwrap() = Some(Box::new(|_, _| {
+            Ok(FinderResult::Err("native query rejected".into()))
+        }));
+        *finder.scan_files.lock().unwrap() = Some(Box::new(|| {
+            Ok(FinderResult::Err("native refresh rejected".into()))
+        }));
         let index = open_with(WorkspaceSearchIndexVariant::Paths, finder)
             .await
             .unwrap();

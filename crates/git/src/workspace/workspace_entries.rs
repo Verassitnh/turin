@@ -8,7 +8,7 @@ use std::time::Duration;
 use regex::Regex;
 use std::sync::LazyLock;
 use thiserror::Error;
-use turin_contracts::base_schemas::{js_trim, TrimmedNonEmptyString};
+use turin_contracts::base_schemas::{TrimmedNonEmptyString, js_trim};
 use turin_contracts::filesystem::{
     FilesystemBrowseEntry, FilesystemBrowseInput, FilesystemBrowseResult,
 };
@@ -21,15 +21,15 @@ use turin_contracts::project::{
 use crate::vcs_process::{VcsProcess, VcsProcessInput};
 
 use super::workspace_paths::{
-    escapes_workspace_root, expand_home_path, is_explicit_relative_path, is_windows_absolute_path,
-    node_basename, node_dirname, node_join, node_relative, node_resolve,
     NormalizeWorkspaceRootError, WorkspacePaths, WorkspaceRootCreateFailedError,
     WorkspaceRootNotDirectoryError, WorkspaceRootNotExistsError, WorkspaceRootStatFailedError,
+    escapes_workspace_root, expand_home_path, is_explicit_relative_path, is_windows_absolute_path,
+    node_basename, node_dirname, node_join, node_relative, node_resolve,
 };
 use super::workspace_search_index::{
-    workspace_search_index_key, ContentSearchInput, WorkspaceSearchIndexCreateFailed,
+    ContentSearchInput, WORKSPACE_SEARCH_INDEX_VARIANTS, WorkspaceSearchIndexCreateFailed,
     WorkspaceSearchIndexMap, WorkspaceSearchIndexOpenError, WorkspaceSearchIndexScanTimedOut,
-    WorkspaceSearchIndexSearchFailed, WorkspaceSearchIndexVariant, WORKSPACE_SEARCH_INDEX_VARIANTS,
+    WorkspaceSearchIndexSearchFailed, WorkspaceSearchIndexVariant, workspace_search_index_key,
 };
 
 const CHECK_IGNORE_CHUNK: usize = 1000;
@@ -57,9 +57,7 @@ impl fmt::Display for WorkspaceEntriesWindowsPathUnsupportedError {
 }
 
 #[derive(Debug, Clone, Error)]
-#[error(
-    "A current project is required to browse relative workspace path '{partial_path}'."
-)]
+#[error("A current project is required to browse relative workspace path '{partial_path}'.")]
 pub struct WorkspaceEntriesCurrentProjectRequiredError {
     pub partial_path: String,
 }
@@ -81,7 +79,7 @@ impl fmt::Display for WorkspaceEntriesReadDirectoryError {
             .unwrap_or_default();
         write!(
             f,
-            "Failed to read workspace directory '{}' while browsing '{}'{}." ,
+            "Failed to read workspace directory '{}' while browsing '{}'{}.",
             self.parent_path, self.partial_path, cwd
         )
     }
@@ -395,9 +393,10 @@ impl WorkspaceEntries {
                 .await
                 .map_err(|error| to_error(error.to_string()))?
         };
-        let entries = list_directory_children(normalized_cwd, &target.absolute_path, &target.relative_path)
-            .await
-            .map_err(|cause| to_error(cause.to_string()))?;
+        let entries =
+            list_directory_children(normalized_cwd, &target.absolute_path, &target.relative_path)
+                .await
+                .map_err(|cause| to_error(cause.to_string()))?;
         let mut ignored = HashSet::new();
         let mut offset = 0;
         while offset < entries.len() {
@@ -474,12 +473,16 @@ async fn list_directory_children(
     let directory = canonicalize_path(absolute_path).await?;
     let relative = node_relative(&root, &directory);
     if escapes_workspace_root(&relative)
-        || relative.split(std::path::MAIN_SEPARATOR).any(|part| part == ".git")
+        || relative
+            .split(std::path::MAIN_SEPARATOR)
+            .any(|part| part == ".git")
         || relative_path.split('/').any(|part| part == ".git")
     {
         return Err("Directory must be inside the workspace and outside .git.".to_owned());
     }
-    let children = read_dir_children(&directory).await.map_err(|error| error.to_string())?;
+    let children = read_dir_children(&directory)
+        .await
+        .map_err(|error| error.to_string())?;
     let mut entries = Vec::new();
     for child in children {
         if child.name == ".git" || (!child.is_directory && !child.is_file) {
@@ -552,12 +555,14 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        host_platform, WorkspaceEntries, WorkspaceEntriesBrowseError, WorkspaceEntriesError,
+        WorkspaceEntries, WorkspaceEntriesBrowseError, WorkspaceEntriesError, host_platform,
     };
     use crate::process::ProcessRunner;
     use crate::vcs_process::VcsProcess;
     use crate::workspace::workspace_paths::WorkspacePaths;
-    use crate::workspace::workspace_search_index::{FileFinderFactory, FinderResult, WorkspaceSearchIndexMap};
+    use crate::workspace::workspace_search_index::{
+        FileFinderFactory, FinderResult, WorkspaceSearchIndexMap,
+    };
     use turin_contracts::base_schemas::{TrimmedNonEmptyString, TrimmedString};
     use turin_contracts::filesystem::FilesystemBrowseInput;
     use turin_contracts::project::{ProjectEntryKind, ProjectListEntriesInput};
@@ -568,8 +573,10 @@ mod tests {
         fn create(
             &self,
             _: &crate::workspace::workspace_search_index::FileFinderCreateOptions,
-        ) -> Result<FinderResult<Arc<dyn crate::workspace::workspace_search_index::FileFinderEngine>>, String>
-        {
+        ) -> Result<
+            FinderResult<Arc<dyn crate::workspace::workspace_search_index::FileFinderEngine>>,
+            String,
+        > {
             panic!("search index engine is not linked");
         }
     }
@@ -630,7 +637,11 @@ mod tests {
         git(cwd.path(), &["init"]);
         write_file(cwd.path(), "tracked.txt", "");
         git(cwd.path(), &["add", "tracked.txt"]);
-        write_file(cwd.path(), ".gitignore", "node_modules/\n.env\ntracked.txt\n");
+        write_file(
+            cwd.path(),
+            ".gitignore",
+            "node_modules/\n.env\ntracked.txt\n",
+        );
         write_file(cwd.path(), ".env", "secret=value");
         write_file(cwd.path(), "node_modules/pkg/index.js", "");
         write_file(cwd.path(), "src/index.ts", "");
@@ -655,11 +666,28 @@ mod tests {
             listed.get("node_modules"),
             Some(&(ProjectEntryKind::Directory, Some(true)))
         );
-        assert_eq!(listed.get("src"), Some(&(ProjectEntryKind::Directory, None)));
-        assert_eq!(listed.get("empty"), Some(&(ProjectEntryKind::Directory, None)));
-        assert_eq!(listed.get("tracked.txt"), Some(&(ProjectEntryKind::File, None)));
-        assert!(root.entries.iter().all(|entry| !entry.path.as_str().contains('/')));
-        assert!(root.entries.iter().all(|entry| entry.path.as_str() != ".git"));
+        assert_eq!(
+            listed.get("src"),
+            Some(&(ProjectEntryKind::Directory, None))
+        );
+        assert_eq!(
+            listed.get("empty"),
+            Some(&(ProjectEntryKind::Directory, None))
+        );
+        assert_eq!(
+            listed.get("tracked.txt"),
+            Some(&(ProjectEntryKind::File, None))
+        );
+        assert!(
+            root.entries
+                .iter()
+                .all(|entry| !entry.path.as_str().contains('/'))
+        );
+        assert!(
+            root.entries
+                .iter()
+                .all(|entry| entry.path.as_str() != ".git")
+        );
         assert!(!root.truncated);
 
         let pkg = service
@@ -819,7 +847,10 @@ mod tests {
     #[tokio::test]
     async fn browse_rejects_relative_paths_without_cwd() {
         let service = entries("/tmp");
-        let error = service.browse(&browse_input("./src", None)).await.unwrap_err();
+        let error = service
+            .browse(&browse_input("./src", None))
+            .await
+            .unwrap_err();
         assert!(matches!(
             error,
             WorkspaceEntriesBrowseError::CurrentProjectRequired(_)
@@ -865,7 +896,10 @@ mod tests {
             error,
             WorkspaceEntriesBrowseError::WindowsPathUnsupported(_)
         ));
-        assert!(error.to_string().contains("is not supported on 'darwin'") || error.to_string().contains("is not supported on 'linux'"));
+        assert!(
+            error.to_string().contains("is not supported on 'darwin'")
+                || error.to_string().contains("is not supported on 'linux'")
+        );
     }
 
     // Index-backed list/search/searchContents tests need `@ff-labs/fff-node`.

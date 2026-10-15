@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use regex::Regex;
 use std::sync::LazyLock;
-use turin_contracts::base_schemas::{js_trim, TrimmedNonEmptyString};
+use turin_contracts::base_schemas::{TrimmedNonEmptyString, js_trim};
 use turin_contracts::git::{
     GitFilePath, VcsRef, VcsStatusLocalResult, VcsStatusRemoteResult, VcsStatusResult,
     VcsStatusStreamEvent, VcsStatusWorkingTree,
@@ -35,9 +35,8 @@ static EDGE_DOT_DASH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[./_-]+|[
 static TRAILING_DOT_DASH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[./_-]+$").unwrap());
 static PREFIX_UNSAFE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-zA-Z0-9_-]+").unwrap());
 static PREFIX_EDGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^-+|-+$").unwrap());
-static SCP_REMOTE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[a-zA-Z0-9._-]+@([^:/\s]+):([^/\s]+(?:/[^/\s]+)+)$").unwrap()
-});
+static SCP_REMOTE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9._-]+@([^:/\s]+):([^/\s]+(?:/[^/\s]+)+)$").unwrap());
 static GITHUB_REMOTE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"^(?:git@github\.com:|ssh://(?:git@)?github\.com/|https://github\.com/|git://github\.com/)([^/\s]+/[^/\s]+?)(?:\.git)?/?$",
@@ -65,14 +64,14 @@ pub fn sanitize_branch_fragment(raw: &str) -> String {
     let collapsed = TRAILING_DOT_DASH
         .replace(
             &js_slice_chars(
-                &EDGE_DOT_DASH
-                    .replace(
-                        &MULTI_DASH.replace_all(
-                            &MULTI_SLASH.replace_all(&FRAGMENT_UNSAFE.replace_all(&normalized, "-"), "/"),
-                            "-",
-                        ),
-                        "",
+                &EDGE_DOT_DASH.replace(
+                    &MULTI_DASH.replace_all(
+                        &MULTI_SLASH
+                            .replace_all(&FRAGMENT_UNSAFE.replace_all(&normalized, "-"), "/"),
+                        "-",
                     ),
+                    "",
+                ),
                 64,
             ),
             "",
@@ -101,7 +100,10 @@ pub fn format_generated_branch_name(raw: &str, naming: Option<&BranchNamingOptio
                 .split('/')
                 .map(|part| {
                     PREFIX_EDGE
-                        .replace_all(&MULTI_DASH.replace_all(&PREFIX_UNSAFE.replace_all(part, "-"), "-"), "")
+                        .replace_all(
+                            &MULTI_DASH.replace_all(&PREFIX_UNSAFE.replace_all(part, "-"), "-"),
+                            "",
+                        )
                         .into_owned()
                 })
                 .filter(|part| !part.is_empty())
@@ -134,8 +136,11 @@ pub fn resolve_auto_feature_branch_name(
     existing_branch_names: &[String],
     preferred_branch: Option<&str>,
 ) -> String {
-    let preferred = preferred_branch.map(js_trim).filter(|value| !value.is_empty());
-    let resolved_base = sanitize_feature_branch_name(preferred.unwrap_or(AUTO_FEATURE_BRANCH_FALLBACK));
+    let preferred = preferred_branch
+        .map(js_trim)
+        .filter(|value| !value.is_empty());
+    let resolved_base =
+        sanitize_feature_branch_name(preferred.unwrap_or(AUTO_FEATURE_BRANCH_FALLBACK));
     let existing_names: Vec<String> = existing_branch_names
         .iter()
         .map(|name| name.to_lowercase())
@@ -189,7 +194,10 @@ pub fn build_temporary_worktree_branch_name(random_hex: impl Fn(usize) -> String
 /// ref impossible. This moves a temporary name to the flat `t3-<hex>` sibling.
 pub fn flatten_temporary_worktree_branch_name(ref_name: &str) -> String {
     let normalized = js_trim(ref_name).to_lowercase();
-    let token_start = normalized.find(['-', '/']).map(|index| index + 1).unwrap_or(0);
+    let token_start = normalized
+        .find(['-', '/'])
+        .map(|index| index + 1)
+        .unwrap_or(0);
     let token: String = normalized.chars().skip(token_start).take(8).collect();
     format!("{WORKTREE_BRANCH_PREFIX}-{token}")
 }
@@ -212,9 +220,13 @@ fn azure_dev_ops_repository_key(host: &str, segments: &[&str]) -> Option<String>
         return None;
     }
     if host == "ssh.dev.azure.com" {
-        Some(format!("dev.azure.com/{organization}/{project}/_git/{repository}"))
+        Some(format!(
+            "dev.azure.com/{organization}/{project}/_git/{repository}"
+        ))
     } else {
-        Some(format!("{organization}.visualstudio.com/{project}/_git/{repository}"))
+        Some(format!(
+            "{organization}.visualstudio.com/{project}/_git/{repository}"
+        ))
     }
 }
 
@@ -273,7 +285,10 @@ fn parse_simple_url(value: &str) -> Option<SimpleUrl> {
         Some(index) => (&rest[..index], &rest[index..]),
         None => (rest, ""),
     };
-    let hostport = authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority);
+    let hostport = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
     if hostport.is_empty() {
         return None;
     }
@@ -298,7 +313,9 @@ fn split_host(hostport: &str) -> Option<(&str, Option<&str>)> {
         return Some((hostname, port));
     }
     match hostport.rsplit_once(':') {
-        Some((host, port)) if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) => {
+        Some((host, port))
+            if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
             Some((host, Some(port)))
         }
         _ => Some((hostport, None)),
@@ -375,7 +392,9 @@ pub fn parse_origin_url_from_git_config(config_text: &str) -> Option<String> {
 }
 
 /// Best-effort parse of a GitHub `owner/repo` identifier from common remote URL shapes.
-pub fn parse_github_repository_name_with_owner_from_remote_url(url: Option<&str>) -> Option<String> {
+pub fn parse_github_repository_name_with_owner_from_remote_url(
+    url: Option<&str>,
+) -> Option<String> {
     let trimmed = js_trim(url.unwrap_or(""));
     if trimmed.is_empty() {
         return None;
@@ -389,7 +408,10 @@ pub fn parse_github_repository_name_with_owner_from_remote_url(url: Option<&str>
     }
 }
 
-fn derive_local_branch_name_candidates(branch_name: &str, remote_name: Option<&str>) -> Vec<String> {
+fn derive_local_branch_name_candidates(
+    branch_name: &str,
+    remote_name: Option<&str>,
+) -> Vec<String> {
     let mut candidates = Vec::new();
     let first = derive_local_branch_name_from_remote_ref(branch_name);
     if !first.is_empty() && !candidates.contains(&first) {
@@ -478,7 +500,10 @@ fn parse_remote_host(remote_url: &str) -> Option<String> {
             .map(|(_, rest)| rest)
             .unwrap_or(trimmed);
         let authority = hostport.split('/').next().unwrap_or("");
-        let hostport = authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority);
+        let hostport = authority
+            .rsplit_once('@')
+            .map(|(_, host)| host)
+            .unwrap_or(authority);
         Some(hostport.to_lowercase())
     }
 }
@@ -575,15 +600,12 @@ pub fn apply_git_status_stream_event(
         VcsStatusStreamEvent::Snapshot { local, remote } => {
             merge_git_status_parts(local.clone(), remote.clone())
         }
-        VcsStatusStreamEvent::LocalUpdated { local } => merge_git_status_parts(
-            local.clone(),
-            current.as_ref().map(to_remote_status_part),
-        ),
+        VcsStatusStreamEvent::LocalUpdated { local } => {
+            merge_git_status_parts(local.clone(), current.as_ref().map(to_remote_status_part))
+        }
         VcsStatusStreamEvent::RemoteUpdated { remote } => match current {
             None => merge_git_status_parts(empty_local(), remote.clone()),
-            Some(current) => {
-                merge_git_status_parts(to_local_status_part(&current), remote.clone())
-            }
+            Some(current) => merge_git_status_parts(to_local_status_part(&current), remote.clone()),
         },
     }
 }
@@ -600,8 +622,8 @@ fn _file_path(value: &str) -> GitFilePath {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use turin_contracts::git::VcsStatusChangeRequest;
     use turin_contracts::base_schemas::PositiveInt;
+    use turin_contracts::git::VcsStatusChangeRequest;
 
     #[test]
     fn normalizes_equivalent_github_remotes() {
@@ -743,7 +765,10 @@ mod tests {
             parse_origin_url_from_git_config(&fallback).as_deref(),
             Some("https://github.com/acme/repo.git")
         );
-        assert_eq!(parse_origin_url_from_git_config("[core]\n\tbare = false\n"), None);
+        assert_eq!(
+            parse_origin_url_from_git_config("[core]\n\tbare = false\n"),
+            None
+        );
         assert_eq!(parse_origin_url_from_git_config(""), None);
     }
 
@@ -800,7 +825,10 @@ mod tests {
         assert!(!is_temporary_worktree_branch(
             "t3code/f4ae4e0e-f971-4d48-c4f2-9cf0aa54ab12"
         ));
-        assert_eq!(flatten_temporary_worktree_branch_name("t3/deadbeef"), "t3-deadbeef");
+        assert_eq!(
+            flatten_temporary_worktree_branch_name("t3/deadbeef"),
+            "t3-deadbeef"
+        );
         assert!(is_temporary_worktree_branch("t3-deadbeef"));
         assert!(!is_temporary_worktree_branch("t3-deadbeef-extra"));
         assert!(!is_temporary_worktree_branch("t3-feature"));
@@ -822,7 +850,10 @@ mod tests {
             sanitize_feature_branch_name(" \"FIX//Calendar recruitment filter\" "),
             "fix/calendar-recruitment-filter"
         );
-        assert_eq!(sanitize_feature_branch_name("refine toolbar"), "feature/refine-toolbar");
+        assert_eq!(
+            sanitize_feature_branch_name("refine toolbar"),
+            "feature/refine-toolbar"
+        );
         assert_eq!(sanitize_feature_branch_name(""), "feature/update");
         assert_eq!(
             sanitize_feature_branch_name(&format!("fix/{}", "x".repeat(80))),
@@ -869,28 +900,35 @@ mod tests {
             "Team/Julius/add-search"
         );
         assert_eq!(
-            format_generated_branch_name("feat/Add Search", Some(&BranchNamingOptions {
-                mode: BranchNamingMode::Semantic,
-                prefix: "t3code".into(),
-                instructions: String::new(),
-            })),
+            format_generated_branch_name(
+                "feat/Add Search",
+                Some(&BranchNamingOptions {
+                    mode: BranchNamingMode::Semantic,
+                    prefix: "t3code".into(),
+                    instructions: String::new(),
+                })
+            ),
             "feat/add-search"
         );
         let branch = format!("Julius/ABC-123/release.v2-{}", "x".repeat(70));
         assert_eq!(
-            format_generated_branch_name(&format!(" {branch} "), Some(&BranchNamingOptions {
-                mode: BranchNamingMode::Custom,
-                prefix: "ignored".into(),
-                instructions: String::new(),
-            })),
+            format_generated_branch_name(
+                &format!(" {branch} "),
+                Some(&BranchNamingOptions {
+                    mode: BranchNamingMode::Custom,
+                    prefix: "ignored".into(),
+                    instructions: String::new(),
+                })
+            ),
             branch
         );
     }
 
     #[test]
     fn github_detection_is_github_only() {
-        let github = detect_source_control_provider_from_git_remote_url("git@github.com:owner/repo.git")
-            .unwrap();
+        let github =
+            detect_source_control_provider_from_git_remote_url("git@github.com:owner/repo.git")
+                .unwrap();
         assert_eq!(github.kind.as_str(), "github");
         assert_eq!(github.name.as_str(), "GitHub");
         assert_eq!(github.base_url, "https://github.com");
@@ -903,10 +941,12 @@ mod tests {
             detect_source_control_provider_from_git_remote_url("https://gitlab.com/group/repo.git")
                 .is_none()
         );
-        assert!(detect_source_control_provider_from_git_remote_url(
-            "https://notgithub.example.com/owner/repo.git"
-        )
-        .is_none());
+        assert!(
+            detect_source_control_provider_from_git_remote_url(
+                "https://notgithub.example.com/owner/repo.git"
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -920,7 +960,9 @@ mod tests {
         };
         let merged = apply_git_status_stream_event(
             None,
-            &VcsStatusStreamEvent::RemoteUpdated { remote: Some(remote) },
+            &VcsStatusStreamEvent::RemoteUpdated {
+                remote: Some(remote),
+            },
         );
         assert!(merged.is_repo);
         assert!(!merged.has_primary_remote);
@@ -966,7 +1008,9 @@ mod tests {
         };
         let merged = apply_git_status_stream_event(
             Some(current.clone()),
-            &VcsStatusStreamEvent::RemoteUpdated { remote: Some(remote) },
+            &VcsStatusStreamEvent::RemoteUpdated {
+                remote: Some(remote),
+            },
         );
         assert_eq!(merged.ref_name, current.ref_name);
         assert!(merged.has_working_tree_changes);

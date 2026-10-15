@@ -12,7 +12,7 @@ use std::sync::Arc;
 use futures::stream::{self, StreamExt};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
-use turin_contracts::base_schemas::{js_trim, TrimmedNonEmptyString};
+use turin_contracts::base_schemas::{TrimmedNonEmptyString, js_trim};
 use turin_contracts::filesystem::{
     FilesystemEntryKind, FilesystemEntryMetadata, FilesystemGetMetadataInput,
     FilesystemGetMetadataResult,
@@ -25,8 +25,8 @@ use turin_contracts::project::{
 use super::file_header_mime_type::file_header_mime_type;
 use super::workspace_entries::WorkspaceEntries;
 use super::workspace_paths::{
-    escapes_workspace_root, expand_home_path, node_dirname, node_extname, node_is_absolute,
-    node_relative, WorkspacePathOutsideRootError, WorkspacePaths,
+    WorkspacePathOutsideRootError, WorkspacePaths, escapes_workspace_root, expand_home_path,
+    node_dirname, node_extname, node_is_absolute, node_relative,
 };
 
 const PROJECT_READ_FILE_MAX_BYTES: u64 = 1024 * 1024;
@@ -87,9 +87,7 @@ pub struct WorkspaceFilePathEscapeError {
 }
 
 #[derive(Debug, Clone, Error)]
-#[error(
-    "Workspace path '{relative_path}' in '{workspace_root}' is not a file: {resolved_path}"
-)]
+#[error("Workspace path '{relative_path}' in '{workspace_root}' is not a file: {resolved_path}")]
 pub struct WorkspacePathNotFileError {
     pub workspace_root: String,
     pub relative_path: String,
@@ -188,15 +186,16 @@ impl WorkspaceFileSystem {
         input: &ProjectReadFileInput,
     ) -> Result<ProjectReadFileResult, WorkspaceFileReadError> {
         let target = self.resolve_read_target(input).await?;
-        let mut file = open_read_nonblock(Path::new(&target.real_target_path)).map_err(|cause| {
-            operation_error(
-                input,
-                &target.real_target_path,
-                &target.real_target_path,
-                ProjectFileOperation::Open,
-                cause,
-            )
-        })?;
+        let mut file =
+            open_read_nonblock(Path::new(&target.real_target_path)).map_err(|cause| {
+                operation_error(
+                    input,
+                    &target.real_target_path,
+                    &target.real_target_path,
+                    ProjectFileOperation::Open,
+                    cause,
+                )
+            })?;
         let stat = file.metadata().await.map_err(|cause| {
             operation_error(
                 input,
@@ -555,12 +554,21 @@ mod tests {
             })
             .await;
         assert_eq!(result.entries.len(), 6);
-        assert_eq!(result.entries[0].as_ref().unwrap().kind, FilesystemEntryKind::File);
+        assert_eq!(
+            result.entries[0].as_ref().unwrap().kind,
+            FilesystemEntryKind::File
+        );
         assert_eq!(result.entries[0].as_ref().unwrap().byte_length, Some(5));
         assert!(result.entries[0].as_ref().unwrap().mime_type.is_none());
-        assert_eq!(result.entries[1].as_ref().unwrap().kind, FilesystemEntryKind::File);
+        assert_eq!(
+            result.entries[1].as_ref().unwrap().kind,
+            FilesystemEntryKind::File
+        );
         assert_eq!(result.entries[1].as_ref().unwrap().byte_length, Some(13));
-        assert_eq!(result.entries[2].as_ref().unwrap().kind, FilesystemEntryKind::Directory);
+        assert_eq!(
+            result.entries[2].as_ref().unwrap().kind,
+            FilesystemEntryKind::Directory
+        );
         assert_eq!(result.entries[3], result.entries[0]);
         assert!(result.entries[4].is_none());
         assert!(result.entries[5].is_none());
@@ -572,11 +580,7 @@ mod tests {
         let script = "#!/usr/bin/env python3\nprint('hello')\n";
         write_text(cwd.path(), "run", script);
         let image = cwd.path().join("image");
-        std::fs::write(
-            &image,
-            [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
-        )
-        .unwrap();
+        std::fs::write(&image, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).unwrap();
         let service = filesystem("/tmp");
         let result = service
             .get_metadata(&FilesystemGetMetadataInput {
@@ -589,10 +593,16 @@ mod tests {
         let script_entry = result.entries[0].as_ref().unwrap();
         assert_eq!(script_entry.kind, FilesystemEntryKind::File);
         assert_eq!(script_entry.byte_length, Some(script.len() as u64));
-        assert_eq!(script_entry.mime_type.as_ref().unwrap().as_str(), "text/x-python");
+        assert_eq!(
+            script_entry.mime_type.as_ref().unwrap().as_str(),
+            "text/x-python"
+        );
         let image_entry = result.entries[1].as_ref().unwrap();
         assert_eq!(image_entry.byte_length, Some(8));
-        assert_eq!(image_entry.mime_type.as_ref().unwrap().as_str(), "image/png");
+        assert_eq!(
+            image_entry.mime_type.as_ref().unwrap().as_str(),
+            "image/png"
+        );
     }
 
     #[cfg(unix)]
@@ -608,12 +618,21 @@ mod tests {
         let service = filesystem("/tmp");
         let result = service
             .get_metadata(&FilesystemGetMetadataInput {
-                paths: vec![ne(&file_link.to_string_lossy()), ne(&directory_link.to_string_lossy())],
+                paths: vec![
+                    ne(&file_link.to_string_lossy()),
+                    ne(&directory_link.to_string_lossy()),
+                ],
             })
             .await;
-        assert_eq!(result.entries[0].as_ref().unwrap().kind, FilesystemEntryKind::File);
+        assert_eq!(
+            result.entries[0].as_ref().unwrap().kind,
+            FilesystemEntryKind::File
+        );
         assert_eq!(result.entries[0].as_ref().unwrap().byte_length, Some(4));
-        assert_eq!(result.entries[1].as_ref().unwrap().kind, FilesystemEntryKind::Directory);
+        assert_eq!(
+            result.entries[1].as_ref().unwrap().kind,
+            FilesystemEntryKind::Directory
+        );
     }
 
     #[tokio::test]
@@ -676,13 +695,19 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(matches!(error, WorkspaceFileReadError::NotFile(WorkspacePathNotFileError { .. })));
+        assert!(matches!(
+            error,
+            WorkspaceFileReadError::NotFile(WorkspacePathNotFileError { .. })
+        ));
         let metadata = service
             .get_metadata(&FilesystemGetMetadataInput {
                 paths: vec![ne(&fifo_path)],
             })
             .await;
-        assert_eq!(metadata.entries[0].as_ref().unwrap().kind, FilesystemEntryKind::Other);
+        assert_eq!(
+            metadata.entries[0].as_ref().unwrap().kind,
+            FilesystemEntryKind::Other
+        );
     }
 
     #[tokio::test]
@@ -696,9 +721,11 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(error.to_string().contains(
-            "Workspace file path must be relative to the project root: ../escape.md"
-        ));
+        assert!(
+            error
+                .to_string()
+                .contains("Workspace file path must be relative to the project root: ../escape.md")
+        );
     }
 
     #[cfg(unix)]
@@ -730,7 +757,10 @@ mod tests {
             .unwrap();
         assert_eq!(error.workspace_root, cwd_path);
         assert_eq!(error.relative_path, "linked-secret.txt");
-        assert_eq!(error.resolved_workspace_root, resolved_root.to_string_lossy());
+        assert_eq!(
+            error.resolved_workspace_root,
+            resolved_root.to_string_lossy()
+        );
         assert_eq!(error.resolved_path, resolved_path.to_string_lossy());
         let _ = WorkspaceFilePathEscapeError {
             workspace_root: error.workspace_root,
@@ -756,7 +786,9 @@ mod tests {
         let WorkspaceFileReadError::NotFile(error) = error else {
             panic!("expected not-file, got {error}");
         };
-        let resolved = tokio::fs::canonicalize(cwd.path().join("src")).await.unwrap();
+        let resolved = tokio::fs::canonicalize(cwd.path().join("src"))
+            .await
+            .unwrap();
         assert_eq!(error.workspace_root, cwd_path);
         assert_eq!(error.relative_path, "src");
         assert_eq!(error.resolved_path, resolved.to_string_lossy());
@@ -796,7 +828,11 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let service = filesystem("/tmp");
         let cwd_path = cwd.path().to_string_lossy().into_owned();
-        let resolved = cwd.path().join("missing.txt").to_string_lossy().into_owned();
+        let resolved = cwd
+            .path()
+            .join("missing.txt")
+            .to_string_lossy()
+            .into_owned();
         let error = service
             .read_file(&ProjectReadFileInput {
                 cwd: ne(&cwd_path),
@@ -862,9 +898,11 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(error.to_string().contains(
-            "Workspace file path must be relative to the project root: ../escape.md"
-        ));
+        assert!(
+            error
+                .to_string()
+                .contains("Workspace file path must be relative to the project root: ../escape.md")
+        );
         let escaped = cwd.path().join("..").join("escape.md");
         assert!(tokio::fs::metadata(&escaped).await.is_err());
     }

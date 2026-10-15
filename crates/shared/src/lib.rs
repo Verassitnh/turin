@@ -13,6 +13,7 @@ pub mod codex_auth_handoff;
 pub mod codex_file_citations;
 //TODO pub mod codex_markdown_directives;
 pub mod composer_context_clipboard;
+pub mod composer_context_references;
 pub mod composer_inline_tokens;
 pub mod composer_pull_request_matches;
 pub mod composer_trigger;

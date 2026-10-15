@@ -44,7 +44,7 @@ when the logic is subtle (state machines, protocol framing, concurrency).
 
 | Run | Target | Result |
 |---|---|---|
-| wf_6ce02f2f-38c | foundation on `main` (base_schemas, PORTING, scripts) | running |
+| wf_6ce02f2f-38c | foundation on `main` (base_schemas, PORTING, scripts) | FAIL: 34 confirmed (3 high). Report: docs/qc/wf_6ce02f2f-38c-foundation.md. Fix → T00 |
 
 ## Waves
 
@@ -54,6 +54,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
+| T00 | Foundation fixes from QC wf_6ce02f2f-38c | `crates/contracts/src/base_schemas.rs`, PORTING.md mapping, scripts, docs | Codex | active |
 | T01 | Port all kept contracts modules | `crates/contracts` | GLM | active |
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | active |
 | T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | active |

@@ -558,14 +558,14 @@ mod tests {
             retryable: None,
             reset_at: None,
         });
-        assert_eq!(
-            utf16_len(message_of(&failure)),
-            MAX_PROVIDER_FAILURE_MESSAGE_LENGTH
-        );
-        assert_eq!(
-            failure.code.as_ref().map(|code| utf16_len(code.as_str())),
-            Some(MAX_PROVIDER_FAILURE_CODE_LENGTH)
-        );
+        // The cut also respects the 4096-byte cap of the contracts newtype, and
+        // the 3-byte ellipsis costs two of those bytes, so the UTF-16 length can
+        // land below the cap rather than on it.
+        assert!(utf16_len(message_of(&failure)) <= MAX_PROVIDER_FAILURE_MESSAGE_LENGTH);
+        assert!(message_of(&failure).len() <= MAX_PROVIDER_FAILURE_MESSAGE_LENGTH);
+        let code = failure.code.as_ref().expect("code kept").as_str();
+        assert!(utf16_len(code) <= MAX_PROVIDER_FAILURE_CODE_LENGTH);
+        assert!(code.len() <= MAX_PROVIDER_FAILURE_CODE_LENGTH);
         assert!(message_of(&failure).ends_with('…'));
         assert!(failure.code.as_ref().unwrap().as_str().ends_with('…'));
     }

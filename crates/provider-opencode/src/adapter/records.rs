@@ -4,18 +4,23 @@
 //! todo list. Both generations build them here, so the field mapping lives in one place.
 
 use turin_contracts::{
-    NodeId, PlanId, ProviderThreadId, ProviderTurnId, ThreadId, TrimmedNonEmptyString, UtcDateTime,
+    NodeId, PlanId, ProviderThreadId, ProviderTurnId, RuntimeRequestId, ThreadId,
+    TrimmedNonEmptyString, UtcDateTime,
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2ConversationMessage,
         OrchestrationV2ConversationMessageRole, OrchestrationV2CreationSource,
         OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeKind,
         OrchestrationV2ExecutionNodeStatus, OrchestrationV2PlanArtifact,
         OrchestrationV2PlanArtifactStatus, OrchestrationV2PlanStep, OrchestrationV2PlanStepStatus,
-        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
+        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus, OrchestrationV2UserInputQuestion,
+        OrchestrationV2UserInputQuestionOption,
     },
     provider_instance::ProviderDriverKind,
+    provider_policy::ProviderRequestKind,
 };
 use turin_provider_core::id_allocator::derive;
+
+use serde_json::Value;
 
 use crate::adapter::logic::native_ref;
 
@@ -265,5 +270,244 @@ pub fn node_status_of(status: OrchestrationV2TurnItemStatus) -> OrchestrationV2E
         OrchestrationV2TurnItemStatus::Completed => OrchestrationV2ExecutionNodeStatus::Completed,
         OrchestrationV2TurnItemStatus::Failed => OrchestrationV2ExecutionNodeStatus::Failed,
         _ => OrchestrationV2ExecutionNodeStatus::Running,
+    }
+}
+
+/// What a waiting runtime request asks: a permission, or structured questions.
+pub enum RequestBody {
+    Approval {
+        request_kind: ProviderRequestKind,
+        title: Option<String>,
+    },
+    UserInput {
+        questions: Vec<OrchestrationV2UserInputQuestion>,
+    },
+}
+
+/// `showRequest`'s node: the request is waiting at `approvalNode(requestId)`.
+pub fn request_node(
+    driver: &ProviderDriverKind,
+    of: &NodeOf<'_>,
+    request_id: &RuntimeRequestId,
+    user_input: bool,
+    now: UtcDateTime,
+) -> OrchestrationV2ExecutionNode {
+    let node = execution_node(
+        driver,
+        of,
+        NodeTiming {
+            kind: if user_input {
+                OrchestrationV2ExecutionNodeKind::UserInputRequest
+            } else {
+                OrchestrationV2ExecutionNodeKind::ApprovalRequest
+            },
+            status: OrchestrationV2ExecutionNodeStatus::Waiting,
+            started_at: now,
+            completed_at: None,
+        },
+    );
+    OrchestrationV2ExecutionNode {
+        id: derive::approval_node(request_id),
+        runtime_request_id: Some(request_id.clone()),
+        ..node
+    }
+}
+
+/// `showRequest`'s turn item, at `approvalTurnItem(requestId)` and waiting on `node_id`.
+pub fn request_turn_item(
+    of: &NodeOf<'_>,
+    request_id: &RuntimeRequestId,
+    ordinal: u64,
+    now: UtcDateTime,
+    body: RequestBody,
+) -> OrchestrationV2TurnItem {
+    let id = derive::approval_turn_item(request_id);
+    let node_id = Some(derive::approval_node(request_id));
+    let thread_id = of.thread_id.clone();
+    let provider_thread_id = of.provider_thread_id.clone();
+    let provider_turn_id = of.provider_turn_id.clone();
+    let native_item_ref = native_ref(of.native_item_id, false);
+    match body {
+        RequestBody::Approval {
+            request_kind,
+            title,
+        } => OrchestrationV2TurnItem::ApprovalRequest {
+            tool_non_execution_kind: None,
+            tool_surface: None,
+            tool_icon: None,
+            tool_source: None,
+            id,
+            thread_id,
+            run_id: None,
+            node_id,
+            provider_thread_id: Some(provider_thread_id),
+            provider_turn_id: Some(provider_turn_id),
+            native_item_ref: Some(native_item_ref),
+            parent_item_id: None,
+            ordinal,
+            status: OrchestrationV2TurnItemStatus::Waiting,
+            title,
+            started_at: Some(now),
+            completed_at: None,
+            updated_at: now,
+            request_id: request_id.clone(),
+            request_kind,
+            prompt: None,
+            app_name: None,
+            options: None,
+        },
+        RequestBody::UserInput { questions } => OrchestrationV2TurnItem::UserInputRequest {
+            tool_non_execution_kind: None,
+            tool_surface: None,
+            tool_icon: None,
+            tool_source: None,
+            id,
+            thread_id,
+            run_id: None,
+            node_id,
+            provider_thread_id: Some(provider_thread_id),
+            provider_turn_id: Some(provider_turn_id),
+            native_item_ref: Some(native_item_ref),
+            parent_item_id: None,
+            ordinal,
+            status: OrchestrationV2TurnItemStatus::Waiting,
+            title: None,
+            started_at: Some(now),
+            completed_at: None,
+            updated_at: now,
+            request_id: request_id.clone(),
+            questions,
+            question_answer: None,
+            response_mode: None,
+        },
+    }
+}
+
+/// `settleRequest`: the node a request stood for, once it resolves or is cancelled.
+pub fn settle_request_node(
+    node: &OrchestrationV2ExecutionNode,
+    cancelled: bool,
+    now: UtcDateTime,
+) -> OrchestrationV2ExecutionNode {
+    OrchestrationV2ExecutionNode {
+        status: if cancelled {
+            OrchestrationV2ExecutionNodeStatus::Cancelled
+        } else {
+            OrchestrationV2ExecutionNodeStatus::Completed
+        },
+        completed_at: Some(now),
+        ..node.clone()
+    }
+}
+
+/// `settleRequest`: the request's turn item, completed or cancelled with its request.
+pub fn settle_request_item(
+    item: &OrchestrationV2TurnItem,
+    cancelled: bool,
+    now: UtcDateTime,
+) -> OrchestrationV2TurnItem {
+    let status = if cancelled {
+        OrchestrationV2TurnItemStatus::Cancelled
+    } else {
+        OrchestrationV2TurnItemStatus::Completed
+    };
+    let mut item = item.clone();
+    match &mut item {
+        OrchestrationV2TurnItem::ApprovalRequest {
+            status: current,
+            completed_at,
+            updated_at,
+            ..
+        }
+        | OrchestrationV2TurnItem::UserInputRequest {
+            status: current,
+            completed_at,
+            updated_at,
+            ..
+        } => {
+            *current = status;
+            *completed_at = Some(now);
+            *updated_at = now;
+        }
+        _ => {}
+    }
+    item
+}
+
+/// `questions` for a user-input request, in the order OpenCode asked them.
+pub fn user_input_questions(questions: &[Value]) -> Vec<OrchestrationV2UserInputQuestion> {
+    questions
+        .iter()
+        .enumerate()
+        .map(|(index, question)| {
+            let header = question
+                .get("header")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|header| !header.is_empty())
+                .unwrap_or("Question")
+                .to_owned();
+            let text = question
+                .get("question")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .unwrap_or(&header)
+                .to_owned();
+            let options = question
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|option| {
+                    let label = option.get("label").and_then(Value::as_str)?.trim();
+                    let label = TrimmedNonEmptyString::new(label).ok()?;
+                    let description = option
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .unwrap_or(label.as_str())
+                        .to_owned();
+                    Some(OrchestrationV2UserInputQuestionOption {
+                        description: TrimmedNonEmptyString::new(description).ok()?,
+                        label,
+                        value: None,
+                    })
+                })
+                .collect();
+            OrchestrationV2UserInputQuestion {
+                id: TrimmedNonEmptyString::new(open_code_question_id(index, &header))
+                    .expect("question id"),
+                header: TrimmedNonEmptyString::new(header).expect("header"),
+                question: TrimmedNonEmptyString::new(text).expect("question text"),
+                options,
+                multi_select: question.get("multiple").and_then(Value::as_bool),
+                allow_custom_answer: question.get("custom").and_then(Value::as_bool),
+                initial_answer: None,
+                required: None,
+            }
+        })
+        .collect()
+}
+
+/// The id of a question OpenCode asked: its index and header, as the answer map keys it.
+pub fn open_code_question_id(index: usize, header: &str) -> String {
+    let header = header
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if header.is_empty() {
+        format!("question-{index}")
+    } else {
+        format!("question-{index}-{header}")
     }
 }

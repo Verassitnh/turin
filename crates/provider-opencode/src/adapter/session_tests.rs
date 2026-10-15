@@ -1230,3 +1230,148 @@ async fn v2_approval_request_emits_a_waiting_node_at_the_approval_id() {
     assert_eq!(request["runtime_request"]["nodeId"], node["node"]["id"]);
     session.close().await;
 }
+
+/// A v1 session with one turn started, and its event stream.
+async fn v1_session_with_turn() -> (Script, Arc<OpenCodeV1Session>, ProviderEventStream) {
+    let mut script = script(|request| {
+        if request.method == "POST" && request.target.contains("prompt_async") {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "POST" && request.target.contains("/session") {
+            return FakeResponse::json(200, r#"{"id":"ses_1"}"#);
+        }
+        FakeResponse::json(200, "{}")
+    })
+    .await;
+    let session = OpenCodeV1Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        &script.server.url,
+        None,
+        Some("openai/gpt"),
+    )
+    .await
+    .unwrap();
+    let events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    await_request(&mut script.server, |request| {
+        request.target.contains("prompt_async")
+    })
+    .await;
+    (script, session, events)
+}
+
+#[tokio::test]
+async fn v1_permission_waits_as_a_node_and_item_then_settles_on_reply() {
+    let (script, session, mut events) = v1_session_with_turn().await;
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"permission.asked","properties":{"id":"perm_1","sessionID":"ses_1","permission":"bash","patterns":["ls"]}}).to_string(),
+        )))
+        .unwrap();
+    let asked = events_until(&mut events, |value| {
+        value["type"] == "runtime_request.updated"
+    })
+    .await;
+    let node = of_type(&asked, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["kind"] == "approval_request")
+        .expect("approval node")
+        .clone();
+    assert_eq!(node["node"]["status"], "waiting", "{asked:#?}");
+    let item = of_type(&asked, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["type"] == "approval_request")
+        .expect("approval item")
+        .clone();
+    assert_eq!(item["turn_item"]["status"], "waiting");
+    assert_eq!(item["turn_item"]["nodeId"], node["node"]["id"]);
+
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"permission.replied","properties":{"requestID":"perm_1","sessionID":"ses_1","reply":"once"}}).to_string(),
+        )))
+        .unwrap();
+    // The request, then its node, then its item: the item is the last event.
+    let replied = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "approval_request"
+            && value["turn_item"]["status"] == "completed"
+    })
+    .await;
+    let settled_node = of_type(&replied, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["id"] == node["node"]["id"])
+        .expect("settled node");
+    assert_eq!(settled_node["node"]["status"], "completed");
+    assert!(settled_node["node"]["completedAt"].is_string());
+    let settled_item = of_type(&replied, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["id"] == item["turn_item"]["id"])
+        .expect("settled item");
+    assert_eq!(settled_item["turn_item"]["status"], "completed");
+    session.close().await;
+}
+
+#[tokio::test]
+async fn v1_an_open_permission_cancels_with_its_turn() {
+    let (script, session, mut events) = v1_session_with_turn().await;
+    // The prompt is admitted by its echo; an idle before that holds the turn open.
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"message.updated","properties":{"info":{"id":"msg_u","sessionID":"ses_1","role":"user"}}}).to_string(),
+        )))
+        .unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"permission.asked","properties":{"id":"perm_2","sessionID":"ses_1","permission":"bash","patterns":["rm"]}}).to_string(),
+        )))
+        .unwrap();
+    events_until(&mut events, |value| {
+        value["type"] == "runtime_request.updated"
+    })
+    .await;
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"session.idle","properties":{"sessionID":"ses_1"}}).to_string(),
+        )))
+        .unwrap();
+    let ended = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "approval_request"
+            && value["turn_item"]["status"] == "cancelled"
+    })
+    .await;
+    let statuses: Vec<Value> = ended
+        .iter()
+        .filter(|event| event["type"] == "runtime_request.updated")
+        .map(|event| event["runtime_request"]["status"].clone())
+        .collect();
+    assert!(
+        statuses.contains(&json!("cancelled")),
+        "{statuses:?} {ended:#?}"
+    );
+    let node = of_type(&ended, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["kind"] == "approval_request")
+        .expect("cancelled node");
+    assert_eq!(node["node"]["status"], "cancelled");
+    session.close().await;
+}

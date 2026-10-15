@@ -34,14 +34,17 @@ use turin_contracts::{
         OrchestrationV2TurnItemStatus,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
+    provider_policy::ProviderRequestKind,
 };
 use turin_provider_core::id_allocator::{IdAllocator, derive};
 
 use crate::adapter::api::*;
 use crate::adapter::logic::*;
 use crate::adapter::records::{
-    NodeOf, NodeTiming, TextBlock, assistant_message, epoch_ms_or, execution_node, next_ordinal,
-    text_turn_item, todo_native_id, todo_plan, todo_steps, todos_complete,
+    NodeOf, NodeTiming, RequestBody, TextBlock, assistant_message, epoch_ms_or, execution_node,
+    next_ordinal, open_code_question_id, request_node, request_turn_item, settle_request_item,
+    settle_request_node, text_turn_item, todo_native_id, todo_plan, todo_steps, todos_complete,
+    user_input_questions,
 };
 use crate::events::V1Event;
 use crate::v1_client::{PermissionReply, QuestionReply, V1Client};
@@ -98,6 +101,9 @@ struct Pending {
     session_id: String,
     kind: &'static str,
     question: Option<Value>,
+    /// The node and item shown while the request waits, settled when it ends.
+    node: OrchestrationV2ExecutionNode,
+    item: OrchestrationV2TurnItem,
 }
 
 struct V1Inner {
@@ -505,6 +511,35 @@ impl OpenCodeV1Session {
         failure: Option<String>,
         disposition: OrchestrationV2ProviderThreadDisposition,
     ) {
+        // `finishTurn`: OpenCode drops a request its session asked when the execution
+        // ends, so the request cancels with the turn.
+        if guard
+            .threads
+            .get(session_id)
+            .is_some_and(|thread| thread.active.is_some())
+        {
+            let doomed: Vec<String> = guard
+                .pending
+                .iter()
+                .filter(|(_, pending)| {
+                    pending.session_id == session_id
+                        || guard
+                            .children
+                            .get(&pending.session_id)
+                            .is_some_and(|owner| owner == session_id)
+                })
+                .map(|(native, _)| native.clone())
+                .collect();
+            for native in doomed {
+                if let Some(pending) = guard.pending.remove(&native) {
+                    self.resolve_request(
+                        guard,
+                        pending,
+                        OrchestrationV2RuntimeRequestStatus::Cancelled,
+                    );
+                }
+            }
+        }
         let Some(thread) = guard.threads.get_mut(session_id) else {
             return;
         };
@@ -963,20 +998,8 @@ impl OpenCodeV1Session {
         if guard.pending.contains_key(&native_id) {
             return;
         }
-        let Some(turn) = guard
-            .threads
-            .get(&owner)
-            .and_then(|thread| thread.active.as_ref())
-        else {
-            return;
-        };
-        let provider_turn_id = turn.provider_turn.id.clone();
-        let thread_id = turn.thread_id.clone();
-        let root_node_id = turn.provider_turn.node_id.clone();
-        let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
-        let request_id =
-            IdAllocator.runtime_request(&self.driver, Some(&provider_turn_id), Some(&native_id));
-        let kind = if event_type == "question.asked" {
+        let user_input = event_type == "question.asked";
+        let kind = if user_input {
             "user_input"
         } else {
             open_code_permission_request_kind(
@@ -991,41 +1014,54 @@ impl OpenCodeV1Session {
             )
         };
         let now = UtcDateTime::now();
-        // `approvalNode`: a request's node derives from the request id.
-        let node_id = derive::approval_node(&request_id);
-        let node = execution_node(
-            &self.driver,
-            &NodeOf {
-                thread_id: &thread_id,
-                root_node_id: &root_node_id,
-                provider_thread_id: &provider_thread_id,
-                provider_turn_id: &provider_turn_id,
-                native_item_id: &native_id,
-                weak_ref: false,
-            },
-            NodeTiming {
-                kind: if kind == "user_input" {
-                    OrchestrationV2ExecutionNodeKind::UserInputRequest
-                } else {
-                    OrchestrationV2ExecutionNodeKind::ApprovalRequest
-                },
-                status: OrchestrationV2ExecutionNodeStatus::Waiting,
-                started_at: now,
-                completed_at: None,
-            },
-        );
-        // The request's node id is `approvalNode`, not the native item's.
-        let node = OrchestrationV2ExecutionNode {
-            id: node_id.clone(),
-            ..node
+        let Some(thread) = guard.threads.get_mut(&owner) else {
+            return;
         };
-        self.emit(ProviderAdapterV2Event::NodeUpdated {
-            driver: self.driver.clone(),
-            node,
-        });
+        let Some(turn) = thread.active.as_mut() else {
+            return;
+        };
+        let provider_turn_id = turn.provider_turn.id.clone();
+        let thread_id = turn.thread_id.clone();
+        let root_node_id = turn.provider_turn.node_id.clone();
+        let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
+        let request_id =
+            IdAllocator.runtime_request(&self.driver, Some(&provider_turn_id), Some(&native_id));
+        let ordinal = item_ordinal(turn, &native_id);
+        let of = NodeOf {
+            thread_id: &thread_id,
+            root_node_id: &root_node_id,
+            provider_thread_id: &provider_thread_id,
+            provider_turn_id: &provider_turn_id,
+            native_item_id: &native_id,
+            weak_ref: false,
+        };
+        let node = request_node(&self.driver, &of, &request_id, user_input, now);
+        let body = if user_input {
+            let questions: Vec<Value> = props
+                .get("questions")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            RequestBody::UserInput {
+                questions: user_input_questions(&questions),
+            }
+        } else {
+            RequestBody::Approval {
+                request_kind: match kind {
+                    "file-read" => ProviderRequestKind::FileRead,
+                    "file-change" => ProviderRequestKind::FileChange,
+                    _ => ProviderRequestKind::Command,
+                },
+                title: props
+                    .get("permission")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            }
+        };
+        let item = request_turn_item(&of, &request_id, ordinal, now, body);
         let request = OrchestrationV2RuntimeRequest {
             id: request_id.clone(),
-            node_id,
+            node_id: node.id.clone(),
             provider_turn_id: Some(provider_turn_id),
             native_request_ref: Some(native_ref(&native_id, false)),
             kind: match kind {
@@ -1043,19 +1079,27 @@ impl OpenCodeV1Session {
             decision: None,
             answers: None,
         };
-        if let Some(thread) = guard.threads.get_mut(&owner) {
-            thread.requests.push(request.clone());
-        }
+        thread.requests.push(request.clone());
         guard.pending.insert(
             native_id.clone(),
             Pending {
-                request_id: request_id.clone(),
+                request_id,
                 native_id,
                 session_id,
                 kind,
                 question: props.get("questions").cloned(),
+                node: node.clone(),
+                item: item.clone(),
             },
         );
+        self.emit(ProviderAdapterV2Event::NodeUpdated {
+            driver: self.driver.clone(),
+            node,
+        });
+        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: self.driver.clone(),
+            turn_item: item,
+        });
         self.emit(ProviderAdapterV2Event::RuntimeRequestUpdated {
             driver: self.driver.clone(),
             thread_id: Some(thread_id),
@@ -1069,21 +1113,21 @@ impl OpenCodeV1Session {
         pending: Pending,
         status: OrchestrationV2RuntimeRequestStatus,
     ) {
+        let now = UtcDateTime::now();
+        let cancelled = status == OrchestrationV2RuntimeRequestStatus::Cancelled;
         let owner = guard
             .children
             .get(&pending.session_id)
             .cloned()
-            .unwrap_or(pending.session_id);
-        let Some(thread) = guard.threads.get_mut(&owner) else {
-            return;
-        };
-        if let Some(request) = thread
-            .requests
-            .iter_mut()
-            .find(|request| request.id == pending.request_id)
+            .unwrap_or_else(|| pending.session_id.clone());
+        if let Some(thread) = guard.threads.get_mut(&owner)
+            && let Some(request) = thread
+                .requests
+                .iter_mut()
+                .find(|request| request.id == pending.request_id)
         {
             request.status = status;
-            request.resolved_at = Some(UtcDateTime::now());
+            request.resolved_at = Some(now);
             let thread_id = thread.active.as_ref().map(|turn| turn.thread_id.clone());
             self.emit(ProviderAdapterV2Event::RuntimeRequestUpdated {
                 driver: self.driver.clone(),
@@ -1091,6 +1135,15 @@ impl OpenCodeV1Session {
                 runtime_request: request.clone(),
             });
         }
+        // `settleRequest`: the node and item the request stood for settle with it.
+        self.emit(ProviderAdapterV2Event::NodeUpdated {
+            driver: self.driver.clone(),
+            node: settle_request_node(&pending.node, cancelled, now),
+        });
+        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: self.driver.clone(),
+            turn_item: settle_request_item(&pending.item, cancelled, now),
+        });
     }
 
     fn require_session(
@@ -1931,26 +1984,6 @@ fn question_rows(
             }
         })
         .collect()
-}
-
-fn open_code_question_id(index: usize, header: &str) -> String {
-    let header = header
-        .trim()
-        .to_ascii_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    if header.is_empty() {
-        format!("question-{index}")
-    } else {
-        format!("question-{index}-{header}")
-    }
 }
 
 fn snapshot_from(

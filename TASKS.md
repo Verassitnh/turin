@@ -56,7 +56,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
-| T00 | Foundation fixes from QC wf_6ce02f2f-38c | `crates/contracts/src/base_schemas.rs`, PORTING.md mapping, scripts, docs | Codex | active |
+| T00 | Foundation fixes from QC wf_6ce02f2f-38c (docs part done by PM; helpers: Codex died on auth expiry → Sonnet r2) | `crates/contracts/src/base_schemas.rs` | Codex → Sonnet | active |
 | T01 | Port all kept contracts modules | `crates/contracts` | GLM | active |
 | T02 | Persistence: SQLite, migrations, event store, receipts | `crates/persistence` | Grok | active |
 | T03 | Design system + static app shell (theme, fonts, tokens, layout) | `crates/app` | Opus | active |

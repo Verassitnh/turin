@@ -5,8 +5,12 @@
 
 #![allow(dead_code)]
 
+pub mod code_tab;
+pub mod detail_context;
+pub mod detail_panel;
 pub mod dropdown;
 pub mod fixtures;
+pub mod guide_tab;
 pub mod link_pull_request_dialog_logic;
 pub mod mock_source;
 pub mod presentation_view;
@@ -28,4 +32,6 @@ pub mod pull_request_stack_snapshot;
 pub mod pull_request_summary_scroll_logic;
 pub mod pull_requests_route_search;
 pub mod relative_time;
+pub mod summary_tab;
+pub mod timeline_tab;
 pub mod view_model;

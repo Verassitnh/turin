@@ -1,22 +1,6 @@
 //! Port of upstream/apps/web/src/components/pullRequest/pullRequestList.logic.ts
 
-// These compile the assigned sibling modules' tests until the lead declares them in mod.rs.
-#[cfg(test)]
-#[path = "pull_request_list_lines.rs"]
-mod pull_request_list_lines;
-#[path = "pull_request_list_preferences.rs"]
-mod pull_request_list_preferences;
-#[cfg(test)]
-#[path = "pull_request_project_assignment_logic.rs"]
-mod pull_request_project_assignment_logic;
-#[cfg(test)]
-#[path = "pull_request_project_filter_logic.rs"]
-mod pull_request_project_filter_logic;
-#[cfg(test)]
-#[path = "pull_requests_route_search.rs"]
-mod pull_requests_route_search;
-
-use self::pull_request_list_preferences::PullRequestListSort;
+use super::pull_request_list_preferences::PullRequestListSort;
 use crate::state::support::collate::locale_compare;
 use crate::state::time::{parse_ms, to_iso_string};
 use serde::{Deserialize, Serialize};

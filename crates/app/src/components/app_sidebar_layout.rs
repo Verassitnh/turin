@@ -15,7 +15,7 @@
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Context, CursorStyle, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
+    AnyView, App, Context, CursorStyle, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
     MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div, px, rems,
 };
@@ -89,6 +89,10 @@ pub struct AppSidebarLayout {
     /// The last drag moved past [`RESIZE_CLICK_SLOP`]; the rail's
     /// double-click reset ignores it, as useResizeDrag suppresses the click.
     last_drag_moved: bool,
+    /// Replaces the chat column (the pull request page and the demo hooks).
+    main_content: Option<AnyView>,
+    /// Replaces the right panel's body.
+    right_panel_content: Option<AnyView>,
     _appearance: Subscription,
 }
 
@@ -110,8 +114,23 @@ impl AppSidebarLayout {
             right_panel_width: PREVIEW_PANEL_DEFAULT_WIDTH,
             resizing: None,
             last_drag_moved: false,
+            main_content: None,
+            right_panel_content: None,
             _appearance: appearance,
         }
+    }
+
+    /// Shows `content` where the chat column normally sits.
+    pub fn set_main_content(&mut self, content: Option<AnyView>, cx: &mut Context<Self>) {
+        self.main_content = content;
+        cx.notify();
+    }
+
+    /// Shows `content` as the right panel's body and opens the panel when it is set.
+    pub fn set_right_panel_content(&mut self, content: Option<AnyView>, cx: &mut Context<Self>) {
+        self.right_panel_open = content.is_some();
+        self.right_panel_content = content;
+        cx.notify();
     }
 
     /// Opens the right panel; used by the screenshot harness (`TURIN_SHELL_RIGHT_PANEL`).
@@ -386,11 +405,12 @@ impl Render for AppSidebarLayout {
                     .min_w_0()
                     .h_full()
                     .bg(theme.background)
-                    .when(!maximized, |this| {
-                        this.child(ChatView {
+                    .when(!maximized, |this| match self.main_content.clone() {
+                        Some(content) => this.child(content),
+                        None => this.child(ChatView {
                             sidebar_open,
                             right_panel_open,
-                        })
+                        }),
                     })
                     .when(right_panel_open, |this| {
                         this.child(
@@ -408,7 +428,10 @@ impl Render for AppSidebarLayout {
                                         this.flex_shrink_0().w(px(right_panel_width))
                                     }
                                 })
-                                .child(RightPanelTabs),
+                                .child(match self.right_panel_content.clone() {
+                                    Some(content) => content.into_any_element(),
+                                    None => RightPanelTabs.into_any_element(),
+                                }),
                         )
                     }),
             )

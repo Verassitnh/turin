@@ -1,28 +1,35 @@
 //! Port of upstream/apps/web/src/components/ChatView.tsx (layout only).
 //!
-//! The chat column: the 52px drag-region header, the messages timeline
-//! (empty state for now) and the composer docked at the bottom of the
-//! `--chat-content-max-width` lane. Timeline, banners, find and the thread
-//! details panel arrive with the thread view task; the terminal drawer is
-//! cut.
+//! The chat column: the 52px drag-region header, the messages timeline and
+//! the composer docked at the bottom of the `--chat-content-max-width` lane,
+//! with pending approvals / questions attached above it. Find and the thread
+//! details panel are not ported yet; the terminal drawer is cut.
 
 use gpui_kit::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window,
-    div, px, rems,
+    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    Styled as _, Window, div, px, rems,
 };
 
 use super::chat::chat_header::ChatHeader;
-use super::chat::composer_surface::ComposerSurface;
+use super::chat::composer_pending_panels::{
+    ComposerPendingApprovalBanner, ComposerPendingUserInputBanner,
+};
+use super::chat::messages_timeline::MessagesTimeline;
+use super::chat::timeline::session_logic::{derive_pending_approvals, derive_pending_user_inputs};
+use super::chat::timeline::source::MockTimelineSource;
 use super::drag_region::DragRegion as _;
 use super::workspace_titlebar::workspace_titlebar_content_left;
+use crate::composer::mock_source::MockComposerSource;
+use crate::composer::views::chat_composer::ChatComposer;
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
-use crate::theme::tokens::{CHAT_CONTENT_MAX_WIDTH, TEXT_SM, WORKSPACE_TOPBAR_HEIGHT};
+use crate::theme::tokens::{CHAT_CONTENT_MAX_WIDTH, WORKSPACE_TOPBAR_HEIGHT};
 
 #[derive(IntoElement)]
 pub struct ChatView {
     pub sidebar_open: bool,
     pub right_panel_open: bool,
+    /// The routed thread's `(project, title)` (sidebar selection).
+    pub thread: Option<(SharedString, SharedString)>,
 }
 
 impl RenderOnce for ChatView {
@@ -37,6 +44,36 @@ impl RenderOnce for ChatView {
         };
         // `.chat-composer-lane` / timeline `padding-inline: 3rem` at ≥640px.
         let lane_inset = rems(3.);
+        let timeline = window.use_keyed_state("messages-timeline", cx, |window, cx| {
+            let store = MockTimelineSource::start(cx);
+            MessagesTimeline::new(store, window, cx)
+        });
+        let composer = window.use_keyed_state("chat-composer", cx, |window, cx| {
+            let store = MockComposerSource::start(cx);
+            ChatComposer::new(store, window, cx)
+        });
+        // The composer's top drawer: the oldest pending approval, else the
+        // oldest pending question (ChatComposer.tsx `showComposerTopDrawer`).
+        let store = timeline.read(cx).store().clone();
+        let snapshot = store.read(cx).snapshot().clone();
+        let source = store.read(cx).source();
+        let approvals = derive_pending_approvals(&snapshot.pending_approvals);
+        let inputs = derive_pending_user_inputs(&snapshot.pending_user_inputs);
+        let drawer = if let Some(approval) = approvals.first().cloned() {
+            Some(
+                ComposerPendingApprovalBanner {
+                    approval,
+                    pending_count: approvals.len(),
+                    source,
+                }
+                .into_any_element(),
+            )
+        } else {
+            inputs
+                .first()
+                .cloned()
+                .map(|prompt| ComposerPendingUserInputBanner { prompt, source }.into_any_element())
+        };
 
         div()
             .flex()
@@ -57,11 +94,11 @@ impl RenderOnce for ChatView {
                     .pl(header_left)
                     .pr(px(20.))
                     .bg(theme.background)
-                    .child(ChatHeader {
-                        project: "turin".into(),
-                        title: "Port design system and app shell".into(),
+                    .children(self.thread.clone().map(|(project, title)| ChatHeader {
+                        project,
+                        title,
                         right_panel_open: self.right_panel_open,
-                    })
+                    }))
                     .drag_region(window, cx),
             )
             .child(
@@ -71,18 +108,9 @@ impl RenderOnce for ChatView {
                     .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .child(
-                        // Empty server thread (MessagesTimeline.tsx).
-                        div()
-                            .flex()
-                            .flex_1()
-                            .items_center()
-                            .justify_center()
-                            .px(lane_inset)
-                            .text_size(TEXT_SM.size)
-                            .text_color(with_alpha(theme.muted_foreground, 0.3))
-                            .child("Send a message to start the conversation."),
-                    )
+                    // `MessagesTimeline`, owned by the chat column for now; the
+                    // thread route will own it once threads are selectable.
+                    .child(timeline)
                     .child(
                         div()
                             .flex_shrink_0()
@@ -93,7 +121,8 @@ impl RenderOnce for ChatView {
                                     .mx_auto()
                                     .w_full()
                                     .max_w(CHAT_CONTENT_MAX_WIDTH)
-                                    .child(ComposerSurface),
+                                    .children(drawer)
+                                    .child(composer),
                             )
                             // Bottom spacer: `h-[calc(env(safe-area-inset-bottom)+1.25rem)]`.
                             .child(div().h(rems(1.25))),

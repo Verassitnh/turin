@@ -52,6 +52,10 @@ pub enum SecretStoreError {
     Persist { resource: String, detail: String },
     #[error("Failed to remove {resource}.")]
     Remove { resource: String, detail: String },
+    #[error("{resource} already exists.")]
+    AlreadyExists { resource: String },
+    #[error("Failed to read {resource} after it was created concurrently.")]
+    ConcurrentRead { resource: String },
 }
 
 impl SecretStoreError {
@@ -61,6 +65,8 @@ impl SecretStoreError {
             Self::Read { .. } => "SecretStoreReadError",
             Self::Persist { .. } => "SecretStorePersistError",
             Self::Remove { .. } => "SecretStoreRemoveError",
+            Self::AlreadyExists { .. } => "SecretStoreAlreadyExistsError",
+            Self::ConcurrentRead { .. } => "SecretStoreConcurrentReadError",
         }
     }
 
@@ -70,6 +76,7 @@ impl SecretStoreError {
             | Self::Read { detail, .. }
             | Self::Persist { detail, .. }
             | Self::Remove { detail, .. } => detail,
+            Self::AlreadyExists { .. } | Self::ConcurrentRead { .. } => "",
         }
     }
 
@@ -90,6 +97,46 @@ pub trait SecretStore: Send + Sync {
     async fn get(&self, name: &str) -> Result<Option<Vec<u8>>, SecretStoreError>;
     async fn set(&self, name: &str, value: &[u8]) -> Result<(), SecretStoreError>;
     async fn remove(&self, name: &str) -> Result<(), SecretStoreError>;
+
+    /// Upstream `ServerSecretStore.create`: writes `value` only when `name` is
+    /// absent. The default is check-then-set and is not atomic. Backends that
+    /// can create exclusively override it.
+    async fn exclusive_create(&self, name: &str, value: &[u8]) -> Result<(), SecretStoreError> {
+        if self.get(name).await?.is_some() {
+            return Err(SecretStoreError::AlreadyExists {
+                resource: format!("secret {name}"),
+            });
+        }
+        self.set(name, value).await
+    }
+
+    /// Upstream `getOrCreateRandom`: the stored bytes, or `bytes` fresh random
+    /// bytes created exclusively. When another writer wins the race, that
+    /// writer's value is returned.
+    async fn get_or_create_random(
+        &self,
+        name: &str,
+        bytes: usize,
+    ) -> Result<Vec<u8>, SecretStoreError> {
+        if let Some(existing) = self.get(name).await? {
+            return Ok(existing);
+        }
+        let mut generated = vec![0u8; bytes];
+        getrandom::fill(&mut generated).map_err(|error| SecretStoreError::Secure {
+            resource: format!("secret {name}"),
+            detail: error.to_string(),
+        })?;
+        match self.exclusive_create(name, &generated).await {
+            Ok(()) => Ok(generated),
+            Err(SecretStoreError::AlreadyExists { .. }) => match self.get(name).await? {
+                Some(existing) => Ok(existing),
+                None => Err(SecretStoreError::ConcurrentRead {
+                    resource: format!("secret {name}"),
+                }),
+            },
+            Err(error) => Err(error),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -116,6 +163,17 @@ impl SecretStore for MemorySecretStore {
 
     async fn remove(&self, name: &str) -> Result<(), SecretStoreError> {
         self.values.lock().remove(name);
+        Ok(())
+    }
+
+    async fn exclusive_create(&self, name: &str, value: &[u8]) -> Result<(), SecretStoreError> {
+        let mut values = self.values.lock();
+        if values.contains_key(name) {
+            return Err(SecretStoreError::AlreadyExists {
+                resource: format!("secret {name}"),
+            });
+        }
+        values.insert(name.to_owned(), value.to_vec());
         Ok(())
     }
 }
@@ -162,7 +220,12 @@ impl SecretStore for FileSecretStore {
         let path = self.path_for(name);
         let temp = PathBuf::from(format!("{}.{}.tmp", path.display(), uuid::Uuid::new_v4()));
         let write = async {
-            tokio::fs::write(&temp, value).await?;
+            // Flushed before the rename: the legacy migration removes its source
+            // after this write, so a power loss must not leave an empty secret.
+            let mut file = tokio::fs::File::create(&temp).await?;
+            tokio::io::AsyncWriteExt::write_all(&mut file, value).await?;
+            file.sync_all().await?;
+            drop(file);
             set_mode_async(&temp, 0o600).await?;
             tokio::fs::rename(&temp, &path).await?;
             set_mode_async(&path, 0o600).await
@@ -176,6 +239,25 @@ impl SecretStore for FileSecretStore {
             });
         }
         Ok(())
+    }
+
+    async fn exclusive_create(&self, name: &str, value: &[u8]) -> Result<(), SecretStoreError> {
+        let path = self.path_for(name);
+        match create_new_file(&path, value) {
+            Ok(()) => set_mode(&path, 0o600).map_err(|error| SecretStoreError::Persist {
+                resource: format!("secret {name}"),
+                detail: error.to_string(),
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(SecretStoreError::AlreadyExists {
+                    resource: format!("secret {name}"),
+                })
+            }
+            Err(error) => Err(SecretStoreError::Persist {
+                resource: format!("secret {name}"),
+                detail: error.to_string(),
+            }),
+        }
     }
 
     async fn remove(&self, name: &str) -> Result<(), SecretStoreError> {
@@ -397,6 +479,26 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
+/// Creates `path` only if it does not exist, with mode 0600 on unix. A failed
+/// write removes the partial file, so a retry is not blocked by it.
+fn create_new_file(path: &Path, value: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    let written = file.write_all(value).and_then(|()| file.sync_all());
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Sync because `open` is a constructor, not an async method.
 fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     #[cfg(unix)]
@@ -500,6 +602,72 @@ mod tests {
         assert_ne!(delimiter, a.binding.key);
         a.remove().await.unwrap();
         assert!(a.get().await.unwrap().is_none());
+    }
+
+    /// A store that implements only the required methods, so the trait defaults run.
+    struct PlainStore(MemorySecretStore);
+
+    #[async_trait]
+    impl SecretStore for PlainStore {
+        async fn get(&self, name: &str) -> Result<Option<Vec<u8>>, SecretStoreError> {
+            self.0.get(name).await
+        }
+        async fn set(&self, name: &str, value: &[u8]) -> Result<(), SecretStoreError> {
+            self.0.set(name, value).await
+        }
+        async fn remove(&self, name: &str) -> Result<(), SecretStoreError> {
+            self.0.remove(name).await
+        }
+    }
+
+    #[tokio::test]
+    async fn exclusive_create_refuses_to_overwrite_on_every_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = FileSecretStore::open(dir.path()).unwrap();
+        let memory = MemorySecretStore::new();
+        let plain = PlainStore(MemorySecretStore::new());
+        for store in [&file as &dyn SecretStore, &memory, &plain] {
+            store.exclusive_create("n", b"first").await.unwrap();
+            let error = store.exclusive_create("n", b"second").await.unwrap_err();
+            assert!(matches!(error, SecretStoreError::AlreadyExists { .. }));
+            assert_eq!(
+                store.get("n").await.unwrap().as_deref(),
+                Some(&b"first"[..])
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exclusive_create_writes_owner_only_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::open(dir.path()).unwrap();
+        store.exclusive_create("n", b"x").await.unwrap();
+        let mode = std::fs::metadata(store.path_for("n"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[tokio::test]
+    async fn get_or_create_random_creates_once_and_then_returns_the_stored_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::open(dir.path()).unwrap();
+        let first = store.get_or_create_random("key", 32).await.unwrap();
+        assert_eq!(first.len(), 32);
+        assert_eq!(store.get("key").await.unwrap(), Some(first.clone()));
+        let second = store.get_or_create_random("key", 32).await.unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn get_or_create_random_uses_the_default_path_for_plain_stores() {
+        let store = PlainStore(MemorySecretStore::new());
+        let first = store.get_or_create_random("key", 16).await.unwrap();
+        assert_eq!(first.len(), 16);
+        assert_eq!(store.get_or_create_random("key", 16).await.unwrap(), first);
     }
 
     #[tokio::test]

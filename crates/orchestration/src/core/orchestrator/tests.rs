@@ -12,6 +12,7 @@ use turin_contracts::{
     CommandId, ThreadId, UtcDateTime,
     orchestration_v2::{
         OrchestrationV2Command, OrchestrationV2DomainEvent, OrchestrationV2ServerCommand,
+        OrchestrationV2SettleOverride,
     },
 };
 use turin_persistence::{Db, OrchestrationEventStore, ReceiptStatus};
@@ -318,7 +319,7 @@ async fn an_invalid_visit_time_is_refused_and_the_refusal_is_replayed() {
         matches!(
             replay,
             OrchestratorError::CommandPreviouslyRejected { ref detail, .. }
-                if detail == "Orchestration command thread.visit (command:visit-bad) failed."
+                if detail == "Failed to dispatch orchestration command thread.visit (command:visit-bad)."
         ),
         "{replay:?}"
     );
@@ -401,7 +402,7 @@ async fn unarchive_of_a_live_thread_is_refused_and_the_refusal_replays() {
         matches!(
             replay,
             OrchestratorError::CommandPreviouslyRejected { ref detail, .. }
-                if detail == "Orchestration command thread.unarchive (command:unarchive-live) failed."
+                if detail == "Failed to dispatch orchestration command thread.unarchive (command:unarchive-live)."
         ),
         "{replay:?}"
     );
@@ -579,4 +580,128 @@ async fn mark_unread_without_a_completed_run_is_refused() {
         matches!(error, OrchestratorError::Dispatch { .. }),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn snooze_to_the_future_then_unsnooze_round_trips() {
+    let (orchestrator, _) = harness().await;
+    let id = thread("thread:snoozed");
+    orchestrator
+        .dispatch(create_command(
+            "command:create-snoozed",
+            "thread:snoozed",
+            "Snoozed",
+        ))
+        .await
+        .expect("create commits");
+
+    orchestrator
+        .dispatch(mutation(
+            "thread.snooze",
+            "command:snooze",
+            "thread:snoozed",
+            json!({"snoozedUntil": "2099-01-01T00:00:00.000Z"}),
+        ))
+        .await
+        .expect("future snooze commits");
+    let snoozed = orchestrator
+        .get_thread_projection(&id)
+        .await
+        .unwrap()
+        .thread;
+    assert!(snoozed.snoozed_until.flatten().is_some());
+    assert!(snoozed.snoozed_at.flatten().is_some());
+
+    orchestrator
+        .dispatch(mutation(
+            "thread.unsnooze",
+            "command:unsnooze",
+            "thread:snoozed",
+            json!({"reason": "user"}),
+        ))
+        .await
+        .expect("unsnooze commits");
+    let awake = orchestrator
+        .get_thread_projection(&id)
+        .await
+        .unwrap()
+        .thread;
+    assert!(awake.snoozed_until.flatten().is_none());
+    assert!(awake.snoozed_at.flatten().is_none());
+    assert!(awake.last_snooze_wake_at.flatten().is_some());
+}
+
+#[tokio::test]
+async fn a_snooze_in_the_past_is_refused() {
+    let (orchestrator, _) = harness().await;
+    orchestrator
+        .dispatch(create_command("command:create-late", "thread:late", "Late"))
+        .await
+        .expect("create commits");
+
+    let error = orchestrator
+        .dispatch(mutation(
+            "thread.snooze",
+            "command:snooze-past",
+            "thread:late",
+            json!({"snoozedUntil": "2000-01-01T00:00:00.000Z"}),
+        ))
+        .await
+        .expect_err("a wake time in the past is refused");
+    assert!(
+        matches!(error, OrchestratorError::Dispatch { .. }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn unsettle_marks_the_thread_active_and_repeats_as_a_no_op_on_updated_at() {
+    let (orchestrator, _) = harness().await;
+    let id = thread("thread:unsettle");
+    orchestrator
+        .dispatch(create_command(
+            "command:create-unsettle",
+            "thread:unsettle",
+            "Unsettle",
+        ))
+        .await
+        .expect("create commits");
+
+    orchestrator
+        .dispatch(mutation(
+            "thread.unsettle",
+            "command:unsettle",
+            "thread:unsettle",
+            json!({"reason": "user"}),
+        ))
+        .await
+        .expect("unsettle commits");
+    let first = orchestrator
+        .get_thread_projection(&id)
+        .await
+        .unwrap()
+        .thread;
+    assert_eq!(
+        first.settled_override,
+        Some(OrchestrationV2SettleOverride::Active)
+    );
+    assert!(first.settled_at.is_none());
+    assert!(first.unsettled_at.flatten().is_some());
+
+    orchestrator
+        .dispatch(mutation(
+            "thread.unsettle",
+            "command:unsettle-again",
+            "thread:unsettle",
+            json!({"reason": "user"}),
+        ))
+        .await
+        .expect("a repeat unsettle commits");
+    let second = orchestrator
+        .get_thread_projection(&id)
+        .await
+        .unwrap()
+        .thread;
+    assert_eq!(second.updated_at, first.updated_at);
+    assert_eq!(second.unsettled_at, first.unsettled_at);
 }

@@ -1,15 +1,17 @@
 //! Port of the state-only arms of upstream `Orchestrator.ts`
 //! `dispatchThreadMutation`: unarchive, pin, unpin, pin and active reorder,
-//! auto-settle, and mark-unread. Each one only rewrites the thread row.
+//! auto-settle, mark-unread, snooze, unsnooze and unsettle. Each one only
+//! rewrites the thread row (snooze reads runs and messages to guard).
 //!
-//! Not here: archive, settle, unsettle and snooze (they also cancel runs or
-//! detach provider sessions), and the metadata, pull-request, mode and model
-//! kinds. Those return `false` from [`decide`] and stay unported.
+//! Not here: archive and settle (they also cancel runs or detach provider
+//! sessions), and the metadata, pull-request, mode and model kinds. Those
+//! return `false` from [`decide`] and stay unported.
 
 use turin_contracts::{
-    UtcDateTime,
+    MessageId, UtcDateTime,
     orchestration_v2::{
         OrchestrationV2AppThread, OrchestrationV2Command as C, OrchestrationV2DomainEvent,
+        OrchestrationV2RunStatus, OrchestrationV2RuntimeRequestStatus,
         OrchestrationV2ServerCommand, OrchestrationV2SettleOverride,
     },
 };
@@ -223,6 +225,144 @@ pub(super) async fn decide(
                 ..thread
             };
             thread_event!(decision, ThreadMarkedUnread, updated);
+        }
+        C::ThreadSnooze {
+            thread_id,
+            snoozed_until,
+            ..
+        } => {
+            let thread = load_live_thread(orchestrator, command, thread_id).await?;
+            let now = decision.now();
+            let wake = snoozed_until.parse::<UtcDateTime>().ok();
+            let Some(wake) = wake.filter(|wake| *wake > now) else {
+                return Err(dispatch_failure(
+                    command,
+                    format!(
+                        "Thread {thread_id} snooze wake time {snoozed_until} is not in the future."
+                    ),
+                ));
+            };
+            let records = orchestrator
+                .get_thread_records(
+                    thread_id,
+                    &[RecordField::Runs, RecordField::RuntimeRequests],
+                    &RecordFilter::default(),
+                )
+                .await?;
+            if records
+                .runtime_requests
+                .iter()
+                .any(|request| request.status == OrchestrationV2RuntimeRequestStatus::Pending)
+            {
+                return Err(dispatch_failure(
+                    command,
+                    format!(
+                        "Thread {thread_id} has a pending approval or user-input request and cannot be snoozed."
+                    ),
+                ));
+            }
+            let queued_message_ids: Vec<MessageId> = records
+                .runs
+                .iter()
+                .filter(|run| run.status == OrchestrationV2RunStatus::Queued)
+                .map(|run| run.user_message_id.clone())
+                .collect();
+            if !queued_message_ids.is_empty() {
+                // Automatic wakes (notifications, delegated completions) are hidden
+                // from the queue UI and must not block snooze.
+                let filter = RecordFilter {
+                    message_ids: Some(queued_message_ids),
+                    ..RecordFilter::default()
+                };
+                let messages = orchestrator
+                    .get_thread_records(thread_id, &[RecordField::Messages], &filter)
+                    .await?
+                    .messages;
+                let automatic: Vec<&MessageId> = messages
+                    .iter()
+                    .filter(|message| {
+                        message.notification.is_some() || message.delegated_completion.is_some()
+                    })
+                    .map(|message| &message.id)
+                    .collect();
+                let blocked = records.runs.iter().any(|run| {
+                    run.status == OrchestrationV2RunStatus::Queued
+                        && !automatic.contains(&&run.user_message_id)
+                });
+                if blocked {
+                    return Err(dispatch_failure(
+                        command,
+                        format!("Thread {thread_id} has a queued run and cannot be snoozed."),
+                    ));
+                }
+            }
+            // Same wake time keeps the original snoozedAt, so a repeated snooze is
+            // a no-op on updatedAt.
+            let same_wake_time = thread.snoozed_until.flatten() == Some(wake);
+            let existing_snoozed_at = if same_wake_time {
+                thread.snoozed_at.flatten()
+            } else {
+                None
+            };
+            let updated = OrchestrationV2AppThread {
+                snoozed_until: Some(Some(wake)),
+                // A user snooze ends any limit-recovery auto-resume for this run.
+                limit_recovery: Some(thread.limit_recovery.flatten().map(|mut recovery| {
+                    recovery.snooze = Some(false);
+                    recovery
+                })),
+                snoozed_at: Some(Some(existing_snoozed_at.unwrap_or(now))),
+                updated_at: if existing_snoozed_at.is_none() {
+                    now
+                } else {
+                    thread.updated_at
+                },
+                ..thread
+            };
+            thread_event!(decision, ThreadSnoozed, updated);
+        }
+        C::ThreadUnsnooze { thread_id, .. } => {
+            let thread = load_live_thread(orchestrator, command, thread_id).await?;
+            let now = decision.now();
+            let already_awake = thread.snoozed_until.flatten().is_none();
+            let updated = OrchestrationV2AppThread {
+                snoozed_until: Some(None),
+                snoozed_at: Some(None),
+                last_snooze_wake_at: if already_awake {
+                    thread.last_snooze_wake_at
+                } else {
+                    Some(Some(now))
+                },
+                updated_at: if already_awake {
+                    thread.updated_at
+                } else {
+                    now
+                },
+                ..thread
+            };
+            thread_event!(decision, ThreadUnsnoozed, updated);
+        }
+        C::ThreadUnsettle { thread_id, .. } => {
+            let thread = load_live_thread(orchestrator, command, thread_id).await?;
+            let now = decision.now();
+            let already_active =
+                thread.settled_override == Some(OrchestrationV2SettleOverride::Active);
+            let updated = OrchestrationV2AppThread {
+                settled_override: Some(OrchestrationV2SettleOverride::Active),
+                settled_at: None,
+                unsettled_at: if already_active {
+                    Some(thread.unsettled_at.flatten())
+                } else {
+                    Some(Some(now))
+                },
+                updated_at: if already_active {
+                    thread.updated_at
+                } else {
+                    now
+                },
+                ..thread
+            };
+            thread_event!(decision, ThreadUnsettled, updated);
         }
         _ => return Ok(false),
     }

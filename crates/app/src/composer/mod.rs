@@ -28,3 +28,4 @@ pub mod search_ranking;
 pub mod selection;
 pub mod dispatch;
 pub mod primary_actions;
+pub mod footer_layout;

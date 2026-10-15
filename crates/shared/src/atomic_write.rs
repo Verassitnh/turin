@@ -126,4 +126,17 @@ mod tests {
         write_file_string_atomically(&file_path, "fresh").unwrap();
         assert_eq!(fs::read_to_string(file_path).unwrap(), "fresh");
     }
+
+    #[test]
+    fn surfaces_an_unreadable_link_instead_of_writing_over_it() {
+        // A regular file in place of a directory makes `readlink` fail with
+        // ENOTDIR, which is neither "not found" nor "not a link".
+        let root = tempfile::tempdir().unwrap();
+        let blocker = root.path().join("blocker");
+        fs::write(&blocker, "keep").unwrap();
+        let path = blocker.join("settings.json");
+
+        assert!(write_file_string_atomically(&path, "after").is_err());
+        assert_eq!(fs::read_to_string(&blocker).unwrap(), "keep");
+    }
 }

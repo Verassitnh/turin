@@ -234,4 +234,21 @@ mod tests {
         assert_eq!(failed, Err("boom"));
         assert!(lock.active_keys().is_empty());
     }
+
+    #[tokio::test]
+    async fn keeps_working_after_earlier_holders_finish() {
+        // Upstream checks the lock outlives the scope that built it. A Rust lock
+        // has no build scope, so the equivalent is reuse after earlier holders.
+        let lock = KeyedLock::new();
+        assert_eq!(lock.with_lock("key", || async { "first" }).await, "first");
+        assert_eq!(lock.with_lock("key", || async { "ran" }).await, "ran");
+    }
+
+    #[tokio::test]
+    async fn releases_a_key_when_its_holder_fails() {
+        let lock = KeyedLock::new();
+        let failed: Result<(), &str> = lock.with_lock("other", || async { Err("boom") }).await;
+        assert_eq!(failed, Err("boom"));
+        assert!(lock.active_keys().is_empty());
+    }
 }

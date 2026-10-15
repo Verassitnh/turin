@@ -235,16 +235,49 @@ pub fn inset_control_highlight() -> BoxShadow {
     highlight
 }
 
-/// `before:shadow-[0_1px_--theme(--color-black/4%)]` on outline controls in
-/// light mode, `0_-1px_white/6%` in dark: the 1px lip under raised surfaces.
-pub fn control_lip(dark: bool) -> BoxShadow {
-    let mut lip = if dark {
-        shadow(-1., 0., 0., white(0.06))
+/// The 1px lip on outline controls and popups: upstream's
+/// `before:shadow-[0_1px_--theme(--color-black/4%)]` (light) and
+/// `dark:before:shadow-[0_-1px_--theme(--color-white/6%)]` are *outer*
+/// shadows of an `inset-0` `::before`, so they paint over the bottom border
+/// in light mode and the top border in dark mode. GPUI paints shadows under
+/// borders, so the lip is drawn as a 1px overlay line ([`control_lip_overlay`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ControlLip {
+    pub color: Hsla,
+    /// `true`: over the top border (dark); `false`: over the bottom border.
+    pub top: bool,
+}
+
+pub fn control_lip(dark: bool) -> ControlLip {
+    if dark {
+        ControlLip {
+            color: white(0.06),
+            top: true,
+        }
     } else {
-        shadow(1., 0., 0., black(0.04))
-    };
-    lip.inset = true;
-    lip
+        ControlLip {
+            color: black(0.04),
+            top: false,
+        }
+    }
+}
+
+/// An absolutely positioned 1px line over the given border edge. Children
+/// paint after their parent's border, so it lands above it. Inset by the
+/// corner radius so it stays on the straight part of the edge.
+pub fn control_lip_overlay(lip: ControlLip, radius: Pixels) -> gpui_kit::Div {
+    use gpui_kit::Styled as _;
+    let line = gpui_kit::div()
+        .absolute()
+        .left(radius)
+        .right(radius)
+        .h(px(1.))
+        .bg(lip.color);
+    if lip.top {
+        line.top(px(-1.))
+    } else {
+        line.bottom(px(-1.))
+    }
 }
 
 /// Rems at the default interface size, for code that needs a pixel figure

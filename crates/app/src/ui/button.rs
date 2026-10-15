@@ -158,6 +158,8 @@ pub(crate) struct VariantColors {
     pub shadow: Vec<BoxShadow>,
     pub underline_on_hover: bool,
     pub pill: bool,
+    /// Outline controls: the 1px lip over the bottom (light) / top (dark) border.
+    pub lip: bool,
 }
 
 fn a(color: impl Into<gpui_kit::Rgba>, alpha: f32) -> Hsla {
@@ -180,6 +182,7 @@ impl ButtonVariant {
             shadow: Vec::new(),
             underline_on_hover: false,
             pill: false,
+            lip: false,
         };
         // Solid fills: inset top highlight plus a tinted shadow-xs.
         let solid_shadow = |tint: Hsla| {
@@ -194,11 +197,7 @@ impl ButtonVariant {
         } else {
             theme.popover
         };
-        let outline_shadow = || {
-            let mut shadow = tokens::shadow_xs(0.05);
-            shadow.push(tokens::control_lip(dark));
-            shadow
-        };
+        let outline_shadow = || tokens::shadow_xs(0.05);
         match self {
             Self::Default => VariantColors {
                 bg: Some(theme.primary),
@@ -223,6 +222,7 @@ impl ButtonVariant {
                 bg_hover: Some(a(theme.destructive, 0.04)),
                 border_hover: Some(a(theme.destructive, 0.32)),
                 shadow: outline_shadow(),
+                lip: true,
                 ..base
             },
             Self::Ghost => VariantColors {
@@ -265,6 +265,7 @@ impl ButtonVariant {
                     a(theme.accent, 0.5)
                 }),
                 shadow: outline_shadow(),
+                lip: true,
                 ..base
             },
             Self::Overlay => VariantColors {
@@ -484,6 +485,13 @@ impl RenderOnce for Button {
             root = root.child(label);
         }
         root = root.children(self.children);
+        // `not-disabled:not-active:not-data-pressed:before:shadow-[…]`.
+        if colors.lip && interactive && !pressed {
+            root = root.child(tokens::control_lip_overlay(
+                tokens::control_lip(theme.is_dark()),
+                radius,
+            ));
+        }
 
         if let Some(on_click) = self.on_click.filter(|_| interactive) {
             root = root.on_click(move |event, window, cx| on_click(event, window, cx));

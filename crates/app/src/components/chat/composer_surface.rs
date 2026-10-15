@@ -11,7 +11,7 @@ use gpui_kit::{
     RenderOnce, StatefulInteractiveElement as _, Styled as _, Window, div, px, rems, svg,
 };
 
-use crate::assets::SEND_ARROW;
+use crate::assets::{CHEVRON_DOWN, SEND_ARROW};
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::{MixSpace, color_mix, with_alpha};
 use crate::theme::tokens::{self, LEADING_RELAXED, RADIUS_3XL, RADIUS_MD, TEXT_SM, tw};
@@ -50,10 +50,10 @@ fn composer_control(
         .child(label)
         .child(
             // ComposerControlChevron size=sm: `size-3.5 text-icon-muted`,
-            // pulled in by the control's `[&_svg]:-mx-0.5`. Upstream strokes
-            // it at 2.25; the lucide asset is the stock 2.
+            // pulled in by the control's `[&_svg]:-mx-0.5`. Stroke 2.25
+            // (`brand/chevron-down.svg`), not the stock lucide stroke 2.
             div().mx(px(-2.)).child(
-                Icon::new(IconName::ChevronDown)
+                Icon::path(CHEVRON_DOWN)
                     .size(rems(0.875))
                     .color(theme.icon_muted),
             ),
@@ -167,7 +167,9 @@ impl RenderOnce for ComposerSurface {
                                             .size(px(14.))
                                             .text_color(theme.message_action_foreground),
                                     )
-                                    .tooltip(|window, cx| Tooltip::new("Send").build(window, cx)),
+                                    .tooltip(|window, cx| {
+                                        Tooltip::new("Submit message").build(window, cx)
+                                    }),
                             ),
                     ),
             )

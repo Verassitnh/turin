@@ -143,7 +143,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T15 | Sidebar (projects, threads, status, snooze, search, drag) | `crates/app/src/components/sidebar` | Opus | r2 active (resume after Claude limit) |
 | T16 | Thread view: timeline, markdown, tool cards, approvals, wrapping | `crates/app/src/components/chat` | Opus | r2 active (resume; merging task/T16-logic) |
-| T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Opus | todo |
+| T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Sonnet+Haiku | done (merged; QC PASS); backlog: queue drag, tasks drawer, usage-limits banner |
 | T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus | todo |
 | T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Opus | todo |
 | T20 | Settings + keybindings UI | `crates/app/src/settings` | Opus | todo |

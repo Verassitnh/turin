@@ -196,9 +196,9 @@ impl VcsProcessExitError {
         let detail = match failure_kind {
             VcsProcessExitFailureKind::Authentication => "Authentication failed.".to_owned(),
             VcsProcessExitFailureKind::RateLimited => "API rate limit exceeded.".to_owned(),
-            VcsProcessExitFailureKind::NotFound => if context.command == "glab" {
-                "Merge request not found."
-            } else if context.command == "gh" || context.command == "az" {
+            // Upstream also special-cases `glab` ("Merge request not found.") and
+            // `az`; both hosts are cut (see PORTING.md Deviations).
+            VcsProcessExitFailureKind::NotFound => if context.command == "gh" {
                 "Pull request not found."
             } else {
                 "VCS resource not found."
@@ -221,7 +221,8 @@ impl VcsProcessExitError {
             } else {
                 None
             },
-            stderr_length: Some(error.stderr.len() as u64),
+            // JS `string.length`: UTF-16 code units, not bytes.
+            stderr_length: Some(error.stderr.encode_utf16().count() as u64),
             stderr_truncated: Some(error.stderr_truncated),
         }
     }
@@ -483,6 +484,290 @@ mod tests {
         });
         let freshness: VcsFreshness = serde_json::from_value(none.clone()).unwrap();
         assert_eq!(serde_json::to_value(&freshness).unwrap(), none);
+    }
+
+    use serde_json::{Value, json};
+
+    fn context(command: &str) -> VcsProcessErrorContext {
+        VcsProcessErrorContext {
+            operation: "status".to_owned(),
+            command: command.to_owned(),
+            cwd: "/repo".to_owned(),
+            argument_count: Some(3),
+        }
+    }
+
+    #[test]
+    fn exit_error_details_cover_every_failure_kind() {
+        let exit = |command: &str, kind, retryable, stderr: &str| {
+            VcsProcessExitError::from_process_exit(
+                context(command),
+                VcsProcessExitFailure {
+                    exit_code: 2.0,
+                    stderr: stderr.to_owned(),
+                    stderr_truncated: true,
+                },
+                kind,
+                retryable,
+            )
+        };
+        let detail = |error: &VcsProcessExitError| {
+            let VcsProcessExitError::VcsProcessExitError { detail, .. } = error;
+            detail.clone()
+        };
+        use VcsProcessExitFailureKind::*;
+        assert_eq!(
+            detail(&exit("gh", Authentication, None, "")),
+            "Authentication failed."
+        );
+        assert_eq!(
+            detail(&exit("gh", RateLimited, None, "")),
+            "API rate limit exceeded."
+        );
+        assert_eq!(
+            detail(&exit("gh", NotFound, None, "")),
+            "Pull request not found."
+        );
+        assert_eq!(
+            detail(&exit("git", NotFound, None, "")),
+            "VCS resource not found."
+        );
+        assert_eq!(
+            detail(&exit("git", CommandFailed, None, "")),
+            "Process exited with a non-zero status."
+        );
+
+        // `retryable` is only ever written when true; stderrLength counts UTF-16 units.
+        let retried = serde_json::to_value(exit("gh", RateLimited, Some(true), "😀a")).unwrap();
+        assert_eq!(retried["retryable"], json!(true));
+        assert_eq!(retried["stderrLength"], json!(3));
+        assert_eq!(retried["stderrTruncated"], json!(true));
+        assert_eq!(retried["argumentCount"], json!(3));
+        let not_retried = serde_json::to_value(exit("gh", RateLimited, Some(false), "")).unwrap();
+        assert!(not_retried.get("retryable").is_none());
+        let unspecified = serde_json::to_value(exit("gh", RateLimited, None, "")).unwrap();
+        assert!(unspecified.get("retryable").is_none());
+    }
+
+    #[test]
+    fn spawn_and_timeout_constructors_copy_the_context() {
+        let spawn = VcsProcessSpawnError::from_process_spawn_error(
+            context("git"),
+            VcsProcessSpawnFailure {
+                cause: json!({"message": "ENOENT"}),
+            },
+        );
+        assert_eq!(
+            serde_json::to_value(&spawn).unwrap(),
+            json!({
+                "_tag": "VcsProcessSpawnError", "operation": "status", "command": "git",
+                "cwd": "/repo", "argumentCount": 3, "cause": {"message": "ENOENT"},
+            })
+        );
+        assert_eq!(
+            spawn.to_string(),
+            "VCS process failed to spawn in status: git (/repo)"
+        );
+        let timeout = VcsProcessTimeoutError::from_process_timeout_error(
+            VcsProcessErrorContext {
+                argument_count: None,
+                ..context("git")
+            },
+            VcsProcessTimeoutFailure { timeout_ms: 1500.5 },
+        );
+        assert_eq!(
+            timeout.to_string(),
+            "VCS process timed out in status: git (/repo) after 1500.5ms"
+        );
+        let json = serde_json::to_value(&timeout).unwrap();
+        assert!(json.get("argumentCount").is_none());
+        assert_eq!(json["timeoutMs"], json!(1500.5));
+    }
+
+    fn error_samples() -> Vec<Value> {
+        let base =
+            |tag: &str| json!({"_tag": tag, "operation": "op", "command": "git", "cwd": "/r"});
+        let with = |tag: &str, extra: Value| {
+            let mut value = base(tag);
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            value
+        };
+        vec![
+            with("VcsProcessSpawnError", json!({"cause": null})),
+            with(
+                "VcsProcessExitError",
+                json!({"exitCode": 128, "detail": "d"}),
+            ),
+            with("VcsProcessTimeoutError", json!({"timeoutMs": 10})),
+            with(
+                "VcsProcessStdinWriteError",
+                json!({"stdinBytes": 7, "cause": "x"}),
+            ),
+            with(
+                "VcsProcessOutputReadError",
+                json!({"stream": "exitCode", "cause": 1}),
+            ),
+            with(
+                "VcsProcessOutputLimitError",
+                json!({"stream": "stderr", "maxBytes": 1, "observedBytes": 2}),
+            ),
+            base("VcsProcessMissingExitCodeError"),
+            json!({"_tag": "VcsRepositoryDetectionError", "operation": "o", "cwd": "/r", "detail": "d"}),
+            json!({"_tag": "VcsUnsupportedOperationError", "operation": "o", "kind": "jj", "detail": "d"}),
+        ]
+    }
+
+    #[test]
+    fn vcs_error_union_decodes_every_member_by_tag_and_round_trips() {
+        for sample in error_samples() {
+            let error: VcsError = serde_json::from_value(sample.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&error).unwrap(), sample);
+        }
+        // Not forward compatible: an unknown tag fails the union.
+        assert!(
+            serde_json::from_value::<VcsError>(json!({"_tag": "VcsFutureError", "operation": "o"}))
+                .is_err()
+        );
+        // A known tag with a broken payload fails too (no cause, bad stream).
+        assert!(
+            serde_json::from_value::<VcsError>(json!({
+                "_tag": "VcsProcessSpawnError", "operation": "o", "command": "c", "cwd": "/"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<VcsError>(json!({
+                "_tag": "VcsProcessOutputLimitError", "operation": "o", "command": "c", "cwd": "/",
+                "stream": "exitCode", "maxBytes": 1, "observedBytes": 1
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn output_decode_error_union_excludes_other_vcs_errors() {
+        let samples = error_samples();
+        for (index, sample) in samples.iter().enumerate() {
+            let decoded = serde_json::from_value::<VcsOutputDecodeError>(sample.clone());
+            assert_eq!(decoded.is_ok(), (3..=6).contains(&index), "{sample}");
+        }
+    }
+
+    #[test]
+    fn error_messages_match_upstream() {
+        let messages: Vec<String> = error_samples()
+            .into_iter()
+            .map(|sample| {
+                serde_json::from_value::<VcsError>(sample)
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            messages[1],
+            "VCS process failed in op: git (/r) exited with 128 - d"
+        );
+        assert_eq!(
+            messages[3],
+            "VCS process failed to write 7 bytes to stdin in op: git (/r)"
+        );
+        assert_eq!(
+            messages[4],
+            "VCS process failed to read exitCode in op: git (/r)"
+        );
+        assert_eq!(
+            messages[5],
+            "VCS process stderr produced 2 bytes in op: git (/r), exceeding the 1 byte limit"
+        );
+        assert_eq!(
+            messages[6],
+            "VCS process completed without an exit code in op: git (/r)"
+        );
+        assert_eq!(messages[7], "VCS repository detection failed in o: /r - d");
+        assert_eq!(messages[8], "VCS operation is unsupported for jj in o: d");
+    }
+
+    #[test]
+    fn freshness_normalises_instants_and_keeps_option_wire_shape() {
+        let freshness: VcsFreshness = serde_json::from_value(json!({
+            "source": "cached-remote",
+            "observedAt": "2026-10-14T02:00:00+02:00",
+            "expiresAt": {"_tag": "None"},
+        }))
+        .unwrap();
+        let encoded = serde_json::to_value(&freshness).unwrap();
+        // DateTimeUtc always encodes as YYYY-MM-DDTHH:MM:SS.sssZ.
+        assert_eq!(encoded["observedAt"], json!("2026-10-14T00:00:00.000Z"));
+        // `expiresAt` is required: absence is not None.
+        assert!(
+            serde_json::from_value::<VcsFreshness>(json!({
+                "source": "live-local", "observedAt": "2026-10-14T00:00:00Z",
+            }))
+            .is_err()
+        );
+        for source in [
+            "live-local",
+            "cached-local",
+            "cached-remote",
+            "explicit-remote",
+        ] {
+            let parsed: VcsFreshnessSource = serde_json::from_value(json!(source)).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), json!(source));
+        }
+        assert!(serde_json::from_value::<VcsFreshnessSource>(json!("stale")).is_err());
+    }
+
+    #[test]
+    fn identity_remotes_and_capabilities_round_trip() {
+        let fresh = json!({
+            "source": "live-local", "observedAt": "2026-10-14T00:00:00.000Z",
+            "expiresAt": {"_tag": "None"},
+        });
+        let identity = json!({
+            "kind": "git", "rootPath": "/repo", "metadataPath": null, "freshness": fresh,
+        });
+        let decoded: VcsRepositoryIdentity = serde_json::from_value(identity.clone()).unwrap();
+        assert!(decoded.metadata_path.is_none());
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), identity);
+        assert!(
+            serde_json::from_value::<VcsRepositoryIdentity>(
+                json!({"kind": "git", "rootPath": "  ", "metadataPath": null, "freshness": fresh})
+            )
+            .is_err()
+        );
+
+        let remotes = json!({
+            "remotes": [
+                {"name": "origin", "url": "git@github.com:o/r.git",
+                 "pushUrl": {"_tag": "Some", "value": "git@github.com:o/r.git"}, "isPrimary": true},
+                {"name": "up", "url": "https://x/y.git", "pushUrl": {"_tag": "None"}, "isPrimary": false},
+            ],
+            "freshness": fresh,
+        });
+        let decoded: VcsListRemotesResult = serde_json::from_value(remotes.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), remotes);
+
+        let files = json!({"paths": ["a", "b"], "truncated": true, "freshness": fresh});
+        let decoded: VcsListWorkspaceFilesResult = serde_json::from_value(files.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), files);
+
+        let capabilities = json!({
+            "kind": "unknown", "supportsWorktrees": false, "supportsBookmarks": false,
+            "supportsAtomicSnapshot": true, "supportsPushDefaultRemote": false,
+            "ignoreClassifier": "git-compatible-fallback",
+        });
+        let decoded: VcsDriverCapabilities = serde_json::from_value(capabilities.clone()).unwrap();
+        assert_eq!(
+            decoded.ignore_classifier,
+            VcsIgnoreClassifier::GitCompatibleFallback
+        );
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), capabilities);
+        let mut bad = capabilities;
+        bad["ignoreClassifier"] = json!("fallback");
+        assert!(serde_json::from_value::<VcsDriverCapabilities>(bad).is_err());
     }
 }
 

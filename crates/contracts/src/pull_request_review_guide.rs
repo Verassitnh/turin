@@ -164,4 +164,89 @@ mod tests {
         assert!(result.run.is_none());
         assert_eq!(result.current_head_sha.as_ref().unwrap().as_str(), "def");
     }
+
+    use serde_json::{Value, json};
+
+    fn guide() -> Value {
+        json!({
+            "headSha": "abc123",
+            "generatedAt": "2026-10-14T00:00:00Z",
+            "modelSelection": { "instanceId": "codex", "model": "gpt-5" },
+            "stops": [{
+                "title": "Contract",
+                "summary": "",
+                "attention": { "kind": "tradeoff", "note": "pick one" },
+                "excerpts": [{
+                    "path": "a.rs", "side": "old", "start": 1, "end": 3, "caption": "",
+                }],
+                "files": [{ "path": "b.rs" }, { "path": "c.rs", "note": "mechanical" }],
+                "notes": [{ "path": "a.rs", "line": 2, "title": "why", "body": "because" }],
+                "questions": ["is it needed?"],
+            }],
+        })
+    }
+
+    #[test]
+    fn guide_round_trips_keeping_absent_file_notes_and_null_attention() {
+        let decoded: PullRequestReviewGuide = serde_json::from_value(guide()).unwrap();
+        // IsoDateTime passes through untouched.
+        assert_eq!(decoded.generated_at, "2026-10-14T00:00:00Z");
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), guide());
+
+        let mut no_attention = guide();
+        no_attention["stops"][0]["attention"] = Value::Null;
+        let decoded: PullRequestReviewGuide = serde_json::from_value(no_attention.clone()).unwrap();
+        assert!(decoded.stops[0].attention.is_none());
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), no_attention);
+    }
+
+    #[test]
+    fn guide_rejects_bad_literals_lines_and_blank_required_strings() {
+        let bad = |edit: &dyn Fn(&mut Value)| {
+            let mut value = guide();
+            edit(&mut value);
+            serde_json::from_value::<PullRequestReviewGuide>(value).is_err()
+        };
+        assert!(bad(&|v| v["stops"][0]["attention"]["kind"] = json!("bug")));
+        assert!(bad(
+            &|v| v["stops"][0]["excerpts"][0]["side"] = json!("both")
+        ));
+        assert!(bad(&|v| v["stops"][0]["excerpts"][0]["start"] = json!(0)));
+        assert!(bad(&|v| v["stops"][0]["notes"][0]["line"] = json!(0)));
+        assert!(bad(&|v| v["stops"][0]["title"] = json!("   ")));
+        assert!(bad(&|v| v["headSha"] = json!("")));
+    }
+
+    #[test]
+    fn run_rejects_unknown_tags_and_lowercase_tags() {
+        for tag in ["running", "Cancelled"] {
+            assert!(
+                serde_json::from_value::<PullRequestReviewGuideRun>(json!({
+                    "_tag": tag, "headSha": "abc", "startedAt": "t"
+                }))
+                .is_err()
+            );
+        }
+        let failed = PullRequestReviewGuideRun::Failed {
+            head_sha: TrimmedNonEmptyString::new("abc").unwrap(),
+            failed_at: "2026-10-14T00:00:00Z".to_owned(),
+            detail: TrimmedNonEmptyString::new("boom").unwrap(),
+        };
+        assert_eq!(
+            serde_json::to_value(&failed).unwrap(),
+            json!({"_tag": "Failed", "headSha": "abc", "failedAt": "2026-10-14T00:00:00Z", "detail": "boom"})
+        );
+    }
+
+    #[test]
+    fn result_round_trips_guide_run_and_null_head() {
+        let value = json!({
+            "guide": guide(),
+            "run": { "_tag": "Running", "headSha": "abc", "startedAt": "t" },
+            "currentHeadSha": null,
+        });
+        let decoded: PullRequestReviewGuideResult = serde_json::from_value(value.clone()).unwrap();
+        assert!(decoded.current_head_sha.is_none());
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), value);
+    }
 }

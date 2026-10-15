@@ -3,6 +3,7 @@ pub mod adapter;
 pub mod approvals;
 pub mod cli_args;
 pub mod codex_developer_instructions;
+pub mod codex_home_layout;
 pub mod codex_installation;
 pub mod codex_launch_args;
 pub mod codex_managed_errors;

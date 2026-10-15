@@ -21,6 +21,13 @@ Read this, TASKS.md and PORTING.md to resume.
 
 Child thread ids are the same strings with `node:` replaced by `thread:`.
 
+After the restart the MCP session prefix changed for new tasks:
+`node:delegated-task:command%3Amcp%3A51608ea3-eaef-438d-89cb-e132943c1fa6%3A…`
+| T03 r3 (resume in same child thread) | claude-opus-5-5 | `…%3Athread-send%3Aturin-T03-r3-resume` | running |
+| T09a codex-app-server | gpt-6-sol (codex) | `…%3Adelegate-task%3Aturin-T09a-r1` | running |
+
+QC runs wf_8b97ef76-9c9 (T02) and wf_42618e43-71a (T04) were resumed after the restart (same run ids).
+
 ## QC workflow runs in flight (lost if the session dies; re-run with same args)
 | Run | Target | Worktree | Notes |
 |---|---|---|---|

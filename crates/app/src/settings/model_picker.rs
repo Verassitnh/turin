@@ -360,7 +360,7 @@ impl SettingsView {
             .into_any_element()
     }
 
-    pub(super) fn default_model_row(&mut self, json: &super::rows::Json, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn default_model_row(&mut self, json: &super::rows::Json, description: &'static str, cx: &mut Context<Self>) -> AnyElement {
         let vm = self.vm(cx);
         let selection = json.get(Which::Server, "defaultModelSelection").clone();
         let is_automatic = selection.is_null();
@@ -380,7 +380,7 @@ impl SettingsView {
         });
         let mut row = super::layout::SettingsRow::new("Model")
             .id("default-model")
-            .description("Default model for new threads. Projects can override it.")
+            .description(description)
             .reset_action(reset)
             .control(control);
         if is_automatic {

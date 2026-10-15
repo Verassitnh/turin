@@ -113,7 +113,7 @@ impl SettingsView {
             |this, value, _, cx| this.update_server(json!({ "defaultRuntimeMode": value }), cx),
         );
 
-        let workspace = self.workspace_row(json, cx);
+        let workspace = self.workspace_row(json, "Where new threads start. Projects and their t3.json can override it.", cx);
         let submodules = self.select_row(
             cx,
             json,
@@ -136,14 +136,14 @@ impl SettingsView {
 
         SettingsSection::new("New threads")
             .id("project-defaults")
-            .child(self.default_model_row(json, cx))
+            .child(self.default_model_row(json, "Default model for new threads. Projects can override it.", cx))
             .child(permissions_row)
             .child(workspace)
             .child(submodules)
             .into_any_element()
     }
 
-    fn workspace_row(&mut self, json: &Json, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn workspace_row(&mut self, json: &Json, description: &'static str, cx: &mut Context<Self>) -> AnyElement {
         let current = json.get(Which::Server, "defaultThreadEnvMode").clone();
         let label = match current.as_str() {
             Some("worktree") => "New worktree",
@@ -172,7 +172,7 @@ impl SettingsView {
         // `title="Workspace"` with the catalog id.
         SettingsRow::new("Workspace")
             .id(searchable_setting("new-threads").0)
-            .description("Where new threads start. Projects and their t3.json can override it.")
+            .description(description)
             .reset_action(reset)
             .control(control)
             .into_any_element()

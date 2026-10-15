@@ -13,6 +13,7 @@ pub mod panels_logic;
 pub mod custom_model_editor_logic;
 pub mod add_provider_instance_logic;
 pub mod github_account_logic;
+pub mod project_scripts;
 pub mod project_settings_logic;
 pub mod provider_settings_logic;
 pub mod provider_status;

@@ -7,18 +7,18 @@ mod archived;
 mod general;
 mod keybindings;
 mod licenses;
+mod projects;
 mod providers;
 mod source_control;
 mod storage;
 
 use gpui_kit::{
-    AnyElement, Context, IntoElement, ParentElement as _, SharedString,
+    AnyElement, Context, IntoElement, ParentElement as _,
     Styled as _, Window, div, px,
 };
 
 use super::search::SettingsPath;
 use super::view::{SettingsRoute, SettingsView, Which};
-use crate::theme::ActiveAppTheme;
 
 /// Per-page UI state that is not part of the settings.
 #[derive(Default)]
@@ -29,6 +29,7 @@ pub struct PanelState {
     pub providers: providers::ProvidersState,
     pub source_control: source_control::SourceControlState,
     pub storage: storage::StorageState,
+    pub projects: projects::ProjectsState,
     pub licenses: licenses::LicensesState,
     /// Dev hook (`TURIN_SETTINGS_SCROLL`): page scroll offset in px and the
     /// renders left to apply it (the first layouts clamp it to zero).
@@ -54,14 +55,8 @@ impl SettingsView {
             SettingsRoute::Section(SettingsPath::Archived) => self.render_archived(window, cx),
             SettingsRoute::Section(SettingsPath::Storage) => self.render_storage(window, cx),
             SettingsRoute::OpenSourceLicenses => self.render_licenses(window, cx),
+            SettingsRoute::Section(SettingsPath::Projects) => self.render_projects(window, cx),
             SettingsRoute::Section(SettingsPath::SourceControl) => self.render_source_control(window, cx),
-            _ => vec![div()
-                .text_color(cx.app_theme().muted_foreground)
-                .child(SharedString::from(format!(
-                    "{} is not ported yet.",
-                    self.route.breadcrumb_label()
-                )))
-                .into_any_element()],
         };
         self.page_container(sections, cx)
     }

@@ -191,6 +191,10 @@ pub trait SettingsSource {
     /// Opens `keybindings.json` in the preferred editor.
     fn open_keybindings_file(&self, cx: &mut App);
     fn unarchive_thread(&self, thread_id: &str, cx: &mut App);
+    /// `projectEnvironment.update` with a new `title`.
+    fn rename_project(&self, project_id: &str, title: &str, cx: &mut App);
+    /// `projectEnvironment.delete` (`force: true`).
+    fn remove_project(&self, project_id: &str, cx: &mut App);
     /// `runStorageCleanup`.
     fn run_storage_cleanup(&self, cx: &mut App);
     fn delete_thread(&self, thread_id: &str, cx: &mut App);

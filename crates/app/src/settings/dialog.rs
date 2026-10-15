@@ -31,6 +31,8 @@ pub enum Dialog {
     Confirm(ConfirmSpec),
     /// `AddUsageLimitSourceDialog`.
     AddHub,
+    /// The Projects page's action editor.
+    ScriptEditor,
 }
 
 /// `DialogPopup` chrome around `children` (header / panel / footer).
@@ -131,6 +133,9 @@ impl SettingsView {
         let theme = cx.app_theme().clone();
         if matches!(self.dialog, Some(Dialog::AddHub)) {
             return Some(self.render_add_hub_dialog(window, cx));
+        }
+        if matches!(self.dialog, Some(Dialog::ScriptEditor)) {
+            return Some(self.render_script_editor_dialog(window, cx));
         }
         let Some(Dialog::Confirm(spec)) = &self.dialog else {
             return None;

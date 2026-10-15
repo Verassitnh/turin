@@ -104,7 +104,7 @@ type NodeChange = Rc<dyn Fn(&mut SettingsView, Node, &mut Context<SettingsView>)
 type NodeRemove = Rc<dyn Fn(&mut SettingsView, &mut Context<SettingsView>)>;
 
 /// `KeybindingPill`.
-fn keybinding_pill(value: &str, mac: bool) -> AnyElement {
+pub(super) fn keybinding_pill(value: &str, mac: bool) -> AnyElement {
     let parts: Vec<String> = value
         .split('+')
         .map(|part| match part {

@@ -144,7 +144,15 @@ fn mock_view_model() -> SettingsViewModel {
     SettingsViewModel {
         appearance: Default::default(),
         client: default_client_settings(),
-        server: default_server_settings(),
+        server: {
+            let mut server = default_server_settings();
+            server.default_project_scripts = serde_json::from_value(json!([
+                { "id": "test", "name": "Test", "command": "cargo test", "icon": "test", "runOnWorktreeCreate": false },
+                { "id": "setup", "name": "Install", "command": "bun install", "icon": "configure", "runOnWorktreeCreate": true },
+            ]))
+            .expect("mock project scripts");
+            server
+        },
         platform: "MacIntel".into(),
         environment: EnvironmentInfo {
             label: "This device".into(),
@@ -391,6 +399,18 @@ impl SettingsSource for MockSettingsSource {
             .vm
             .archived_threads
             .retain(|thread| thread.id != thread_id);
+        self.publish(cx);
+    }
+
+    fn rename_project(&self, project_id: &str, title: &str, cx: &mut App) {
+        if let Some(project) = self.state.borrow_mut().vm.projects.iter_mut().find(|p| p.id == project_id) {
+            project.display_name = title.to_owned();
+        }
+        self.publish(cx);
+    }
+
+    fn remove_project(&self, project_id: &str, cx: &mut App) {
+        self.state.borrow_mut().vm.projects.retain(|p| p.id != project_id);
         self.publish(cx);
     }
 

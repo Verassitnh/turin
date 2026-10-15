@@ -7512,6 +7512,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "turin-projects"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "indexmap",
+ "parking_lot",
+ "pretty_assertions",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "turin-contracts",
+ "turin-git",
+ "turin-shared",
+ "unicode-normalization",
+ "uuid",
+]
+
+[[package]]
 name = "turin-provider-claude"
 version = "0.1.0"
 dependencies = [

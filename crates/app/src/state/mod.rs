@@ -6,4 +6,11 @@
 //! a typed in-process event source; the reducers and selectors keep upstream's
 //! shapes. See PORTING.md "No client/server split".
 
+pub mod contracts;
+pub mod entities;
 pub mod helpers;
+pub mod models;
+pub mod subagent_display;
+pub mod subagent_runtime;
+pub mod support;
+pub mod time;

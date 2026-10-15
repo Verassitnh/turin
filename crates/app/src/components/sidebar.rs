@@ -7,6 +7,7 @@
 //! sidebar task; the row geometry here is the upstream geometry they plug
 //! into.
 
+pub mod runtime;
 pub mod sidebar_chrome;
 pub mod sidebar_thread_header;
 

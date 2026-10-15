@@ -8,6 +8,7 @@ mod theme;
 mod ui;
 
 mod assets;
+mod timestamp_format;
 // Ported upstream constants and helpers (storage keys, brand-width
 // minimum, statuses) land before their callers.
 #[allow(dead_code)]

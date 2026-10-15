@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::Mutex;
+use turin_contracts::base_schemas::js_trim;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RotatingFileSinkConfigurationError {
@@ -219,7 +220,7 @@ impl RotatingFileSink {
             let Some(index) = js_integer(suffix) else {
                 continue;
             };
-            if index <= self.max_files as i64 {
+            if index <= self.max_files as f64 {
                 continue;
             }
             // Upstream aborts the whole prune on the first failed removal.
@@ -391,7 +392,7 @@ impl AsyncRotatingFileSink {
             let Some(index) = js_integer(suffix) else {
                 continue;
             };
-            if index <= self.max_files as i64 {
+            if index <= self.max_files as f64 {
                 continue;
             }
             rm_force(&entry.path()).map_err(|cause| sink_error("prune", &self.file_path, cause))?;
@@ -446,17 +447,83 @@ fn rm_force(path: &Path) -> io::Result<()> {
     }
 }
 
-/// `Number(suffix)` when it is an integer. An empty suffix is `0`.
-fn js_integer(suffix: &str) -> Option<i64> {
-    let trimmed = suffix.trim();
+/// `Number(suffix)` when `Number.isInteger` accepts it. Upstream prunes any
+/// suffix that passes that check and is above `maxFiles`, so `app.log.1e3` or
+/// `app.log.0x10` go too. An empty suffix is `0`.
+fn js_integer(suffix: &str) -> Option<f64> {
+    let trimmed = js_trim(suffix);
     if trimmed.is_empty() {
-        return Some(0);
+        return Some(0.0);
     }
-    if trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
-        trimmed.parse().ok()
-    } else {
-        None
+    let value = js_string_to_number(trimmed)?;
+    (value.is_finite() && value.fract() == 0.0).then_some(value)
+}
+
+/// JS `StringToNumber` for a trimmed, non-empty string. `None` is NaN.
+/// Accepts the `0x`/`0o`/`0b` forms (unsigned, as JS does) and a signed decimal
+/// literal with optional fraction and exponent. `Infinity` is an infinity.
+fn js_string_to_number(text: &str) -> Option<f64> {
+    let radix = match text.get(..2) {
+        Some("0x" | "0X") => Some(16),
+        Some("0o" | "0O") => Some(8),
+        Some("0b" | "0B") => Some(2),
+        _ => None,
+    };
+    if let Some(radix) = radix {
+        let digits = &text[2..];
+        if digits.is_empty() {
+            return None;
+        }
+        // Each digit folds in exactly while the value is below 2^53. Larger
+        // values are integral either way, so only the comparison matters.
+        return digits.chars().try_fold(0.0_f64, |value, ch| {
+            Some(value * f64::from(radix) + f64::from(ch.to_digit(radix)?))
+        });
     }
+    let (sign, unsigned) = match text.as_bytes().first() {
+        Some(b'-') => (-1.0, &text[1..]),
+        Some(b'+') => (1.0, &text[1..]),
+        _ => (1.0, text),
+    };
+    if unsigned == "Infinity" {
+        return Some(sign * f64::INFINITY);
+    }
+    // StrUnsignedDecimalLiteral: digits [. digits] [e [+-] digits], with at
+    // least one digit in the mantissa and at least one in any exponent.
+    let bytes = unsigned.as_bytes();
+    let mut cursor = 0;
+    let mut mantissa_digits = 0;
+    while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+        cursor += 1;
+        mantissa_digits += 1;
+    }
+    if cursor < bytes.len() && bytes[cursor] == b'.' {
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+            cursor += 1;
+            mantissa_digits += 1;
+        }
+    }
+    if mantissa_digits == 0 {
+        return None;
+    }
+    if cursor < bytes.len() && (bytes[cursor] == b'e' || bytes[cursor] == b'E') {
+        cursor += 1;
+        if cursor < bytes.len() && (bytes[cursor] == b'+' || bytes[cursor] == b'-') {
+            cursor += 1;
+        }
+        let exponent_start = cursor;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+        if cursor == exponent_start {
+            return None;
+        }
+    }
+    if cursor != bytes.len() {
+        return None;
+    }
+    unsigned.parse::<f64>().ok().map(|value| sign * value)
 }
 
 #[cfg(test)]
@@ -557,6 +624,59 @@ mod tests {
         let error = sink.write("next").unwrap_err();
         assert_eq!(error.operation, "rotate");
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "oversized");
+    }
+
+    #[test]
+    fn js_integer_accepts_suffixes_that_number_reads_as_integers() {
+        for (suffix, value) in [
+            ("", 0.0),
+            ("  7  ", 7.0),
+            ("1e3", 1000.0),
+            ("1E+3", 1000.0),
+            ("1.5e1", 15.0),
+            ("1.0", 1.0),
+            ("1.", 1.0),
+            (".5e1", 5.0),
+            ("+5", 5.0),
+            ("-0", 0.0),
+            ("0x10", 16.0),
+            ("0X1f", 31.0),
+            ("0o17", 15.0),
+            ("0b101", 5.0),
+            ("99999999999999999999", 1e20),
+        ] {
+            assert_eq!(js_integer(suffix), Some(value), "{suffix:?}");
+        }
+    }
+
+    #[test]
+    fn js_integer_rejects_what_number_does_not_make_an_integer() {
+        for suffix in [
+            "1.5", "abc", "Infinity", "-Infinity", "1e400", "-", "+", ".", "0x", "0x1g", "0b2",
+            "-0x10", "1e", "1e+", "1_000", "1 2",
+        ] {
+            assert_eq!(js_integer(suffix), None, "{suffix:?}");
+        }
+    }
+
+    #[test]
+    fn prunes_backups_that_js_number_reads_as_integers_above_max_files() {
+        let directory = temp_dir();
+        let file_path = directory.path().join("log.ndjson");
+        for suffix in ["1e3", "0x10", "1.0", "+5"] {
+            fs::write(format!("{}.{suffix}", file_path.display()), "old").unwrap();
+        }
+        let sink = RotatingFileSink::open(&file_path, 1024, 2, true).unwrap();
+        drop(sink);
+        for suffix in ["1e3", "0x10"] {
+            assert!(
+                !Path::new(&format!("{}.{suffix}", file_path.display())).exists(),
+                "{suffix}"
+            );
+        }
+        // `1.0` and `+5` equal 1 and 5: 1 is kept (<= maxFiles), 5 is pruned.
+        assert!(Path::new(&format!("{}.1.0", file_path.display())).exists());
+        assert!(!Path::new(&format!("{}.+5", file_path.display())).exists());
     }
 
     #[test]

@@ -17,7 +17,7 @@ use super::drag_region::{DragRegion as _, no_drag};
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_MD, TEXT_SM, TEXT_XS, WORKSPACE_TOPBAR_HEIGHT};
-use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
+use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 
 /// A surface tab: `h-6 max-w-36 rounded-md pl-1.5 pr-2 text-xs gap-0.5`,
 /// active `bg-accent text-foreground`.
@@ -101,8 +101,7 @@ impl RenderOnce for RightPanelTabs {
                         Button::new("right-panel-add-surface")
                             .variant(ButtonVariant::GhostMuted)
                             .size(ButtonSize::IconXs)
-                            .icon(IconName::Plus)
-                            .tooltip(Tooltip::new("New tab").shortcut("⌘T")),
+                            .icon(IconName::Plus),
                     )
                     .drag_region(window, cx),
             )

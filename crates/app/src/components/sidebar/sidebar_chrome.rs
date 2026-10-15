@@ -164,7 +164,7 @@ impl RenderOnce for SidebarChromeFooter {
                     .child(SidebarUtilityButton::new(
                         "sidebar-pull-requests",
                         IconName::GitPullRequest,
-                        "Pull requests",
+                        "Pull Requests",
                     ))
                     .child(SidebarUtilityButton::new(
                         "sidebar-usage",

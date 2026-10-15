@@ -271,7 +271,7 @@ impl Render for AppSidebarLayout {
                     } else {
                         IconName::PanelLeft
                     })
-                    .tooltip(Tooltip::new("Toggle sidebar").shortcut("⌘B"))
+                    .tooltip(Tooltip::new("Toggle main sidebar").shortcut("⌘B"))
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(ToggleSidebar), cx);
                     }),

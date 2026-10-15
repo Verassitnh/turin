@@ -138,7 +138,7 @@ impl RenderOnce for ComposerSurface {
                                     .variant(ButtonVariant::Ghost)
                                     .size(ButtonSize::IconSm)
                                     .icon(IconName::Paperclip)
-                                    .tooltip(Tooltip::new("Attach images")),
+                                    .tooltip(Tooltip::new("Attach files")),
                             )
                             .child(
                                 // Send: 32px round `bg-message-action`, disabled while empty.

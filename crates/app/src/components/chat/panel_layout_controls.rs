@@ -43,14 +43,14 @@ impl RenderOnce for PanelLayoutControls {
                 "toggle-thread-details",
                 IconName::SquareMenu,
                 false,
-                Tooltip::new("Thread details").shortcut("⇧⌘B"),
+                Tooltip::new("Toggle thread details").shortcut("⇧⌘B"),
             ))
             .child(
                 toggle(
                     "toggle-right-panel",
                     IconName::PanelRight,
                     self.right_panel_open,
-                    Tooltip::new("Toggle panel").shortcut("⌥⌘B"),
+                    Tooltip::new("Toggle right panel").shortcut("⌥⌘B"),
                 )
                 .on_click(move |event, window, cx| on_toggle_right_panel(event, window, cx)),
             )
@@ -65,7 +65,7 @@ impl RenderOnce for PanelLayoutControls {
                         },
                         self.right_panel_maximized,
                         Tooltip::new(if self.right_panel_maximized {
-                            "Restore panel"
+                            "Restore panel size"
                         } else {
                             "Maximize panel"
                         }),

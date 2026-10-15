@@ -30,7 +30,12 @@ pub fn write_file_string_atomically(file_path: &Path, contents: &str) -> io::Res
     let temp_directory = make_temp_directory(&target_directory, &prefix)?;
     let write = (|| {
         let temp_path = temp_directory.join("contents.tmp");
-        fs::write(&temp_path, contents)?;
+        // Flushed before the rename, so the rename never exposes a short file
+        // after a power loss.
+        let mut file = fs::File::create(&temp_path)?;
+        io::Write::write_all(&mut file, contents.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
         fs::rename(&temp_path, &target_path)?;
         Ok(())
     })();

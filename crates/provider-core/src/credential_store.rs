@@ -220,7 +220,12 @@ impl SecretStore for FileSecretStore {
         let path = self.path_for(name);
         let temp = PathBuf::from(format!("{}.{}.tmp", path.display(), uuid::Uuid::new_v4()));
         let write = async {
-            tokio::fs::write(&temp, value).await?;
+            // Flushed before the rename: the legacy migration removes its source
+            // after this write, so a power loss must not leave an empty secret.
+            let mut file = tokio::fs::File::create(&temp).await?;
+            tokio::io::AsyncWriteExt::write_all(&mut file, value).await?;
+            file.sync_all().await?;
+            drop(file);
             set_mode_async(&temp, 0o600).await?;
             tokio::fs::rename(&temp, &path).await?;
             set_mode_async(&path, 0o600).await

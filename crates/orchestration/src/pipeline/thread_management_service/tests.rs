@@ -1436,3 +1436,58 @@ fn run_helpers_pick_the_expected_runs() {
         "run:4"
     );
 }
+
+#[tokio::test]
+async fn a_settle_waiting_on_its_own_turn_does_not_keep_the_service_alive() {
+    // An agent settling its own thread waits for the turn to end, up to 24 h.
+    // Dropping the service must abort that wait rather than leave the service
+    // (and its orchestrator) alive until the turn ends.
+    let shell = json!({
+        "createdBy": "user", "creationSource": "web", "id": WAIT_THREAD, "projectId": WAIT_PROJECT,
+        "title": "Thread", "providerInstanceId": "codex",
+        "modelSelection": {"instanceId": "codex", "model": "m"},
+        "runtimeMode": "full-access", "interactionMode": "default", "branch": null,
+        "worktreePath": null, "activeProviderThreadId": null,
+        "lineage": {"parentThreadId": null, "relationshipToParent": null, "rootThreadId": WAIT_THREAD},
+        "forkedFrom": null, "createdAt": "2026-06-21T00:00:00.000Z", "updatedAt": "2026-06-21T00:00:00.000Z",
+        "archivedAt": null, "settledOverride": null, "settledAt": null, "lastVisitedAt": null,
+        "deletedAt": null, "latestRunId": WAIT_RUN, "activeRunId": WAIT_RUN, "status": "running",
+        "latestUserMessageAt": null, "pendingRuntimeRequest": null, "pendingBackgroundTasks": [],
+        "hasActionableProposedPlan": false, "providerInstanceHistory": [],
+        "latestVisibleMessage": null, "itemCount": 0, "visibleItemCount": 0, "messageCount": 0,
+    });
+    let orchestrator = MockOrchestrator::default().with_records(|_| {
+        Ok(wait_projection(vec![run_json(
+            WAIT_RUN,
+            WAIT_THREAD,
+            1,
+            "running",
+        )]))
+    });
+    *orchestrator.shell.lock() = Some(serde_json::from_value(shell).expect("shell fixture"));
+    let h = harness(
+        orchestrator,
+        StaticSettings::default_settings(),
+        Arc::new(NoSessions),
+    )
+    .await;
+    let outcome = h
+        .service
+        .settle_thread(
+            &ThreadId::new(WAIT_THREAD).unwrap(),
+            &CommandId::new("command:settle-own-turn").unwrap(),
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SettleOutcome::SettlesWhenTurnEnds));
+    let orchestrator = Arc::downgrade(&h.orchestrator);
+    drop(h);
+    for _ in 0..200 {
+        if orchestrator.upgrade().is_none() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the settle wait still holds the dropped service");
+}

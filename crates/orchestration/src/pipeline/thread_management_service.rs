@@ -34,6 +34,7 @@ use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -374,7 +375,10 @@ pub struct StopDelegatedTasksInput {
     pub reason: Option<String>,
 }
 
-pub struct ThreadManagementService {
+/// Shared state of the service. Background tasks hold an `Arc` of this, never
+/// of [`ThreadManagementService`]: the service owns their `JoinSet`, so a task
+/// holding the service would keep it alive and never be aborted.
+pub struct ThreadManagementCore {
     executor: ThreadCommandExecutor,
     orchestrator: Arc<dyn OrchestratorPort>,
     sessions: Arc<dyn ProviderSessionLookup>,
@@ -383,9 +387,22 @@ pub struct ThreadManagementService {
     projects: Arc<dyn ProjectDirectory>,
     hooks: Arc<dyn OrchestrationHooks>,
     stop_task_timeout: Duration,
-    /// Upstream forks `settleAfterRun` into the layer scope; here the service
-    /// owns the tasks and aborts them when it drops.
+}
+
+pub struct ThreadManagementService {
+    core: Arc<ThreadManagementCore>,
+    /// Upstream forks `settleAfterRun` into the layer scope, which ends when
+    /// the layer closes. Here this set owns those tasks, so dropping the
+    /// service aborts them.
     background: Mutex<JoinSet<()>>,
+}
+
+impl Deref for ThreadManagementService {
+    type Target = ThreadManagementCore;
+
+    fn deref(&self) -> &ThreadManagementCore {
+        &self.core
+    }
 }
 
 impl ThreadManagementService {
@@ -399,24 +416,77 @@ impl ThreadManagementService {
         hooks: Arc<dyn OrchestrationHooks>,
     ) -> Self {
         Self {
-            executor,
-            orchestrator,
-            sessions,
-            settings,
-            receipts,
-            projects,
-            hooks,
-            stop_task_timeout: STOP_TASK_TIMEOUT,
+            core: Arc::new(ThreadManagementCore {
+                executor,
+                orchestrator,
+                sessions,
+                settings,
+                receipts,
+                projects,
+                hooks,
+                stop_task_timeout: STOP_TASK_TIMEOUT,
+            }),
             background: Mutex::new(JoinSet::new()),
         }
     }
 
     /// Overrides the 15 s bound on a provider's `stopTask` (tests).
     pub fn with_stop_task_timeout(mut self, timeout: Duration) -> Self {
-        self.stop_task_timeout = timeout;
+        Arc::get_mut(&mut self.core)
+            .expect("configured before the core is shared")
+            .stop_task_timeout = timeout;
         self
     }
 
+    /// Settles a thread. When the thread's own agent asks, it is mid-turn, so
+    /// the thread settles through `settle_after_run` once that turn ends.
+    pub async fn settle_thread(
+        self: &Arc<Self>,
+        thread_id: &ThreadId,
+        command_id: &CommandId,
+        by_own_agent: bool,
+    ) -> Result<SettleOutcome, ThreadManagementError> {
+        let shell = if by_own_agent {
+            self.orchestrator.get_thread_shell(thread_id).await?
+        } else {
+            None
+        };
+        if let Some(shell) = shell
+            && let Some(active_run_id) = shell.active_run_id.clone()
+        {
+            // The task holds the core, not the service: the service owns this
+            // JoinSet, so a task holding the service would keep it alive and
+            // never be aborted.
+            let core = Arc::clone(&self.core);
+            let mut background = self.background.lock();
+            // Reap finished settles so the set stays small.
+            while background.try_join_next().is_some() {}
+            background.spawn(async move {
+                if let Err(error) = core
+                    .settle_after_run(&shell.project_id, &shell.id, &active_run_id)
+                    .await
+                {
+                    tracing::warn!(%error, "settle after run failed");
+                }
+            });
+            return Ok(SettleOutcome::SettlesWhenTurnEnds);
+        }
+        let result = self
+            .dispatch(OrchestrationV2ServerCommand::Client(
+                OrchestrationV2Command::ThreadSettle {
+                    command_id: command_id.clone(),
+                    thread_id: thread_id.clone(),
+                    settled_at: None,
+                },
+            ))
+            .await?;
+        Ok(SettleOutcome::Settled {
+            sequence: result.sequence,
+        })
+    }
+}
+
+impl ThreadManagementCore {
     pub fn orchestrator(&self) -> &Arc<dyn OrchestratorPort> {
         &self.orchestrator
     }
@@ -1084,50 +1154,6 @@ impl ThreadManagementService {
         ))
         .await?;
         Ok(())
-    }
-
-    /// Settles a thread. When the thread's own agent asks, it is mid-turn, so
-    /// the thread settles through `settle_after_run` once that turn ends.
-    pub async fn settle_thread(
-        self: &Arc<Self>,
-        thread_id: &ThreadId,
-        command_id: &CommandId,
-        by_own_agent: bool,
-    ) -> Result<SettleOutcome, ThreadManagementError> {
-        let shell = if by_own_agent {
-            self.orchestrator.get_thread_shell(thread_id).await?
-        } else {
-            None
-        };
-        if let Some(shell) = shell
-            && let Some(active_run_id) = shell.active_run_id.clone()
-        {
-            let service = Arc::clone(self);
-            let mut background = self.background.lock();
-            // Reap finished settles so the set stays small.
-            while background.try_join_next().is_some() {}
-            background.spawn(async move {
-                if let Err(error) = service
-                    .settle_after_run(&shell.project_id, &shell.id, &active_run_id)
-                    .await
-                {
-                    tracing::warn!(%error, "settle after run failed");
-                }
-            });
-            return Ok(SettleOutcome::SettlesWhenTurnEnds);
-        }
-        let result = self
-            .dispatch(OrchestrationV2ServerCommand::Client(
-                OrchestrationV2Command::ThreadSettle {
-                    command_id: command_id.clone(),
-                    thread_id: thread_id.clone(),
-                    settled_at: None,
-                },
-            ))
-            .await?;
-        Ok(SettleOutcome::Settled {
-            sequence: result.sequence,
-        })
     }
 
     pub async fn interrupt_thread(

@@ -6,6 +6,13 @@ PM (Claude Opus 5.5) owns this file. Agents don't edit it; they report back.
 
 ## Roster and budget
 
+**Current policy (user, 2026-10-15 ~23:55 UTC; supersedes the table below):**
+- Claude-plan usage is scarce, Cursor usage is plentiful. Implementation goes through the `cursor` provider: `composer-2.5` (bulk ports), `claude-sonnet-5-5` (hard ports, UI, critical path), `grok-4.7` (backend). No cap on Sonnet.
+- `claudeAgent` Haiku: Workflow QC and small fixes only. PM (Opus) stays lean.
+- Never Codex. Pushing to GitHub (origin) is allowed. Cloud agents only if the Mac is truly resource-bound.
+- Never interrupt running threads to switch models; switch on the next continuation.
+- Builds: rustc-throttle (5 slots) + sccache shared cache (`sccache.noindex`, 20G).
+
 | Agent | Model | Cost | Use for |
 |---|---|---|---|
 | PM | Claude Opus 5.5 | $$$$ | Planning, briefs, merges, conflict calls. No implementation. |

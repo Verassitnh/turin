@@ -119,10 +119,8 @@ fn token_at(text: &str, start: usize) -> Option<(usize, &str)> {
     if start == 0 {
         candidates.push(0);
     }
-    if let Some(ch) = char_at(text, start) {
-        if is_js_whitespace_char(ch) {
-            candidates.push(start + ch.len_utf8());
-        }
+    if let Some(ch) = char_at(text, start).filter(|ch| is_js_whitespace_char(*ch)) {
+        candidates.push(start + ch.len_utf8());
     }
     candidates.into_iter().find_map(|currency_at| {
         let currency = char_at(text, currency_at).filter(|ch| is_currency(*ch))?;

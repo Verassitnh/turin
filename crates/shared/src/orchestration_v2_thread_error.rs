@@ -84,7 +84,7 @@ pub fn latest_executed_run<R: RunOrder>(runs: &[R]) -> Option<&R> {
         if run.status() == OrchestrationV2RunStatus::Cancelled && !run.started() {
             continue;
         }
-        if latest.map_or(true, |current| run_ran_after(run, current)) {
+        if latest.is_none_or(|current| run_ran_after(run, current)) {
             latest = Some(run);
         }
     }
@@ -99,7 +99,7 @@ pub fn latest_unheld_run<R: RunOrder>(runs: &[R]) -> Option<&R> {
         if run.status() == OrchestrationV2RunStatus::Queued && run.queue_held() {
             continue;
         }
-        if latest.map_or(true, |current| run.ordinal() > current.ordinal()) {
+        if latest.is_none_or(|current| run.ordinal() > current.ordinal()) {
             latest = Some(run);
         }
     }

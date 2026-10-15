@@ -147,7 +147,7 @@ pub fn pending_background_turn_items<'a>(
                 && item
                     .run_id
                     .as_deref()
-                    .map_or(true, |run_id| !rolled_back_run_ids.contains(&run_id))
+                    .is_none_or(|run_id| !rolled_back_run_ids.contains(&run_id))
         })
         .collect()
 }
@@ -303,7 +303,7 @@ pub fn derive_pending_background_work(
     let provider_threads = input.provider_threads.iter().filter(|thread| {
         input
             .active_provider_thread_id
-            .map_or(true, |active| thread.id == active)
+            .is_none_or(|active| thread.id == active)
     });
     for provider_thread in provider_threads {
         for task in provider_thread.pending_background_tasks.iter().flatten() {

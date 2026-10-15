@@ -24,9 +24,9 @@ use turin_contracts::orchestration_v2::{
     OrchestrationV2ProviderRef, OrchestrationV2ProviderSession,
     OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
     OrchestrationV2ProviderThreadDisposition, OrchestrationV2ProviderThreadStatus,
-    OrchestrationV2RuntimeRequest, OrchestrationV2RuntimeRequestKind,
-    OrchestrationV2RuntimeRequestStatus, OrchestrationV2ResponseCapability, OrchestrationV2TurnItem,
-    OrchestrationV2TurnItemStatus,
+    OrchestrationV2ResponseCapability, OrchestrationV2RuntimeRequest,
+    OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
+    OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
 };
 use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceId};
 use turin_contracts::provider_policy::ProviderApprovalDecision;
@@ -42,8 +42,8 @@ use turin_provider_core::provider_adapter::{
     ProviderAdapterV2InterruptInput, ProviderAdapterV2OpenSessionInput,
     ProviderAdapterV2ReadThreadSnapshotInput, ProviderAdapterV2ResumeThreadInput,
     ProviderAdapterV2RollbackThreadInput, ProviderAdapterV2RuntimeRequestResponseInput,
-    ProviderAdapterV2SteerInput, ProviderAdapterV2TurnInput,
-    ProviderAdapterV2TurnTerminalStatus, ProviderEventStream, ProviderSessionRuntime,
+    ProviderAdapterV2SteerInput, ProviderAdapterV2TurnInput, ProviderAdapterV2TurnTerminalStatus,
+    ProviderEventStream, ProviderSessionRuntime,
 };
 use turin_provider_core::selection_transition::{
     ProviderSelectionTransitionInput, ProviderSelectionTransitionPlan, acp_selection_transition,
@@ -244,8 +244,7 @@ impl CursorSession {
     pub fn from_client(client: AcpClient, cursor_home: Option<PathBuf>) -> Self {
         let instance_id = ProviderInstanceId::new("cursor").expect("cursor instance id");
         let driver = ProviderDriverKind::new("cursor").expect("cursor driver slug");
-        let provider_session_id =
-            derive::provider_session(&instance_id);
+        let provider_session_id = derive::provider_session(&instance_id);
         Self::from_client_with(
             client,
             cursor_home,
@@ -274,12 +273,11 @@ impl CursorSession {
             driver: driver.clone(),
             provider_instance_id: instance_id.clone(),
             status: OrchestrationV2ProviderSessionStatus::Starting,
-            cwd: TrimmedNonEmptyString::new(&cwd).unwrap_or_else(|_| {
-                TrimmedNonEmptyString::new("/").expect("slash cwd")
-            }),
+            cwd: TrimmedNonEmptyString::new(&cwd)
+                .unwrap_or_else(|_| TrimmedNonEmptyString::new("/").expect("slash cwd")),
             model,
             capabilities: capabilities::cursor_capabilities(),
-            created_at: now.clone(),
+            created_at: now,
             updated_at: now,
             last_error: None,
         };
@@ -620,7 +618,6 @@ impl CursorSession {
             ))
         }
     }
-
 }
 
 impl CursorSession {
@@ -672,7 +669,7 @@ impl CursorSession {
             context_usage: None,
             native_metadata: None,
             goal: None,
-            created_at: now.clone(),
+            created_at: now,
             updated_at: now,
         };
         *self.inner.provider_thread.lock().expect("provider thread") = Some(thread.clone());
@@ -717,8 +714,10 @@ impl CursorSession {
         } else {
             OrchestrationV2ProviderThreadDisposition::Reusable
         };
-        let _ = self.inner.provider_events.send(
-            ProviderAdapterV2Event::TurnTerminal {
+        let _ = self
+            .inner
+            .provider_events
+            .send(ProviderAdapterV2Event::TurnTerminal {
                 driver: self.inner.driver.clone(),
                 provider_thread_id: provider_thread_id.clone(),
                 provider_turn_id: provider_turn_id.clone(),
@@ -730,8 +729,7 @@ impl CursorSession {
                 retry: None,
                 retry_started_at: None,
                 thread_disposition: disposition,
-            },
-        );
+            });
     }
 
     fn cancel_waiters(&self) {
@@ -782,9 +780,8 @@ fn rollback_checkpoint(
 }
 
 fn map_error(kind: ProviderAdapterErrorKind, error: CursorError) -> ProviderAdapterV2Error {
-    ProviderAdapterV2Error::new(kind).with_cause(
-        ProviderFailureCause::tagged("CursorError").with_message(error.to_string()),
-    )
+    ProviderAdapterV2Error::new(kind)
+        .with_cause(ProviderFailureCause::tagged("CursorError").with_message(error.to_string()))
 }
 
 fn emit_runtime_request(
@@ -861,8 +858,8 @@ fn emit_update(inner: &SessionInner, update: &CursorUpdate) {
             ordinal,
             status: OrchestrationV2TurnItemStatus::Completed,
             title: None,
-            started_at: Some(now.clone()),
-            completed_at: Some(now.clone()),
+            started_at: Some(now),
+            completed_at: Some(now),
             updated_at: now,
             message_id: derive::message_from_provider_item(&inner.driver, &native),
             text: text.clone(),
@@ -885,8 +882,8 @@ fn emit_update(inner: &SessionInner, update: &CursorUpdate) {
             ordinal,
             status: OrchestrationV2TurnItemStatus::Completed,
             title: None,
-            started_at: Some(now.clone()),
-            completed_at: Some(now.clone()),
+            started_at: Some(now),
+            completed_at: Some(now),
             updated_at: now,
             text: text.clone(),
             streaming: true,
@@ -992,11 +989,7 @@ impl ProviderSessionRuntime for CursorSession {
     }
 
     fn events(&self) -> ProviderEventStream {
-        let receiver = self
-            .provider_events
-            .lock()
-            .expect("provider events")
-            .take();
+        let receiver = self.provider_events.lock().expect("provider events").take();
         match receiver {
             Some(rx) => Box::pin(unfold(rx, |mut rx| async move {
                 let event = rx.recv().await?;
@@ -1201,7 +1194,13 @@ impl ProviderSessionRuntime for CursorSession {
             .copied();
         let reply = match kind {
             Some(PendingKind::Ask) => {
-                let params = self.inner.asks.lock().expect("asks").get(request_id).cloned();
+                let params = self
+                    .inner
+                    .asks
+                    .lock()
+                    .expect("asks")
+                    .get(request_id)
+                    .cloned();
                 let cancelled = input.decision == Some(ProviderApprovalDecision::Cancel);
                 let disposition = match params {
                     Some(params) => extensions::ask_disposition_from_answers(
@@ -1222,16 +1221,15 @@ impl ProviderSessionRuntime for CursorSession {
             }
             _ => OrchestrationV2RuntimeRequestKind::Permission,
         };
-        self.answer_request(request_id, reply)
-            .map_err(|error| {
-                map_error(
-                    ProviderAdapterErrorKind::RuntimeRequestResponse {
-                        driver: self.inner.driver.clone(),
-                        request_id: input.request_id.clone(),
-                    },
-                    error,
-                )
-            })?;
+        self.answer_request(request_id, reply).map_err(|error| {
+            map_error(
+                ProviderAdapterErrorKind::RuntimeRequestResponse {
+                    driver: self.inner.driver.clone(),
+                    request_id: input.request_id.clone(),
+                },
+                error,
+            )
+        })?;
         self.inner
             .pending_kind
             .lock()
@@ -1256,8 +1254,10 @@ impl ProviderSessionRuntime for CursorSession {
     async fn read_thread_snapshot(
         &self,
         input: ProviderAdapterV2ReadThreadSnapshotInput,
-    ) -> Result<turin_provider_core::provider_adapter::ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>
-    {
+    ) -> Result<
+        turin_provider_core::provider_adapter::ProviderAdapterV2ThreadSnapshot,
+        ProviderAdapterV2Error,
+    > {
         Err(ProviderAdapterV2Error::new(
             ProviderAdapterErrorKind::ReadThreadSnapshot {
                 driver: self.inner.driver.clone(),
@@ -1269,8 +1269,10 @@ impl ProviderSessionRuntime for CursorSession {
     async fn rollback_thread(
         &self,
         input: ProviderAdapterV2RollbackThreadInput,
-    ) -> Result<turin_provider_core::provider_adapter::ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>
-    {
+    ) -> Result<
+        turin_provider_core::provider_adapter::ProviderAdapterV2ThreadSnapshot,
+        ProviderAdapterV2Error,
+    > {
         Err(ProviderAdapterV2Error::new(
             ProviderAdapterErrorKind::RollbackThread {
                 driver: self.inner.driver.clone(),

@@ -86,9 +86,8 @@ impl ProviderDriver for CursorDriver {
         &self,
         input: ProviderDriverCreateInput,
     ) -> Result<ProviderInstance, ProviderDriverError> {
-        let settings = CursorSettings::from_value(input.config.clone()).map_err(|error| {
-            driver_error(&self.kind, &input.instance_id, error.to_string())
-        })?;
+        let settings = CursorSettings::from_value(input.config.clone())
+            .map_err(|error| driver_error(&self.kind, &input.instance_id, error.to_string()))?;
         let adapter = CursorAdapter::from_settings(input.instance_id.clone(), &settings);
         let snapshot = CursorSnapshot {
             provider: snapshot_provider(&input, &self.kind, settings.enabled && input.enabled),
@@ -277,7 +276,12 @@ mod tests {
         assert!(!capabilities.threads.can_fork_thread);
         assert!(!capabilities.turns.supports_active_steering);
         assert_eq!(
-            instance.snapshot.get_snapshot().await.draft.supports_text_generation,
+            instance
+                .snapshot
+                .get_snapshot()
+                .await
+                .draft
+                .supports_text_generation,
             Some(false)
         );
 

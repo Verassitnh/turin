@@ -12,9 +12,10 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex as StdMutex};
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use tokio::task::JoinHandle;
 
@@ -47,7 +48,7 @@ struct Inner {
 }
 
 struct CheckpointNotify {
-    lock: Mutex<()>,
+    lock: StdMutex<()>,
     cv: Condvar,
     stop: AtomicBool,
     pending: AtomicBool,
@@ -97,7 +98,7 @@ impl Db {
         let opened = AbortOnDrop::new(tokio::task::spawn_blocking(move || open_file(&path)))
             .join()
             .await
-            .map_err(|_| PersistenceError::Closed)??;
+            .map_err(join_error)??;
         Ok(opened)
     }
 
@@ -105,7 +106,7 @@ impl Db {
         let opened = AbortOnDrop::new(tokio::task::spawn_blocking(open_memory))
             .join()
             .await
-            .map_err(|_| PersistenceError::Closed)??;
+            .map_err(join_error)??;
         Ok(opened)
     }
 
@@ -126,7 +127,7 @@ impl Db {
     {
         let inner = Arc::clone(&self.inner);
         let value = AbortOnDrop::new(tokio::task::spawn_blocking(move || {
-            let mut conn = lock_mutex(&inner.writer)?;
+            let mut conn = inner.writer.lock();
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|err| PersistenceError::sql("sqlite.begin", &err))?;
@@ -137,7 +138,7 @@ impl Db {
         }))
         .join()
         .await
-        .map_err(|_| PersistenceError::Closed)??;
+        .map_err(join_error)??;
         self.inner.checkpoint_notify.kick();
         Ok(value)
     }
@@ -151,15 +152,15 @@ impl Db {
         let inner = Arc::clone(&self.inner);
         AbortOnDrop::new(tokio::task::spawn_blocking(move || {
             if let Some(reader) = &inner.reader {
-                let conn = lock_mutex(reader)?;
+                let conn = reader.lock();
                 return f(&conn);
             }
-            let conn = lock_mutex(&inner.writer)?;
+            let conn = inner.writer.lock();
             f(&conn)
         }))
         .join()
         .await
-        .map_err(|_| PersistenceError::Closed)?
+        .map_err(join_error)?
     }
 }
 
@@ -169,17 +170,30 @@ impl Drop for Inner {
         self.checkpoint_notify.cv.notify_one();
         // `checkpoint` is dropped first by field order only if declared first.
         // Take it explicitly so its thread joins before the connections close.
-        drop(self.checkpoint.lock().ok().and_then(|mut slot| slot.take()));
+        drop(self.checkpoint.lock().take());
     }
 }
 
-fn lock_mutex<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, PersistenceError> {
-    mutex.lock().map_err(|_| {
-        PersistenceError::migration(
-            crate::errors::MigrationErrorKind::Failed,
-            "SQLite connection lock poisoned",
-        )
-    })
+fn join_error(err: tokio::task::JoinError) -> PersistenceError {
+    if !err.is_panic() {
+        return PersistenceError::Closed;
+    }
+    let rendered = err.to_string();
+    let message = match err.try_into_panic() {
+        Ok(payload) => panic_message(payload.as_ref()).unwrap_or(rendered),
+        Err(err) => err.to_string(),
+    };
+    PersistenceError::Panicked { message }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> Option<String> {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return Some((*message).to_owned());
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return Some(message.clone());
+    }
+    None
 }
 
 fn open_file(path: &Path) -> Result<Db, PersistenceError> {
@@ -198,7 +212,7 @@ fn open_file(path: &Path) -> Result<Db, PersistenceError> {
     finish_writer(&writer)?;
     let reader = open_reader(path);
     let notify = Arc::new(CheckpointNotify {
-        lock: Mutex::new(()),
+        lock: StdMutex::new(()),
         cv: Condvar::new(),
         stop: AtomicBool::new(false),
         pending: AtomicBool::new(false),
@@ -224,7 +238,7 @@ fn open_memory() -> Result<Db, PersistenceError> {
             writer: Mutex::new(writer),
             reader: None,
             checkpoint_notify: Arc::new(CheckpointNotify {
-                lock: Mutex::new(()),
+                lock: StdMutex::new(()),
                 cv: Condvar::new(),
                 stop: AtomicBool::new(false),
                 pending: AtomicBool::new(false),

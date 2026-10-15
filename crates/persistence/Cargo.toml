@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+parking_lot.workspace = true
 regex.workspace = true
 rusqlite = { workspace = true, features = ["backup"] }
 serde.workspace = true

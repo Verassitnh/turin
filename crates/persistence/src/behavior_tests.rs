@@ -724,6 +724,21 @@ async fn high_water_and_command_reads_use_their_indexes() {
 }
 
 #[tokio::test]
+async fn a_panicking_write_does_not_poison_the_connection() {
+    let db = memory_db().await;
+    let err = db
+        .write(|_| -> Result<(), PersistenceError> { panic!("boom") })
+        .await
+        .unwrap_err();
+    match err {
+        PersistenceError::Panicked { message } => assert!(message.contains("boom"), "{message}"),
+        other => panic!("expected a panic error, got {other}"),
+    }
+    db.write(|_| Ok(())).await.unwrap();
+    db.read(|_| Ok(())).await.unwrap();
+}
+
+#[tokio::test]
 async fn releases_consumed_application_replay_pages() {
     let store = memory_store().await;
     store

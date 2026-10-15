@@ -9,4 +9,5 @@ pub mod projection_reads;
 pub mod provider_event_ingestor;
 pub mod provider_session_manager;
 pub mod provider_session_transition_policy;
+pub mod restart_background_note;
 pub mod session_sink;

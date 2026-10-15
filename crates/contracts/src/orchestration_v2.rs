@@ -3279,10 +3279,10 @@ pub mod projected_turn_item_array {
         let raw = Vec::<serde_json::Value>::deserialize(d)?;
         let mut rows = Vec::with_capacity(raw.len());
         for value in raw {
-            if let Some(item) = value.get("item") {
-                if is_unknown_turn_item(item) {
-                    continue;
-                }
+            if let Some(item) = value.get("item")
+                && is_unknown_turn_item(item)
+            {
+                continue;
             }
             rows.push(serde_json::from_value(value).map_err(serde::de::Error::custom)?);
         }
@@ -7671,8 +7671,8 @@ mod tests {
         }))
         .unwrap();
         assert!(provider_thread.pending_background_tasks.is_empty());
-        assert_eq!(provider_thread.native_metadata, Some(None));
-        assert_eq!(provider_thread.goal, Some(None));
+        assert_eq!(provider_thread.native_metadata, None);
+        assert_eq!(provider_thread.goal, None);
         // (Upstream also asserts contextUsage is null here; that field is
         // dropped until providerRuntime lands — see the module note.)
 
@@ -7695,8 +7695,8 @@ mod tests {
         }))
         .unwrap();
         assert!(runtime_thread.pending_background_tasks.is_empty());
-        assert_eq!(runtime_thread.native_metadata, Some(None));
-        assert_eq!(runtime_thread.goal, Some(None));
+        assert_eq!(runtime_thread.native_metadata, None);
+        assert_eq!(runtime_thread.goal, None);
     }
 
     #[test]

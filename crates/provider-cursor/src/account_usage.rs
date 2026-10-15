@@ -1232,6 +1232,115 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn reads_past_one_hundred_pages_until_a_short_page() {
+        let access = token("auth|demo");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::json!({"accessToken": access}).to_string(),
+        )
+        .unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_task = Arc::clone(&requests);
+        let client = script(move |_| {
+            let seen = requests_task.fetch_add(1, Ordering::SeqCst) + 1;
+            let length = if seen <= 100 { 1000 } else { 1 };
+            let events: Vec<Value> = (0..length)
+                .map(|_| serde_json::json!({"tokenUsage": null}))
+                .collect();
+            async move {
+                Ok(json_response(
+                    200,
+                    serde_json::json!({
+                        "totalUsageEventsCount": 100_001,
+                        "usageEventsDisplay": events
+                    }),
+                ))
+            }
+        });
+        let result = read_cursor_account_usage(
+            CredentialSource::File(path),
+            0.0,
+            1_781_000_000_000.0,
+            client,
+        )
+        .await;
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(requests.load(Ordering::SeqCst), 101);
+        assert!(result.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn full_page_at_the_reported_count_still_needs_a_terminal_page() {
+        let access = token("auth|demo");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::json!({"accessToken": access}).to_string(),
+        )
+        .unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_task = Arc::clone(&requests);
+        let client = script(move |_| {
+            let seen = requests_task.fetch_add(1, Ordering::SeqCst) + 1;
+            let body = if seen == 1 {
+                let events: Vec<Value> = (0..1000)
+                    .map(|index| {
+                        serde_json::json!({
+                            "timestamp": (1_780_000_000_000u64 + index).to_string(),
+                            "model": "gpt-5",
+                            "tokenUsage": {"inputTokens": 10, "outputTokens": 5}
+                        })
+                    })
+                    .collect();
+                serde_json::json!({"totalUsageEventsCount": 1000, "usageEventsDisplay": events})
+            } else {
+                serde_json::json!({"totalUsageEventsCount": 1000})
+            };
+            async move { Ok(json_response(200, body)) }
+        });
+        let result = read_cursor_account_usage(
+            CredentialSource::File(path),
+            0.0,
+            1_781_000_000_000.0,
+            client,
+        )
+        .await;
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.records.len(), 1000);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn truncated_pages_are_not_presented_as_complete_history() {
+        let access = token("auth|demo");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::json!({"accessToken": access}).to_string(),
+        )
+        .unwrap();
+        let client = script(|_| async {
+            Ok(json_response(
+                200,
+                serde_json::json!({"totalUsageEventsCount": 101, "usageEventsDisplay": []}),
+            ))
+        });
+        let result = read_cursor_account_usage(
+            CredentialSource::File(path),
+            0.0,
+            1_781_000_000_000.0,
+            client,
+        )
+        .await;
+        assert!(result.error.is_some());
+        assert!(result.records.is_empty());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn read_that_never_answers_keeps_the_account_key() {
         let access = token("auth|demo");

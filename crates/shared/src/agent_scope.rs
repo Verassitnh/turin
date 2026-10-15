@@ -7,8 +7,7 @@
 pub const AGENT_OOM_SCORE_ADJ: u16 = 800;
 
 /// Shell line that raises the score of the current process, ignoring failure.
-pub const RAISE_OOM_SCORE_LINE: &str =
-    "{ echo 800 >/proc/self/oom_score_adj; } 2>/dev/null";
+pub const RAISE_OOM_SCORE_LINE: &str = "{ echo 800 >/proc/self/oom_score_adj; } 2>/dev/null";
 
 const LAUNCH_SCRIPT: &str = "{ echo 800 >/proc/self/oom_score_adj; } 2>/dev/null\nexec \"$@\"";
 
@@ -46,7 +45,8 @@ pub fn agent_scope_command(
     args: &[impl AsRef<str>],
     scope: Option<&AgentSystemdScope>,
 ) -> AgentScopeCommand {
-    let tail = std::iter::once(command.to_owned()).chain(args.iter().map(|arg| arg.as_ref().to_owned()));
+    let tail =
+        std::iter::once(command.to_owned()).chain(args.iter().map(|arg| arg.as_ref().to_owned()));
     match scope {
         None => AgentScopeCommand {
             command: "/bin/sh".to_owned(),
@@ -90,7 +90,7 @@ mod tests {
         assert_eq!(command.command, "claude");
         assert_eq!(command.args, ["--resume"]);
         assert!(!default_oom_killed("thread"));
-        assert_eq!(RAISE_OOM_SCORE_LINE.contains("800"), true);
+        assert!(RAISE_OOM_SCORE_LINE.contains("800"));
         assert_eq!(AGENT_OOM_SCORE_ADJ, 800);
     }
 
@@ -121,7 +121,11 @@ mod tests {
         };
         let launch = agent_scope_command("claude", &["--resume"], Some(&scope));
         assert_eq!(launch.args[3], "/run/user/1");
-        assert!(launch.args.contains(&"--property=OOMPolicy=stop".to_owned()));
+        assert!(
+            launch
+                .args
+                .contains(&"--property=OOMPolicy=stop".to_owned())
+        );
         assert!(launch.args.contains(&"--slice=t3-agents.slice".to_owned()));
         assert_eq!(launch.args[launch.args.len() - 2], "claude");
         assert_eq!(launch.args[launch.args.len() - 1], "--resume");

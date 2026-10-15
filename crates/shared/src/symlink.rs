@@ -28,10 +28,7 @@ pub fn resolve_symlink_target(file_path: &Path) -> io::Result<PathBuf> {
 
 fn is_not_a_symlink(error: &io::Error) -> bool {
     // Node reports a missing path as NotFound and a non-link as EINVAL.
-    matches!(
-        error.kind(),
-        ErrorKind::NotFound | ErrorKind::InvalidInput
-    )
+    matches!(error.kind(), ErrorKind::NotFound | ErrorKind::InvalidInput)
 }
 
 fn lexical_absolute(path: &Path) -> io::Result<PathBuf> {
@@ -62,9 +59,11 @@ fn normalize_lexical(path: &Path) -> PathBuf {
             Component::RootDir => out.push(Component::RootDir),
             Component::CurDir => {}
             Component::ParentDir => {
-                if out.components().next_back().is_some_and(|part| {
-                    matches!(part, Component::Normal(_))
-                }) {
+                if out
+                    .components()
+                    .next_back()
+                    .is_some_and(|part| matches!(part, Component::Normal(_)))
+                {
                     out.pop();
                 }
             }
@@ -101,7 +100,12 @@ mod tests {
         std::os::unix::fs::symlink(&linked_state, home.join("state")).unwrap();
         let link = home.join("state/settings.json");
         std::os::unix::fs::symlink("../config/settings.json", &link).unwrap();
-        assert_eq!(resolve_symlink_target(&link).unwrap(), destination);
+        // macOS temp dirs sit behind `/var` -> `/private/var`; upstream's
+        // realPath resolves the link's directory, so compare canonical paths.
+        assert_eq!(
+            resolve_symlink_target(&link).unwrap(),
+            fs::canonicalize(&destination).unwrap()
+        );
     }
 
     #[test]

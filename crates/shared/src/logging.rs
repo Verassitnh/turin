@@ -3,8 +3,8 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::Mutex;
 
@@ -68,6 +68,7 @@ impl std::fmt::Display for RotatingFileSinkOpenError {
 
 impl std::error::Error for RotatingFileSinkOpenError {}
 
+#[derive(Debug)]
 pub struct RotatingFileSink {
     file_path: PathBuf,
     max_bytes: u64,
@@ -118,7 +119,9 @@ impl RotatingFileSink {
         };
         sink.prune_overflow_backups()
             .map_err(RotatingFileSinkOpenError::Io)?;
-        let current_size = sink.read_current_size().map_err(RotatingFileSinkOpenError::Io)?;
+        let current_size = sink
+            .read_current_size()
+            .map_err(RotatingFileSinkOpenError::Io)?;
         Ok(Self {
             current_size,
             ..sink
@@ -218,10 +221,10 @@ impl RotatingFileSink {
             if index <= self.max_files as i64 {
                 continue;
             }
-            if let Err(cause) = rm_force(&entry.path()) {
-                if self.throw_on_error {
-                    return Err(sink_error("prune", &self.file_path, cause));
-                }
+            if let Err(cause) = rm_force(&entry.path())
+                && self.throw_on_error
+            {
+                return Err(sink_error("prune", &self.file_path, cause));
             }
         }
         Ok(())
@@ -291,11 +294,8 @@ impl AsyncRotatingFileSink {
             state: Mutex::new(AsyncState { current_size: 0 }),
             fail_appends: AtomicUsize::new(0),
         });
-        sink.prune()
-            .map_err(RotatingFileSinkOpenError::Io)?;
-        let size = sink
-            .read_size()
-            .map_err(RotatingFileSinkOpenError::Io)?;
+        sink.prune().map_err(RotatingFileSinkOpenError::Io)?;
+        let size = sink.read_size().map_err(RotatingFileSinkOpenError::Io)?;
         sink.state.lock().await.current_size = size;
         Ok(sink)
     }
@@ -305,7 +305,10 @@ impl AsyncRotatingFileSink {
         self.fail_appends.store(count, Ordering::SeqCst);
     }
 
-    pub async fn write(self: &Arc<Self>, chunk: impl AsRef<[u8]>) -> Result<(), RotatingFileSinkError> {
+    pub async fn write(
+        self: &Arc<Self>,
+        chunk: impl AsRef<[u8]>,
+    ) -> Result<(), RotatingFileSinkError> {
         let buffer = chunk.as_ref().to_vec();
         let mut state = self.state.lock().await;
         if buffer.is_empty() {
@@ -321,10 +324,10 @@ impl AsyncRotatingFileSink {
             Ok(())
         }
         .await;
-        if written.is_err() {
-            if let Ok(size) = self.read_size() {
-                state.current_size = size;
-            }
+        if written.is_err()
+            && let Ok(size) = self.read_size()
+        {
+            state.current_size = size;
         }
         written
     }
@@ -372,7 +375,8 @@ impl AsyncRotatingFileSink {
         let Some(base_name) = self.file_path.file_name().and_then(|name| name.to_str()) else {
             return Ok(());
         };
-        for entry in fs::read_dir(parent).map_err(|cause| sink_error("prune", &self.file_path, cause))?
+        for entry in
+            fs::read_dir(parent).map_err(|cause| sink_error("prune", &self.file_path, cause))?
         {
             let entry = entry.map_err(|cause| sink_error("prune", &self.file_path, cause))?;
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
@@ -405,7 +409,11 @@ fn suffixed(path: &Path, index: u64) -> PathBuf {
     PathBuf::from(format!("{}.{}", path.display(), index))
 }
 
-fn sink_error(operation: &'static str, file_path: &Path, cause: io::Error) -> RotatingFileSinkError {
+fn sink_error(
+    operation: &'static str,
+    file_path: &Path,
+    cause: io::Error,
+) -> RotatingFileSinkError {
     RotatingFileSinkError {
         operation,
         file_path: file_path.to_path_buf(),
@@ -427,9 +435,10 @@ fn rm_force(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
-        Ok(metadata) if metadata.is_dir() => {
-            Err(io::Error::new(io::ErrorKind::IsADirectory, "is a directory"))
-        }
+        Ok(metadata) if metadata.is_dir() => Err(io::Error::new(
+            io::ErrorKind::IsADirectory,
+            "is a directory",
+        )),
         Ok(_) => fs::remove_file(path),
     }
 }
@@ -466,7 +475,10 @@ mod tests {
             assert_eq!(error.option, option);
             assert_eq!(error.received, 0);
             assert_eq!(error.minimum, 1);
-            assert_eq!(error.to_string(), format!("{option} must be >= 1 (received 0)"));
+            assert_eq!(
+                error.to_string(),
+                format!("{option} must be >= 1 (received 0)")
+            );
         }
     }
 
@@ -495,11 +507,7 @@ mod tests {
         };
         assert_eq!(error.operation, "read");
         assert_eq!(error.file_path, file_path);
-        assert_eq!(
-            error.cause.raw_os_error(),
-            Some(63),
-            "ENAMETOOLONG"
-        );
+        assert_eq!(error.cause.raw_os_error(), Some(63), "ENAMETOOLONG");
     }
 
     #[test]
@@ -516,8 +524,7 @@ mod tests {
         let directory = temp_dir();
         let file_path = directory.path().join("log.ndjson");
         fs::create_dir(&file_path).unwrap();
-        let mut sink =
-            RotatingFileSink::open(&file_path, 9_007_199_254_740_991, 1, true).unwrap();
+        let mut sink = RotatingFileSink::open(&file_path, 9_007_199_254_740_991, 1, true).unwrap();
         let error = sink.write("entry").unwrap_err();
         assert_eq!(error.operation, "write");
         assert_eq!(error.file_path, file_path);
@@ -569,9 +576,7 @@ mod tests {
         let directory = temp_dir();
         let file_path = directory.path().join("async.log");
         fs::write(format!("{}.50", file_path.display()), "obsolete").unwrap();
-        let lines: Vec<String> = (0..100)
-            .map(|index| format!("{index:03}\n"))
-            .collect();
+        let lines: Vec<String> = (0..100).map(|index| format!("{index:03}\n")).collect();
         let sink = AsyncRotatingFileSink::open(&file_path, 32, 20)
             .await
             .unwrap();

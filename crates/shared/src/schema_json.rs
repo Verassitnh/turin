@@ -136,7 +136,11 @@ pub fn format_schema_error(reasons: &[SchemaReason]) -> String {
     truncate_diagnostic(&formatted, room) + &suffix
 }
 
-fn collect(issue: &SchemaIssue, path: &[SchemaPathKey], diagnostics: &mut Vec<DiagnosticIssue>) -> usize {
+fn collect(
+    issue: &SchemaIssue,
+    path: &[SchemaPathKey],
+    diagnostics: &mut Vec<DiagnosticIssue>,
+) -> usize {
     match issue {
         SchemaIssue::Encoding(inner) => return collect(inner, path, diagnostics),
         SchemaIssue::Filter(inner) if !matches!(inner.as_ref(), SchemaIssue::InvalidValue) => {
@@ -208,7 +212,10 @@ fn format_path_segment(key: &SchemaPathKey) -> String {
         SchemaPathKey::Index(index) => format!("[{index}]"),
         SchemaPathKey::Name(name) => {
             let truncated = truncate_diagnostic(name, MAX_SCHEMA_DIAGNOSTIC_PATH_SEGMENT_LENGTH);
-            format!("[{}]", serde_json::to_string(&truncated).unwrap_or_else(|_| "\"\"".into()))
+            format!(
+                "[{}]",
+                serde_json::to_string(&truncated).unwrap_or_else(|_| "\"\"".into())
+            )
         }
     }
 }
@@ -248,7 +255,10 @@ fn strip_lenient_json(input: &str) -> String {
             if captures.get(1).is_some() {
                 captures.get(0).unwrap().as_str().to_owned()
             } else {
-                captures.get(2).map(|group| group.as_str().to_owned()).unwrap_or_default()
+                captures
+                    .get(2)
+                    .map(|group| group.as_str().to_owned())
+                    .unwrap_or_default()
             }
         })
         .into_owned()
@@ -283,7 +293,9 @@ mod tests {
     #[test]
     fn ignores_braces_inside_strings() {
         assert_eq!(
-            extract_json_object("prefix {\"message\":\"literal } brace\",\"nested\":{\"ok\":true}} suffix"),
+            extract_json_object(
+                "prefix {\"message\":\"literal } brace\",\"nested\":{\"ok\":true}} suffix"
+            ),
             "{\"message\":\"literal } brace\",\"nested\":{\"ok\":true}}"
         );
     }

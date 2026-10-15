@@ -3,6 +3,7 @@
 pub mod agent_awareness;
 pub mod agent_scope;
 pub mod array;
+pub mod assistant_citations;
 pub mod atomic_write;
 pub mod change_request_url;
 pub mod chat_list;

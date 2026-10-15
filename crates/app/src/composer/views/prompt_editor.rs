@@ -39,7 +39,7 @@ use crate::composer::views::block_flow::{
     build_inline_flow,
 };
 use crate::theme::color::with_alpha;
-use crate::theme::tokens::{LEADING_RELAXED, RADIUS_LG};
+use crate::theme::tokens::{LEADING_RELAXED, RADIUS_LG, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Icon, IconName};
 
@@ -1152,16 +1152,18 @@ impl PromptEditor {
                             ))
                             .flex()
                             .items_center()
-                            .gap(env.rem * 0.375)
+                            // ComposerCodeBlockLanguagePicker: Button `ghost-muted`,
+                            // size `xs` (`gap-1`, `sm:text-xs`, `font-medium`).
+                            .gap(rems(0.25))
                             .h(rems(1.5))
                             .px(rems(0.5))
                             .ml(rems(-0.5))
                             .rounded(px(6.))
                             .cursor(CursorStyle::PointingHand)
-                            .text_color(header_color)
-                            .font_family(env.mono.clone())
-                            .text_size(env.rem * 0.6875)
-                            .hover(|style| style.bg(theme.accent))
+                            .text_color(theme.muted_foreground)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_size(TEXT_XS.size)
+                            .hover(|style| style.bg(theme.accent).text_color(theme.foreground))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |_, event: &MouseDownEvent, _, cx| {
@@ -1179,9 +1181,10 @@ impl PromptEditor {
                             )
                             .child(div().max_w(rems(10.)).truncate().child(label))
                             .child(
+                                // `opacity-60` on the label color.
                                 Icon::new(IconName::ChevronDown)
                                     .size(rems(0.875))
-                                    .color(with_alpha(theme.foreground, 0.45).into()),
+                                    .color(with_alpha(theme.muted_foreground, 0.6).into()),
                             ),
                     ),
             )

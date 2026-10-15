@@ -13,6 +13,7 @@ pub mod sidebar_drag;
 pub mod sidebar_logic;
 pub mod sidebar_motion;
 pub mod sidebar_pointer;
+pub mod sidebar_snooze;
 pub mod sidebar_thread_header;
 
 use gpui_kit::prelude::FluentBuilder as _;

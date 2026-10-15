@@ -7,4 +7,6 @@ pub mod drag_region;
 pub mod project_monogram;
 pub mod right_panel_tabs;
 pub mod sidebar;
+pub mod thread_action_menu_logic;
+pub mod thread_search_match;
 pub mod thread_sidebar_width;

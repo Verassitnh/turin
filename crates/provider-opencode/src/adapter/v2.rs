@@ -143,13 +143,15 @@ struct V2Child {
     prompt: String,
     /// Executions started so far; upstream numbers the child's turns by it.
     turns: u64,
-    turn: Option<V2Turn>,
 }
 
 struct V2Inner {
     threads: HashMap<String, V2Thread>,
     /// Child sessions a `task` call revealed, by child session id.
     subagents: HashMap<String, V2Child>,
+    /// The turn each child session is running. Its own map, so revealing a grandchild can
+    /// borrow the subagents while a child's turn is borrowed.
+    child_turns: HashMap<String, V2Turn>,
     pending: HashMap<String, Pending>,
     children: HashMap<String, String>,
     windows: HashMap<String, u64>,
@@ -232,6 +234,7 @@ impl OpenCodeV2Session {
                 children: HashMap::new(),
                 windows: HashMap::new(),
                 subagents: HashMap::new(),
+                child_turns: HashMap::new(),
                 stream_dead: None,
                 wakes: HashMap::new(),
                 reports: HashMap::new(),
@@ -778,11 +781,20 @@ impl OpenCodeV2Session {
         {
             let mut guard = self.inner.lock();
             let inner: &mut V2Inner = &mut guard;
-            let Some(turn) = inner
+            // A thread's own turn, or a child session's turn. A child reveals no grandchild.
+            let is_root = inner
                 .threads
-                .get_mut(session_id)
-                .and_then(|thread| thread.active.as_mut())
-            else {
+                .get(session_id)
+                .is_some_and(|thread| thread.active.is_some());
+            let turn = if is_root {
+                inner
+                    .threads
+                    .get_mut(session_id)
+                    .and_then(|thread| thread.active.as_mut())
+            } else {
+                inner.child_turns.get_mut(session_id)
+            };
+            let Some(turn) = turn else {
                 return;
             };
             let status_name = state
@@ -840,7 +852,7 @@ impl OpenCodeV2Session {
                     .and_then(Value::as_str);
                 let subagent_node = derive::node_from_provider_item(&self.driver, call_id);
                 let mut child = None;
-                if let Some(child_session) = child_session {
+                if let Some(child_session) = child_session.filter(|_| is_root) {
                     inner
                         .children
                         .insert(child_session.to_owned(), session_id.to_owned());
@@ -1307,7 +1319,6 @@ impl OpenCodeV2Session {
                 parent_thread: parent.thread_id.clone(),
                 prompt: prompt.to_owned(),
                 turns: 0,
-                turn: None,
             },
         );
     }
@@ -1325,22 +1336,25 @@ impl OpenCodeV2Session {
             _ => return false,
         };
         let mut guard = self.inner.lock();
-        let Some(child) = guard.subagents.get_mut(session_id) else {
+        if !guard.subagents.contains_key(session_id) {
             return false;
-        };
+        }
         match end {
-            None => self.start_child_turn(child, session_id, UtcDateTime::now()),
-            Some(status) => self.finish_child_turn(child, status),
+            None => self.start_child_turn(&mut guard, session_id, UtcDateTime::now()),
+            Some(status) => self.finish_child_turn(&mut guard, session_id, status),
         }
         true
     }
 
     /// `startChildTurn`: an execution of the child opens its turn, under a `root_turn`. The
     /// task's prompt opens the conversation as a user message from the parent thread.
-    fn start_child_turn(&self, child: &mut V2Child, child_session: &str, now: UtcDateTime) {
-        if child.turn.is_some() {
+    fn start_child_turn(&self, inner: &mut V2Inner, child_session: &str, now: UtcDateTime) {
+        if inner.child_turns.contains_key(child_session) {
             return;
         }
+        let Some(child) = inner.subagents.get_mut(child_session) else {
+            return;
+        };
         child.turns += 1;
         let native_turn = format!("{child_session}:turn:{}", child.turns);
         let root = derive::node_from_provider_item(&self.driver, &format!("{native_turn}:root"));
@@ -1370,22 +1384,28 @@ impl OpenCodeV2Session {
         );
         let thread_id = child.thread.id.clone();
         let provider_thread_id = child.provider_thread.id.clone();
-        child.turn = Some(V2Turn {
-            provider_turn: provider_turn.clone(),
-            thread_id: thread_id.clone(),
-            run_ordinal: 0,
-            interrupted: false,
-            finalized: false,
-            usage: UsageAccum::new(),
-            item_ordinals: HashMap::new(),
-            next_item_ordinal: 1,
-            text_blocks: HashMap::new(),
-            tool_started: HashMap::new(),
-            compaction: None,
-            compactions: 0,
-            app_thread: child.thread.clone(),
-            before: None,
-        });
+        let child_app_thread = child.thread.clone();
+        let prompt = child.prompt.clone();
+        let parent_thread = child.parent_thread.clone();
+        inner.child_turns.insert(
+            child_session.to_owned(),
+            V2Turn {
+                provider_turn: provider_turn.clone(),
+                thread_id: thread_id.clone(),
+                run_ordinal: 0,
+                interrupted: false,
+                finalized: false,
+                usage: UsageAccum::new(),
+                item_ordinals: HashMap::new(),
+                next_item_ordinal: 1,
+                text_blocks: HashMap::new(),
+                tool_started: HashMap::new(),
+                compaction: None,
+                compactions: 0,
+                app_thread: child_app_thread,
+                before: None,
+            },
+        );
         self.emit(ProviderAdapterV2Event::NodeUpdated {
             driver: self.driver.clone(),
             node,
@@ -1395,13 +1415,14 @@ impl OpenCodeV2Session {
             thread_id: Some(thread_id.clone()),
             provider_turn,
         });
-        if child.prompt.is_empty() {
+        if prompt.is_empty() {
             return;
         }
         let native_prompt = format!("{native_turn}:prompt");
-        let prompt = child.prompt.clone();
-        let parent_thread = child.parent_thread.clone();
-        let turn = child.turn.as_mut().expect("the turn was just installed");
+        let turn = inner
+            .child_turns
+            .get_mut(child_session)
+            .expect("the turn was just installed");
         let ordinal = item_ordinal(turn, &native_prompt);
         let artifacts = make_subagent_conversation_artifacts(SubagentConversationArtifactsInput {
             message_id: derive::message_from_provider_item(&self.driver, &native_prompt),
@@ -1429,8 +1450,16 @@ impl OpenCodeV2Session {
 
     /// The end of a child's execution: its open text is final, its root node and provider turn
     /// settle with the terminal status (upstream `finishTurn` for a subagent).
-    fn finish_child_turn(&self, child: &mut V2Child, status: ProviderAdapterV2TurnTerminalStatus) {
-        let Some(mut turn) = child.turn.take() else {
+    fn finish_child_turn(
+        &self,
+        inner: &mut V2Inner,
+        child_session: &str,
+        status: ProviderAdapterV2TurnTerminalStatus,
+    ) {
+        let Some(mut turn) = inner.child_turns.remove(child_session) else {
+            return;
+        };
+        let Some(child) = inner.subagents.get(child_session) else {
             return;
         };
         let now = UtcDateTime::now();
@@ -2903,10 +2932,7 @@ fn active_turn_mut<'a>(inner: &'a mut V2Inner, session: &str) -> Option<&'a mut 
             .get_mut(session)
             .and_then(|thread| thread.active.as_mut());
     }
-    inner
-        .subagents
-        .get_mut(session)
-        .and_then(|child| child.turn.as_mut())
+    inner.child_turns.get_mut(session)
 }
 
 fn item_ordinal(turn: &mut V2Turn, native_id: &str) -> u64 {

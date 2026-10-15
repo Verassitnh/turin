@@ -2070,6 +2070,27 @@ async fn v2_child_execution_is_a_turn_under_a_root_turn_with_the_task_prompt() {
         .expect("text node");
     assert_eq!(text_node["node"]["rootNodeId"], root["node"]["id"]);
 
+    // The child's own tools land on its turn, not on the parent's.
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"evt3b","type":"session.tool.success","data":{"sessionID":"child_1","id":"call_b","name":"bash","status":"completed","input":{"command":"ls"},"output":"x"}}).to_string(),
+        )))
+        .unwrap();
+    let tool = events_until(&mut events, |value| {
+        value["type"] == "node.updated" && value["node"]["kind"] == "tool_call"
+    })
+    .await;
+    let tool_node = of_type(&tool, "node.updated")
+        .into_iter()
+        .find(|event| event["node"]["kind"] == "tool_call")
+        .expect("child tool node");
+    assert_eq!(
+        tool_node["node"]["threadId"],
+        json!(derive_thread("child_1"))
+    );
+    assert_eq!(tool_node["node"]["rootNodeId"], root["node"]["id"]);
+
     script
         .frames
         .send(Some(sse(

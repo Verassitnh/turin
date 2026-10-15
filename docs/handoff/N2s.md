@@ -17,7 +17,7 @@ Deviations are logged in `PORTING.md` (rows for each file below).
 | `ManagedProjectFolders.ts` | `managed_project_folders.rs` | 16 | 14 upstream cases + 2 helpers; real git; fake project service |
 | `ProjectFolderName` (from `shared/path.ts`) | `project_folder_name.rs` | 2 | local until the Rust `shared` crate ports `path.ts` |
 | `normalizeProjectPathFor{Dispatch,Comparison}` (`shared/path.ts`) | `project_path.rs` | 2 | local, same reason as above |
-| `KeyedLock` (from `shared/KeyedLock.ts`) | `keyed_lock.rs` | 1 | |
+| `KeyedLock` (from `shared/KeyedLock.ts`) | `turin_shared::keyed_lock` (the project crate's copy was removed after the QC fixes) | 0 | the cancel-safety test lives in `project_service.rs` |
 | `AgentSessionImporter.ts` | `agent_session_importer.rs` | 1 | all 1 upstream case; seams in `project_ports.rs` |
 | `AgentSessionScanner.ts`: model types, `recentThreads` trait | `agent_session_scanner.rs` | 0 | `AgentSessionScanner` trait, `AgentSessionRecentThread` outcomes |
 | `AgentSessionScanner.ts`: transcript parser | `agent_session_scanner.rs` | 16 | `parse_agent_session_transcript`; all pure upstream cases |

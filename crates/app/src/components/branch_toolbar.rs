@@ -60,7 +60,7 @@ use crate::theme::tokens::{self, RADIUS_SM, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::icon::{Icon, IconName};
 use crate::ui::middle_truncate::MiddleTruncate;
-use crate::ui::tooltip::{Tooltip, dropdown_glass_background, dropdown_glass_border};
+use crate::ui::tooltip::{Tooltip, dropdown_glass_border};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BranchToolbarLayout {
@@ -448,7 +448,7 @@ impl BranchToolbar {
             .rounded_lg()
             .border_1()
             .border_color(dropdown_glass_border(&theme))
-            .bg(dropdown_glass_background(&theme))
+            .bg(theme.popover)
             .shadow(tokens::shadow_popover(theme.is_dark()))
             .text_color(theme.popover_foreground)
             .child(

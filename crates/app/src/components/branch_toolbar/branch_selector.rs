@@ -55,7 +55,7 @@ use crate::theme::tokens::{self, RADIUS_SM, TEXT_3XS, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::icon::{Icon, IconName};
 use crate::ui::middle_truncate::MiddleTruncate;
-use crate::ui::tooltip::{Tooltip, dropdown_glass_background, dropdown_glass_border};
+use crate::ui::tooltip::{Tooltip, dropdown_glass_border};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BranchDisplayMode {
@@ -737,6 +737,7 @@ impl BranchToolbarBranchSelector {
             .px_2()
             .py_1()
             .text_size(TEXT_SM.size)
+            .line_height(TEXT_SM.line_height)
             .cursor(CursorStyle::PointingHand)
             .when(highlighted, move |this| {
                 this.bg(accent).text_color(accent_foreground)
@@ -836,6 +837,7 @@ impl BranchToolbarBranchSelector {
                         div()
                             .flex_shrink_0()
                             .text_size(TEXT_3XS.size)
+                            .line_height(TEXT_3XS.line_height)
                             .text_color(with_alpha(theme.muted_foreground, 0.45))
                             .child(badge)
                     }))
@@ -924,7 +926,7 @@ impl BranchToolbarBranchSelector {
             .rounded_lg()
             .border_1()
             .border_color(dropdown_glass_border(&theme))
-            .bg(dropdown_glass_background(&theme))
+            .bg(theme.popover)
             .shadow(tokens::shadow_popover(theme.is_dark()))
             .text_color(theme.popover_foreground)
             .overflow_hidden()

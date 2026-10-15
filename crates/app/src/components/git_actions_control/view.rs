@@ -30,7 +30,7 @@ use crate::theme::tokens::{self, RADIUS_SM, TEXT_2XS, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::timestamp_format::now_ms;
 use crate::ui::icon::{Icon, IconName};
-use crate::ui::tooltip::{Tooltip, dropdown_glass_background, dropdown_glass_border};
+use crate::ui::tooltip::{Tooltip, dropdown_glass_border};
 use crate::ui::{Button, ButtonSize, ButtonVariant};
 
 fn quick_action_icon(quick: &GitQuickAction) -> IconName {
@@ -275,7 +275,7 @@ impl GitActionsControl {
             .rounded_lg()
             .border_1()
             .border_color(dropdown_glass_border(&theme))
-            .bg(dropdown_glass_background(&theme))
+            .bg(theme.popover)
             .shadow(tokens::shadow_popover(theme.is_dark()))
             .text_color(theme.popover_foreground)
             .children(rows)

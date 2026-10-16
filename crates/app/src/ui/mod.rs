@@ -17,6 +17,7 @@ pub mod dialog;
 pub mod discovery_list;
 pub mod draft_input;
 pub mod empty;
+pub mod gallery;
 pub mod group;
 pub mod icon;
 pub mod input_group;

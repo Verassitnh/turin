@@ -90,6 +90,16 @@ fn main() {
             cx.set_global(state::store::ClientStoreGlobal(store));
             app_sidebar_layout::bind_keys(cx);
             let right_panel = dev_overrides(cx);
+            // Dev hook: `TURIN_UI_GALLERY=<page>` shows the S3 primitives instead of the shell.
+            if let Some(page) = ui::gallery::page_from_env() {
+                ui::toast::init(ui::toast_logic::ToastPosition::TopRight, cx);
+                gpui_kit::open_window(window_options(cx), cx, |window, cx| {
+                    cx.new(|cx| ui::gallery::UiGallery::new(page, window, cx))
+                })
+                .expect("failed to open window");
+                cx.activate(true);
+                return;
+            }
             let handle = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
                 cx.new(|cx| {
                     let mut layout = AppSidebarLayout::new(window, cx);

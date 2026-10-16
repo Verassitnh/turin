@@ -259,10 +259,7 @@ impl RenderOnce for PullRequestStackPopover {
             if let Some(source) = store.read(cx).source() {
                 source.open_detail(&reference, cx);
             }
-            let stack = store
-                .read(cx)
-                .detail(&reference)
-                .and_then(|snapshot| snapshot.stack.clone());
+            let stack = store.read(cx).stack_view(&reference).data;
             match stack {
                 Some(stack) => stack_menu_items(
                     menu,

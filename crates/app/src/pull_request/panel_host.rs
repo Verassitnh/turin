@@ -15,7 +15,10 @@ use turin_contracts::pull_request::PullRequestRef;
 
 use super::detail_context::DetailTab;
 use super::detail_panel::PullRequestDetailPanel;
+use super::guide_run_coordinator::{GuideRunCoordinator, GuideRunCoordinatorEvent};
+use super::guide_run_store::GuideRunStore;
 use super::presentation_view::PullRequestStateGlyph;
+use super::toast::render_toasts;
 use super::view_model::{Loadable, PullRequestStore, pull_request_key};
 use crate::components::drag_region::{DragRegion as _, no_drag};
 use crate::theme::ActiveAppTheme;
@@ -34,16 +37,35 @@ pub struct PullRequestPanelHost {
     active: usize,
     /// A stack layer chosen inside a panel: opened on the next render, which has the window.
     pending_open: Option<(EnvironmentId, PullRequestRef)>,
+    /// A guide a notice asked to open, on the Guide tab (`openRequestKey`).
+    pending_guide: Option<(EnvironmentId, PullRequestRef)>,
+    guide_runs: Entity<GuideRunCoordinator>,
+    _subscriptions: Vec<gpui_kit::Subscription>,
 }
 
 impl PullRequestPanelHost {
     pub fn new(store: Entity<PullRequestStore>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        let guide_runs = cx.new(|cx| GuideRunCoordinator::new(store.clone(), cx));
+        let subscriptions = vec![
+            cx.observe(&store, |_, _, cx| cx.notify()),
+            cx.observe(&guide_runs, |_, _, cx| cx.notify()),
+            cx.subscribe(&guide_runs, |this, _, event, cx| {
+                let GuideRunCoordinatorEvent::OpenGuide {
+                    environment_id,
+                    reference,
+                } = event;
+                this.pending_guide = Some((environment_id.clone(), reference.clone()));
+                cx.notify();
+            }),
+        ];
         Self {
             store,
             surfaces: Vec::new(),
             active: 0,
             pending_open: None,
+            pending_guide: None,
+            guide_runs,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -117,6 +139,17 @@ impl Render for PullRequestPanelHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some((environment_id, reference)) = self.pending_open.take() {
             self.open(environment_id, reference, None, window, cx);
+        }
+        if let Some((environment_id, reference)) = self.pending_guide.take() {
+            self.open(
+                environment_id,
+                reference,
+                Some(DetailTab::Guide),
+                window,
+                cx,
+            );
+            // The request is answered once the panel is on the Guide tab.
+            GuideRunStore::global(cx).update(cx, |runs, cx| runs.request_open(None, cx));
         }
         let theme = cx.app_theme().clone();
         let tabs: Vec<_> = self
@@ -197,6 +230,7 @@ impl Render for PullRequestPanelHost {
                     .min_h_0()
                     .children(self.surfaces.get(self.active).map(|s| s.panel.clone())),
             )
+            .children(render_toasts(self.guide_runs.read(cx).toasts(), cx))
     }
 }
 

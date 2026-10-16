@@ -11,7 +11,7 @@
 use gpui_kit::{App, AppContext as _, Entity, Window};
 
 use super::detail_context::DetailTab;
-use super::link_dialog::{LinkPullRequestDialog, LinkPullRequestDialogEvent};
+use super::link_dialog::{LinkCommands, LinkPullRequestDialog, LinkPullRequestDialogEvent};
 use super::list_page::{PullRequestsPage, PullRequestsPageEvent};
 use super::mock_source::{MockPullRequestSource, demo_environment_id, demo_reference};
 use super::panel_host::PullRequestPanelHost;
@@ -19,6 +19,8 @@ use super::pull_request_list_preferences::{PullRequestListPreferences, PullReque
 use super::thread_panel::ThreadPullRequestsPanelEvent;
 use super::view_model::PullRequestStore;
 use crate::components::app_sidebar_layout::AppSidebarLayout;
+use crate::hooks::use_pull_request_linking::PullRequestLinking;
+use turin_contracts::environment::ExecutionEnvironmentCapabilities;
 
 /// The parsed `TURIN_PULL_REQUESTS_DEMO` value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,38 +83,35 @@ pub fn install(
             let layout = layout.clone();
             let store = store.clone();
             move |prefill: Option<String>, window: &mut Window, cx: &mut App| {
+                let commands = LinkCommands {
+                    linking: PullRequestLinking::new(
+                        Some(ExecutionEnvironmentCapabilities {
+                            thread_pull_requests: Some(true),
+                            ..Default::default()
+                        }),
+                        Vec::new(),
+                    ),
+                    thread_id: super::mock_source::demo_thread_id(),
+                    store: store.clone(),
+                };
                 let dialog = cx.new(|cx| {
                     LinkPullRequestDialog::new(
                         Some(super::mock_source::demo_link_project()),
                         window,
                         cx,
                     )
+                    .with_commands(commands)
                 });
                 if let Some(prefill) = prefill.filter(|text| !text.is_empty()) {
                     dialog.update(cx, |dialog, cx| dialog.prefill(&prefill, window, cx));
                 }
                 let dialog_layout = layout.clone();
-                let dialog_store = store.clone();
                 window
                     .subscribe(
                         &dialog,
                         cx,
-                        move |_, event: &LinkPullRequestDialogEvent, _, cx| {
-                            if let LinkPullRequestDialogEvent::Link(link) = event
-                                && let Some(source) = dialog_store.read(cx).source()
-                                && let Some(number) = turin_contracts::PositiveInt::new(link.number)
-                                && let Some(reference) = super::mock_source::reference_for(
-                                    &link.host,
-                                    &link.repository,
-                                    number,
-                                )
-                            {
-                                source.link_thread(
-                                    &super::mock_source::demo_thread_id(),
-                                    &reference,
-                                    cx,
-                                );
-                            }
+                        move |_, _: &LinkPullRequestDialogEvent, _, cx| {
+                            // The dialog linked the thread itself; the host removes the overlay.
                             dialog_layout.update(cx, |layout, cx| layout.set_overlay(None, cx));
                         },
                     )

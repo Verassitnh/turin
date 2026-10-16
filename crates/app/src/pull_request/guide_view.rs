@@ -20,14 +20,13 @@ use std::sync::Arc;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight, Global,
-    Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render,
     ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
     div, point, px, relative, rems,
 };
-use turin_contracts::EnvironmentId;
 use turin_contracts::pull_request::{
-    PullRequestDiffSide, PullRequestRef, PullRequestReviewCommentDraft, PullRequestReviewPosition,
+    PullRequestDiffSide, PullRequestReviewCommentDraft, PullRequestReviewPosition,
 };
 use turin_contracts::pull_request_review_guide::{
     PullRequestReviewGuide, PullRequestReviewGuideAttentionKind, PullRequestReviewGuideExcerpt,
@@ -74,56 +73,14 @@ const FILE_DIFF_ROW_LIMIT: usize = 500;
 
 // ── Keys and progress ───────────────────────────────────────────────────────
 
-/// `guideRunKey`.
-pub fn guide_run_key(environment_id: &EnvironmentId, reference: &PullRequestRef) -> String {
-    format!(
-        "{}:{}",
-        environment_id.as_str(),
-        pull_request_review_key(reference)
-    )
-}
+use super::guide_run_store::GuideRunStore;
+pub use super::guide_run_store::{GuideProgress, guide_progress_key, guide_run_key};
 
-/// `guideProgressKey`: a new head is a new tour, since its stops are not the ones read.
-pub fn guide_progress_key(run_key: &str, head_sha: &str) -> String {
-    format!("{run_key}:{head_sha}")
-}
-
-/// Where a reader is in one guide.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GuideProgress {
-    pub position: usize,
-    /// Stops the reader has moved on from, which the rail checks off.
-    pub seen: BTreeSet<usize>,
-}
-
-/// `useGuideRunStore.progress`: shared by every panel showing the same guide.
-#[derive(Default)]
-pub struct GuideProgressStore {
-    progress: HashMap<String, GuideProgress>,
-}
-
-impl GuideProgressStore {
-    pub fn get(&self, key: &str) -> GuideProgress {
-        self.progress.get(key).cloned().unwrap_or_default()
-    }
-
-    pub fn set(&mut self, key: &str, change: impl FnOnce(&GuideProgress) -> GuideProgress) {
-        let next = change(&self.get(key));
-        self.progress.insert(key.to_owned(), next);
-    }
-}
-
-struct ProgressGlobal(Entity<GuideProgressStore>);
-
-impl Global for ProgressGlobal {}
+/// The progress half of `useGuideRunStore`.
+pub type GuideProgressStore = GuideRunStore;
 
 fn progress_store(cx: &mut App) -> Entity<GuideProgressStore> {
-    if let Some(global) = cx.try_global::<ProgressGlobal>() {
-        return global.0.clone();
-    }
-    let store = cx.new(|_| GuideProgressStore::default());
-    cx.set_global(ProgressGlobal(store.clone()));
-    store
+    GuideRunStore::global(cx)
 }
 
 /// `ATTENTION_LABELS`.

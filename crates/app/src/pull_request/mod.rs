@@ -22,6 +22,8 @@ pub mod detail_panel;
 pub mod dropdown;
 pub mod edit_button;
 pub mod fixtures;
+pub mod guide_run_coordinator;
+pub mod guide_run_store;
 pub mod guide_tab;
 pub mod guide_view;
 pub mod link_dialog;

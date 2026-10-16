@@ -4,11 +4,13 @@
 //! and stored, so opening the tab is free.
 //!
 //! The run is the source's: `generate_guide` starts it and the snapshot's `guide` carries
-//! `run: Running | Failed`, which is all `PullRequestGuideRunCoordinator` polls for upstream.
+//! `run: Running | Failed`. Starting one hands it to the [`GuideRunStore`], which the
+//! [`GuideRunCoordinator`](super::guide_run_coordinator) polls and announces, so the reader can
+//! leave; the tab also says which guide is on screen, which needs no announcement.
 //!
-//! Not ported: the coordinator's "Review guide ready / failed" toast, desktop notification and
-//! sound (they need the app's toast and notification services and the reader leaving the tab),
-//! and the header menu's rewrite entry (the panel header, S1) — [`GuideTab::write`] is its seam.
+//! Not ported: the header menu's rewrite entry (the panel header, S1) — [`GuideTab::write`] is its
+//! seam — and the "Could not start a review guide" toast (the source has no start-failure
+//! channel; a run that fails to start arrives as a failed run).
 
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render,
@@ -17,6 +19,7 @@ use gpui_kit::{
 use turin_contracts::pull_request_review_guide::PullRequestReviewGuideRun;
 
 use super::detail_context::DetailContext;
+use super::guide_run_store::{GuideRunStore, GuideRunWatch, guide_run_key};
 use super::guide_view::{FinishHandler, GuideBanner, GuideTour};
 use super::presentation_view::Spinner;
 use super::view_model::Loadable;
@@ -39,8 +42,11 @@ pub struct GuideTab {
 
 impl GuideTab {
     pub fn new(ctx: DetailContext, _: &mut Window, cx: &mut Context<Self>) -> Self {
-        let subscription = cx.observe(&ctx.store, |_, _, cx| cx.notify());
-        Self {
+        let subscription = cx.observe(&ctx.store, |this, _, cx| {
+            this.watch_run_seen_elsewhere(cx);
+            cx.notify();
+        });
+        let this = Self {
             ctx,
             active: true,
             starting: false,
@@ -48,6 +54,70 @@ impl GuideTab {
             tour: None,
             on_finish: None,
             _subscriptions: vec![subscription],
+        };
+        this.set_shown(true, cx);
+        this
+    }
+
+    fn run_key(&self) -> String {
+        guide_run_key(&self.ctx.environment_id, &self.ctx.reference)
+    }
+
+    /// `setShown`: the guide on screen needs no notice when it lands.
+    fn set_shown(&self, shown: bool, cx: &mut Context<Self>) {
+        let key = self.run_key();
+        let runs = GuideRunStore::global(cx);
+        runs.update(cx, |runs, cx| {
+            if shown {
+                runs.set_shown(Some(key), cx);
+            } else if runs.shown_key() == Some(key.as_str()) {
+                runs.set_shown(None, cx);
+            }
+        });
+    }
+
+    /// `watchRun`: the baseline the coordinator compares the run's end against.
+    fn watch_run(&self, cx: &mut Context<Self>) {
+        let (previous_guide_at, previous_failed_at, title) = {
+            let snapshot = self.ctx.snapshot(cx);
+            let result = snapshot.and_then(|snapshot| snapshot.guide.ready());
+            (
+                result
+                    .and_then(|result| result.guide.as_ref())
+                    .map(|guide| guide.generated_at.clone()),
+                result.and_then(|result| match &result.run {
+                    Some(PullRequestReviewGuideRun::Failed { failed_at, .. }) => {
+                        Some(failed_at.clone())
+                    }
+                    _ => None,
+                }),
+                snapshot
+                    .and_then(|snapshot| snapshot.detail.ready())
+                    .map(|detail| detail.title.as_str().to_owned()),
+            )
+        };
+        let watch = GuideRunWatch {
+            environment_id: self.ctx.environment_id.clone(),
+            reference: self.ctx.reference.clone(),
+            title,
+            previous_guide_at,
+            previous_failed_at,
+            since: crate::timestamp_format::now_ms(),
+        };
+        GuideRunStore::global(cx).update(cx, |runs, cx| runs.watch(watch, cx));
+    }
+
+    /// A run started elsewhere, or before a reload, is watched as soon as it is seen.
+    fn watch_run_seen_elsewhere(&self, cx: &mut Context<Self>) {
+        let running = self
+            .ctx
+            .snapshot(cx)
+            .and_then(|snapshot| snapshot.guide.ready())
+            .is_some_and(|result| {
+                matches!(result.run, Some(PullRequestReviewGuideRun::Running { .. }))
+            });
+        if running {
+            self.watch_run(cx);
         }
     }
 
@@ -60,6 +130,7 @@ impl GuideTab {
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.active != active {
             self.active = active;
+            self.set_shown(active, cx);
             cx.notify();
         }
     }
@@ -70,6 +141,7 @@ impl GuideTab {
             return;
         }
         self.starting = true;
+        self.watch_run(cx);
         self.baseline = run_signature(
             self.ctx
                 .snapshot(cx)

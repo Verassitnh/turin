@@ -7,9 +7,14 @@
 //! [`LinkPullRequestDialogEvent`]s; whoever hosts it links the thread through the source and
 //! removes the overlay.
 //!
-//! Not ported: the per-environment `usePullRequestLinking` capability lookup (the host passes the
-//! thread's own project and the set of readable repositories in [`LinkDialogProject`]) and focus
-//! restore on close.
+//! With [`LinkCommands`] the dialog is `usePullRequestLinking`'s caller: it asks `can_link` of the
+//! environment's capabilities and projects, and on submit plans the link and hands it to the
+//! store's source (`changeLink`), staying open with the reason when that refuses. Without them the
+//! host passes the thread's own project and the readable repositories in [`LinkDialogProject`] and
+//! links on the event.
+//!
+//! Not ported: focus restore on close, and a pending state while the command runs (the source
+//! takes the mutation synchronously and publishes the result through the store).
 
 use std::rc::Rc;
 
@@ -18,6 +23,10 @@ use gpui_kit::{
     App, AppContext as _, Context, Entity, EventEmitter, Focusable as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px,
 };
+
+use super::view_model::PullRequestStore;
+use crate::hooks::use_pull_request_linking::PullRequestLinking;
+use turin_contracts::ThreadId;
 
 use super::link_pull_request_dialog_logic::{
     LinkPullRequestProject, LinkPullRequestResolution, ResolvedLink, link_pull_request_can_submit,
@@ -57,6 +66,15 @@ impl LinkDialogProject {
     }
 }
 
+/// What the dialog needs to link through the environment (`linking` and `threadRef` in
+/// `LinkPullRequestDialog`).
+#[derive(Clone)]
+pub struct LinkCommands {
+    pub linking: PullRequestLinking,
+    pub thread_id: ThreadId,
+    pub store: Entity<PullRequestStore>,
+}
+
 #[derive(Clone, Debug)]
 pub enum LinkPullRequestDialogEvent {
     Link(ResolvedLink),
@@ -66,6 +84,7 @@ pub enum LinkPullRequestDialogEvent {
 pub struct LinkPullRequestDialog {
     input: Entity<InputState>,
     project: Option<LinkDialogProject>,
+    commands: Option<LinkCommands>,
     reference: String,
     dirty: bool,
     submit_error: Option<String>,
@@ -100,12 +119,19 @@ impl LinkPullRequestDialog {
         Self {
             input,
             project,
+            commands: None,
             reference: String::new(),
             dirty: false,
             submit_error: None,
             pending: false,
             _subscription: subscription,
         }
+    }
+
+    /// Link through the environment instead of leaving the link to the host.
+    pub fn with_commands(mut self, commands: LinkCommands) -> Self {
+        self.commands = Some(commands);
+        self
     }
 
     fn resolution(&self) -> Option<LinkPullRequestResolution> {
@@ -124,10 +150,14 @@ impl LinkPullRequestDialog {
                 repository,
                 web_url: &web_url,
             });
+        let commands = self.commands.as_ref();
         resolve_link_pull_request_input(&self.reference, own_project.as_ref(), &|link| {
-            project
-                .as_ref()
-                .is_some_and(|project| project.can_link(link))
+            match commands {
+                Some(commands) => commands.linking.can_link(&link.url),
+                None => project
+                    .as_ref()
+                    .is_some_and(|project| project.can_link(link)),
+            }
         })
     }
 
@@ -135,6 +165,20 @@ impl LinkPullRequestDialog {
         self.dirty = true;
         if let Some(LinkPullRequestResolution::Link(link)) = self.resolution() {
             self.submit_error = None;
+            if let Some(commands) = self.commands.clone() {
+                let sent = commands
+                    .linking
+                    .plan_change_link(&commands.thread_id, &link.url, true)
+                    .and_then(|mutation| match commands.store.read(cx).source() {
+                        Some(source) => source.change_thread_link(mutation, cx),
+                        None => Err("Could not link the pull request.".to_owned()),
+                    });
+                if let Err(message) = sent {
+                    self.submit_error = Some(message);
+                    cx.notify();
+                    return;
+                }
+            }
             cx.emit(LinkPullRequestDialogEvent::Link(link));
         }
         cx.notify();

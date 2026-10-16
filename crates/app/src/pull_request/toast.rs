@@ -5,6 +5,7 @@
 //! Upstream's manager is one global stack. A surface here owns a [`ToastQueue`] and draws it with
 //! [`render_toasts`] over its own bottom edge; the owner is whatever view raised the toast.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::{
@@ -15,7 +16,7 @@ use gpui_kit::{
 use super::presentation_view::tone_color;
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::{RADIUS_LG, TEXT_SM, TEXT_XS, shadow_md};
-use crate::ui::{Icon, IconName};
+use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 
 /// How long a toast stays (the app's `toastManager` default is five seconds).
 pub const TOAST_FOR: Duration = Duration::from_secs(5);
@@ -26,15 +27,23 @@ pub enum ToastKind {
     Error,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `actionProps`: one button on the card.
+#[derive(Clone)]
+pub struct ToastAction {
+    pub label: SharedString,
+    pub on_click: Rc<dyn Fn(&mut App)>,
+}
+
+#[derive(Clone)]
 pub struct Toast {
     pub id: u64,
     pub kind: ToastKind,
     pub title: SharedString,
     pub description: Option<SharedString>,
+    pub action: Option<ToastAction>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ToastQueue {
     items: Vec<Toast>,
     next_id: u64,
@@ -56,6 +65,16 @@ impl ToastQueue {
         title: impl Into<SharedString>,
         description: Option<String>,
     ) -> u64 {
+        self.add_with_action(kind, title, description, None)
+    }
+
+    pub fn add_with_action(
+        &mut self,
+        kind: ToastKind,
+        title: impl Into<SharedString>,
+        description: Option<String>,
+        action: Option<ToastAction>,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.items.push(Toast {
@@ -63,6 +82,7 @@ impl ToastQueue {
             kind,
             title: title.into(),
             description: description.map(Into::into),
+            action,
         });
         id
     }
@@ -83,7 +103,20 @@ impl ToastQueue {
         title: impl Into<SharedString>,
         description: Option<String>,
     ) {
-        let id = self.add(kind, title, description);
+        self.push_with_action(cx, queue_of, kind, title, description, None);
+    }
+
+    /// [`Self::push`] with a button on the card; returns the toast's id.
+    pub fn push_with_action<T: 'static>(
+        &mut self,
+        cx: &mut Context<T>,
+        queue_of: fn(&mut T) -> &mut ToastQueue,
+        kind: ToastKind,
+        title: impl Into<SharedString>,
+        description: Option<String>,
+        action: Option<ToastAction>,
+    ) -> u64 {
+        let id = self.add_with_action(kind, title, description, action);
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_FOR).await;
             this.update(cx, |this, cx| {
@@ -94,6 +127,7 @@ impl ToastQueue {
         })
         .detach();
         cx.notify();
+        id
     }
 }
 
@@ -136,6 +170,7 @@ pub fn render_toasts(queue: &ToastQueue, cx: &App) -> Option<AnyElement> {
                         div()
                             .flex()
                             .flex_col()
+                            .flex_1()
                             .min_w_0()
                             .gap(px(2.))
                             .child(
@@ -152,6 +187,14 @@ pub fn render_toasts(queue: &ToastQueue, cx: &App) -> Option<AnyElement> {
                                     .child(description)
                             })),
                     )
+                    .children(toast.action.clone().map(|action| {
+                        let on_click = action.on_click.clone();
+                        Button::new(SharedString::from(format!("toast-action-{}", toast.id)))
+                            .variant(ButtonVariant::Outline)
+                            .size(ButtonSize::Xs)
+                            .label(action.label.clone())
+                            .on_click(move |_, _, cx| on_click(cx))
+                    }))
             }))
             .into_any_element(),
     )

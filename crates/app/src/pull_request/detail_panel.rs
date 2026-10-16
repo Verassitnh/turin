@@ -929,7 +929,7 @@ impl PullRequestDetailPanel {
         let snapshot = self.ctx.snapshot(cx);
         let can_write = snapshot.is_some_and(|s| s.can_write);
         let pending_action = snapshot.and_then(|s| s.pending_action);
-        let native_stack = snapshot.and_then(|s| s.stack.clone());
+        let native_stack = self.ctx.store.read(cx).stack_view(&self.ctx.reference).data;
         let activity_pending = snapshot.is_some_and(|s| s.activity_pending);
         let refreshing = false;
 

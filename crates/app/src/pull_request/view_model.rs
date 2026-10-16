@@ -22,11 +22,15 @@ use turin_contracts::pull_request::{
 };
 use turin_contracts::pull_request_review_guide::PullRequestReviewGuideResult;
 use turin_contracts::thread_pull_request::ThreadPullRequestLink;
+
+use crate::state::helpers::thread_pull_request_compatibility::ThreadPullRequestMutation;
 use turin_contracts::{EnvironmentId, ThreadId};
 
 use gpui_kit::{App, Context};
 
 use super::pull_request_list_logic::{EnvironmentPullRequestEntry, MergedPullRequestList};
+use super::pull_request_stack_snapshot::{PullRequestStackQuery, PullRequestStackView};
+use crate::hooks::use_pull_request_stack::use_pull_request_stack;
 
 /// A read that may not have answered yet, or may have failed. `stale` data is kept on screen
 /// while a refresh is in flight, as the upstream atoms do (SWR).
@@ -120,6 +124,10 @@ pub struct PullRequestDetailSnapshot {
     pub activity_pending: bool,
     pub checks: Loadable<PullRequestChecks>,
     pub stack: Option<PullRequestStack>,
+    /// The stack read has answered (`pullRequestStackAtom` succeeded, with or without a stack).
+    pub stack_loaded: bool,
+    /// The stack read failed; saved membership keeps navigation working (`usePullRequestStack`).
+    pub stack_error: Option<String>,
     pub diffs: DiffsByCommit,
     pub files_viewed: Vec<PullRequestFileViewed>,
     pub linked_threads: Vec<LinkedThread>,
@@ -274,9 +282,24 @@ pub trait PullRequestSource: 'static {
     fn set_labels(&self, reference: &PullRequestRef, labels: Vec<String>, cx: &mut App);
     /// The Guide tab: write (or rewrite) the review guide.
     fn generate_guide(&self, reference: &PullRequestRef, cx: &mut App);
+    /// Read the stored guide and its run again (`query.refresh` of `reviewGuide`), which the run
+    /// coordinator does while a run is watched. Sources without a cheaper read refresh the detail.
+    fn refresh_guide(&self, reference: &PullRequestRef, cx: &mut App) {
+        self.refresh_detail(reference, cx);
+    }
     /// Thread ↔ pull request linking.
     fn link_thread(&self, thread_id: &ThreadId, reference: &PullRequestRef, cx: &mut App);
     fn unlink_thread(&self, thread_id: &ThreadId, reference: &PullRequestRef, cx: &mut App);
+    /// Send a planned link mutation (`PullRequestLinking::plan_change_link`) to the environment
+    /// that owns the thread: `thread.pull-request.link`, `.unlink` or `thread.meta.update`.
+    fn change_thread_link(
+        &self,
+        mutation: ThreadPullRequestMutation,
+        cx: &mut App,
+    ) -> Result<(), String> {
+        let _ = (mutation, cx);
+        Err(crate::hooks::use_pull_request_linking::LINKING_UNSUPPORTED.to_owned())
+    }
     /// Open a thread in the app (the linked-threads row).
     fn open_thread(&self, thread_id: &ThreadId, cx: &mut App);
     /// Open a URL in the system browser.
@@ -326,6 +349,27 @@ impl PullRequestStore {
 
     pub fn detail(&self, reference: &PullRequestRef) -> Option<&PullRequestDetailSnapshot> {
         self.details.get(&pull_request_key(reference))
+    }
+
+    /// `usePullRequestStack`: the live stack with saved thread links standing in while the read is
+    /// unavailable, so a detail header and a list popover keep their navigation.
+    pub fn stack_view(&self, reference: &PullRequestRef) -> PullRequestStackView {
+        let snapshot = self.detail(reference);
+        let links: Vec<ThreadPullRequestLink> =
+            self.thread_links.values().flatten().cloned().collect();
+        use_pull_request_stack(
+            &links,
+            Some(reference),
+            PullRequestStackQuery {
+                data: snapshot.and_then(|snapshot| snapshot.stack.as_ref()),
+                is_success: snapshot.is_some_and(|snapshot| snapshot.stack_loaded),
+                is_pending: snapshot.is_none_or(|snapshot| {
+                    !snapshot.stack_loaded && snapshot.stack_error.is_none()
+                }),
+                error: snapshot.and_then(|snapshot| snapshot.stack_error.as_deref()),
+            },
+        )
+        .view
     }
 
     pub fn thread_links(&self, thread_id: &ThreadId) -> &[ThreadPullRequestLink] {

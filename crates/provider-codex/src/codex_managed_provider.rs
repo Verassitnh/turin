@@ -475,11 +475,13 @@ mod tests {
     /// A `codex app-server` that answers the status probe with canned replies.
     const FAKE_APP_SERVER: &str = r#"#!/bin/sh
 while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$(dirname "$0")/requests.log"
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   case "$line" in
     *'"method":"initialize"'*) printf '{"id":%s,"result":{"userAgent":"codex-cli/0.156.1","codexHome":"/tmp/fake-codex-home","platformFamily":"unix","platformOs":"macos"}}\n' "$id" ;;
     *'"method":"account/read"'*) printf '{"id":%s,"result":{"account":{"type":"apiKey"},"requiresOpenaiAuth":false}}\n' "$id" ;;
     *'"method":"model/list"'*) printf '{"id":%s,"result":{"data":[{"id":"gpt-5.5","model":"gpt-5.5","displayName":"gpt-5.5","description":"d","hidden":false,"isDefault":true,"defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low","description":"l"},{"reasoningEffort":"high","description":"h"}],"serviceTiers":[{"id":"fast","name":"Fast","description":"f"}]}]}}\n' "$id" ;;
+    *'"method":"account/rateLimits/read"'*) printf '{"id":%s,"error":{"code":-32601,"message":"not available"}}\n' "$id" ;;
     *'"method":"skills/list"'*) printf '{"id":%s,"result":{"data":[]}}\n' "$id" ;;
   esac
 done
@@ -841,6 +843,10 @@ done
             .map(|c| c.name.as_str())
             .collect();
         assert_eq!(commands, ["compact", "goal"]);
+        // `skipNativeUsage`: the app-server's own rate limits are never read.
+        let log = std::fs::read_to_string(h._temp.path().join("requests.log")).unwrap();
+        assert!(log.contains(r#""method":"account/read""#));
+        assert!(!log.contains("rateLimits"), "{log}");
         // The initial sign-in state also refreshes, so the catalog may be read twice.
         let authorizations = h.catalog.authorizations.lock();
         assert!(!authorizations.is_empty());
@@ -915,5 +921,57 @@ done
             snapshot.auth.status,
             ServerProviderAuthStatus::Unauthenticated
         );
+    }
+
+    #[tokio::test]
+    async fn only_a_managed_status_skips_the_native_usage_read() {
+        let h = harness(
+            "codex",
+            Setup {
+                installed: true,
+                scopes: None,
+                script: true,
+            },
+        )
+        .await;
+        let config = CodexRuntimeConfig {
+            binary: h._temp.path().join("codex"),
+            cwd: h._temp.path().to_path_buf(),
+            home_path: None,
+            launch_args: Vec::new(),
+            environment: Default::default(),
+            remove_environment: Vec::new(),
+            client_version: "1".to_owned(),
+        };
+        let kind = ProviderDriverKind::new("codex").unwrap();
+        let instance_id = ProviderInstanceId::new("codex").unwrap();
+        let status = |managed_auth| {
+            check_codex_provider_status(StatusInput {
+                kind: &kind,
+                instance_id: &instance_id,
+                enabled: true,
+                config: &config,
+                custom_models: &[],
+                managed_auth,
+            })
+        };
+        let log = h._temp.path().join("requests.log");
+        let managed = ServerProviderAuth::with_status(ServerProviderAuthStatus::Authenticated);
+        let provider = status(Some(managed.clone())).await;
+        assert_eq!(provider.auth, managed);
+        assert!(provider.usage_limits.is_none());
+        assert!(
+            !std::fs::read_to_string(&log)
+                .unwrap()
+                .contains("rateLimits")
+        );
+
+        let provider = status(None).await;
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .contains("account/rateLimits/read")
+        );
+        assert!(provider.usage_limits.is_some());
     }
 }

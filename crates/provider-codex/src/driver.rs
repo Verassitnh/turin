@@ -845,4 +845,56 @@ mod tests {
         assert!(!after.draft.installed);
         assert_eq!(after.draft.status, ServerProviderState::Error);
     }
+
+    #[tokio::test]
+    async fn a_shadow_home_is_materialized_and_keys_the_continuation_to_the_shared_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let shared = temp.path().join("shared");
+        let shadow = temp.path().join("shadow");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("config.toml"), "# shared\n").unwrap();
+        let driver = CodexDriver::new();
+        let config = driver
+            .decode_config(&json!({
+                "binaryPath": "/nonexistent/turin-codex-binary",
+                "homePath": shared.to_string_lossy(),
+                "shadowHomePath": shadow.to_string_lossy(),
+            }))
+            .unwrap();
+        let instance = driver
+            .create(ProviderDriverCreateInput {
+                instance_id: ProviderInstanceId::new("codex-work").unwrap(),
+                display_name: turin_contracts::TrimmedNonEmptyString::new("Work").ok(),
+                accent_color: None,
+                environment: Vec::new(),
+                enabled: true,
+                config,
+                scope: turin_provider_core::driver::ProviderInstanceScope::new(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            instance.continuation_identity.continuation_key,
+            format!("codex:home:{}", shared.display())
+        );
+        assert_eq!(
+            std::fs::read_link(shadow.join("config.toml")).unwrap(),
+            shared.join("config.toml")
+        );
+        let snapshot = instance.snapshot.get_snapshot().await;
+        assert_eq!(snapshot.display_name.as_ref().unwrap().as_str(), "Work");
+        assert_eq!(
+            snapshot.continuation.as_ref().unwrap().group_key.as_str(),
+            format!("codex:home:{}", shared.display())
+        );
+    }
+
+    #[test]
+    fn a_successful_probe_offers_compact_goal_and_feedback() {
+        let names: Vec<_> = codex_slash_commands()
+            .into_iter()
+            .map(|command| command.name.as_str().to_owned())
+            .collect();
+        assert_eq!(names, ["compact", "goal", "feedback"]);
+    }
 }

@@ -199,4 +199,116 @@ mod tests {
             Err(ChatGptModelsError::Invalid(_))
         ));
     }
+
+    /// Serves `catalog` for a bearer token and the recorded requests, on loopback.
+    async fn serve(
+        status: u16,
+        catalogs: Vec<(&'static str, serde_json::Value)>,
+    ) -> (
+        String,
+        std::sync::Arc<parking_lot::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use crate::codex_chatgpt_auth::mini_http;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/v1/models",
+            listener.local_addr().unwrap().port()
+        );
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let requests = std::sync::Arc::clone(&seen);
+        let task = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let Ok(request) = mini_http::read_request(&mut socket).await else {
+                    continue;
+                };
+                let authorization = request
+                    .headers
+                    .get("authorization")
+                    .cloned()
+                    .unwrap_or_default();
+                requests.lock().push(authorization.clone());
+                let body = catalogs
+                    .iter()
+                    .find(|(token, _)| format!("Bearer {token}") == authorization)
+                    .map(|(_, body)| body.to_string())
+                    .unwrap_or_else(|| "{}".to_owned());
+                let _ = mini_http::write_response(&mut socket, status, "OK", &[], body.as_bytes())
+                    .await;
+            }
+        });
+        (url, seen, task)
+    }
+
+    #[tokio::test]
+    async fn uses_each_selected_profiles_token_and_the_servers_visible_catalog_order_and_names() {
+        let (url, requests, task) = serve(
+            200,
+            vec![
+                (
+                    "account-a",
+                    serde_json::json!({"models": [
+                        {"slug": "second", "display_name": "Second from OpenAI", "visibility": "list"},
+                        {"slug": "hidden", "display_name": "Hidden", "visibility": "hidden"},
+                        {"slug": "first", "display_name": "First from OpenAI", "visibility": "list"},
+                    ]}),
+                ),
+                (
+                    "account-b",
+                    serde_json::json!({"models": [
+                        {"slug": "account-b-only", "display_name": "B", "visibility": "list"},
+                    ]}),
+                ),
+            ],
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let mut first = native_model("first");
+        first.name = TrimmedNonEmptyString::new("Cached first").unwrap();
+        first.is_custom = false;
+        first.capabilities = Some(turin_contracts::model::ModelCapabilities {
+            option_descriptors: Some(Vec::new()),
+        });
+        let mut other = native_model("not-entitled");
+        other.name = TrimmedNonEmptyString::new("Cached other").unwrap();
+        other.is_custom = false;
+        let native = [first, other];
+
+        let a = chat_gpt_models_at(&client, &url, "account-a", &native)
+            .await
+            .unwrap();
+        assert_eq!(
+            a.iter()
+                .map(|m| (m.slug.as_str(), m.name.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("second", "Second from OpenAI"),
+                ("first", "First from OpenAI")
+            ]
+        );
+        assert_eq!(a[1].capabilities, native[0].capabilities);
+        assert_eq!(a[0].capabilities, None);
+        let b = chat_gpt_models_at(&client, &url, "account-b", &native)
+            .await
+            .unwrap();
+        assert_eq!(
+            b.iter().map(|m| m.slug.as_str()).collect::<Vec<_>>(),
+            ["account-b-only"]
+        );
+        assert_eq!(*requests.lock(), ["Bearer account-a", "Bearer account-b"]);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn does_not_present_a_cached_catalog_as_account_entitlements_when_discovery_fails() {
+        let (url, _, task) = serve(503, Vec::new()).await;
+        let error = chat_gpt_models_at(&reqwest::Client::new(), &url, "account-a", &[])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ChatGptModelsError::Catalog(ChatGptCatalogError { status: 503 })
+        ));
+        task.abort();
+    }
 }

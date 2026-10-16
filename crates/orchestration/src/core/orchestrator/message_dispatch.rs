@@ -9,11 +9,12 @@
 //! * start: a new `starting` run with its provider turn effect, or a
 //!   `preparing` run for `defer_start` that waits for its workspace.
 //!
+//! * steer and restart into the active run: `message_steer.rs`.
+//!
 //! Refused until their slices land: restart continuation (needs
 //! `stopReachedRun`, T13e), delegated-completion and source-plan dispatch
-//! (S6, plan reads), steer and restart into the active run (S5). Not yet
-//! ported: provider switch, fork and merge-back transfers, legacy import
-//! handoffs (refused, see `start_run`).
+//! (S6, plan reads). Not yet ported: provider switch, fork and merge-back
+//! transfers, legacy import handoffs (refused, see `start_run`).
 
 use turin_contracts::{
     NodeId, PositiveInt, ProviderThreadId, RunId, ThreadId, UtcDateTime,
@@ -58,6 +59,7 @@ use crate::projection::shared::thread_error::{
 
 use super::Orchestrator;
 use super::dispatch::{Decision, command_id, dispatch_failure};
+use super::message_steer::{SteerInput, steer_into_run};
 use super::services::PrepareRootRunScope;
 
 /// The workspace-preparation placeholder, upstream `WORKSPACE_PREPARATION_INPUT`.
@@ -81,6 +83,8 @@ macro_rules! run_scoped_event {
         });
     }};
 }
+
+pub(super) use run_scoped_event;
 
 /// Decides `message.dispatch`. `Ok(false)` leaves the command to another group.
 pub(super) async fn decide(
@@ -306,29 +310,47 @@ async fn dispatch_message(
         ));
     }
 
+    let requested_model = model_selection
+        .clone()
+        .unwrap_or_else(|| projection.thread.model_selection.clone());
+    let dispatch = resolve_dispatch_mode(&projection, dispatch_mode, *delivery_intent);
+    // A restart continuation resumes the interrupted turn, so it starts
+    // immediately rather than queueing like other wakes.
     if notification.is_some()
         && (*created_by != OrchestrationV2Actor::Agent
             || !matches!(
                 creation_source,
                 turin_contracts::orchestration_v2::OrchestrationV2CreationSource::Server
                     | turin_contracts::orchestration_v2::OrchestrationV2CreationSource::Provider
-            ))
+            )
+            || (dispatch != Dispatch::QueueAfterActive
+                && !(restart_continuation_of_run_id.is_some()
+                    && dispatch == Dispatch::Start(Start::Immediate))))
     {
         return Err(dispatch_failure(
             command,
             "Notifications must be server- or provider-created queued messages.",
         ));
     }
-
-    let requested_model = model_selection
-        .clone()
-        .unwrap_or_else(|| projection.thread.model_selection.clone());
-    let dispatch = resolve_dispatch_mode(&projection, dispatch_mode, *delivery_intent);
-    if dispatch == Dispatch::SteerOrRestart {
-        return Err(dispatch_failure(
+    if let Dispatch::Steer {
+        target_run_id,
+        restart,
+    } = &dispatch
+    {
+        return steer_into_run(
+            orchestrator,
             command,
-            "Steering or restarting the active run is not ported yet (T13c S5).",
-        ));
+            &projection,
+            SteerInput {
+                message: message_template(client, &projection.thread.id, decision.now()),
+                model_selection: requested_model,
+                target_run_id: target_run_id.clone(),
+                force_restart: *restart,
+                promoted: false,
+            },
+            decision,
+        )
+        .await;
     }
 
     let active_run = projection
@@ -378,7 +400,7 @@ async fn dispatch_message(
     // message, as upstream does.
     let start = match dispatch {
         Dispatch::Start(start) => start,
-        Dispatch::QueueAfterActive | Dispatch::SteerOrRestart => Start::Immediate,
+        Dispatch::QueueAfterActive | Dispatch::Steer { .. } => Start::Immediate,
     };
     start_run(
         orchestrator,
@@ -397,7 +419,11 @@ async fn dispatch_message(
 enum Dispatch {
     QueueAfterActive,
     Start(Start),
-    SteerOrRestart,
+    /// `steer_active`, or `restart_active` when `restart` is set.
+    Steer {
+        target_run_id: RunId,
+        restart: bool,
+    },
 }
 
 /// How a start-type dispatch begins. A deferred start waits for its workspace
@@ -471,9 +497,14 @@ fn resolve_dispatch_mode(
         }
     }
     match mode {
-        RequestedDispatchMode::SteerActive { .. } | RequestedDispatchMode::RestartActive { .. } => {
-            Dispatch::SteerOrRestart
-        }
+        RequestedDispatchMode::SteerActive { target_run_id } => Dispatch::Steer {
+            target_run_id,
+            restart: false,
+        },
+        RequestedDispatchMode::RestartActive { target_run_id } => Dispatch::Steer {
+            target_run_id,
+            restart: true,
+        },
         RequestedDispatchMode::QueueAfterActive => Dispatch::QueueAfterActive,
         RequestedDispatchMode::StartImmediately => Dispatch::Start(Start::Immediate),
     }
@@ -490,11 +521,11 @@ fn is_blocking_run(run: &OrchestrationV2Run) -> bool {
 }
 
 /// `isNativeMaintenanceCommand`: `/compact` and `/logout` without attachments.
-fn is_native_maintenance_command(text: &str, attachments: &[ChatAttachment]) -> bool {
+pub(super) fn is_native_maintenance_command(text: &str, attachments: &[ChatAttachment]) -> bool {
     attachments.is_empty() && matches!(text.trim().to_lowercase().as_str(), "/compact" | "/logout")
 }
 
-fn emit_thread_event(
+pub(super) fn emit_thread_event(
     decision: &mut Decision,
     kind: &str,
     thread: &OrchestrationV2AppThread,
@@ -909,6 +940,12 @@ async fn start_run(
         root_node
     );
     if let Some(scope) = checkpoint_scope {
+        let stored = orchestrator
+            .seams
+            .checkpoints
+            .ensure_scope(scope)
+            .await
+            .map_err(|cause| dispatch_failure(command, cause.to_string()))?;
         run_scoped_event!(
             decision,
             CheckpointScopeCreated,
@@ -916,7 +953,7 @@ async fn start_run(
             &run_id,
             &root_node_id,
             instance,
-            scope
+            stored
         );
     }
     // The notification item is projected from the message, so it is built
@@ -1005,6 +1042,19 @@ fn conversation_message(
     root_node_id: &NodeId,
     now: UtcDateTime,
 ) -> OrchestrationV2ConversationMessage {
+    OrchestrationV2ConversationMessage {
+        run_id: Some(run_id.clone()),
+        node_id: Some(root_node_id.clone()),
+        ..message_template(client, thread_id, now)
+    }
+}
+
+/// The command's user message before it lands in a run: no run or node yet.
+pub(super) fn message_template(
+    client: &C,
+    thread_id: &ThreadId,
+    now: UtcDateTime,
+) -> OrchestrationV2ConversationMessage {
     let C::MessageDispatch {
         created_by,
         creation_source,
@@ -1018,7 +1068,7 @@ fn conversation_message(
         ..
     } = client
     else {
-        unreachable!("conversation_message is called only for message.dispatch");
+        unreachable!("message_template is called only for message.dispatch");
     };
     OrchestrationV2ConversationMessage {
         created_by: *created_by,
@@ -1027,8 +1077,8 @@ fn conversation_message(
         sender_thread_id: sender_thread_id.clone(),
         id: message_id.clone(),
         thread_id: thread_id.clone(),
-        run_id: Some(run_id.clone()),
-        node_id: Some(root_node_id.clone()),
+        run_id: None,
+        node_id: None,
         role: OrchestrationV2ConversationMessageRole::User,
         text: text.to_owned(),
         context: context.clone(),
@@ -1059,7 +1109,7 @@ fn wake_work_started_at(runs: &[OrchestrationV2Run], client: &C) -> Option<UtcDa
 
 /// `nextTurnItemOrdinal` for a projection read from the store: the store's
 /// next ordinal already sits past every stored turn item.
-async fn next_turn_item_ordinal(
+pub(super) async fn next_turn_item_ordinal(
     orchestrator: &Orchestrator,
     projection: &OrchestrationV2ThreadProjection,
 ) -> Result<u64, OrchestratorError> {
@@ -1425,7 +1475,7 @@ async fn queue_run(
 /// The cwd follows `RuntimePolicyV2.resolve`: the thread's worktree, else the
 /// project root; the provider session's cwd wins over both, as upstream.
 #[allow(clippy::too_many_arguments)]
-async fn prepare_root_scope(
+pub(super) async fn prepare_root_scope(
     orchestrator: &Orchestrator,
     command: &OrchestrationV2ServerCommand,
     projection: &OrchestrationV2ThreadProjection,

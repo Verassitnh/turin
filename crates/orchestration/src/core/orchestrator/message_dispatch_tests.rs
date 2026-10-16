@@ -38,7 +38,7 @@ use crate::projection::store::ProjectionStore;
 
 /// The checkpoint seam with no git behind it: a root scope under the run.
 #[derive(Debug, Default)]
-struct FakeCheckpoints;
+pub(super) struct FakeCheckpoints;
 
 #[async_trait]
 impl CheckpointScopes for FakeCheckpoints {
@@ -71,7 +71,7 @@ impl CheckpointScopes for FakeCheckpoints {
 
 /// The project-root read: every project lives at one fixed directory.
 #[derive(Debug, Default)]
-struct FakeProjectRoots;
+pub(super) struct FakeProjectRoots;
 
 #[async_trait]
 impl ProjectRoots for FakeProjectRoots {
@@ -86,10 +86,13 @@ impl ProjectRoots for FakeProjectRoots {
 /// One Codex-like adapter with the full capability set. Sessions and turns
 /// are not opened here, so the session and turn methods refuse.
 #[derive(Debug)]
-struct FakeAdapter {
-    instance: ProviderInstanceId,
-    capabilities: OrchestrationV2ProviderCapabilities,
-    driver: turin_contracts::provider_instance::ProviderDriverKind,
+pub(super) struct FakeAdapter {
+    pub(super) instance: ProviderInstanceId,
+    pub(super) capabilities: OrchestrationV2ProviderCapabilities,
+    pub(super) driver: turin_contracts::provider_instance::ProviderDriverKind,
+    /// What `plan_selection_transition` answers; `None` fails it.
+    pub(super) transition:
+        Option<turin_provider_core::selection_transition::ProviderSelectionTransitionPlan>,
 }
 
 #[async_trait]
@@ -115,6 +118,9 @@ impl ProviderAdapterV2 for FakeAdapter {
         turin_provider_core::selection_transition::ProviderSelectionTransitionPlan,
         ProviderAdapterV2Error,
     > {
+        if let Some(plan) = &self.transition {
+            return Ok(plan.clone());
+        }
         Err(ProviderAdapterV2Error::new(
             turin_provider_core::provider_adapter::ProviderAdapterErrorKind::Capabilities {
                 driver: self.driver.clone(),
@@ -138,8 +144,8 @@ impl ProviderAdapterV2 for FakeAdapter {
 }
 
 /// Resolves the one fake instance and nothing else.
-struct FakeAdapters {
-    adapter: Arc<dyn ProviderAdapterV2>,
+pub(super) struct FakeAdapters {
+    pub(super) adapter: Arc<dyn ProviderAdapterV2>,
 }
 
 impl ProviderAdapterLookup for FakeAdapters {
@@ -162,6 +168,7 @@ async fn harness() -> (Orchestrator, EffectOutbox) {
         instance: serde_json::from_value(json!("codex")).expect("instance fixture"),
         capabilities: crate::pipeline::test_support::default_capabilities(),
         driver: serde_json::from_value(json!("codex")).expect("driver fixture"),
+        transition: None,
     });
     let orchestrator = Orchestrator::new(
         projection,
@@ -173,6 +180,7 @@ async fn harness() -> (Orchestrator, EffectOutbox) {
         checkpoints: Arc::new(FakeCheckpoints),
         adapters: Arc::new(FakeAdapters { adapter }),
         project_roots: Arc::new(FakeProjectRoots),
+        ..DispatchSeams::default()
     });
     (orchestrator, EffectOutbox::new(db))
 }

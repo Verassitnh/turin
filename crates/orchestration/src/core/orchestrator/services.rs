@@ -28,9 +28,12 @@ use turin_contracts::{
     },
     provider_instance::ProviderInstanceId,
 };
-use turin_provider_core::provider_adapter::{ProviderAdapterV2, ProviderAdapterV2SubagentOutcome};
+use turin_provider_core::provider_adapter::{
+    ProviderAdapterV2, ProviderAdapterV2SubagentOutcome, ProviderSessionRuntime,
+};
 
 use crate::core::provider_session_manager::ProviderAdapterLookup;
+use crate::core::runtime_request_service::LiveSessions;
 
 use crate::pipeline::orchestrator_port::BoxError;
 
@@ -320,6 +323,11 @@ pub struct DispatchSeams {
     pub checkpoints: Arc<dyn CheckpointScopes>,
     pub adapters: Arc<dyn ProviderAdapterLookup>,
     pub project_roots: Arc<dyn ProjectRoots>,
+    /// `ProviderSessionManagerV2.get`: the live session a steer or restart
+    /// reads its capabilities from.
+    pub sessions: Arc<dyn LiveSessions>,
+    /// `ProviderSwitchServiceV2.plan`, for a steer that changes the provider.
+    pub switch_planner: Arc<dyn ProviderSwitchPlanner>,
 }
 
 impl Default for DispatchSeams {
@@ -328,7 +336,24 @@ impl Default for DispatchSeams {
             checkpoints: Arc::new(UnwiredCheckpointScopes),
             adapters: Arc::new(NoProviderAdapters),
             project_roots: Arc::new(UnwiredProjectRoots),
+            sessions: Arc::new(NoLiveSessions),
+            switch_planner: Arc::new(UnwiredProviderSwitchPlanner),
         }
+    }
+}
+
+/// [`LiveSessions`] with no sessions: every provider session is inactive, so
+/// a steer into a run reports that its session is not active.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoLiveSessions;
+
+#[async_trait]
+impl LiveSessions for NoLiveSessions {
+    async fn get_session(
+        &self,
+        _provider_session_id: &ProviderSessionId,
+    ) -> Result<Option<Arc<dyn ProviderSessionRuntime>>, BoxError> {
+        Ok(None)
     }
 }
 

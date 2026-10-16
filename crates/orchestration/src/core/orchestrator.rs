@@ -17,6 +17,9 @@ mod dispatch_limit_tests;
 mod message_dispatch;
 #[cfg(test)]
 mod message_dispatch_tests;
+mod message_steer;
+#[cfg(test)]
+mod message_steer_tests;
 mod provider_detach;
 pub mod services;
 #[cfg(test)]

@@ -18,13 +18,9 @@ use crate::error::{CursorError, CursorOperation};
 use crate::status::{CURSOR_PROBE_TIMEOUT, CursorProbe, auth_status_from_error};
 
 pub async fn probe_initialize(program: &str) -> Result<InitializeResponse, CursorError> {
-    let client = spawn(SpawnCommand {
-        program,
-        args: ACP_ARGS,
-        cwd: None,
-    })
-    .await
-    .map_err(|error| CursorError::from_acp(CursorOperation::Spawn, &error))?;
+    let client = spawn(SpawnCommand::new(program, ACP_ARGS))
+        .await
+        .map_err(|error| CursorError::from_acp(CursorOperation::Spawn, &error))?;
     let response = client
         .initialize(AcpClient::cursor_initialize(
             "turin",
@@ -52,13 +48,7 @@ pub async fn probe_status(program: &str) -> CursorProbe {
 }
 
 async fn probe_agent(program: &str) -> CursorProbe {
-    let client = match spawn(SpawnCommand {
-        program,
-        args: ACP_ARGS,
-        cwd: None,
-    })
-    .await
-    {
+    let client = match spawn(SpawnCommand::new(program, ACP_ARGS)).await {
         Ok(client) => client,
         Err(error) => {
             let error = CursorError::from_acp(CursorOperation::Spawn, &error);

@@ -70,13 +70,20 @@ pub fn producer_id_from_composer_context_id(kind: &str, context_id: &str) -> Str
 
 fn to_composer_context_id(producer_id: &str) -> ComposerContextId {
     if is_raw_context_id(producer_id) {
-        return must_context_id(producer_id);
+        return derived_context_id(producer_id);
     }
     let slugged = NON_ID.replace_all(producer_id, "-");
     let trimmed = slugged.trim_matches('-');
     let slug = slice_utf16(trimmed, 0, 48);
     let slug = if slug.is_empty() { "ctx" } else { slug };
-    must_context_id(&format!("{slug}-{}", fnv1a64(producer_id)))
+    derived_context_id(&format!("{slug}-{}", fnv1a64(producer_id)))
+}
+
+/// `value` is a raw id that passed `is_raw_context_id`, or a slug of
+/// `[A-Za-z0-9_-]` (at most 48 units) plus a hash: both satisfy the contract's
+/// id pattern and length, so the check cannot fail.
+fn derived_context_id(value: &str) -> ComposerContextId {
+    parse_context_id(value).expect("derived context ids satisfy the id pattern")
 }
 
 fn is_raw_context_id(value: &str) -> bool {
@@ -101,16 +108,28 @@ fn fnv1a64(value: &str) -> String {
     format!("{forward:08x}{reverse:08x}")
 }
 
-fn must_context_id(value: &str) -> ComposerContextId {
-    ComposerContextId::new(value).unwrap_or_else(|err| panic!("context id {value:?}: {err}"))
+/// A draft that cannot become a context record: a blank required field or an
+/// attachment id the contract rejects. Builders return it instead of
+/// panicking, so the send boundary can tell the user what to fix.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct ContextRecordError(pub String);
+
+/// Context ids are built from a validated raw id or a slug plus hash, so this
+/// cannot fail for them; the error path exists for the type's sake.
+fn parse_context_id(value: &str) -> Result<ComposerContextId, ContextRecordError> {
+    ComposerContextId::new(value)
+        .map_err(|err| ContextRecordError(format!("Invalid context id {value:?}: {err}")))
 }
 
-fn must_attachment_id(value: &str) -> ContextAttachmentId {
-    ContextAttachmentId::new(value).unwrap_or_else(|err| panic!("attachment id {value:?}: {err}"))
+fn parse_attachment_id(value: &str) -> Result<ContextAttachmentId, ContextRecordError> {
+    ContextAttachmentId::new(value)
+        .map_err(|err| ContextRecordError(format!("Invalid attachment id {value:?}: {err}")))
 }
 
-fn must_nonempty(value: &str) -> TrimmedNonEmptyString {
-    TrimmedNonEmptyString::new(value).unwrap_or_else(|err| panic!("non-empty {value:?}: {err}"))
+fn parse_nonempty(field: &str, value: &str) -> Result<TrimmedNonEmptyString, ContextRecordError> {
+    TrimmedNonEmptyString::new(value)
+        .map_err(|_| ContextRecordError(format!("The {field} must not be blank.")))
 }
 
 fn now_iso() -> String {
@@ -505,24 +524,28 @@ pub fn thread_context_record(reference: &ScopedThreadRef, title: &str) -> Thread
     }
 }
 
-pub fn terminal_context_record(context: &TerminalContextDraft) -> TerminalContextRecord {
+pub fn terminal_context_record(
+    context: &TerminalContextDraft,
+) -> Result<TerminalContextRecord, ContextRecordError> {
     let label =
         sanitize_composer_context_label(&format_terminal_context_label(context), "terminal");
-    TerminalContextRecord {
+    Ok(TerminalContextRecord {
         version: ComposerContextRecordVersion,
         context_id: to_kind_scoped_composer_context_id("terminal", &context.id),
         kind: TerminalContextKind,
         label,
-        terminal_id: must_nonempty(&context.terminal_id),
-        terminal_label: must_nonempty(&context.terminal_label),
+        terminal_id: parse_nonempty("terminal id", &context.terminal_id)?,
+        terminal_label: parse_nonempty("terminal label", &context.terminal_label)?,
         line_start: context.line_start,
         line_end: context.line_end,
         text: normalize_terminal_context_text(&context.text),
-    }
+    })
 }
 
-pub fn review_comment_context_record(comment: &ReviewCommentContext) -> ReviewCommentContextRecord {
-    ReviewCommentContextRecord {
+pub fn review_comment_context_record(
+    comment: &ReviewCommentContext,
+) -> Result<ReviewCommentContextRecord, ContextRecordError> {
+    Ok(ReviewCommentContextRecord {
         version: ComposerContextRecordVersion,
         context_id: review_comment_context_id(&comment.id),
         kind: ReviewCommentContextKind,
@@ -530,9 +553,9 @@ pub fn review_comment_context_record(comment: &ReviewCommentContext) -> ReviewCo
             &review_comment_context_label(comment),
             "review-comment",
         ),
-        section_id: must_nonempty(&comment.section_id),
+        section_id: parse_nonempty("review section id", &comment.section_id)?,
         section_title: comment.section_title.clone(),
-        file_path: must_nonempty(&comment.file_path),
+        file_path: parse_nonempty("review file path", &comment.file_path)?,
         start_index: comment.start_index,
         end_index: comment.end_index,
         range_label: comment.range_label.clone(),
@@ -540,7 +563,7 @@ pub fn review_comment_context_record(comment: &ReviewCommentContext) -> ReviewCo
         diff: clamp_context_text(&comment.diff, COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS),
         fence_language: comment.fence_language.clone(),
         pull_request: comment.pull_request.clone(),
-    }
+    })
 }
 
 fn preview_target_summary(annotation: &PreviewAnnotationPayload) -> String {
@@ -575,7 +598,8 @@ pub fn normalize_element_context_selection(
             .page_title
             .as_deref()
             .map(|title| turin_contracts::base_schemas::js_trim(title).to_owned()),
-        tag_name: must_nonempty(&tag_name),
+        // Already non-empty above; a type-level rejection drops the element.
+        tag_name: parse_nonempty("element tag name", &tag_name).ok()?,
         selector: optional_trimmed(raw.selector.as_deref()),
         html_preview: truncate_element(
             &normalize_terminal_context_text(&raw.html_preview),
@@ -768,23 +792,27 @@ pub fn uploaded_attachment_context_record(
             Some(AttachmentUploadState::Ready(ready)) => Some(ready.attachment_id.clone()),
             _ => None,
         })?;
-    Some(attachment_context_record(&BoundComposerAttachment {
+    // An id the contract rejects means there is no record to offer.
+    attachment_context_record(&BoundComposerAttachment {
         attachment: attachment.clone(),
         attachment_id,
-    }))
+    })
+    .ok()
 }
 
-pub fn attachment_context_record(bound: &BoundComposerAttachment) -> ComposerContextRecord {
+pub fn attachment_context_record(
+    bound: &BoundComposerAttachment,
+) -> Result<ComposerContextRecord, ContextRecordError> {
     let attachment = &bound.attachment;
     let context_id = to_kind_scoped_composer_context_id(attachment.kind(), attachment.id());
     let label = sanitize_composer_context_label(attachment.name(), attachment.kind());
-    let attachment_id = must_attachment_id(&bound.attachment_id);
-    let name = must_nonempty(attachment.name());
-    let mime_type = must_nonempty(attachment.mime_type());
+    let attachment_id = parse_attachment_id(&bound.attachment_id)?;
+    let name = parse_nonempty("attachment name", attachment.name())?;
+    let mime_type = parse_nonempty("attachment type", attachment.mime_type())?;
     let size_bytes = attachment.size_bytes();
     match attachment {
-        ComposerContextAttachment::Image(_) => {
-            ComposerContextRecord::Known(KnownComposerContextRecord::Image(ImageContextRecord {
+        ComposerContextAttachment::Image(_) => Ok(ComposerContextRecord::Known(
+            KnownComposerContextRecord::Image(ImageContextRecord {
                 version: ComposerContextRecordVersion,
                 context_id,
                 label,
@@ -793,10 +821,10 @@ pub fn attachment_context_record(bound: &BoundComposerAttachment) -> ComposerCon
                 name,
                 mime_type,
                 size_bytes,
-            }))
-        }
-        ComposerContextAttachment::File(_) => {
-            ComposerContextRecord::Known(KnownComposerContextRecord::File(FileContextRecord {
+            }),
+        )),
+        ComposerContextAttachment::File(_) => Ok(ComposerContextRecord::Known(
+            KnownComposerContextRecord::File(FileContextRecord {
                 version: ComposerContextRecordVersion,
                 context_id,
                 label,
@@ -805,8 +833,8 @@ pub fn attachment_context_record(bound: &BoundComposerAttachment) -> ComposerCon
                 name,
                 mime_type,
                 size_bytes,
-            }))
-        }
+            }),
+        )),
     }
 }
 
@@ -818,9 +846,12 @@ pub struct MessageContextInput<'a> {
     pub attachments: &'a [BoundComposerAttachment],
 }
 
+/// `buildMessageContext`. A record that cannot be built (a blank required
+/// field, an attachment id the contract rejects) fails the whole context, so
+/// the send boundary reports it instead of sending a message that lost a chip.
 pub fn build_message_context(
     input: MessageContextInput<'_>,
-) -> Option<OrchestrationMessageContext> {
+) -> Result<Option<OrchestrationMessageContext>, ContextRecordError> {
     let screenshot_ids: HashSet<&str> = input
         .attachments
         .iter()
@@ -830,16 +861,16 @@ pub fn build_message_context(
         })
         .collect();
     let mut records = Vec::new();
-    records.extend(input.terminal_contexts.iter().map(|context| {
-        ComposerContextRecord::Known(KnownComposerContextRecord::Terminal(
-            terminal_context_record(context),
-        ))
-    }));
-    records.extend(input.review_comments.iter().map(|comment| {
-        ComposerContextRecord::Known(KnownComposerContextRecord::ReviewComment(
-            review_comment_context_record(comment),
-        ))
-    }));
+    for context in input.terminal_contexts {
+        records.push(ComposerContextRecord::Known(
+            KnownComposerContextRecord::Terminal(terminal_context_record(context)?),
+        ));
+    }
+    for comment in input.review_comments {
+        records.push(ComposerContextRecord::Known(
+            KnownComposerContextRecord::ReviewComment(review_comment_context_record(comment)?),
+        ));
+    }
     records.extend(
         input
             .thread_contexts
@@ -855,15 +886,17 @@ pub fn build_message_context(
             preview_annotation_context_record(annotation, screenshot),
         ))
     }));
-    records.extend(input.attachments.iter().map(attachment_context_record));
-    if records.is_empty() {
+    for bound in input.attachments {
+        records.push(attachment_context_record(bound)?);
+    }
+    Ok(if records.is_empty() {
         None
     } else {
         Some(OrchestrationMessageContext {
             version: ComposerContextRecordVersion,
             records,
         })
-    }
+    })
 }
 
 pub fn as_known_context_record(

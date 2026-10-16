@@ -63,6 +63,10 @@ pub enum UndoPlan {
     },
     /// `unsnoozeThread(target)`.
     Unsnooze { thread: ScopedThreadRef },
+    /// `discardComposerDraft`'s undo: puts a discarded draft back. The data
+    /// it needs lives in the discard registry under `discard_id`
+    /// (`composer/discard_composer_draft.rs`).
+    RestoreDraft { discard_id: String },
 }
 
 /// `ThreadUndo.begin`'s claim. Upstream's `Symbol` token is a counter here.
@@ -136,6 +140,26 @@ impl ThreadUndo {
     }
 }
 
+/// `UndoOptions.commit`: runs once the action can no longer be undone.
+#[derive(Clone)]
+pub struct UndoCommit(Arc<dyn Fn() + Send + Sync>);
+
+impl UndoCommit {
+    pub fn new(commit: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Arc::new(commit))
+    }
+
+    fn run(&self) {
+        (self.0)();
+    }
+}
+
+impl std::fmt::Debug for UndoCommit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("UndoCommit")
+    }
+}
+
 /// One Undo offered by the notice (`UndoOptions`), without its closure.
 #[derive(Clone, Debug)]
 pub struct UndoOffer {
@@ -144,6 +168,7 @@ pub struct UndoOffer {
     pub plan: UndoPlan,
     pub failure_title: &'static str,
     pub claim: ThreadUndoClaim,
+    pub commit: Option<UndoCommit>,
 }
 
 /// `UndoNotice`: the newest action and how many consecutive ones of its kind
@@ -189,6 +214,19 @@ impl ThreadUndoNotices {
         plan: UndoPlan,
         failure_title: &'static str,
     ) {
+        self.show_with_commit(action, claim, plan, failure_title, None);
+    }
+
+    /// `showThreadUndoNotice` with `commit`. The commit runs when the offer's
+    /// claim goes stale or the notice expires, never when it is undone.
+    pub fn show_with_commit(
+        &self,
+        action: UndoAction,
+        claim: ThreadUndoClaim,
+        plan: UndoPlan,
+        failure_title: &'static str,
+        commit: Option<UndoCommit>,
+    ) {
         if !claim.is_current() {
             return;
         }
@@ -202,14 +240,26 @@ impl ThreadUndoNotices {
                 plan,
                 failure_title,
                 claim,
+                commit,
             });
         }
         self.refresh();
     }
 
-    /// `refreshNotice`'s first step: drops offers whose claim went stale.
+    /// `refreshNotice`'s first step: drops offers whose claim went stale and
+    /// commits them.
     fn refresh(&self) {
-        self.lock().live.retain(|offer| offer.claim.is_current());
+        let stale: Vec<UndoOffer> = {
+            let mut state = self.lock();
+            let (live, stale) = std::mem::take(&mut state.live)
+                .into_iter()
+                .partition(|offer| offer.claim.is_current());
+            state.live = live;
+            stale
+        };
+        for commit in stale.iter().filter_map(|offer| offer.commit.as_ref()) {
+            commit.run();
+        }
     }
 
     /// The notice to show: the newest offer and the consecutive offers of its
@@ -270,12 +320,15 @@ impl ThreadUndoNotices {
             .collect()
     }
 
-    /// The 5 s expiry: every live offer's claim is finished and the queue is
-    /// emptied. The caller owns the timer.
+    /// The 5 s expiry: every live offer's claim is finished and committed,
+    /// and the queue is emptied. The caller owns the timer.
     pub fn expire(&self) {
         let expired: Vec<UndoOffer> = std::mem::take(&mut self.lock().live);
         for offer in &expired {
             offer.claim.finish();
+            if let Some(commit) = &offer.commit {
+                commit.run();
+            }
         }
     }
 }

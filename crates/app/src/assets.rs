@@ -7,6 +7,8 @@
 use std::borrow::Cow;
 
 use gpui_kit::assets::{Assets, icon_assets};
+
+use crate::components::usage::icons::UsageIcons;
 use gpui_kit::{AssetSource, Result, SharedString};
 
 icon_assets!(
@@ -117,6 +119,7 @@ icon_assets!(
         PenLine,
         Pencil,
         PencilRuler,
+        Quote,
         Pilcrow,
         Pin,
         Play,
@@ -155,6 +158,7 @@ icon_assets!(
         Undo2,
         UserRound,
         Wrench,
+        Workflow,
         Unlink2,
         UserCheck,
         UserLock,
@@ -172,14 +176,11 @@ icon_assets!(
         FileSearch,
         FolderGit,
         GitBranchPlus,
-        GitCommitHorizontal,
         Laptop,
-        Lock,
         MessageSquareDashed,
         Monitor,
         Moon,
         Palette,
-        RotateCcw,
         Scale,
         Server,
         Sun,
@@ -229,6 +230,32 @@ pub const SMILE_PLUS: &str = "brand/smile-plus.svg";
 pub const T3_WORDMARK: &str = "brand/t3-wordmark.svg";
 
 /// `@pierre/diffs` sprite icons (`dist/sprite.js`), one monochrome SVG each.
+/// JetBrains product marks (`components/JetBrainsIcons.tsx`).
+pub mod editor_icons {
+    pub const ANTIGRAVITY: &str = "editors/antigravity.svg";
+    pub const AQUA: &str = "editors/aqua.svg";
+    pub const CLION: &str = "editors/clion.svg";
+    pub const DATAGRIP: &str = "editors/datagrip.svg";
+    pub const DATASPELL: &str = "editors/dataspell.svg";
+    pub const FILE_EXPLORER: &str = "editors/file-explorer.svg";
+    pub const FINDER: &str = "editors/finder.svg";
+    pub const FOLDER_CLOSED: &str = "editors/folder-closed.svg";
+    pub const GOLAND: &str = "editors/goland.svg";
+    pub const IDEA: &str = "editors/idea.svg";
+    pub const KIRO: &str = "editors/kiro.svg";
+    pub const PHPSTORM: &str = "editors/phpstorm.svg";
+    pub const PYCHARM: &str = "editors/pycharm.svg";
+    pub const RIDER: &str = "editors/rider.svg";
+    pub const RUBYMINE: &str = "editors/rubymine.svg";
+    pub const RUSTROVER: &str = "editors/rustrover.svg";
+    pub const TRAE: &str = "editors/trae.svg";
+    pub const VSCODIUM: &str = "editors/vscodium.svg";
+    pub const VSCODE: &str = "editors/vscode.svg";
+    pub const VSCODE_INSIDERS: &str = "editors/vscode-insiders.svg";
+    pub const WEBSTORM: &str = "editors/webstorm.svg";
+    pub const ZED: &str = "editors/zed.svg";
+}
+
 pub mod diff_icons {
     pub const SYMBOL_ADDED: &str = "diff/symbol-added.svg";
     pub const SYMBOL_DELETED: &str = "diff/symbol-deleted.svg";
@@ -242,6 +269,22 @@ pub mod diff_icons {
 }
 
 const BRAND: &[(&str, &[u8])] = &[
+    (
+        "brand/openai.svg",
+        include_bytes!("../assets/brand/openai.svg"),
+    ),
+    (
+        "brand/claude.svg",
+        include_bytes!("../assets/brand/claude.svg"),
+    ),
+    (
+        "brand/cursor.svg",
+        include_bytes!("../assets/brand/cursor.svg"),
+    ),
+    (
+        "brand/opencode.svg",
+        include_bytes!("../assets/brand/opencode.svg"),
+    ),
     (SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg")),
     (
         CHEVRON_DOWN,
@@ -273,6 +316,94 @@ const BRAND: &[(&str, &[u8])] = &[
     (
         T3_WORDMARK,
         include_bytes!("../assets/brand/t3-wordmark.svg"),
+    ),
+    (
+        editor_icons::ANTIGRAVITY,
+        include_bytes!("../assets/editors/antigravity.svg"),
+    ),
+    (
+        editor_icons::AQUA,
+        include_bytes!("../assets/editors/aqua.svg"),
+    ),
+    (
+        editor_icons::CLION,
+        include_bytes!("../assets/editors/clion.svg"),
+    ),
+    (
+        editor_icons::DATAGRIP,
+        include_bytes!("../assets/editors/datagrip.svg"),
+    ),
+    (
+        editor_icons::DATASPELL,
+        include_bytes!("../assets/editors/dataspell.svg"),
+    ),
+    (
+        editor_icons::FILE_EXPLORER,
+        include_bytes!("../assets/editors/file-explorer.svg"),
+    ),
+    (
+        editor_icons::FINDER,
+        include_bytes!("../assets/editors/finder.svg"),
+    ),
+    (
+        editor_icons::FOLDER_CLOSED,
+        include_bytes!("../assets/editors/folder-closed.svg"),
+    ),
+    (
+        editor_icons::GOLAND,
+        include_bytes!("../assets/editors/goland.svg"),
+    ),
+    (
+        editor_icons::IDEA,
+        include_bytes!("../assets/editors/idea.svg"),
+    ),
+    (
+        editor_icons::KIRO,
+        include_bytes!("../assets/editors/kiro.svg"),
+    ),
+    (
+        editor_icons::PHPSTORM,
+        include_bytes!("../assets/editors/phpstorm.svg"),
+    ),
+    (
+        editor_icons::PYCHARM,
+        include_bytes!("../assets/editors/pycharm.svg"),
+    ),
+    (
+        editor_icons::RIDER,
+        include_bytes!("../assets/editors/rider.svg"),
+    ),
+    (
+        editor_icons::RUBYMINE,
+        include_bytes!("../assets/editors/rubymine.svg"),
+    ),
+    (
+        editor_icons::RUSTROVER,
+        include_bytes!("../assets/editors/rustrover.svg"),
+    ),
+    (
+        editor_icons::TRAE,
+        include_bytes!("../assets/editors/trae.svg"),
+    ),
+    (
+        editor_icons::VSCODIUM,
+        include_bytes!("../assets/editors/vscodium.svg"),
+    ),
+    (
+        editor_icons::VSCODE,
+        include_bytes!("../assets/editors/vscode.svg"),
+    ),
+    (
+        editor_icons::VSCODE_INSIDERS,
+        include_bytes!("../assets/editors/vscode-insiders.svg"),
+    ),
+    (
+        editor_icons::WEBSTORM,
+        include_bytes!("../assets/editors/webstorm.svg"),
+    ),
+    (
+        editor_icons::ZED,
+        include_bytes!("../assets/editors/zed.svg"),
     ),
     (
         diff_icons::SYMBOL_ADDED,
@@ -319,6 +450,9 @@ impl AssetSource for AppAssets {
         if let Some(bytes) = AppIcons.load(path)? {
             return Ok(Some(bytes));
         }
+        if let Some(bytes) = UsageIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
         if let Some(bytes) = crate::settings::icons::load_brand(path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
@@ -336,6 +470,7 @@ impl AssetSource for AppAssets {
             .map(SharedString::from)
             .collect();
         names.extend(AppIcons.list(path)?);
+        names.extend(UsageIcons.list(path)?);
         names.extend(crate::settings::icons::SettingsIcons.list(path)?);
         names.extend(Assets.list(path)?);
         names.sort();

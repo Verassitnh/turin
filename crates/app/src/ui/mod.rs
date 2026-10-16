@@ -3,12 +3,14 @@
 //! module documents what it maps onto in gpui-component and what is not
 //! ported.
 
+pub mod alert;
 pub mod alert_dialog;
 pub mod animated_size;
 pub mod autocomplete;
 pub mod badge;
 pub mod button;
 pub mod calendar;
+pub mod checkbox;
 pub mod collapsible;
 pub mod collapsible_section_header;
 pub mod color_picker;
@@ -39,6 +41,7 @@ pub mod separator;
 pub mod sheet;
 pub mod sidebar;
 pub mod skeleton;
+pub mod spinner;
 pub mod standalone_page;
 pub mod start_truncated_path;
 pub mod switch;

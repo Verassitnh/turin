@@ -9,6 +9,24 @@ use turin_contracts::source_control::ChangeRequestState;
 use turin_shared::composer_context_references::format_composer_context_reference;
 
 use super::*;
+
+// The builders return `Result`; the upstream cases build valid drafts, so these
+// wrappers unwrap them. The error paths are tested at the end by their full names.
+fn terminal_context_record(context: &TerminalContextDraft) -> TerminalContextRecord {
+    super::terminal_context_record(context).unwrap()
+}
+
+fn review_comment_context_record(comment: &ReviewCommentContext) -> ReviewCommentContextRecord {
+    super::review_comment_context_record(comment).unwrap()
+}
+
+fn attachment_context_record(bound: &BoundComposerAttachment) -> ComposerContextRecord {
+    super::attachment_context_record(bound).unwrap()
+}
+
+fn build_message_context(input: MessageContextInput<'_>) -> Option<OrchestrationMessageContext> {
+    super::build_message_context(input).unwrap()
+}
 use crate::composer::attachment_upload_state::{AttachmentUploadState, ReadyAttachmentUpload};
 
 fn thread(id: &str) -> ThreadId {
@@ -1093,4 +1111,66 @@ fn returns_null_when_no_selected_chip_has_backing_records() {
         })
         .is_none()
     );
+}
+
+// Builders return an error instead of panicking on a draft that cannot become
+// a record, so the send boundary can report it. (No upstream cases: schema
+// `make` throws there.)
+
+#[test]
+fn a_blank_terminal_id_is_an_error_not_a_panic() {
+    let mut draft = terminal("t-1");
+    draft.terminal_id = "   ".into();
+    assert_eq!(
+        super::terminal_context_record(&draft),
+        Err(ContextRecordError(
+            "The terminal id must not be blank.".into()
+        ))
+    );
+    let mut labelless = terminal("t-2");
+    labelless.terminal_label = String::new();
+    assert!(super::terminal_context_record(&labelless).is_err());
+}
+
+#[test]
+fn a_blank_review_section_or_file_path_is_an_error() {
+    let mut comment = review("rc-1", "L1");
+    comment.file_path = String::new();
+    assert!(super::review_comment_context_record(&comment).is_err());
+    let mut comment = review("rc-2", "L1");
+    comment.section_id = " ".into();
+    assert!(super::review_comment_context_record(&comment).is_err());
+}
+
+#[test]
+fn an_attachment_the_contract_rejects_surfaces_as_an_error_or_no_record() {
+    let bad_id = BoundComposerAttachment {
+        attachment: image("img-1", "shot.png"),
+        attachment_id: "not a valid id".into(),
+    };
+    assert!(super::attachment_context_record(&bad_id).is_err());
+
+    let nameless = BoundComposerAttachment {
+        attachment: image("img-2", "  "),
+        attachment_id: "uploaded".into(),
+    };
+    assert!(super::attachment_context_record(&nameless).is_err());
+
+    // A persisted file whose stored id is invalid has no record to offer.
+    let mut persisted = file_draft("file-1");
+    persisted.uploaded_attachment_id = Some("not a valid id".into());
+    assert!(
+        uploaded_attachment_context_record(&ComposerContextAttachment::File(persisted), None)
+            .is_none()
+    );
+
+    // And one bad chip fails the whole context rather than dropping silently.
+    let error = super::build_message_context(MessageContextInput {
+        terminal_contexts: &[],
+        review_comments: &[],
+        preview_annotations: &[],
+        thread_contexts: &[],
+        attachments: &[bad_id],
+    });
+    assert!(error.is_err());
 }

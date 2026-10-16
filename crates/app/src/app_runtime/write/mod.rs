@@ -4,6 +4,7 @@ pub mod commands;
 #[cfg(test)]
 mod e2e_tests;
 pub mod effects;
+pub mod opencode_driver;
 pub mod providers;
 #[cfg(test)]
 mod provider_smoke_tests;

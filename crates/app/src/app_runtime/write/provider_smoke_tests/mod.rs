@@ -265,12 +265,16 @@ impl Smoke {
                 .and_then(|data| data.runs.last())
                 .is_some_and(|run| run.status == status);
             let row_idle = state.shell_view.as_ref().is_some_and(|view| {
-                view.threads.iter().all(|row| {
-                    use turin_contracts::orchestration_v2::OrchestrationV2ShellThreadStatus as S;
-                    !matches!(
-                        row.status,
+                use crate::state::models::RunStatus as S;
+                let live = |status: S| {
+                    matches!(
+                        status,
                         S::Preparing | S::Queued | S::Starting | S::Running | S::Waiting
                     )
+                };
+                view.threads.iter().all(|row| {
+                    !row.latest_run.as_ref().is_some_and(|run| live(run.status))
+                        && !row.runtime.as_ref().is_some_and(|runtime| live(runtime.status))
                 })
             });
             run_settled && row_idle

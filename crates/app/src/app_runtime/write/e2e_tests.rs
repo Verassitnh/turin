@@ -532,7 +532,7 @@ async fn a_user_input_question_is_answered_from_a_command_and_the_turn_finishes(
                     &RecordFilter::default(),
                 )
                 .await
-            );
+                .expect("records");
             let Some(request) = records
                 .runtime_requests
                 .iter()

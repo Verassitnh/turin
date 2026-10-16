@@ -103,6 +103,9 @@ impl LiveChat {
         handle.open_thread(thread_id.clone());
         let timeline = cx.new(|_| ThreadTimelineStore::new(Default::default()));
         let composer = cx.new(|_| ComposerStore::new(ComposerViewModel::default()));
+        // `ComposerSource` / `TimelineSource` are `Arc<dyn _>` seams used on the
+        // UI thread only, so the `RefCell` inside never crosses threads.
+        #[allow(clippy::arc_with_non_send_sync)]
         let source = Arc::new(LiveSource {
             thread_id,
             bus,
@@ -449,10 +452,12 @@ impl LiveSource {
         let mode_changes = self.thread_modes().map(|(runtime, interaction)| {
             (
                 (request.runtime_mode != runtime).then(|| request.runtime_mode.wire()),
-                (request.interaction_mode != interaction).then(|| match request.interaction_mode {
-                    InteractionMode::Plan => "plan",
-                    InteractionMode::Default => "default",
-                }),
+                (request.interaction_mode != interaction).then_some(
+                    match request.interaction_mode {
+                        InteractionMode::Plan => "plan",
+                        InteractionMode::Default => "default",
+                    },
+                ),
             )
         });
         let message = SendMessage {

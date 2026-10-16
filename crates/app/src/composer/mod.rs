@@ -12,6 +12,7 @@ pub mod attachment_upload_state;
 pub mod banner_stack;
 pub mod catalog;
 pub mod code_block;
+pub mod code_block_highlight;
 pub mod code_languages;
 pub mod command_items;
 pub mod composer_context_records;

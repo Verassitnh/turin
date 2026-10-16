@@ -76,7 +76,7 @@ impl Default for AppearancePreferences {
 pub struct AppTheme {
     /// The applied theme's id; `None` is the standard look (no
     /// `data-theme-id`).
-    pub theme_id: Option<&'static str>,
+    pub theme_id: Option<gpui_kit::SharedString>,
     pub appearance: ThemeAppearance,
     pub fonts: ResolvedFonts,
 
@@ -173,36 +173,38 @@ impl AppTheme {
     /// theme on its own half; any other half falls back to the standard
     /// palette, as upstream clears `data-theme-id` when a theme cannot render.
     pub fn resolve(
-        definition: Option<&'static ThemeDefinition>,
+        definition: Option<&ThemeDefinition>,
         appearance: ThemeAppearance,
         contrast: u32,
         fonts: ResolvedFonts,
     ) -> Self {
         let themed = definition
             .and_then(|definition| get_theme_colors_for_mode(definition, appearance))
-            .map(|colors| (definition.map(|d| d.id), colors));
-        let (theme_id, palette): (Option<&'static str>, ThemeColors) =
+            .map(|colors| (definition.map(|d| d.id.clone()), colors));
+        let (theme_id, palette): (Option<gpui_kit::SharedString>, ThemeColors) =
             themed.unwrap_or((None, get_standard_theme_colors(appearance)));
         let dark = appearance.is_dark();
         let contrast = AppearanceContrast::new(contrast);
         let target = if dark { tw::WHITE } else { tw::BLACK };
-        let c = |value: &str| -> Hsla { color(value) };
-        let fg = |value: &str, backdrop: &str| -> Hsla {
+        let c = |value: &gpui_kit::SharedString| -> Hsla { color(value.as_ref()) };
+        let fg = |value: &gpui_kit::SharedString, backdrop: &gpui_kit::SharedString| -> Hsla {
             contrast
-                .foreground(rgba(value), rgba(backdrop), target)
+                .foreground(rgba(value.as_ref()), rgba(backdrop.as_ref()), target)
                 .into()
         };
-        let line = |value: &str, foreground: &str| -> Hsla {
-            contrast.border(rgba(value), rgba(foreground)).into()
+        let line = |value: &gpui_kit::SharedString, foreground: &gpui_kit::SharedString| -> Hsla {
+            contrast
+                .border(rgba(value.as_ref()), rgba(foreground.as_ref()))
+                .into()
         };
         let p = &palette;
 
-        let sidebar_muted_foreground = fg(p.sidebar_muted_foreground, p.sidebar);
+        let sidebar_muted_foreground = fg(&p.sidebar_muted_foreground, &p.sidebar);
         let sidebar_icon_color: Hsla = color_mix(
             MixSpace::Srgb,
             sidebar_muted_foreground,
             0.6,
-            rgba(p.sidebar),
+            rgba(p.sidebar.as_ref()),
         )
         .into();
 
@@ -220,63 +222,65 @@ impl AppTheme {
             (color::hex(0xd9d9d9).into(), color::hex(0xbfbfbf).into())
         };
 
+        let themed = theme_id.is_some();
+        let sidebar_theme_id = theme_id.clone().map(|id| id.to_string());
         Self {
             theme_id,
             appearance,
             fonts,
-            background: c(p.canvas),
-            app_chrome_background: c(p.chrome),
-            toolbar_background: c(p.toolbar),
-            toolbar_foreground: fg(p.toolbar_foreground, p.toolbar),
-            toolbar_border: line(p.toolbar_border, p.toolbar_foreground),
-            toolbar_control: c(p.toolbar_control),
-            toolbar_control_foreground: fg(p.toolbar_control_foreground, p.toolbar_control),
-            toolbar_control_hover: c(p.toolbar_control_hover),
-            surface_raised: c(p.surface_raised),
-            foreground: fg(p.text, p.canvas),
-            card: c(p.surface),
-            card_foreground: fg(p.text, p.surface),
-            popover: c(p.surface_overlay),
-            popover_foreground: fg(p.text, p.surface_overlay),
-            primary: c(p.message_action),
-            primary_foreground: c(p.message_action_foreground),
-            secondary: c(p.secondary),
-            secondary_foreground: fg(p.secondary_foreground, p.secondary),
-            muted: c(p.muted),
-            muted_foreground: fg(p.muted_foreground, p.canvas),
-            placeholder: fg(p.placeholder, p.canvas),
-            secondary_label: fg(p.secondary_label, p.canvas),
-            icon_muted: fg(p.icon_muted, p.canvas),
-            accent: c(p.accent_surface),
-            accent_foreground: fg(p.accent_surface_foreground, p.accent_surface),
-            theme_accent: c(p.accent),
-            theme_accent_foreground: c(p.accent_foreground),
-            message_surface: c(p.message_surface),
-            message_foreground: fg(p.message_foreground, p.message_surface),
-            message_action: c(p.message_action),
-            message_action_foreground: c(p.message_action_foreground),
-            message_action_hover: c(p.message_action_hover),
-            error: c(p.error),
-            error_foreground: c(p.error_foreground),
-            error_surface: c(p.error_surface),
-            tool_error_icon: if theme_id.is_none() {
+            background: c(&p.canvas),
+            app_chrome_background: c(&p.chrome),
+            toolbar_background: c(&p.toolbar),
+            toolbar_foreground: fg(&p.toolbar_foreground, &p.toolbar),
+            toolbar_border: line(&p.toolbar_border, &p.toolbar_foreground),
+            toolbar_control: c(&p.toolbar_control),
+            toolbar_control_foreground: fg(&p.toolbar_control_foreground, &p.toolbar_control),
+            toolbar_control_hover: c(&p.toolbar_control_hover),
+            surface_raised: c(&p.surface_raised),
+            foreground: fg(&p.text, &p.canvas),
+            card: c(&p.surface),
+            card_foreground: fg(&p.text, &p.surface),
+            popover: c(&p.surface_overlay),
+            popover_foreground: fg(&p.text, &p.surface_overlay),
+            primary: c(&p.message_action),
+            primary_foreground: c(&p.message_action_foreground),
+            secondary: c(&p.secondary),
+            secondary_foreground: fg(&p.secondary_foreground, &p.secondary),
+            muted: c(&p.muted),
+            muted_foreground: fg(&p.muted_foreground, &p.canvas),
+            placeholder: fg(&p.placeholder, &p.canvas),
+            secondary_label: fg(&p.secondary_label, &p.canvas),
+            icon_muted: fg(&p.icon_muted, &p.canvas),
+            accent: c(&p.accent_surface),
+            accent_foreground: fg(&p.accent_surface_foreground, &p.accent_surface),
+            theme_accent: c(&p.accent),
+            theme_accent_foreground: c(&p.accent_foreground),
+            message_surface: c(&p.message_surface),
+            message_foreground: fg(&p.message_foreground, &p.message_surface),
+            message_action: c(&p.message_action),
+            message_action_foreground: c(&p.message_action_foreground),
+            message_action_hover: c(&p.message_action_hover),
+            error: c(&p.error),
+            error_foreground: c(&p.error_foreground),
+            error_surface: c(&p.error_surface),
+            tool_error_icon: if !themed {
                 if dark {
                     // index.css dark `--tool-error-icon: #fca5a5` (a literal).
                     color::hex(0xfca5a5).into()
                 } else {
-                    c(p.error)
+                    c(&p.error)
                 }
             } else {
-                c(p.error_foreground)
+                c(&p.error_foreground)
             },
-            destructive: c(p.error),
-            destructive_foreground: c(p.error_foreground),
-            warning: c(p.warning),
-            warning_foreground: c(p.warning_foreground),
-            warning_surface: c(p.warning_surface),
-            update: c(p.update),
-            update_foreground: c(p.update_foreground),
-            update_surface: c(p.update_surface),
+            destructive: c(&p.error),
+            destructive_foreground: c(&p.error_foreground),
+            warning: c(&p.warning),
+            warning_foreground: c(&p.warning_foreground),
+            warning_surface: c(&p.warning_surface),
+            update: c(&p.update),
+            update_foreground: c(&p.update_foreground),
+            update_surface: c(&p.update_surface),
             info: info.into(),
             info_foreground: info_foreground.into(),
             success: success.into(),
@@ -288,27 +292,33 @@ impl AppTheme {
             }
             .into(),
             diff_deletion_foreground: if dark { tw::RED_400 } else { tw::RED_600 }.into(),
-            border: line(p.border, p.text),
-            input: line(p.input, p.text),
-            ring: c(p.focus),
-            code_background: c(p.code_background),
-            code_foreground: c(p.code_foreground),
-            search_match_background: c(p.search_match_background),
-            search_match_foreground: c(p.search_match_foreground),
-            search_match_active_background: c(p.search_match_active_background),
-            search_match_active_foreground: c(p.search_match_active_foreground),
-            sidebar: c(p.sidebar),
-            sidebar_foreground: fg(p.sidebar_foreground, p.sidebar),
+            border: line(&p.border, &p.text),
+            input: line(&p.input, &p.text),
+            ring: c(&p.focus),
+            code_background: c(&p.code_background),
+            code_foreground: c(&p.code_foreground),
+            search_match_background: c(&p.search_match_background),
+            search_match_foreground: c(&p.search_match_foreground),
+            search_match_active_background: c(&p.search_match_active_background),
+            search_match_active_foreground: c(&p.search_match_active_foreground),
+            sidebar: c(&p.sidebar),
+            sidebar_foreground: fg(&p.sidebar_foreground, &p.sidebar),
             sidebar_muted_foreground,
-            sidebar_control_surface: c(p.sidebar_control_surface),
-            sidebar_row_hover: c(p.sidebar_row_hover),
-            sidebar_row_active: c(p.sidebar_row_active),
-            sidebar_row_selected: c(p.sidebar_row_selected),
-            sidebar_border: line(p.sidebar_border, p.sidebar_foreground),
+            sidebar_control_surface: c(&p.sidebar_control_surface),
+            sidebar_row_hover: c(&p.sidebar_row_hover),
+            sidebar_row_active: c(&p.sidebar_row_active),
+            sidebar_row_selected: c(&p.sidebar_row_selected),
+            sidebar_border: line(&p.sidebar_border, &p.sidebar_foreground),
             sidebar_icon_color,
             scrollbar_thumb,
             scrollbar_thumb_hover,
-            sidebar_scope: SidebarScope::resolve(p, theme_id.is_none(), theme_id, dark, contrast),
+            sidebar_scope: SidebarScope::resolve(
+                p,
+                !themed,
+                sidebar_theme_id.as_deref(),
+                dark,
+                contrast,
+            ),
         }
     }
 
@@ -371,7 +381,8 @@ pub fn init(cx: &mut App) {
 /// system appearance, and pushes it into gpui-component.
 pub fn apply(window_appearance: Option<WindowAppearance>, cx: &mut App) {
     let preferences = cx.global::<ThemeState>().preferences.clone();
-    let definition = get_theme_definition(&preferences.theme);
+    let owned_definition = get_theme_definition(&preferences.theme);
+    let definition = owned_definition.as_ref();
     let system_dark =
         system_appearance(window_appearance.unwrap_or_else(|| cx.window_appearance())).is_dark();
     let appearance = resolve_theme_appearance(

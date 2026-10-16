@@ -159,7 +159,7 @@ pub fn theme_config(theme: &AppTheme) -> Rc<ThemeConfig> {
         is_default: false,
         name: format!(
             "{} {}",
-            theme.theme_id.unwrap_or(MOBILE_DEFAULT_THEME_ID),
+            theme.theme_id.as_deref().unwrap_or(MOBILE_DEFAULT_THEME_ID),
             if dark { "dark" } else { "light" }
         )
         .into(),

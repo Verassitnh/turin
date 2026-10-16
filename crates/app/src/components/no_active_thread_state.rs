@@ -1,4 +1,7 @@
 //! Port of upstream/apps/web/src/components/NoActiveThreadState.tsx
+//! Also ports upstream/apps/web/src/components/WorkspacePageHeader.tsx (folded in:
+//! `WORKSPACE_TOPBAR_HEIGHT` in `theme/tokens.rs`, the titlebar inset in
+//! `components/workspace_titlebar.rs` and `components/drag_region.rs`).
 //!
 //! What the main column shows when no thread is open: the workspace top bar with a "No active
 //! thread" label over a centred prompt to pick or create one.

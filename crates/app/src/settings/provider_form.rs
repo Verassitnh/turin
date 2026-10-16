@@ -19,6 +19,16 @@ use turin_contracts::settings::{
 use turin_provider_core::server_provider::ServerProviderModel;
 use turin_shared::model::{CustomModelDefinition, read_custom_model_entries};
 
+use crate::composer::model_ordering::{
+    ModelSlugItem, SortModelsOptions, sort_models_for_provider_instance,
+};
+
+impl ModelSlugItem for &ServerProviderModel {
+    fn slug(&self) -> &str {
+        self.slug.as_str()
+    }
+}
+
 /// `ProviderSettingsFieldModel`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderSettingsFieldModel {
@@ -437,29 +447,6 @@ pub fn derive_provider_models_for_display(
     models
 }
 
-/// `sortModelsForProviderInstance` with `groupFavorites`.
-fn sort_models_for_provider_instance<'a>(
-    models: &'a [ServerProviderModel],
-    favorite_models: &HashSet<String>,
-    model_order: &[String],
-) -> Vec<&'a ServerProviderModel> {
-    let rank = |slug: &str| model_order.iter().position(|candidate| candidate == slug);
-    let mut sorted: Vec<(usize, &ServerProviderModel)> = models.iter().enumerate().collect();
-    sorted.sort_by(|(left_index, left), (right_index, right)| {
-        let left_favorite = favorite_models.contains(left.slug.as_str());
-        let right_favorite = favorite_models.contains(right.slug.as_str());
-        right_favorite
-            .cmp(&left_favorite)
-            .then_with(|| {
-                rank(left.slug.as_str())
-                    .unwrap_or(usize::MAX)
-                    .cmp(&rank(right.slug.as_str()).unwrap_or(usize::MAX))
-            })
-            .then(left_index.cmp(right_index))
-    });
-    sorted.into_iter().map(|(_, model)| model).collect()
-}
-
 /// `groupModelsForDisplay`: favorites first (in user order), then visible
 /// models, then hidden ones.
 pub fn group_models_for_display(
@@ -468,7 +455,14 @@ pub fn group_models_for_display(
     hidden_models: &HashSet<String>,
     model_order: &[String],
 ) -> Vec<ServerProviderModel> {
-    let ordered = sort_models_for_provider_instance(models, favorite_models, model_order);
+    let ordered = sort_models_for_provider_instance(
+        models.iter().collect::<Vec<_>>(),
+        SortModelsOptions {
+            model_order,
+            favorite_models: Some(favorite_models),
+            group_favorites: true,
+        },
+    );
     let is_hidden = |model: &ServerProviderModel| {
         !model.is_custom && hidden_models.contains(model.slug.as_str())
     };

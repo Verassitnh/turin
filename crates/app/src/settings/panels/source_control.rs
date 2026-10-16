@@ -7,7 +7,9 @@
 //! Not ported (PORTING.md Deviations): host settings forms for the other
 //! source-control hosts (GitLab, Bitbucket, Azure DevOps, GitCafe: only GitHub
 //! is kept), the scope notice / mixed-value states of multi-environment
-//! scopes, and the `Collapsible` height animation.
+//! scopes, and the `Collapsible` height animation. The other hosts' marks are
+//! bundled (`assets::source_control_icon_path`) and drawn if a discovery row
+//! names the kind.
 
 use std::collections::HashSet;
 
@@ -343,6 +345,14 @@ impl SettingsView {
                     .flex_shrink_0()
                     .into_any_element(),
             ),
+            (Item::Provider(_), kind) => {
+                crate::assets::source_control_icon_path(kind).map(|path| {
+                    img(path)
+                        .size(rems(1.125))
+                        .flex_shrink_0()
+                        .into_any_element()
+                })
+            }
             _ => None,
         };
         let mark: AnyElement = match glyph {

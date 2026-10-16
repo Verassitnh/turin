@@ -6062,6 +6062,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7352,12 +7365,20 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-bash",
  "turin-contracts",
+ "turin-launcher",
+ "turin-orchestration",
+ "turin-persistence",
  "turin-provider-core",
+ "turin-review",
  "turin-runtime",
  "turin-shared",
  "unicode-normalization",
@@ -7369,15 +7390,23 @@ dependencies = [
 name = "turin-acp"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "chrono",
  "futures",
  "libc",
  "parking_lot",
  "pretty_assertions",
+ "regex",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "turin-contracts",
+ "turin-provider-core",
+ "turin-shared",
+ "uuid",
 ]
 
 [[package]]
@@ -7517,6 +7546,7 @@ dependencies = [
  "chrono",
  "futures",
  "indexmap",
+ "libc",
  "parking_lot",
  "pretty_assertions",
  "regex",
@@ -7654,7 +7684,9 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "turin-contracts",
+ "turin-shared",
  "url",
  "uuid",
 ]
@@ -7667,12 +7699,14 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs 6.0.0",
+ "fancy-regex",
  "futures",
  "pretty_assertions",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
@@ -7681,6 +7715,7 @@ dependencies = [
  "turin-acp",
  "turin-contracts",
  "turin-provider-core",
+ "turin-shared",
 ]
 
 [[package]]
@@ -7688,19 +7723,55 @@ name = "turin-provider-opencode"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "bytes",
+ "chrono",
  "futures",
  "getrandom 0.2.17",
+ "parking_lot",
  "pretty_assertions",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "turin-contracts",
+ "turin-provider-core",
+]
+
+[[package]]
+name = "turin-providers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "indexmap",
+ "parking_lot",
+ "pretty_assertions",
+ "regex",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "turin-contracts",
+ "turin-orchestration",
+ "turin-provider-claude",
+ "turin-provider-core",
+ "turin-provider-cursor",
+ "turin-runtime",
+ "turin-shared",
 ]
 
 [[package]]
@@ -7802,6 +7873,7 @@ dependencies = [
  "turin-contracts",
  "turin-persistence",
  "turin-provider-core",
+ "turin-shared",
  "uuid",
 ]
 
@@ -7950,6 +8022,12 @@ name = "unicode-width"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

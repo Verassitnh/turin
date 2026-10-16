@@ -229,6 +229,7 @@ impl OpenCode2Api for Replay {
                     data,
                     event: None,
                     id: None,
+                    retry: None,
                 })
                 .map(Ok::<_, EventStreamError>),
             )

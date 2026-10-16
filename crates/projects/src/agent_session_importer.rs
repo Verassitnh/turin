@@ -36,12 +36,12 @@ use crate::agent_session_scanner::{
     AgentSessionMessageRole, AgentSessionRecentThread, AgentSessionScanner, AgentSessionThread,
     AgentSessionThreadMessage,
 };
-use crate::project_path::normalize_project_path_for_comparison;
 use crate::project_ports::{
     ImportedProviderRuntime, OrchestrationEventWriter, PortError, ProviderRuntimeRows,
     ProviderThreadIds, ThreadRecordReader,
 };
 use crate::project_service::ProjectServiceApi;
+use turin_shared::path::normalize_project_path_for_comparison;
 
 const IMPORT_EVENT_PREFIX: &str = "agent-session-import:v2";
 

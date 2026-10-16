@@ -9,7 +9,7 @@ use crate::state::subagent_runtime::{RuntimeSubagentStatus, is_terminal_subagent
 use crate::state::support::model::{
     SelectableModel, format_model_slug_name, resolve_selectable_model,
 };
-use crate::state::support::path::file_basename;
+use turin_shared::path::file_basename;
 
 fn is_active_turn_item_status(status: OrchestrationV2TurnItemStatus) -> bool {
     matches!(

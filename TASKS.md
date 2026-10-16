@@ -195,3 +195,8 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 4. UI QC: look-and-feel workflow over every screen (screenshots light/dark vs upstream classes), all UI bugs fixed, re-checked.
 5. Full gate on main: `cargo check --workspace`, per-crate `scripts/check.sh` all green.
 Capacity notes: rustc slots 4 (CPU was pinned at 97%), sccache on; cloud agents not useful for UI (macOS-only GPUI) — backend only if needed.
+
+## PM status 2026-10-16 02:45 UTC
+- On main (all QC PASS + fixes): T19, T17, N1, N1b, U3a/b, U3d, T10(+T10d), T07, T13d, T20, GITFS, T24b, DEDUP-1, U1. App crate 2838 tests green.
+- In flight: T13c (dispatch S4–S6, Sonnet), T13e (RunExecution/turn start, Sonnet), R1 (ProviderRegistry, Sonnet), T22a fixes, T11 (verifier fixing 2 high), S4 (re-QC high fix), U3c fixes → U3e QC, R2 (ACP runtime), R3/R4/R5, T09d, S1/S2/S2b/S3/S5/S6 UI, U2.
+- Infra: test-runner throttle (2 slots), rustc slots 4, sccache 6G, disk guard tiers 40/35/25/15/8G with idle-target eviction; fingerprint-safe pruning.

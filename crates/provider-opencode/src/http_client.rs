@@ -9,8 +9,11 @@ use std::time::Duration;
 use bytes::Bytes;
 use reqwest::Method;
 
+use std::sync::Arc;
+
 use crate::auth::{basic_authorization, encode_uri_component};
 use crate::error::{EventStreamError, OpenCodeRuntimeError};
+use crate::protocol_log::{ProtocolDirection, ProtocolEvent, ProtocolLog, ProtocolMessageKind};
 use crate::sse::{self, EventStream, SseFrame};
 use crate::urlutil::{append_query, join_server_path, parse_http_base};
 
@@ -23,6 +26,7 @@ pub struct HttpClient {
     /// when the password is empty (the SDK treats `""` as missing).
     always_authorize: bool,
     directory: Option<String>,
+    protocol: Option<Arc<dyn ProtocolLog>>,
 }
 
 impl HttpClient {
@@ -37,12 +41,35 @@ impl HttpClient {
             password: password.into(),
             always_authorize,
             directory: None,
+            protocol: None,
         })
     }
 
     pub fn with_directory(mut self, directory: impl Into<String>) -> Self {
         self.directory = Some(directory.into());
         self
+    }
+
+    pub fn with_protocol_log(mut self, protocol: Arc<dyn ProtocolLog>) -> Self {
+        self.protocol = Some(protocol);
+        self
+    }
+
+    fn record(
+        &self,
+        direction: ProtocolDirection,
+        message_kind: ProtocolMessageKind,
+        method: &str,
+        payload: serde_json::Value,
+    ) {
+        if let Some(protocol) = &self.protocol {
+            protocol.record(ProtocolEvent {
+                direction,
+                message_kind,
+                method: method.to_owned(),
+                payload,
+            });
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -57,23 +84,80 @@ impl HttpClient {
         expected: &[u16],
         timeout: Option<Duration>,
     ) -> Result<Bytes, OpenCodeRuntimeError> {
-        let response = self
-            .send(operation, method, path, query, extra_query, body, timeout)
-            .await?;
-        let status = response.status().as_u16();
-        let content_type = header_str(response.headers(), reqwest::header::CONTENT_TYPE);
-        if content_type.as_deref() == Some("text/html") {
-            return Err(OpenCodeRuntimeError::new(
+        self.record(
+            ProtocolDirection::Outgoing,
+            ProtocolMessageKind::Request,
+            operation,
+            body.cloned().unwrap_or(serde_json::Value::Null),
+        );
+        let result = self
+            .exchange_json(
                 operation,
-                "Request is not supported by this version of OpenCode Server (Server responded with text/html)",
-            ));
-        }
-        let bytes = response.bytes().await.map_err(|err| {
-            OpenCodeRuntimeError::new(
-                operation,
-                format!("Couldn't read the OpenCode response: {err}"),
+                method,
+                path,
+                query,
+                extra_query,
+                body,
+                expected,
+                timeout,
             )
-        })?;
+            .await;
+        match &result {
+            Ok(bytes) => {
+                let payload = serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null);
+                self.record(
+                    ProtocolDirection::Incoming,
+                    ProtocolMessageKind::Response,
+                    operation,
+                    payload,
+                );
+            }
+            Err(err) => self.record(
+                ProtocolDirection::Incoming,
+                ProtocolMessageKind::Error,
+                operation,
+                serde_json::Value::String(err.detail.clone()),
+            ),
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn exchange_json(
+        &self,
+        operation: &str,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        extra_query: &[(String, String)],
+        body: Option<&serde_json::Value>,
+        expected: &[u16],
+        timeout: Option<Duration>,
+    ) -> Result<Bytes, OpenCodeRuntimeError> {
+        // The deadline covers the body as well as the headers. Upstream wraps the
+        // whole SDK call in `Effect.timeoutOption`, so a server that sends headers
+        // and then stalls must still fail.
+        let exchange = async {
+            let response = self
+                .send(operation, method, path, query, extra_query, body)
+                .await?;
+            let status = response.status().as_u16();
+            let content_type = header_str(response.headers(), reqwest::header::CONTENT_TYPE);
+            if content_type.as_deref() == Some("text/html") {
+                return Err(OpenCodeRuntimeError::new(
+                    operation,
+                    "Request is not supported by this version of OpenCode Server (Server responded with text/html)",
+                ));
+            }
+            let bytes = response.bytes().await.map_err(|err| {
+                OpenCodeRuntimeError::new(
+                    operation,
+                    format!("Couldn't read the OpenCode response: {err}"),
+                )
+            })?;
+            Ok((status, bytes))
+        };
+        let (status, bytes) = within(operation, timeout, exchange).await?;
         if expected.contains(&status) {
             return Ok(bytes);
         }
@@ -120,19 +204,27 @@ impl HttpClient {
         operation: &str,
         path: &str,
         query: &[(&str, String)],
+        last_event_id: Option<&str>,
         silent_timeout: Duration,
     ) -> Result<EventStream<SseFrame>, OpenCodeRuntimeError> {
-        let url = self.url(&Method::GET, path, query, &[]);
+        // The SDK's SSE request skips the interceptor that moves the directory header
+        // into `?directory=`, so the subscription sends the header and no query.
+        let url = self.build_url(path, query, &[], false);
         let mut builder = self
             .http
             .get(url)
             .header(reqwest::header::ACCEPT, "text/event-stream");
+        if let Some(last_event_id) = last_event_id {
+            builder = builder.header("Last-Event-ID", last_event_id);
+        }
         builder = self.authorize(builder);
-        builder = self.directory_header(builder, Method::GET);
-        let response = builder.send().await.map_err(|err| {
-            OpenCodeRuntimeError::new(operation, "Couldn't reach the OpenCode server.")
-                .with_cause(err)
-        })?;
+        if let Some(directory) = &self.directory {
+            builder = builder.header("x-opencode-directory", encode_uri_component(directory));
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|err| unreachable(operation, err))?;
         let status = response.status().as_u16();
         let content_type = header_str(response.headers(), reqwest::header::CONTENT_TYPE);
         if content_type.as_deref() == Some("text/html") {
@@ -165,7 +257,6 @@ impl HttpClient {
         query: &[(&str, String)],
         extra_query: &[(String, String)],
         body: Option<&serde_json::Value>,
-        timeout: Option<Duration>,
     ) -> Result<reqwest::Response, OpenCodeRuntimeError> {
         let url = self.url(&method, path, query, extra_query);
         let mut builder = self.http.request(method.clone(), url);
@@ -174,22 +265,10 @@ impl HttpClient {
         if let Some(body) = body {
             builder = builder.json(body);
         }
-        let request = async {
-            builder.send().await.map_err(|err| {
-                OpenCodeRuntimeError::new(operation, "Couldn't reach the OpenCode server.")
-                    .with_cause(err)
-            })
-        };
-        match timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, request).await {
-                Ok(result) => result,
-                Err(_elapsed) => Err(OpenCodeRuntimeError::new(
-                    operation,
-                    "Timed out while waiting for the OpenCode server.",
-                )),
-            },
-            None => request.await,
-        }
+        builder
+            .send()
+            .await
+            .map_err(|err| unreachable(operation, err))
     }
 
     fn url(
@@ -199,12 +278,22 @@ impl HttpClient {
         query: &[(&str, String)],
         extra_query: &[(String, String)],
     ) -> reqwest::Url {
+        // The 1.x SDK copies `x-opencode-directory` onto `?directory=` for GET/HEAD
+        // and leaves the header in place for every other method.
+        let directory_query = matches!(*method, Method::GET | Method::HEAD);
+        self.build_url(path, query, extra_query, directory_query)
+    }
+
+    fn build_url(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        extra_query: &[(String, String)],
+        directory_query: bool,
+    ) -> reqwest::Url {
         let mut url = join_server_path(&self.base, path);
         let mut extra: Vec<(&str, &str)> = Vec::new();
-        let directory = self.directory.clone();
-        if matches!(*method, Method::GET | Method::HEAD)
-            && let Some(directory) = directory.as_deref()
-        {
+        if directory_query && let Some(directory) = self.directory.as_deref() {
             extra.push(("directory", directory));
         }
         if extra.is_empty() && query.is_empty() && extra_query.is_empty() {
@@ -212,8 +301,6 @@ impl HttpClient {
         }
         {
             let mut pairs = url.query_pairs_mut();
-            // The 1.x SDK copies `x-opencode-directory` onto `?directory=` for GET/HEAD
-            // and leaves the header in place for every other method.
             for (key, value) in extra {
                 pairs.append_pair(key, value);
             }
@@ -262,12 +349,57 @@ impl HttpClient {
     }
 }
 
+/// Runs one whole JSON exchange under `timeout`, if the caller set one.
+async fn within<T>(
+    operation: &str,
+    timeout: Option<Duration>,
+    exchange: impl std::future::Future<Output = Result<T, OpenCodeRuntimeError>>,
+) -> Result<T, OpenCodeRuntimeError> {
+    let Some(timeout) = timeout else {
+        return exchange.await;
+    };
+    match tokio::time::timeout(timeout, exchange).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(OpenCodeRuntimeError::new(
+            operation,
+            "Timed out while waiting for the OpenCode server.",
+        )),
+    }
+}
+
+/// `no_proxy`: upstream's Effect/Node fetch ignores `HTTP(S)_PROXY`, `ALL_PROXY`
+/// and the system proxy, so a proxy in the environment must not route the
+/// loopback server (or an external one) away from the adapter.
 pub fn shared_http() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::limited(10))
+        .no_proxy()
         .build()
         .expect("reqwest client")
+}
+
+/// Transport failure with the tokens upstream's status classifier matches
+/// (`fetch failed`, `ECONNREFUSED`). reqwest's own Display includes the URL,
+/// which must not reach a detail, so the text is written here.
+pub fn unreachable(operation: &str, err: reqwest::Error) -> OpenCodeRuntimeError {
+    let detail = if connection_refused(&err) {
+        "Couldn't reach the OpenCode server (fetch failed: ECONNREFUSED)."
+    } else {
+        "Couldn't reach the OpenCode server (fetch failed)."
+    };
+    OpenCodeRuntimeError::new(operation, detail).with_cause(err)
+}
+
+fn connection_refused(err: &reqwest::Error) -> bool {
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return io.kind() == std::io::ErrorKind::ConnectionRefused;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 pub fn decode_json<T: serde::de::DeserializeOwned>(
@@ -339,5 +471,131 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_deadline_covers_a_body_that_stalls_after_the_headers() {
+        // Headers arrive with a 1 MiB Content-Length, a few bytes follow, then the socket stays open.
+        let server = FakeServer::spawn(|_| FakeResponse {
+            status: 200,
+            content_type: Some("application/json".to_string()),
+            body: Vec::new(),
+            stream: Some(vec![b"{\"healthy\"".to_vec()]),
+            hold: true,
+            follow: None,
+            truncated: true,
+        })
+        .await;
+        let client = HttpClient::new(&server.url, "", false).unwrap();
+        let started = std::time::Instant::now();
+        let err = client
+            .send_json(
+                "global.health",
+                Method::GET,
+                "/global/health",
+                &[],
+                &[],
+                None,
+                &[200],
+                Some(Duration::from_millis(200)),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.detail,
+            "Timed out while waiting for the OpenCode server."
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// Child half of [`ignores_proxy_environment_for_loopback`]. The parent sets
+    /// the proxy variables and the server URL; without them this test is a no-op.
+    #[tokio::test]
+    async fn proxy_child() {
+        let Ok(url) = std::env::var("TURIN_PROXY_TEST_URL") else {
+            return;
+        };
+        let status = shared_http()
+            .get(format!("{url}/global/health"))
+            .send()
+            .await
+            .expect("request reached the loopback server without a proxy")
+            .status();
+        assert_eq!(status.as_u16(), 200);
+    }
+
+    /// A proxy in the environment must not capture a loopback request. reqwest
+    /// reads proxy variables when the client is built, so the check runs in a child
+    /// process that carries them; the parent's environment is left alone.
+    #[tokio::test]
+    async fn ignores_proxy_environment_for_loopback() {
+        let server = FakeServer::spawn(|_| FakeResponse::json(200, r#"{"healthy":true}"#)).await;
+        let exe = std::env::current_exe().unwrap();
+        let output = tokio::process::Command::new(exe)
+            .args(["--exact", "http_client::tests::proxy_child", "--nocapture"])
+            .env("TURIN_PROXY_TEST_URL", &server.url)
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[derive(Default)]
+    struct Recorder(parking_lot::Mutex<Vec<crate::protocol_log::ProtocolEvent>>);
+
+    impl crate::protocol_log::ProtocolLog for Recorder {
+        fn record(&self, event: crate::protocol_log::ProtocolEvent) {
+            self.0.lock().push(event);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_json_exchange_is_recorded_as_a_request_then_a_response() {
+        let server = FakeServer::spawn(|_| FakeResponse::json(200, r#"{"id":"ses_1"}"#)).await;
+        let recorder = Arc::new(Recorder::default());
+        let client = HttpClient::new(&server.url, "", false)
+            .unwrap()
+            .with_protocol_log(recorder.clone());
+        client
+            .send_json(
+                "session.create",
+                Method::POST,
+                "/session",
+                &[],
+                &[],
+                Some(&serde_json::json!({"title": "private"})),
+                &[200],
+                None,
+            )
+            .await
+            .unwrap();
+        let events = recorder.0.lock();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].direction,
+            crate::protocol_log::ProtocolDirection::Outgoing
+        );
+        assert_eq!(
+            events[0].message_kind,
+            crate::protocol_log::ProtocolMessageKind::Request
+        );
+        assert_eq!(events[0].method, "session.create");
+        assert_eq!(
+            events[1].direction,
+            crate::protocol_log::ProtocolDirection::Incoming
+        );
+        assert_eq!(
+            events[1].message_kind,
+            crate::protocol_log::ProtocolMessageKind::Response
+        );
+        assert_eq!(events[1].payload["id"], "ses_1");
     }
 }

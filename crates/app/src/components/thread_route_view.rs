@@ -3,22 +3,28 @@
 
 use gpui_kit::{IntoElement, ParentElement as _, Styled as _, div};
 
+use crate::components::chat::chat_git_host::ChatGitHost;
 use crate::components::chat_view::ChatView;
 use crate::shell::thread_routes::{ThreadRouteRenderState, ThreadRouteTarget};
 
 /// Renders the chat column for the active thread route target.
+#[allow(dead_code)]
 pub fn thread_route_view(
     _target: &ThreadRouteTarget,
     render_state: ThreadRouteRenderState,
     sidebar_open: bool,
     right_panel_open: bool,
     thread_header: Option<(gpui_kit::SharedString, gpui_kit::SharedString)>,
+    git_host: gpui_kit::Entity<ChatGitHost>,
+    thread_details_open: bool,
 ) -> gpui_kit::AnyElement {
     match render_state {
         ThreadRouteRenderState::Ready => ChatView {
             sidebar_open,
             right_panel_open,
             thread: thread_header,
+            git_host,
+            thread_details_open,
         }
         .into_any_element(),
         ThreadRouteRenderState::Loading => div().flex_1().child("Loading…").into_any_element(),

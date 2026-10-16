@@ -1,6 +1,7 @@
 //! Ports of upstream/apps/web/src/components/chat.
 
 pub mod changed_files_tree;
+pub mod chat_git_host;
 pub mod chat_header;
 // Chat-lane geometry for the canvas; the canvas does not call it yet.
 #[allow(dead_code)]
@@ -8,10 +9,20 @@ pub mod chat_canvas_layout;
 // Pure citation-selector text logic; the DOM capture half is not ported yet.
 #[allow(dead_code)]
 pub mod assistant_text_selection;
+// Pure citation-target rules; the chat view does not drive the navigation yet.
+#[allow(dead_code)]
+pub mod assistant_citation_target;
 pub mod composer_pending_panels;
+// Embedded-script scan for command and tool views; no view calls it yet.
+#[allow(dead_code)]
+pub mod embedded_scripts;
+// Copy-as-markdown for selections over rendered blocks; nothing calls it yet.
 pub mod markdown;
+#[allow(dead_code)]
+pub mod markdown_clipboard;
 pub mod message_copy_button;
 pub mod messages_timeline;
+pub mod open_in_picker;
 pub mod panel_layout_controls;
 // Pure scroll state machine; the timeline view does not drive page keys yet.
 #[allow(dead_code)]
@@ -20,6 +31,7 @@ pub mod page_scroll_controller;
 // in element state, so nothing calls these yet.
 #[allow(dead_code)]
 pub mod pending_user_input;
+pub mod thread_details_control;
 // The ported timeline read model keeps upstream's full helper surface; the
 // view and T14's reducers call into it piecemeal.
 #[allow(dead_code)]
@@ -33,4 +45,15 @@ pub mod timeline_scroll_anchoring;
 #[allow(dead_code)]
 pub mod selection_actions;
 pub mod timestamp_format;
+// Find-in-thread logic. The timeline does not drive find yet, so nothing calls these.
+#[allow(dead_code)]
+pub mod thread_find;
+#[allow(dead_code)]
+pub mod thread_find_highlights;
+#[allow(dead_code)]
+pub mod thread_find_navigation;
+#[allow(dead_code)]
+pub mod thread_find_position;
+#[allow(dead_code)]
+pub mod thread_find_state;
 pub mod work_log;

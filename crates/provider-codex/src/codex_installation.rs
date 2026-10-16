@@ -32,6 +32,12 @@ use turin_contracts::{
 use turin_provider_core::{
     command_path::resolve_command_path,
     host_process::{Platform, ProcessEnv},
+    model_manifest::{ModelManifest, ModelManifestData, bundled_model_manifest},
+    provider_compatibility::{
+        ProviderCompatibilityPolicy, decode_provider_compatibility_policies,
+        resolve_provider_compatibility,
+    },
+    server_provider::ServerProviderCompatibilityStatus,
 };
 
 const DRIVER_SLUG: &str = "codex";
@@ -195,10 +201,70 @@ pub struct CompatibilityAdvisory {
     pub message: Option<String>,
 }
 
-/// `resolveProviderCompatibility` for the Codex driver. The model manifest is
-/// not ported yet, so callers supply the lookup.
+/// `compatibility` in `makeCodexInstallation`: the advisory for one Codex version.
+/// `None` means no policy covers it, which leaves the version unsupported.
+#[async_trait]
 pub trait CodexCompatibility: Send + Sync {
-    fn advisory(&self, version: &str) -> Option<CompatibilityAdvisory>;
+    async fn advisory(&self, version: &str) -> Option<CompatibilityAdvisory>;
+}
+
+/// The model manifest as the installation reads it: always the current copy.
+#[async_trait]
+pub trait CodexManifestSource: Send + Sync {
+    async fn current(&self) -> ModelManifestData;
+}
+
+#[async_trait]
+impl CodexManifestSource for ModelManifest {
+    async fn current(&self) -> ModelManifestData {
+        ModelManifest::current(self).await
+    }
+}
+
+/// `CodexInstallation.compatibility`: the manifest's policy first, then the
+/// bundled one when the manifest has none that covers this T3 Code release. The
+/// manifest is read on every call, so a policy change applies to a cached local runtime.
+pub struct ManifestCodexCompatibility {
+    manifest: Arc<dyn CodexManifestSource>,
+    t3_code_version: String,
+}
+
+impl ManifestCodexCompatibility {
+    pub fn new(manifest: Arc<dyn CodexManifestSource>, t3_code_version: impl Into<String>) -> Self {
+        Self {
+            manifest,
+            t3_code_version: t3_code_version.into(),
+        }
+    }
+}
+
+fn decoded_policies(manifest: &ModelManifestData) -> Option<Vec<ProviderCompatibilityPolicy>> {
+    manifest
+        .compatibility
+        .as_deref()
+        .map(decode_provider_compatibility_policies)
+}
+
+#[async_trait]
+impl CodexCompatibility for ManifestCodexCompatibility {
+    async fn advisory(&self, version: &str) -> Option<CompatibilityAdvisory> {
+        let manifest = self.manifest.current().await;
+        let kind = driver();
+        let resolve = |policies: Option<Vec<ProviderCompatibilityPolicy>>| {
+            resolve_provider_compatibility(
+                policies.as_deref(),
+                &kind,
+                Some(version),
+                &self.t3_code_version,
+            )
+        };
+        resolve(decoded_policies(&manifest))
+            .or_else(|| resolve(decoded_policies(&bundled_model_manifest())))
+            .map(|advisory| CompatibilityAdvisory {
+                supported: advisory.status == ServerProviderCompatibilityStatus::Supported,
+                message: advisory.message.map(|message| message.as_str().to_owned()),
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -717,7 +783,7 @@ impl CodexInstallation {
             return Err(installation_error("resolve", MSG_NOT_INSTALLED));
         }
         let executable = self.resolve_active_installed().await?;
-        match self.compatibility.advisory(&executable.version) {
+        match self.compatibility.advisory(&executable.version).await {
             Some(advisory) if advisory.supported => Ok(executable),
             advisory => Err(installation_error(
                 "resolve",
@@ -777,6 +843,7 @@ impl CodexInstallation {
         let supported = self
             .compatibility
             .advisory(&executable.version)
+            .await
             .is_some_and(|advisory| advisory.supported);
         supported.then_some(executable)
     }
@@ -1126,8 +1193,9 @@ mod tests {
     use std::process::Command;
 
     struct Supported;
+    #[async_trait]
     impl CodexCompatibility for Supported {
-        fn advisory(&self, _: &str) -> Option<CompatibilityAdvisory> {
+        async fn advisory(&self, _: &str) -> Option<CompatibilityAdvisory> {
             Some(CompatibilityAdvisory {
                 supported: true,
                 message: None,
@@ -1136,8 +1204,9 @@ mod tests {
     }
 
     struct NoAdvisory;
+    #[async_trait]
     impl CodexCompatibility for NoAdvisory {
-        fn advisory(&self, _: &str) -> Option<CompatibilityAdvisory> {
+        async fn advisory(&self, _: &str) -> Option<CompatibilityAdvisory> {
             None
         }
     }
@@ -1208,9 +1277,13 @@ mod tests {
         for dir in ["bin", "codex-path"] {
             std::fs::create_dir_all(package.join(dir)).unwrap();
         }
-        for file in ["bin/codex", "bin/codex-code-mode-host", "codex-path/rg"] {
+        for (file, contents) in [
+            ("bin/codex", &b"#!/bin/sh\nexit 0\n"[..]),
+            ("bin/codex-code-mode-host", &b"host"[..]),
+            ("codex-path/rg", &b"rg"[..]),
+        ] {
             let path = package.join(file);
-            std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::write(&path, contents).unwrap();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -1491,5 +1564,499 @@ mod tests {
         let state = service.state();
         assert_eq!(state.phase, ProviderInstallPhase::Idle);
         assert!(!state.can_remove);
+    }
+
+    #[test]
+    fn complete_packages_exist_for_every_supported_platform() {
+        for platform in ["darwin", "linux", "win32"] {
+            for arch in ["x64", "arm64"] {
+                let asset = resolve_codex_release_asset(platform, arch).expect("asset");
+                assert!(asset.url.contains("codex-package-"), "{platform} {arch}");
+            }
+        }
+        assert!(resolve_codex_release_asset("linux", "riscv64").is_none());
+    }
+
+    #[cfg(unix)]
+    mod with_local_cli {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// The T3 Code release the bundled Codex policy is read against.
+        const T3_CODE_VERSION: &str = "0.0.44";
+
+        struct ManifestCell(parking_lot::Mutex<ModelManifestData>);
+
+        #[async_trait]
+        impl CodexManifestSource for ManifestCell {
+            async fn current(&self) -> ModelManifestData {
+                self.0.lock().clone()
+            }
+        }
+
+        struct CountingDownloader {
+            inner: FixtureDownloader,
+            count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl CodexReleaseDownloader for CountingDownloader {
+            async fn download(
+                &self,
+                url: &str,
+                destination: &Path,
+                max_bytes: u64,
+                on_progress: &(dyn Fn(u64) + Send + Sync),
+            ) -> Result<CodexDownload, CodexInstallationError> {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                self.inner
+                    .download(url, destination, max_bytes, on_progress)
+                    .await
+            }
+        }
+
+        #[derive(Clone, Copy, Default)]
+        struct Local {
+            version: &'static str,
+            app_server_fails: bool,
+            version_fails: bool,
+        }
+
+        struct Harness {
+            _temp: tempfile::TempDir,
+            base: PathBuf,
+            local_dir: PathBuf,
+            local_bin: PathBuf,
+            probe_log: PathBuf,
+            downloads: Arc<AtomicUsize>,
+            manifest: Arc<ManifestCell>,
+            archive: PathBuf,
+            sha256: String,
+            bytes: u64,
+            has_local: bool,
+        }
+
+        fn write_executable(path: &Path, contents: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(path, contents).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        fn harness(local: Option<Local>) -> Harness {
+            let temp = tempfile::tempdir().unwrap();
+            let (archive, sha256, bytes) = make_fixture(temp.path());
+            let base = temp.path().join("base");
+            let local_dir = base.join("local");
+            let local_bin = local_dir.join("codex");
+            let probe_log = base.join("local-probes.txt");
+            if let Some(local) = local {
+                std::fs::create_dir_all(&local_dir).unwrap();
+                let version = if local.version_fails {
+                    "exit 1".to_owned()
+                } else {
+                    format!("printf '%s\\n' 'codex-cli {}'", local.version)
+                };
+                let app_server = if local.app_server_fails { 1 } else { 0 };
+                write_executable(
+                    &local_bin,
+                    &format!(
+                        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n--version) {version};;\napp-server) exit {app_server};;\nesac\n",
+                        probe_log.display()
+                    ),
+                );
+            }
+            Harness {
+                base,
+                local_dir,
+                local_bin,
+                probe_log,
+                downloads: Arc::new(AtomicUsize::new(0)),
+                manifest: Arc::new(ManifestCell(parking_lot::Mutex::new(
+                    bundled_model_manifest(),
+                ))),
+                archive,
+                sha256,
+                bytes,
+                has_local: local.is_some(),
+                _temp: temp,
+            }
+        }
+
+        impl Harness {
+            async fn open_with(&self, asset: CodexReleaseAsset) -> Arc<CodexInstallation> {
+                let mut options = options(
+                    &self.base,
+                    asset,
+                    Arc::new(CountingDownloader {
+                        inner: FixtureDownloader {
+                            archive: self.archive.clone(),
+                        },
+                        count: Arc::clone(&self.downloads),
+                    }),
+                    Arc::new(ManifestCodexCompatibility::new(
+                        self.manifest.clone(),
+                        T3_CODE_VERSION,
+                    )),
+                );
+                if self.has_local {
+                    options.environment = ProcessEnv::from([(
+                        "PATH".to_owned(),
+                        self.local_dir.to_string_lossy().into_owned(),
+                    )]);
+                }
+                CodexInstallation::open(options).await
+            }
+
+            async fn open(&self) -> Arc<CodexInstallation> {
+                self.open_with(asset(&self.sha256, self.bytes)).await
+            }
+
+            fn downloads(&self) -> usize {
+                self.downloads.load(Ordering::SeqCst)
+            }
+
+            fn probes(&self) -> Vec<String> {
+                std::fs::read_to_string(&self.probe_log)
+                    .unwrap()
+                    .trim()
+                    .lines()
+                    .map(str::to_owned)
+                    .collect()
+            }
+        }
+
+        #[tokio::test]
+        async fn reuses_installed_codex_without_downloading_or_taking_ownership() {
+            for version in ["0.156.0", "0.156.1", "0.156.2", "0.157.0"] {
+                let h = harness(Some(Local {
+                    version,
+                    ..Local::default()
+                }));
+                let service = h.open().await;
+                let started = service.start().await.unwrap();
+                assert_eq!(started.source, Some(Some(ProviderInstallSource::Local)));
+                assert_eq!(started.phase, ProviderInstallPhase::Succeeded);
+                assert_eq!(
+                    started.installed_version.as_ref().map(|v| v.as_str()),
+                    Some(version)
+                );
+                assert_eq!(
+                    started.executable_path,
+                    Some(trimmed(h.local_bin.to_string_lossy()))
+                );
+                assert!(!started.can_remove);
+                let resolved = service.resolve().await.unwrap();
+                assert_eq!(resolved.source, ProviderInstallSource::Local);
+                assert_eq!(resolved.executable_path, h.local_bin);
+                assert_eq!(resolved.managed_version_directory, None);
+                assert_eq!(resolved.version, version);
+                drop(service.acquire().await.unwrap());
+                assert_eq!(h.downloads(), 0);
+                assert!(!service.managed_directory().exists());
+                assert_eq!(h.probes(), ["--version", "app-server --help"]);
+                service.remove(&[]).await.unwrap();
+                assert!(h.local_bin.exists());
+                assert_eq!(
+                    service.state().source,
+                    Some(Some(ProviderInstallSource::Local))
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn downloads_the_pinned_release_when_the_local_cli_is_unsupported_or_broken() {
+            let cases = [
+                Local {
+                    version: "0.128.9",
+                    ..Local::default()
+                },
+                Local {
+                    version: "0.145.0",
+                    ..Local::default()
+                },
+                Local {
+                    version: "0.155.1",
+                    ..Local::default()
+                },
+                Local {
+                    version: "0.155.9",
+                    ..Local::default()
+                },
+                Local {
+                    version: "0.156.1-alpha.1",
+                    ..Local::default()
+                },
+                Local {
+                    version: "unknown",
+                    ..Local::default()
+                },
+                Local {
+                    version: "0.156.1",
+                    app_server_fails: true,
+                    ..Local::default()
+                },
+                Local {
+                    version: "0.156.1",
+                    version_fails: true,
+                    ..Local::default()
+                },
+            ];
+            for local in cases {
+                let label = format!(
+                    "{} appServerFails={} versionFails={}",
+                    local.version, local.app_server_fails, local.version_fails
+                );
+                let h = harness(Some(local));
+                let service = h.open().await;
+                assert_eq!(service.state().installed_version, None, "{label}");
+                service.start().await.unwrap();
+                let installed = settled(&service).await;
+                assert_eq!(installed.phase, ProviderInstallPhase::Succeeded, "{label}");
+                let executable = service.resolve().await.unwrap();
+                assert_eq!(executable.source, ProviderInstallSource::Managed, "{label}");
+                assert_eq!(
+                    installed.executable_path,
+                    Some(trimmed(executable.executable_path.to_string_lossy())),
+                    "{label}"
+                );
+                assert_eq!(h.downloads(), 1, "{label}");
+                assert!(h.local_bin.exists(), "{label}");
+            }
+        }
+
+        #[tokio::test]
+        async fn falls_back_to_a_managed_download_when_the_reused_local_executable_disappears() {
+            let h = harness(Some(Local {
+                version: "0.156.1",
+                ..Local::default()
+            }));
+            let service = h.open().await;
+            assert_eq!(
+                service.resolve().await.unwrap().source,
+                ProviderInstallSource::Local
+            );
+            std::fs::remove_file(&h.local_bin).unwrap();
+            service.start().await.unwrap();
+            assert_eq!(
+                settled(&service).await.phase,
+                ProviderInstallPhase::Succeeded
+            );
+            assert_eq!(
+                service.resolve().await.unwrap().source,
+                ProviderInstallSource::Managed
+            );
+            assert_eq!(h.downloads(), 1);
+        }
+
+        #[tokio::test]
+        async fn rechecks_compatibility_after_the_local_executable_is_replaced() {
+            let h = harness(Some(Local {
+                version: "0.156.1",
+                ..Local::default()
+            }));
+            let service = h.open().await;
+            assert_eq!(
+                service.resolve().await.unwrap().source,
+                ProviderInstallSource::Local
+            );
+            std::fs::remove_file(&h.local_bin).unwrap();
+            write_executable(&h.local_bin, "#!/bin/sh\nprintf 'codex-cli 0.128.9\\n'\n");
+            service.start().await.unwrap();
+            assert_eq!(
+                settled(&service).await.phase,
+                ProviderInstallPhase::Succeeded
+            );
+            assert_eq!(
+                service.resolve().await.unwrap().source,
+                ProviderInstallSource::Managed
+            );
+            assert_eq!(h.downloads(), 1);
+        }
+
+        #[tokio::test]
+        async fn rechecks_a_cached_local_executable_when_the_shared_manifest_policy_changes() {
+            let h = harness(Some(Local {
+                version: "0.156.0",
+                ..Local::default()
+            }));
+            let service = h.open().await;
+            assert_eq!(
+                service.resolve().await.unwrap().source,
+                ProviderInstallSource::Local
+            );
+            h.manifest.0.lock().compatibility = Some(vec![serde_json::json!({
+                "driver": "codex",
+                "t3CodeRange": ">=0.0.42",
+                "ranges": [
+                    {"range": ">=0.156.1", "status": "supported"},
+                    {"range": "<0.156.1", "status": "broken"},
+                ],
+            })]);
+            service.start().await.unwrap();
+            assert_eq!(
+                settled(&service).await.phase,
+                ProviderInstallPhase::Succeeded
+            );
+            assert_eq!(
+                service.resolve().await.unwrap().source,
+                ProviderInstallSource::Managed
+            );
+            assert_eq!(h.downloads(), 1);
+            // The cached probe is reused: the policy changed, the executable did not.
+            assert_eq!(h.probes(), ["--version", "app-server --help"]);
+        }
+
+        #[tokio::test]
+        async fn uses_bundled_compatibility_when_the_remote_manifest_omits_its_policy() {
+            let h = harness(Some(Local {
+                version: "0.156.0",
+                ..Local::default()
+            }));
+            h.manifest.0.lock().compatibility = Some(Vec::new());
+            let service = h.open().await;
+            let started = service.start().await.unwrap();
+            assert_eq!(started.source, Some(Some(ProviderInstallSource::Local)));
+            assert_eq!(h.downloads(), 0);
+        }
+
+        #[tokio::test]
+        async fn preserves_the_invoked_name_of_version_manager_launcher_symlinks() {
+            let h = harness(Some(Local {
+                version: "0.156.1",
+                ..Local::default()
+            }));
+            let launcher = h.base.join("launcher");
+            write_executable(
+                &launcher,
+                "#!/bin/sh\ncase \"$0\" in */codex) ;; *) exit 1;; esac\ncase \"$1\" in --version) printf \"codex-cli 0.156.1\\n\";; app-server) exit 0;; esac\n",
+            );
+            std::fs::remove_file(&h.local_bin).unwrap();
+            std::os::unix::fs::symlink(&launcher, &h.local_bin).unwrap();
+            let service = h.open().await;
+            let started = service.start().await.unwrap();
+            assert_eq!(started.source, Some(Some(ProviderInstallSource::Local)));
+            assert_eq!(started.phase, ProviderInstallPhase::Succeeded);
+            assert_eq!(
+                service.resolve().await.unwrap().executable_path,
+                h.local_bin
+            );
+            assert_eq!(h.downloads(), 0);
+        }
+
+        #[tokio::test]
+        async fn installs_the_complete_verified_package_and_survives_a_restart() {
+            let h = harness(None);
+            let service = h.open().await;
+            service.start().await.unwrap();
+            assert_eq!(
+                settled(&service).await.phase,
+                ProviderInstallPhase::Succeeded
+            );
+            let executable = service.resolve().await.unwrap();
+            assert_eq!(
+                executable.executable_path,
+                h.base.join("tools/codex/0.156.1/bin/codex")
+            );
+            let directory = executable.managed_version_directory.unwrap();
+            assert_eq!(
+                std::fs::read_to_string(directory.join("bin/codex-code-mode-host")).unwrap(),
+                "host"
+            );
+            assert_eq!(
+                std::fs::read_to_string(directory.join("codex-path/rg")).unwrap(),
+                "rg"
+            );
+            let restarted = h.open().await;
+            assert_eq!(restarted.resolve().await.unwrap().version, "0.156.1");
+        }
+
+        #[tokio::test]
+        async fn requires_an_update_before_running_an_older_activated_managed_installation() {
+            let h = harness(None);
+            let first = h.open().await;
+            first.start().await.unwrap();
+            settled(&first).await;
+            let executable = first.resolve().await.unwrap();
+            let old_directory = first.managed_directory().join("0.155.1");
+            std::fs::rename(
+                executable.managed_version_directory.unwrap(),
+                &old_directory,
+            )
+            .unwrap();
+            for name in ["codex-package.json", ".install-complete.json"] {
+                let file = old_directory.join(name);
+                let text = std::fs::read_to_string(&file).unwrap();
+                std::fs::write(&file, text.replace("0.156.1", "0.155.1")).unwrap();
+            }
+            std::fs::write(
+                first.managed_directory().join("active.json"),
+                r#"{"version":"0.155.1"}"#,
+            )
+            .unwrap();
+            let downloads_before = h.downloads();
+            let restarted = h.open().await;
+            let error = restarted.resolve().await.expect_err("older release");
+            assert!(
+                error.detail.contains("outside the supported range"),
+                "{}",
+                error.detail
+            );
+            restarted.start().await.unwrap();
+            assert_eq!(
+                settled(&restarted).await.phase,
+                ProviderInstallPhase::Succeeded
+            );
+            assert_eq!(restarted.resolve().await.unwrap().version, "0.156.1");
+            assert_eq!(h.downloads() - downloads_before, 1);
+        }
+
+        #[tokio::test]
+        async fn protects_active_process_leases_and_removes_the_runtime_after_release() {
+            let h = harness(None);
+            let service = h.open().await;
+            service.start().await.unwrap();
+            settled(&service).await;
+            let lease = service.acquire().await.unwrap();
+            let error = service.remove(&[]).await.expect_err("leased");
+            assert!(
+                error.detail.contains("Stop Codex sessions"),
+                "{}",
+                error.detail
+            );
+            drop(lease);
+            service.remove(&[]).await.unwrap();
+            assert!(!service.managed_directory().exists());
+            let state = service.state();
+            assert_eq!(state.installed_version, None);
+            assert_eq!(state.executable_path, Some(None));
+        }
+
+        #[tokio::test]
+        async fn keeps_an_activated_runtime_when_a_later_update_fails_verification() {
+            let h = harness(None);
+            let first = h.open().await;
+            first.start().await.unwrap();
+            settled(&first).await;
+            let update = h
+                .open_with(CodexReleaseAsset {
+                    version: "0.156.2".to_owned(),
+                    ..asset(&"0".repeat(64), h.bytes)
+                })
+                .await;
+            assert_eq!(
+                update.state().executable_path,
+                Some(trimmed(
+                    first
+                        .resolve()
+                        .await
+                        .unwrap()
+                        .executable_path
+                        .to_string_lossy()
+                ))
+            );
+            update.start().await.unwrap();
+            assert_eq!(settled(&update).await.phase, ProviderInstallPhase::Failed);
+            assert_eq!(update.resolve().await.unwrap().version, "0.156.1");
+        }
     }
 }

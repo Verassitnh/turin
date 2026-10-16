@@ -174,8 +174,8 @@ pub fn spawn_status_feed(providers: &Providers, bus: super::bus::CommandBus) {
 /// The Codex driver with its managed host (T09d "App wiring"). Everything it
 /// touches lives under `base_dir`: the secrets dir, the managed install dir and
 /// the shadow `CODEX_HOME`s. Nothing is downloaded until a managed install is
-/// requested. Turin runs no HTTP server, so the sign-in return URL is a
-/// absent: the desktop has no HTTP welcome page; sign-in uses client callbacks.
+/// requested. The desktop has no HTTP welcome page, so the return URL is
+/// absent. Native sign-in can use the controller's own loopback callback server.
 async fn codex_driver(
     base_dir: &Path,
     host: &Arc<ProviderHost>,

@@ -9,7 +9,10 @@ Public `WriteRuntime` services:
 - `provider_auth: Arc<ProviderAuthService>`; `start/respond/complete/cancel/logout/subscribe`
   use existing `turin_providers::provider_auth_service` signatures. Use one stable
   owner session ID for each settings UI's auth flow; explicit Client callback mode
-  where supported. No HTTP callback listener is supplied by this runtime.
+  where supported. IMPORTANT: native desktop auth should use Server callback mode;
+  Codex's own auth controller spawns a loopback callback listener in Server mode.
+  WIRE-settings currently forces Client mode, which needs a desktop receiver for
+  callback URLs. Runtime supplies no such receiver. No phantom welcome URL remains.
 - `provider_installation: Arc<ProviderInstallation>`; existing provider setup/install
   APIs. Shared Codex managed installation used by actual driver, not a second installer.
 - `server_settings: Arc<ServerSettingsService>`; use Commands facade for patches so
@@ -34,9 +37,13 @@ Commands facade methods:
 - `usage_summary(&UsageSummaryInput) -> Result<UsageSummary, CommandError>`
 - `pending_approval_count() -> Result<usize, CommandError>` (approval requests on non-deleted/non-archived threads).
 
-Draft undo: runtime does not own composer DraftStore. Existing seam is UI-owned
-`composer::draft_store::DraftStore` plus `discard_composer_draft`; shell/composer owner
-must retain and restore discarded draft there. Runtime must not invent another store.
+Draft undo exact seam: runtime does not own the UI's `ComposerDraftStore`.
+`composer::discard_composer_draft::DiscardableDraftStore` has no production
+implementation (only tests). UI owner must implement it for its shared draft/session
+store, retain `DiscardedDrafts<St::Session>` alongside notices, and execute
+`restore_discarded_draft(&mut store, &discarded, &releaser, discard_id)` from
+`UndoPlan::RestoreDraft`. The same store/registry/releaser must back discard and undo;
+runtime cannot restore into another copy of the composer store.
 
 No cargo, tests, clippy run here: parent owns integrated build. Rustfmt and `git diff --check` only; parent owns compile validation.
 

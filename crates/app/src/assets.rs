@@ -168,6 +168,13 @@ pub const SEND_ARROW: &str = "brand/send-arrow.svg";
 /// Lucide `chevron-down` at `stroke-width` 2.25 (ComposerControl.tsx); the
 /// stock `IconName::ChevronDown` is stroke 2.
 pub const CHEVRON_DOWN: &str = "brand/chevron-down.svg";
+/// The bare T mark for the sidebar brand slot (upstream `T3Wordmark`). Bytes are
+/// `assets/prod/wordmark.svg`, `currentColor`. The asset key stays `brand/`.
+pub const WORDMARK: &str = "brand/wordmark.svg";
+/// The macOS app icon, the same `assets/prod/black-macos-1024.png` that
+/// `scripts/bundle-macos.sh` turns into `Turin.icns`. Set as the Dock icon of an
+/// unbundled run.
+pub const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/prod/black-macos-1024.png");
 
 /// Provider marks (components/Icons.tsx), keyed by driver kind in
 /// [`provider_icon_path`].
@@ -210,6 +217,10 @@ const BRAND: &[(&str, &[u8])] = &[
     (
         CHEVRON_DOWN,
         include_bytes!("../assets/brand/chevron-down.svg"),
+    ),
+    (
+        WORDMARK,
+        include_bytes!("../../../assets/prod/wordmark.svg"),
     ),
     (
         PROVIDER_OPENAI,

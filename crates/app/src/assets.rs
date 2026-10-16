@@ -52,6 +52,7 @@ icon_assets!(
         CornerUpRight,
         Ellipsis,
         Eye,
+        EyeOff,
         File,
         CornerDownRight,
         ExternalLink,

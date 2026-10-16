@@ -378,3 +378,141 @@ pub fn example_edge() -> ThreadRelationshipEdge {
         status: Some("completed".into()),
     }
 }
+
+/// `TURIN_CHAT_DEMO=thread-details,pr-rows`: the panel's pull request rows with a host detail in
+/// each state the action slot ranks.
+pub fn pr_rows_demo(
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> Option<gpui_kit::AnyElement> {
+    use std::rc::Rc;
+
+    use gpui_kit::{IntoElement as _, ParentElement as _, Styled as _, div};
+    use turin_contracts::thread_pull_request::ThreadPullRequestLink;
+
+    use super::thread_details_pr_row::{
+        PrRowActions, ThreadDetailsPrRow, demo_pull_request_detail,
+    };
+    use super::thread_details_pr_rows::{ThreadDetailsPrRows, thread_details_pr_link_row};
+    use super::thread_details_section::ThreadDetailsSection;
+
+    if !std::env::var("TURIN_CHAT_DEMO").is_ok_and(|demo| demo.contains("pr-rows")) {
+        return None;
+    }
+    let link = |number: u64, head: &str, base: &str, updated_at: &str, watched: bool| {
+        let mut link: ThreadPullRequestLink = serde_json::from_value(json!({
+            "host": "github.com",
+            "repository": "acme/web",
+            "number": number,
+            "url": format!("https://github.com/acme/web/pull/{number}"),
+            "source": "manual",
+            "linkedAt": updated_at,
+            "snapshot": {
+                "state": "open",
+                "title": format!("Change {number}"),
+                "headBranch": head,
+                "baseBranch": base,
+                "isDraft": false,
+                "updatedAt": updated_at,
+                "syncedAt": updated_at,
+            },
+            "stack": null,
+        }))
+        .expect("demo link decodes");
+        if watched {
+            link.watch = serde_json::from_value(json!({
+                "startedAt": updated_at, "headSha": null, "failedChecks": [], "passed": false,
+                "passedChecks": [], "remarksThrough": updated_at, "remarkIds": [],
+                "conflicting": false, "wakes": 0,
+            }))
+            .ok();
+        }
+        link
+    };
+    let check = |name: &str, status: &str| json!({ "name": name, "status": status, "description": null, "url": null });
+    let noop: super::thread_details_pr_row::OpenHandler = Rc::new(|_, _, _| {});
+    let row = |id: &str, number: u64, detail: serde_json::Value| {
+        let detail = demo_pull_request_detail(serde_json::Value::as_object(&detail).map_or(
+            json!({ "number": number }),
+            |_| {
+                let mut detail = detail.clone();
+                detail["number"] = json!(number);
+                detail
+            },
+        ));
+        ThreadDetailsPrRow::new(id.to_owned(), number, format!("#{number}"), noop.clone())
+            .detail(Some(detail))
+            .actions(PrRowActions::default())
+            .into_any_element()
+    };
+    let current = link(
+        12,
+        "layer-two",
+        "layer-one",
+        "2026-10-15T10:00:20.000Z",
+        false,
+    );
+    let links = vec![
+        link(11, "layer-one", "main", "2026-10-15T10:00:10.000Z", true),
+        current.clone(),
+        link(3, "unrelated", "main", "2026-10-15T10:00:05.000Z", false),
+    ];
+    let merge_ready = demo_pull_request_detail(json!({
+        "number": 12,
+        "title": "Cache the checkout title",
+        "checks": [check("ci", "success"), check("lint", "success")],
+    }));
+    let current_row =
+        thread_details_pr_link_row("demo-current", &current, noop.clone(), Some(merge_ready))
+            .actions(PrRowActions::default());
+    let rows = ThreadDetailsPrRows {
+        id: "demo-pr-rows".into(),
+        links,
+        current_link: Some(current),
+        current_row,
+        on_open_link: Rc::new(|_, _, _, _| {}),
+        stop_watching: Some(Rc::new(|_, _, _| {})),
+        link_detail: None,
+    };
+    let _ = (window, cx);
+    Some(
+        ThreadDetailsSection::new("Pull requests")
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(rows)
+                    .child(row(
+                        "demo-fix",
+                        21,
+                        json!({
+                            "title": "Fix the flaky cart test",
+                            "checks": [check("ci", "failure"), check("lint", "success")],
+                        }),
+                    ))
+                    .child(row(
+                        "demo-running",
+                        22,
+                        json!({
+                            "title": "Bump the checkout SDK",
+                            "checks": [check("ci", "pending"), check("lint", "success")],
+                        }),
+                    ))
+                    .child(row(
+                        "demo-resolve",
+                        23,
+                        json!({
+                            "title": "Rework the tax rules",
+                            "mergeability": "conflicting",
+                            "checks": [check("ci", "success")],
+                        }),
+                    ))
+                    .child(row(
+                        "demo-draft",
+                        24,
+                        json!({ "title": "Spike: order history", "isDraft": true }),
+                    )),
+            )
+            .into_any_element(),
+    )
+}

@@ -242,7 +242,10 @@ impl RenderOnce for ThreadDetailsControl {
                 .px(rems(0.375))
                 .rounded(RADIUS_MD)
                 .text_size(TEXT_XS.size)
-                .text_color(theme.muted_foreground),
+                // A toned meta control (a row's "Merge" / "Fix") keeps its tone.
+                .when(self.tone == ThreadDetailsTone::Default, |this| {
+                    this.text_color(theme.muted_foreground)
+                }),
         };
         if self.multiline {
             root = root.h_auto().min_h(rems(2.)).py(px(3.));

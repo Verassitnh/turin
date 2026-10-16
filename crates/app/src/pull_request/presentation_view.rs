@@ -94,7 +94,7 @@ pub fn tone_color(tone: &str, theme: &AppTheme) -> Hsla {
     chosen.unwrap_or(theme.muted_foreground)
 }
 
-fn glyph_icon(glyph: &str) -> IconName {
+pub(crate) fn glyph_icon(glyph: &str) -> IconName {
     match glyph {
         "draft" => IconName::GitPullRequestDraft,
         "closed" => IconName::GitPullRequestClosed,

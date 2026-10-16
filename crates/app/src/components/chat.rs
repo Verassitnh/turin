@@ -59,6 +59,8 @@ pub mod thread_details_control;
 pub mod thread_details_demo;
 pub mod thread_details_panel;
 pub mod thread_details_panel_styles;
+pub mod thread_details_pr_row;
+pub mod thread_details_pr_rows;
 pub mod thread_details_section;
 pub mod thread_relationships_panel;
 #[allow(dead_code)]

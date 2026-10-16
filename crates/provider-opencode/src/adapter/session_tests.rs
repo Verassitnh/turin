@@ -956,20 +956,46 @@ async fn v2_unload_forgets_an_idle_thread_and_keeps_a_busy_one() {
     session.close().await;
 }
 
-/// Events from a session until `done` matches one, or the deadline passes. Returns them as JSON.
+/// Events from a session until `done` matches one. A deadline or a closed stream fails the test.
 async fn events_until(
     events: &mut ProviderEventStream,
     done: impl Fn(&Value) -> bool,
 ) -> Vec<Value> {
     let mut seen = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, events.next()).await {
-        let value = serde_json::to_value(event.expect("event")).expect("event json");
-        let finished = done(&value);
-        seen.push(value);
-        if finished {
-            break;
+    loop {
+        match tokio::time::timeout_at(deadline, events.next()).await {
+            Ok(Some(event)) => {
+                let value = serde_json::to_value(event.expect("event")).expect("event json");
+                let finished = done(&value);
+                seen.push(value);
+                if finished {
+                    return seen;
+                }
+            }
+            Ok(None) => panic!("event stream ended before the expected event; saw {seen:#?}"),
+            Err(_) => panic!("timed out waiting for an event; saw {seen:#?}"),
         }
+    }
+}
+
+/// Polls until `ready` is true. The deadline fails the test instead of continuing.
+async fn until_ready(mut ready: impl FnMut() -> bool, what: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !ready() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Events already queued. Does not wait for a later frame.
+async fn drain_ready(events: &mut ProviderEventStream) -> Vec<Value> {
+    let mut seen = Vec::new();
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::ZERO, events.next()).await {
+        seen.push(serde_json::to_value(event.expect("event")).expect("event json"));
     }
     seen
 }
@@ -1575,27 +1601,25 @@ async fn v1_compaction_emits_one_completed_item_on_the_root_node() {
             &json!({"type":"session.compacted","properties":{"sessionID":"ses_1"}}).to_string(),
         )))
         .unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"message.part.updated","properties":{"part":{"id":"p_after","sessionID":"ses_1","messageID":"msg_a","type":"text","text":"after compact"}}}).to_string(),
+        )))
+        .unwrap();
     let seen = events_until(&mut events, |value| {
-        value["type"] == "turn_item.updated" && value["turn_item"]["type"] == "compaction"
+        value["type"] == "turn_item.updated" && value["turn_item"]["text"] == "after compact"
     })
     .await;
-    let item = of_type(&seen, "turn_item.updated")
+    let compactions: Vec<_> = of_type(&seen, "turn_item.updated")
         .into_iter()
-        .find(|event| event["turn_item"]["type"] == "compaction")
-        .expect("compaction item")
-        .clone();
-    assert_eq!(item["turn_item"]["status"], "completed");
-    assert_eq!(item["turn_item"]["title"], "Context compacted");
+        .filter(|event| event["turn_item"]["type"] == "compaction")
+        .collect();
+    assert_eq!(compactions.len(), 1, "{seen:#?}");
+    assert_eq!(compactions[0]["turn_item"]["status"], "completed");
+    assert_eq!(compactions[0]["turn_item"]["title"], "Context compacted");
     // Upstream places the compaction on the turn's root node, with no node of its own.
-    assert_eq!(item["turn_item"]["nodeId"], "node_1");
-    // A second compaction in the same turn is not a second item.
-    let more = events_until(&mut events, |value| value["type"] == "turn_item.updated").await;
-    assert!(
-        of_type(&more, "turn_item.updated")
-            .iter()
-            .all(|event| event["turn_item"]["type"] != "compaction"),
-        "{more:#?}"
-    );
+    assert_eq!(compactions[0]["turn_item"]["nodeId"], "node_1");
     session.close().await;
 }
 
@@ -1896,7 +1920,7 @@ async fn assert_event_stream_closes(frames: &mpsc::UnboundedSender<Option<Vec<u8
         let _ = frames.send(Some(sse(
             &json!({"id":"e0","type":"server.heartbeat","data":{}}).to_string(),
         )));
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -2063,8 +2087,7 @@ async fn v2_stop_drops_queued_reports_from_its_children() {
                 .to_string(),
         )))
         .unwrap();
-    // The report is queued before the Stop reaches the session.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    until_ready(|| session.test_has_report("ses_1"), "queued child report").await;
     session
         .interrupt_turn(ProviderAdapterV2InterruptInput {
             provider_thread: thread,
@@ -2168,7 +2191,12 @@ async fn v2_wake_offers_a_continuation_and_parks_the_execution_events() {
     );
     assert!(offer.message_id.is_some());
     // The parked text is not projected while the thread waits for its continuation.
-    let parked = events_until(&mut events, |value| value["type"] == "turn_item.updated").await;
+    until_ready(
+        || session.test_wake_contains("ses_1", "hello"),
+        "parked wake text",
+    )
+    .await;
+    let parked = drain_ready(&mut events).await;
     assert!(
         of_type(&parked, "turn_item.updated").is_empty(),
         "{parked:#?}"
@@ -2872,7 +2900,7 @@ async fn v2_plain_tool_success_completes_despite_metadata_running() {
         .unwrap();
     let seen = events_until(&mut events, |value| {
         value["type"] == "turn_item.updated"
-            && value["turn_item"]["type"] == "tool_call"
+            && value["turn_item"]["nativeItemRef"]["nativeId"] == "call_plain"
             && value["turn_item"]["status"] == "completed"
     })
     .await;
@@ -2999,11 +3027,10 @@ async fn v2_reconcile_settles_a_background_child_gone_from_active() {
     ] {
         script.frames.send(Some(sse(&frame.to_string()))).unwrap();
     }
-    let _ = events_until(&mut events, |value| {
-        value["type"] == "turn_item.updated"
-            && value["turn_item"]["type"] == "subagent"
-            && value["turn_item"]["status"] == "running"
-    })
+    until_ready(
+        || session.test_background_attached("ses_child"),
+        "background child attached",
+    )
     .await;
     session
         .reconcile_within(Duration::from_secs(5))
@@ -3095,19 +3122,16 @@ async fn v2_reconcile_discards_wakes_only_for_sessions_that_owe_work() {
     ] {
         script.frames.send(Some(sse(&frame.to_string()))).unwrap();
     }
-    let mut parked = false;
-    for _ in 0..50 {
-        if session.test_has_wake("ses_bg")
-            && session.test_has_wake("ses_keep")
-            && session.test_has_report("ses_child")
-            && session.test_has_report("ses_keep")
-        {
-            parked = true;
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert!(parked, "wakes and reports should be queued before reconcile");
+    until_ready(
+        || {
+            session.test_has_wake("ses_bg")
+                && session.test_has_wake("ses_keep")
+                && session.test_has_report("ses_child")
+                && session.test_has_report("ses_keep")
+        },
+        "wakes and reports queued",
+    )
+    .await;
     session
         .reconcile_within(Duration::from_secs(5))
         .await
@@ -3192,16 +3216,11 @@ async fn v2_stop_interrupts_an_announced_child_before_the_call_attaches() {
             &json!({"id":"s2","type":"session.created","data":{"sessionID":"ses_child","parentID":"ses_1","id":"ses_child"}}).to_string(),
         )))
         .unwrap();
-    let linked = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if session.test_child_linked("ses_child", "ses_1") {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
+    until_ready(
+        || session.test_child_linked("ses_child", "ses_1"),
+        "session.created announces the child",
+    )
     .await;
-    assert!(linked.is_ok(), "session.created must announce the child");
     session
         .interrupt_turn(ProviderAdapterV2InterruptInput {
             provider_thread: thread,
@@ -3284,11 +3303,10 @@ async fn v2_stop_treats_a_gone_background_child_as_interrupted() {
     ] {
         script.frames.send(Some(sse(&frame.to_string()))).unwrap();
     }
-    let _ = events_until(&mut events, |value| {
-        value["type"] == "turn_item.updated"
-            && value["turn_item"]["type"] == "subagent"
-            && value["turn_item"]["status"] == "running"
-    })
+    until_ready(
+        || session.test_background_attached("ses_child"),
+        "background child attached",
+    )
     .await;
     session
         .interrupt_turn(ProviderAdapterV2InterruptInput {
@@ -3384,11 +3402,10 @@ async fn v2_a_stopped_child_report_settles_interrupted() {
     ] {
         script.frames.send(Some(sse(&frame.to_string()))).unwrap();
     }
-    let _ = events_until(&mut events, |value| {
-        value["type"] == "turn_item.updated"
-            && value["turn_item"]["type"] == "subagent"
-            && value["turn_item"]["status"] == "running"
-    })
+    until_ready(
+        || session.test_background_attached("ses_child"),
+        "background child attached",
+    )
     .await;
     session
         .interrupt_turn(ProviderAdapterV2InterruptInput {
@@ -3410,16 +3427,8 @@ async fn v2_a_stopped_child_report_settles_interrupted() {
             &json!({"id":"x4","type":"session.inbox.enqueued","data":{"sessionID":"ses_1","inboxID":"inbox_late","item":{"type":"synthetic","payload":{"text":"<subagent sessionID=\"ses_child\" state=\"completed\" description=\"work\">\nLATE\n</subagent>","metadata":{"source":"subagent","childID":"ses_child","state":"completed","description":"work"}}}}}).to_string(),
         )))
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let mut after = Vec::new();
-    let drain_until = tokio::time::Instant::now() + Duration::from_secs(2);
-    while tokio::time::Instant::now() < drain_until {
-        if let Ok(Some(event)) =
-            tokio::time::timeout(Duration::from_millis(100), events.next()).await
-        {
-            after.push(serde_json::to_value(event.expect("event")).expect("json"));
-        }
-    }
+    until_ready(|| session.test_has_report("ses_1"), "late report queued").await;
+    let after = drain_ready(&mut events).await;
     assert!(
         !of_type(&after, "turn_item.updated").iter().any(|event| {
             event["turn_item"]["type"] == "subagent"
@@ -3447,25 +3456,12 @@ async fn v2_subagent_events_park_while_the_parent_holds_a_wake() {
     ] {
         script.frames.send(Some(sse(&frame.to_string()))).unwrap();
     }
-    let parked = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if session.test_wake_contains("ses_1", "held") {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
+    until_ready(
+        || session.test_wake_contains("ses_1", "held"),
+        "child text parked on the held wake",
+    )
     .await;
-    assert!(
-        parked.is_ok(),
-        "child text must park on the held wake before a turn takes it"
-    );
-    let mut early = Vec::new();
-    while let Ok(Some(event)) =
-        tokio::time::timeout(Duration::from_millis(20), events.next()).await
-    {
-        early.push(serde_json::to_value(event.expect("event")).expect("event json"));
-    }
+    let early = drain_ready(&mut events).await;
     assert!(
         !early.iter().any(|event| {
             event["type"] == "message.updated" && event["message"]["text"] == "held"
@@ -3641,8 +3637,11 @@ async fn v2_an_undelivered_child_permission_reply_abandons_the_child_turn() {
             .any(|event| event["provider_turn"]["status"] == "failed"),
         "{failed:#?}"
     );
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(interrupts.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+    until_ready(
+        || interrupts.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "child interrupt",
+    )
+    .await;
     session.close().await;
 }
 
@@ -3658,11 +3657,10 @@ async fn v2_stream_failure_settles_a_running_background_subagent() {
     ] {
         script.frames.send(Some(sse(&frame.to_string()))).unwrap();
     }
-    let _ = events_until(&mut events, |value| {
-        value["type"] == "turn_item.updated"
-            && value["turn_item"]["type"] == "subagent"
-            && value["turn_item"]["status"] == "running"
-    })
+    until_ready(
+        || session.test_background_attached("ses_child"),
+        "background child attached",
+    )
     .await;
     session.test_fail_stream("stream lost").await;
     let seen = events_until(&mut events, |value| {

@@ -596,6 +596,12 @@ impl OpenCodeV2Session {
         self.fail_stream(message).await;
     }
 
+    /// Whether a background call has attached `child`.
+    #[cfg(test)]
+    pub(in crate::adapter) fn test_background_attached(&self, child: &str) -> bool {
+        self.inner.lock().background.contains_key(child)
+    }
+
     /// Whether `session.created` has linked `child` under `parent`.
     #[cfg(test)]
     pub(in crate::adapter) fn test_child_linked(&self, child: &str, parent: &str) -> bool {

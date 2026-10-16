@@ -5,8 +5,9 @@
 //! detaches live provider sessions with MCP revocation, and queues the
 //! terminal cleanup effect. Settle is a row update plus session detach.
 //!
+//! Archive also disposes every delegated-completion cohort.
+//!
 //! Not ported, and refused loudly rather than skipped:
-//! * archive with delegated completion work (`disposeAllDelegatedCompletionCohorts`);
 //! * settle with a pending message-capable question (its cancel is the
 //!   runtime-request respond path, owned by T13e);
 //! * settle with an automatic queued run (its cancel is `queued-run.cancel`).
@@ -21,12 +22,12 @@ use turin_contracts::{
         OrchestrationV2ExecutionNodeStatus, OrchestrationV2ResponseCapability,
         OrchestrationV2RunAttemptStatus, OrchestrationV2RunStatus,
         OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
-        OrchestrationV2ServerCommand, OrchestrationV2SubagentOrigin,
-        OrchestrationV2ThreadProjection,
+        OrchestrationV2ServerCommand, OrchestrationV2ThreadProjection,
     },
 };
 
 use super::Orchestrator;
+use super::cohort::{dispose_all_delegated_completion_cohorts, with_pending_events};
 use super::dispatch::{Decision, dispatch_failure};
 use super::provider_detach;
 use crate::pipeline::effect_outbox::{EffectRequest, PendingEffect};
@@ -66,14 +67,6 @@ pub(super) async fn decide(
                     &RecordFilter::default(),
                 )
                 .await?;
-            if has_delegated_completion_work(&records) {
-                return Err(dispatch_failure(
-                    command,
-                    format!(
-                        "Thread {thread_id} has delegated completion work; archiving it is not ported yet."
-                    ),
-                ));
-            }
             let now = decision.now();
             let updated = OrchestrationV2AppThread {
                 archived_at: Some(now),
@@ -96,6 +89,9 @@ pub(super) async fn decide(
                 payload: updated,
             });
             cancel_queued_runs(&records, decision, thread_id, now);
+            // The disposals read what the cancel block just wrote.
+            let pending = with_pending_events(records.clone(), &decision.events, thread_id);
+            dispose_all_delegated_completion_cohorts(decision, &pending, now, false);
             provider_detach::detach_sessions(
                 decision,
                 thread_id,
@@ -257,19 +253,6 @@ pub(super) async fn decide(
         _ => return Ok(false),
     }
     Ok(true)
-}
-
-/// Archive cannot yet dispose delegated cohorts, so it refuses when any exist.
-/// Mirrors the two sources upstream disposes from: runs with a delegated
-/// completion, and app-owned subagents bound to a run.
-fn has_delegated_completion_work(records: &OrchestrationV2ThreadProjection) -> bool {
-    records
-        .runs
-        .iter()
-        .any(|run| run.delegated_completion.is_some())
-        || records.subagents.iter().any(|task| {
-            task.origin == OrchestrationV2SubagentOrigin::AppOwned && task.run_id.is_some()
-        })
 }
 
 /// Upstream `withPullRequestWatch(link, undefined)`: archive and settle drop

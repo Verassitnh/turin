@@ -11,6 +11,9 @@
 //! return an error here. Command kinds not yet ported are rejected in
 //! `dispatch::decide`, which reports `OrchestratorError::CommandRejected`.
 
+mod cohort;
+#[cfg(test)]
+mod cohort_tests;
 pub mod dispatch;
 #[cfg(test)]
 mod dispatch_limit_tests;

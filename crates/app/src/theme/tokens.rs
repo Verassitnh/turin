@@ -205,6 +205,11 @@ pub fn shadow_xl(alpha: f32) -> Vec<BoxShadow> {
     ]
 }
 
+/// Tailwind `shadow-2xl` (`0 25px 50px -12px`). Pass `0.20` for `shadow-black/20`.
+pub fn shadow_2xl(alpha: f32) -> Vec<BoxShadow> {
+    vec![shadow(25., 50., -12., black(alpha))]
+}
+
 /// `--shadow-composer` / `--shadow-composer-dark`: the composer's elevation,
 /// a soft drop pulled in under the surface.
 pub fn shadow_composer(dark: bool) -> Vec<BoxShadow> {

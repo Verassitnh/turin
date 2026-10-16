@@ -21,6 +21,7 @@ pub mod scroll_area;
 pub mod separator;
 pub mod sidebar;
 pub mod skeleton;
+pub mod standalone_page;
 pub mod switch;
 pub mod table;
 pub mod text_input;

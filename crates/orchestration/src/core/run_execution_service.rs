@@ -30,6 +30,8 @@ mod finalize;
 #[cfg(test)]
 mod ingestion_tests;
 #[cfg(test)]
+mod interrupt_tests;
+#[cfg(test)]
 mod routing_tests;
 mod service;
 #[cfg(test)]

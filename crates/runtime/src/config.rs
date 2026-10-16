@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::support::blocking::blocking;
+
 /// Directory name under the home directory when no base dir is configured.
 /// Upstream uses `.t3`.
 pub const DEFAULT_BASE_DIR_NAME: &str = ".turin";
@@ -79,7 +81,7 @@ impl std::ops::Deref for ServerConfig {
 impl ServerConfig {
     /// Desktop configuration for `base_dir`: derives the layout and creates
     /// its directories.
-    pub fn new_desktop(
+    pub async fn new_desktop(
         cwd: PathBuf,
         base_dir: PathBuf,
         dev_url: Option<String>,
@@ -89,7 +91,7 @@ impl ServerConfig {
             dev_url.as_deref(),
             DeriveServerPathsOptions::default(),
         );
-        ensure_server_directories(&paths)?;
+        ensure_server_directories(&paths).await?;
         Ok(Self {
             paths,
             mode: RuntimeMode::Desktop,
@@ -101,10 +103,13 @@ impl ServerConfig {
     }
 
     /// Port of `layerTest(cwd, baseDir)`.
-    pub fn for_test(cwd: impl Into<PathBuf>, base_dir: impl Into<PathBuf>) -> io::Result<Self> {
+    pub async fn for_test(
+        cwd: impl Into<PathBuf>,
+        base_dir: impl Into<PathBuf>,
+    ) -> io::Result<Self> {
         let base_dir = base_dir.into();
         let paths = derive_server_paths(&base_dir, None, DeriveServerPathsOptions::default());
-        ensure_server_directories(&paths)?;
+        ensure_server_directories(&paths).await?;
         Ok(Self {
             paths,
             mode: RuntimeMode::Web,
@@ -153,7 +158,14 @@ pub fn derive_server_paths(
     }
 }
 
-pub fn ensure_server_directories(paths: &ServerDerivedPaths) -> io::Result<()> {
+/// Creates the server directories. Blocking filesystem work runs on the
+/// blocking pool.
+pub async fn ensure_server_directories(paths: &ServerDerivedPaths) -> io::Result<()> {
+    let paths = paths.clone();
+    blocking(move || create_server_directories(&paths)).await
+}
+
+fn create_server_directories(paths: &ServerDerivedPaths) -> io::Result<()> {
     let parent = |path: &Path| path.parent().map(Path::to_path_buf).unwrap_or_default();
     for directory in [
         paths.state_dir.clone(),
@@ -286,10 +298,12 @@ mod tests {
         assert_eq!(expand_home_path("~", home), Path::new("/home/me"));
     }
 
-    #[test]
-    fn creates_the_server_directories() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn creates_the_server_directories() {
         let root = tempfile::tempdir().unwrap();
-        let config = ServerConfig::for_test(root.path(), root.path()).unwrap();
+        let config = ServerConfig::for_test(root.path(), root.path())
+            .await
+            .unwrap();
         for directory in [
             &config.state_dir,
             &config.logs_dir,
@@ -300,5 +314,17 @@ mod tests {
         ] {
             assert!(directory.is_dir(), "{}", directory.display());
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_desktop_config_creates_its_directories_on_the_blocking_pool() {
+        let root = tempfile::tempdir().unwrap();
+        let base_dir = root.path().join("base");
+        let config = ServerConfig::new_desktop(root.path().to_path_buf(), base_dir, None)
+            .await
+            .unwrap();
+        assert!(config.state_dir.is_dir());
+        assert!(config.keybindings_config_path.parent().unwrap().is_dir());
+        assert!(config.server_runtime_state_path.parent().unwrap().is_dir());
     }
 }

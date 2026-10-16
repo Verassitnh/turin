@@ -228,6 +228,7 @@ impl SecretStore for FileSecretStore {
             drop(file);
             set_mode_async(&temp, 0o600).await?;
             tokio::fs::rename(&temp, &path).await?;
+            sync_parent_directory(&path).await;
             set_mode_async(&path, 0o600).await
         }
         .await;
@@ -523,6 +524,26 @@ async fn set_mode_async(path: &Path, mode: u32) -> std::io::Result<()> {
     {
         let _ = (path, mode);
         Ok(())
+    }
+}
+
+/// Flushes the directory that holds `path`, so the rename that just put the
+/// file there survives a power loss. Unix only, best effort: a failure leaves
+/// the secret written and readable, so it does not fail the set.
+async fn sync_parent_directory(path: &Path) {
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        if let Ok(directory) = tokio::fs::File::open(parent).await {
+            let _ = directory.sync_all().await;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
 }
 

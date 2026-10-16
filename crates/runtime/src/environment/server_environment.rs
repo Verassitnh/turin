@@ -17,6 +17,7 @@ use turin_contracts::environment::{
 };
 
 use super::server_environment_label::{SystemHost, resolve_server_environment_label};
+use crate::support::blocking::blocking;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvironmentIdOperation {
@@ -122,7 +123,8 @@ fn persist_environment_id(
 }
 
 /// Reads the persisted environment ID, or creates and persists a new UUIDv4.
-/// Port of `makeIdentity`'s `environmentIdRaw` effect.
+/// Port of `makeIdentity`'s `environmentIdRaw` effect. Blocking: [`ServerEnvironment::load`]
+/// calls it on the blocking pool.
 pub fn load_or_create_environment_id(
     state_dir: &Path,
     environment_id_path: &Path,
@@ -186,18 +188,26 @@ pub struct ServerEnvironment {
 impl ServerEnvironment {
     /// `make` for the local host. `state_dir`, `environment_id_path` and `cwd`
     /// come from [`crate::config::ServerDerivedPaths`] and the process config.
-    pub fn load(
+    /// The ID file and the label probes (`/etc/machine-info`, `scutil`,
+    /// `hostnamectl`) are blocking, so they run on the blocking pool.
+    pub async fn load(
         state_dir: &Path,
         environment_id_path: &Path,
         cwd: &Path,
     ) -> Result<Self, ServerEnvironmentIdPersistenceError> {
-        let environment_id = load_or_create_environment_id(state_dir, environment_id_path)?;
-        let cwd_base_name = cwd
-            .file_name()
-            .map(|name| name.to_string_lossy().trim().to_owned())
-            .unwrap_or_default();
-        let label = resolve_server_environment_label(&SystemHost, &cwd_base_name);
-        Ok(Self::from_parts(environment_id, &label))
+        let state_dir = state_dir.to_path_buf();
+        let environment_id_path = environment_id_path.to_path_buf();
+        let cwd = cwd.to_path_buf();
+        blocking(move || {
+            let environment_id = load_or_create_environment_id(&state_dir, &environment_id_path)?;
+            let cwd_base_name = cwd
+                .file_name()
+                .map(|name| name.to_string_lossy().trim().to_owned())
+                .unwrap_or_default();
+            let label = resolve_server_environment_label(&SystemHost, &cwd_base_name);
+            Ok(Self::from_parts(environment_id, &label))
+        })
+        .await
     }
 
     fn from_parts(environment_id: EnvironmentId, label: &str) -> Self {
@@ -346,5 +356,22 @@ mod tests {
         );
         assert!(descriptor.capabilities.repository_identity);
         assert_eq!(descriptor.capabilities.server_browser, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_persists_the_id_on_the_blocking_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("environment-id");
+        let first = ServerEnvironment::load(dir.path(), &path, dir.path())
+            .await
+            .unwrap();
+        let second = ServerEnvironment::load(dir.path(), &path, dir.path())
+            .await
+            .unwrap();
+        assert_eq!(first.environment_id(), second.environment_id());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            first.environment_id().as_str()
+        );
     }
 }

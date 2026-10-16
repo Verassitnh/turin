@@ -27,6 +27,7 @@ pub mod skeleton;
 pub mod standalone_page;
 pub mod start_truncated_path;
 pub mod switch;
+pub mod t3_wordmark;
 pub mod table;
 pub mod text_input;
 pub mod textarea;

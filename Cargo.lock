@@ -7352,11 +7352,13 @@ dependencies = [
  "libc",
  "parking_lot",
  "pretty_assertions",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "turin-contracts",
 ]
 
 [[package]]

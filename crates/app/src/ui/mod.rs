@@ -21,6 +21,7 @@ pub mod morph_icon;
 pub mod number_field;
 pub mod panel_tab_close_button;
 pub mod popover;
+pub mod preview_card;
 pub mod radio_group;
 pub mod refresh_icon;
 pub mod scroll_area;

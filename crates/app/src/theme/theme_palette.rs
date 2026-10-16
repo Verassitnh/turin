@@ -91,17 +91,14 @@ pub fn get_theme_definition(theme: &ThemePreference) -> Option<ThemeDefinition> 
             return Some(definition.clone());
         }
     }
-    for definition in get_custom_themes() {
-        if definition.id.as_str() == theme_id {
-            return Some(definition);
-        }
-    }
-    for definition in get_environment_themes() {
-        if definition.id.as_str() == theme_id {
-            return Some(definition);
-        }
-    }
-    None
+    get_custom_themes()
+        .into_iter()
+        .find(|definition| definition.id.as_str() == theme_id)
+        .or_else(|| {
+            get_environment_themes()
+                .into_iter()
+                .find(|definition| definition.id.as_str() == theme_id)
+        })
 }
 
 /// Artwork palettes are reviewed alongside built-ins; user themes always use the pill fallback.

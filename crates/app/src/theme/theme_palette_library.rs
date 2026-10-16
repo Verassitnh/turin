@@ -688,7 +688,7 @@ pub fn lenient_theme_color_overrides(value: &Map<String, Value>) -> HashMap<Stri
         if !roles.contains(snake) {
             continue;
         }
-        let Some(normalized) = color.as_str().and_then(|raw| to_canonical_theme_color(raw)) else {
+        let Some(normalized) = color.as_str().and_then(to_canonical_theme_color) else {
             continue;
         };
         overrides.insert(snake.to_string(), normalized);
@@ -2067,10 +2067,9 @@ mod tests {
     fn contrast_ratio(first: &str, second: &str) -> f64 {
         let parse = |value: &str| {
             let hex = as_hex(value);
-            let channels = [1, 3, 5].map(|index| {
+            [1, 3, 5].map(|index| {
                 u8::from_str_radix(&hex[index..index + 2], 16).expect("hex") as f64 / 255.0
-            });
-            channels
+            })
         };
         let luminance = |value: &str| {
             parse(value)

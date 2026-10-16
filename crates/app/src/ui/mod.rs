@@ -18,6 +18,7 @@ pub mod scroll_area;
 pub mod separator;
 pub mod sidebar;
 pub mod skeleton;
+pub mod switch;
 pub mod text_input;
 pub mod toggle;
 pub mod tooltip;

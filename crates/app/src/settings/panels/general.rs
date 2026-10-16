@@ -14,6 +14,7 @@ use super::super::panels_logic::{
     project_grouping_mode_from_toggle, read_last_enabled_project_grouping_mode,
     remember_enabled_project_grouping_mode, resolve_background_activity_profile_option,
 };
+use super::super::project_defaults_settings::ProjectDefaultsCategory;
 use super::super::rows::{BoolRow, Json, SelectRowSpec};
 use super::super::search::searchable_setting;
 use super::super::view::{SettingsView, Which};
@@ -42,7 +43,7 @@ impl SettingsView {
         let _ = window;
 
         vec![
-            self.new_threads_section(&json, cx),
+            self.project_defaults_section(ProjectDefaultsCategory::General, cx),
             self.organization_section(&json, window, cx),
             self.behavior_section(&json, modifier, cx),
             self.projects_and_threads_section(&json, window, cx),
@@ -51,187 +52,6 @@ impl SettingsView {
             self.about_section(cx),
             self.legacy_features_section(&json, cx),
         ]
-    }
-
-    fn new_threads_section(&mut self, json: &Json, cx: &mut Context<Self>) -> AnyElement {
-        let runtime_mode = json.str(Which::Server, "defaultRuntimeMode").to_owned();
-        let modes: [(&str, &str, &str); 4] = [
-            (
-                "approval-required",
-                "Supervised",
-                "Ask before commands and file changes.",
-            ),
-            (
-                "auto-accept-edits",
-                "Auto-accept edits",
-                "Auto-approve edits, ask before other actions.",
-            ),
-            (
-                "auto",
-                "Auto",
-                "Supported providers approve routine actions; others still ask.",
-            ),
-            (
-                "full-access",
-                "Full access",
-                "Allow commands and edits without prompts.",
-            ),
-        ];
-        let theme = cx.app_theme().clone();
-        let mode_icon = |value: &str| match value {
-            "approval-required" => crate::ui::IconName::Lock,
-            "auto-accept-edits" => crate::ui::IconName::PenLine,
-            "auto" => crate::ui::IconName::Sparkles,
-            _ => crate::ui::IconName::LockOpen,
-        };
-        let current = modes.iter().find(|(value, _, _)| *value == runtime_mode);
-        let trigger_label = div()
-            .flex()
-            .items_center()
-            .gap(rems(0.375))
-            .child(
-                crate::ui::Icon::new(mode_icon(&runtime_mode))
-                    .size(rems(0.875))
-                    .color(theme.muted_foreground),
-            )
-            .child(current.map(|(_, label, _)| *label).unwrap_or(""))
-            .into_any_element();
-        let permissions = self.select_control_rich(
-            cx,
-            "default-permissions",
-            trigger_label,
-            modes
-                .iter()
-                .map(|(value, label, description)| {
-                    let item = div()
-                        .min_w(rems(16.))
-                        .flex()
-                        .flex_col()
-                        .gap(rems(0.125))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(rems(0.375))
-                                .font_weight(gpui_kit::FontWeight::MEDIUM)
-                                .child(
-                                    crate::ui::Icon::new(mode_icon(value))
-                                        .size(rems(0.875))
-                                        .color(theme.muted_foreground),
-                                )
-                                .child(*label),
-                        )
-                        .child(
-                            div()
-                                .text_size(crate::theme::tokens::TEXT_XS.size)
-                                .line_height(rems(1.))
-                                .text_color(theme.muted_foreground)
-                                .child(*description),
-                        )
-                        .into_any_element();
-                    (json!(value), item, *value == runtime_mode)
-                })
-                .collect(),
-            SelectWidth::Auto,
-            |this, value, _, cx| this.update_server(json!({ "defaultRuntimeMode": value }), cx),
-        );
-
-        let workspace = self.workspace_row(
-            json,
-            "Where new threads start. Projects and their t3.json can override it.",
-            cx,
-        );
-        let submodules = self.select_row(
-            cx,
-            json,
-            SelectRowSpec {
-                search_id: "worktree-submodules",
-                description: "How new worktrees populate git submodules. Projects and their t3.json can override it.".into(),
-                which: Which::Server,
-                key: "worktreeSubmodules",
-                reset_label: "worktree submodules",
-                options: opts(&[("recursive", "Recursive"), ("top-level", "Top level only"), ("none", "Skip")]),
-                width: SelectWidth::Auto,
-                check: false,
-            },
-        );
-        let permissions_row = Self::base_row("default-permissions")
-            .description("Default permissions for new threads. Projects can override them.")
-            .reset_action(self.reset_button(
-                cx,
-                json,
-                Which::Server,
-                "defaultRuntimeMode",
-                "default permissions",
-            ))
-            .control(permissions)
-            .into_any_element();
-
-        SettingsSection::new("New threads")
-            .id("project-defaults")
-            .child(self.default_model_row(
-                json,
-                "Default model for new threads. Projects can override it.",
-                cx,
-            ))
-            .child(permissions_row)
-            .child(workspace)
-            .child(submodules)
-            .into_any_element()
-    }
-
-    pub(super) fn workspace_row(
-        &mut self,
-        json: &Json,
-        description: &'static str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let current = json.get(Which::Server, "defaultThreadEnvMode").clone();
-        let label = match current.as_str() {
-            Some("worktree") => "New worktree",
-            Some("local") => "Current checkout",
-            // `effective?.defaultThreadEnvMode` falls back to the built-in "local".
-            _ => "Current checkout",
-        };
-        let selected = current.as_str().unwrap_or("local").to_owned();
-        let control = self.select_control(
-            cx,
-            "default-workspace",
-            label.into(),
-            vec![
-                (
-                    json!("local"),
-                    "Current checkout".into(),
-                    selected == "local",
-                ),
-                (
-                    json!("worktree"),
-                    "New worktree".into(),
-                    selected == "worktree",
-                ),
-            ],
-            SelectWidth::Auto,
-            false,
-            |this, value, _, cx| this.update_server(json!({ "defaultThreadEnvMode": value }), cx),
-        );
-        let reset = if current.is_null() {
-            None
-        } else {
-            self.reset_button(
-                cx,
-                json,
-                Which::Server,
-                "defaultThreadEnvMode",
-                "default workspace",
-            )
-        };
-        // `title="Workspace"` with the catalog id.
-        SettingsRow::new("Workspace")
-            .id(searchable_setting("new-threads").0)
-            .description(description)
-            .reset_action(reset)
-            .control(control)
-            .into_any_element()
     }
 
     fn organization_section(

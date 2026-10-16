@@ -237,6 +237,7 @@ pub struct SettingsRow {
     reset_action: Option<AnyElement>,
     inheritance: Option<AnyElement>,
     inert: Option<SharedString>,
+    compact: bool,
     control: Option<AnyElement>,
     disabled: bool,
     children: Vec<AnyElement>,
@@ -252,6 +253,7 @@ impl SettingsRow {
             reset_action: None,
             inheritance: None,
             inert: None,
+            compact: false,
             control: None,
             disabled: false,
             children: Vec::new(),
@@ -281,6 +283,12 @@ impl SettingsRow {
     /// The inheritance indicator beside the title (`SettingInheritance`).
     pub fn inheritance(mut self, inheritance: Option<AnyElement>) -> Self {
         self.inheritance = inheritance;
+        self
+    }
+
+    /// `className="py-2"`: a denser row (lists of items).
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
         self
     }
 
@@ -425,7 +433,8 @@ impl RenderOnce for SettingsRow {
             .flex_col()
             .px_4()
             .when(has_children, |this| this.pt_3().pb_1())
-            .when(!has_children, |this| this.py_3())
+            .when(!has_children && !self.compact, |this| this.py_3())
+            .when(!has_children && self.compact, |this| this.py_2())
             .when(self.disabled, |this| this.opacity(0.64))
             .when(pulsing, |this| {
                 this.border_2().border_color(pulse_ring(theme))

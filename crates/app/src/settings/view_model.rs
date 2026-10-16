@@ -20,21 +20,6 @@ use turin_contracts::settings::{ClientSettings, ServerSettings};
 use turin_provider_core::server_provider::ServerProvider;
 use turin_shared::keybindings::ResolvedKeybindingRule;
 
-/// A project as the settings pages list it (`SidebarProjectSnapshot` subset).
-#[derive(Debug, Clone, PartialEq)]
-pub struct SettingsProject {
-    /// `ProjectId` of the project's primary checkout.
-    pub id: String,
-    /// The project's key; one logical project can have several checkouts.
-    pub key: String,
-    pub display_name: String,
-    pub workspace_root: String,
-    pub favicon_color: u32,
-    pub monogram: String,
-    pub remote_url: Option<String>,
-    pub checkout_count: usize,
-}
-
 /// One row of `StorageCleanupReport.entries`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CleanupEntry {
@@ -148,7 +133,8 @@ pub struct SettingsViewModel {
     pub pending_provider_auth_delivery: Option<ProviderAuthDelivery>,
     /// `sourceControlEnvironment.discovery` of the local environment.
     pub source_control: turin_contracts::source_control::SourceControlDiscoveryResult,
-    pub projects: Vec<SettingsProject>,
+    /// Threads per project id (`useThreadShells`), for the remove confirmation.
+    pub project_thread_counts: IndexMap<String, usize>,
     /// The environment's projects as the sidebar groups them
     /// (`useProjects`); the settings scope picks among their logical groups.
     pub environment_projects: Vec<crate::state::models::EnvironmentProject>,

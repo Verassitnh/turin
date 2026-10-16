@@ -27,8 +27,8 @@ use turin_shared::server_settings::apply_server_settings_patch;
 
 use super::view_model::{
     ArchivedThread, CleanupEntry, CleanupReport, EnvironmentInfo, KeybindingsViewModel,
-    LicenseEntry, RemoveKeybinding, SettingsProject, SettingsSource, SettingsStore,
-    SettingsViewModel, SetupResult, UpsertKeybinding,
+    LicenseEntry, RemoveKeybinding, SettingsSource, SettingsStore, SettingsViewModel, SetupResult,
+    UpsertKeybinding,
 };
 
 fn provider(value: Value) -> turin_provider_core::server_provider::ServerProvider {
@@ -137,59 +137,40 @@ fn mock_providers() -> Vec<turin_provider_core::server_provider::ServerProvider>
     ]
 }
 
-fn mock_projects() -> Vec<SettingsProject> {
-    vec![
-        SettingsProject {
-            id: "project-turin".into(),
-            key: "turin".into(),
-            display_name: "turin".into(),
-            workspace_root: "/Users/dev/code/turin".into(),
-            favicon_color: 0x155dfc,
-            monogram: "T".into(),
-            remote_url: Some("github.com/example/turin".into()),
-            checkout_count: 3,
-        },
-        SettingsProject {
-            id: "project-t3code".into(),
-            key: "t3code".into(),
-            display_name: "t3code".into(),
-            workspace_root: "/Users/dev/code/t3code".into(),
-            favicon_color: 0x009966,
-            monogram: "T3".into(),
-            remote_url: Some("github.com/pingdotgg/t3code".into()),
-            checkout_count: 1,
-        },
-        SettingsProject {
-            id: "project-notes".into(),
-            key: "notes".into(),
-            display_name: "notes".into(),
-            workspace_root: "/Users/dev/notes".into(),
-            favicon_color: 0xe17100,
-            monogram: "N".into(),
-            remote_url: None,
-            checkout_count: 1,
-        },
-    ]
-}
+/// The mock projects as the sidebar's `EnvironmentProject`s: id, name, root.
+const MOCK_PROJECTS: [(&str, &str, &str); 3] = [
+    ("project-turin", "turin", "/Users/dev/code/turin"),
+    ("project-t3code", "t3code", "/Users/dev/code/t3code"),
+    ("project-notes", "notes", "/Users/dev/notes"),
+];
 
-/// The mock projects as the sidebar's `EnvironmentProject`s.
 fn mock_environment_projects() -> Vec<crate::state::models::EnvironmentProject> {
     use crate::state::contracts::{EnvironmentId, ProjectId};
-    mock_projects()
+    MOCK_PROJECTS
         .into_iter()
-        .map(|project| crate::state::models::EnvironmentProject {
-            environment_id: EnvironmentId::new("local").expect("environment id"),
-            id: ProjectId::new(&project.id).expect("project id"),
-            title: project.display_name,
-            workspace_root: project.workspace_root,
-            favicon_path: None,
-            project_icon: None,
-            created_at: Some("2026-10-01T09:00:00.000Z".into()),
-            updated_at: Some("2026-10-14T18:22:00.000Z".into()),
-            is_scratch: false,
-            source: None,
-        })
+        .map(
+            |(id, title, root)| crate::state::models::EnvironmentProject {
+                environment_id: EnvironmentId::new("local").expect("environment id"),
+                id: ProjectId::new(id).expect("project id"),
+                title: title.to_owned(),
+                workspace_root: root.to_owned(),
+                favicon_path: None,
+                project_icon: None,
+                created_at: Some("2026-10-01T09:00:00.000Z".into()),
+                updated_at: Some("2026-10-14T18:22:00.000Z".into()),
+                is_scratch: false,
+                source: None,
+            },
+        )
         .collect()
+}
+
+fn mock_project_thread_counts() -> IndexMap<String, usize> {
+    IndexMap::from([
+        ("project-turin".to_owned(), 14),
+        ("project-t3code".to_owned(), 3),
+        ("project-notes".to_owned(), 0),
+    ])
 }
 
 fn mock_archived_threads() -> Vec<ArchivedThread> {
@@ -272,7 +253,7 @@ fn mock_view_model() -> SettingsViewModel {
         chat_gpt_welcome_acknowledged: Vec::new(),
         pending_provider_auth_delivery: None,
         source_control: mock_source_control(),
-        projects: mock_projects(),
+        project_thread_counts: mock_project_thread_counts(),
         environment_projects: mock_environment_projects(),
         archived_threads: mock_archived_threads(),
         storage_cleanup: None,
@@ -886,11 +867,11 @@ impl SettingsSource for MockSettingsSource {
             .state
             .borrow_mut()
             .vm
-            .projects
+            .environment_projects
             .iter_mut()
-            .find(|p| p.id == project_id)
+            .find(|p| p.id.as_str() == project_id)
         {
-            project.display_name = title.to_owned();
+            project.title = title.to_owned();
         }
         self.publish(cx);
     }
@@ -899,8 +880,8 @@ impl SettingsSource for MockSettingsSource {
         self.state
             .borrow_mut()
             .vm
-            .projects
-            .retain(|p| p.id != project_id);
+            .environment_projects
+            .retain(|p| p.id.as_str() != project_id);
         self.publish(cx);
     }
 

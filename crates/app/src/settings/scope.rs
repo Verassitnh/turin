@@ -54,7 +54,7 @@ use crate::state::sidebar_project_grouping::{
 };
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
-use crate::theme::tokens::{TEXT_BASE, TEXT_SM};
+use crate::theme::tokens::TEXT_BASE;
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 
 /// The one environment's id (`EnvironmentId` of the local server).
@@ -673,21 +673,13 @@ impl SettingsView {
                     })),
             );
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .rounded(crate::theme::tokens::RADIUS_LG)
-            .border_1()
-            .border_color(theme.border)
-            .bg(with_alpha(theme.card, 0.4))
-            .px_4()
-            .py_3()
-            .text_size(TEXT_SM.size)
-            .text_color(theme.foreground)
-            .child(div().child(message.to_owned()))
-            .child(actions)
-            .into_any_element()
+        super::alert::alert(
+            &theme,
+            super::alert::AlertVariant::Default,
+            None,
+            vec![div().child(message.to_owned()).into_any_element()],
+            Some(actions.into_any_element()),
+        )
     }
 }
 

@@ -86,7 +86,15 @@ impl SettingsView {
         if let Some(sentence) = self.settings_scope_sentence(cx) {
             sections.insert(0, sentence);
         }
-        self.page_container(sections, cx)
+        // `ProjectSettingsPanel`'s container is `gap-6`.
+        let gap = if self.route == SettingsRoute::Section(SettingsPath::Projects)
+            && context.is_project_scope()
+        {
+            px(24.)
+        } else {
+            px(32.)
+        };
+        self.page_container(sections, gap, cx)
     }
 
     fn render_route_sections(
@@ -116,6 +124,7 @@ impl SettingsView {
     pub(super) fn page_container(
         &mut self,
         children: Vec<AnyElement>,
+        gap: gpui_kit::Pixels,
         _cx: &mut Context<Self>,
     ) -> AnyElement {
         use gpui_kit::component::scroll::ScrollableElement as _;
@@ -137,7 +146,7 @@ impl SettingsView {
                             .mx_auto()
                             .flex()
                             .flex_col()
-                            .gap_8()
+                            .gap(gap)
                             .w_full()
                             .max_w(px(READABLE_WIDTH))
                             .px_6()

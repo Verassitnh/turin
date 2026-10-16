@@ -35,7 +35,8 @@ use super::super::model_picker::{provider_is_selectable, resolve_default_selecti
 use super::super::panels_logic::{
     background_activity_fetch_interval_settings, duration_to_seconds,
 };
-use super::super::rows::{BoolRow, Json, SelectRowSpec};
+use super::super::project_defaults_settings::ProjectDefaultsCategory;
+use super::super::rows::{Json, SelectRowSpec};
 use super::super::search::searchable_setting;
 use super::super::view::{SettingsView, Which};
 use crate::theme::color::with_alpha;
@@ -170,8 +171,8 @@ impl SettingsView {
     ) -> Vec<AnyElement> {
         let theme = cx.app_theme().clone();
         let vm = self.vm(cx);
-        let json = self.json(cx);
-        let mut sections = vec![self.repositories_section(&json, cx)];
+        let mut sections =
+            vec![self.project_defaults_section(ProjectDefaultsCategory::SourceControl, cx)];
 
         let result = vm.source_control.clone();
         let has_vcs = !result.version_control_systems.is_empty();
@@ -297,103 +298,6 @@ impl SettingsView {
             section = section.child(self.discovery_item_row(&item, details, cx));
         }
         section.into_any_element()
-    }
-
-    // ── repositories (ProjectDefaultsSettings, category source-control) ──
-
-    fn repositories_section(&mut self, json: &Json, cx: &mut Context<Self>) -> AnyElement {
-        let auto_pull = self.bool_row(
-            cx,
-            json,
-            BoolRow {
-                search_id: "automatic-pull",
-                title: None,
-                description: "Keeps the default branch current when the checkout has no local changes or commits. Projects can override it.".into(),
-                which: Which::Server,
-                key: "defaultAutoPull",
-                label: "Default automatic pull",
-                reset_label: "default automatic pull",
-            },
-        );
-        let credits = self.bool_row(
-            cx,
-            json,
-            BoolRow {
-                search_id: "remove-agent-credits-on-merge",
-                title: None,
-                description: "Remove recognized agent credit lines from GitHub merge and squash messages, keeping human co-authors. Includes auto-merge. Excludes merge queues, stack merges, and existing commits.".into(),
-                which: Which::Server,
-                key: "removeAgentCreditsOnMerge",
-                label: "Remove agent credits when merging",
-                reset_label: "agent credit removal",
-            },
-        );
-        let opts = |items: &[(&str, &str)]| -> Vec<(Value, SharedString)> {
-            items
-                .iter()
-                .map(|(value, label)| (json!(value), SharedString::from((*label).to_owned())))
-                .collect()
-        };
-        // `pullRequestMergeMethod: null` is "Last selected".
-        let current = json.get(Which::Server, "pullRequestMergeMethod").clone();
-        let options = opts(&[
-            ("last", "Last selected"),
-            ("merge", "Create merge commit"),
-            ("squash", "Squash and merge"),
-            ("rebase", "Rebase and merge"),
-        ]);
-        let current_key = current.as_str().unwrap_or("last").to_owned();
-        let label = options
-            .iter()
-            .find(|(value, _)| value.as_str() == Some(current_key.as_str()))
-            .map(|(_, label)| label.clone())
-            .unwrap_or_default();
-        let control = self.select_control(
-            cx,
-            "pull-request-merge-method",
-            label,
-            options
-                .iter()
-                .map(|(value, label)| {
-                    (
-                        value.clone(),
-                        label.clone(),
-                        value.as_str() == Some(current_key.as_str()),
-                    )
-                })
-                .collect(),
-            SelectWidth::Auto,
-            false,
-            |this, value, _, cx| {
-                let next = match value.as_str() {
-                    Some("last") | None => Value::Null,
-                    Some(other) => json!(other),
-                };
-                this.update_server(json!({ "pullRequestMergeMethod": next }), cx);
-            },
-        );
-        let reset = (!current.is_null()).then(|| {
-            let action = self.cb(cx, |this, _, cx| {
-                this.update_server(json!({ "pullRequestMergeMethod": Value::Null }), cx)
-            });
-            setting_reset_button(
-                "reset-merge-method",
-                "Reset to last selected",
-                move |w, c| action(w, c),
-            )
-            .into_any_element()
-        });
-        let merge = Self::base_row("pull-request-merge-method")
-            .description("Pull requests start with this method. Last selected reuses whatever you chose most recently on this device.")
-            .reset_action(reset)
-            .control(control)
-            .into_any_element();
-        SettingsSection::new("Repositories")
-            .id("source-control-defaults")
-            .child(auto_pull)
-            .child(credits)
-            .child(merge)
-            .into_any_element()
     }
 
     // ── discovery rows ──────────────────────────────────────────────────
@@ -1565,6 +1469,7 @@ impl SettingsView {
                 menu_id,
                 providers,
                 &selection,
+                false,
                 move |this, value, cx| this.update_server(json!({ key: value }), cx),
             ));
         }

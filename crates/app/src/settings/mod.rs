@@ -12,6 +12,7 @@
 
 pub mod add_codex_account_dialog;
 pub mod add_provider_instance_logic;
+pub mod alert;
 pub mod chat_gpt_welcome_coordinator;
 pub mod chat_gpt_widgets;
 pub mod codex_setup_logic;
@@ -34,6 +35,7 @@ pub mod model_picker;
 pub mod nav;
 pub mod panels;
 pub mod panels_logic;
+pub mod project_defaults_settings;
 pub mod project_favicon_picker_dialog;
 pub mod project_file_picker_logic;
 pub mod project_icon_options;

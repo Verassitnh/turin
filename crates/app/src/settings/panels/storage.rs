@@ -1,27 +1,29 @@
-//! Port of StorageSettings.tsx (`StorageSettingsPanel`) for the single local
-//! environment.
+//! Port of upstream/apps/web/src/components/settings/StorageSettings.tsx
+//! (`StorageSettingsPanel`) for the single local environment.
+//!
+//! At a project scope the page shows the project's own worktree cleanup tier
+//! (inherit, off or custom rules); the environment-wide rows return at the
+//! all-projects scope.
 //!
 //! Not ported (PORTING.md Deviations): the browser-artifact retention row
-//! (the browser integration is cut), the project-scope worktree cleanup
-//! override (project scope), and the "Mixed across selected machines" states.
+//! (the browser integration is cut) and the "Mixed across selected machines"
+//! status of rows (one environment).
 
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    AnyElement, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
     px, rems,
 };
 use serde_json::{Value, json};
 
 use super::super::controls::{FieldSize, SelectWidth, switch, text_field};
+use super::super::folded_settings_section::FoldedSection;
 use super::super::layout::{SettingsRow, SettingsSection, setting_reset_button, settings_group};
 use super::super::search::searchable_setting;
 use super::super::time_format::format_relative_time_label;
 use super::super::view::{SettingsView, Which};
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
-use crate::theme::tokens::{TEXT_SM, TEXT_XS};
-use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
+use crate::theme::tokens::TEXT_XS;
+use crate::ui::{Button, ButtonSize, ButtonVariant};
 
 /// `formatBytes`.
 pub fn format_bytes(value: f64) -> String {
@@ -50,8 +52,77 @@ pub fn format_bytes(value: f64) -> String {
 
 #[derive(Default)]
 pub struct StorageState {
-    pub last_run_open: bool,
     pub running: bool,
+}
+
+/// Which tier of worktree cleanup a project uses (`projectMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectCleanupMode {
+    Inherit,
+    Off,
+    Custom,
+}
+
+impl ProjectCleanupMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Inherit => "Inherit",
+            Self::Off => "Off",
+            Self::Custom => "Custom",
+        }
+    }
+
+    fn value(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Off => "off",
+            Self::Custom => "custom",
+        }
+    }
+
+    /// The row's description under the mode.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Off => "Keep this project's worktrees until you delete them manually.",
+            Self::Custom => "Use these rules for this project.",
+            Self::Inherit => "Use each machine's worktree cleanup settings.",
+        }
+    }
+}
+
+/// `projectMode(target)`: a project's own `worktreeCleanup` mode, else inherit.
+pub fn project_cleanup_mode(
+    target: &crate::settings_logic::scoped_settings::ScopedSettingsTarget,
+) -> ProjectCleanupMode {
+    use turin_contracts::settings::WorktreeCleanup;
+    use turin_shared::project_settings::ProjectSettingSource;
+    if target.sources.get("worktreeCleanup").copied() != Some(ProjectSettingSource::Project) {
+        return ProjectCleanupMode::Inherit;
+    }
+    match target.settings.worktree_cleanup {
+        Some(WorktreeCleanup::Off) => ProjectCleanupMode::Off,
+        Some(WorktreeCleanup::Custom { .. }) => ProjectCleanupMode::Custom,
+        None => ProjectCleanupMode::Inherit,
+    }
+}
+
+/// The storage settings the page shows: `{...storageCleanup, ...resolveWorktreeCleanup(settings, null)}`.
+pub fn effective_storage(settings: &turin_contracts::settings::ServerSettings) -> Value {
+    let mut storage = serde_json::to_value(&settings.storage_cleanup).unwrap_or(Value::Null);
+    let rules = turin_shared::project_settings::resolve_worktree_cleanup(
+        settings,
+        None,
+        super::super::scope::text_generation_fallback(),
+    );
+    if let (Some(storage), Some(rules)) = (
+        storage.as_object_mut(),
+        serde_json::to_value(&rules)
+            .ok()
+            .and_then(|v| v.as_object().cloned()),
+    ) {
+        storage.extend(rules);
+    }
+    storage
 }
 
 impl SettingsView {
@@ -61,117 +132,217 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let json = self.json(cx);
-        let storage = json.get(Which::Server, "storageCleanup").clone();
+        let context = self.scope_context(cx);
+        let project_scope = context.is_project_scope();
+        let vm = self.vm(cx);
+        let storage = effective_storage(context.settings().unwrap_or(&vm.server));
         let default_storage = json.default_of(Which::Server, "storageCleanup").clone();
         let get_bool = |key: &str| storage.get(key).and_then(Value::as_bool).unwrap_or(false);
         let get_days = |key: &str| storage.get(key).and_then(Value::as_u64);
+        let mode = context
+            .target
+            .as_ref()
+            .map(project_cleanup_mode)
+            .unwrap_or(ProjectCleanupMode::Inherit);
+        let mixed_modes = context
+            .targets
+            .iter()
+            .any(|target| project_cleanup_mode(target) != mode);
 
         let mut worktrees = SettingsSection::new("Worktrees").id("storage-worktrees");
-        worktrees = worktrees.child(self.worktrees_directory_row(&json, window, cx));
-        worktrees = worktrees.child(self.storage_switch_row(
-            "Delete worktrees with deleted threads",
-            "Remove unused worktrees when active or archived threads are deleted. Worktrees with local changes are kept.",
-            "worktreeOnDelete",
-            get_bool("worktreeOnDelete"),
-            cx,
-        ));
-        worktrees = worktrees.child(self.storage_retention_row(
-            "Delete inactive worktrees",
-            "Remove worktrees after their threads have been inactive for this many days. Branches and thread history are kept.",
-            "worktreeAfterDays",
-            get_days("worktreeAfterDays"),
-            window,
-            cx,
-        ));
-        worktrees = worktrees.child(self.storage_switch_row(
-            "Delete merged worktrees",
-            "Remove worktrees whose pull request is merged and whose commits are included in the default branch.",
-            "worktreeOnMerge",
-            get_bool("worktreeOnMerge"),
-            cx,
-        ));
-        worktrees = worktrees.child(self.storage_switch_row(
-            "Delete unchanged worktrees",
-            "Remove worktrees with no commits beyond the default branch.",
-            "worktreeUnchanged",
-            get_bool("worktreeUnchanged"),
-            cx,
-        ));
-        let keep_when = storage
-            .get("worktreeKeepWhen")
-            .and_then(Value::as_str)
-            .unwrap_or("uncommitted-changes")
-            .to_owned();
-        let keep_options: [(&str, &str); 3] = [
-            ("any-local-files", "Any local files"),
-            ("uncommitted-changes", "Uncommitted changes"),
-            ("tracked-changes", "Edited tracked files"),
-        ];
-        let keep_label = keep_options
-            .iter()
-            .find(|(v, _)| *v == keep_when)
-            .map(|(_, l)| *l)
-            .unwrap_or("");
-        let keep_control = self.select_control(
-            cx,
-            "storage-worktree-keep-when",
-            keep_label.into(),
-            keep_options
-                .iter()
-                .map(|(v, l)| (json!(v), SharedString::from(*l), *v == keep_when))
-                .collect(),
-            SelectWidth::Auto,
-            false,
-            |this, value, _, cx| {
-                this.update_server(
-                    json!({ "storageCleanup": { "worktreeKeepWhen": value } }),
-                    cx,
-                )
-            },
-        );
-        let keep_dirty = storage.get("worktreeKeepWhen") != default_storage.get("worktreeKeepWhen");
-        let keep_reset = keep_dirty.then(|| {
-            let default = default_storage
-                .get("worktreeKeepWhen")
-                .cloned()
-                .unwrap_or(Value::Null);
-            let action = self.cb(cx, move |this, _, cx| {
-                this.update_server(
-                    json!({ "storageCleanup": { "worktreeKeepWhen": default } }),
-                    cx,
-                )
-            });
-            setting_reset_button("reset-keep-when", "Reset to default", move |w, c| {
-                action(w, c)
-            })
-            .into_any_element()
-        });
-        worktrees = worktrees.child(
-            Self::base_row("storage-worktree-keep-when")
-                .description(match keep_when.as_str() {
-                    "any-local-files" => "Includes ignored files, except node_modules.",
-                    "tracked-changes" => "Deletes untracked and ignored files, including .env.",
-                    _ => "Keeps edits and untracked files. Deletes ignored files, including .env.",
-                })
-                .reset_action(keep_reset)
-                .control(keep_control),
-        );
-
-        let logs = SettingsSection::new("Artifacts and logs")
-            .id("storage-artifacts")
-            .child(self.storage_retention_row(
-                "Delete old rotated logs",
-                "Delete inactive rotated log files after this many days. Current logs are kept.",
-                "logsAfterDays",
-                get_days("logsAfterDays"),
+        if !project_scope {
+            worktrees = worktrees.child(self.worktrees_directory_row(&json, window, cx));
+        } else {
+            worktrees = worktrees.child(self.project_cleanup_mode_row(mode, mixed_modes, cx));
+        }
+        if !project_scope || (!mixed_modes && mode == ProjectCleanupMode::Custom) {
+            worktrees = worktrees.child(self.storage_switch_row(
+                "Delete worktrees with deleted threads",
+                "Remove unused worktrees when active or archived threads are deleted. Worktrees with local changes are kept.",
+                "worktreeOnDelete",
+                get_bool("worktreeOnDelete"),
+                project_scope,
+                cx,
+            ));
+            worktrees = worktrees.child(self.storage_retention_row(
+                "Delete inactive worktrees",
+                "Remove worktrees after their threads have been inactive for this many days. Branches and thread history are kept.",
+                "worktreeAfterDays",
+                get_days("worktreeAfterDays"),
+                project_scope,
                 window,
                 cx,
             ));
-        vec![
-            worktrees.into_any_element(),
-            logs.into_any_element(),
-            self.cleanup_section(&storage, cx),
-        ]
+            worktrees = worktrees.child(self.storage_switch_row(
+                "Delete merged worktrees",
+                "Remove worktrees whose pull request is merged and whose commits are included in the default branch.",
+                "worktreeOnMerge",
+                get_bool("worktreeOnMerge"),
+                project_scope,
+                cx,
+            ));
+            worktrees = worktrees.child(self.storage_switch_row(
+                "Delete unchanged worktrees",
+                "Remove worktrees with no commits beyond the default branch.",
+                "worktreeUnchanged",
+                get_bool("worktreeUnchanged"),
+                project_scope,
+                cx,
+            ));
+            let keep_when = storage
+                .get("worktreeKeepWhen")
+                .and_then(Value::as_str)
+                .unwrap_or("uncommitted-changes")
+                .to_owned();
+            let keep_options: [(&str, &str); 3] = [
+                ("any-local-files", "Any local files"),
+                ("uncommitted-changes", "Uncommitted changes"),
+                ("tracked-changes", "Edited tracked files"),
+            ];
+            let keep_label = keep_options
+                .iter()
+                .find(|(v, _)| *v == keep_when)
+                .map(|(_, l)| *l)
+                .unwrap_or("");
+            let keep_control = self.select_control(
+                cx,
+                "storage-worktree-keep-when",
+                keep_label.into(),
+                keep_options
+                    .iter()
+                    .map(|(v, l)| (json!(v), SharedString::from(*l), *v == keep_when))
+                    .collect(),
+                SelectWidth::Auto,
+                false,
+                move |this, value, _, cx| {
+                    this.update_worktree_rule("worktreeKeepWhen", value, project_scope, cx)
+                },
+            );
+            let keep_dirty =
+                storage.get("worktreeKeepWhen") != default_storage.get("worktreeKeepWhen");
+            let keep_reset = (keep_dirty && !project_scope).then(|| {
+                let default = default_storage
+                    .get("worktreeKeepWhen")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let action = self.cb(cx, move |this, _, cx| {
+                    this.update_worktree_rule("worktreeKeepWhen", default.clone(), false, cx)
+                });
+                setting_reset_button("reset-keep-when", "Reset to default", move |w, c| {
+                    action(w, c)
+                })
+                .into_any_element()
+            });
+            worktrees = worktrees.child(
+                Self::base_row("storage-worktree-keep-when")
+                    .description(match keep_when.as_str() {
+                        "any-local-files" => "Includes ignored files, except node_modules.",
+                        "tracked-changes" => "Deletes untracked and ignored files, including .env.",
+                        _ => "Keeps edits and untracked files. Deletes ignored files, including .env.",
+                    })
+                    .reset_action(keep_reset)
+                    .control(keep_control),
+            );
+        }
+
+        let mut sections = vec![worktrees.into_any_element()];
+        if !project_scope {
+            sections.push(
+                SettingsSection::new("Artifacts and logs")
+                    .id("storage-artifacts")
+                    .child(self.storage_retention_row(
+                        "Delete old rotated logs",
+                        "Delete inactive rotated log files after this many days. Current logs are kept.",
+                        "logsAfterDays",
+                        get_days("logsAfterDays"),
+                        false,
+                        window,
+                        cx,
+                    ))
+                    .into_any_element(),
+            );
+            sections.push(self.cleanup_section(&storage, cx));
+        }
+        sections
+    }
+
+    /// The write of a worktree rule: `worktreeCleanup` custom rules at a
+    /// project scope, `storageCleanup` otherwise (`updateWorktree`).
+    fn update_worktree_rule(
+        &mut self,
+        key: &'static str,
+        value: Value,
+        project_scope: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let patch = if project_scope {
+            json!({ "worktreeCleanup": { "mode": "custom", "rules": { key: value } } })
+        } else {
+            json!({ "storageCleanup": { key: value } })
+        };
+        self.update(Which::Server, patch, cx);
+    }
+
+    /// "Automatic worktree cleanup": a project's own tier.
+    fn project_cleanup_mode_row(
+        &mut self,
+        mode: ProjectCleanupMode,
+        mixed: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let json = self.json(cx);
+        let row = SettingsRow::new("Automatic worktree cleanup").description(mode.description());
+        let (row, _) = {
+            let (row, scoped_reset, mixed_keys) = self.decorate_server_row(
+                cx,
+                row,
+                "storage-project-cleanup",
+                &["worktreeCleanup"],
+                "project worktree cleanup",
+            );
+            let _ = &json;
+            (
+                match scoped_reset {
+                    Some(reset) => row.reset_action(reset),
+                    None => row,
+                },
+                mixed_keys,
+            )
+        };
+        let options = [
+            ProjectCleanupMode::Inherit,
+            ProjectCleanupMode::Off,
+            ProjectCleanupMode::Custom,
+        ];
+        let control = self.select_control(
+            cx,
+            "storage-project-cleanup-mode",
+            if mixed { "Mixed" } else { mode.label() }.into(),
+            options
+                .iter()
+                .map(|option| {
+                    (
+                        json!(option.value()),
+                        SharedString::from(option.label()),
+                        !mixed && *option == mode,
+                    )
+                })
+                .collect(),
+            SelectWidth::Auto,
+            false,
+            |this, value, _, cx| match value.as_str() {
+                Some("inherit") => this.clear_scoped_settings(&["worktreeCleanup"], cx),
+                Some("off") => {
+                    this.update_scoped(json!({ "worktreeCleanup": { "mode": "off" } }), cx)
+                }
+                Some("custom") => this.update_scoped(
+                    json!({ "worktreeCleanup": { "mode": "custom", "rules": {} } }),
+                    cx,
+                ),
+                _ => {}
+            },
+        );
+        row.control(control).into_any_element()
     }
 
     fn worktrees_directory_row(
@@ -204,6 +375,7 @@ impl SettingsView {
         description: &'static str,
         key: &'static str,
         checked: bool,
+        project_scope: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let entity = cx.entity();
@@ -216,7 +388,7 @@ impl SettingsView {
                 cx,
                 move |next, _, cx| {
                     entity.update(cx, |this, cx| {
-                        this.update_server(json!({ "storageCleanup": { key: next } }), cx)
+                        this.update_worktree_rule(key, json!(next), project_scope, cx)
                     });
                 },
             ))
@@ -230,6 +402,7 @@ impl SettingsView {
         description: &'static str,
         key: &'static str,
         value: Option<u64>,
+        project_scope: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -246,7 +419,7 @@ impl SettingsView {
                     cx,
                     move |this, next, cx| {
                         let days = next.clamp(1, 3650);
-                        this.update_server(json!({ "storageCleanup": { key: days } }), cx);
+                        this.update_worktree_rule(key, json!(days), project_scope, cx);
                     },
                 );
                 control = control.child(field).child(
@@ -274,7 +447,7 @@ impl SettingsView {
             move |next, _, cx| {
                 let days = if next { json!(8) } else { Value::Null };
                 entity.update(cx, |this, cx| {
-                    this.update_server(json!({ "storageCleanup": { key: days } }), cx)
+                    this.update_worktree_rule(key, days, project_scope, cx)
                 });
             },
         ));
@@ -346,7 +519,6 @@ impl SettingsView {
             .plain()
             .child(main);
         if let Some(report) = report {
-            let open = self.panels.storage.last_run_open;
             let summary = format!(
                 "{} removed, {} kept{}",
                 report.removed,
@@ -357,125 +529,70 @@ impl SettingsView {
                     String::new()
                 }
             );
-            let header = div()
-                .id("storage-last-run-toggle")
-                .flex()
-                .items_center()
-                .gap_4()
-                .px_4()
-                .min_h(rems(2.75))
-                .cursor(CursorStyle::PointingHand)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.panels.storage.last_run_open = !this.panels.storage.last_run_open;
-                    cx.notify();
-                }))
-                .child(
+            let mut rows: Vec<AnyElement> = Vec::new();
+            for entry in report.entries.iter() {
+                let mut text = String::new();
+                if let Some(title) = &entry.thread_title
+                    && *title != entry.name
+                {
+                    text.push_str(&format!("{title}. "));
+                }
+                text.push_str(&entry.reason);
+                let size = [
+                    entry
+                        .files
+                        .filter(|_| entry.name == "Rotated logs")
+                        .map(|f| format!("{f} {}", if f == 1 { "file" } else { "files" })),
+                    entry.bytes.map(|b| format_bytes(b as f64)),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+                let mut row = SettingsRow::new(entry.name.clone()).description(
                     div()
-                        .flex()
-                        .min_w_0()
-                        .flex_1()
-                        .items_center()
-                        .gap_2()
-                        .py_2()
-                        .child(
-                            // GPUI svgs cannot rotate: an open fold swaps to the down chevron.
-                            Icon::new(if open {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .size(rems(1.))
-                            .color(theme.muted_foreground),
-                        )
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(TEXT_SM.size)
-                                .font_weight(FontWeight::MEDIUM)
-                                .child("Last run"),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(TEXT_XS.size)
-                                .text_color(theme.muted_foreground)
-                                .child(summary),
-                        ),
+                        .text_color(if entry.failed {
+                            theme.destructive
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .child(text),
                 );
-            let mut body = div().flex().flex_col();
-            if open {
-                body = body
-                    .border_t_1()
-                    .border_color(with_alpha(theme.border, 0.5));
-                for (index, entry) in report.entries.iter().enumerate() {
-                    let mut text = String::new();
-                    if let Some(title) = &entry.thread_title
-                        && *title != entry.name
-                    {
-                        text.push_str(&format!("{title}. "));
-                    }
-                    text.push_str(&entry.reason);
-                    let size = [
-                        entry
-                            .files
-                            .filter(|_| entry.name == "Rotated logs")
-                            .map(|f| format!("{f} {}", if f == 1 { "file" } else { "files" })),
-                        entry.bytes.map(|b| format_bytes(b as f64)),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                    let mut row = SettingsRow::new(entry.name.clone()).description(
+                if entry.removed {
+                    row = row.control(
                         div()
-                            .text_color(if entry.failed {
-                                theme.destructive
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child(text),
-                    );
-                    if entry.removed {
-                        row = row.control(
-                            div()
-                                .text_size(TEXT_XS.size)
-                                .text_color(theme.muted_foreground)
-                                .child(size),
-                        );
-                    }
-                    body = body.child(
-                        div()
-                            .when(index > 0, |this| {
-                                this.border_t_1()
-                                    .border_color(with_alpha(theme.border, 0.5))
-                            })
-                            .child(row),
-                    );
-                }
-                if report.omitted > 0 {
-                    body = body.child(
-                        div()
-                            .px_4()
-                            .py(px(10.))
                             .text_size(TEXT_XS.size)
                             .text_color(theme.muted_foreground)
-                            .child(format!("{} more results.", report.omitted)),
+                            .child(size),
                     );
                 }
-                if report.entries.is_empty() && report.omitted == 0 {
-                    body = body.child(
-                        div()
-                            .px_4()
-                            .py(px(10.))
-                            .text_size(TEXT_XS.size)
-                            .text_color(theme.muted_foreground)
-                            .child("Nothing needed cleanup."),
-                    );
-                }
+                rows.push(row.into_any_element());
             }
-            section = section.child(settings_group(
-                vec![header.into_any_element(), body.into_any_element()],
+            if report.omitted > 0 {
+                rows.push(
+                    div()
+                        .px_4()
+                        .py(px(10.))
+                        .text_size(TEXT_XS.size)
+                        .text_color(theme.muted_foreground)
+                        .child(format!("{} more results.", report.omitted))
+                        .into_any_element(),
+                );
+            }
+            if report.entries.is_empty() && report.omitted == 0 {
+                rows.push(
+                    div()
+                        .px_4()
+                        .py(px(10.))
+                        .text_size(TEXT_XS.size)
+                        .text_color(theme.muted_foreground)
+                        .child("Nothing needed cleanup.")
+                        .into_any_element(),
+                );
+            }
+            section = section.child(self.folded_settings_section(
+                FoldedSection::new("storage-cleanup-last-run", "Last run").summary(Some(summary)),
+                rows,
                 cx,
             ));
         }
@@ -485,7 +602,38 @@ impl SettingsView {
 
 #[cfg(test)]
 mod tests {
-    use super::format_bytes;
+    use serde_json::json;
+    use turin_contracts::settings::default_server_settings;
+
+    use super::*;
+
+    #[test]
+    fn reads_the_storage_the_page_shows_from_the_resolved_worktree_rules() {
+        let mut settings = default_server_settings();
+        settings.storage_cleanup.logs_after_days = None;
+        let storage = effective_storage(&settings);
+        assert_eq!(storage["worktreeKeepWhen"], json!("uncommitted-changes"));
+        assert_eq!(storage["worktreeOnDelete"], json!(false));
+        assert!(storage["logsAfterDays"].is_null());
+    }
+
+    #[test]
+    fn describes_a_projects_cleanup_tier() {
+        assert_eq!(
+            ProjectCleanupMode::Off.description(),
+            "Keep this project's worktrees until you delete them manually."
+        );
+        assert_eq!(
+            ProjectCleanupMode::Custom.description(),
+            "Use these rules for this project."
+        );
+        assert_eq!(
+            ProjectCleanupMode::Inherit.description(),
+            "Use each machine's worktree cleanup settings."
+        );
+        assert_eq!(ProjectCleanupMode::Inherit.label(), "Inherit");
+        assert_eq!(ProjectCleanupMode::Custom.value(), "custom");
+    }
 
     #[test]
     fn formats_bytes_like_upstream() {

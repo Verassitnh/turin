@@ -269,6 +269,19 @@ impl SettingsView {
         key: &'static str,
         label: &'static str,
     ) -> Option<AnyElement> {
+        self.reset_button_tip(cx, json, which, key, label, "Reset to default")
+    }
+
+    /// [`Self::reset_button`] with its own tooltip (`SettingResetButton tooltip`).
+    pub(super) fn reset_button_tip(
+        &self,
+        cx: &mut Context<Self>,
+        json: &Json,
+        which: Which,
+        key: &'static str,
+        label: &'static str,
+        tooltip: &'static str,
+    ) -> Option<AnyElement> {
         if label.is_empty() || !json.changed(which, key) {
             return None;
         }
@@ -279,11 +292,33 @@ impl SettingsView {
         Some(
             setting_reset_button(
                 SharedString::from(format!("reset-{key}")),
-                "Reset to default",
+                tooltip,
                 move |window, cx| action(window, cx),
             )
             .into_any_element(),
         )
+    }
+
+    /// Decorates a server row with the scope parts and its reset: clearing the
+    /// override at a project scope, else restoring the default (`tooltip`).
+    /// Returns whether the targets disagree on the row's key.
+    pub(super) fn scoped_row(
+        &mut self,
+        cx: &mut Context<Self>,
+        json: &Json,
+        row: SettingsRow,
+        row_id: &str,
+        key: &'static str,
+        reset_label: &'static str,
+        tooltip: &'static str,
+    ) -> (SettingsRow, bool) {
+        let (row, scoped_reset, mixed) =
+            self.decorate_server_row(cx, row, row_id, &[key], reset_label);
+        let reset = match scoped_reset {
+            Some(reset) => reset,
+            None => self.reset_button_tip(cx, json, Which::Server, key, reset_label, tooltip),
+        };
+        (row.reset_action(reset), mixed)
     }
 
     pub(super) fn bool_row(
@@ -291,6 +326,17 @@ impl SettingsView {
         cx: &mut Context<Self>,
         json: &Json,
         spec: BoolRow,
+    ) -> AnyElement {
+        self.bool_row_tip(cx, json, spec, "Reset to default")
+    }
+
+    /// [`Self::bool_row`] with the reset tooltip of the row.
+    pub(super) fn bool_row_tip(
+        &mut self,
+        cx: &mut Context<Self>,
+        json: &Json,
+        spec: BoolRow,
+        tooltip: &'static str,
     ) -> AnyElement {
         let checked = json.bool(spec.which, spec.key);
         let key = spec.key;
@@ -317,7 +363,7 @@ impl SettingsView {
         );
         let reset = match scoped_reset {
             Some(reset) => reset,
-            None => self.reset_button(cx, json, which, key, spec.reset_label),
+            None => self.reset_button_tip(cx, json, which, key, spec.reset_label, tooltip),
         };
         row.description(spec.description)
             .reset_action(reset)

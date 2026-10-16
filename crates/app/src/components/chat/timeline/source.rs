@@ -36,7 +36,13 @@ pub trait TimelineSource: 'static {
         cx: &mut App,
     );
     /// The composer's pending-user-input submit: answers keyed by question id.
-    fn respond_to_user_input(&self, request_id: &str, answers: Vec<(String, String)>, cx: &mut App);
+    /// Returns false when staging, upload, or respond failed (drafts are kept).
+    fn respond_to_user_input(
+        &self,
+        request_id: &str,
+        answers: Vec<(String, String)>,
+        cx: &mut App,
+    ) -> bool;
     /// `onDismissActivePendingUserInput`.
     fn dismiss_user_input(&self, request_id: &str, cx: &mut App);
     /// `onRevertToTurnCount` ("Edit from here").
@@ -249,9 +255,10 @@ impl TimelineSource for MockTimelineSource {
         request_id: &str,
         answers: Vec<(String, String)>,
         cx: &mut App,
-    ) {
+    ) -> bool {
         tracing::info!(request_id, ?answers, "mock: user input response");
         self.dismiss_user_input(request_id, cx);
+        true
     }
 
     fn dismiss_user_input(&self, request_id: &str, cx: &mut App) {

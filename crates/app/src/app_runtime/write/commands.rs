@@ -343,6 +343,30 @@ impl Commands {
         self.dispatch(command).await.map(drop)
     }
 
+    /// `runtime-request.respond` for user-input answers, optionally with
+    /// staged question attachments (`attachmentsByQuestionId`).
+    pub async fn respond_to_user_input_request(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+        answers: Value,
+        attachments_by_question_id: Option<Value>,
+    ) -> Result<(), CommandError> {
+        let mut command = json!({
+            "type": "runtime-request.respond",
+            "commandId": command_id(),
+            "threadId": thread_id,
+            "requestId": request_id,
+            "answers": answers,
+        });
+        if let Some(object) = command.as_object_mut() {
+            if let Some(attachments) = attachments_by_question_id {
+                object.insert("attachmentsByQuestionId".into(), attachments);
+            }
+        }
+        self.dispatch(command).await.map(drop)
+    }
+
     /// `thread.user-input.dismiss`: gives up on a pending question.
     pub async fn dismiss_user_input(
         &self,

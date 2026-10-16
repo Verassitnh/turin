@@ -20,6 +20,7 @@ pub mod assistant_citation_target;
 pub mod assistant_selection_state;
 pub mod assistant_selection_toolbar;
 pub mod question_attachment_drafts;
+pub mod question_attachment_submit;
 pub mod thread_navigation;
 pub mod changed_files_tree;
 pub mod chat_canvas;

@@ -524,7 +524,13 @@ fn advance(
                     .map(|answer| (question.id.as_str().to_owned(), answer_text(answer)))
             })
             .collect();
-        source.respond_to_user_input(&prompt.request_id, answers, cx);
+        let ok = source.respond_to_user_input(&prompt.request_id, answers, cx);
+        if !ok {
+            state.update(cx, |state, cx| {
+                state.responding = false;
+                cx.notify();
+            });
+        }
     }
 }
 
@@ -825,55 +831,62 @@ impl RenderOnce for ComposerPendingUserInputBanner {
                                 .child("Select one or more options."),
                         )
                     })
-                    .when(
-                        question.allow_custom_answer != Some(false)
-                            && self.environment_id.is_some()
-                            && self.thread_id.is_some(),
-                        |this| {
-                            let env = self.environment_id.clone().unwrap_or_default();
-                            let thread = self.thread_id.clone().unwrap_or_default();
-                            let request = self.prompt.request_id.clone();
-                            let qid = question.id.clone();
-                            let count = super::question_attachment_drafts::question_draft_attachment_count(
-                                cx,
-                                &env,
-                                &thread,
-                                &request,
-                                &qid,
+                    .when(self.environment_id.is_some() && self.thread_id.is_some(), |this| {
+                        let attachments_enabled =
+                            super::question_attachment_submit::pending_user_input_attachments_enabled(
+                                &self.prompt,
                             );
-                            this.child(
-                                div()
-                                    .mt(rems(0.5))
-                                    .flex()
-                                    .items_center()
-                                    .gap(rems(0.5))
-                                    .child(
-                                        Button::new(("pending-attach", index))
-                                            .variant(ButtonVariant::GhostMuted)
-                                            .size(ButtonSize::Xs)
-                                            .child(Icon::new(IconName::Plus).size(rems(0.75)))
-                                            .child("Attach files")
-                                            .on_click(move |_, window, cx| {
-                                                let key =
-                                                    crate::state::question_attachments::question_attachment_draft_id(
-                                                        &env, &thread, &request, &qid,
-                                                    );
-                                                super::question_attachment_drafts::pick_question_attachments(
-                                                    window, cx, key,
+                        let disabled_reason =
+                            super::question_attachment_submit::pending_user_input_attachments_disabled_reason(
+                                &self.prompt,
+                            );
+                        let env = self.environment_id.clone().unwrap_or_default();
+                        let thread = self.thread_id.clone().unwrap_or_default();
+                        let request = self.prompt.request_id.clone();
+                        let qid = question.id.clone();
+                        let count = super::question_attachment_drafts::question_draft_attachment_count(
+                            cx,
+                            &env,
+                            &thread,
+                            &request,
+                            &qid,
+                        );
+                        this.child(
+                            div()
+                                .mt(rems(0.5))
+                                .flex()
+                                .items_center()
+                                .gap(rems(0.5))
+                                .child(
+                                    Button::new(("pending-attach", index))
+                                        .variant(ButtonVariant::GhostMuted)
+                                        .size(ButtonSize::Xs)
+                                        .disabled(!attachments_enabled || responding)
+                                        .when_some(disabled_reason.map(str::to_owned), |button, reason| {
+                                            button.tooltip(Tooltip::new(reason))
+                                        })
+                                        .child(Icon::new(IconName::Plus).size(rems(0.75)))
+                                        .child("Attach files")
+                                        .on_click(move |_, window, cx| {
+                                            let key =
+                                                crate::state::question_attachments::question_attachment_draft_id(
+                                                    &env, &thread, &request, &qid,
                                                 );
-                                            }),
+                                            super::question_attachment_drafts::pick_question_attachments(
+                                                window, cx, key,
+                                            );
+                                        }),
+                                )
+                                .when(count > 0, |row| {
+                                    row.child(
+                                        div()
+                                            .text_size(TEXT_XS.size)
+                                            .text_color(theme.secondary_label)
+                                            .child(format!("{count} attached")),
                                     )
-                                    .when(count > 0, |row| {
-                                        row.child(
-                                            div()
-                                                .text_size(TEXT_XS.size)
-                                                .text_color(theme.secondary_label)
-                                                .child(format!("{count} attached")),
-                                        )
-                                    }),
-                            )
-                        },
-                    )
+                                }),
+                        )
+                    })
                     .child(options),
             );
         let content = div()

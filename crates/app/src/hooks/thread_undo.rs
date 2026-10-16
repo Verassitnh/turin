@@ -233,11 +233,13 @@ impl ThreadUndoNotices {
     }
 
     /// `undo` on a notice: consumes the live offers named by `ids` whose
-    /// claims are still current. Each claim is finished before the caller runs
-    /// anything, so a repeated click restores nothing twice. A stale handle
-    /// restores nothing.
+    /// claims are still current. Offers come back in `ids` order.
+    /// `current_notice` builds that list newest first, which is the order
+    /// upstream dispatches (`group` walked from the end, then `current.map`).
+    /// Each claim is finished before the caller runs anything, so a repeated
+    /// click restores nothing twice. A stale handle restores nothing.
     pub fn take_undo(&self, ids: &[u64]) -> Vec<UndoRun> {
-        let taken: Vec<UndoOffer> = {
+        let mut taken: Vec<UndoOffer> = {
             let mut state = self.lock();
             let mut taken = Vec::new();
             state.live.retain(|offer| {
@@ -249,6 +251,12 @@ impl ThreadUndoNotices {
             });
             taken
         };
+        // `retain` visits oldest first. Match the notice's ids instead.
+        taken.sort_by_key(|offer| {
+            ids.iter()
+                .position(|id| *id == offer.id)
+                .unwrap_or(usize::MAX)
+        });
         for offer in &taken {
             offer.claim.finish();
         }

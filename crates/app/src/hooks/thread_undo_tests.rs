@@ -205,3 +205,28 @@ fn undoes_the_latest_kind_first_then_reveals_the_preceding_group() {
     assert_eq!(notices.take_undo(&older.ids).len(), 1);
     assert!(notices.current_notice().is_none());
 }
+
+#[test]
+fn take_undo_returns_a_same_kind_group_newest_first() {
+    let undo = ThreadUndo::default();
+    let notices = ThreadUndoNotices::default();
+    notices.show(
+        UndoAction::Archived,
+        undo.begin("archive", "env/older"),
+        unpin_plan("older"),
+        "Restore failed",
+    );
+    notices.show(
+        UndoAction::Archived,
+        undo.begin("archive", "env/newer"),
+        unpin_plan("newer"),
+        "Restore failed",
+    );
+    let group = notices.current_notice().unwrap();
+    assert_eq!(group.count, 2);
+    let runs = notices.take_undo(&group.ids);
+    assert_eq!(
+        runs.into_iter().map(|run| run.plan).collect::<Vec<_>>(),
+        vec![unpin_plan("newer"), unpin_plan("older")]
+    );
+}

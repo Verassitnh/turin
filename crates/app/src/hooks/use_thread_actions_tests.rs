@@ -852,6 +852,43 @@ fn a_rejected_restore_toasts_the_error_message() {
     assert_eq!(toasts[0].description, "disconnected");
 }
 
+/// Two offers of one kind dispatch newest first (`showThreadUndoNotice.ts`
+/// builds `group` from the end, then `current.map`s in that order).
+#[test]
+fn an_undo_group_restores_the_newest_offer_first() {
+    let harness = Harness::new();
+    grant(
+        &harness.world,
+        "undo-env",
+        &[AUTH_ORCHESTRATION_OPERATE_SCOPE],
+    );
+    let mut actions = harness.owner(FakeHost {
+        threads: vec![shell("undo-env", "older"), shell("undo-env", "newer")],
+        ..FakeHost::default()
+    });
+    actions
+        .archive_thread(&thread_ref("undo-env", "older"))
+        .unwrap();
+    actions
+        .archive_thread(&thread_ref("undo-env", "newer"))
+        .unwrap();
+    let notice = harness.notices.current_notice().unwrap();
+    assert_eq!((notice.action, notice.count), (UndoAction::Archived, 2));
+
+    actions.undo_notice(&notice.ids);
+    let unarchives: Vec<String> = calls(&harness.world)
+        .into_iter()
+        .filter(|call| call.starts_with("unarchive "))
+        .collect();
+    assert_eq!(
+        unarchives,
+        vec![
+            "unarchive undo-env/newer".to_owned(),
+            "unarchive undo-env/older".to_owned(),
+        ]
+    );
+}
+
 /// `showThreadUndoNotice.test.ts`: "does not report interrupted restores as errors".
 #[test]
 fn an_interrupted_restore_does_not_toast() {

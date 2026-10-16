@@ -21,6 +21,7 @@ pub mod morph_icon;
 pub mod number_field;
 pub mod popover;
 pub mod radio_group;
+pub mod refresh_icon;
 pub mod scroll_area;
 pub mod separator;
 pub mod sidebar;

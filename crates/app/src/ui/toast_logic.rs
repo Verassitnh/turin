@@ -348,6 +348,481 @@ pub fn thread_ref(environment_id: &str, thread_id: &str) -> ScopedThreadRef {
     }
 }
 
+// ---- viewport, swipe, and motion rules (toast.tsx `Toasts`, Base UI `ToastRoot`) ----
+
+/// Base UI `ToastProvider` defaults.
+pub const DEFAULT_TOAST_TIMEOUT_MS: u64 = 5000;
+pub const TOAST_LIMIT: usize = 3;
+
+/// `max-w-90`.
+pub const TOAST_MAX_WIDTH_PX: f64 = 360.;
+/// `--toast-inset`: `--spacing(4)`, and `--spacing(8)` from the `sm` breakpoint (640px).
+pub fn toast_inset(window_width: f64) -> f64 {
+    if window_width >= 640. { 32. } else { 16. }
+}
+
+/// `w-[calc(100%-var(--toast-inset)*2)] max-w-90`.
+pub fn toast_viewport_width(window_width: f64) -> f64 {
+    (window_width - toast_inset(window_width) * 2.).clamp(0., TOAST_MAX_WIDTH_PX)
+}
+
+/// `[transition:transform_.5s_cubic-bezier(.22,1,.36,1),opacity_.5s,height_.15s]`.
+pub const TOAST_MOTION_MS: u64 = 500;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastPosition {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+impl ToastPosition {
+    pub fn is_top(self) -> bool {
+        matches!(self, Self::TopLeft | Self::TopCenter | Self::TopRight)
+    }
+
+    pub fn is_left(self) -> bool {
+        matches!(self, Self::TopLeft | Self::BottomLeft)
+    }
+
+    pub fn is_right(self) -> bool {
+        matches!(self, Self::TopRight | Self::BottomRight)
+    }
+
+    pub fn is_center(self) -> bool {
+        matches!(self, Self::TopCenter | Self::BottomCenter)
+    }
+
+    /// `swipeDirection` on `Toast.Root`.
+    pub fn swipe_directions(self) -> Vec<SwipeDirection> {
+        let vertical = if self.is_top() {
+            SwipeDirection::Up
+        } else {
+            SwipeDirection::Down
+        };
+        if self.is_center() {
+            vec![vertical]
+        } else if self.is_left() {
+            vec![SwipeDirection::Left, vertical]
+        } else {
+            vec![SwipeDirection::Right, vertical]
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwipeDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+const SWIPE_THRESHOLD: f64 = 40.;
+const REVERSE_CANCEL_THRESHOLD: f64 = 10.;
+const MIN_DRAG_THRESHOLD: f64 = 1.;
+const OPPOSITE_DIRECTION_DAMPING_FACTOR: f64 = 0.5;
+
+/// `getDisplacement`: movement along `direction`.
+pub fn swipe_displacement(direction: SwipeDirection, dx: f64, dy: f64) -> f64 {
+    match direction {
+        SwipeDirection::Up => -dy,
+        SwipeDirection::Down => dy,
+        SwipeDirection::Left => -dx,
+        SwipeDirection::Right => dx,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LockedAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwipeEnd {
+    Dismiss(SwipeDirection),
+    Restore,
+}
+
+/// Base UI's swipe-to-dismiss gesture on one toast: axis lock, intended
+/// direction, change-of-mind cancel, damped motion against the allowed
+/// directions, and the 40px release threshold.
+#[derive(Clone, Debug)]
+pub struct SwipeTracker {
+    directions: Vec<SwipeDirection>,
+    start: (f64, f64),
+    cancel_baseline: (f64, f64),
+    last: (f64, f64),
+    intended: Option<SwipeDirection>,
+    max_displacement: f64,
+    cancelled: bool,
+    locked: Option<LockedAxis>,
+    first_move: bool,
+    /// The offset applied to the toast, in pixels.
+    pub offset: (f64, f64),
+    pub is_real_swipe: bool,
+}
+
+impl SwipeTracker {
+    pub fn new(directions: Vec<SwipeDirection>, x: f64, y: f64) -> Self {
+        Self {
+            directions,
+            start: (x, y),
+            cancel_baseline: (x, y),
+            last: (x, y),
+            intended: None,
+            max_displacement: 0.,
+            cancelled: false,
+            locked: None,
+            first_move: true,
+            offset: (0., 0.),
+            is_real_swipe: false,
+        }
+    }
+
+    fn allows(&self, direction: SwipeDirection) -> bool {
+        self.directions.contains(&direction)
+    }
+
+    fn damp(&self, dx: f64, dy: f64) -> (f64, f64) {
+        let damp = |value: f64| {
+            if value > 0. {
+                value.powf(OPPOSITE_DIRECTION_DAMPING_FACTOR)
+            } else {
+                -(value.abs().powf(OPPOSITE_DIRECTION_DAMPING_FACTOR))
+            }
+        };
+        let (left, right) = (
+            self.allows(SwipeDirection::Left),
+            self.allows(SwipeDirection::Right),
+        );
+        let (up, down) = (
+            self.allows(SwipeDirection::Up),
+            self.allows(SwipeDirection::Down),
+        );
+        let mut x = dx;
+        let mut y = dy;
+        if !left && !right {
+            x = damp(dx);
+        } else {
+            if !right && dx > 0. {
+                x = damp(dx);
+            }
+            if !left && dx < 0. {
+                x = damp(dx);
+            }
+        }
+        if !up && !down {
+            y = damp(dy);
+        } else {
+            if !down && dy > 0. {
+                y = damp(dy);
+            }
+            if !up && dy < 0. {
+                y = damp(dy);
+            }
+        }
+        (x, y)
+    }
+
+    /// `handlePointerMove`. Returns the new toast offset.
+    pub fn pointer_move(&mut self, x: f64, y: f64) -> (f64, f64) {
+        if self.first_move {
+            // Start from the first move to absorb the press-to-move delay.
+            self.start = (x, y);
+            self.first_move = false;
+        }
+        let (movement_x, movement_y) = (x - self.last.0, y - self.last.1);
+        self.last = (x, y);
+        if (movement_y < 0. && y > self.cancel_baseline.1)
+            || (movement_y > 0. && y < self.cancel_baseline.1)
+        {
+            self.cancel_baseline.1 = y;
+        }
+        if (movement_x < 0. && x > self.cancel_baseline.0)
+            || (movement_x > 0. && x < self.cancel_baseline.0)
+        {
+            self.cancel_baseline.0 = x;
+        }
+        let delta_x = x - self.start.0;
+        let delta_y = y - self.start.1;
+        let cancel_dx = x - self.cancel_baseline.0;
+        let cancel_dy = y - self.cancel_baseline.1;
+        // State set during this event is not visible until the next one.
+        let locked = self.locked;
+        if !self.is_real_swipe && delta_x.hypot(delta_y) >= MIN_DRAG_THRESHOLD {
+            self.is_real_swipe = true;
+            if self.locked.is_none() {
+                let horizontal =
+                    self.allows(SwipeDirection::Left) || self.allows(SwipeDirection::Right);
+                let vertical = self.allows(SwipeDirection::Up) || self.allows(SwipeDirection::Down);
+                if horizontal && vertical {
+                    self.locked = Some(if delta_x.abs() > delta_y.abs() {
+                        LockedAxis::Horizontal
+                    } else {
+                        LockedAxis::Vertical
+                    });
+                }
+            }
+        }
+        match self.intended {
+            None => {
+                let candidate = match locked {
+                    Some(LockedAxis::Vertical) => {
+                        if delta_y > 0. {
+                            Some(SwipeDirection::Down)
+                        } else if delta_y < 0. {
+                            Some(SwipeDirection::Up)
+                        } else {
+                            None
+                        }
+                    }
+                    Some(LockedAxis::Horizontal) => {
+                        if delta_x > 0. {
+                            Some(SwipeDirection::Right)
+                        } else if delta_x < 0. {
+                            Some(SwipeDirection::Left)
+                        } else {
+                            None
+                        }
+                    }
+                    None => {
+                        if delta_x.abs() >= delta_y.abs() {
+                            Some(if delta_x > 0. {
+                                SwipeDirection::Right
+                            } else {
+                                SwipeDirection::Left
+                            })
+                        } else {
+                            Some(if delta_y > 0. {
+                                SwipeDirection::Down
+                            } else {
+                                SwipeDirection::Up
+                            })
+                        }
+                    }
+                };
+                if let Some(candidate) = candidate.filter(|candidate| self.allows(*candidate)) {
+                    self.intended = Some(candidate);
+                    self.max_displacement = swipe_displacement(candidate, delta_x, delta_y);
+                }
+            }
+            Some(direction) => {
+                let displacement = swipe_displacement(direction, cancel_dx, cancel_dy);
+                let one_axis = !(self.allows(SwipeDirection::Left)
+                    && self.allows(SwipeDirection::Right))
+                    && !(self.allows(SwipeDirection::Up) && self.allows(SwipeDirection::Down));
+                if displacement > SWIPE_THRESHOLD {
+                    self.cancelled = false;
+                } else if one_axis
+                    && self.max_displacement - displacement >= REVERSE_CANCEL_THRESHOLD
+                {
+                    self.cancelled = true;
+                }
+            }
+        }
+        let (damped_x, damped_y) = self.damp(delta_x, delta_y);
+        let horizontal = self.allows(SwipeDirection::Left) || self.allows(SwipeDirection::Right);
+        let vertical = self.allows(SwipeDirection::Up) || self.allows(SwipeDirection::Down);
+        let mut offset = (0., 0.);
+        match locked {
+            Some(LockedAxis::Horizontal) => {
+                if horizontal {
+                    offset.0 += damped_x;
+                }
+            }
+            Some(LockedAxis::Vertical) => {
+                if vertical {
+                    offset.1 += damped_y;
+                }
+            }
+            None => {
+                if horizontal {
+                    offset.0 += damped_x;
+                }
+                if vertical {
+                    offset.1 += damped_y;
+                }
+            }
+        }
+        self.offset = offset;
+        offset
+    }
+
+    /// `handleSwipeEnd` on pointer release.
+    pub fn pointer_up(&self) -> SwipeEnd {
+        if self.cancelled {
+            return SwipeEnd::Restore;
+        }
+        let (dx, dy) = self.offset;
+        for direction in &self.directions {
+            let past = match direction {
+                SwipeDirection::Right => dx > SWIPE_THRESHOLD,
+                SwipeDirection::Left => dx < -SWIPE_THRESHOLD,
+                SwipeDirection::Down => dy > SWIPE_THRESHOLD,
+                SwipeDirection::Up => dy < -SWIPE_THRESHOLD,
+            };
+            if past {
+                return SwipeEnd::Dismiss(*direction);
+            }
+        }
+        SwipeEnd::Restore
+    }
+}
+
+/// Where a toast is drawn: `dx` is the horizontal translate, `edge` the
+/// distance from the viewport's anchored edge (top or bottom), and the
+/// width/height come from the collapsed scale or the measured content.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ToastFrame {
+    pub dx: f64,
+    pub edge: f64,
+    pub width: f64,
+    pub height: f64,
+    pub opacity: f64,
+}
+
+impl ToastFrame {
+    pub fn lerp(self, to: Self, t: f64) -> Self {
+        let mix = |a: f64, b: f64| a + (b - a) * t;
+        Self {
+            dx: mix(self.dx, to.dx),
+            edge: mix(self.edge, to.edge),
+            width: mix(self.width, to.width),
+            height: mix(self.height, to.height),
+            opacity: mix(self.opacity, to.opacity),
+        }
+    }
+
+    pub fn near(self, other: Self) -> bool {
+        (self.dx - other.dx).abs() < 0.25
+            && (self.edge - other.edge).abs() < 0.25
+            && (self.width - other.width).abs() < 0.25
+            && (self.height - other.height).abs() < 0.25
+            && (self.opacity - other.opacity).abs() < 0.01
+    }
+}
+
+/// Everything `Toasts` feeds one root's transform for a single toast.
+#[derive(Clone, Copy, Debug)]
+pub struct ToastFrameInput {
+    pub position: ToastPosition,
+    pub visible_index: usize,
+    pub offset_y: f64,
+    pub frontmost_height: f64,
+    /// The toast's own measured content height.
+    pub height: f64,
+    pub viewport_width: f64,
+    pub expanded: bool,
+    pub limited: bool,
+    /// Pixels of swipe movement applied while dragging.
+    pub swipe: (f64, f64),
+}
+
+/// The resting frame: `data-[position*=top]:transform-[translateX(swipe) translateY(..) scale(..)]`
+/// collapsed, `--toast-calc-offset-y` expanded. Behind collapsed cards are
+/// drawn at the frontmost height, scaled.
+pub fn toast_resting_frame(input: ToastFrameInput) -> ToastFrame {
+    let top = input.position.is_top();
+    let index = input.visible_index;
+    let behind_collapsed = index > 0 && !input.expanded;
+    let (dx, swipe_y) = input.swipe;
+    // Swipe y is a screen-space movement; the edge distance grows downward at the top.
+    let swipe_edge = if top { swipe_y } else { -swipe_y };
+    let (edge, width, height) = if input.expanded {
+        let edge = toast_expanded_translate_y(input.offset_y, index, true);
+        (edge + swipe_edge, input.viewport_width, input.height)
+    } else {
+        let scale = toast_collapsed_scale(index);
+        let height = if behind_collapsed {
+            input.frontmost_height
+        } else {
+            input.height
+        };
+        let edge = toast_collapsed_translate_y(index, input.frontmost_height, true);
+        (
+            edge + swipe_edge,
+            input.viewport_width * scale,
+            height * scale,
+        )
+    };
+    // `transform-origin: top` / `bottom` centres the scaled card horizontally.
+    let center_shift = (input.viewport_width - width) / 2.;
+    ToastFrame {
+        dx: dx + center_shift,
+        edge,
+        width,
+        height,
+        opacity: if input.limited { 0. } else { 1. },
+    }
+}
+
+/// `data-starting-style`: top-right slides in from the right, other tops
+/// slide down from above, bottoms slide up from below.
+pub fn toast_starting_frame(
+    rest: ToastFrame,
+    position: ToastPosition,
+    viewport_width: f64,
+    inset: f64,
+) -> ToastFrame {
+    if position.is_top() && position.is_right() {
+        return ToastFrame {
+            dx: rest.dx + viewport_width + inset,
+            ..rest
+        };
+    }
+    ToastFrame {
+        edge: -(rest.height + inset),
+        ..rest
+    }
+}
+
+/// `data-ending-style`: fade out while sliding off. A swipe dismissal keeps
+/// going in its direction from where the pointer let go (`rest` already
+/// carries the swipe movement).
+pub fn toast_ending_frame(
+    rest: ToastFrame,
+    position: ToastPosition,
+    viewport_width: f64,
+    inset: f64,
+    swipe: Option<SwipeDirection>,
+) -> ToastFrame {
+    let top = position.is_top();
+    let out = viewport_width + inset;
+    let down = rest.height + inset;
+    // Screen-space "down" moves away from the top edge and towards the bottom one.
+    let toward_screen_bottom =
+        |edge: f64, amount: f64| if top { edge + amount } else { edge - amount };
+    let mut frame = ToastFrame {
+        opacity: 0.,
+        ..rest
+    };
+    match swipe {
+        Some(SwipeDirection::Left) => frame.dx = rest.dx - out,
+        Some(SwipeDirection::Right) => frame.dx = rest.dx + out,
+        Some(SwipeDirection::Up) => frame.edge = toward_screen_bottom(rest.edge, -down),
+        Some(SwipeDirection::Down) => frame.edge = toward_screen_bottom(rest.edge, down),
+        None if top && position.is_right() => frame.dx = rest.dx + out,
+        None => frame.edge = toward_screen_bottom(rest.edge, down),
+    }
+    frame
+}
+
+/// The frame drawn `elapsed_ms` into a motion toward `to`.
+pub fn toast_motion_frame(from: ToastFrame, to: ToastFrame, elapsed_ms: f64) -> ToastFrame {
+    let t = (elapsed_ms / TOAST_MOTION_MS as f64).clamp(0., 1.);
+    from.lerp(
+        to,
+        f64::from(super::animated_size::cubic_bezier(
+            0.22, 1., 0.36, 1., t as f32,
+        )),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,5 +1143,166 @@ mod tests {
         timer.remaining_ms = 0;
         assert!(timer.start_running(500));
         assert!(timer.closed);
+    }
+
+    #[test]
+    fn swipe_directions_follow_the_position() {
+        use SwipeDirection::*;
+        assert_eq!(ToastPosition::TopRight.swipe_directions(), vec![Right, Up]);
+        assert_eq!(ToastPosition::TopLeft.swipe_directions(), vec![Left, Up]);
+        assert_eq!(
+            ToastPosition::BottomRight.swipe_directions(),
+            vec![Right, Down]
+        );
+        assert_eq!(ToastPosition::TopCenter.swipe_directions(), vec![Up]);
+        assert_eq!(ToastPosition::BottomCenter.swipe_directions(), vec![Down]);
+    }
+
+    #[test]
+    fn the_viewport_is_inset_and_capped() {
+        assert_eq!(toast_inset(1100.), 32.);
+        assert_eq!(toast_inset(500.), 16.);
+        assert_eq!(toast_viewport_width(1100.), 360.);
+        assert_eq!(toast_viewport_width(380.), 348.);
+    }
+
+    #[test]
+    fn a_swipe_past_the_threshold_dismisses_in_that_direction() {
+        let mut swipe = SwipeTracker::new(ToastPosition::TopRight.swipe_directions(), 100., 100.);
+        swipe.pointer_move(100., 100.);
+        swipe.pointer_move(120., 101.);
+        swipe.pointer_move(160., 102.);
+        assert_eq!(swipe.pointer_up(), SwipeEnd::Dismiss(SwipeDirection::Right));
+        assert_eq!(swipe.offset.0, 60.);
+    }
+
+    #[test]
+    fn a_short_swipe_restores_the_toast() {
+        let mut swipe = SwipeTracker::new(ToastPosition::TopRight.swipe_directions(), 100., 100.);
+        swipe.pointer_move(100., 100.);
+        swipe.pointer_move(130., 100.);
+        assert_eq!(swipe.pointer_up(), SwipeEnd::Restore);
+    }
+
+    #[test]
+    fn swiping_up_locks_the_vertical_axis() {
+        let mut swipe = SwipeTracker::new(ToastPosition::TopRight.swipe_directions(), 100., 100.);
+        swipe.pointer_move(100., 100.);
+        swipe.pointer_move(102., 90.);
+        // The lock lands after the first real movement, as React state does.
+        let (x, y) = swipe.pointer_move(103., 40.);
+        assert_eq!(x, 0.);
+        assert_eq!(y, -60.);
+        assert_eq!(swipe.pointer_up(), SwipeEnd::Dismiss(SwipeDirection::Up));
+    }
+
+    #[test]
+    fn motion_against_the_allowed_direction_is_damped() {
+        let mut swipe = SwipeTracker::new(ToastPosition::TopRight.swipe_directions(), 100., 100.);
+        swipe.pointer_move(100., 100.);
+        let (x, _) = swipe.pointer_move(36., 100.);
+        // 64px left of a right-swipe toast: -sqrt(64).
+        assert_eq!(x, -8.);
+        assert_eq!(swipe.pointer_up(), SwipeEnd::Restore);
+    }
+
+    #[test]
+    fn reversing_a_one_way_swipe_cancels_it() {
+        let mut swipe = SwipeTracker::new(ToastPosition::TopCenter.swipe_directions(), 100., 100.);
+        swipe.pointer_move(100., 100.);
+        swipe.pointer_move(100., 40.);
+        swipe.pointer_move(100., 55.);
+        assert_eq!(swipe.pointer_up(), SwipeEnd::Restore);
+    }
+
+    fn frame_input(index: usize, expanded: bool) -> ToastFrameInput {
+        ToastFrameInput {
+            position: ToastPosition::TopRight,
+            visible_index: index,
+            offset_y: index as f64 * 50.,
+            frontmost_height: 50.,
+            height: 50.,
+            viewport_width: 360.,
+            expanded,
+            limited: false,
+            swipe: (0., 0.),
+        }
+    }
+
+    #[test]
+    fn a_collapsed_stack_peeks_behind_the_front_toast() {
+        let front = toast_resting_frame(frame_input(0, false));
+        assert_eq!((front.edge, front.width, front.height), (0., 360., 50.));
+        let behind = toast_resting_frame(frame_input(1, false));
+        // 1 * 12px peek + (1 - 0.9) * 50px; scaled to 90% and centred.
+        assert_eq!(behind.edge, 12. + 0.1 * 50.);
+        assert!((behind.width - 324.).abs() < 1e-9);
+        assert!((behind.height - 45.).abs() < 1e-9);
+        assert!((behind.dx - 18.).abs() < 1e-9);
+        // Its bottom edge sits one peek below the front toast.
+        assert!((behind.edge + behind.height - (12. + 50.)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_expanded_stack_uses_full_width_offsets_and_gaps() {
+        let second = toast_resting_frame(frame_input(1, true));
+        assert_eq!(
+            (second.edge, second.width, second.dx),
+            (50. + 12., 360., 0.)
+        );
+    }
+
+    #[test]
+    fn limited_toasts_are_transparent() {
+        let mut input = frame_input(3, false);
+        input.limited = true;
+        assert_eq!(toast_resting_frame(input).opacity, 0.);
+    }
+
+    #[test]
+    fn entering_and_leaving_follow_the_position() {
+        let rest = toast_resting_frame(frame_input(0, false));
+        let start = toast_starting_frame(rest, ToastPosition::TopRight, 360., 32.);
+        assert_eq!(start.dx, 360. + 32.);
+        let above = toast_starting_frame(rest, ToastPosition::TopCenter, 360., 32.);
+        assert_eq!(above.edge, -(50. + 32.));
+        let gone = toast_ending_frame(rest, ToastPosition::TopRight, 360., 32., None);
+        assert_eq!((gone.dx, gone.opacity), (392., 0.));
+        let swiped = toast_ending_frame(
+            ToastFrame { dx: 70., ..rest },
+            ToastPosition::TopRight,
+            360.,
+            32.,
+            Some(SwipeDirection::Right),
+        );
+        assert_eq!(swiped.dx, 70. + 392.);
+        let up = toast_ending_frame(
+            ToastFrame { edge: -45., ..rest },
+            ToastPosition::TopRight,
+            360.,
+            32.,
+            Some(SwipeDirection::Up),
+        );
+        assert_eq!(up.edge, -45. - (50. + 32.));
+    }
+
+    #[test]
+    fn motion_eases_from_the_start_to_the_target() {
+        let from = ToastFrame {
+            dx: 100.,
+            edge: 0.,
+            width: 360.,
+            height: 50.,
+            opacity: 0.,
+        };
+        let to = ToastFrame {
+            dx: 0.,
+            opacity: 1.,
+            ..from
+        };
+        assert_eq!(toast_motion_frame(from, to, 0.), from);
+        assert_eq!(toast_motion_frame(from, to, 5000.), to);
+        let mid = toast_motion_frame(from, to, 100.);
+        assert!(mid.dx < 50. && mid.dx > 0., "fast start: {}", mid.dx);
     }
 }

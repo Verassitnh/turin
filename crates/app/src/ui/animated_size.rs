@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyElement, App, ElementId, IntoElement, ParentElement,
+    Animation, AnimationExt as _, AnyElement, App, ElementId, Entity, IntoElement, ParentElement,
     RenderOnce, Styled, Window, div, px,
 };
 
@@ -55,9 +55,14 @@ pub fn measured_width(content_rect_width: f64) -> Option<f64> {
 
 /// CSS `ease-out`: cubic-bezier(0, 0, 0.2, 1).
 pub fn css_ease_out(t: f32) -> f32 {
+    cubic_bezier(0., 0., 0.2, 1., t)
+}
+
+/// CSS `cubic-bezier(x1, y1, x2, y2)` timing function.
+pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
     let t = t.clamp(0., 1.);
-    let u = solve_bezier_x(t, 0., 0.2);
-    bezier_1d(u, 0., 1.)
+    let u = solve_bezier_x(t, x1, x2);
+    bezier_1d(u, y1, y2)
 }
 
 fn bezier_1d(u: f32, c1: f32, c2: f32) -> f32 {
@@ -70,49 +75,106 @@ fn bezier_1d_slope(u: f32, c1: f32, c2: f32) -> f32 {
     3. * o * o * c1 + 6. * o * u * (c2 - c1) + 3. * u * u * (1. - c2)
 }
 
+/// Newton steps, then bisection when the slope is too flat to trust.
 fn solve_bezier_x(target: f32, x1: f32, x2: f32) -> f32 {
     let mut u = target;
     for _ in 0..8 {
         let x = bezier_1d(u, x1, x2);
         let slope = bezier_1d_slope(u, x1, x2);
+        if (x - target).abs() < 1e-6 {
+            return u;
+        }
         if slope.abs() < 1e-6 {
             break;
         }
         u = (u - (x - target) / slope).clamp(0., 1.);
     }
+    let (mut low, mut high) = (0f32, 1f32);
+    u = target;
+    for _ in 0..24 {
+        let x = bezier_1d(u, x1, x2);
+        if (x - target).abs() < 1e-6 {
+            break;
+        }
+        if x < target {
+            low = u;
+        } else {
+            high = u;
+        }
+        u = (low + high) / 2.;
+    }
     u
 }
 
-fn lerp(from: f32, to: f32, t: f32) -> f32 {
+pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
     from + (to - from) * t
+}
+
+/// Measured state behind one [`AnimatedHeight`]: upstream's `heightState`
+/// plus the height the current travel starts from.
+#[derive(Default)]
+struct AnimatedHeightState {
+    height: HeightState,
+    from: Option<f64>,
+    epoch: u64,
+}
+
+/// Upstream's `HEIGHT_TRANSITION_FALLBACK_MS` timer: clip no longer than this.
+fn schedule_clip_release(state: &Entity<AnimatedHeightState>, epoch: u64, cx: &mut App) {
+    let state = state.downgrade();
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(Duration::from_millis(HEIGHT_TRANSITION_FALLBACK_MS))
+            .await;
+        state
+            .update(cx, |state, cx| {
+                if state.epoch == epoch && state.height.is_clipping {
+                    state.height = clear_clipping(state.height);
+                    cx.notify();
+                }
+            })
+            .ok();
+    })
+    .detach();
+}
+
+/// Applies one `updateHeight` measurement (`Math.ceil` of the content).
+fn apply_measurement(state: &Entity<AnimatedHeightState>, content_height: f32, cx: &mut App) {
+    let next = f64::from(content_height).ceil();
+    let current = state.read(cx).height;
+    let updated = next_height(current, next);
+    if updated == current {
+        return;
+    }
+    let epoch = state.update(cx, |state, cx| {
+        state.from = current.height;
+        state.height = updated;
+        state.epoch += 1;
+        cx.notify();
+        state.epoch
+    });
+    if updated.is_clipping {
+        schedule_clip_release(state, epoch, cx);
+    }
 }
 
 #[derive(IntoElement)]
 pub struct AnimatedHeight {
     id: ElementId,
-    state: HeightState,
-    /// Height before [`next_height`], so a clipping change can travel.
-    from: Option<f64>,
     hold_height: bool,
     children: Vec<AnyElement>,
 }
 
 impl AnimatedHeight {
-    pub fn new(id: impl Into<ElementId>, state: HeightState) -> Self {
+    pub fn new(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
-            state,
-            from: None,
             hold_height: false,
             children: Vec::new(),
         }
     }
 
-    pub fn previous_height(mut self, from: f64) -> Self {
-        self.from = Some(from);
-        self
-    }
-
+    /// Retain the previous content height while a replacement is loading.
     pub fn hold_height(mut self, hold: bool) -> Self {
         self.hold_height = hold;
         self
@@ -126,39 +188,49 @@ impl ParentElement for AnimatedHeight {
 }
 
 impl RenderOnce for AnimatedHeight {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let children = self.children;
-        let hold = self.hold_height;
-        let inner = |child: gpui_kit::Div| {
-            if hold {
-                child.child(div().h_full().children(children))
-            } else {
-                child.children(children)
-            }
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state =
+            window.use_keyed_state(self.id.clone(), cx, |_, _| AnimatedHeightState::default());
+        let (height, from, epoch) = {
+            let state = state.read(cx);
+            (state.height, state.from, state.epoch)
         };
-        if self.state.is_clipping
-            && let (Some(from), Some(to)) = (self.from, self.state.height)
+        let hold = self.hold_height;
+        let content = if hold {
+            div().h_full().children(self.children)
+        } else {
+            div().children(self.children)
+        };
+        // The wrapper keeps the measured content as its only child; its natural
+        // height (what `scrollHeight` reports) is the first child's bounds.
+        let mut root = div().on_children_prepainted(move |bounds, _, cx| {
+            if hold {
+                return;
+            }
+            if let Some(content) = bounds.first() {
+                apply_measurement(&state, f32::from(content.size.height), cx);
+            }
+        });
+        let Some(target) = height.height else {
+            return root.child(content).into_any_element();
+        };
+        if height.is_clipping
+            && let Some(from) = from
         {
-            return inner(div())
+            root = root.child(content);
+            return root
                 .with_animation(
-                    self.id,
+                    ElementId::NamedInteger(format!("{:?}-height", self.id).into(), epoch),
                     Animation::new(Duration::from_millis(HEIGHT_TRANSITION_MS))
                         .with_easing(css_ease_out),
                     move |el, delta| {
-                        el.h(px(lerp(from as f32, to as f32, delta)))
+                        el.h(px(lerp(from as f32, target as f32, delta)))
                             .overflow_hidden()
                     },
                 )
                 .into_any_element();
         }
-        let mut root = div();
-        if let Some(height) = self.state.height {
-            root = root.h(px(height as f32));
-            if self.state.is_clipping {
-                root = root.overflow_hidden();
-            }
-        }
-        inner(root).into_any_element()
+        root.h(px(target as f32)).child(content).into_any_element()
     }
 }
 
@@ -255,5 +327,13 @@ mod tests {
         assert_eq!(css_ease_out(1.), 1.);
         let mid = css_ease_out(0.5);
         assert!(mid > 0.75 && mid < 0.9, "ease-out midpoint {mid}");
+    }
+
+    #[test]
+    fn toast_curve_overshoots_then_settles() {
+        assert_eq!(cubic_bezier(0.22, 1., 0.36, 1., 0.), 0.);
+        assert_eq!(cubic_bezier(0.22, 1., 0.36, 1., 1.), 1.);
+        let early = cubic_bezier(0.22, 1., 0.36, 1., 0.2);
+        assert!(early > 0.5, "fast start: {early}");
     }
 }

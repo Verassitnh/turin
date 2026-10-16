@@ -542,6 +542,46 @@ pub fn text_field_leading(
         )
 }
 
+/// A disabled `Input` showing `value` (or `placeholder` when empty): `Input`'s
+/// frame at `opacity-64`, with the placeholder in `muted-foreground`.
+pub fn static_text_field(value: &str, placeholder: &str, width: Option<Pixels>, cx: &App) -> Div {
+    let theme = cx.app_theme();
+    let shown_text_color = if value.is_empty() {
+        with_alpha(theme.muted_foreground, 0.72).into()
+    } else {
+        theme.foreground
+    };
+    div()
+        .flex()
+        .items_center()
+        .h(px(32.))
+        .when_some(width, |this, width| this.w(width))
+        .when(width.is_none(), |this| this.w_full())
+        .min_w_0()
+        .rounded(RADIUS_LG)
+        .border_1()
+        .border_color(theme.input)
+        .bg(if theme.is_dark() {
+            with_alpha(theme.input, 0.32).into()
+        } else {
+            theme.background
+        })
+        .opacity(0.64)
+        .text_size(TEXT_SM.size)
+        .px(px(9.))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(shown_text_color)
+                .child(if value.is_empty() {
+                    placeholder.to_owned()
+                } else {
+                    value.to_owned()
+                }),
+        )
+}
+
 /// A `Textarea` frame: `Input`'s border and fill around a multi-line state,
 /// `min-h` of `rows` lines plus padding.
 pub fn textarea_field(

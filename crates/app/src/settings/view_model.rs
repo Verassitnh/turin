@@ -13,7 +13,9 @@ use std::rc::Rc;
 use gpui_kit::{App, Context};
 use indexmap::IndexMap;
 use serde_json::Value;
-use turin_contracts::provider_setup::ProviderAuthState;
+use turin_contracts::provider_setup::{
+    ProviderAuthRespondInput, ProviderAuthState, ProviderInstallState,
+};
 use turin_contracts::settings::{ClientSettings, ServerSettings};
 use turin_provider_core::server_provider::ServerProvider;
 use turin_shared::keybindings::ResolvedKeybindingRule;
@@ -135,6 +137,15 @@ pub struct SettingsViewModel {
     pub providers: Vec<ServerProvider>,
     /// Live auth flows keyed by provider instance id (`providerAuthState` query).
     pub provider_auth: IndexMap<String, ProviderAuthState>,
+    /// Managed runtime installs keyed by provider instance id
+    /// (`providerInstallState` query).
+    pub provider_install: IndexMap<String, ProviderInstallState>,
+    /// `t3:chatgpt-sharing-welcome:v1`: the profile keys whose welcome dialog
+    /// the user already dismissed (`ChatGptWelcomeCoordinator`).
+    pub chat_gpt_welcome_acknowledged: Vec<String>,
+    /// A one-time provider sign-in code handed to the app, waiting for
+    /// `ProviderAuthCallbackCoordinator` (`pendingProviderAuthDelivery`).
+    pub pending_provider_auth_delivery: Option<ProviderAuthDelivery>,
     /// `sourceControlEnvironment.discovery` of the local environment.
     pub source_control: turin_contracts::source_control::SourceControlDiscoveryResult,
     pub projects: Vec<SettingsProject>,
@@ -171,6 +182,19 @@ pub struct RemoveKeybinding {
     pub when: Option<String>,
 }
 
+/// `readCodexAuthDelivery`'s result: the one-time code a sign-in page handed
+/// back to the app, for the flow that is still waiting for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderAuthDelivery {
+    pub instance_id: String,
+    pub flow_id: String,
+    pub callback_url: String,
+}
+
+/// What a setup request answers: accepted, or the message the card shows.
+/// Progress itself arrives as a new view model.
+pub type SetupResult = Result<(), String>;
+
 /// The user's intent. Implemented by the mock here and by the live services in T22.
 pub trait SettingsSource {
     /// `useUpdateSettings` for client keys: a `ClientSettingsPatch` as JSON.
@@ -187,17 +211,43 @@ pub trait SettingsSource {
     fn update_provider(&self, instance_id: &str, target_version: Option<String>, cx: &mut App);
     /// Starts / ends the provider account sign-in (the in-app auth flow of
     /// ProviderAuthenticationSection).
-    fn start_provider_auth(&self, instance_id: &str, cx: &mut App);
-    fn cancel_provider_auth(&self, instance_id: &str, flow_id: &str, cx: &mut App);
+    /// `startProviderAuth`; `method_id` is the chosen sign-in method (the
+    /// provider default when `None`). The callback always returns to this app
+    /// (`callbackMode: "server"`).
+    fn start_provider_auth(
+        &self,
+        instance_id: &str,
+        method_id: Option<&str>,
+        cx: &mut App,
+    ) -> SetupResult;
+    fn cancel_provider_auth(&self, instance_id: &str, flow_id: &str, cx: &mut App) -> SetupResult;
+    /// `respondProviderAuth`: answers the live interaction (browser consent,
+    /// terminal input, credentials).
+    fn respond_provider_auth(&self, input: ProviderAuthRespondInput, cx: &mut App) -> SetupResult;
     fn complete_provider_auth(
         &self,
         instance_id: &str,
         flow_id: &str,
         callback_url: &str,
         cx: &mut App,
-    );
+    ) -> SetupResult;
     fn open_external_url(&self, url: &str, cx: &mut App);
-    fn logout_provider(&self, instance_id: &str, cx: &mut App);
+    fn logout_provider(&self, instance_id: &str, cx: &mut App) -> SetupResult;
+    /// `startProviderInstall`: download and verify the managed runtime.
+    fn start_provider_install(&self, instance_id: &str, cx: &mut App) -> SetupResult;
+    /// `cancelProviderInstall`.
+    fn cancel_provider_install(
+        &self,
+        instance_id: &str,
+        operation_id: &str,
+        cx: &mut App,
+    ) -> SetupResult;
+    /// `removeProviderInstallation`: delete the downloaded runtime.
+    fn remove_provider_installation(&self, instance_id: &str, cx: &mut App) -> SetupResult;
+    /// Writes the dismissed welcome key to `t3:chatgpt-sharing-welcome:v1`.
+    fn acknowledge_chat_gpt_welcome(&self, key: &str, cx: &mut App);
+    /// `clearProviderAuthDelivery`.
+    fn clear_provider_auth_delivery(&self, cx: &mut App);
     /// `useTheme().setTheme` / `setAppearanceMode`.
     fn set_theme(&self, theme: String, cx: &mut App);
     fn set_appearance_mode(&self, mode: String, cx: &mut App);

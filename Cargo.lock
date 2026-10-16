@@ -7382,6 +7382,7 @@ dependencies = [
  "turin-shared",
  "unicode-normalization",
  "url",
+ "uuid",
 ]
 
 [[package]]

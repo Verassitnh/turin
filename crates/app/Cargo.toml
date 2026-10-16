@@ -9,6 +9,7 @@ name = "turin"
 path = "src/main.rs"
 
 [dependencies]
+uuid.workspace = true
 turin-contracts.workspace = true
 turin-review.workspace = true
 turin-shared.workspace = true

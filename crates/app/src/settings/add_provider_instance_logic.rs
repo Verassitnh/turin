@@ -1,4 +1,5 @@
 //! Port of upstream/apps/web/src/components/settings/AddProviderInstanceDialog.logic.ts
+//! and upstream/apps/web/src/components/settings/CodexSetupSection.logic.ts
 //! (and AddProviderInstanceDialog.test.ts) for the kept drivers.
 //!
 //! Not ported: the ACP registry wizard (`ACP_REGISTRY_WIZARD_STEPS`,

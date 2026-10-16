@@ -38,6 +38,10 @@ pub struct PanelState {
     pub page_scroll: gpui_kit::ScrollHandle,
     /// [`super::expandable_text`] toggle state (element id → expanded).
     pub expanded_text: std::collections::HashSet<String>,
+    /// [`super::folded_settings_section`] ids that are open, and the ones a
+    /// search target already opened.
+    pub folded_open: std::collections::HashSet<String>,
+    pub folded_opened_for_target: std::collections::HashSet<String>,
 }
 
 /// `max-w-4xl`.

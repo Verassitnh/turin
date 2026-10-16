@@ -92,6 +92,7 @@ impl SettingsScope {
 }
 
 type InputCommit = Rc<dyn Fn(&mut SettingsView, String, &mut Window, &mut Context<SettingsView>)>;
+type InputSubmit = Rc<dyn Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>)>;
 
 /// Placeholder of a saved secret field (`SecretInput` with `configured`).
 pub(super) const STORED_SECRET_PLACEHOLDER: &str = "Stored secret, enter a new value to replace";
@@ -105,10 +106,27 @@ enum InputKind {
     Live,
     /// A masked draft that commits like [`InputKind::Draft`] (`SecretInput`).
     Secret,
+    /// A masked input that also commits on every change.
+    SecretLive,
 }
 
 fn input_kind_is_masked(kind: InputKind) -> bool {
-    kind == InputKind::Secret
+    matches!(kind, InputKind::Secret | InputKind::SecretLive)
+}
+
+/// `toastManager.add({ type, title, description })`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SettingsToast {
+    pub kind: SettingsToastKind,
+    pub title: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SettingsToastKind {
+    Success,
+    Warning,
+    Error,
 }
 
 pub struct SettingsView {
@@ -118,6 +136,8 @@ pub struct SettingsView {
     pub(super) menus: MenuState,
     pub(super) inputs: HashMap<SharedString, Entity<InputState>>,
     input_commits: HashMap<SharedString, InputCommit>,
+    /// Handlers run when Enter is pressed in an input (a form's `onSubmit`).
+    input_submits: HashMap<SharedString, InputSubmit>,
     /// The placeholder each input was last given, so it is only pushed on change.
     input_placeholders: HashMap<SharedString, SharedString>,
     pub(super) textareas: HashMap<SharedString, Entity<TextareaState>>,
@@ -131,6 +151,9 @@ pub struct SettingsView {
     pub(super) slider_drag: Option<SharedString>,
     /// Focus target of the keybinding recorder.
     pub(super) capture_focus: gpui_kit::FocusHandle,
+    /// Toasts queued by actions that have no window at hand (`toastManager.add`);
+    /// the next render pushes them.
+    toasts: Vec<SettingsToast>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -157,6 +180,7 @@ impl SettingsView {
             menus: MenuState::default(),
             inputs: HashMap::new(),
             input_commits: HashMap::new(),
+            input_submits: HashMap::new(),
             input_placeholders: HashMap::new(),
             textareas: HashMap::new(),
             nav_search,
@@ -167,6 +191,7 @@ impl SettingsView {
             slider_bounds: HashMap::new(),
             slider_drag: None,
             capture_focus: cx.focus_handle(),
+            toasts: Vec::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -177,6 +202,22 @@ impl SettingsView {
             .page_scroll
             .set_offset(gpui_kit::point(px(0.), px(0.)));
         self.menus.close();
+        cx.notify();
+    }
+
+    /// Queues a toast; the next render shows it.
+    pub(super) fn toast(
+        &mut self,
+        kind: SettingsToastKind,
+        title: impl Into<String>,
+        description: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.toasts.push(SettingsToast {
+            kind,
+            title: title.into(),
+            description: description.into(),
+        });
         cx.notify();
     }
 
@@ -299,6 +340,37 @@ impl SettingsView {
             value,
             placeholder,
             InputKind::Secret,
+            window,
+            cx,
+            commit,
+        )
+    }
+
+    /// Runs `submit` when Enter is pressed in the input `id` (`<form onSubmit>`).
+    pub(super) fn on_input_submit(
+        &mut self,
+        id: &str,
+        submit: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        self.input_submits
+            .insert(SharedString::from(id.to_owned()), Rc::new(submit));
+    }
+
+    /// A masked input whose `commit` runs on every change.
+    pub(super) fn password_input_live(
+        &mut self,
+        id: &str,
+        value: &str,
+        placeholder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        commit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Entity<InputState> {
+        self.input_with(
+            id,
+            value,
+            placeholder,
+            InputKind::SecretLive,
             window,
             cx,
             commit,
@@ -451,7 +523,7 @@ impl SettingsView {
         let state = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(placeholder.to_owned())
-                .masked(kind == InputKind::Secret)
+                .masked(input_kind_is_masked(kind))
                 .default_value(value.to_owned())
         });
         let subscription_key = key.clone();
@@ -460,12 +532,18 @@ impl SettingsView {
             window,
             move |this, state, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur)
-                    || (kind == InputKind::Live && matches!(event, InputEvent::Change))
+                    || (matches!(kind, InputKind::Live | InputKind::SecretLive)
+                        && matches!(event, InputEvent::Change))
                 {
                     let text = state.read(cx).value().to_string();
                     if let Some(commit) = this.input_commits.get(&subscription_key).cloned() {
                         commit(this, text, window, cx);
                     }
+                }
+                if matches!(event, InputEvent::PressEnter { .. })
+                    && let Some(submit) = this.input_submits.get(&subscription_key).cloned()
+                {
+                    submit(this, window, cx);
                 }
             },
         );
@@ -512,6 +590,17 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::component::WindowExt as _;
+        use gpui_kit::component::notification::Notification;
+        for toast in std::mem::take(&mut self.toasts) {
+            let notification = match toast.kind {
+                SettingsToastKind::Success => Notification::success(toast.description),
+                SettingsToastKind::Warning => Notification::warning(toast.description),
+                SettingsToastKind::Error => Notification::error(toast.description),
+            };
+            window.push_notification(notification.title(toast.title), cx);
+        }
+        self.provider_auth_callback_coordinator(cx);
         let theme = cx.app_theme().clone();
         let viewport_width = f32::from(window.viewport_size().width);
         let sidebar_width = THREAD_SIDEBAR_DEFAULT_WIDTH;
@@ -682,5 +771,6 @@ mod tests {
         assert!(!input_kind_is_masked(InputKind::Draft));
         assert!(!input_kind_is_masked(InputKind::Live));
         assert!(input_kind_is_masked(InputKind::Secret));
+        assert!(input_kind_is_masked(InputKind::SecretLive));
     }
 }

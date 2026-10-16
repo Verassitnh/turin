@@ -25,10 +25,12 @@ use turin_provider_core::server_provider::{
     ServerProvider, ServerProviderAuthStatus, ServerProviderState,
 };
 
+use super::super::add_provider_instance_logic::{CodexSetupMode, read_codex_setup_mode};
 use super::super::controls::{
     FieldSize, PopupAlign, SelectWidth, password_field, redacted_sensitive_text, switch,
     text_field, with_popup,
 };
+use super::super::folded_settings_section::{FoldedHeaderPlacement, FoldedSection};
 use super::super::layout::{SettingsRow, SettingsSection, setting_reset_button, settings_group};
 use super::super::panels_logic::{
     BackgroundActivityOverridePatch, PROVIDER_HEALTH_INTERVAL_STEP_SECONDS,
@@ -73,10 +75,18 @@ pub struct ProvidersState {
     pub editing_model: Option<String>,
     pub custom_model_draft: Option<super::super::custom_model_editor_logic::CustomModelDraft>,
     pub custom_model_editor_error: Option<String>,
-    pub auth_method_id: std::collections::HashMap<String, String>,
-    pub auth_callback_draft: std::collections::HashMap<String, String>,
-    pub auth_field_draft:
-        std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    /// `ProviderAuthenticationSection` state per instance.
+    pub auth_ui: std::collections::HashMap<
+        String,
+        super::super::provider_authentication::ProviderAuthUiState,
+    >,
+    /// `ManagedCodexSetup` state per instance.
+    pub codex:
+        std::collections::HashMap<String, super::super::codex_setup_logic::ManagedCodexState>,
+    /// `AddCodexAccountDialog` state.
+    pub add_codex: super::super::add_codex_account_dialog::AddCodexAccountState,
+    /// `ProviderAuthCallbackCoordinator`'s `started` ref.
+    pub auth_delivery_started: bool,
     pub wizard: super::add_provider::AddProviderState,
     pub env_drafts:
         std::collections::HashMap<String, Vec<super::super::provider_form::EnvironmentVariable>>,
@@ -90,7 +100,7 @@ pub(crate) struct InstanceRow {
     pub(crate) instance: ProviderInstanceConfig,
 }
 
-fn instance_enabled(row: &InstanceRow) -> bool {
+pub(crate) fn instance_enabled(row: &InstanceRow) -> bool {
     resolve_provider_instance_enabled(&row.instance)
 }
 
@@ -199,7 +209,7 @@ impl SettingsView {
 
     /// Writes one instance (or removes it) with the `providerInstances` map
     /// replacement the settings service expects.
-    pub(super) fn write_provider_instance(
+    pub(in crate::settings) fn write_provider_instance(
         &mut self,
         id: &str,
         next: Option<Value>,
@@ -914,18 +924,35 @@ impl SettingsView {
                 .and_then(|v| v.get("environment").cloned())
                 .as_ref(),
         );
-        let can_authenticate = live
-            .as_ref()
-            .is_some_and(|p| p.setup.as_ref().is_some_and(|s| s.can_authenticate));
-        if can_authenticate || !env_fields.is_empty() {
+        let codex_managed = row.driver == "codex"
+            && read_codex_setup_mode(config.as_ref()) == CodexSetupMode::Managed;
+        let setup_node: Option<AnyElement> = if codex_managed {
+            Some(self.codex_setup_section(row, live.as_ref(), false, window, cx))
+        } else if let Some(provider) = live.as_ref().filter(|provider| {
+            provider
+                .setup
+                .as_ref()
+                .is_some_and(|setup| setup.can_authenticate)
+        }) {
+            Some(self.provider_authentication_section(&row.id, provider, false, window, cx))
+        } else if row.driver == "cursor"
+            && live
+                .as_ref()
+                .and_then(|provider| provider.setup.as_ref())
+                .is_some_and(|setup| !setup.can_authenticate)
+        {
+            Some(
+                SettingsRow::new("Cursor account")
+                    .description("Using CURSOR_API_KEY. Remove it from this provider's environment to use browser sign-in.")
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+        if setup_node.is_some() || !env_fields.is_empty() {
             let mut setup = SettingsSection::new("Setup");
-            if can_authenticate {
-                if row.driver == "codex" {
-                    setup = setup.child(self.codex_setup_section(row, live.as_ref(), window, cx));
-                } else if let Some(provider) = live.as_ref() {
-                    setup = setup
-                        .child(self.provider_authentication_section(&row.id, provider, window, cx));
-                }
+            if let Some(node) = setup_node {
+                setup = setup.child(node);
             }
             for field in env_fields {
                 let variable =
@@ -943,14 +970,31 @@ impl SettingsView {
         }
 
         // Runtime: the driver's settings form.
-        let fields = derive_provider_settings_fields(&row.driver);
-        if !fields.is_empty() {
-            let mut runtime = SettingsSection::new("Runtime");
-            for field in &fields {
-                runtime =
-                    runtime.child(self.provider_field_row(row, field, config.as_ref(), window, cx));
+        if codex_managed {
+            let fields = self.codex_managed_runtime_fields(&row.id, cx);
+            sections.push(
+                self.folded_settings_section(
+                    FoldedSection::new(format!("provider-instance-{}-runtime", row.id), "Runtime")
+                        .placement(FoldedHeaderPlacement::Outside),
+                    fields,
+                    cx,
+                ),
+            );
+        } else {
+            let fields = derive_provider_settings_fields(&row.driver);
+            if !fields.is_empty() {
+                let mut runtime = SettingsSection::new("Runtime");
+                for field in &fields {
+                    runtime = runtime.child(self.provider_field_row(
+                        row,
+                        field,
+                        config.as_ref(),
+                        window,
+                        cx,
+                    ));
+                }
+                sections.push(runtime.into_any_element());
             }
-            sections.push(runtime.into_any_element());
         }
 
         // Environment.

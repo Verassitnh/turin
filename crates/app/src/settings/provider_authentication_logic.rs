@@ -33,11 +33,13 @@ pub fn provider_signed_in(
 
 pub fn auth_is_discovering(
     driver: &str,
+    active: bool,
     signed_in: bool,
     query_error: bool,
     auth_state: Option<&ProviderAuthState>,
 ) -> bool {
     driver == "acpRegistry"
+        && !active
         && !signed_in
         && !query_error
         && auth_state.is_none_or(|state| state.methods.is_none())
@@ -136,16 +138,43 @@ pub fn sign_in_button_label(
     }
 }
 
-pub fn show_sign_in_button(active: bool, needs_external: bool, can_authenticate: bool) -> bool {
-    !active && !needs_external && can_authenticate
+/// The one button after the URL buttons: docs, cancel, or sign in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimaryAuthAction {
+    OpenDocs,
+    Cancel,
+    SignIn,
+    None,
 }
 
-pub fn show_sign_out_button(active: bool, signed_in: bool, can_logout: bool) -> bool {
-    !active && signed_in && can_logout
+/// `needsExternalSetup && documentationUrl ? docs : active && flowId ? cancel :
+/// !active && !needsExternalSetup && canAuthenticate !== false ? sign in : none`.
+pub fn primary_auth_action(
+    needs_external: bool,
+    has_documentation_url: bool,
+    active: bool,
+    has_flow_id: bool,
+    can_authenticate: Option<bool>,
+) -> PrimaryAuthAction {
+    if needs_external && has_documentation_url {
+        PrimaryAuthAction::OpenDocs
+    } else if active && has_flow_id {
+        PrimaryAuthAction::Cancel
+    } else if !active && !needs_external && can_authenticate != Some(false) {
+        PrimaryAuthAction::SignIn
+    } else {
+        PrimaryAuthAction::None
+    }
 }
 
-pub fn show_cancel_button(active: bool, flow_id_present: bool) -> bool {
-    active && flow_id_present
+/// `!active && signedIn && (provider.auth.canLogout ?? provider.setup?.canAuthenticate)`.
+pub fn show_sign_out_button(
+    active: bool,
+    signed_in: bool,
+    can_logout: Option<bool>,
+    can_authenticate: Option<bool>,
+) -> bool {
+    !active && signed_in && can_logout.or(can_authenticate).unwrap_or(false)
 }
 
 pub fn show_callback_form(
@@ -258,6 +287,83 @@ mod tests {
             sign_in_button_label(false, Some(&state)),
             Some(SignInButtonLabel::RetrySignIn)
         );
+    }
+
+    #[test]
+    fn primary_action_follows_the_upstream_chain() {
+        use PrimaryAuthAction::{Cancel, OpenDocs, SignIn};
+        let none = PrimaryAuthAction::None;
+        assert_eq!(
+            primary_auth_action(true, true, false, false, Some(false)),
+            OpenDocs
+        );
+        assert_eq!(
+            primary_auth_action(true, false, false, false, Some(false)),
+            none
+        );
+        assert_eq!(
+            primary_auth_action(false, false, true, true, Some(true)),
+            Cancel
+        );
+        assert_eq!(
+            primary_auth_action(false, false, true, false, Some(true)),
+            none
+        );
+        assert_eq!(
+            primary_auth_action(false, false, false, false, Some(true)),
+            SignIn
+        );
+        assert_eq!(
+            primary_auth_action(false, false, false, false, None),
+            SignIn
+        );
+        assert_eq!(
+            primary_auth_action(false, false, false, false, Some(false)),
+            none
+        );
+    }
+
+    #[test]
+    fn sign_out_needs_a_logout_capability_falling_back_to_authenticate() {
+        assert!(show_sign_out_button(false, true, Some(true), Some(false)));
+        assert!(!show_sign_out_button(false, true, Some(false), Some(true)));
+        assert!(show_sign_out_button(false, true, None, Some(true)));
+        assert!(!show_sign_out_button(false, true, None, None));
+        assert!(!show_sign_out_button(true, true, Some(true), None));
+        assert!(!show_sign_out_button(false, false, Some(true), None));
+    }
+
+    #[test]
+    fn discovering_only_for_an_idle_signed_out_acp_provider_without_methods() {
+        assert!(auth_is_discovering(
+            "acpRegistry",
+            false,
+            false,
+            false,
+            None
+        ));
+        assert!(!auth_is_discovering(
+            "acpRegistry",
+            true,
+            false,
+            false,
+            None
+        ));
+        assert!(!auth_is_discovering("cursor", false, false, false, None));
+        assert!(!auth_is_discovering(
+            "acpRegistry",
+            false,
+            true,
+            false,
+            None
+        ));
+        assert!(!auth_is_discovering(
+            "acpRegistry",
+            false,
+            false,
+            true,
+            None
+        ));
     }
 
     #[test]

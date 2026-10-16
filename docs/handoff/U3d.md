@@ -9,11 +9,11 @@ Clippy `-D warnings` clean for `turin`, including tests.
 | upstream | Rust | tests |
 |---|---|---|
 | `rightPanelStore.ts` (+ 1242-line test) | `state/right_panel_store.rs`, `_tests.rs` | 50 |
-| `hooks/threadUndo.ts` (+ test) and `showThreadUndoNotice.ts` queue | `hooks/thread_undo.rs`, `_tests.rs` | 10 |
-| `hooks/useThreadActions.ts` (+ `.test`, `.undo.test`, `.permissions.test`) | `hooks/use_thread_actions.rs`, `_tests.rs` | 38 |
+| `hooks/threadUndo.ts` (+ test) and `showThreadUndoNotice.ts` queue | `hooks/thread_undo.rs`, `_tests.rs` | 11 |
+| `hooks/useThreadActions.ts` (+ `.test`, `.undo.test`, `.permissions.test`) | `hooks/use_thread_actions.rs`, `_tests.rs` | 42 |
 | `hooks/useThreadActionMenu.ts` (+ test) | `hooks/use_thread_action_menu.rs` (plan) | 14 |
 | `lib/chatThreadActions.ts` (+ test) | `hooks/chat_thread_actions.rs`, `_tests.rs` | 11 |
-| `hooks/useHandleNewThread.ts` (pure decisions only) | `hooks/use_handle_new_thread.rs`, `_tests.rs` | 12 |
+| `hooks/useHandleNewThread.ts` (pure decisions only) | `hooks/use_handle_new_thread.rs`, `_tests.rs` | 13 |
 | `worktreeCleanup.ts` (orphan rule) | `state/worktree_cleanup.rs` | 6 |
 
 Sidebar `handle_thread_menu` (`components/sidebar/sidebar_actions.rs`) dispatches on `ThreadMenuPlan`.
@@ -55,15 +55,15 @@ Skipped cases exercise only cut surfaces. Each is marked in the test file:
 - `rightPanelStore.test.ts`: browser tab, device, terminal, `files` explorer, `reconcileBrowserSurfaces`.
   Some cases were adapted with a kept surface in place of the cut one. Those are commented in place.
 - `useThreadActions.undo.test.ts`: none skipped.
-- `useThreadActions.test.ts`: the browser and terminal cases of `showThreadUndoNotice.test.ts` are
-  not in this unit. Restore-failure toast and interrupted-restore cases are not ported. `run_undo_plan`
-  raises the same toast, but no test covers it yet.
+- `showThreadUndoNotice.test.ts` and `useThreadActions.test.ts` have no browser or terminal cases.
+  Their restore-result cases are ported in `use_thread_actions_tests.rs`: a failed restore toasts
+  and releases its claim, a rejected restore toasts the error, and an interrupted restore does not
+  toast. They are kept behavior, not cut-list skips.
 
 ## Not done
 
 - `rename` and `fork` are not on `ThreadCommands`. Upstream's `useThreadActions` does not call them.
 - Undo `commit` callbacks: no caller in the ported surface passes one.
-- `showThreadUndoNotice.test.ts` is not ported in full (see above).
 - `useHandleNewThread` async handler: needs the composer draft store.
 
 ## Notes for the PM

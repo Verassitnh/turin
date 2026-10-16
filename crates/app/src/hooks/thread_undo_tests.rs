@@ -1,6 +1,8 @@
 //! Tests for `thread_undo.rs`: upstream `threadUndo.test.ts` (all cases) and the
 //! queue cases of `showThreadUndoNotice.test.ts`. The 5 s timer cases become
-//! explicit `expire` calls, since the timer is the caller's.
+//! explicit `expire` calls, since the timer is the caller's. The restore-result
+//! cases (failed, rejected, interrupted) live in `use_thread_actions_tests.rs`,
+//! where the toast is raised. Those files have no browser or terminal cases.
 
 use turin_contracts::environment::ScopedThreadRef;
 

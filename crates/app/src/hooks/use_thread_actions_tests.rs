@@ -7,10 +7,11 @@
 //! `"<op> <env>/<thread> [detail]"` and each UI effect as a string, so the
 //! assertions read as upstream's do.
 //!
-//! Upstream cases that only exercise the cut features are not ported. Those
-//! are the device and terminal cases and the browser-tab reconcile, plus the
-//! `files` explorer. `useThreadActions.permissions.test.ts`'s `sessionLookup`
-//! cases are ported by `FakeCommands::session_grant_fails`.
+//! `showThreadUndoNotice.test.ts` and `useThreadActions.test.ts` have no
+//! browser or terminal cases. The three restore-result cases (failed restore,
+//! rejected restore, interrupted restore) are ported here. An interrupted
+//! restore does not toast. `useThreadActions.permissions.test.ts`'s
+//! `sessionLookup` cases are ported by `FakeCommands::session_grant_fails`.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

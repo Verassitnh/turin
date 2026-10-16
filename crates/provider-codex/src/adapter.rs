@@ -70,6 +70,8 @@ pub struct CodexSession {
     pub broker: RequestBroker,
     pub version: Option<String>,
     pub codex_home: Option<String>,
+    /// The `additionalContext` of each thread's latest turn that carried one.
+    additional_context: Mutex<std::collections::HashMap<String, serde_json::Map<String, Value>>>,
 }
 
 fn payload(response: Option<Value>, method: &str) -> Result<Value, AppServerError> {
@@ -174,6 +176,7 @@ impl CodexAdapter {
             broker,
             version,
             codex_home,
+            additional_context: Mutex::new(Default::default()),
         })
     }
 }
@@ -254,16 +257,30 @@ impl CodexSession {
             service_tier,
             policy,
         );
-        let response = payload(
-            self.client.request("turn/start", Some(params)).await?,
-            "turn/start",
-        )?;
-        let turn_id = id(&response, "/turn/id", "turn/start")?;
+        // Codex drops client developer messages during compaction but only resends
+        // additionalContext when it changes; remember what to restore.
+        {
+            let mut contexts = self.additional_context.lock();
+            match params.get("additionalContext").and_then(Value::as_object) {
+                Some(context) => {
+                    contexts.insert(thread_id.to_owned(), context.clone());
+                }
+                None => {
+                    contexts.remove(thread_id);
+                }
+            }
+        }
+        // Before the request: an approval can arrive before the response, and it must see this
+        // turn's mode, not the previous one.
         let mode = serde_json::to_value(policy.runtime_mode).expect("runtime mode");
         if let Some(mode) = mode.as_str() {
             self.broker.set_runtime_mode(thread_id, mode);
         }
-        Ok(turn_id)
+        let response = payload(
+            self.client.request("turn/start", Some(params)).await?,
+            "turn/start",
+        )?;
+        id(&response, "/turn/id", "turn/start")
     }
 
     pub async fn steer_turn(
@@ -338,6 +355,44 @@ impl CodexSession {
         }
         let result = revert_codex_thread(&self.client, thread_id, num_turns).await?;
         response_thread(&result).cloned()
+    }
+
+    /// `restoreAdditionalContext`: after a compaction, puts the thread's current
+    /// additional context back as injected items, as Codex sent it: application
+    /// context as developer input, untrusted context as quoted user-side input.
+    /// Bounded to 10 s; a failure is only logged.
+    pub async fn restore_additional_context(&self, thread_id: &str) {
+        let Some(context) = self.additional_context.lock().get(thread_id).cloned() else {
+            return;
+        };
+        let items: Vec<Value> = context
+            .iter()
+            .map(|(key, entry)| {
+                let value = entry.get("value").and_then(Value::as_str).unwrap_or_default();
+                if entry.get("kind").and_then(Value::as_str) == Some("untrusted") {
+                    json!({"type": "message", "role": "user", "content": [
+                        {"type": "input_text", "text": format!("<external_{key}>{value}</external_{key}>")}
+                    ]})
+                } else {
+                    json!({"type": "message", "role": "developer", "content": [
+                        {"type": "input_text", "text": format!("<{key}>{value}</{key}>")}
+                    ]})
+                }
+            })
+            .collect();
+        let request = self.client.request(
+            "thread/inject_items",
+            Some(json!({"threadId": thread_id, "items": items})),
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(10), request).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(cause)) => {
+                tracing::warn!(%cause, "Failed to restore Codex additional context after compaction.")
+            }
+            Err(_) => {
+                tracing::warn!("Failed to restore Codex additional context after compaction.")
+            }
+        }
     }
 
     pub async fn shutdown(self) -> Result<(), AppServerError> {

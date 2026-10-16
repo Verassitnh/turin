@@ -27,7 +27,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        Arc, LazyLock,
+        Arc, LazyLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -1473,7 +1473,7 @@ async fn handle_callback(
     mut socket: tokio::net::TcpStream,
     gate: Arc<CallbackGate>,
 ) -> std::io::Result<()> {
-    let request = mini_http::read_request(&mut socket).await?;
+    let request = mini_http::read_request_within(&mut socket, mini_http::READ_TIMEOUT).await?;
     let target = request.target.clone();
     let path = target.split('?').next().unwrap_or("/");
     if request.method != "GET" || path != "/auth/callback" {
@@ -1554,7 +1554,17 @@ fn decode_tokens(raw: &Value) -> Result<Tokens, ()> {
     let token_type = required_string(obj, "token_type")?;
     let expires_in = match obj.get("expires_in") {
         Some(Value::Number(number)) => {
-            let value = number.as_i64().ok_or(())?;
+            // `Schema.Int`: an integral float such as `3600.0` is an integer too.
+            let value = number
+                .as_i64()
+                .or_else(|| {
+                    number
+                        .as_f64()
+                        .filter(|value| value.is_finite() && value.fract() == 0.0)
+                        .filter(|value| value.abs() <= 9_007_199_254_740_991.0)
+                        .map(|value| value as i64)
+                })
+                .ok_or(())?;
             if value <= 0 {
                 return Err(());
             }
@@ -1619,9 +1629,8 @@ fn optional_string(obj: &Map<String, Value>, key: &str) -> Result<Option<String>
 fn earliest_millis(value: Option<Earliest>) -> Option<f64> {
     let time = match value? {
         Earliest::Number(seconds) => seconds * 1000.0,
-        Earliest::Text(text) => chrono::DateTime::parse_from_rfc3339(&text)
-            .ok()
-            .map(|time| time.timestamp_millis() as f64)?,
+        // `Date.parse`: RFC 3339, or a bare date.
+        Earliest::Text(text) => turin_provider_core::js::date_parse_ms(&text)? as f64,
     };
     time.is_finite().then_some(time)
 }
@@ -1724,15 +1733,20 @@ fn operation_of(error: &ProviderSetupError) -> &str {
     operation
 }
 
+/// Upstream's per-environment semaphore (a `WeakMap` keyed by the secret store). The map is
+/// keyed by the store's address, but holds the store weakly: an entry whose store is gone is
+/// pruned, and an address a later store reuses never inherits the old permit.
 fn shared_permit(secrets: &Arc<dyn SecretStore>, key: &str) -> Arc<Mutex<()>> {
-    static LOCKS: LazyLock<SyncMutex<HashMap<(usize, String), Arc<Mutex<()>>>>> =
+    type Entry = (Weak<dyn SecretStore>, Arc<Mutex<()>>);
+    static LOCKS: LazyLock<SyncMutex<HashMap<(usize, String), Entry>>> =
         LazyLock::new(|| SyncMutex::new(HashMap::new()));
     let id = Arc::as_ptr(secrets) as *const () as usize;
-    LOCKS
-        .lock()
+    let mut locks = LOCKS.lock();
+    locks.retain(|_, (store, _)| store.strong_count() > 0);
+    let entry = locks
         .entry((id, key.to_owned()))
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
+        .or_insert_with(|| (Arc::downgrade(secrets), Arc::new(Mutex::new(()))));
+    entry.1.clone()
 }
 
 async fn session_locked<T>(
@@ -1789,5 +1803,72 @@ async fn deliver_page(
     });
     if let Some(done) = incoming.done.take() {
         let _ = done.await;
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn tokens(extra: Value) -> Value {
+        let mut base = json!({
+            "access_token": "a", "token_type": "Bearer", "scope": "openid", "expires_in": 3600
+        });
+        if let (Some(base), Some(extra)) = (base.as_object_mut(), extra.as_object()) {
+            base.extend(extra.clone());
+        }
+        base
+    }
+
+    #[test]
+    fn expires_in_accepts_an_integral_float_and_rejects_a_fraction() {
+        assert_eq!(
+            decode_tokens(&tokens(json!({"expires_in": 3600.0})))
+                .unwrap()
+                .expires_in,
+            3600
+        );
+        assert!(decode_tokens(&tokens(json!({"expires_in": 3600.5}))).is_err());
+        assert!(decode_tokens(&tokens(json!({"expires_in": 0}))).is_err());
+        assert!(decode_tokens(&tokens(json!({"expires_in": "3600"}))).is_err());
+    }
+
+    #[test]
+    fn earliest_refresh_text_parses_like_date_parse() {
+        assert_eq!(
+            earliest_millis(Some(Earliest::Text("2026-01-01T00:00:00Z".to_owned()))),
+            Some(1_767_225_600_000.0)
+        );
+        // `Date.parse("2026-01-01")` is midnight UTC.
+        assert_eq!(
+            earliest_millis(Some(Earliest::Text("2026-01-01".to_owned()))),
+            Some(1_767_225_600_000.0)
+        );
+        assert_eq!(
+            earliest_millis(Some(Earliest::Text("soon".to_owned()))),
+            None
+        );
+        assert_eq!(earliest_millis(Some(Earliest::Number(2.0))), Some(2000.0));
+    }
+
+    #[test]
+    fn the_shared_permit_is_per_store_and_keeps_no_dead_store() {
+        use turin_provider_core::credential_store::MemorySecretStore;
+        let first: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let a = shared_permit(&first, "k");
+        assert!(
+            Arc::ptr_eq(&a, &shared_permit(&first, "k")),
+            "same store, same key"
+        );
+        assert!(
+            !Arc::ptr_eq(&a, &shared_permit(&first, "other")),
+            "another key"
+        );
+        drop(first);
+        // A later store, possibly at the same address, never inherits the old permit.
+        let second: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        assert!(!Arc::ptr_eq(&a, &shared_permit(&second, "k")));
     }
 }

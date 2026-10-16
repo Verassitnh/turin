@@ -229,21 +229,27 @@ pub fn reasoning(
     native_item: &str,
     text: &str,
     completed: bool,
+    interrupted: bool,
     now: UtcDateTime,
 ) -> ItemArtifacts {
     let (ordinal, started_at) = resolve_position(turn, part_key, None, now);
     let completed_at = completed.then_some(now);
-    let status = if completed {
+    // A turn that did not complete leaves its reasoning interrupted, however far it got.
+    let status = if interrupted {
+        OrchestrationV2ExecutionNodeStatus::Interrupted
+    } else if completed {
         OrchestrationV2ExecutionNodeStatus::Completed
     } else {
         OrchestrationV2ExecutionNodeStatus::Running
     };
-    let item_status = if completed {
+    let item_status = if interrupted {
+        OrchestrationV2TurnItemStatus::Interrupted
+    } else if completed {
         OrchestrationV2TurnItemStatus::Completed
     } else {
         OrchestrationV2TurnItemStatus::Running
     };
-    let node = node(
+    let mut node = node(
         turn,
         part_key,
         OrchestrationV2ExecutionNodeKind::Reasoning,
@@ -251,6 +257,8 @@ pub fn reasoning(
         started_at,
         completed_at,
     );
+    // The node and the item both name the Codex item, not the composite part key.
+    node.native_item_ref = Some(native_item_ref(native_item));
     let turn_item = OrchestrationV2TurnItem::Reasoning {
         tool_non_execution_kind: None,
         tool_surface: None,
@@ -335,13 +343,12 @@ pub fn command_execution(
     }
 }
 
-/// Upstream `webSearchPatterns`: query and action strings, deduplicated in order.
+/// Upstream `webSearchPatterns`: query and action strings, trimmed, in order. Repeats stay,
+/// as `compactStrings` keeps them.
 pub fn web_search_patterns(item: &Value) -> Vec<String> {
     let mut patterns: Vec<String> = Vec::new();
     let mut push = |value: Option<&str>| {
-        if let Some(text) = value.map(str::trim).filter(|text| !text.is_empty())
-            && !patterns.iter().any(|p| p == text)
-        {
+        if let Some(text) = value.map(js_trim).filter(|text| !text.is_empty()) {
             patterns.push(text.to_owned());
         }
     };
@@ -807,7 +814,7 @@ pub fn user_input_request(
 pub fn codex_questions(questions: &Value) -> Vec<OrchestrationV2UserInputQuestion> {
     let text = |value: Option<&str>, fallback: &str| {
         value
-            .map(str::trim)
+            .map(js_trim)
             .filter(|text| !text.is_empty())
             .map_or_else(|| fallback.to_owned(), str::to_owned)
     };

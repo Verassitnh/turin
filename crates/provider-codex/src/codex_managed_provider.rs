@@ -11,11 +11,11 @@
 
 #![allow(clippy::result_large_err)]
 
-use std::{path::PathBuf, sync::Arc};
+use std::{future::Future, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use futures::{StreamExt, stream};
-use parking_lot::RwLock;
+use futures::StreamExt;
+use turin_contracts::git::TextGenerationError;
 use turin_contracts::{
     TrimmedNonEmptyString,
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
@@ -27,31 +27,47 @@ use turin_contracts::{
     settings::CodexSettings,
 };
 use turin_provider_core::{
-    auth::{AdmittedFailure, AdmittedTask},
-    driver::{ProviderContinuationIdentity, ProviderDriverCreateInput, ProviderInstance},
+    auth::{AdmittedFailure, AdmittedTask, ProviderAuthController},
+    driver::{
+        ProviderContinuationIdentity, ProviderDriverCreateInput, ProviderInstance, SnapshotForCwd,
+    },
     errors::ProviderDriverError,
     instance_environment::merge_provider_instance_environment,
     maintenance::ProviderMaintenanceCapabilities,
     maintenance_resolver::make_manual_only_provider_maintenance_capabilities,
     rt::BoxStream,
     server_provider::{
-        ServerProvider, ServerProviderAuth, ServerProviderAuthStatus, ServerProviderRuntimePaths,
-        ServerProviderSetup,
+        ProviderWorkspaceSnapshot, ServerProvider, ServerProviderAuth, ServerProviderAuthStatus,
+        ServerProviderRuntimePaths, ServerProviderSetup, ServerProviderSkill,
     },
     snapshot::ManagedServerProvider,
+    text_generation::{
+        BranchNameGenerationInput, BranchNameGenerationResult, CommitMessageGenerationInput,
+        CommitMessageGenerationResult, PrContentGenerationInput, PrContentGenerationResult,
+        ProviderTextGeneration, ReviewGuideGenerationInput, ReviewGuideGenerationResult,
+        ThreadTitleGenerationInput, ThreadTitleGenerationResult,
+    },
+};
+use turin_text_generation::codex_text_generation::{
+    AttachmentPathResolver, CodexEffectiveRuntime as TextEffectiveRuntime,
+    CodexManagedRuntimeSource, CodexModel, CodexModelSource, CodexTextGenerationOptions,
+    codex_text_generation,
 };
 
 use crate::{
     codex_chatgpt_auth::records::CodexChatGptCredentials,
     codex_chatgpt_models::chat_gpt_models_at,
     codex_home_layout::CodexHomeMode,
-    codex_managed_runtime::{CodexManagedHost, CodexManagedRuntime, CodexManagedRuntimeOptions},
+    codex_managed_runtime::{
+        CodexManagedHost, CodexManagedRuntime, CodexManagedRuntimeOptions, managed_launch_config,
+    },
+    codex_snapshot::SnapshotCell,
     driver::{
-        CodexText, SnapshotIdentity, StatusInput, check_codex_provider_status,
-        codex_continuation_identity, pending_provider,
+        SKILLS_PROBE_TIMEOUT, SnapshotIdentity, StatusInput, check_codex_provider_status,
+        codex_continuation_identity, pending_provider, probe_skills_for_cwd,
     },
     orchestration_adapter::CodexProviderAdapter,
-    runtime::CodexRuntimeConfig,
+    runtime::{CodexRuntimeConfig, CodexRuntimeResolver},
 };
 
 /// The scope that lets T3 hand the access token to the Codex CLI.
@@ -119,7 +135,7 @@ pub(crate) struct ManagedCodexSnapshot {
     setup: ServerProviderSetup,
     runtime_paths: ServerProviderRuntimePaths,
     maintenance: ProviderMaintenanceCapabilities,
-    current: RwLock<ServerProvider>,
+    cell: SnapshotCell,
 }
 
 impl ManagedCodexSnapshot {
@@ -298,20 +314,191 @@ impl ManagedServerProvider for ManagedCodexSnapshot {
     }
 
     async fn get_snapshot(&self) -> ServerProvider {
-        self.current.read().clone()
+        self.cell.get()
     }
 
     async fn refresh(&self) -> ServerProvider {
         let next = self.check().await;
-        *self.current.write() = next.clone();
+        self.cell.publish(next.clone());
         next
     }
 
     fn stream_changes(&self) -> BoxStream<'static, ServerProvider> {
-        Box::pin(stream::empty())
+        self.cell.stream()
     }
 
-    async fn apply_usage_limits(&self, _update: ProviderUsageLimitsUpdate, _checked_at: &str) {}
+    async fn apply_usage_limits(&self, update: ProviderUsageLimitsUpdate, checked_at: &str) {
+        self.cell.apply_usage_limits(&update, checked_at);
+    }
+}
+
+impl ManagedCodexSnapshot {
+    /// `snapshotForCwd`: the machine snapshot with this workspace's skills, probed
+    /// with the signed-in runtime. Any failure leaves the snapshot as it is.
+    async fn workspace_snapshot(&self, cwd: &str) -> ProviderWorkspaceSnapshot {
+        let mut provider = self.cell.get();
+        if self.enabled {
+            let runtime = Arc::clone(&self.runtime);
+            let base_config = self.base_config.clone();
+            let cwd = cwd.to_owned();
+            let task = AdmittedTask::new(async move {
+                let resolved = runtime.resolve().await.map_err(|_| ())?;
+                let launch = managed_launch_config(&base_config, &resolved.effective);
+                tokio::time::timeout(SKILLS_PROBE_TIMEOUT, probe_skills_for_cwd(&launch, &cwd))
+                    .await
+                    .map_err(|_| ())?
+                    .map_err(|_| ())
+            });
+            let outcome = match self.runtime.auth.controller.with_access.clone() {
+                Some(gate) => gate(task).await,
+                None => task.run().await,
+            };
+            if let Ok(skills) = outcome
+                && let Ok(skills) = skills.downcast::<Vec<ServerProviderSkill>>()
+            {
+                provider.skills = *skills;
+            }
+        }
+        ProviderWorkspaceSnapshot {
+            provider,
+            slash_commands_pending: None,
+        }
+    }
+}
+
+/// `CodexManagedRuntime.resolve` as text generation's managed-runtime source.
+/// The executable lease is not held across the generation (a deviation).
+struct ManagedTextRuntime {
+    runtime: Arc<CodexManagedRuntime>,
+}
+
+#[async_trait]
+impl CodexManagedRuntimeSource for ManagedTextRuntime {
+    async fn resolve(&self) -> Result<TextEffectiveRuntime, String> {
+        let resolved = self
+            .runtime
+            .resolve()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(TextEffectiveRuntime {
+            settings: resolved.effective.config.clone(),
+            environment: resolved.effective.environment.clone().into_iter().collect(),
+        })
+    }
+}
+
+/// `protect`: every generation runs under the sign-in gate, so a sign-out waits
+/// for it and a changing account rejects it.
+struct ProtectedTextGeneration {
+    inner: Arc<dyn ProviderTextGeneration>,
+    controller: ProviderAuthController,
+}
+
+impl ProtectedTextGeneration {
+    async fn protect<T: Send + 'static>(
+        &self,
+        operation: &str,
+        work: impl Future<Output = Result<T, TextGenerationError>> + Send + 'static,
+    ) -> Result<T, TextGenerationError> {
+        let failed = |detail: &str| TextGenerationError::TextGenerationError {
+            operation: operation.to_owned(),
+            detail: detail.to_owned(),
+            cause: None,
+        };
+        let task = AdmittedTask::new(work);
+        let outcome = match self.controller.with_access.clone() {
+            Some(gate) => gate(task).await,
+            None => task.run().await,
+        };
+        match outcome {
+            Ok(value) => value
+                .downcast::<T>()
+                .map(|boxed| *boxed)
+                .map_err(|_| failed("Codex text generation failed.")),
+            Err(AdmittedFailure::Other(error)) => Err(error
+                .downcast::<TextGenerationError>()
+                .map(|error| *error)
+                .unwrap_or_else(|_| failed("Codex text generation failed."))),
+            Err(AdmittedFailure::Setup(_)) => Err(failed("Codex text generation failed.")),
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderTextGeneration for ProtectedTextGeneration {
+    async fn generate_commit_message(
+        &self,
+        input: CommitMessageGenerationInput,
+    ) -> Result<CommitMessageGenerationResult, TextGenerationError> {
+        let inner = Arc::clone(&self.inner);
+        self.protect("generateCommitMessage", async move {
+            inner.generate_commit_message(input).await
+        })
+        .await
+    }
+
+    async fn generate_pr_content(
+        &self,
+        input: PrContentGenerationInput,
+    ) -> Result<PrContentGenerationResult, TextGenerationError> {
+        let inner = Arc::clone(&self.inner);
+        self.protect("generatePrContent", async move {
+            inner.generate_pr_content(input).await
+        })
+        .await
+    }
+
+    async fn generate_branch_name(
+        &self,
+        input: BranchNameGenerationInput,
+    ) -> Result<BranchNameGenerationResult, TextGenerationError> {
+        let inner = Arc::clone(&self.inner);
+        self.protect("generateBranchName", async move {
+            inner.generate_branch_name(input).await
+        })
+        .await
+    }
+
+    async fn generate_thread_title(
+        &self,
+        input: ThreadTitleGenerationInput,
+    ) -> Result<ThreadTitleGenerationResult, TextGenerationError> {
+        let inner = Arc::clone(&self.inner);
+        self.protect("generateThreadTitle", async move {
+            inner.generate_thread_title(input).await
+        })
+        .await
+    }
+
+    async fn generate_review_guide(
+        &self,
+        input: ReviewGuideGenerationInput,
+    ) -> Result<ReviewGuideGenerationResult, TextGenerationError> {
+        let inner = Arc::clone(&self.inner);
+        self.protect("generateReviewGuide", async move {
+            inner.generate_review_guide(input).await
+        })
+        .await
+    }
+}
+
+/// The live model list text generation resolves aliases against.
+struct ManagedModels(Arc<ManagedCodexSnapshot>);
+
+#[async_trait]
+impl CodexModelSource for ManagedModels {
+    async fn models(&self) -> Vec<CodexModel> {
+        self.0
+            .cell
+            .get()
+            .models
+            .iter()
+            .map(|model| CodexModel {
+                slug: model.slug.as_str().to_owned(),
+                is_custom: model.is_custom,
+            })
+            .collect()
+    }
 }
 
 /// `makeManagedCodexProvider`.
@@ -320,6 +507,7 @@ pub async fn make_managed_codex_provider(
     input: ProviderDriverCreateInput,
     settings: CodexSettings,
     host: CodexManagedHost,
+    attachment_path: Option<AttachmentPathResolver>,
 ) -> Result<ProviderInstance, ProviderDriverError> {
     let failed =
         |detail: &str| turin_provider_core::driver::driver_error(kind, &input.instance_id, detail);
@@ -387,9 +575,9 @@ pub async fn make_managed_codex_provider(
         },
         runtime_paths,
         maintenance: make_manual_only_provider_maintenance_capabilities(kind.clone()),
-        current: RwLock::new(pending_provider(kind, &input.instance_id, enabled, &[])),
+        cell: SnapshotCell::new(pending_provider(kind, &input.instance_id, enabled, &[])),
     });
-    *snapshot.current.write() = snapshot.base();
+    snapshot.cell.publish(snapshot.base());
 
     // A settled sign-in changes what the snapshot says. Sign-out closes the scope
     // of an in-flight probe, which fails that refresh; keep listening so the
@@ -418,6 +606,38 @@ pub async fn make_managed_codex_provider(
         }
     });
 
+    let usage_target = Arc::clone(&snapshot);
+    let mut adapter = CodexProviderAdapter::with_runtime_resolver(
+        input.instance_id.clone(),
+        base_config,
+        Arc::clone(&runtime) as Arc<dyn CodexRuntimeResolver>,
+    )
+    .with_usage_sink(Arc::new(move |update, checked_at| {
+        usage_target.cell.apply_usage_limits(&update, &checked_at);
+    }));
+    if let Some(resolver) = &attachment_path {
+        adapter = adapter.with_attachment_resolver(Arc::clone(resolver));
+    }
+    // Generations run under the sign-in gate, with the signed-in runtime.
+    let native_text = codex_text_generation(CodexTextGenerationOptions {
+        settings: settings.clone(),
+        environment: None,
+        models: Arc::new(ManagedModels(Arc::clone(&snapshot))),
+        managed_runtime: Some(Arc::new(ManagedTextRuntime {
+            runtime: Arc::clone(&runtime),
+        })),
+        resolve_attachment_path: attachment_path.unwrap_or_else(|| Arc::new(|_| None)),
+        home_dir: home.clone(),
+    });
+    let text_generation: Arc<dyn ProviderTextGeneration> = Arc::new(ProtectedTextGeneration {
+        inner: Arc::new(native_text),
+        controller: runtime.auth.controller.clone(),
+    });
+    let for_cwd = Arc::clone(&snapshot);
+    let snapshot_for_cwd: SnapshotForCwd = Arc::new(move |cwd: String| {
+        let snapshot = Arc::clone(&for_cwd);
+        Box::pin(async move { Ok(snapshot.workspace_snapshot(&cwd).await) })
+    });
     let auth = Arc::new(runtime.auth.controller.clone());
     Ok(ProviderInstance {
         instance_id: input.instance_id.clone(),
@@ -433,16 +653,12 @@ pub async fn make_managed_codex_provider(
             .map(|color| color.as_str().to_owned()),
         enabled: input.enabled,
         snapshot,
-        snapshot_for_cwd: None,
+        snapshot_for_cwd: Some(snapshot_for_cwd),
         refresh_models: None,
         invalidate_caches: None,
         consume_reset_credit: None,
-        orchestration_adapter: Arc::new(CodexProviderAdapter::with_runtime_resolver(
-            input.instance_id.clone(),
-            base_config,
-            runtime,
-        )),
-        text_generation: Arc::new(CodexText),
+        orchestration_adapter: Arc::new(adapter),
+        text_generation,
         auth: Some(auth),
     })
 }
@@ -458,6 +674,10 @@ mod tests {
     use parking_lot::Mutex;
     use serde_json::json;
     use turin_contracts::provider_setup::ProviderInstallSource;
+    use turin_contracts::provider_usage_limits::{
+        ServerProviderUsageWindow, ServerProviderUsageWindowKind,
+    };
+    use turin_provider_core::text_generation::ThreadTitleGenerationInput;
     use turin_provider_core::{
         credential_store::{MemorySecretStore, ProviderCredentials, SecretStore},
         driver::{ProviderDriver, ProviderInstanceScope},
@@ -474,6 +694,21 @@ mod tests {
 
     /// A `codex app-server` that answers the status probe with canned replies.
     const FAKE_APP_SERVER: &str = r#"#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in mcp) is_mcp=1 ;; exec) is_exec=1 ;; esac
+done
+if [ "$is_mcp" = 1 ]; then printf '[]'; exit 0; fi
+if [ "$is_exec" = 1 ]; then
+  out=''; prev=''
+  for a in "$@"; do
+    if [ "$prev" = --output-last-message ]; then out="$a"; fi
+    prev="$a"
+  done
+  cat >/dev/null
+  printf '%s\n' "$ACCESS_TOKEN" > "$(dirname "$0")/exec-token.txt"
+  printf '%s\n' '{"title":"Managed title"}' > "$out"
+  exit 0
+fi
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$(dirname "$0")/requests.log"
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
@@ -482,7 +717,9 @@ while IFS= read -r line; do
     *'"method":"account/read"'*) printf '{"id":%s,"result":{"account":{"type":"apiKey"},"requiresOpenaiAuth":false}}\n' "$id" ;;
     *'"method":"model/list"'*) printf '{"id":%s,"result":{"data":[{"id":"gpt-5.5","model":"gpt-5.5","displayName":"gpt-5.5","description":"d","hidden":false,"isDefault":true,"defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low","description":"l"},{"reasoningEffort":"high","description":"h"}],"serviceTiers":[{"id":"fast","name":"Fast","description":"f"}]}]}}\n' "$id" ;;
     *'"method":"account/rateLimits/read"'*) printf '{"id":%s,"error":{"code":-32601,"message":"not available"}}\n' "$id" ;;
-    *'"method":"skills/list"'*) printf '{"id":%s,"result":{"data":[]}}\n' "$id" ;;
+    *'"method":"skills/list"'*)
+      cwd=$(printf '%s' "$line" | sed -n 's/.*"cwds":\["\([^"]*\)"\].*/\1/p')
+      printf '{"id":%s,"result":{"data":[{"cwd":"%s","errors":[],"skills":[{"name":"workspace-skill","description":"d","scope":"repo","path":"%s/SKILL.md","enabled":true}]}]}}\n' "$id" "$cwd" "$cwd" ;;
   esac
 done
 "#;
@@ -648,7 +885,7 @@ done
 
     #[tokio::test]
     async fn managed_instances_fail_to_create_without_a_host() {
-        let error = CodexDriver::new()
+        let Err(error) = CodexDriver::new()
             .create(ProviderDriverCreateInput {
                 instance_id: ProviderInstanceId::new("codex").unwrap(),
                 display_name: None,
@@ -659,8 +896,9 @@ done
                 scope: ProviderInstanceScope::new(),
             })
             .await
-            .err()
-            .expect("managed create without a host");
+        else {
+            panic!("managed create without a host");
+        };
         assert!(error.detail.contains("Managed Codex needs the host"));
     }
 
@@ -973,5 +1211,151 @@ done
                 .contains("account/rateLimits/read")
         );
         assert!(provider.usage_limits.is_some());
+    }
+
+    #[tokio::test]
+    async fn snapshot_for_cwd_probes_skills_with_the_signed_in_runtime() {
+        let h = harness(
+            "codex",
+            Setup {
+                installed: true,
+                scopes: Some(vec!["chatgpt.tokens.use.direct"]),
+                script: true,
+            },
+        )
+        .await;
+        let for_cwd = h.instance.snapshot_for_cwd.clone().expect("snapshotForCwd");
+        let workspace = for_cwd("/work/project".to_owned()).await.unwrap();
+        let skills: Vec<_> = workspace
+            .provider
+            .skills
+            .iter()
+            .map(|skill| skill.path.as_str().to_owned())
+            .collect();
+        assert_eq!(skills, ["/work/project/SKILL.md"]);
+        assert_eq!(workspace.provider.instance_id.as_str(), "codex");
+    }
+
+    #[tokio::test]
+    async fn snapshot_for_cwd_keeps_the_snapshot_when_signed_out() {
+        let h = harness(
+            "codex",
+            Setup {
+                installed: true,
+                scopes: None,
+                script: true,
+            },
+        )
+        .await;
+        let for_cwd = h.instance.snapshot_for_cwd.clone().unwrap();
+        let workspace = for_cwd("/work/project".to_owned()).await.unwrap();
+        assert!(workspace.provider.skills.is_empty());
+    }
+
+    #[tokio::test]
+    async fn text_generation_runs_with_the_signed_in_token() {
+        let h = harness(
+            "codex",
+            Setup {
+                installed: true,
+                scopes: Some(vec!["chatgpt.tokens.use.direct"]),
+                script: true,
+            },
+        )
+        .await;
+        let selection =
+            serde_json::from_value(json!({"instanceId": "codex", "model": "gpt-5.4-mini"}))
+                .unwrap();
+        let result = h
+            .instance
+            .text_generation
+            .generate_thread_title(ThreadTitleGenerationInput {
+                linked_context: None,
+                cwd: h._temp.path().to_string_lossy().into_owned(),
+                message: "Name this".to_owned(),
+                previous_title: None,
+                attachments: Vec::new(),
+                model_selection: selection,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.title, "Managed title");
+        assert_eq!(
+            std::fs::read_to_string(h._temp.path().join("exec-token.txt"))
+                .unwrap()
+                .trim(),
+            "dummy-owned-access"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_generation_fails_cleanly_when_signed_out() {
+        let h = harness(
+            "codex",
+            Setup {
+                installed: true,
+                scopes: None,
+                script: true,
+            },
+        )
+        .await;
+        let selection =
+            serde_json::from_value(json!({"instanceId": "codex", "model": "gpt-5.4-mini"}))
+                .unwrap();
+        let error = h
+            .instance
+            .text_generation
+            .generate_thread_title(ThreadTitleGenerationInput {
+                linked_context: None,
+                cwd: h._temp.path().to_string_lossy().into_owned(),
+                message: "Name this".to_owned(),
+                previous_title: None,
+                attachments: Vec::new(),
+                model_selection: selection,
+            })
+            .await
+            .expect_err("no account");
+        let TextGenerationError::TextGenerationError { detail, .. } = &error;
+        assert!(!detail.is_empty(), "{error:?}");
+        assert!(!h._temp.path().join("exec-token.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn usage_pushes_update_the_managed_snapshot() {
+        let h = harness(
+            "codex",
+            Setup {
+                installed: false,
+                scopes: None,
+                script: false,
+            },
+        )
+        .await;
+        let window = ServerProviderUsageWindow {
+            id: TrimmedNonEmptyString::new("primary").unwrap(),
+            kind: ServerProviderUsageWindowKind::Session,
+            label: TrimmedNonEmptyString::new("Session").unwrap(),
+            used_percent: 12.0,
+            resets_at: None,
+            window_duration_mins: Some(300),
+        };
+        h.instance
+            .snapshot
+            .apply_usage_limits(
+                ProviderUsageLimitsUpdate {
+                    windows: vec![window],
+                },
+                "2026-01-01T00:00:00.000Z",
+            )
+            .await;
+        let limits = h
+            .instance
+            .snapshot
+            .get_snapshot()
+            .await
+            .usage_limits
+            .clone()
+            .unwrap();
+        assert_eq!(limits.windows[0].used_percent, 12.0);
     }
 }

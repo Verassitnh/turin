@@ -18,6 +18,28 @@ pub struct MiniRequest {
     pub body: Vec<u8>,
 }
 
+/// The largest body read. The loopback callback is a GET and the mock token requests are
+/// small forms, so anything bigger is refused rather than buffered.
+pub const MAX_BODY_BYTES: usize = 256 * 1024;
+
+/// How long a peer may take to send its request before it is dropped.
+pub const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `read_request` with a deadline, for sockets that face the network.
+pub async fn read_request_within(
+    socket: &mut TcpStream,
+    timeout: std::time::Duration,
+) -> std::io::Result<MiniRequest> {
+    tokio::time::timeout(timeout, read_request(socket))
+        .await
+        .unwrap_or_else(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "request not received in time",
+            ))
+        })
+}
+
 pub async fn read_request(socket: &mut TcpStream) -> std::io::Result<MiniRequest> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 2048];
@@ -57,6 +79,12 @@ pub async fn read_request(socket: &mut TcpStream) -> std::io::Result<MiniRequest
         .get("content-length")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
+    if length > MAX_BODY_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "body too large",
+        ));
+    }
     while body.len() < length {
         let n = socket.read(&mut tmp).await?;
         if n == 0 {
@@ -102,4 +130,64 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::*;
+
+    async fn pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn a_stalled_peer_is_dropped_at_the_deadline() {
+        let (_client, mut server) = pair().await;
+        let error = read_request_within(&mut server, std::time::Duration::from_millis(50))
+            .await
+            .err()
+            .expect("timeout");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_body_is_refused() {
+        let (mut client, mut server) = pair().await;
+        client
+            .write_all(
+                format!(
+                    "POST /x HTTP/1.1\r\ncontent-length: {}\r\n\r\n",
+                    MAX_BODY_BYTES + 1
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let error = read_request(&mut server).await.err().expect("refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn a_small_request_reads_with_its_body() {
+        let (mut client, mut server) = pair().await;
+        client
+            .write_all(b"POST /x HTTP/1.1\r\ncontent-length: 2\r\n\r\nhi")
+            .await
+            .unwrap();
+        let request = read_request_within(&mut server, READ_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(
+            (request.method.as_str(), request.target.as_str()),
+            ("POST", "/x")
+        );
+        assert_eq!(request.body, b"hi");
+    }
 }

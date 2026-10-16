@@ -15,6 +15,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use turin_contracts::base_schemas::js_trim;
 use turin_contracts::{
     NodeId, ProviderThreadId, ProviderTurnId, RunId, ThreadId, TrimmedNonEmptyString, TurnItemId,
     UtcDateTime,
@@ -129,8 +130,16 @@ pub fn subagent_node(state: &RuntimeState, turn: &TurnState) -> Option<NodeId> {
     node
 }
 
+/// Whether a subagent's task is running (`subagent.task.status === "running"`).
+pub fn has_running(state: &RuntimeState) -> bool {
+    state
+        .subagents
+        .values()
+        .any(|sub| sub.task.status == OrchestrationV2SubagentStatus::Running)
+}
+
 /// The turn and every turn above it, through the subagents it runs under.
-fn ancestors_of(state: &RuntimeState, turn: &TurnState) -> Vec<String> {
+pub(crate) fn ancestors_of(state: &RuntimeState, turn: &TurnState) -> Vec<String> {
     let mut ancestors = vec![turn.native_turn.clone()];
     if let Some(sub) = turn
         .subagent
@@ -195,7 +204,7 @@ pub fn update_selection(
     effort: Option<Option<&str>>,
     tier: Option<Option<&str>>,
 ) -> Vec<ProviderAdapterV2Event> {
-    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+    let Some(model) = model.map(js_trim).filter(|model| !model.is_empty()) else {
         return vec![];
     };
     let previous_options = state
@@ -218,7 +227,7 @@ pub fn update_selection(
             ("reasoningEffort", effort.flatten()),
             ("serviceTier", tier.flatten()),
         ] {
-            if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(value) = value.map(js_trim).filter(|value| !value.is_empty()) {
                 kept.push(json!({"id": id, "value": value}));
             }
         }
@@ -285,7 +294,7 @@ pub fn settings_updated(
 /// Upstream `subagentThreadTitle`.
 fn thread_title(parent_title: &str, title: Option<&str>, prompt: &str, ordinal: usize) -> String {
     let trimmed = |text: &str| {
-        let text = text.trim();
+        let text = js_trim(text);
         (!text.is_empty()).then(|| text.to_owned())
     };
     match title.and_then(trimmed).or_else(|| trimmed(prompt)) {
@@ -547,8 +556,7 @@ pub fn register(
     let child_root =
         derive::node_from_provider_item(&driver(), &format!("{}:thread-root", spawn.native_item));
     let child_thread = derive::thread_from_provider_thread(&driver(), None, spawn.native_thread);
-    let provider_thread_id =
-        derive::provider_thread(&driver(), Some(&instance), spawn.native_thread);
+    let provider_thread_id = derive::provider_thread(&driver(), None, spawn.native_thread);
     let turn_item_id = derive::turn_item_from_provider_item(&driver(), &spawn.native_item);
     // Upstream `registerSubagentThread`: a spawn's model and effort are the child's
     // selection, unless the child has already reported one. The subagent is not
@@ -1041,7 +1049,7 @@ pub fn child_user_message(
         .filter_map(|part| part.get("text").and_then(Value::as_str))
         .collect::<Vec<_>>()
         .join("\n");
-    let text = text.trim();
+    let text = js_trim(&text);
     if text.is_empty() {
         return vec![];
     }

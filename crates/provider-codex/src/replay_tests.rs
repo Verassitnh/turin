@@ -5,7 +5,7 @@
 //! approval counts mirror `scenarioExpectations` there.
 use crate::{
     adapter::CodexEvent,
-    orchestration_adapter::CodexProviderAdapter,
+    orchestration_adapter::{CodexProviderAdapter, UsageLimitsSink},
     projection::{RuntimeState, TurnState, project_event},
     runtime::CodexRuntimeConfig,
 };
@@ -33,13 +33,15 @@ use turin_contracts::{
     provider_policy::{ProviderInteractionMode, ProviderUserInputAnswers, RuntimeMode},
 };
 use turin_provider_core::provider_adapter::{
-    ProviderAdapterV2, ProviderAdapterV2EnsureThreadInput, ProviderAdapterV2Event,
-    ProviderAdapterV2ForkThreadInput, ProviderAdapterV2InterruptInput,
+    ProviderAdapterV2, ProviderAdapterV2AppContext, ProviderAdapterV2EnsureThreadInput,
+    ProviderAdapterV2Error, ProviderAdapterV2Event, ProviderAdapterV2ForkThreadInput,
+    ProviderAdapterV2HistoricalContext, ProviderAdapterV2InterruptInput,
     ProviderAdapterV2OpenSessionInput, ProviderAdapterV2ResumeThreadInput,
     ProviderAdapterV2RollbackTarget, ProviderAdapterV2RollbackThreadInput,
     ProviderAdapterV2RuntimePolicy, ProviderAdapterV2RuntimeRequestResponseInput,
     ProviderAdapterV2SteerInput, ProviderAdapterV2TurnInput, ProviderAdapterV2TurnMessage,
-    ProviderAdapterV2TurnTerminalStatus, ProviderEventStream, ProviderSessionRuntime,
+    ProviderAdapterV2TurnTerminalStatus, ProviderAdapterV2UploadFeedbackInput, ProviderEventStream,
+    ProviderSessionRuntime,
 };
 
 const CLIENT_VERSION: &str = "0.0.44";
@@ -185,7 +187,29 @@ struct Replay {
 }
 
 async fn open(transcript: ReplayTranscript) -> Replay {
-    let (model, runtime, events, driver) = open_session(transcript).await;
+    open_with_sink(transcript, None).await
+}
+
+async fn open_with_sink(transcript: ReplayTranscript, sink: Option<UsageLimitsSink>) -> Replay {
+    open_with(
+        transcript,
+        OpenOptions {
+            sink,
+            ..OpenOptions::default()
+        },
+    )
+    .await
+}
+
+/// What a replay session's adapter is built with beyond the transcript.
+#[derive(Default)]
+struct OpenOptions {
+    sink: Option<UsageLimitsSink>,
+    attachments: Option<crate::codex_input::AttachmentPathResolver>,
+}
+
+async fn open_with(transcript: ReplayTranscript, options: OpenOptions) -> Replay {
+    let (model, runtime, events, driver) = open_session_with(transcript, options).await;
     let thread = runtime
         .ensure_thread(ProviderAdapterV2EnsureThreadInput {
             thread_id: id("thread-1"),
@@ -248,6 +272,18 @@ async fn open_session(
     ProviderEventStream,
     ReplayDriver,
 ) {
+    open_session_with(transcript, OpenOptions::default()).await
+}
+
+async fn open_session_with(
+    transcript: ReplayTranscript,
+    options: OpenOptions,
+) -> (
+    String,
+    Arc<dyn ProviderSessionRuntime>,
+    ProviderEventStream,
+    ReplayDriver,
+) {
     // The replay runs on the model the upstream recorder used for this scenario.
     let model = recorded_model(&transcript);
     let (client, driver) = make_replay_client(transcript);
@@ -260,11 +296,17 @@ async fn open_session(
         remove_environment: vec![],
         client_version: CLIENT_VERSION.into(),
     };
-    let adapter = CodexProviderAdapter::with_client(
+    let mut adapter = CodexProviderAdapter::with_client(
         ProviderInstanceId::new("codex").unwrap(),
         config,
         client,
     );
+    if let Some(sink) = options.sink {
+        adapter = adapter.with_usage_sink(sink);
+    }
+    if let Some(resolver) = options.attachments {
+        adapter = adapter.with_attachment_resolver(resolver);
+    }
     let runtime = adapter
         .open_session(ProviderAdapterV2OpenSessionInput {
             thread_id: id("thread-1"),
@@ -331,12 +373,18 @@ impl Replay {
     ) -> Vec<ProviderAdapterV2Event> {
         let mut seen = Vec::new();
         loop {
-            let event = self
-                .events
-                .next()
-                .await
-                .expect("event stream ended")
-                .expect("event error");
+            // A replay that stops answering fails the test instead of hanging it.
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(20), self.events.next())
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "replay stalled; replay state: {:?}",
+                            self.driver.verify_complete().err()
+                        )
+                    })
+                    .expect("event stream ended")
+                    .expect("event error");
             let stop = done(&event);
             seen.push(event);
             if stop {
@@ -768,6 +816,1067 @@ async fn app_context_goes_out_as_untrusted_additional_context() {
     // No T3 MCP server, so no developer instructions and no `collaborationMode`
     // in a default-mode turn; the recorded frame carries neither.
     replay.driver.verify_complete().unwrap();
+}
+
+/// `account/rateLimits/updated` arrives mid-turn: the adapter hands the pushed
+/// windows to the snapshot's sink, and an update with no windows says nothing.
+#[tokio::test]
+async fn rate_limit_pushes_reach_the_usage_sink() {
+    let mut transcript = fixture("simple");
+    let completed = transcript
+        .entries
+        .iter()
+        .position(|entry| matches!(entry, ReplayEntry::EmitInbound { frame, .. } if frame["method"] == "turn/completed"))
+        .expect("turn/completed");
+    for (offset, rate_limits) in [
+        json!({"limitId": "codex", "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1790000000}, "secondary": null}),
+        // A model-specific allowance (such as Spark) names no windows.
+        json!({"limitId": "codex_spark", "primary": {"usedPercent": 99}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        transcript.entries.insert(
+            completed + offset,
+            ReplayEntry::EmitInbound {
+                label: None,
+                frame: json!({
+                    "method": "account/rateLimits/updated",
+                    "params": {"rateLimits": rate_limits}
+                }),
+                after_ms: None,
+            },
+        );
+    }
+    let pushes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&pushes);
+    let mut replay = open_with_sink(
+        transcript,
+        Some(Arc::new(move |update, checked_at| {
+            seen.lock().push((update, checked_at));
+        })),
+    )
+    .await;
+    replay
+        .start(
+            "Respond with the following text: fixture simple ok",
+            policy(
+                RuntimeMode::FullAccess,
+                ProviderInteractionMode::Default,
+                None,
+                None,
+            ),
+        )
+        .await;
+    let events = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&events),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    let pushes = pushes.lock();
+    assert_eq!(pushes.len(), 1, "{pushes:?}");
+    let windows = &pushes[0].0.windows;
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].id.as_str(), "primary");
+    assert_eq!(windows[0].used_percent, 42.0);
+    assert_eq!(windows[0].window_duration_mins, Some(300));
+    replay.driver.verify_complete().unwrap();
+}
+
+/// The `message_steering` transcript with the user texts it expects rewritten, so
+/// the replay checks the exact `turn/start` and `turn/steer` input Codex receives.
+fn steering_with_input(start: Value, steer: Value) -> ReplayTranscript {
+    let mut transcript = fixture("message_steering");
+    for entry in &mut transcript.entries {
+        let ReplayEntry::ExpectOutbound { frame, .. } = entry else {
+            continue;
+        };
+        match frame["method"].as_str() {
+            Some("turn/start") => frame["params"]["input"] = start.clone(),
+            Some("turn/steer") => frame["params"]["input"] = steer.clone(),
+            _ => {}
+        }
+    }
+    transcript
+}
+
+async fn start_and_steer(replay: &mut Replay, start: &str, steer: &str) {
+    replay
+        .start(
+            start,
+            policy(
+                RuntimeMode::FullAccess,
+                ProviderInteractionMode::Default,
+                None,
+                None,
+            ),
+        )
+        .await;
+    let started = replay.next_until(is_turn_running).await;
+    let provider_turn_id = started
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::ProviderTurnUpdated { provider_turn, .. } => {
+                Some(provider_turn.id.clone())
+            }
+            _ => None,
+        })
+        .expect("provider turn");
+    replay
+        .runtime
+        .steer_turn(ProviderAdapterV2SteerInput {
+            thread_id: id("thread-1"),
+            run_id: id("run-1"),
+            provider_thread: replay.thread.clone(),
+            provider_turn_id,
+            message: ProviderAdapterV2TurnMessage {
+                message_id: id("message-steer"),
+                text: steer.into(),
+                attachments: vec![],
+                created_by: OrchestrationV2Actor::User,
+                creation_source: OrchestrationV2CreationSource::Web,
+                scheduled_task_id: None,
+                sender_thread_id: None,
+            },
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn currency_sigil_skill_mentions_go_out_as_dollar_mentions() {
+    let mut replay = open(steering_with_input(
+        json!([{"type": "text", "text": "$review do it"}]),
+        json!([{"type": "text", "text": "then $ship it"}]),
+    ))
+    .await;
+    start_and_steer(&mut replay, "€review do it", "then £ship it").await;
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn image_attachments_go_out_as_data_urls_after_the_text_with_their_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("img-1.png"), [1u8, 2, 3]).unwrap();
+    let dir = temp.path().to_path_buf();
+    let path = dir.join("img-1.png").to_string_lossy().into_owned();
+    let mut replay = open_with(
+        steering_with_input(
+            json!([
+                {"type": "text", "text": format!("look\n\n[Attached image \"img-1.png\" is saved at: {path}]")},
+                {"type": "image", "url": "data:image/png;base64,AQID"}
+            ]),
+            json!([{"type": "text", "text": "ok"}]),
+        ),
+        OpenOptions {
+            attachments: Some(Arc::new(move |attachment| match attachment {
+                turin_contracts::chat_attachment::ChatAttachment::Image(image) => {
+                    Some(dir.join(format!("{}.png", image.id.as_str())))
+                }
+                _ => None,
+            })),
+            ..OpenOptions::default()
+        },
+    )
+    .await;
+    let mut input = replay.turn_input(
+        "look",
+        policy(
+            RuntimeMode::FullAccess,
+            ProviderInteractionMode::Default,
+            None,
+            None,
+        ),
+    );
+    input.message.attachments = vec![
+        serde_json::from_value(json!({
+            "type": "image", "id": "img-1", "name": "img-1.png",
+            "mimeType": "image/png", "sizeBytes": 3
+        }))
+        .unwrap(),
+    ];
+    replay.runtime.start_turn(input).await.unwrap();
+    replay.next_until(is_turn_running).await;
+}
+
+#[tokio::test]
+async fn an_empty_turn_fails_before_any_request_is_sent() {
+    let mut replay = open(fixture("simple")).await;
+    let input = replay.turn_input(
+        "",
+        policy(
+            RuntimeMode::FullAccess,
+            ProviderInteractionMode::Default,
+            None,
+            None,
+        ),
+    );
+    let error = replay
+        .runtime
+        .start_turn(input)
+        .await
+        .expect_err("empty input");
+    assert!(format!("{error:?}").contains("Turn requires non-empty text or attachments."));
+}
+
+#[tokio::test]
+async fn a_restart_continuation_sends_no_user_input() {
+    let mut transcript = fixture("simple");
+    for entry in &mut transcript.entries {
+        if let ReplayEntry::ExpectOutbound { frame, .. } = entry
+            && frame["method"] == "turn/start"
+        {
+            frame["params"]["input"] = json!([]);
+        }
+    }
+    let mut replay = open(transcript).await;
+    let mut input = replay.turn_input(
+        "this text is not resent",
+        policy(
+            RuntimeMode::FullAccess,
+            ProviderInteractionMode::Default,
+            None,
+            None,
+        ),
+    );
+    input.restart_continuation_of_run_id = Some(id("run-0"));
+    replay.runtime.start_turn(input).await.unwrap();
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+/// The `simple` transcript up to its `turn/start`: initialize and `thread/start`.
+/// Synthetic scenarios continue from here with request id 3.
+fn preamble() -> Vec<ReplayEntry> {
+    let transcript = fixture("simple");
+    let end = transcript
+        .entries
+        .iter()
+        .position(|entry| matches!(entry, ReplayEntry::ExpectOutbound { frame, .. } if frame["method"] == "turn/start"))
+        .expect("turn/start");
+    transcript.entries[..end].to_vec()
+}
+
+fn native_thread_of(entries: &[ReplayEntry]) -> String {
+    entries
+        .iter()
+        .find_map(|entry| match entry {
+            ReplayEntry::EmitInbound { frame, .. } => frame
+                .pointer("/result/thread/id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        })
+        .expect("thread id")
+}
+
+fn synthetic(scenario: &str, tail: Vec<ReplayEntry>) -> ReplayTranscript {
+    let mut entries = preamble();
+    entries.extend(tail);
+    ReplayTranscript {
+        scenario: scenario.into(),
+        ..fixture("simple")
+    }
+    .with_entries(entries)
+}
+
+trait WithEntries {
+    fn with_entries(self, entries: Vec<ReplayEntry>) -> Self;
+}
+
+impl WithEntries for ReplayTranscript {
+    fn with_entries(mut self, entries: Vec<ReplayEntry>) -> Self {
+        self.entries = entries;
+        self
+    }
+}
+
+fn expect(frame: Value) -> ReplayEntry {
+    ReplayEntry::ExpectOutbound { label: None, frame }
+}
+
+fn emit(frame: Value) -> ReplayEntry {
+    ReplayEntry::EmitInbound {
+        label: None,
+        frame,
+        after_ms: None,
+    }
+}
+
+fn compaction_turn(thread: &str, status: &str) -> Value {
+    json!({"id": "compact-turn", "status": status, "items": [], "startedAt": 1, "completedAt": null})
+        .as_object()
+        .map(|turn| {
+            let mut turn = turn.clone();
+            if status == "completed" {
+                turn.insert("completedAt".into(), json!(2));
+            }
+            let _ = thread;
+            Value::Object(turn)
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn compact_thread_uses_the_native_rpc_and_completes_the_compaction_turn() {
+    let thread = native_thread_of(&preamble());
+    let item = json!({"type": "contextCompaction", "id": "compact-item"});
+    let mut tail = vec![
+        expect(json!({"id": 3, "method": "thread/compact/start", "params": {"threadId": thread}})),
+        emit(json!({"id": 3, "result": {}})),
+        emit(
+            json!({"method": "turn/started", "params": {"threadId": thread, "turn": compaction_turn(&thread, "inProgress")}}),
+        ),
+    ];
+    for method in ["item/started", "item/completed"] {
+        tail.push(emit(json!({"method": method, "params": {"threadId": thread, "turnId": "compact-turn", "item": item}})));
+    }
+    tail.push(emit(json!({"method": "turn/completed", "params": {"threadId": thread, "turn": compaction_turn(&thread, "completed")}})));
+    let mut replay = open(synthetic("compaction", tail)).await;
+    let input = replay.turn_input(
+        "/compact",
+        policy(
+            RuntimeMode::FullAccess,
+            ProviderInteractionMode::Default,
+            None,
+            None,
+        ),
+    );
+    replay
+        .runtime
+        .compact_thread(input)
+        .expect("compact_thread")
+        .await
+        .unwrap();
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    let compactions: Vec<_> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::TurnItemUpdated { turn_item, .. } => {
+                let value = serde_json::to_value(turn_item).unwrap();
+                (value["type"] == "compaction").then_some(value)
+            }
+            _ => None,
+        })
+        .collect();
+    let statuses: Vec<_> = compactions
+        .iter()
+        .map(|item| item["status"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(statuses, ["running", "completed"]);
+    assert_eq!(compactions[0]["id"], compactions[1]["id"]);
+    replay.driver.verify_complete().unwrap();
+}
+
+async fn inject(response: Value) -> (Result<bool, ProviderAdapterV2Error>, Replay) {
+    use turin_contracts::orchestration_v2::{
+        OrchestrationV2HistoricalMessage, OrchestrationV2HistoricalMessageRole,
+    };
+    let thread = native_thread_of(&preamble());
+    let messages = vec![OrchestrationV2HistoricalMessage {
+        role: OrchestrationV2HistoricalMessageRole::User,
+        text: "Original request".into(),
+        run_status: None,
+        thread_id: id("source"),
+        run_id: Some(id("source-run")),
+        item_id: id("source-user"),
+        provider_thread_id: None,
+        status: "completed".into(),
+        kind: "user_message".into(),
+    }];
+    let context = ProviderAdapterV2HistoricalContext {
+        messages,
+        context: "Summary of the source thread".into(),
+    };
+    let items = turin_provider_core::handoff_budget::history_response_items(
+        &context.messages,
+        &context.context,
+    );
+    let tail = vec![
+        expect(
+            json!({"id": 3, "method": "thread/inject_items", "params": {"threadId": thread, "items": items}}),
+        ),
+        emit(response),
+    ];
+    let replay = open(synthetic("inject", tail)).await;
+    let outcome = replay
+        .runtime
+        .inject_history(&replay.thread, &context)
+        .expect("inject_history")
+        .await;
+    (outcome, replay)
+}
+
+#[tokio::test]
+async fn inject_history_delivers_through_thread_inject_items() {
+    let (outcome, replay) = inject(json!({"id": 3, "result": {}})).await;
+    assert!(outcome.unwrap());
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn inject_history_reports_false_when_the_app_server_predates_it() {
+    let (outcome, replay) =
+        inject(json!({"id": 3, "error": {"code": -32601, "message": "Injection rejected"}})).await;
+    assert!(!outcome.unwrap());
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn inject_history_fails_on_any_other_rejection() {
+    let (outcome, _replay) =
+        inject(json!({"id": 3, "error": {"code": -32602, "message": "Injection rejected"}})).await;
+    let error = outcome.expect_err("invalid payload");
+    assert!(format!("{error:?}").contains("Failed to inject historical context"));
+}
+
+#[tokio::test]
+async fn upload_feedback_sends_the_thread_and_returns_the_feedback_id() {
+    let thread = native_thread_of(&preamble());
+    let tail = vec![
+        expect(json!({"id": 3, "method": "feedback/upload", "params": {
+            "classification": "bug", "includeLogs": true, "reason": "it broke", "threadId": thread
+        }})),
+        emit(json!({"id": 3, "result": {"threadId": "feedback-1"}})),
+    ];
+    let replay = open(synthetic("feedback", tail)).await;
+    let feedback_id = replay
+        .runtime
+        .upload_feedback(ProviderAdapterV2UploadFeedbackInput {
+            provider_thread: replay.thread.clone(),
+            reason: Some("it broke".into()),
+        })
+        .expect("upload_feedback")
+        .await
+        .unwrap();
+    assert_eq!(feedback_id, "feedback-1");
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn unload_thread_unsubscribes_and_forgets_session_approvals() {
+    let thread = native_thread_of(&preamble());
+    let tail = vec![
+        expect(json!({"id": 3, "method": "thread/unsubscribe", "params": {"threadId": thread}})),
+        emit(json!({"id": 3, "result": {"status": "unsubscribed"}})),
+    ];
+    let replay = open(synthetic("unload", tail)).await;
+    replay
+        .runtime
+        .unload_thread(&replay.thread)
+        .expect("unload_thread")
+        .await
+        .unwrap();
+    replay.driver.verify_complete().unwrap();
+}
+
+/// After a compaction Codex drops client developer messages and only resends
+/// `additionalContext` when it changes, so the adapter injects it again.
+#[tokio::test]
+async fn additional_context_is_restored_after_a_compaction() {
+    let mut transcript = fixture("simple");
+    let thread = native_thread_of(&transcript.entries);
+    let context = json!({
+        "mcp_app_notes": {"kind": "untrusted", "value": "The app saved a draft."}
+    });
+    let mut inject_id = 0;
+    for entry in &mut transcript.entries {
+        if let ReplayEntry::ExpectOutbound { frame, .. } = entry
+            && frame["method"] == "turn/start"
+        {
+            frame["params"]["additionalContext"] = context.clone();
+            inject_id = frame["id"].as_i64().unwrap() + 1;
+        }
+    }
+    // The turn's ids shift by one after the injection.
+    let completed = transcript
+        .entries
+        .iter()
+        .position(|entry| matches!(entry, ReplayEntry::EmitInbound { frame, .. } if frame["method"] == "turn/completed"))
+        .unwrap();
+    transcript.entries.splice(
+        completed..completed,
+        [
+            emit(json!({"method": "item/completed", "params": {
+                "threadId": thread, "turnId": recorded_turn_id(&fixture("simple")),
+                "item": {"type": "contextCompaction", "id": "compact-item"}
+            }})),
+            expect(json!({"id": inject_id, "method": "thread/inject_items", "params": {
+                "threadId": thread,
+                "items": [{"type": "message", "role": "user", "content": [
+                    {"type": "input_text",
+                     "text": "<external_mcp_app_notes>The app saved a draft.</external_mcp_app_notes>"}
+                ]}]
+            }})),
+            emit(json!({"id": inject_id, "result": {}})),
+        ],
+    );
+    let mut replay = open(transcript).await;
+    let mut input = replay.turn_input(
+        "Respond with the following text: fixture simple ok",
+        policy(
+            RuntimeMode::FullAccess,
+            ProviderInteractionMode::Default,
+            None,
+            None,
+        ),
+    );
+    input.app_context = Some(vec![ProviderAdapterV2AppContext {
+        key: "mcp_app_notes".into(),
+        text: "The app saved a draft.".into(),
+    }]);
+    replay.runtime.start_turn(input).await.unwrap();
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+fn recorded_turn_id(transcript: &ReplayTranscript) -> String {
+    transcript
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            ReplayEntry::EmitInbound { frame, .. } if frame["method"] == "turn/started" => frame
+                .pointer("/params/turn/id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        })
+        .expect("turn id")
+}
+
+#[test]
+fn pending_background_work_follows_running_commands_tools_and_subagents() {
+    use crate::projection::{has_pending_background_work, has_pending_background_work_for_thread};
+    let mut state = RuntimeState::default();
+    assert!(!has_pending_background_work(&state));
+    state
+        .turns
+        .insert("native-turn-1".into(), detached_turn("native-turn-1"));
+    assert!(
+        !has_pending_background_work(&state),
+        "an idle turn is not work"
+    );
+    assert!(!has_pending_background_work_for_thread(
+        &state,
+        "provider-thread-1"
+    ));
+
+    notify(
+        &mut state,
+        "item/started",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "startedAtMs": 1, "item": {
+            "type": "commandExecution", "id": "cmd-1", "command": "sleep 60", "cwd": "/w",
+            "processId": "p1", "status": "inProgress", "commandActions": [], "source": "agent",
+            "aggregatedOutput": null, "exitCode": null, "durationMs": null
+        }}),
+    );
+    assert!(has_pending_background_work(&state));
+    assert!(has_pending_background_work_for_thread(
+        &state,
+        "provider-thread-1"
+    ));
+    assert!(
+        !has_pending_background_work_for_thread(&state, "another-provider-thread"),
+        "other threads are unaffected"
+    );
+
+    // A clean turn end keeps the turn with its running command.
+    notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-1", "status": "completed", "completedAt": 2}}),
+    );
+    assert!(state.settled.contains_key("native-turn-1"));
+    assert!(has_pending_background_work(&state));
+    assert!(has_pending_background_work_for_thread(
+        &state,
+        "provider-thread-1"
+    ));
+
+    notify(
+        &mut state,
+        "item/completed",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "item": {
+            "type": "commandExecution", "id": "cmd-1", "command": "sleep 60", "cwd": "/w",
+            "processId": "p1", "status": "completed", "commandActions": [], "source": "agent",
+            "aggregatedOutput": "", "exitCode": 0, "durationMs": 5
+        }}),
+    );
+    assert!(!has_pending_background_work(&state));
+    assert!(!has_pending_background_work_for_thread(
+        &state,
+        "provider-thread-1"
+    ));
+}
+
+/// Provider thread ids carry the driver and native id, not the instance
+/// (`idAllocator.derive.providerThread({driver, nativeThreadId})`), so a T3 database imports.
+#[tokio::test]
+async fn provider_thread_ids_omit_the_provider_instance() {
+    let transcript = fixture("simple");
+    let native = native_thread_of(&transcript.entries);
+    let replay = open(transcript).await;
+    assert_eq!(
+        replay.thread.id.as_str(),
+        format!("provider-thread:provider:codex:native-thread:{native}")
+    );
+}
+
+/// `fixture_name` with its first server request replaced by `request` (keeping the
+/// request id) and the answer it expects by `answer`.
+fn with_request_swapped(fixture_name: &str, request: Value, answer: Value) -> ReplayTranscript {
+    let mut transcript = fixture(fixture_name);
+    for entry in &mut transcript.entries {
+        match entry {
+            ReplayEntry::EmitInbound { frame, .. }
+                if frame["method"]
+                    .as_str()
+                    .is_some_and(|method| method.ends_with("/requestApproval")) =>
+            {
+                let id = frame["id"].clone();
+                let mut swapped = request.clone();
+                swapped["id"] = id;
+                *frame = swapped;
+            }
+            ReplayEntry::ExpectOutbound { frame, .. }
+                if frame.pointer("/result/decision").is_some() =>
+            {
+                let id = frame["id"].clone();
+                *frame = json!({"id": id, "result": answer.clone()});
+            }
+            _ => {}
+        }
+    }
+    transcript
+}
+
+/// The legacy `execCommandApproval` names a conversation and a call, not a turn and an item.
+#[tokio::test]
+async fn legacy_exec_command_approval_is_raised_on_the_active_turn_of_its_conversation() {
+    let base = fixture("tool_call_read_only_on_request");
+    let thread = native_thread_of(&base.entries);
+    let policy = read_only_policy(&base);
+    let text = recorded_turn_params(&base, 0)["input"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let transcript = with_request_swapped(
+        "tool_call_read_only_on_request",
+        json!({"method": "execCommandApproval", "params": {
+            "conversationId": thread, "callId": "call-1", "approvalId": null,
+            "command": ["git", "status"], "cwd": "/workspace", "parsedCmd": [],
+            "reason": null
+        }}),
+        json!({"decision": "approved"}),
+    );
+    let mut replay = open(transcript).await;
+    replay.start(&text, policy).await;
+    let seen = replay
+        .next_until(|event| !runtime_requests(std::slice::from_ref(event)).is_empty())
+        .await;
+    let request = runtime_requests(&seen).remove(0);
+    assert_eq!(request.kind, OrchestrationV2RuntimeRequestKind::Command);
+    assert_eq!(
+        request
+            .native_request_ref
+            .as_ref()
+            .unwrap()
+            .native_id
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "call-1"
+    );
+    let prompt = seen.iter().find_map(|event| match event {
+        ProviderAdapterV2Event::TurnItemUpdated {
+            turn_item: OrchestrationV2TurnItem::ApprovalRequest { prompt, .. },
+            ..
+        } => Some(prompt.clone()),
+        _ => None,
+    });
+    assert_eq!(prompt.flatten().as_deref(), Some("git status"));
+    replay
+        .runtime
+        .respond_to_runtime_request(accept(&request))
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.finish_turn().await,
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn legacy_apply_patch_approval_describes_the_patch() {
+    let base = fixture("tool_call_restricted_granular");
+    let thread = native_thread_of(&base.entries);
+    let text = recorded_text(&base, 0);
+    let policy = recorded_policy(&base, RuntimeMode::ApprovalRequired);
+    let transcript = with_request_swapped(
+        "tool_call_restricted_granular",
+        json!({"method": "applyPatchApproval", "params": {
+            "conversationId": thread, "callId": "patch-1", "reason": null, "grantRoot": null,
+            "fileChanges": {"/tmp/added.ts": {"type": "add", "content": ""}}
+        }}),
+        json!({"decision": "approved"}),
+    );
+    let mut replay = open(transcript).await;
+    replay.start(&text, policy).await;
+    let seen = replay
+        .next_until(|event| !runtime_requests(std::slice::from_ref(event)).is_empty())
+        .await;
+    let request = runtime_requests(&seen).remove(0);
+    assert_eq!(request.kind, OrchestrationV2RuntimeRequestKind::FileChange);
+    let prompt = seen.iter().find_map(|event| match event {
+        ProviderAdapterV2Event::TurnItemUpdated {
+            turn_item: OrchestrationV2TurnItem::ApprovalRequest { prompt, .. },
+            ..
+        } => Some(prompt.clone()),
+        _ => None,
+    });
+    assert_eq!(prompt.flatten().as_deref(), Some("add /tmp/added.ts"));
+    replay
+        .runtime
+        .respond_to_runtime_request(accept(&request))
+        .await
+        .unwrap();
+    replay.finish_turn().await;
+    replay.driver.verify_complete().unwrap();
+}
+
+/// A request no active turn can show is answered at once, so Codex is not left waiting.
+#[tokio::test]
+async fn a_legacy_approval_without_an_active_turn_gets_a_protocol_error() {
+    let thread = native_thread_of(&preamble());
+    let transcript = synthetic(
+        "no-turn-legacy",
+        vec![
+            emit(json!({"method": "execCommandApproval", "id": 0, "params": {
+                "conversationId": thread, "callId": "call-1", "approvalId": null,
+                "command": ["ls"], "cwd": "/w", "parsedCmd": [], "reason": null
+            }})),
+            expect(json!({"id": 0, "error": {
+                "code": -32603,
+                "message": "Codex App Server request handler failed for method 'execCommandApproval'"
+            }})),
+        ],
+    );
+    let replay = open(transcript).await;
+    // The answer is sent from the pump; wait until the driver has consumed it.
+    for _ in 0..200 {
+        if replay.driver.verify_complete().is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn an_mcp_elicitation_without_a_turn_is_declined() {
+    let thread = native_thread_of(&preamble());
+    let transcript = synthetic(
+        "no-turn-elicitation",
+        vec![
+            emit(
+                json!({"method": "mcpServer/elicitation/request", "id": 0, "params": {
+                    "threadId": thread, "serverName": "gmail", "mode": "form",
+                    "message": "Allow ChatGPT to use Gmail?",
+                    "requestedSchema": {"type": "object", "properties": {}}
+                }}),
+            ),
+            expect(json!({"id": 0, "result": {"action": "decline"}})),
+        ],
+    );
+    let replay = open(transcript).await;
+    for _ in 0..200 {
+        if replay.driver.verify_complete().is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    replay.driver.verify_complete().unwrap();
+}
+
+fn running_command(id: &str, process: &str) -> Value {
+    json!({
+        "type": "commandExecution", "id": id, "command": "sleep 60", "cwd": "/w",
+        "processId": process, "status": "inProgress", "commandActions": [], "source": "agent",
+        "aggregatedOutput": null, "exitCode": null, "durationMs": null
+    })
+}
+
+fn provider_turn_for(native_turn: &str) -> turin_contracts::ProviderTurnId {
+    turin_provider_core::id_allocator::derive::provider_turn(
+        &crate::orchestration_adapter::driver(),
+        native_turn,
+    )
+}
+
+/// A Stop on a turn that ended cleanly with a command still running reaches the settled
+/// turn: its terminal is read first, and its item ends as interrupted.
+#[test]
+fn a_stop_reaches_the_settled_turn_and_stops_its_retained_command() {
+    use crate::interrupt;
+    let mut state = RuntimeState::default();
+    let mut turn = detached_turn("native-turn-1");
+    turn.input.provider_thread.native_thread_ref =
+        Some(crate::orchestration_adapter::native_ref("thread-1"));
+    let provider_thread = turn.input.provider_thread.id.clone();
+    state.turns.insert("native-turn-1".into(), turn);
+    notify(
+        &mut state,
+        "item/started",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "startedAtMs": 1, "item": running_command("cmd-1", "p1")}),
+    );
+    notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-1", "status": "completed", "completedAt": 2}}),
+    );
+    assert!(state.settled.contains_key("native-turn-1"));
+
+    // The turn is no longer active: only a runtime restart request reaches it.
+    let provider_turn = provider_turn_for("native-turn-1");
+    assert_eq!(
+        interrupt::plan(&state, &provider_turn, &provider_thread, false),
+        None
+    );
+    let plan = interrupt::plan(&state, &provider_turn, &provider_thread, true).expect("plan");
+    assert_eq!(plan.targets.len(), 1);
+    assert!(!plan.targets[0].active);
+    let terminals = interrupt::terminals(&state, &plan.targets);
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(terminals[0].1, "p1");
+
+    let events = crate::projection::stop_settled_work(
+        &mut state,
+        "native-turn-1",
+        turin_contracts::UtcDateTime::now(),
+    );
+    assert!(
+        !state.settled.contains_key("native-turn-1"),
+        "the turn is released"
+    );
+    assert!(turn_items(&events).iter().any(|item| matches!(
+        item,
+        OrchestrationV2TurnItem::CommandExecution {
+            status: OrchestrationV2TurnItemStatus::Interrupted,
+            ..
+        }
+    )));
+}
+
+/// The terminal list is read before `turn/interrupt`, so the pump ending the turn first
+/// cannot hide a command from the terminate step.
+#[test]
+fn the_terminals_of_an_active_turn_are_read_before_it_ends() {
+    use crate::interrupt;
+    let mut state = RuntimeState::default();
+    let mut turn = detached_turn("native-turn-1");
+    turn.input.provider_thread.native_thread_ref =
+        Some(crate::orchestration_adapter::native_ref("thread-1"));
+    let provider_thread = turn.input.provider_thread.id.clone();
+    state.turns.insert("native-turn-1".into(), turn);
+    notify(
+        &mut state,
+        "item/started",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "startedAtMs": 1, "item": running_command("cmd-1", "p1")}),
+    );
+    let plan = interrupt::plan(
+        &state,
+        &provider_turn_for("native-turn-1"),
+        &provider_thread,
+        false,
+    )
+    .expect("plan");
+    assert!(plan.targets[0].active);
+    let before = interrupt::terminals(&state, &plan.targets);
+    assert_eq!(before, vec![("thread-1".to_owned(), "p1".to_owned())]);
+
+    // Ending the interrupted turn forgets its commands.
+    state.interrupting.insert("native-turn-1".into());
+    let events = notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-1", "status": "completed", "completedAt": 2}}),
+    );
+    assert!(interrupt::terminals(&state, &plan.targets).is_empty());
+    // A turn Stop is interrupting ends as interrupted although Codex called it completed.
+    assert_eq!(
+        terminal_status(&events),
+        ProviderAdapterV2TurnTerminalStatus::Interrupted
+    );
+}
+
+async fn terminate_with(entries: Vec<ReplayEntry>) -> (Result<(), String>, ReplayDriver) {
+    let mut transcript = fixture("simple");
+    transcript.entries = entries;
+    let (client, driver) = make_replay_client(transcript);
+    let outcome = crate::interrupt::terminate_background_terminal(&client, "thread-1", "p1").await;
+    (outcome, driver)
+}
+
+fn terminate_request(id: i64) -> ReplayEntry {
+    expect(
+        json!({"id": id, "method": "thread/backgroundTerminals/terminate",
+        "params": {"threadId": "thread-1", "processId": "p1"}}),
+    )
+}
+
+#[tokio::test]
+async fn terminating_tolerates_a_thread_the_app_server_already_unloaded() {
+    let (outcome, driver) = terminate_with(vec![
+        terminate_request(1),
+        emit(json!({"id": 1, "error": {"code": -32600, "message": "thread not found: thread-1"}})),
+    ])
+    .await;
+    assert_eq!(outcome, Ok(()));
+    driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn terminating_fails_on_other_request_errors() {
+    let (outcome, _driver) = terminate_with(vec![
+        terminate_request(1),
+        emit(json!({"id": 1, "error": {"code": -32600, "message": "something else"}})),
+    ])
+    .await;
+    assert!(outcome.is_err());
+}
+
+#[tokio::test]
+async fn an_unconfirmed_terminal_that_is_still_listed_is_an_error() {
+    let list = |id: i64| {
+        expect(
+            json!({"id": id, "method": "thread/backgroundTerminals/list",
+        "params": {"threadId": "thread-1"}}),
+        )
+    };
+    let (outcome, driver) = terminate_with(vec![
+        terminate_request(1),
+        emit(json!({"id": 1, "result": {"terminated": false}})),
+        list(2),
+        emit(json!({"id": 2, "result": {"data": [{"processId": "p1"}], "nextCursor": null}})),
+    ])
+    .await;
+    assert_eq!(
+        outcome,
+        Err("Codex background terminal p1 remained active after termination.".to_owned())
+    );
+    driver.verify_complete().unwrap();
+
+    let (outcome, driver) = terminate_with(vec![
+        terminate_request(1),
+        emit(json!({"id": 1, "result": {"terminated": false}})),
+        list(2),
+        emit(json!({"id": 2, "result": {"data": [{"processId": "other"}], "nextCursor": null}})),
+    ])
+    .await;
+    assert_eq!(
+        outcome,
+        Ok(()),
+        "a terminal that is gone needs nothing more"
+    );
+    driver.verify_complete().unwrap();
+}
+
+/// A Stop on a turn nothing retains anything for is an error, unless it asks for a restart.
+#[tokio::test]
+async fn stopping_a_turn_that_is_not_active_is_an_error() {
+    let replay = open(fixture("simple")).await;
+    let input = |restart| ProviderAdapterV2InterruptInput {
+        provider_thread: replay.thread.clone(),
+        provider_turn_id: provider_turn_for("unknown-turn"),
+        request_runtime_restart: restart,
+    };
+    let error = replay
+        .runtime
+        .interrupt_turn(input(None))
+        .await
+        .expect_err("not active");
+    assert!(format!("{error:?}").contains("is not active and cannot be interrupted."));
+    replay
+        .runtime
+        .interrupt_turn(input(Some(true)))
+        .await
+        .unwrap();
+}
+
+/// `compactStrings` trims and drops blanks but keeps repeats.
+#[test]
+fn web_search_patterns_keep_repeats() {
+    let patterns = crate::items::web_search_patterns(&json!({
+        "type": "webSearch", "id": "w", "query": "rust",
+        "action": {"type": "search", "queries": ["rust", " rust ", ""], "query": "rust"}
+    }));
+    assert_eq!(patterns, ["rust", "rust", "rust", "rust"]);
+}
+
+/// Reasoning on a turn that did not complete is interrupted, and both its node and its
+/// item name the Codex item rather than the composite part key.
+#[test]
+fn reasoning_on_an_interrupted_turn_is_interrupted_and_names_the_codex_item() {
+    let mut turn = detached_turn("native-turn-1");
+    let part_key = "[\"native-turn-1\",\"item-1\",\"summary\",0]";
+    let running = crate::items::reasoning(
+        &mut turn,
+        part_key,
+        "item-1",
+        "thinking",
+        false,
+        false,
+        turin_contracts::UtcDateTime::now(),
+    );
+    assert_eq!(
+        running.node.status,
+        OrchestrationV2ExecutionNodeStatus::Running
+    );
+    let stopped = crate::items::reasoning(
+        &mut turn,
+        part_key,
+        "item-1",
+        "thinking",
+        true,
+        true,
+        turin_contracts::UtcDateTime::now(),
+    );
+    assert_eq!(
+        stopped.node.status,
+        OrchestrationV2ExecutionNodeStatus::Interrupted
+    );
+    let OrchestrationV2TurnItem::Reasoning {
+        status,
+        native_item_ref,
+        ..
+    } = &stopped.turn_item
+    else {
+        panic!("reasoning item");
+    };
+    assert_eq!(*status, OrchestrationV2TurnItemStatus::Interrupted);
+    for native in [
+        native_item_ref.as_ref().and_then(|r| r.native_id.as_ref()),
+        stopped
+            .node
+            .native_item_ref
+            .as_ref()
+            .and_then(|r| r.native_id.as_ref()),
+    ] {
+        assert_eq!(native.map(|id| id.as_str()), Some("item-1"));
+    }
 }
 
 /// Policy with the approval and sandbox settings the upstream recorder sent, so

@@ -2,10 +2,12 @@
 //! at the provider-core `ProviderAdapterV2` boundary.
 use crate::{
     adapter::{CodexAdapter, CodexEvent, CodexSession},
-    approvals::{Decision, PendingRequest},
+    approvals::{Decision, PendingRequest, codex_file_change_approval_prompt},
+    codex_input::{AttachmentPathResolver, to_codex_input},
     codex_mcp_elicitation::describe_mcp_elicitation,
+    codex_usage_limits::{CodexRateLimitSnapshot, codex_rate_limits_to_update},
     goal::{self, GoalCommand},
-    items,
+    interrupt, items,
     params::{RuntimePolicy, TurnContext},
     projection::{self, RuntimeState, TurnState},
     runtime::{CodexRuntimeConfig, CodexRuntimeResolver},
@@ -35,25 +37,30 @@ use turin_contracts::{
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
     provider_policy::{ProviderApprovalDecision, ProviderRequestKind},
+    provider_usage_limits::ProviderUsageLimitsUpdate,
 };
 use turin_provider_core::{
     failure::ProviderFailureCause,
+    handoff_budget::history_response_items,
     id_allocator::{IdAllocator, derive},
     provider_adapter::{
         ProviderAdapterErrorKind, ProviderAdapterV2, ProviderAdapterV2AppContext,
         ProviderAdapterV2EnsureThreadInput, ProviderAdapterV2Error, ProviderAdapterV2Event,
-        ProviderAdapterV2ForkThreadInput, ProviderAdapterV2InterruptInput,
-        ProviderAdapterV2OpenSessionInput, ProviderAdapterV2ReadThreadSnapshotInput,
-        ProviderAdapterV2ResumeThreadInput, ProviderAdapterV2RollbackTarget,
-        ProviderAdapterV2RollbackThreadInput, ProviderAdapterV2RuntimeRequestResponseInput,
-        ProviderAdapterV2SteerInput, ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2TurnInput,
-        ProviderEventStream, ProviderSessionRuntime,
+        ProviderAdapterV2ForkThreadInput, ProviderAdapterV2HistoricalContext,
+        ProviderAdapterV2InterruptInput, ProviderAdapterV2OpenSessionInput,
+        ProviderAdapterV2ReadThreadSnapshotInput, ProviderAdapterV2ResumeThreadInput,
+        ProviderAdapterV2RollbackTarget, ProviderAdapterV2RollbackThreadInput,
+        ProviderAdapterV2RuntimeRequestResponseInput, ProviderAdapterV2SteerInput,
+        ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2TurnInput,
+        ProviderAdapterV2UploadFeedbackInput, ProviderEventStream, ProviderSessionRuntime,
     },
+    rt::BoxFuture,
     selection_transition::{
         ProviderSelectionTransitionInput, ProviderSelectionTransitionPlan,
         turn_scoped_selection_transition,
     },
 };
+use turin_shared::model::model_selections_equal;
 
 pub(crate) fn driver() -> ProviderDriverKind {
     ProviderDriverKind::new("codex").expect("driver kind")
@@ -98,6 +105,9 @@ fn error(kind: ProviderAdapterErrorKind, cause: impl std::fmt::Display) -> Provi
     )
 }
 
+/// Receives a runtime rate-limit push (`onUsageLimits`): the update and when it arrived.
+pub type UsageLimitsSink = Arc<dyn Fn(ProviderUsageLimitsUpdate, String) + Send + Sync>;
+
 pub struct CodexProviderAdapter {
     instance_id: ProviderInstanceId,
     driver: ProviderDriverKind,
@@ -105,6 +115,8 @@ pub struct CodexProviderAdapter {
     injected_client: Mutex<Option<Client>>,
     /// Resolves the launch per session (managed Codex: the signed-in token).
     resolver: Option<Arc<dyn CodexRuntimeResolver>>,
+    usage_sink: Option<UsageLimitsSink>,
+    attachment_path: Option<AttachmentPathResolver>,
 }
 
 impl CodexProviderAdapter {
@@ -115,7 +127,19 @@ impl CodexProviderAdapter {
             config,
             injected_client: Mutex::new(None),
             resolver: None,
+            usage_sink: None,
+            attachment_path: None,
         }
+    }
+    /// `resolveAttachmentPath` for turn input: attachment paths in the text and image data URLs.
+    pub fn with_attachment_resolver(mut self, resolver: AttachmentPathResolver) -> Self {
+        self.attachment_path = Some(resolver);
+        self
+    }
+    /// Upstream's `onUsageLimits` hook: where `account/rateLimits/updated` pushes go.
+    pub fn with_usage_sink(mut self, sink: UsageLimitsSink) -> Self {
+        self.usage_sink = Some(sink);
+        self
     }
     /// Upstream's `resolveRuntime` option: the launch settings come from `resolver`
     /// for every session, with `config` supplying the cwd and client version.
@@ -141,6 +165,8 @@ impl CodexProviderAdapter {
             config,
             injected_client: Mutex::new(Some(client)),
             resolver: None,
+            usage_sink: None,
+            attachment_path: None,
         }
     }
 }
@@ -242,6 +268,7 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
             turn_registered.clone(),
             input.provider_session_id.clone(),
             out_tx,
+            self.usage_sink.clone(),
         ));
         let now = UtcDateTime::now();
         let cwd = input
@@ -273,6 +300,9 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
             turn_registered,
             state,
             config,
+            attachment_path: self.attachment_path.clone(),
+            // ChatGPT token sharing does not accept service tiers.
+            omit_service_tier: self.resolver.is_some(),
             _keepalive: keepalive,
         }))
     }
@@ -294,6 +324,9 @@ pub struct CodexProviderRuntime {
     turn_registered: Arc<tokio::sync::Notify>,
     state: Arc<Mutex<RuntimeState>>,
     config: CodexRuntimeConfig,
+    attachment_path: Option<AttachmentPathResolver>,
+    /// `omitServiceTier`: a managed (ChatGPT token sharing) session never sends a tier.
+    omit_service_tier: bool,
     /// Held for the session: the managed executable lease.
     _keepalive: Option<Box<dyn std::any::Any + Send + Sync>>,
 }
@@ -301,6 +334,23 @@ pub struct CodexProviderRuntime {
 impl Drop for CodexProviderRuntime {
     fn drop(&mut self) {
         self.pump.abort();
+    }
+}
+
+/// `account/rateLimits/updated`: the pushed windows go to the snapshot.
+fn push_usage_limits(sink: &UsageLimitsSink, event: &CodexEvent) {
+    if event.method != "account/rateLimits/updated" {
+        return;
+    }
+    let Some(snapshot) = event
+        .params
+        .get("rateLimits")
+        .and_then(|value| serde_json::from_value::<CodexRateLimitSnapshot>(value.clone()).ok())
+    else {
+        return;
+    };
+    if let Some(update) = codex_rate_limits_to_update(&snapshot) {
+        sink(update, UtcDateTime::now().to_string());
     }
 }
 
@@ -361,6 +411,15 @@ fn project_parked(
 /// Whether an item's turn is registered, or is the first `turn/started` of a
 /// registered subagent, which opens a child turn when it projects.
 fn admitted(item: &Parked, state: &RuntimeState) -> bool {
+    // A legacy approval names a conversation. While that thread's turn is still starting,
+    // its turn is not registered yet, so the request waits for it.
+    if let Parked::Request(request) = item
+        && is_legacy_approval(&request.method)
+        && let Some(thread) = request.params.get("conversationId").and_then(Value::as_str)
+    {
+        return active_turn_on_thread(state, thread).is_some()
+            || !(state.starting.contains(thread) || state.pending_root_turns.contains_key(thread));
+    }
     match item.turn() {
         None => true,
         Some(turn) => {
@@ -374,7 +433,8 @@ fn admitted(item: &Parked, state: &RuntimeState) -> bool {
                             .and_then(Value::as_str)
                             .unwrap_or_default();
                         event.method == "turn/started"
-                            && subagent::opens_child_turn(state, thread, turn)
+                            && (state.pending_root_turns.contains_key(thread)
+                                || subagent::opens_child_turn(state, thread, turn))
                     }
                     Parked::Request(_) => false,
                 }
@@ -394,6 +454,18 @@ fn ingest(
         .turn()
         .is_some_and(|turn| parked.iter().any(|p| p.turn() == Some(turn)));
     if behind_parked || !admitted(&item, state) {
+        // A frame for a turn that already ended will never be admitted. Parking it would
+        // only grow the queue every later arrival scans.
+        if !behind_parked
+            && item
+                .turn()
+                .is_some_and(|turn| state.finished.contains(turn))
+        {
+            if let Parked::Request(request) = &item {
+                reject_unanswered(state, request);
+            }
+            return vec![];
+        }
         if parked.len() >= PARKED_LIMIT {
             parked.pop_front();
         }
@@ -430,6 +502,7 @@ fn drain_parked(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn project_pump(
     mut events: Option<tokio::sync::mpsc::UnboundedReceiver<CodexEvent>>,
     mut requests: Option<tokio::sync::mpsc::UnboundedReceiver<PendingRequest>>,
@@ -438,28 +511,78 @@ async fn project_pump(
     registered: Arc<tokio::sync::Notify>,
     session_id: ProviderSessionId,
     out: tokio::sync::mpsc::UnboundedSender<ProviderAdapterV2Event>,
+    usage_sink: Option<UsageLimitsSink>,
 ) {
     let mut parked = VecDeque::new();
+    // Owned by the pump, so ending the session aborts them.
+    let mut background = tokio::task::JoinSet::new();
     loop {
+        // Reap finished tasks so the set does not grow.
+        while background.try_join_next().is_some() {}
         let flush = projection::next_flush(&state.lock());
-        let mut batch = tokio::select! {
+        let wake = tokio::select! {
             raw = recv_raw(&mut events) => match raw {
-                Some(raw) => ingest(&mut parked, Parked::Event(raw), &mut state.lock(), &session_id),
+                Some(raw) => Wake::Event(raw),
                 None => return,
             },
-            request = recv_request(&mut requests) => {
-                ingest(&mut parked, Parked::Request(request), &mut state.lock(), &session_id)
-            }
-            _ = registered.notified() => vec![],
+            request = recv_request(&mut requests) => Wake::Request(request),
+            _ = registered.notified() => Wake::Idle,
             _ = async {
                 match flush {
                     Some(at) => tokio::time::sleep_until(at).await,
                     None => std::future::pending().await,
                 }
-            } => projection::flush_due(&mut state.lock(), tokio::time::Instant::now()),
+            } => Wake::Flush,
         };
-        batch.extend(drain_parked(&mut parked, &mut state.lock(), &session_id));
-        let interrupts = std::mem::take(&mut state.lock().interrupts);
+        if let Wake::Event(raw) = &wake {
+            if let Some(sink) = &usage_sink {
+                push_usage_limits(sink, raw);
+            }
+            // The callback must not wait on the injection's response, which this
+            // pump reads.
+            if raw.method == "item/completed"
+                && raw.params.pointer("/item/type").and_then(Value::as_str)
+                    == Some("contextCompaction")
+                && let Some(thread) = raw.params.get("threadId").and_then(Value::as_str)
+            {
+                let session = session.clone();
+                let thread = thread.to_owned();
+                background.spawn(async move {
+                    session.restore_additional_context(&thread).await;
+                });
+            }
+        }
+        // One guard from computing the events to sending them: a command's events, which are
+        // sent under the same lock, can neither overtake these nor trail them.
+        let (unanswered, interrupts) = {
+            let mut guard = state.lock();
+            let mut batch = match wake {
+                Wake::Event(raw) => {
+                    ingest(&mut parked, Parked::Event(raw), &mut guard, &session_id)
+                }
+                Wake::Request(request) => ingest(
+                    &mut parked,
+                    Parked::Request(request),
+                    &mut guard,
+                    &session_id,
+                ),
+                Wake::Idle => vec![],
+                Wake::Flush => projection::flush_due(&mut guard, tokio::time::Instant::now()),
+            };
+            batch.extend(drain_parked(&mut parked, &mut guard, &session_id));
+            for event in batch {
+                if out.send(event).is_err() {
+                    return;
+                }
+            }
+            (
+                std::mem::take(&mut guard.unanswered),
+                std::mem::take(&mut guard.interrupts),
+            )
+        };
+        for (id, decision) in unanswered {
+            session.broker.reply(id, decision);
+        }
         for (thread, turn) in interrupts {
             // Upstream interrupts a late child turn and does not wait on it: the
             // interrupt is bounded by a timeout, and its failure is only logged.
@@ -479,12 +602,15 @@ async fn project_pump(
                 }
             });
         }
-        for event in batch {
-            if out.send(event).is_err() {
-                return;
-            }
-        }
     }
+}
+
+/// What woke the pump.
+enum Wake {
+    Event(CodexEvent),
+    Request(PendingRequest),
+    Idle,
+    Flush,
 }
 
 fn thread_from(
@@ -505,7 +631,8 @@ fn thread_from(
                 detail: "missing thread.id".into(),
             })?;
     Ok(OrchestrationV2ProviderThread {
-        id: derive::provider_thread(&driver(), Some(instance_id), id),
+        // Upstream derives it from the driver and native id alone, so a T3 database imports.
+        id: derive::provider_thread(&driver(), None, id),
         driver: driver(),
         provider_instance_id: instance_id.clone(),
         provider_session_id: Some(session_id.clone()),
@@ -565,13 +692,6 @@ fn option<'a>(selection: &'a ModelSelection, key: &str) -> Option<&'a str> {
             ProviderOptionSelectionValue::Str(s) => Some(s.as_str()),
             _ => None,
         })
-}
-fn turn_input(text: &str) -> Vec<Value> {
-    if text.is_empty() {
-        vec![]
-    } else {
-        vec![json!({"type":"text","text":text})]
-    }
 }
 /// Upstream `isTerminalProviderTurn`: a turn with a native ref that has stopped.
 fn is_terminal_turn(turn: &OrchestrationV2ProviderTurn) -> bool {
@@ -669,6 +789,285 @@ fn snapshot(
 }
 
 impl CodexProviderRuntime {
+    /// The active turns in the lineage of `roots` (the roots included).
+    fn active_lineage(&self, roots: &[String]) -> Vec<interrupt::Target> {
+        let state = self.state.lock();
+        let mut found: Vec<interrupt::Target> = state
+            .turns
+            .values()
+            .filter(|turn| interrupt::in_lineage(&state, turn, roots))
+            .filter_map(|turn| {
+                projection::turn_native_thread(turn).map(|thread| interrupt::Target {
+                    native_turn: turn.native_turn.clone(),
+                    thread,
+                    active: true,
+                })
+            })
+            .collect();
+        found.sort_by(|left, right| left.native_turn.cmp(&right.native_turn));
+        found
+    }
+
+    /// `turn/interrupt` for each target, all at once, bounded to 10 s.
+    async fn interrupt_all(&self, targets: &[interrupt::Target]) -> Result<(), String> {
+        let requests = targets.iter().map(|target| {
+            self.session
+                .interrupt_turn(&target.thread, &target.native_turn)
+        });
+        match tokio::time::timeout(Duration::from_secs(10), futures::future::join_all(requests))
+            .await
+        {
+            Ok(results) => results
+                .into_iter()
+                .find_map(Result::err)
+                .map_or(Ok(()), |cause| Err(cause.to_string())),
+            Err(_) => {
+                tracing::warn!(
+                    turns = ?targets.iter().map(|t| t.native_turn.as_str()).collect::<Vec<_>>(),
+                    "Codex interrupt timed out"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Adds the lineage turns that started after the Stop began to the tracked set,
+    /// marking them interrupting. Returns them.
+    fn track_new_lineage(
+        &self,
+        roots: &[String],
+        tracked: &mut Vec<String>,
+        include_roots: bool,
+    ) -> Vec<interrupt::Target> {
+        let lineage = self.active_lineage(roots);
+        let mut state = self.state.lock();
+        let mut added = vec![];
+        for target in lineage {
+            if tracked.contains(&target.native_turn)
+                || (!include_roots && roots.contains(&target.native_turn))
+            {
+                continue;
+            }
+            tracked.push(target.native_turn.clone());
+            state.interrupting.insert(target.native_turn.clone());
+            added.push(target);
+        }
+        added
+    }
+
+    /// `finalizeRemainingInterruptLineage`: whatever of the lineage is still active after the
+    /// waits is interrupted and ended as interrupted, so a Stop never leaves a turn running.
+    async fn finalize_remaining(&self, roots: &[String], tracked: &mut Vec<String>) {
+        for _ in 0..100 {
+            let lineage = self.active_lineage(roots);
+            if lineage.is_empty() {
+                return;
+            }
+            let newly = self.track_new_lineage(roots, tracked, true);
+            if !newly.is_empty()
+                && let Err(cause) = self.interrupt_all(&newly).await
+            {
+                tracing::warn!(%cause, "orchestration-v2.codex-remaining-lineage-interrupt-failed");
+            }
+            let now = UtcDateTime::now();
+            self.apply(|state| {
+                let mut events = vec![];
+                for target in &lineage {
+                    events.extend(projection::project_event(
+                        CodexEvent::from_notification(
+                            "turn/completed".to_owned(),
+                            json!({
+                                "threadId": target.thread,
+                                "turn": {
+                                    "id": target.native_turn,
+                                    "status": "interrupted",
+                                    "completedAt": now.as_datetime().timestamp(),
+                                },
+                            }),
+                        ),
+                        state,
+                    ));
+                }
+                events
+            });
+        }
+    }
+
+    /// Terminates each terminal not yet contained. Every one is attempted, and the first
+    /// failure is reported afterwards.
+    async fn terminate_terminals(
+        &self,
+        terminals: &[(String, String)],
+        contained: &mut std::collections::HashSet<(String, String)>,
+    ) -> Result<(), String> {
+        let mut first_failure = None;
+        for terminal in terminals {
+            if contained.contains(terminal) {
+                continue;
+            }
+            match interrupt::terminate_background_terminal(
+                self.session.client(),
+                &terminal.0,
+                &terminal.1,
+            )
+            .await
+            {
+                Ok(()) => {
+                    contained.insert(terminal.clone());
+                }
+                Err(cause) => {
+                    first_failure.get_or_insert(cause);
+                }
+            }
+        }
+        first_failure.map_or(Ok(()), Err)
+    }
+
+    /// Waits up to 10 s for the active targets to end.
+    async fn wait_for_targets(&self, targets: &[String]) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            {
+                let state = self.state.lock();
+                if !targets
+                    .iter()
+                    .any(|native| state.turns.contains_key(native))
+                {
+                    return true;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn run_interrupt(
+        &self,
+        plan: &interrupt::Plan,
+        terminals: Vec<(String, String)>,
+        tracked: &mut Vec<String>,
+    ) -> Result<(), String> {
+        // Interrupt each target Codex still runs.
+        for target in &plan.targets {
+            let running =
+                target.active && self.state.lock().turns.contains_key(&target.native_turn);
+            if !running {
+                continue;
+            }
+            if let Err(cause) = self
+                .session
+                .interrupt_turn(&target.thread, &target.native_turn)
+                .await
+            {
+                self.finalize_remaining(&plan.roots, tracked).await;
+                return Err(cause.to_string());
+            }
+        }
+        let mut contained = std::collections::HashSet::new();
+        let active: Vec<String> = plan
+            .targets
+            .iter()
+            .filter(|target| target.active)
+            .map(|target| target.native_turn.clone())
+            .collect();
+        // Terminals are stopped while the turns wind down.
+        let (_, completed) = tokio::join!(
+            self.terminate_terminals(&terminals, &mut contained),
+            self.wait_for_targets(&active)
+        );
+        if !completed {
+            tracing::warn!(
+                turns = ?active,
+                "orchestration-v2.codex-interrupt-timeout"
+            );
+        }
+        // Turns that started under the lineage since the Stop began.
+        let late = self.track_new_lineage(&plan.roots, tracked, false);
+        if !late.is_empty()
+            && let Err(cause) = self.interrupt_all(&late).await
+        {
+            self.finalize_remaining(&plan.roots, tracked).await;
+            return Err(cause);
+        }
+        self.finalize_remaining(&plan.roots, tracked).await;
+        // Everything attempted again, with what the lineage still holds.
+        let mut all = terminals;
+        {
+            let state = self.state.lock();
+            let targets: Vec<interrupt::Target> = tracked
+                .iter()
+                .filter_map(|native| {
+                    state
+                        .turns
+                        .get(native)
+                        .or_else(|| state.settled.get(native))
+                        .and_then(|turn| {
+                            projection::turn_native_thread(turn).map(|thread| interrupt::Target {
+                                native_turn: native.clone(),
+                                thread,
+                                active: true,
+                            })
+                        })
+                })
+                .collect();
+            for terminal in interrupt::terminals(&state, &targets) {
+                if !all.contains(&terminal) {
+                    all.push(terminal);
+                }
+            }
+        }
+        self.terminate_terminals(&all, &mut contained).await?;
+        // Stop the retained items without rewriting the completed root turn.
+        let now = UtcDateTime::now();
+        self.apply(|state| {
+            let mut events = vec![];
+            for target in &plan.targets {
+                events.extend(projection::stop_settled_work(
+                    state,
+                    &target.native_turn,
+                    now,
+                ));
+            }
+            events
+        });
+        Ok(())
+    }
+
+    /// `toCodexInput`.
+    async fn codex_input(
+        &self,
+        text: &str,
+        attachments: &[turin_contracts::chat_attachment::ChatAttachment],
+    ) -> Result<Vec<Value>, crate::codex_input::CodexInputError> {
+        to_codex_input(text, attachments, self.attachment_path.as_ref()).await
+    }
+
+    fn turn_start_error(
+        &self,
+        input: &ProviderAdapterV2TurnInput,
+        cause: impl std::fmt::Display,
+    ) -> ProviderAdapterV2Error {
+        error(
+            ProviderAdapterErrorKind::TurnStart {
+                driver: self.driver.clone(),
+                thread_id: input.thread_id.clone(),
+                provider_thread_id: input.provider_thread.id.clone(),
+                run_id: input.run_id.clone(),
+            },
+            cause,
+        )
+    }
+
+    /// Runs `change` on the state and sends the events it returns before the lock is released,
+    /// so the pump (which sends under the same lock) cannot interleave a newer event.
+    fn apply(&self, change: impl FnOnce(&mut RuntimeState) -> Vec<ProviderAdapterV2Event>) {
+        let mut state = self.state.lock();
+        let events = change(&mut state);
+        self.send(events);
+    }
+
     fn send(&self, events: Vec<ProviderAdapterV2Event>) {
         for event in events {
             let _ = self.out.send(event);
@@ -715,8 +1114,7 @@ impl CodexProviderRuntime {
                 .await
                 .map_err(fail)?,
         );
-        let events = goal::set_goal(&mut self.state.lock(), &thread, current.clone());
-        self.send(events);
+        self.apply(|state| goal::set_goal(state, &thread, current.clone()));
 
         match &command {
             GoalCommand::Show => {
@@ -736,8 +1134,7 @@ impl CodexProviderRuntime {
                     .and_then(|response| response.get("cleared"))
                     .and_then(Value::as_bool)
                     == Some(true);
-                let events = goal::set_goal(&mut self.state.lock(), &thread, None);
-                self.send(events);
+                self.apply(|state| goal::set_goal(state, &thread, None));
                 let reply = if cleared {
                     "Goal cleared."
                 } else {
@@ -762,8 +1159,7 @@ impl CodexProviderRuntime {
                     )
                     .await
                     .map_err(fail)?;
-                let events = goal::set_goal(&mut self.state.lock(), &thread, goal_of(response));
-                self.send(events);
+                self.apply(|state| goal::set_goal(state, &thread, goal_of(response)));
                 self.send(goal::reply_events(
                     &input,
                     "Goal paused. Send /goal resume to continue.",
@@ -793,17 +1189,25 @@ impl CodexProviderRuntime {
                 )
                 .await
                 .map_err(fail)?;
-            let events = goal::set_goal(&mut self.state.lock(), &thread, goal_of(response));
-            self.send(events);
+            self.apply(|state| goal::set_goal(state, &thread, goal_of(response)));
         }
         // Until the goal is active, a fast first turn holds the run.
         self.state.lock().goal_activations.insert(thread.clone());
         let mut turn_input = input.clone();
+        let objective_text = objective.clone();
         if let Some(objective) = objective {
             turn_input.message.text = objective;
         }
+        // The first goal turn carries the objective; a resume continues from history.
+        let codex_input = match &objective_text {
+            Some(objective) => self
+                .codex_input(objective, &[])
+                .await
+                .map_err(|cause| self.turn_start_error(&input, cause))?,
+            None => Vec::new(),
+        };
         let outcome = async {
-            self.start_native_turn(turn_input).await?;
+            self.start_native_turn(turn_input, codex_input).await?;
             let response = client
                 .request(
                     "thread/goal/set",
@@ -814,19 +1218,19 @@ impl CodexProviderRuntime {
             Ok::<_, ProviderAdapterV2Error>(goal_of(response))
         }
         .await;
-        let mut state = self.state.lock();
-        state.goal_activations.remove(&thread);
-        let active = goal::is_active(&state, &thread);
-        let mut events = match &outcome {
-            Ok(goal) => goal::set_goal(&mut state, &thread, goal.clone()),
-            Err(_) => vec![],
-        };
-        // A run held for an activation that did not happen settles now.
-        if !goal::is_active(&state, &thread) || !active {
-            events.extend(goal::release_hold(&mut state, &thread));
-        }
-        drop(state);
-        self.send(events);
+        self.apply(|state| {
+            state.goal_activations.remove(&thread);
+            let active = goal::is_active(state, &thread);
+            let mut events = match &outcome {
+                Ok(goal) => goal::set_goal(state, &thread, goal.clone()),
+                Err(_) => vec![],
+            };
+            // A run held for an activation that did not happen settles now.
+            if !goal::is_active(state, &thread) || !active {
+                events.extend(goal::release_hold(state, &thread));
+            }
+            events
+        });
         outcome.map(|_| ())
     }
     /// Starts a native Codex turn for this run's configuration. Upstream `startNativeTurn`.
@@ -834,6 +1238,7 @@ impl CodexProviderRuntime {
     async fn start_native_turn(
         &self,
         input: ProviderAdapterV2TurnInput,
+        codex_input: Vec<Value>,
     ) -> Result<(), ProviderAdapterV2Error> {
         let thread = native_id(&input.provider_thread)?.to_owned();
         let policy = runtime_policy(
@@ -849,10 +1254,10 @@ impl CodexProviderRuntime {
             .session
             .start_turn(
                 &thread,
-                turn_input(&input.message.text),
+                codex_input,
                 model,
                 option(&input.model_selection, "reasoningEffort"),
-                option(&input.model_selection, "serviceTier"),
+                option(&input.model_selection, "serviceTier").filter(|_| !self.omit_service_tier),
                 &policy,
             )
             .await;
@@ -908,27 +1313,188 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
             rx.recv().await.map(|event| (Ok(event), rx))
         }))
     }
+    /// `canReuseCodexContextUsage`: the same selection, ignoring the reasoning effort.
     fn can_reuse_context_usage(
         &self,
         previous: &ModelSelection,
         next: &ModelSelection,
     ) -> Option<bool> {
-        Some(
-            previous.instance_id == next.instance_id
-                && previous.model == next.model
-                && previous
+        let without_effort = |selection: &ModelSelection| {
+            let mut selection = selection.clone();
+            selection.options = Some(
+                selection
                     .options
-                    .as_ref()
+                    .take()
                     .into_iter()
                     .flatten()
-                    .filter(|o| o.id.as_str() != "reasoningEffort")
-                    .eq(next
-                        .options
-                        .as_ref()
-                        .into_iter()
-                        .flatten()
-                        .filter(|o| o.id.as_str() != "reasoningEffort")),
-        )
+                    .filter(|option| option.id.as_str() != "reasoningEffort")
+                    .collect(),
+            );
+            selection
+        };
+        Some(model_selections_equal(
+            &without_effort(previous),
+            &without_effort(next),
+        ))
+    }
+
+    /// Idle release must not stop the app-server while a command, tool or subagent runs.
+    fn has_pending_background_work(
+        &self,
+    ) -> Option<BoxFuture<'_, Result<bool, ProviderAdapterV2Error>>> {
+        Some(Box::pin(async move {
+            Ok(projection::has_pending_background_work(&self.state.lock()))
+        }))
+    }
+
+    fn has_pending_background_work_for_thread(
+        &self,
+        provider_thread: &OrchestrationV2ProviderThread,
+    ) -> Option<BoxFuture<'_, Result<bool, ProviderAdapterV2Error>>> {
+        let thread = provider_thread.id.as_str().to_owned();
+        Some(Box::pin(async move {
+            Ok(projection::has_pending_background_work_for_thread(
+                &self.state.lock(),
+                &thread,
+            ))
+        }))
+    }
+
+    /// `compactThread`: `/compact` runs through `thread/compact/start`. The compaction's
+    /// turn is adopted when Codex reports it (`pendingRootTurns`).
+    fn compact_thread(
+        &self,
+        input: ProviderAdapterV2TurnInput,
+    ) -> Option<BoxFuture<'_, Result<(), ProviderAdapterV2Error>>> {
+        Some(Box::pin(async move {
+            let thread = native_id(&input.provider_thread)
+                .map_err(|cause| self.turn_start_error(&input, format!("{cause:?}")))?
+                .to_owned();
+            self.state
+                .lock()
+                .pending_root_turns
+                .insert(thread.clone(), input.clone());
+            // Cleared on failure too: an unstarted compaction must not adopt a later turn.
+            match self.session.compact_thread(&thread).await {
+                Ok(_) => Ok(()),
+                Err(cause) => {
+                    self.state.lock().pending_root_turns.remove(&thread);
+                    Err(self.turn_start_error(&input, cause))
+                }
+            }
+        }))
+    }
+
+    /// `injectHistory`: `thread/inject_items`. `false` when the app-server predates it
+    /// (-32601); other failures are ambiguous and must not fall through to a second delivery.
+    fn inject_history(
+        &self,
+        provider_thread: &OrchestrationV2ProviderThread,
+        context: &ProviderAdapterV2HistoricalContext,
+    ) -> Option<BoxFuture<'_, Result<bool, ProviderAdapterV2Error>>> {
+        let provider_thread = provider_thread.clone();
+        let items = history_response_items(&context.messages, &context.context);
+        Some(Box::pin(async move {
+            let protocol = |cause: &dyn std::fmt::Display| {
+                error(
+                    ProviderAdapterErrorKind::Protocol {
+                        driver: self.driver.clone(),
+                        detail: "Failed to inject historical context".to_owned(),
+                        payload: None,
+                    },
+                    cause,
+                )
+            };
+            let thread = native_id(&provider_thread)
+                .map_err(|cause| protocol(&format!("{cause:?}")))?
+                .to_owned();
+            match self
+                .session
+                .client()
+                .request(
+                    "thread/inject_items",
+                    Some(json!({"threadId": thread, "items": items})),
+                )
+                .await
+            {
+                Ok(_) => Ok(true),
+                Err(AppServerError::Request { error, .. }) if error.code == -32601 => Ok(false),
+                Err(cause) => Err(protocol(&cause)),
+            }
+        }))
+    }
+
+    /// `unloadThread`: forgets the thread's session approvals and drops this connection's
+    /// subscription, so the shared app-server can shut an idle thread down.
+    fn unload_thread(
+        &self,
+        provider_thread: &OrchestrationV2ProviderThread,
+    ) -> Option<BoxFuture<'_, Result<(), ProviderAdapterV2Error>>> {
+        let provider_thread = provider_thread.clone();
+        Some(Box::pin(async move {
+            let protocol = |cause: &dyn std::fmt::Display| {
+                error(
+                    ProviderAdapterErrorKind::Protocol {
+                        driver: self.driver.clone(),
+                        detail: format!(
+                            "Failed to unload Codex thread for provider thread {}",
+                            provider_thread.id
+                        ),
+                        payload: None,
+                    },
+                    cause,
+                )
+            };
+            let thread = native_id(&provider_thread)
+                .map_err(|cause| protocol(&format!("{cause:?}")))?
+                .to_owned();
+            self.session
+                .unload_thread(&thread)
+                .await
+                .map_err(|cause| protocol(&cause))
+        }))
+    }
+
+    /// `uploadFeedback`: `/feedback` uploads the thread and Codex logs. Returns the feedback id.
+    fn upload_feedback(
+        &self,
+        input: ProviderAdapterV2UploadFeedbackInput,
+    ) -> Option<BoxFuture<'_, Result<String, ProviderAdapterV2Error>>> {
+        Some(Box::pin(async move {
+            let protocol = |cause: &dyn std::fmt::Display| {
+                error(
+                    ProviderAdapterErrorKind::Protocol {
+                        driver: self.driver.clone(),
+                        detail: "Failed to upload Codex thread feedback.".to_owned(),
+                        payload: None,
+                    },
+                    cause,
+                )
+            };
+            let thread = native_id(&input.provider_thread)
+                .map_err(|cause| protocol(&format!("{cause:?}")))?
+                .to_owned();
+            let mut params = json!({
+                "classification": "bug",
+                "includeLogs": true,
+                "threadId": thread,
+            });
+            if let Some(reason) = input.reason.as_deref().filter(|reason| !reason.is_empty()) {
+                params["reason"] = json!(reason);
+            }
+            let response = self
+                .session
+                .client()
+                .request("feedback/upload", Some(params))
+                .await
+                .map_err(|cause| protocol(&cause))?;
+            response
+                .as_ref()
+                .and_then(|response| response.get("threadId"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| protocol(&"feedback/upload returned no thread id"))
+        }))
     }
     async fn ensure_thread(
         &self,
@@ -1010,7 +1576,15 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
         {
             return self.run_goal_command(input, command).await;
         }
-        self.start_native_turn(input).await
+        // A restart continuation resumes from history: it sends no new user input.
+        let codex_input = if input.restart_continuation_of_run_id.is_none() {
+            self.codex_input(&input.message.text, &input.message.attachments)
+                .await
+                .map_err(|cause| self.turn_start_error(&input, cause))?
+        } else {
+            Vec::new()
+        };
+        self.start_native_turn(input, codex_input).await
     }
     async fn steer_turn(
         &self,
@@ -1025,8 +1599,21 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
             .find(|(id, _)| derive::provider_turn(&self.driver, id) == input.provider_turn_id)
             .map(|(id, _)| id.clone())
             .unwrap_or_else(|| input.provider_turn_id.as_str().to_owned());
+        let codex_input = self
+            .codex_input(&input.message.text, &input.message.attachments)
+            .await
+            .map_err(|cause| {
+                error(
+                    ProviderAdapterErrorKind::SteerRun {
+                        driver: self.driver.clone(),
+                        provider_thread_id: input.provider_thread.id.clone(),
+                        provider_turn_id: input.provider_turn_id.clone(),
+                    },
+                    cause,
+                )
+            })?;
         self.session
-            .steer_turn(&thread, &native_turn, turn_input(&input.message.text))
+            .steer_turn(&thread, &native_turn, codex_input)
             .await
             .map_err(|e| {
                 error(
@@ -1039,61 +1626,58 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
                 )
             })
     }
+    /// Upstream `interruptTurn`: Stop reaches the active turn, every turn running under it
+    /// (subagents), and the settled turns of that lineage that still hold commands or tools.
     async fn interrupt_turn(
         &self,
         input: ProviderAdapterV2InterruptInput,
     ) -> Result<(), ProviderAdapterV2Error> {
-        let thread = native_id(&input.provider_thread)?.to_owned();
-        let native_turn = self
-            .state
-            .lock()
-            .turns
-            .iter()
-            .find(|(id, _)| derive::provider_turn(&self.driver, id) == input.provider_turn_id)
-            .map(|(id, _)| id.clone())
-            .unwrap_or_else(|| input.provider_turn_id.as_str().to_owned());
-        let interrupt_error = |e| {
+        let interrupt_error = |cause: &dyn std::fmt::Display| {
             error(
                 ProviderAdapterErrorKind::Interrupt {
                     driver: self.driver.clone(),
                     provider_thread_id: input.provider_thread.id.clone(),
                     provider_turn_id: input.provider_turn_id.clone(),
                 },
-                e,
+                cause,
             )
         };
-        self.session
-            .interrupt_turn(&thread, &native_turn)
-            .await
-            .map_err(interrupt_error)?;
-        // Commands still running under this turn keep their background terminal
-        // alive after the turn stops, so Codex needs an explicit terminate.
-        let processes: Vec<String> = self
-            .state
-            .lock()
-            .turns
-            .get(&native_turn)
-            .map(|turn| {
-                turn.running_commands
-                    .iter()
-                    .filter_map(|command| command.process_id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        for process_id in processes {
-            // Upstream calls this through the raw client: the method is not in the
-            // pinned typed surface.
-            self.session
-                .client()
-                .raw
-                .request(
-                    "thread/backgroundTerminals/terminate",
-                    Some(json!({"threadId": thread, "processId": process_id})),
-                )
-                .await
-                .map_err(interrupt_error)?;
+        let restart = input.request_runtime_restart == Some(true);
+        let plan = interrupt::plan(
+            &self.state.lock(),
+            &input.provider_turn_id,
+            &input.provider_thread.id,
+            restart,
+        );
+        let Some(plan) = plan else {
+            // Stop on a settled turn this process retains nothing for.
+            if restart {
+                return Ok(());
+            }
+            return Err(interrupt_error(&format!(
+                "Provider turn {} is not active and cannot be interrupted.",
+                input.provider_turn_id
+            )));
+        };
+        let mut tracked: Vec<String> = plan
+            .targets
+            .iter()
+            .map(|target| target.native_turn.clone())
+            .collect();
+        // Read the terminals before anything ends: ending a stopped turn forgets its commands.
+        let terminals = {
+            let mut state = self.state.lock();
+            state.interrupting.extend(tracked.iter().cloned());
+            interrupt::terminals(&state, &plan.targets)
+        };
+        let outcome = self.run_interrupt(&plan, terminals, &mut tracked).await;
+        {
+            let mut state = self.state.lock();
+            for native in &tracked {
+                state.interrupting.remove(native);
+            }
         }
-        Ok(())
+        outcome.map_err(|detail| interrupt_error(&detail))
     }
     async fn respond_to_runtime_request(
         &self,
@@ -1274,13 +1858,27 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
     }
 }
 
-/// The runtime request kind for a Codex server request method.
-fn runtime_kind(method: &str) -> OrchestrationV2RuntimeRequestKind {
+/// The runtime request kind for a Codex server request. A permissions request takes
+/// the kind of what it asks for (`providerRequestKindFromPermissions`): writes are a
+/// file change, reads a file read, anything else a command.
+fn runtime_kind(method: &str, params: &Value) -> OrchestrationV2RuntimeRequestKind {
+    let asks = |access: &str| {
+        params
+            .pointer(&format!("/permissions/fileSystem/{access}"))
+            .and_then(Value::as_array)
+            .is_some_and(|paths| !paths.is_empty())
+    };
     match method {
         "item/fileChange/requestApproval" | "applyPatchApproval" => {
             OrchestrationV2RuntimeRequestKind::FileChange
         }
-        "item/permissions/requestApproval" => OrchestrationV2RuntimeRequestKind::Permission,
+        "item/permissions/requestApproval" if asks("write") => {
+            OrchestrationV2RuntimeRequestKind::FileChange
+        }
+        "item/permissions/requestApproval" if asks("read") => {
+            OrchestrationV2RuntimeRequestKind::FileRead
+        }
+        "item/permissions/requestApproval" => OrchestrationV2RuntimeRequestKind::Command,
         "mcpServer/elicitation/request" => OrchestrationV2RuntimeRequestKind::McpElicitation,
         "item/tool/requestUserInput" => OrchestrationV2RuntimeRequestKind::UserInput,
         _ => OrchestrationV2RuntimeRequestKind::Command,
@@ -1289,8 +1887,8 @@ fn runtime_kind(method: &str) -> OrchestrationV2RuntimeRequestKind {
 
 /// The approval kind an approval node is raised for. Plan questions are not
 /// approvals, so they have none.
-fn approval_kind(method: &str) -> Option<ProviderRequestKind> {
-    match runtime_kind(method) {
+fn approval_kind(method: &str, params: &Value) -> Option<ProviderRequestKind> {
+    match runtime_kind(method, params) {
         OrchestrationV2RuntimeRequestKind::Command => Some(ProviderRequestKind::Command),
         OrchestrationV2RuntimeRequestKind::FileRead => Some(ProviderRequestKind::FileRead),
         OrchestrationV2RuntimeRequestKind::FileChange => Some(ProviderRequestKind::FileChange),
@@ -1304,6 +1902,102 @@ fn approval_kind(method: &str) -> Option<ProviderRequestKind> {
     }
 }
 
+fn is_legacy_approval(method: &str) -> bool {
+    matches!(method, "execCommandApproval" | "applyPatchApproval")
+}
+
+/// `findActiveTurnByNativeThreadId`: the active turn running on a native thread.
+fn active_turn_on_thread(state: &RuntimeState, thread: &str) -> Option<String> {
+    state
+        .turns
+        .values()
+        .find(|turn| {
+            let on = match &turn.subagent {
+                Some(child) => Some(child.as_str()),
+                None => turn
+                    .input
+                    .provider_thread
+                    .native_thread_ref
+                    .as_ref()
+                    .and_then(|native| native.native_id.as_ref())
+                    .map(|id| id.as_str()),
+            };
+            on == Some(thread)
+        })
+        .map(|turn| turn.native_turn.clone())
+}
+
+/// The request's prompt: what the user is asked to approve.
+fn approval_prompt(method: &str, params: &Value) -> Option<String> {
+    let text = |key: &str| params.get(key).and_then(Value::as_str).map(str::to_owned);
+    match method {
+        // `payload.reason ?? payload.command.join(" ")`
+        "execCommandApproval" => text("reason").or_else(|| {
+            params
+                .get("command")
+                .and_then(Value::as_array)
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+        }),
+        "item/fileChange/requestApproval" | "applyPatchApproval" => {
+            codex_file_change_approval_prompt(params)
+        }
+        // `payload.reason ?? payload.command`
+        _ => text("reason").or_else(|| text("command")),
+    }
+}
+
+/// A request nobody can show is answered at once, so Codex does not wait on it: an
+/// elicitation is declined, anything else is a protocol error.
+fn reject_unanswered(state: &mut RuntimeState, request: &PendingRequest) {
+    let param = |key: &str| {
+        request
+            .params
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    };
+    let decision = match request.method.as_str() {
+        "mcpServer/elicitation/request" => {
+            tracing::warn!(
+                server_name = param("serverName"),
+                "Declined an MCP elicitation without an active Codex turn context."
+            );
+            Decision::Approval("decline")
+        }
+        "execCommandApproval" => Decision::Reject(format!(
+            "No active Codex turn context for exec approval thread {}.",
+            param("conversationId")
+        )),
+        "applyPatchApproval" => Decision::Reject(format!(
+            "No active Codex turn context for apply patch approval thread {}.",
+            param("conversationId")
+        )),
+        "item/fileChange/requestApproval" => Decision::Reject(format!(
+            "No active Codex turn context for file change approval turn {}.",
+            param("turnId")
+        )),
+        "item/permissions/requestApproval" => Decision::Reject(format!(
+            "No active Codex turn context for permissions approval turn {}.",
+            param("turnId")
+        )),
+        "item/tool/requestUserInput" => Decision::Reject(format!(
+            "No active Codex turn context for user input request turn {}.",
+            param("turnId")
+        )),
+        _ => Decision::Reject(format!(
+            "No active Codex turn context for approval turn {}.",
+            param("turnId")
+        )),
+    };
+    state.unanswered.push((request.id, decision));
+}
+
 /// Upstream `item/tool/requestUserInput`: a plan question is answered on the turn
 /// that asked it, with its node and item under that turn's root.
 fn project_user_input(
@@ -1311,10 +2005,9 @@ fn project_user_input(
     state: &mut RuntimeState,
     session_id: &ProviderSessionId,
 ) -> Vec<ProviderAdapterV2Event> {
-    let Some(native_turn) = request.params.get("turnId").and_then(Value::as_str) else {
-        return vec![];
-    };
-    let Some(turn) = state.turns.get_mut(native_turn) else {
+    let native_turn = request.params.get("turnId").and_then(Value::as_str);
+    let Some(turn) = native_turn.and_then(|native_turn| state.turns.get_mut(native_turn)) else {
+        reject_unanswered(state, &request);
         return vec![];
     };
     let native_item = request
@@ -1360,13 +2053,30 @@ fn project_request(
     state: &mut RuntimeState,
     session_id: &ProviderSessionId,
 ) -> Vec<ProviderAdapterV2Event> {
-    let Some(native_turn) = request.params.get("turnId").and_then(Value::as_str) else {
-        return vec![];
-    };
-    if runtime_kind(&request.method) == OrchestrationV2RuntimeRequestKind::UserInput {
+    if runtime_kind(&request.method, &request.params)
+        == OrchestrationV2RuntimeRequestKind::UserInput
+    {
         return project_user_input(request, state, session_id);
     }
-    let Some(context) = state.turns.get(native_turn) else {
+    // The legacy approvals name a conversation, not a turn: the active turn on that thread.
+    let native_turn = if is_legacy_approval(&request.method) {
+        request
+            .params
+            .get("conversationId")
+            .and_then(Value::as_str)
+            .and_then(|thread| active_turn_on_thread(state, thread))
+    } else {
+        request
+            .params
+            .get("turnId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let Some(context) = native_turn
+        .as_deref()
+        .and_then(|native_turn| state.turns.get(native_turn))
+    else {
+        reject_unanswered(state, &request);
         return vec![];
     };
     let owner_native = subagent::owner_native_turn(state, context);
@@ -1391,15 +2101,15 @@ fn project_request(
             )
         }
     });
+    let param = |key: &str| request.params.get(key).and_then(Value::as_str);
+    // Legacy approvals name the item `callId`; their request is the approval, or the call.
     let native_item = elicitation_request
         .as_deref()
-        .or_else(|| request.params.get("itemId").and_then(Value::as_str));
+        .or_else(|| param("itemId").or_else(|| param("callId")));
     let native_req = elicitation_request.as_deref().or_else(|| {
-        request
-            .params
-            .get("approvalId")
-            .or_else(|| request.params.get("itemId"))
-            .and_then(Value::as_str)
+        param("approvalId")
+            .or_else(|| param("itemId"))
+            .or_else(|| param("callId"))
     });
     let parent_node = subagent::subagent_node(state, context).unwrap_or_else(|| {
         derive::node_from_provider_item(&driver(), native_item.or(native_req).unwrap_or_default())
@@ -1411,8 +2121,8 @@ fn project_request(
     let provider_turn_id = derive::provider_turn(&driver(), &owner_native);
     let id = IdAllocator.runtime_request(&driver(), Some(&provider_turn_id), native_req);
     state.requests.insert(id.clone(), request.id);
-    let kind = runtime_kind(&request.method);
-    let Some(item_kind) = approval_kind(&request.method) else {
+    let kind = runtime_kind(&request.method, &request.params);
+    let Some(item_kind) = approval_kind(&request.method, &request.params) else {
         return vec![];
     };
     let ordinal_key = format!(
@@ -1441,12 +2151,7 @@ fn project_request(
         )
     } else {
         (
-            request
-                .params
-                .get("reason")
-                .or_else(|| request.params.get("command"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            approval_prompt(&request.method, &request.params),
             None,
             None,
         )
@@ -1526,4 +2231,78 @@ fn project_request(
             runtime_request,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `providerRequestKindFromPermissions`.
+    #[test]
+    fn a_permissions_request_takes_the_kind_of_what_it_asks_for() {
+        let kind = |permissions: Value| {
+            runtime_kind(
+                "item/permissions/requestApproval",
+                &json!({"permissions": permissions}),
+            )
+        };
+        assert_eq!(
+            kind(json!({"fileSystem": {"write": ["/w"], "read": ["/r"]}})),
+            OrchestrationV2RuntimeRequestKind::FileChange
+        );
+        assert_eq!(
+            kind(json!({"fileSystem": {"read": ["/r"]}})),
+            OrchestrationV2RuntimeRequestKind::FileRead
+        );
+        assert_eq!(
+            kind(json!({"fileSystem": {"write": [], "read": []}})),
+            OrchestrationV2RuntimeRequestKind::Command
+        );
+        assert_eq!(
+            kind(json!({"network": {"enabled": true}})),
+            OrchestrationV2RuntimeRequestKind::Command
+        );
+        assert_eq!(
+            approval_kind(
+                "item/permissions/requestApproval",
+                &json!({"permissions": {"fileSystem": {"read": ["/r"]}}})
+            ),
+            Some(ProviderRequestKind::FileRead)
+        );
+    }
+
+    /// A late frame for a turn that ended is dropped, not parked until the queue cap.
+    #[test]
+    fn frames_for_a_finished_turn_are_not_parked() {
+        let mut state = RuntimeState::default();
+        state.finished.insert("done-turn".to_owned());
+        let mut parked = VecDeque::new();
+        let session = ProviderSessionId::new("session-1").unwrap();
+
+        let delta = CodexEvent::from_notification(
+            "item/agentMessage/delta".to_owned(),
+            json!({"threadId": "t", "turnId": "done-turn", "itemId": "i", "delta": "late"}),
+        );
+        assert!(ingest(&mut parked, Parked::Event(delta), &mut state, &session).is_empty());
+        assert!(parked.is_empty());
+
+        // A request for it is answered, not left waiting.
+        let request = PendingRequest {
+            id: 7,
+            method: "item/commandExecution/requestApproval".to_owned(),
+            params: json!({"threadId": "t", "turnId": "done-turn", "itemId": "i"}),
+        };
+        assert!(ingest(&mut parked, Parked::Request(request), &mut state, &session).is_empty());
+        assert!(parked.is_empty());
+        assert_eq!(state.unanswered.len(), 1);
+        assert_eq!(state.unanswered[0].0, 7);
+
+        // A turn that has not registered yet still parks.
+        let early = CodexEvent::from_notification(
+            "item/agentMessage/delta".to_owned(),
+            json!({"threadId": "t", "turnId": "future-turn", "itemId": "i", "delta": "early"}),
+        );
+        assert!(ingest(&mut parked, Parked::Event(early), &mut state, &session).is_empty());
+        assert_eq!(parked.len(), 1);
+    }
 }

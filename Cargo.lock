@@ -7667,8 +7667,17 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-stream",
  "tracing",
  "turin-contracts",
+<<<<<<< HEAD
+=======
+ "turin-provider-core",
+ "turin-shared",
+ "turin-text-generation",
+ "url",
+ "uuid",
+>>>>>>> task/T09d-codex-driver
 ]
 
 [[package]]

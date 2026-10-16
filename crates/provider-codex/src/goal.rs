@@ -12,6 +12,7 @@ use crate::{
 use serde_json::Value;
 use std::time::Duration;
 use tokio::time::Instant;
+use turin_contracts::base_schemas::{is_js_whitespace, js_trim};
 use turin_contracts::{
     NonNegativeInt, TrimmedNonEmptyString, UtcDateTime,
     orchestration_v2::{
@@ -39,7 +40,7 @@ pub struct GoalHold {
 
 /// Upstream `providerGoalFromCodex`: a goal with no objective is no goal.
 pub fn provider_goal_from_codex(goal: &Value) -> Option<OrchestrationV2ProviderGoal> {
-    let objective = goal.get("objective")?.as_str()?.trim();
+    let objective = js_trim(goal.get("objective")?.as_str()?);
     if objective.is_empty() {
         return None;
     }
@@ -58,7 +59,7 @@ pub fn provider_goal_from_codex(goal: &Value) -> Option<OrchestrationV2ProviderG
             .map(|count| count as NonNegativeInt)
     };
     Some(OrchestrationV2ProviderGoal {
-        objective: TrimmedNonEmptyString::new(objective).expect("nonempty objective"),
+        objective: TrimmedNonEmptyString::new(objective).ok()?,
         status,
         tokens_used: Some(count("tokensUsed").unwrap_or(0)),
         token_budget: Some(count("tokenBudget")),
@@ -193,12 +194,12 @@ pub enum GoalCommand {
 }
 
 pub fn parse_command(text: &str) -> Option<GoalCommand> {
-    let trimmed = text.trim();
+    let trimmed = js_trim(text);
     let rest = trimmed.strip_prefix("/goal")?;
-    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+    if !rest.is_empty() && !rest.starts_with(is_js_whitespace) {
         return None;
     }
-    let argument = rest.trim();
+    let argument = js_trim(rest);
     Some(match argument.to_lowercase().as_str() {
         "" | "edit" => GoalCommand::Show,
         "clear" => GoalCommand::Clear,
@@ -309,4 +310,52 @@ pub fn reply_events(
         thread_disposition: OrchestrationV2ProviderThreadDisposition::Reusable,
     });
     events
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn parses_the_goal_subcommands_and_an_objective() {
+        assert!(matches!(parse_command("/goal"), Some(GoalCommand::Show)));
+        assert!(matches!(
+            parse_command("  /goal edit "),
+            Some(GoalCommand::Show)
+        ));
+        assert!(matches!(
+            parse_command("/goal CLEAR"),
+            Some(GoalCommand::Clear)
+        ));
+        assert!(matches!(
+            parse_command("/goal pause"),
+            Some(GoalCommand::Pause)
+        ));
+        assert!(matches!(
+            parse_command("/goal resume"),
+            Some(GoalCommand::Resume)
+        ));
+        assert!(
+            matches!(parse_command("/goal ship it"), Some(GoalCommand::Set(objective)) if objective == "ship it")
+        );
+        // Not a goal command: another word, or no separator after the name.
+        assert!(parse_command("/goals").is_none());
+        assert!(parse_command("hello /goal").is_none());
+    }
+
+    #[test]
+    fn a_goal_with_a_blank_objective_is_no_goal() {
+        let goal = |objective: &str| {
+            provider_goal_from_codex(&json!({"objective": objective, "status": "active"}))
+        };
+        assert!(goal("   ").is_none());
+        // JS `trim()` also strips U+FEFF; a goal made of nothing else must not panic.
+        assert!(goal("\u{feff}").is_none());
+        assert_eq!(
+            goal("\u{feff} ship \u{feff}").unwrap().objective.as_str(),
+            "ship"
+        );
+    }
 }

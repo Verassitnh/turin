@@ -44,7 +44,7 @@ pub fn normalize_semver_version(version: &str) -> String {
     }
 }
 
-pub(crate) fn is_valid_semver(value: &str) -> bool {
+pub fn is_valid_semver(value: &str) -> bool {
     parse_semver(value).is_some()
 }
 

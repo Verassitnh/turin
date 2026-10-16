@@ -9,6 +9,7 @@ turin-contracts.workspace = true
 turin-codex-app-server = { path = "../codex-app-server" }
 turin-provider-core = { path = "../provider-core" }
 turin-shared = { path = "../shared" }
+turin-text-generation.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 base64.workspace = true
@@ -28,6 +29,7 @@ url.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

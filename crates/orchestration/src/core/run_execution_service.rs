@@ -26,6 +26,25 @@ use turin_provider_core::{id_allocator::derive, provider_adapter::ProviderAdapte
 
 use crate::projection::turn_item;
 
+mod finalize;
+#[cfg(test)]
+mod ingestion_tests;
+mod service;
+#[cfg(test)]
+mod start_tests;
+#[cfg(test)]
+mod termination_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
+
+pub use service::{
+    AfterTurnRefresh, AsyncBool, FailureAndWriteCause, InheritedBackgroundLoader,
+    NoAfterTurnRefresh, RunBaselineCapture, RunEventIngest, RunEventWriter,
+    RunExecutionIngestError, RunExecutionService, RunExecutionServiceError, RunExecutionStartError,
+    StartRootRunInput, TerminalSummary,
+};
+use service::{RefreshOnce, RunExecutionInner};
+
 /// `RunOwnedSubagentTerminalStatus`: the statuses a run's open subagent
 /// work is cascaded to when the run stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

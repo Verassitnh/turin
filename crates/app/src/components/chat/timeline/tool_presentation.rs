@@ -12,12 +12,12 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::file_preview::is_workspace_image_preview_path;
 use super::js_text::{js_trim, utf16_len};
 use super::tool_activity::{computer_use_tool_source, dynamic_tool_surface};
 use super::turn_item::{
     ToolActivityIcon, ToolActivitySource, ToolActivitySurface, TurnItem, TurnItemPayload,
 };
+use turin_shared::file_preview::is_workspace_image_preview_path;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ExtractedToolActivityPresentation {

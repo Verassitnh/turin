@@ -196,6 +196,26 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 5. Full gate on main: `cargo check --workspace`, per-crate `scripts/check.sh` all green.
 Capacity notes: rustc slots 4 (CPU was pinned at 97%), sccache on; cloud agents not useful for UI (macOS-only GPUI) — backend only if needed.
 
+## PM status 2026-10-16 05:45 UTC (final wave)
+- Policy: new agents are Sonnet 5.5 by default and Opus for hard work (e.g. composer prompt-editor parity, look-and-feel judging). No new Cursor/Grok work: both are out of usage. Never Codex. Ultracode: Workflow-driven QC, coverage, S3 and UI QC.
+- Newly on main (QC PASS + fixes): T11 OpenCode, U3e+U3c chat logic and find, R2 ACP/Cursor, U2 usage/onboarding, S5 app shell, R4 composer + client logic, S2b chat media. App tests: 3512.
+- Finished on branch, merging through T22b: T13e turn and restart services (QC PASS, all fixes in).
+- In flight:
+  - T13c-F orchestration dispatch remainder (Sonnet), with T13c QC workflow wf_5986b045-21a running.
+  - T22b write path (approvals, queue, attachments, titles, @search, read-path gaps).
+  - T22c provider smoke tests vs fake CLIs (Cursor, OpenCode, Codex).
+  - T09d Codex provider: done; QC wf_307b939d-f99 running; remainder: model catalog, snapshotForCwd, usage pushes, codex text generation.
+  - S1 settings UI, S2 chat panels, S6 PR/diff/sidebar, R3 theme logic + theme UI (all Sonnet).
+  - S3 workflow wf_d3a2d49c-5f6 (primitives; composer prompt editor on Opus).
+  - Coverage workflow wf_068e46cb-67c (C1 backend, C2 web).
+  - UI QC pass 1 wf_7d19f01b-f48 on UIQC-1.
+- Remaining to done:
+  1. Merge T13c+T13e+T22b (the app working on main) and T22c.
+  2. Merge T09d, S1, S2, S6, R3, S3/S3c, C1, C2 after QC.
+  3. UI QC pass 2 on the newly merged screens.
+  4. Coverage recount (/tmp/turin-pm/coverage.py).
+  5. Full gate on main.
+
 ## PM status 2026-10-16 02:45 UTC
 - On main (all QC PASS + fixes): T19, T17, N1, N1b, U3a/b, U3d, T10(+T10d), T07, T13d, T20, GITFS, T24b, DEDUP-1, U1. App crate 2838 tests green.
 - In flight: T13c (dispatch S4–S6, Sonnet), T13e (RunExecution/turn start, Sonnet), R1 (ProviderRegistry, Sonnet), T22a fixes, T11 (verifier fixing 2 high), S4 (re-QC high fix), U3c fixes → U3e QC, R2 (ACP runtime), R3/R4/R5, T09d, S1/S2/S2b/S3/S5/S6 UI, U2.

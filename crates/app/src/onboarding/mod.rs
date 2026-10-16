@@ -9,6 +9,9 @@
 // The hosted-static decision is ported (and tested) with the rest of firstRun.logic.
 #![allow(dead_code)]
 
+pub mod agent_session_live;
 pub mod first_run_logic;
+pub mod live_evidence;
+pub mod live_providers;
 pub mod project_import_logic;
 pub mod provider_readiness_logic;

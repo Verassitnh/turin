@@ -133,6 +133,18 @@ impl Commands {
         workspace_root: &str,
     ) -> Result<ProjectId, CommandError> {
         let project_id = ProjectId::new(new_id()).expect("uuid project id");
+        self.create_project_with_id(project_id, title, workspace_root)
+            .await
+    }
+
+    /// Same as [`Self::create_project`], but keeps the caller's project id
+    /// (onboarding retries must not mint a new id each attempt).
+    pub async fn create_project_with_id(
+        &self,
+        project_id: ProjectId,
+        title: &str,
+        workspace_root: &str,
+    ) -> Result<ProjectId, CommandError> {
         let command = ProjectCommand::Create(ProjectCreateCommand {
             command_id: command_id(),
             project_id: project_id.clone(),

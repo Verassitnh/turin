@@ -111,7 +111,28 @@ pub(super) async fn decide(
     let OrchestrationV2ServerCommand::Client(client @ C::MessageDispatch { .. }) = command else {
         return Ok(false);
     };
+    let C::MessageDispatch {
+        command_id,
+        thread_id,
+        ..
+    } = client
+    else {
+        unreachable!("matched above");
+    };
+    // A provider's own subagent takes no messages: the provider runs it.
+    let thread = orchestrator
+        .projection
+        .get_thread(thread_id)
+        .await
+        .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))?;
+    if turin_contracts::orchestration_v2::is_provider_native_subagent_thread(&thread) {
+        return Err(OrchestratorError::SubagentThreadReadOnly {
+            command_id: command_id.clone(),
+            thread_id: thread_id.clone(),
+        });
+    }
     dispatch_message(orchestrator, command, client, decision).await?;
+    super::subagent_followup::record(orchestrator, command, client, decision).await?;
     Ok(true)
 }
 

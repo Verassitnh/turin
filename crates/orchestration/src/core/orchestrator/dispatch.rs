@@ -482,10 +482,35 @@ pub async fn dispatch_with_limit(
     limit: Option<&DispatchModeLimit>,
 ) -> Result<DispatchResult, OrchestratorError> {
     let thread_id = command_thread_id(&command).clone();
-    orchestrator
-        .locks
-        .with_lock(&thread_id, || dispatch_locked(orchestrator, command, limit))
-        .await
+    // Follow-up intake into an app-owned child writes the parent's task rows,
+    // so it serializes with Stop and finalize on the parent lock, taken before
+    // the child's.
+    let parent_thread_id = match &command {
+        OrchestrationV2ServerCommand::Client(
+            turin_contracts::orchestration_v2::OrchestrationV2Command::MessageDispatch {
+                created_by,
+                creation_source,
+                ..
+            },
+        ) if *created_by == turin_contracts::orchestration_v2::OrchestrationV2Actor::User
+            || *creation_source
+                == turin_contracts::orchestration_v2::OrchestrationV2CreationSource::Mcp =>
+        {
+            orchestrator
+                .app_owned_subagent_parent_thread_id(&thread_id)
+                .await?
+        }
+        _ => None,
+    };
+    let dispatch = || {
+        orchestrator
+            .locks
+            .with_lock(&thread_id, || dispatch_locked(orchestrator, command, limit))
+    };
+    match parent_thread_id {
+        Some(parent) => orchestrator.locks.with_lock(&parent, dispatch).await,
+        None => dispatch().await,
+    }
 }
 
 /// `refuseAboveDispatchModeLimit`: fails when a limited sender's command would

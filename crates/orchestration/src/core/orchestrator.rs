@@ -27,6 +27,9 @@ pub mod dispatch;
 #[cfg(test)]
 mod dispatch_limit_tests;
 mod message_dispatch;
+mod subagent_followup;
+#[cfg(test)]
+mod subagent_followup_tests;
 pub(crate) use message_dispatch::is_native_maintenance_command;
 #[cfg(test)]
 mod message_dispatch_tests;

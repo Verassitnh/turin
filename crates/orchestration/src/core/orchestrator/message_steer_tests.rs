@@ -44,7 +44,7 @@ use crate::projection::store::ProjectionStore;
 use crate::projection::test_support::{apply_all, event};
 
 const T0: &str = "2026-01-01T00:00:00.000Z";
-const T1: &str = "2026-01-01T00:01:00.000Z";
+pub(super) const T1: &str = "2026-01-01T00:01:00.000Z";
 
 /// A live session that answers nothing: steering only reads its record.
 struct FakeRuntime {
@@ -140,8 +140,8 @@ impl ProviderSessionRuntime for FakeRuntime {
 
 /// Serves the one runtime, once a test installs it, under any session id.
 #[derive(Default)]
-struct FakeSessions {
-    runtime: Mutex<Option<Arc<dyn ProviderSessionRuntime>>>,
+pub(super) struct FakeSessions {
+    pub(super) runtime: Mutex<Option<Arc<dyn ProviderSessionRuntime>>>,
 }
 
 #[async_trait]
@@ -154,17 +154,17 @@ impl LiveSessions for FakeSessions {
     }
 }
 
-struct Steer {
-    orchestrator: Orchestrator,
-    outbox: EffectOutbox,
-    projection: Arc<ProjectionStore>,
-    sessions: Arc<FakeSessions>,
-    capabilities: OrchestrationV2ProviderCapabilities,
+pub(super) struct Steer {
+    pub(super) orchestrator: Orchestrator,
+    pub(super) outbox: EffectOutbox,
+    pub(super) projection: Arc<ProjectionStore>,
+    pub(super) sessions: Arc<FakeSessions>,
+    pub(super) capabilities: OrchestrationV2ProviderCapabilities,
 }
 
 /// Active steering is offered when `active_steering`; a restart is always
 /// possible. `transition` is what the adapter answers for a selection change.
-async fn harness(
+pub(super) async fn harness(
     active_steering: bool,
     transition: Option<ProviderSelectionTransitionPlan>,
 ) -> Steer {
@@ -173,7 +173,7 @@ async fn harness(
 
 /// `restart_steering` is whether the provider can steer by interrupt and
 /// restart.
-async fn harness_with(
+pub(super) async fn harness_with(
     active_steering: bool,
     restart_steering: bool,
     transition: Option<ProviderSelectionTransitionPlan>,
@@ -225,7 +225,7 @@ impl Steer {
     /// A thread whose first message started a run, then the provider started
     /// its turn: the run is `running` with a `running` provider turn, and the
     /// provider thread's session is live. Returns the run id.
-    async fn running_run(&self, thread_id: &str) -> String {
+    pub(super) async fn running_run(&self, thread_id: &str) -> String {
         self.orchestrator
             .dispatch(create_command(
                 &format!("command:create:{thread_id}"),
@@ -299,7 +299,7 @@ impl Steer {
         run.id.to_string()
     }
 
-    async fn steer(
+    pub(super) async fn steer(
         &self,
         command: &str,
         thread_id: &str,
@@ -318,7 +318,7 @@ impl Steer {
             .map(|_| ())
     }
 
-    async fn effects(&self, command: &str) -> Vec<EffectRequest> {
+    pub(super) async fn effects(&self, command: &str) -> Vec<EffectRequest> {
         self.outbox
             .list_by_command_id(command_id(command))
             .await

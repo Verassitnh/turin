@@ -17,6 +17,8 @@ mod dispatch_limit_tests;
 mod message_dispatch;
 #[cfg(test)]
 mod message_dispatch_tests;
+#[cfg(test)]
+mod message_plan_tests;
 mod message_steer;
 #[cfg(test)]
 mod message_steer_tests;

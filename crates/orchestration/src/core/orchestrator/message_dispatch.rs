@@ -11,9 +11,11 @@
 //!
 //! * steer and restart into the active run: `message_steer.rs`.
 //!
+//! * delegated-completion deliveries (wake text, mailbox steer routing) and
+//!   source-plan starts.
+//!
 //! Refused until their slices land: restart continuation (needs
-//! `stopReachedRun`, T13e), delegated-completion and source-plan dispatch
-//! (S6, plan reads). Not yet ported: provider switch, fork and merge-back
+//! `stopReachedRun`, T13e). Not yet ported: provider switch, fork and merge-back
 //! transfers, legacy import handoffs (refused, see `start_run`).
 
 use turin_contracts::{
@@ -22,21 +24,24 @@ use turin_contracts::{
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2Actor, OrchestrationV2AppThread, OrchestrationV2CheckpointScope,
-        OrchestrationV2Command as C, OrchestrationV2ContextTransferStatus,
-        OrchestrationV2ContextTransferType, OrchestrationV2ConversationMessage,
-        OrchestrationV2ConversationMessageRole, OrchestrationV2DeliveryIntent,
-        OrchestrationV2DispatchMode, OrchestrationV2DomainEvent, OrchestrationV2ExecutionNode,
-        OrchestrationV2ExecutionNodeKind, OrchestrationV2ExecutionNodeStatus,
-        OrchestrationV2LimitRecovery, OrchestrationV2ProviderFailureClass,
+        OrchestrationV2Command as C, OrchestrationV2CompletionWake,
+        OrchestrationV2ContextTransferStatus, OrchestrationV2ContextTransferType,
+        OrchestrationV2ConversationMessage, OrchestrationV2ConversationMessageRole,
+        OrchestrationV2CreationSource, OrchestrationV2DelegatedCompletionCohortDisposition,
+        OrchestrationV2DeliveryIntent, OrchestrationV2DispatchMode, OrchestrationV2DomainEvent,
+        OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeKind,
+        OrchestrationV2ExecutionNodeStatus, OrchestrationV2LimitRecovery,
+        OrchestrationV2MessageDelegatedCompletion, OrchestrationV2PlanArtifact,
+        OrchestrationV2PlanArtifactStatus, OrchestrationV2ProviderFailureClass,
         OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadStatus,
         OrchestrationV2ProviderTurnStatus, OrchestrationV2Run, OrchestrationV2RunAttempt,
         OrchestrationV2RunAttemptReason, OrchestrationV2RunAttemptStatus, OrchestrationV2RunStatus,
         OrchestrationV2RuntimeRequestStatus, OrchestrationV2ServerCommand,
-        OrchestrationV2SettleOverride, OrchestrationV2ThreadHistoryOrigin,
-        OrchestrationV2ThreadLaunchWorkspaceStrategy, OrchestrationV2ThreadProjection,
-        OrchestrationV2TitleRegeneration, OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
-        OrchestrationV2UserMessageInputIntent, latest_provider_turn_for_attempt,
-        orchestration_v2_run_work_started_at,
+        OrchestrationV2SettleOverride, OrchestrationV2SourcePlanRef,
+        OrchestrationV2ThreadHistoryOrigin, OrchestrationV2ThreadLaunchWorkspaceStrategy,
+        OrchestrationV2ThreadProjection, OrchestrationV2TitleRegeneration, OrchestrationV2TurnItem,
+        OrchestrationV2TurnItemStatus, OrchestrationV2UserMessageInputIntent,
+        latest_provider_turn_for_attempt, orchestration_v2_run_work_started_at,
     },
     provider_instance::ProviderInstanceId,
 };
@@ -51,6 +56,7 @@ use crate::pipeline::command_policy::{
     resolve_message_dispatch_intent,
 };
 use crate::pipeline::effect_outbox::{EffectRequest, PendingEffect, ThreadTitleKind};
+use crate::pipeline::notification_mailbox::is_undelivered_mailbox_steer;
 use crate::pipeline::orchestrator_port::OrchestratorError;
 use crate::pipeline::runtime_policy::{self, RuntimePolicyOverride};
 use crate::projection::shared::thread_error::{
@@ -117,13 +123,11 @@ async fn dispatch_message(
         attachments,
         title_seed,
         model_selection,
-        source_plan_ref,
         restart_continuation_of_run_id,
         usage_limit_continuation_of_run_id,
         manual_continuation_of_run_id,
         usage_limit_recovery_request_id,
         delivery_intent,
-        delegated_completion,
         dispatch_mode,
         ..
     } = client
@@ -296,20 +300,6 @@ async fn dispatch_message(
         projection.thread = thread;
     }
 
-    // Not ported (S6 and the plan reads): these return before any event.
-    if delegated_completion.is_some() {
-        return Err(dispatch_failure(
-            command,
-            "Delegated completion dispatch is not ported yet.",
-        ));
-    }
-    if source_plan_ref.is_some() {
-        return Err(dispatch_failure(
-            command,
-            "Proposed-plan dispatch is not ported yet.",
-        ));
-    }
-
     let requested_model = model_selection
         .clone()
         .unwrap_or_else(|| projection.thread.model_selection.clone());
@@ -332,18 +322,47 @@ async fn dispatch_message(
             "Notifications must be server- or provider-created queued messages.",
         ));
     }
+    let delegated = resolve_delegated_completion(command, client, &projection, &dispatch)?;
+    // Route durable mailbox deliveries under the thread lock, using the live
+    // session's capabilities. Never interrupt or restart a turn for a
+    // notification.
+    let dispatch = match &delegated {
+        Some(completion) => {
+            route_mailbox_steer(orchestrator, &projection, completion, dispatch).await
+        }
+        None => dispatch,
+    };
+    let text = match &delegated {
+        Some(completion) => delegated_completion_wake_detail(&completion.task_ids),
+        None => text.clone(),
+    };
+    let resolved = Resolved {
+        text,
+        delegated_completion: delegated,
+        source_plan: resolve_source_plan(orchestrator, command, client, &projection).await?,
+    };
     if let Dispatch::Steer {
         target_run_id,
         restart,
     } = &dispatch
     {
+        // A delegated completion carries the run's selection, not a user choice.
+        let model_selection = match (
+            &resolved.delegated_completion,
+            projection.runs.iter().find(|run| &run.id == target_run_id),
+        ) {
+            (Some(_), Some(target)) => target.model_selection.clone(),
+            _ => requested_model,
+        };
+        let mut message = message_template(client, &projection.thread.id, decision.now());
+        resolved.apply(&mut message);
         return steer_into_run(
             orchestrator,
             command,
             &projection,
             SteerInput {
-                message: message_template(client, &projection.thread.id, decision.now()),
-                model_selection: requested_model,
+                message,
+                model_selection,
                 target_run_id: target_run_id.clone(),
                 force_restart: *restart,
                 promoted: false,
@@ -390,6 +409,7 @@ async fn dispatch_message(
                 queue_behind: &queue_behind,
                 model_selection: &requested_model,
                 worktree_missing: worktree_missing_run.is_some(),
+                resolved: &resolved,
             },
             decision,
         )
@@ -406,12 +426,273 @@ async fn dispatch_message(
         orchestrator,
         command,
         &projection,
-        client,
-        &requested_model,
-        start,
+        StartInput {
+            client,
+            requested_model: &requested_model,
+            start,
+            resolved: &resolved,
+        },
         decision,
     )
     .await
+}
+
+/// What the delegated-completion and source-plan reads settle for one
+/// dispatch: the message text (a delegated completion replaces it with a wake
+/// detail), the delivery it carries, and the plan it completes.
+struct Resolved {
+    text: String,
+    delegated_completion: Option<OrchestrationV2MessageDelegatedCompletion>,
+    source_plan: Option<OrchestrationV2PlanArtifact>,
+}
+
+impl Resolved {
+    /// The command's message as this dispatch writes it.
+    fn apply(&self, message: &mut OrchestrationV2ConversationMessage) {
+        message.text.clone_from(&self.text);
+        message.delegated_completion = self.delegated_completion.clone();
+    }
+
+    /// `completeSourcePlan`: the plan a run was started from is done once the
+    /// run exists.
+    fn complete_source_plan(&self, decision: &mut Decision, now: UtcDateTime) {
+        let Some(OrchestrationV2PlanArtifact::ProposedPlan {
+            id,
+            thread_id,
+            run_id,
+            node_id,
+            detail_in_turn_item,
+            markdown,
+            ..
+        }) = &self.source_plan
+        else {
+            return;
+        };
+        let event_id = decision.event_id(thread_id);
+        decision.emit(OrchestrationV2DomainEvent::PlanUpdated {
+            id: event_id,
+            thread_id: thread_id.clone(),
+            run_id: run_id.clone(),
+            node_id: Some(node_id.clone()),
+            driver: None,
+            provider_instance_id: None,
+            raw_event_id: None,
+            occurred_at: now,
+            payload: OrchestrationV2PlanArtifact::ProposedPlan {
+                id: id.clone(),
+                thread_id: thread_id.clone(),
+                run_id: run_id.clone(),
+                node_id: node_id.clone(),
+                status: OrchestrationV2PlanArtifactStatus::Completed,
+                detail_in_turn_item: *detail_in_turn_item,
+                markdown: markdown.clone(),
+            },
+        });
+    }
+}
+
+fn source_plan_ref_of(client: &C) -> Option<OrchestrationV2SourcePlanRef> {
+    let C::MessageDispatch {
+        source_plan_ref, ..
+    } = client
+    else {
+        unreachable!("source_plan_ref_of is called only for message.dispatch");
+    };
+    source_plan_ref.clone()
+}
+
+/// `delegatedCompletionWakeDetail`.
+fn delegated_completion_wake_detail(task_ids: &[NodeId]) -> String {
+    let list = task_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if task_ids.len() == 1 {
+        format!(
+            "Delegated task {list} reached a terminal state. Use task_status with taskId {list} to read the result."
+        )
+    } else {
+        format!(
+            "Delegated tasks {list} reached terminal states. Use task_status with each taskId to read the results."
+        )
+    }
+}
+
+/// The delivery a `delegatedCompletion` command carries, if the parent run's
+/// cohort still expects it.
+fn resolve_delegated_completion(
+    command: &OrchestrationV2ServerCommand,
+    client: &C,
+    projection: &OrchestrationV2ThreadProjection,
+    dispatch: &Dispatch,
+) -> Result<Option<OrchestrationV2MessageDelegatedCompletion>, OrchestratorError> {
+    let C::MessageDispatch {
+        created_by,
+        creation_source,
+        message_id,
+        delegated_completion,
+        ..
+    } = client
+    else {
+        unreachable!("resolve_delegated_completion is called only for message.dispatch");
+    };
+    let Some(requested) = delegated_completion else {
+        return Ok(None);
+    };
+    if *created_by != OrchestrationV2Actor::Agent
+        || *creation_source != OrchestrationV2CreationSource::Server
+        || *dispatch != Dispatch::QueueAfterActive
+    {
+        return Err(dispatch_failure(
+            command,
+            "Delegated completion delivery must be a server-created queued message.",
+        ));
+    }
+    let cohort = projection
+        .runs
+        .iter()
+        .find(|candidate| candidate.id == requested.parent_run_id)
+        .and_then(|parent| parent.delegated_completion.as_ref());
+    let delivery = cohort.and_then(|cohort| cohort.delivery.as_ref());
+    let dispatchable = cohort.is_some_and(|cohort| {
+        cohort.disposition == OrchestrationV2DelegatedCompletionCohortDisposition::Open
+    }) && delivery.is_some_and(|delivery| {
+        delivery.generation == requested.generation
+            && &delivery.message_id == message_id
+            && (!projection
+                .messages
+                .iter()
+                .any(|candidate| &candidate.id == message_id)
+                || is_undelivered_mailbox_steer(projection, message_id))
+    });
+    let (true, Some(delivery)) = (dispatchable, delivery) else {
+        return Err(dispatch_failure(
+            command,
+            "Delegated completion delivery is no longer dispatchable.",
+        ));
+    };
+    Ok(Some(OrchestrationV2MessageDelegatedCompletion {
+        parent_run_id: requested.parent_run_id.clone(),
+        generation: delivery.generation,
+        task_ids: delivery.task_ids.clone(),
+    }))
+}
+
+/// A delegated completion whose tasks always wake the parent steers the
+/// running turn when the live session can take a steer without interrupting
+/// its tools; otherwise the dispatch stands.
+async fn route_mailbox_steer(
+    orchestrator: &Orchestrator,
+    projection: &OrchestrationV2ThreadProjection,
+    completion: &OrchestrationV2MessageDelegatedCompletion,
+    dispatch: Dispatch,
+) -> Dispatch {
+    let always = completion.task_ids.iter().all(|id| {
+        projection
+            .subagents
+            .iter()
+            .find(|task| &task.id == id)
+            .is_some_and(|task| task.completion_wake == Some(OrchestrationV2CompletionWake::Always))
+    });
+    if !always {
+        return dispatch;
+    }
+    let Some(active) = projection
+        .runs
+        .iter()
+        .find(|run| run.status == OrchestrationV2RunStatus::Running)
+    else {
+        return dispatch;
+    };
+    let session_id = projection
+        .provider_threads
+        .iter()
+        .find(|row| Some(&row.id) == active.provider_thread_id.as_ref())
+        .and_then(|row| row.provider_session_id.clone());
+    let turn_running = projection.provider_turns.iter().any(|turn| {
+        turn.run_attempt_id.is_some()
+            && turn.run_attempt_id == active.active_attempt_id
+            && turn.status == OrchestrationV2ProviderTurnStatus::Running
+    });
+    let maintenance = projection
+        .messages
+        .iter()
+        .find(|message| message.id == active.user_message_id)
+        .is_some_and(|message| is_native_maintenance_command(&message.text, &message.attachments));
+    let Some(session_id) = session_id.filter(|_| turn_running && !maintenance) else {
+        return dispatch;
+    };
+    // A failed lookup leaves the dispatch as it is, as upstream's `orElseSucceed`.
+    let Ok(Some(session)) = orchestrator.seams.sessions.get_session(&session_id).await else {
+        return dispatch;
+    };
+    let turns = &session.provider_session().capabilities.turns;
+    if turns.supports_active_steering && turns.active_steering_interrupts_tools != Some(true) {
+        return Dispatch::Steer {
+            target_run_id: active.id.clone(),
+            restart: false,
+        };
+    }
+    dispatch
+}
+
+/// The proposed plan a command starts from, once it is known to be usable.
+async fn resolve_source_plan(
+    orchestrator: &Orchestrator,
+    command: &OrchestrationV2ServerCommand,
+    client: &C,
+    projection: &OrchestrationV2ThreadProjection,
+) -> Result<Option<OrchestrationV2PlanArtifact>, OrchestratorError> {
+    let Some(reference) = source_plan_ref_of(client) else {
+        return Ok(None);
+    };
+    let source_project_id = if reference.thread_id == projection.thread.id {
+        projection.thread.project_id.clone()
+    } else {
+        orchestrator
+            .projection
+            .get_thread_projection(&reference.thread_id)
+            .await
+            .map_err(|cause| OrchestratorError::projection(reference.thread_id.clone(), cause))?
+            .thread
+            .project_id
+    };
+    // Command projections leave plans out, so read the source plan directly.
+    let artifact = orchestrator
+        .projection
+        .get_plan(&reference.thread_id, reference.plan_id.as_str())
+        .await
+        .map_err(|cause| dispatch_failure(command, cause.to_string()))?;
+    let Some(plan) = artifact
+        .filter(|artifact| matches!(artifact, OrchestrationV2PlanArtifact::ProposedPlan { .. }))
+    else {
+        return Err(dispatch_failure(
+            command,
+            format!(
+                "Proposed plan {} does not exist on thread {}.",
+                reference.plan_id, reference.thread_id
+            ),
+        ));
+    };
+    if source_project_id != projection.thread.project_id {
+        return Err(dispatch_failure(
+            command,
+            format!(
+                "Proposed plan {} belongs to a different project.",
+                reference.plan_id
+            ),
+        ));
+    }
+    if let OrchestrationV2PlanArtifact::ProposedPlan { id, status, .. } = &plan
+        && *status != OrchestrationV2PlanArtifactStatus::Active
+    {
+        return Err(dispatch_failure(
+            command,
+            format!("Proposed plan {id} is not active."),
+        ));
+    }
+    Ok(Some(plan))
 }
 
 /// The dispatch mode after the server resolves delivery intent.
@@ -612,6 +893,14 @@ fn millis(at: UtcDateTime) -> i64 {
     at.as_datetime().timestamp_millis()
 }
 
+/// What the start branch needs beyond the projection.
+struct StartInput<'a> {
+    client: &'a C,
+    requested_model: &'a ModelSelection,
+    start: Start,
+    resolved: &'a Resolved,
+}
+
 /// The start branch of `dispatchMessage`: a `starting` run that gets its
 /// provider turn from the effect, or a `preparing` run for `defer_start`. A
 /// deferred run has no effect here; it starts once its workspace is ready.
@@ -623,11 +912,15 @@ async fn start_run(
     orchestrator: &Orchestrator,
     command: &OrchestrationV2ServerCommand,
     projection: &OrchestrationV2ThreadProjection,
-    client: &C,
-    requested_model: &ModelSelection,
-    start: Start,
+    input: StartInput<'_>,
     decision: &mut Decision,
 ) -> Result<(), OrchestratorError> {
+    let StartInput {
+        client,
+        requested_model,
+        start,
+        resolved,
+    } = input;
     let C::MessageDispatch {
         created_by,
         creation_source,
@@ -803,7 +1096,7 @@ async fn start_run(
         delegated_task_id: None,
         work_started_at: wake_work_started_at(&projection.runs, client),
         restart_cancelled_background_work: None,
-        source_plan_ref: None,
+        source_plan_ref: source_plan_ref_of(client),
         delegated_completion: None,
         workspace_preparation,
     };
@@ -838,7 +1131,8 @@ async fn start_run(
         started_at: None,
         completed_at: None,
     };
-    let message = conversation_message(client, &thread.id, &run_id, &root_node_id, now);
+    let mut message = conversation_message(client, &thread.id, &run_id, &root_node_id, now);
+    resolved.apply(&mut message);
     // The user's turn item is new on the start path. Its ordinal is the
     // store's next one, which already sits past every stored item.
     let turn_item_ordinal = next_turn_item_ordinal(orchestrator, projection).await?;
@@ -921,6 +1215,7 @@ async fn start_run(
         instance,
         run
     );
+    resolved.complete_source_plan(decision, now);
     run_scoped_event!(
         decision,
         RunAttemptCreated,
@@ -1128,6 +1423,7 @@ struct QueueInput<'a> {
     model_selection: &'a ModelSelection,
     /// The run was held because its worktree never came up.
     worktree_missing: bool,
+    resolved: &'a Resolved,
 }
 
 /// The queued branch of `dispatchMessage`: the message becomes a `queued` run
@@ -1327,7 +1623,7 @@ async fn queue_run(
         delegated_task_id: None,
         work_started_at: None,
         restart_cancelled_background_work: None,
-        source_plan_ref: None,
+        source_plan_ref: source_plan_ref_of(input.client),
         delegated_completion: None,
         workspace_preparation: None,
     };
@@ -1362,7 +1658,8 @@ async fn queue_run(
         started_at: None,
         completed_at: None,
     };
-    let message = conversation_message(input.client, &thread.id, &run_id, &root_node_id, now);
+    let mut message = conversation_message(input.client, &thread.id, &run_id, &root_node_id, now);
+    input.resolved.apply(&mut message);
 
     let instance = &input.model_selection.instance_id;
     if thread_is_new {
@@ -1388,6 +1685,7 @@ async fn queue_run(
         instance,
         run
     );
+    input.resolved.complete_source_plan(decision, now);
     run_scoped_event!(
         decision,
         RunAttemptCreated,

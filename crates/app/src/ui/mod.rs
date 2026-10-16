@@ -3,6 +3,7 @@
 //! module documents what it maps onto in gpui-component and what is not
 //! ported.
 
+pub mod animated_size;
 pub mod badge;
 pub mod button;
 pub mod collapsible_section_header;

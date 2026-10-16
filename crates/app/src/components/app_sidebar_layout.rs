@@ -189,7 +189,11 @@ impl AppSidebarLayout {
     ) {
         match event {
             SidebarEvent::Navigate(_) => {
-                self.usage = None;
+                // Screenshot runs (`TURIN_PAGE`) keep their route: under load the
+                // sidebar's startup selection can land well after the window opens.
+                if std::env::var_os("TURIN_PAGE").is_none() {
+                    self.usage = None;
+                }
                 cx.notify();
             }
             SidebarEvent::OpenUsage => self.open_usage(window, cx),

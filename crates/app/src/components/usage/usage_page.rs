@@ -225,23 +225,18 @@ impl UsagePage {
             Ok("metric-menu") => self.menu = Some(OpenMenu::Metric),
             Ok("period-menu") => self.menu = Some(OpenMenu::Period),
             Ok(open @ ("model-dialog" | "price-dialog" | "limits-popup")) => {
+                // Deferred, not timed: a window that is not on screen stops
+                // redrawing, so the overlay has to be up before the first frame.
                 let open = open.to_owned();
-                cx.spawn_in(window, async move |this, cx| {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(700))
-                        .await;
-                    this.update_in(cx, |this, window, cx| match open.as_str() {
-                        "model-dialog" => this.demo_model_dialog(window, cx),
-                        "price-dialog" => {
-                            this.open_price_dialog(Some("deepseek-v4-pro".into()), window, cx)
-                        }
-                        _ => this
-                            .limits
-                            .update(cx, |limits, cx| limits.demo_open_first(cx)),
-                    })
-                    .ok();
-                })
-                .detach();
+                cx.defer_in(window, move |this, window, cx| match open.as_str() {
+                    "model-dialog" => this.demo_model_dialog(window, cx),
+                    "price-dialog" => {
+                        this.open_price_dialog(Some("deepseek-v4-pro".into()), window, cx)
+                    }
+                    _ => this
+                        .limits
+                        .update(cx, |limits, cx| limits.demo_open_first(cx)),
+                });
             }
             _ => {}
         }

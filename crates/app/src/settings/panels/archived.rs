@@ -2,6 +2,7 @@
 //! environment. The thread context menu (Unarchive / Delete on right click) is
 //! not ported; the Unarchive button covers the common path and Delete lives on
 //! the thread's own sidebar menu (PORTING.md Deviations).
+//! Also ports upstream/apps/web/src/lib/archivedThreadsState.ts.
 
 use gpui_kit::{
     AnyElement, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,

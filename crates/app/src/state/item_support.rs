@@ -1,4 +1,5 @@
 //! Port of upstream/packages/client-runtime/src/state/itemSupport.ts
+//! Also ports upstream/apps/web/src/state/v2ItemSupport.ts.
 
 use std::sync::{Arc, LazyLock};
 

@@ -421,6 +421,9 @@ impl AssetSource for AppAssets {
         if let Some((_, bytes)) = BRAND.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
+        if let Some(bytes) = crate::ui::pierre_icons::load_pierre_icon(path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
+        }
         if let Some(bytes) = AppIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -440,6 +443,12 @@ impl AssetSource for AppAssets {
             .filter(|name| name.starts_with(path))
             .map(SharedString::from)
             .collect();
+        names.extend(
+            crate::ui::pierre_icons::pierre_icon_asset_paths()
+                .into_iter()
+                .filter(|name| name.starts_with(path))
+                .map(SharedString::from),
+        );
         names.extend(AppIcons.list(path)?);
         names.extend(crate::settings::icons::SettingsIcons.list(path)?);
         names.extend(Assets.list(path)?);

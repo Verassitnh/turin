@@ -14,6 +14,7 @@ pub mod icon;
 pub mod kbd;
 pub mod menu;
 pub mod middle_truncate;
+pub mod pierre_icons;
 pub mod popover;
 pub mod scroll_area;
 pub mod separator;

@@ -637,7 +637,7 @@ mod tests {
                 InjectMode::Refuse
             });
             let result = deliver(
-                &vec![source],
+                std::slice::from_ref(&source),
                 16_000,
                 false,
                 &HashSet::new(),

@@ -2017,10 +2017,10 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
-    fn fixture() -> Fixture {
+    async fn fixture() -> Fixture {
         let base = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(base.path()).unwrap();
-        let config = ServerConfig::for_test(&root, &root).unwrap();
+        let config = ServerConfig::for_test(&root, &root).await.unwrap();
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-b", "main"]);
@@ -2082,7 +2082,7 @@ mod tests {
 
     #[tokio::test]
     async fn measures_nested_regular_files_without_following_symlinks() {
-        let fx = fixture();
+        let fx = fixture().await;
         fx.service.host().update_storage(|settings| {
             settings.worktree_keep_when = WorktreeKeepWhen::TrackedChanges;
         });
@@ -2122,7 +2122,7 @@ mod tests {
 
     #[tokio::test]
     async fn still_removes_a_worktree_when_measuring_its_size_fails() {
-        let fx = fixture();
+        let fx = fixture().await;
         fx.service.host().fail_read_dir();
         let report = fx.service.run_now().await;
         let entry = worktree_entry(&report);
@@ -2134,7 +2134,7 @@ mod tests {
     }
 
     async fn keeps_when_threads_change_during_measure(share: bool) {
-        let fx = fixture();
+        let fx = fixture().await;
         fx.service.host().update_storage(|settings| {
             settings.worktree_keep_when = WorktreeKeepWhen::TrackedChanges;
         });
@@ -2189,7 +2189,7 @@ mod tests {
 
     #[tokio::test]
     async fn reads_the_thread_snapshot_once_per_sweep() {
-        let fx = fixture();
+        let fx = fixture().await;
         let report = fx.service.run_now().await;
         assert_eq!(
             worktree_entry(&report).outcome,
@@ -2199,7 +2199,7 @@ mod tests {
     }
 
     async fn session_updates_queue_sweeps(first: &'static str, second: &'static str, sweeps: u64) {
-        let fx = fixture();
+        let fx = fixture().await;
         fx.service
             .host()
             .set_pause_at(std::fs::canonicalize(&fx.worktree).unwrap());
@@ -2234,7 +2234,7 @@ mod tests {
 
     #[tokio::test]
     async fn does_not_measure_a_worktree_kept_for_an_open_provider_session() {
-        let fx = fixture();
+        let fx = fixture().await;
         fx.service.host().record_walks();
         let root = path_string(&std::fs::canonicalize(&fx.worktree).unwrap());
         fx.service
@@ -2262,7 +2262,7 @@ mod tests {
 
     #[tokio::test]
     async fn compares_the_checked_out_branch_without_a_full_status() {
-        let fx = fixture();
+        let fx = fixture().await;
         let changed = "Repository or branch changed";
         git(&fx.worktree, &["checkout", "--detach"]);
         assert_eq!(worktree_entry(&fx.service.run_now().await).reason, changed);
@@ -2331,7 +2331,7 @@ mod tests {
     }
 
     async fn applies(policy: WorktreeKeepWhen, file: &str, removed: bool) {
-        let fx = fixture();
+        let fx = fixture().await;
         fx.service
             .host()
             .update_storage(|settings| settings.worktree_keep_when = policy);
@@ -2416,7 +2416,7 @@ mod tests {
 
     #[tokio::test]
     async fn preserves_tracked_edits_written_after_the_final_status_check() {
-        let fx = fixture();
+        let fx = fixture().await;
         fx.service.host().update_storage(|settings| {
             settings.worktree_keep_when = WorktreeKeepWhen::TrackedChanges;
         });
@@ -2446,7 +2446,7 @@ mod tests {
 
     #[tokio::test]
     async fn streams_the_current_report_and_subsequent_runs() {
-        let fx = fixture();
+        let fx = fixture().await;
         let mut reports = fx.service.subscribe();
         let mut seen = Vec::new();
         loop {
@@ -2475,7 +2475,7 @@ mod tests {
 
     #[tokio::test]
     async fn caps_entries_while_preserving_totals_and_prioritizing_removals() {
-        let fx = fixture();
+        let fx = fixture().await;
         let mut threads = Vec::new();
         for index in 0..205 {
             let path = PathBuf::from(format!("{}-{index}", path_string(&fx.worktree)));
@@ -2513,7 +2513,7 @@ mod tests {
 
     #[tokio::test]
     async fn keeps_staged_edits_in_tracked_only_mode() {
-        let fx = fixture();
+        let fx = fixture().await;
         fx.service.host().update_storage(|settings| {
             settings.worktree_keep_when = WorktreeKeepWhen::TrackedChanges;
         });
@@ -2529,7 +2529,7 @@ mod tests {
     #[tokio::test]
     async fn reports_shared_and_running_worktrees_but_omits_disabled_rules_and_missing_directories()
     {
-        let fx = fixture();
+        let fx = fixture().await;
         let path = path_string(&fx.worktree);
         fx.service.host().set_threads(vec![shell(json!({
             "branch": "feature",
@@ -2569,7 +2569,7 @@ mod tests {
 
     #[tokio::test]
     async fn serializes_concurrent_requests_and_returns_each_runs_report() {
-        let fx = fixture();
+        let fx = fixture().await;
         let first = fx.service.clone();
         let second = fx.service.clone();
         let (left, right) = tokio::join!(first.run_now(), second.run_now());
@@ -2597,7 +2597,7 @@ mod tests {
 
     #[tokio::test]
     async fn aggregates_expired_artifacts_and_rotated_logs() {
-        let fx = fixture();
+        let fx = fixture().await;
         fx.service.host().update_storage(|settings| {
             settings.worktree_after_days = None;
             settings.worktree_on_delete = false;
@@ -2645,7 +2645,7 @@ mod tests {
 
     #[tokio::test]
     async fn reports_git_failures_without_aborting_the_remaining_categories() {
-        let fx = fixture();
+        let fx = fixture().await;
         fx.service.host().update_storage(|settings| {
             settings.browser_artifacts_after_days = Some(StorageRetentionDays::new(8).unwrap());
             settings.logs_after_days = Some(StorageRetentionDays::new(8).unwrap());

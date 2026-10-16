@@ -9,5 +9,7 @@ pub mod environment_coordinator;
 pub mod reopen_closed_view;
 pub mod thread_notifications;
 pub mod thread_routes;
+pub mod live;
+pub mod pr_preferences;
 
 pub use chat_route_shortcuts::bind_chat_route_keys;

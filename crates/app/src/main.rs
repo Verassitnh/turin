@@ -187,6 +187,7 @@ fn main() {
             #[cfg(target_os = "macos")]
             dock_icon::set_unbundled_app_icon();
             theme::init(cx);
+            crate::ui::toast::init(crate::ui::toast_logic::ToastPosition::TopRight, cx);
             // Device-local theme state (useTheme's localStorage) persists next to the
             // app data; the settings demo keeps it in memory.
             if std::env::var_os("TURIN_SETTINGS").is_none()

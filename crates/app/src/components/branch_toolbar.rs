@@ -22,6 +22,8 @@ pub mod branch_selector;
 pub mod branch_toolbar_logic;
 pub mod composer_control;
 pub mod env_selectors;
+pub mod live_source;
+pub mod live_source;
 pub mod mock_source;
 pub mod paginated_branches;
 

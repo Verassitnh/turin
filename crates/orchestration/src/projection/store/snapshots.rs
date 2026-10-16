@@ -232,7 +232,7 @@ mod tests {
     fn items_budget(max_items: usize) -> ThreadHistoryPagePolicy {
         ThreadHistoryPagePolicy {
             max_user_turns: None,
-            max_items: max_items,
+            max_items,
             max_encoded_bytes: 10_000_000,
         }
     }

@@ -5,6 +5,7 @@
 
 pub mod legacy;
 pub mod service;
+pub use service::ServerSettingsService;
 
 use serde_json::{Map, Value, json};
 use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceConfig};

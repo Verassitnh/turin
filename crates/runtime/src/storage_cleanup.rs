@@ -638,6 +638,7 @@ struct Inner {
     automatic_queued: AtomicBool,
     last_settings: Mutex<ServerSettings>,
     activated: AtomicBool,
+    worktree_cleanup_unavailable: Option<String>,
 }
 
 /// Serialized storage sweeps and the report they publish.
@@ -649,6 +650,21 @@ pub struct StorageCleanup {
 
 impl StorageCleanup {
     pub fn new(config: ServerConfig, host: CleanupHost) -> Self {
+        Self::build(config, host, None)
+    }
+
+    /// Artifact/log cleanup for hosts that cannot yet supply current workspace
+    /// leases and session/deletion snapshots. Worktree policies are reported as
+    /// unavailable rather than interpreted against an empty host snapshot.
+    pub fn files_only(config: ServerConfig, host: CleanupHost, reason: impl Into<String>) -> Self {
+        Self::build(config, host, Some(reason.into()))
+    }
+
+    fn build(
+        config: ServerConfig,
+        host: CleanupHost,
+        worktree_cleanup_unavailable: Option<String>,
+    ) -> Self {
         let settings = host.settings();
         let (reports, _) = watch::channel(None);
         let inner = Arc::new(Inner {
@@ -658,6 +674,7 @@ impl StorageCleanup {
             automatic_queued: AtomicBool::new(false),
             last_settings: Mutex::new(settings),
             activated: AtomicBool::new(false),
+            worktree_cleanup_unavailable,
         });
         let worker_inner = Arc::clone(&inner);
         let worker = DrainableWorker::spawn(move |job| {
@@ -691,6 +708,12 @@ impl StorageCleanup {
         self.worker.enqueue(Job::Manual(tx));
         rx.await
             .expect("storage cleanup worker dropped the manual run")
+    }
+
+    /// Queues and waits for one automatic sweep; the composition root owns the timer.
+    pub async fn run_automatic(&self) {
+        self.request_automatic();
+        self.drain().await;
     }
 
     /// Starts the hourly automatic sweep. Further calls do not start another loop.
@@ -730,6 +753,7 @@ impl StorageCleanup {
 
     /// Settings subscription: a cleanup-policy change queues one automatic sweep.
     pub fn note_settings(&self, settings: ServerSettings) {
+        *self.inner.host.settings.lock() = settings.clone();
         let mut last = self.inner.last_settings.lock();
         if !cleanup_settings_changed(&last, &settings) {
             return;
@@ -1407,6 +1431,22 @@ impl Inner {
         settings: &ServerSettings,
         now: i64,
     ) -> Vec<StorageCleanupReportEntry> {
+        if let Some(reason) = &self.worktree_cleanup_unavailable {
+            return if any_worktree_policy(settings, worktree_cleanup_enabled) {
+                vec![StorageCleanupReportEntry {
+                    kind: StorageCleanupReportEntryKind::Worktree,
+                    outcome: StorageCleanupReportEntryOutcome::Kept,
+                    reason: reason.clone(),
+                    path: Some(path_string(&self.config.worktrees_dir)),
+                    thread_id: None,
+                    thread_title: None,
+                    bytes: None,
+                    files: None,
+                }]
+            } else {
+                Vec::new()
+            };
+        }
         let mut entries = Vec::new();
         let roots = self.managed_roots(settings).await;
         let projects = self.host.projects();

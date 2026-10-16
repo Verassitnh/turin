@@ -498,3 +498,129 @@ impl Commands {
             .map_err(|error| CommandError::new(error.to_string()))
     }
 }
+
+impl Commands {
+    pub async fn server_settings(
+        &self,
+    ) -> Result<turin_contracts::settings::ServerSettings, CommandError> {
+        self.runtime
+            .server_settings
+            .get_settings()
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    pub async fn update_server_settings(
+        &self,
+        patch: turin_contracts::settings::ServerSettingsPatch,
+    ) -> Result<turin_contracts::settings::ServerSettings, CommandError> {
+        self.runtime
+            .server_settings
+            .update_settings(&patch)
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        self.runtime
+            .sync_provider_settings()
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    pub async fn update_provider_instance(
+        &self,
+        mutation: turin_contracts::provider_instance::ProviderInstanceMutation,
+    ) -> Result<turin_contracts::settings::ServerSettings, CommandError> {
+        self.runtime
+            .server_settings
+            .update_provider_instance(&mutation, None)
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        self.runtime
+            .sync_provider_settings()
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    /// Full live git status including the real source-control change request.
+    pub async fn git_status(
+        &self,
+        cwd: &str,
+    ) -> Result<turin_contracts::git::VcsStatusResult, CommandError> {
+        let input = turin_contracts::git::VcsStatusInput {
+            cwd: turin_contracts::TrimmedNonEmptyString::new(cwd)
+                .map_err(|error| CommandError::new(error.to_string()))?,
+        };
+        self.runtime
+            .git_manager
+            .status(&input)
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    /// Local branches; use `git_list_refs` for paged local + remote refs.
+    pub async fn git_branches(&self, cwd: &str) -> Result<Vec<String>, CommandError> {
+        self.runtime
+            .git
+            .list_local_branch_names(cwd)
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    pub async fn git_list_refs(
+        &self,
+        input: &turin_contracts::git::VcsListRefsInput,
+    ) -> Result<turin_contracts::git::VcsListRefsResult, CommandError> {
+        self.runtime
+            .git
+            .list_refs(input)
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    pub async fn git_switch_branch(
+        &self,
+        input: turin_contracts::git::VcsSwitchRefInput,
+    ) -> Result<turin_contracts::git::VcsSwitchRefResult, CommandError> {
+        let result = self
+            .runtime
+            .git
+            .switch_ref(&input)
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        self.runtime
+            .git_manager
+            .invalidate_status(input.cwd.as_str());
+        Ok(result)
+    }
+
+    /// A missing production reader is unavailable, never a successful zero total.
+    pub async fn usage_summary(
+        &self,
+        input: &turin_contracts::usage::UsageSummaryInput,
+    ) -> Result<turin_contracts::usage::UsageSummary, CommandError> {
+        if !self.runtime.usage_readers_available {
+            return Err(CommandError::new(
+                "Usage history is unavailable: retained provider drivers do not supply production usage readers yet.",
+            ));
+        }
+        let settings = self.runtime.providers.settings.settings().await;
+        self.runtime
+            .usage
+            .read_summary(input, &settings)
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    /// Pending approval cards across active, non-archived threads. Questions and
+    /// auth prompts have separate UI affordances and do not inflate the badge.
+    pub async fn pending_approval_count(&self) -> Result<usize, CommandError> {
+        self.runtime.stores.db.read(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM orchestration_v2_projection_runtime_requests request
+                 INNER JOIN orchestration_v2_projection_threads thread ON thread.thread_id = request.thread_id
+                 WHERE request.status = 'pending' AND thread.archived_at IS NULL AND thread.deleted_at IS NULL
+                 AND request.kind IN ('command', 'file-read', 'file-change', 'mcp-elicitation', 'permission', 'dynamic_tool_call')",
+                [], |row| row.get::<_, i64>(0),
+            ).map(|count| count as usize).map_err(|error| turin_persistence::PersistenceError::sql("runtime.pendingApprovalCount", &error))
+        }).await.map_err(|error| CommandError::from_error(&error))
+    }
+}

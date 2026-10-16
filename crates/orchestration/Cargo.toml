@@ -23,6 +23,7 @@ async-trait.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
 indexmap.workspace = true
+libc.workspace = true
 regex.workspace = true
 sha2.workspace = true
 uuid.workspace = true

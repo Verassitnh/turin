@@ -1,7 +1,15 @@
 //! Ports of upstream/apps/web/src/components/chat.
 
+#[allow(dead_code)]
+pub mod agent_elapsed;
+#[allow(dead_code)]
+pub mod agent_spawn_summary;
+#[allow(dead_code)]
+pub mod assistant_citation_navigation;
 pub mod changed_files_tree;
 pub mod chat_header;
+#[allow(dead_code)]
+pub mod context_window;
 // Chat-lane geometry for the canvas; the canvas does not call it yet.
 #[allow(dead_code)]
 pub mod chat_canvas_layout;
@@ -23,8 +31,14 @@ pub mod pending_user_input;
 // The ported timeline read model keeps upstream's full helper surface; the
 // view and T14's reducers call into it piecemeal.
 #[allow(dead_code)]
+pub mod thread_details_card_layout;
+#[allow(dead_code)]
+pub mod thread_status_line;
+#[allow(dead_code)]
 pub mod timeline;
 pub mod timeline_message_rows;
+#[allow(dead_code)]
+pub mod timeline_minimap_items;
 pub mod timeline_work_rows;
 // Scroll anchoring state for the timeline view; the view does not read it yet.
 #[allow(dead_code)]

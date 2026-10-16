@@ -151,25 +151,9 @@ pub fn format_pending_primary_action_label(
     }
 }
 
-/// `formatContextWindowTokens`.
+/// `formatContextWindowTokens` (`lib/contextWindow.ts`).
 pub fn format_context_window_tokens(value: Option<f64>) -> String {
-    let Some(value) = value.filter(|v| v.is_finite()) else {
-        return "0".to_owned();
-    };
-    // JS `toFixed(1)` rounds ties up, where Rust's formatter rounds them to even.
-    let fixed = |value: f64| format!("{:.1}", (value * 10.0).round() / 10.0);
-    let trim = |text: String| text.strip_suffix(".0").map(str::to_owned).unwrap_or(text);
-    if value < 1_000.0 {
-        return format!("{}", value.round());
-    }
-    if value < 10_000.0 {
-        return format!("{}k", trim(fixed(value / 1_000.0)));
-    }
-    // Anything from 999,500 rounds to 1000k, so it belongs to the next unit.
-    if value < 999_500.0 {
-        return format!("{}k", (value / 1_000.0).round());
-    }
-    format!("{}m", trim(fixed(value / 1_000_000.0)))
+    crate::components::chat::context_window::format_context_window_tokens(value)
 }
 
 fn action_name(action: ActiveTurnComposerAction) -> &'static str {

@@ -93,10 +93,16 @@ pub struct InMemoryThemeLibraryStorage {
 }
 
 impl InMemoryThemeLibraryStorage {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             value: Mutex::new(None),
         }
+    }
+}
+
+impl Default for InMemoryThemeLibraryStorage {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -182,7 +188,7 @@ fn is_theme_label(value: &str) -> bool {
     !trimmed.is_empty() && trimmed.len() <= 48
 }
 
-fn snake_to_camel_role(role: &str) -> String {
+pub fn snake_to_camel_role(role: &str) -> String {
     let mut out = String::new();
     for (index, part) in role.split('_').enumerate() {
         if index == 0 {
@@ -198,7 +204,7 @@ fn snake_to_camel_role(role: &str) -> String {
     out
 }
 
-fn camel_to_snake_role(camel: &str) -> Option<&'static str> {
+pub fn camel_to_snake_role(camel: &str) -> Option<&'static str> {
     let mut snake = String::new();
     for (index, ch) in camel.chars().enumerate() {
         if ch.is_uppercase() {
@@ -220,7 +226,7 @@ fn theme_color_role_set() -> HashSet<&'static str> {
     THEME_COLOR_ROLES.iter().copied().collect()
 }
 
-fn get_color_role<'a>(colors: &'a ThemeColors, role: &str) -> Option<&'a SharedString> {
+pub fn get_color_role<'a>(colors: &'a ThemeColors, role: &str) -> Option<&'a SharedString> {
     match role {
         "canvas" => Some(&colors.canvas),
         "chrome" => Some(&colors.chrome),
@@ -287,7 +293,7 @@ fn get_color_role<'a>(colors: &'a ThemeColors, role: &str) -> Option<&'a SharedS
     }
 }
 
-fn set_color_role(colors: &mut ThemeColors, role: &str, value: SharedString) -> bool {
+pub fn set_color_role(colors: &mut ThemeColors, role: &str, value: SharedString) -> bool {
     match role {
         "canvas" => colors.canvas = value,
         "chrome" => colors.chrome = value,
@@ -738,7 +744,7 @@ fn canonicalize_theme_definition(theme: ThemeDefinition) -> Result<ThemeDefiniti
     Ok(next)
 }
 
-fn merge_overrides(base: ThemeColors, overrides: HashMap<String, SharedString>) -> ThemeColors {
+pub fn merge_overrides(base: ThemeColors, overrides: HashMap<String, SharedString>) -> ThemeColors {
     let mut merged = base;
     for (role, value) in overrides {
         set_color_role(&mut merged, role.as_str(), value);
@@ -912,8 +918,63 @@ fn get_custom_theme_library_snapshot() -> CustomThemeLibrarySnapshot {
     cache.clone().expect("snapshot")
 }
 
+type CustomThemeListener = Arc<dyn Fn() + Send + Sync>;
+
+struct CustomThemeListeners {
+    next_id: u64,
+    listeners: Vec<(u64, CustomThemeListener)>,
+}
+
+static CUSTOM_THEME_LISTENERS: Mutex<CustomThemeListeners> = Mutex::new(CustomThemeListeners {
+    next_id: 0,
+    listeners: Vec::new(),
+});
+
+fn notify_custom_theme_listeners() {
+    let listeners: Vec<CustomThemeListener> = CUSTOM_THEME_LISTENERS
+        .lock()
+        .listeners
+        .iter()
+        .map(|(_, listener)| Arc::clone(listener))
+        .collect();
+    for listener in listeners {
+        listener();
+    }
+}
+
 pub fn invalidate_custom_themes() {
     *CUSTOM_THEME_LIBRARY_SNAPSHOT.lock() = None;
+    notify_custom_theme_listeners();
+}
+
+/// `subscribeToCustomThemes`; returns the unsubscribe handle. The host feeds
+/// cross-process storage changes through
+/// [`handle_custom_themes_storage_event`] in place of upstream's `storage`
+/// window listener.
+pub fn subscribe_to_custom_themes(
+    listener: impl Fn() + Send + Sync + 'static,
+) -> Box<dyn FnOnce() + Send> {
+    let id = {
+        let mut state = CUSTOM_THEME_LISTENERS.lock();
+        let id = state.next_id;
+        state.next_id += 1;
+        state.listeners.push((id, Arc::new(listener)));
+        id
+    };
+    Box::new(move || {
+        CUSTOM_THEME_LISTENERS
+            .lock()
+            .listeners
+            .retain(|(listener_id, _)| *listener_id != id);
+    })
+}
+
+/// A write to the theme library's storage key (or a clear, `key: None`) from
+/// elsewhere: drop the cached snapshot so the next read sees it.
+pub fn handle_custom_themes_storage_event(key: Option<&str>) {
+    if key == Some(CUSTOM_THEMES_STORAGE_KEY) || key.is_none() {
+        invalidate_custom_themes();
+    }
 }
 
 pub fn get_custom_themes() -> Vec<ThemeDefinition> {
@@ -928,11 +989,14 @@ pub fn get_environment_themes() -> Vec<ThemeDefinition> {
 }
 
 pub fn set_environment_themes(themes: Vec<ThemeDefinition>) -> bool {
-    let mut slot = ENVIRONMENT_THEME_DEFINITIONS.lock();
-    if *slot == themes {
-        return false;
+    {
+        let mut slot = ENVIRONMENT_THEME_DEFINITIONS.lock();
+        if *slot == themes {
+            return false;
+        }
+        *slot = themes;
     }
-    *slot = themes;
+    notify_custom_theme_listeners();
     true
 }
 
@@ -990,6 +1054,7 @@ fn save_custom_themes(
         stored_themes,
         themes,
     });
+    notify_custom_theme_listeners();
     Ok(())
 }
 
@@ -1064,25 +1129,26 @@ pub fn update_custom_theme(theme: ThemeDefinition) -> Result<ThemeDefinition, St
     Ok(canonical)
 }
 
-pub fn remove_custom_theme(theme_id: &str) {
-    remove_custom_themes(&[theme_id.to_string()]);
+/// `removeCustomTheme`: throws upstream when the library cannot be read or
+/// written; here that is an `Err`.
+pub fn remove_custom_theme(theme_id: &str) -> Result<(), String> {
+    remove_custom_themes(&[theme_id.to_string()])
 }
 
-pub fn remove_custom_themes(theme_ids: &[String]) {
+pub fn remove_custom_themes(theme_ids: &[String]) -> Result<(), String> {
     let removed: HashSet<&str> = theme_ids.iter().map(String::as_str).collect();
     if removed.is_empty() {
-        return;
+        return Ok(());
     }
-    let Ok((stored_themes, themes)) = get_writable_custom_theme_library() else {
-        return;
-    };
+    let (stored_themes, themes) =
+        get_writable_custom_theme_library().map_err(|error| error.to_string())?;
     let previous_len = themes.len();
     let next_themes: Vec<_> = themes
         .into_iter()
         .filter(|theme| !removed.contains(theme.id.as_str()))
         .collect();
     if next_themes.len() == previous_len {
-        return;
+        return Ok(());
     }
     let next_stored: Vec<_> = stored_themes
         .into_iter()
@@ -1094,7 +1160,7 @@ pub fn remove_custom_themes(theme_ids: &[String]) {
                 .is_some_and(|id| removed.contains(id))
         })
         .collect();
-    let _ = save_custom_themes(next_stored, next_themes);
+    save_custom_themes(next_stored, next_themes).map_err(|error| error.to_string())
 }
 
 pub fn replace_custom_theme_collection(
@@ -1335,7 +1401,7 @@ pub fn parse_theme_file(value: Value) -> Result<ThemeDefinition, String> {
     })
 }
 
-fn theme_colors_to_camel_map(colors: &ThemeColors) -> Map<String, Value> {
+pub fn theme_colors_to_camel_map(colors: &ThemeColors) -> Map<String, Value> {
     let mut map = Map::new();
     for (role, value) in colors.entries() {
         map.insert(snake_to_camel_role(role), Value::String(value.to_string()));
@@ -2236,6 +2302,7 @@ mod tests {
 
     #[test]
     fn canonicalizes_explicit_writes_without_migrating_untouched() {
+        let _guard = crate::theme::THEME_GLOBALS_TEST_LOCK.lock();
         let storage = Arc::new(InMemoryThemeLibraryStorage::new());
         set_theme_library_storage(storage.clone());
         invalidate_custom_themes();
@@ -2275,7 +2342,426 @@ mod tests {
             updated.colors.accent.as_str(),
             canonical("hsl(263 70% 58%)")
         );
-        remove_custom_theme("aurora");
+        remove_custom_theme("aurora").expect("remove");
         invalidate_custom_themes();
+    }
+
+    // Port of the remaining theme-library cases of upstream/apps/web/src/themePalette.test.ts.
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use serde_json::json;
+
+    /// `window.localStorage` stand-in that counts reads and writes and can fail
+    /// reads after a number of successes.
+    struct CountingStorage {
+        value: Mutex<Option<String>>,
+        reads: AtomicUsize,
+        writes: AtomicUsize,
+        /// Reads past this many fail with `StorageUnavailable`.
+        read_limit: Mutex<Option<usize>>,
+    }
+
+    impl CountingStorage {
+        fn new(initial: Option<Value>) -> Arc<Self> {
+            Arc::new(Self {
+                value: Mutex::new(initial.map(|v| v.to_string())),
+                reads: AtomicUsize::new(0),
+                writes: AtomicUsize::new(0),
+                read_limit: Mutex::new(None),
+            })
+        }
+
+        fn stored(&self) -> Value {
+            serde_json::from_str(self.value.lock().as_deref().unwrap_or("[]")).expect("stored")
+        }
+
+        fn replace_raw(&self, value: Value) {
+            *self.value.lock() = Some(value.to_string());
+        }
+    }
+
+    impl ThemeLibraryStorage for CountingStorage {
+        fn read(&self) -> Result<Option<String>, ThemeLibraryStorageError> {
+            let count = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.read_limit.lock().is_some_and(|limit| count > limit) {
+                return Err(ThemeLibraryStorageError::read(
+                    ThemeLibraryStorageReason::StorageUnavailable,
+                ));
+            }
+            Ok(self.value.lock().clone())
+        }
+
+        fn write(&self, raw: &str) -> Result<(), ThemeLibraryStorageError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            *self.value.lock() = Some(raw.to_string());
+            Ok(())
+        }
+    }
+
+    fn with_library(
+        initial: Option<Value>,
+    ) -> (parking_lot::MutexGuard<'static, ()>, Arc<CountingStorage>) {
+        let guard = crate::theme::THEME_GLOBALS_TEST_LOCK.lock();
+        let storage = CountingStorage::new(initial);
+        set_theme_library_storage(storage.clone());
+        invalidate_custom_themes();
+        (guard, storage)
+    }
+
+    fn reset_library() {
+        set_theme_library_storage(Arc::new(InMemoryThemeLibraryStorage::new()));
+        invalidate_custom_themes();
+    }
+
+    fn file(id: &str, name: &str, appearance: &str, colors: Value) -> ThemeDefinition {
+        parse_theme_file(json!({
+            "version": THEME_FILE_VERSION,
+            "id": id,
+            "name": name,
+            "appearance": appearance,
+            "colors": colors,
+        }))
+        .expect("theme file")
+    }
+
+    fn demo_collection() -> ThemeCollection {
+        ThemeCollection {
+            id: SharedString::from("open-vsx:demo.theme"),
+            label: SharedString::from("Demo Theme"),
+        }
+    }
+
+    fn ids(themes: &[ThemeDefinition]) -> Vec<&str> {
+        themes.iter().map(|theme| theme.id.as_str()).collect()
+    }
+
+    #[test]
+    fn invalidates_cached_themes_when_another_process_clears_storage() {
+        let (_guard, storage) = with_library(Some(json!([{
+            "id": "ocean-dusk",
+            "label": "Ocean dusk",
+            "appearance": "dark",
+            "colors": { "canvas": "#07152f" },
+        }])));
+        assert_eq!(get_custom_themes().len(), 1);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let unsubscribe = subscribe_to_custom_themes(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+
+        *storage.value.lock() = None;
+        handle_custom_themes_storage_event(None);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(get_custom_themes(), vec![]);
+        // Unrelated keys leave the cache alone.
+        handle_custom_themes_storage_event(Some("something-else"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        unsubscribe();
+        reset_library();
+    }
+
+    #[test]
+    fn preserves_valid_imported_theme_collections_and_drops_malformed_metadata() {
+        let (_guard, _storage) = with_library(Some(json!([
+            {
+                "id": "github-dark",
+                "label": "GitHub Dark",
+                "appearance": "dark",
+                "colors": { "canvas": "#0d1117" },
+                "collection": { "id": "open-vsx:github.github-vscode-theme", "label": "GitHub Theme" },
+            },
+            {
+                "id": "github-light",
+                "label": "GitHub Light",
+                "appearance": "light",
+                "colors": { "canvas": "#ffffff" },
+                "collection": { "id": "bad collection id", "label": "GitHub Theme" },
+            },
+        ])));
+        let themes = get_custom_themes();
+        assert_eq!(ids(&themes), ["github-dark", "github-light"]);
+        let collection = themes[0].collection.as_ref().expect("collection");
+        assert_eq!(
+            collection.id.as_str(),
+            "open-vsx:github.github-vscode-theme"
+        );
+        assert_eq!(collection.label.as_str(), "GitHub Theme");
+        assert_eq!(themes[1].collection, None);
+        reset_library();
+    }
+
+    fn collection_fixture() -> (Value, Value) {
+        let personal = json!({
+            "id": "personal",
+            "label": "Personal",
+            "appearance": "dark",
+            "colors": { "canvas": "#111111", "futureRole": "hsl(10 20% 30%)" },
+            "futureMetadata": { "version": 2 },
+        });
+        let collection = json!({ "id": "open-vsx:demo.theme", "label": "Demo Theme" });
+        (personal, collection)
+    }
+
+    #[test]
+    fn atomically_replaces_an_imported_collection_and_removes_stale_variants() {
+        let (personal, collection) = collection_fixture();
+        let (_guard, storage) = with_library(Some(json!([
+            personal,
+            {
+                "id": "old-light", "label": "Old Light", "appearance": "light",
+                "colors": { "canvas": "#ffffff" }, "collection": collection,
+            },
+            {
+                "id": "removed-dark", "label": "Removed Dark", "appearance": "dark",
+                "colors": { "canvas": "#000000" }, "collection": collection,
+            },
+        ])));
+        let expected_collection = get_stored_custom_theme_collection("open-vsx:demo.theme");
+        get_custom_themes();
+        // Another process adds a theme after the snapshot was cached.
+        let mut raw = storage.stored();
+        raw.as_array_mut().expect("array").push(json!({
+            "id": "other-tab", "label": "Other Tab", "appearance": "dark",
+            "colors": { "canvas": "#222222" },
+        }));
+        storage.replace_raw(raw);
+        let replacement = vec![
+            ThemeDefinition {
+                collection: Some(demo_collection()),
+                ..file(
+                    "old-light",
+                    "New Light",
+                    "light",
+                    json!({ "canvas": "#fafafa" }),
+                )
+            },
+            ThemeDefinition {
+                collection: Some(demo_collection()),
+                ..file(
+                    "new-dark",
+                    "New Dark",
+                    "dark",
+                    json!({ "canvas": "#101010" }),
+                )
+            },
+        ];
+
+        let replaced = replace_custom_theme_collection(
+            "open-vsx:demo.theme",
+            replacement.clone(),
+            Some(&expected_collection),
+        )
+        .expect("replace");
+        assert_eq!(replaced, replacement);
+        assert_eq!(
+            ids(&get_custom_themes()),
+            ["personal", "old-light", "new-dark", "other-tab"]
+        );
+        assert_eq!(storage.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(storage.stored()[0], personal);
+        reset_library();
+    }
+
+    #[test]
+    fn replaces_collection_entries_even_when_their_stored_collection_label_is_malformed() {
+        let (_guard, _storage) = with_library(Some(json!([{
+            "id": "old-light", "label": "Old Light", "appearance": "light",
+            "colors": { "canvas": "#ffffff" },
+            "collection": { "id": "open-vsx:demo.theme", "label": 42 },
+        }])));
+        let replacement = ThemeDefinition {
+            collection: Some(demo_collection()),
+            ..file(
+                "old-light",
+                "New Light",
+                "light",
+                json!({ "canvas": "#fafafa" }),
+            )
+        };
+        assert_eq!(
+            replace_custom_theme_collection("open-vsx:demo.theme", vec![replacement.clone()], None),
+            Ok(vec![replacement.clone()])
+        );
+        assert_eq!(get_custom_themes(), vec![replacement]);
+        reset_library();
+    }
+
+    #[test]
+    fn canonicalizes_explicit_writes_and_keeps_untouched_stored_entries_byte_for_byte() {
+        let untouched = json!({
+            "id": "legacy", "label": "Legacy", "appearance": "dark",
+            "colors": { "accent": "#5b6cff", "futureRole": "hsl(10 20% 30%)" },
+            "futureMetadata": { "version": 2 },
+        });
+        let (_guard, storage) = with_library(Some(json!([untouched])));
+        let created = install_custom_theme(
+            parse_theme_file(json!({
+                "version": THEME_FILE_VERSION, "id": "aurora", "name": "Aurora",
+                "appearance": "light",
+                "colors": { "canvas": "#f8fbff", "accent": "#5b6cff" },
+                "sidebarArtwork": true,
+            }))
+            .expect("aurora"),
+        )
+        .expect("install");
+        let updated = update_custom_theme(ThemeDefinition {
+            label: SharedString::from("Aurora Night"),
+            colors: ThemeColors {
+                accent: SharedString::from("hsl(263 70% 58%)"),
+                ..created.colors.clone()
+            },
+            ..created
+        })
+        .expect("update");
+
+        assert_eq!(updated.id.as_str(), "aurora");
+        assert_eq!(updated.label.as_str(), "Aurora Night");
+        assert_eq!(
+            updated.colors.accent.as_str(),
+            canonical("hsl(263 70% 58%)")
+        );
+        assert!(!updated.sidebar_artwork);
+        let stored = storage.stored();
+        assert_eq!(stored[0], untouched);
+        assert_eq!(stored[1]["id"], "aurora");
+        assert_eq!(stored[1]["label"], "Aurora Night");
+        assert_eq!(
+            stored[1]["colors"]["accent"],
+            Value::String(canonical("hsl(263 70% 58%)"))
+        );
+        assert!(stored[1].get("sidebarArtwork").is_none());
+        invalidate_custom_themes();
+        let reread = get_custom_themes()
+            .into_iter()
+            .find(|theme| theme.id.as_str() == "aurora")
+            .expect("aurora");
+        assert_eq!(reread.colors.accent.as_str(), canonical("hsl(263 70% 58%)"));
+        remove_custom_theme("aurora").expect("remove");
+        assert_eq!(storage.stored(), json!([untouched]));
+        reset_library();
+    }
+
+    #[test]
+    fn removes_multiple_custom_themes_atomically_while_preserving_unrelated_entries() {
+        let (personal, collection) = collection_fixture();
+        let (_guard, storage) = with_library(Some(json!([
+            personal,
+            {
+                "id": "demo-light", "label": "Demo Light", "appearance": "light",
+                "colors": { "canvas": "#ffffff" }, "collection": collection,
+            },
+            {
+                "id": "demo-dark", "label": "Demo Dark", "appearance": "dark",
+                "colors": { "canvas": "#000000" }, "collection": collection,
+            },
+        ])));
+        remove_custom_themes(&["demo-light".to_string(), "demo-dark".to_string()]).expect("remove");
+        assert_eq!(storage.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(ids(&get_custom_themes()), ["personal"]);
+        assert_eq!(storage.stored(), json!([personal]));
+        reset_library();
+    }
+
+    #[test]
+    fn writes_from_the_cached_raw_snapshot_without_risking_a_destructive_reread() {
+        let legacy = json!({
+            "id": "legacy", "label": "Legacy", "appearance": "dark",
+            "colors": { "accent": "#5b6cff" }, "futureMetadata": true,
+        });
+        let (_guard, storage) = with_library(Some(json!([legacy])));
+        *storage.read_limit.lock() = Some(1);
+        assert_eq!(get_custom_themes().len(), 1);
+        install_custom_theme(file(
+            "aurora",
+            "Aurora",
+            "light",
+            json!({ "accent": "hsl(263 70% 58%)" }),
+        ))
+        .expect("install");
+        assert_eq!(storage.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(storage.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(storage.stored()[0], legacy);
+        reset_library();
+    }
+
+    #[test]
+    fn refuses_to_overwrite_a_theme_library_that_could_not_be_read() {
+        let (_guard, storage) = with_library(None);
+        *storage.read_limit.lock() = Some(0);
+        invalidate_custom_themes();
+        assert_eq!(get_custom_themes(), vec![]);
+        let error = install_custom_theme(file(
+            "aurora",
+            "Aurora",
+            "light",
+            json!({ "accent": "#5b6cff" }),
+        ))
+        .expect_err("unreadable library");
+        assert_eq!(
+            error,
+            format!("Failed to read the theme library from {CUSTOM_THEMES_STORAGE_KEY}.")
+        );
+        assert_eq!(storage.writes.load(Ordering::SeqCst), 0);
+        reset_library();
+    }
+
+    #[test]
+    fn rejects_malformed_stored_entries_that_reuse_an_installed_theme_id() {
+        let (_guard, storage) = with_library(Some(json!([{ "id": "aurora", "malformed": true }])));
+        let error = install_custom_theme(file(
+            "aurora",
+            "Aurora",
+            "light",
+            json!({ "accent": "#5b6cff" }),
+        ))
+        .expect_err("duplicate id");
+        assert_eq!(error, "A theme named \"Aurora\" is already installed.");
+        assert_eq!(storage.writes.load(Ordering::SeqCst), 0);
+        reset_library();
+    }
+
+    #[test]
+    fn collapses_duplicate_raw_entries_when_their_theme_is_explicitly_updated() {
+        let theme = json!({
+            "id": "aurora", "label": "Aurora", "appearance": "light",
+            "colors": { "accent": "#5b6cff" },
+        });
+        let untouched = json!({ "id": "future", "malformed": true, "metadata": { "version": 2 } });
+        let (_guard, storage) = with_library(Some(json!([
+            theme,
+            { "id": "aurora", "malformed": true },
+            untouched,
+        ])));
+        let installed = get_custom_themes().remove(0);
+        update_custom_theme(ThemeDefinition {
+            label: SharedString::from("Aurora Night"),
+            colors: ThemeColors {
+                accent: SharedString::from("hsl(263 70% 58%)"),
+                ..installed.colors.clone()
+            },
+            ..installed
+        })
+        .expect("update");
+
+        let library = storage.stored();
+        let library = library.as_array().expect("array");
+        assert_eq!(
+            library
+                .iter()
+                .filter(|entry| entry["id"] == "aurora")
+                .count(),
+            1
+        );
+        assert_eq!(library[0]["id"], "aurora");
+        assert_eq!(library[0]["label"], "Aurora Night");
+        assert_eq!(
+            library[0]["colors"]["accent"],
+            Value::String(canonical("hsl(263 70% 58%)"))
+        );
+        assert_eq!(library[1], untouched);
+        reset_library();
     }
 }

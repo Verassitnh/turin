@@ -25,16 +25,27 @@ pub mod appearance_contrast;
 pub mod appearance_fonts;
 pub mod color;
 pub mod component_theme;
+pub mod environment_theme;
 pub mod open_vsx;
 pub mod open_vsx_themes;
 pub mod sidebar_scope;
+pub mod theme_editor_store;
 pub mod theme_inspector;
 pub mod theme_palette;
 pub mod theme_palette_library;
 pub mod theme_palettes;
 pub mod theme_preview;
 pub mod tokens;
+pub mod use_custom_themes;
+pub mod use_default_theme;
+pub mod use_environment_theme;
+pub mod use_theme;
 pub mod vscode_theme_import;
+
+/// Theme state (library, environment themes, live preview) is process-wide, as
+/// upstream's module state is; tests that touch it take this lock.
+#[cfg(test)]
+pub(crate) static THEME_GLOBALS_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, Global, Hsla, Rgba, Window, WindowAppearance, px};
@@ -420,6 +431,7 @@ pub fn apply(window_appearance: Option<WindowAppearance>, cx: &mut App) {
         system_dark,
         None,
         preferences.appearance_mode,
+        None,
     );
     let fonts = resolve_fonts(&preferences.fonts, cx);
 

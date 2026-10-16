@@ -7362,6 +7362,7 @@ dependencies = [
  "tracing",
  "turin-contracts",
  "turin-shared",
+ "uuid",
 ]
 
 [[package]]

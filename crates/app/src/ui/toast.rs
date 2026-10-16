@@ -733,17 +733,25 @@ fn copy_error_button(
     } else {
         "Copy error"
     };
-    let (icon, color) = if is_copied {
-        (IconName::Check, theme.success)
+    // `text-muted-foreground/80 hover:bg-transparent hover:text-muted-foreground`;
+    // the check is `text-success` in both states.
+    let (icon, color, hover_color) = if is_copied {
+        (IconName::Check, theme.success, theme.success)
     } else {
         (
             IconName::Copy,
             with_alpha(theme.muted_foreground, 0.8).into(),
+            theme.muted_foreground,
         )
     };
     Button::new(SharedString::from(format!("toast-{id}-copy")))
         .size(ButtonSize::IconMicro)
         .variant(ButtonVariant::GhostMuted)
+        .fg(color)
+        .hover_fg(hover_color)
+        .hover_bg(with_alpha(theme.muted_foreground, 0.))
+        .icon(icon)
+        .icon_size(rems(0.75))
         .rounded(RADIUS_MD)
         .tooltip(Tooltip::new(label))
         .on_click(move |_, _, cx| {
@@ -764,7 +772,6 @@ fn copy_error_button(
             })
             .detach();
         })
-        .child(Icon::new(icon).size(rems(0.75)).color(color))
 }
 
 /// `toastExpandablePanelClassName`.

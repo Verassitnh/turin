@@ -23,9 +23,7 @@ use super::button::{Button, ButtonSize, ButtonVariant};
 use super::calendar::Calendar;
 use super::collapsible::Collapsible;
 use super::color_picker::{ColorHueSlider, ColorSaturationValuePlane, HsvColor, PlaneVariant};
-use super::combobox::{
-    ComboboxItem, ComboboxPopup, combobox_empty, combobox_search_input, combobox_status,
-};
+use super::combobox::{ComboboxItem, ComboboxPopup, combobox_search_input, combobox_status};
 use super::discovery_list::{DiscoveryList, DiscoveryListRow};
 use super::group::Group;
 use super::icon::{Icon, IconName};
@@ -735,7 +733,7 @@ impl UiGallery {
 
     fn popups(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.app_theme().clone();
-        let combobox_items = ["main", "feature/gallery", "fix/toast-swipe"];
+        let combobox_items = ["feature/gallery", "feature/toast-swipe"];
         let combobox = div()
             .relative()
             .h(px(250.))
@@ -749,8 +747,7 @@ impl UiGallery {
                         ComboboxItem::new(name)
                             .selected(index == 0)
                             .highlighted(index == 1)
-                    }))
-                    .child(combobox_empty("No matches", cx)),
+                    })),
             );
         let autocomplete = div()
             .relative()

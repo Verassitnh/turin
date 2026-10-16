@@ -17,13 +17,13 @@ use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Bounds, Context, CursorStyle, DispatchPhase, ElementId, Entity, FocusHandle,
+    App, Bounds, BoxShadow, Context, CursorStyle, DispatchPhase, ElementId, Entity, FocusHandle,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Point, RenderOnce, Rgba, SharedString, Styled, Window,
-    canvas, div, linear_color_stop, linear_gradient, px, relative,
+    canvas, div, linear_color_stop, linear_gradient, point, px, relative,
 };
 
-use crate::theme::tokens::{self, RADIUS_DEFAULT, RADIUS_LG, TEXT_XS};
+use crate::theme::tokens::{RADIUS_DEFAULT, RADIUS_LG, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 
 fn solid(red: u8, green: u8, blue: u8, alpha: f32) -> Rgba {
@@ -144,6 +144,34 @@ fn hue_rgb(hue: f64) -> (u8, u8, u8) {
     }
 }
 
+/// `shadow-[0_0_0_1px_rgb(0_0_0/0.4)]`: a 1px spread ring, no blur or offset.
+fn thumb_ring() -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: solid(0, 0, 0, 0.4).into(),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(1.),
+        inset: false,
+    }]
+}
+
+/// Pointer position to a plane value, measured against the control's bounds.
+fn plane_value_at_pointer(position: Point<Pixels>, bounds: Bounds<Pixels>) -> Option<(f64, f64)> {
+    let local = position - bounds.origin;
+    saturation_value_at(
+        f64::from(local.x),
+        f64::from(local.y),
+        f64::from(bounds.size.width),
+        f64::from(bounds.size.height),
+    )
+}
+
+/// Pointer position to a hue, measured against the control's bounds.
+fn hue_at_pointer(position: Point<Pixels>, bounds: Bounds<Pixels>) -> Option<f64> {
+    let local = position - bounds.origin;
+    hue_at(f64::from(local.x), f64::from(bounds.size.width))
+}
+
 type Change<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
 type InteractionEnd = Rc<dyn Fn(&mut Window, &mut App)>;
 type PointerUpdate = Rc<dyn Fn(Point<Pixels>, Bounds<Pixels>, &mut Window, &mut App)>;
@@ -168,7 +196,8 @@ impl ColorControlState {
     }
 }
 
-/// Zero-size canvas that records the control's bounds and, while dragging,
+/// Canvas that fills the control (`inset_0`, never `size_0`: a canvas is handed
+/// its own laid-out bounds) and records them and, while dragging,
 /// listens for the pointer outside of it.
 fn drag_tracker(
     state: &Entity<ColorControlState>,
@@ -215,7 +244,7 @@ fn drag_tracker(
         },
     )
     .absolute()
-    .size_0()
+    .inset_0()
 }
 
 /// `focus-visible:ring-2 ring-inset ring-ring ring-offset-2 ring-offset-popover`:
@@ -326,13 +355,7 @@ impl RenderOnce for ColorSaturationValuePlane {
                       window: &mut Window,
                       cx: &mut App| {
                     let Some(on_change) = &on_change else { return };
-                    let local = position - bounds.origin;
-                    if let Some((s, v)) = saturation_value_at(
-                        f64::from(local.x),
-                        f64::from(local.y),
-                        f64::from(bounds.size.width),
-                        f64::from(bounds.size.height),
-                    ) {
+                    if let Some((s, v)) = plane_value_at_pointer(position, bounds) {
                         on_change(HsvColor { s, v, ..value }, window, cx);
                     }
                 },
@@ -420,7 +443,7 @@ impl RenderOnce for ColorSaturationValuePlane {
                     .rounded_full()
                     .border_2()
                     .border_color(solid(255, 255, 255, 1.))
-                    .shadow(tokens::shadow_sm(0.4)),
+                    .shadow(thumb_ring()),
             );
         // Hidden until a range input has keyboard focus (`peer-focus-visible:visible`).
         if let Some((axis_label, amount)) = readout {
@@ -525,8 +548,7 @@ impl RenderOnce for ColorHueSlider {
                       window: &mut Window,
                       cx: &mut App| {
                     let Some(on_change) = &on_change else { return };
-                    let local = position - bounds.origin;
-                    if let Some(hue) = hue_at(f64::from(local.x), f64::from(bounds.size.width)) {
+                    if let Some(hue) = hue_at_pointer(position, bounds) {
                         on_change(hue, window, cx);
                     }
                 },
@@ -580,7 +602,7 @@ impl RenderOnce for ColorHueSlider {
                     .rounded_full()
                     .border_2()
                     .border_color(solid(255, 255, 255, 1.))
-                    .shadow(tokens::shadow_sm(0.4))
+                    .shadow(thumb_ring())
                     .bg(hue_color(value)),
             );
         if focused {
@@ -602,6 +624,39 @@ mod tests {
         assert_eq!(saturation_value_at(25., 10., 100., 40.), Some((0.25, 0.75)));
         assert_eq!(saturation_value_at(-10., 80., 100., 40.), Some((0., 0.)));
         assert_eq!(saturation_value_at(1., 1., 0., 10.), None);
+    }
+
+    #[test]
+    fn pointer_maps_through_real_bounds_not_an_empty_canvas() {
+        use gpui_kit::{point, px, size};
+        // A 200x100 plane at (40, 30): its centre is saturation 0.5, value 0.5.
+        let bounds = Bounds::new(point(px(40.), px(30.)), size(px(200.), px(100.)));
+        assert_eq!(
+            plane_value_at_pointer(point(px(140.), px(80.)), bounds),
+            Some((0.5, 0.5))
+        );
+        assert_eq!(
+            plane_value_at_pointer(point(px(40.), px(30.)), bounds),
+            Some((0., 1.))
+        );
+        assert_eq!(hue_at_pointer(point(px(140.), px(80.)), bounds), Some(180.));
+        // The zero-size canvas bug: every pointer position was rejected.
+        let empty = Bounds::new(point(px(40.), px(30.)), size(px(0.), px(0.)));
+        assert_eq!(
+            plane_value_at_pointer(point(px(140.), px(80.)), empty),
+            None
+        );
+        assert_eq!(hue_at_pointer(point(px(140.), px(80.)), empty), None);
+    }
+
+    #[test]
+    fn thumb_shadow_is_a_one_pixel_hard_ring() {
+        let ring = thumb_ring();
+        assert_eq!(ring.len(), 1);
+        assert_eq!(ring[0].blur_radius, px(0.));
+        assert_eq!(ring[0].spread_radius, px(1.));
+        assert_eq!(ring[0].offset, point(px(0.), px(0.)));
+        assert!((ring[0].color.a - 0.4).abs() < 1e-6);
     }
 
     #[test]

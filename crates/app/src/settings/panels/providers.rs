@@ -70,17 +70,19 @@ pub struct ProvidersState {
     pub model_input: String,
     pub model_error: Option<String>,
     pub editing_model: Option<String>,
+    pub custom_model_draft: Option<super::super::custom_model_editor_logic::CustomModelDraft>,
+    pub custom_model_editor_error: Option<String>,
     pub wizard: super::add_provider::AddProviderState,
     pub env_drafts:
         std::collections::HashMap<String, Vec<super::super::provider_form::EnvironmentVariable>>,
 }
 
-struct InstanceRow {
-    id: String,
-    driver: String,
+pub(crate) struct InstanceRow {
+    pub(crate) id: String,
+    pub(crate) driver: String,
     is_default: bool,
     is_dirty: bool,
-    instance: ProviderInstanceConfig,
+    pub(crate) instance: ProviderInstanceConfig,
 }
 
 fn instance_enabled(row: &InstanceRow) -> bool {
@@ -116,7 +118,7 @@ pub(super) fn provider_brand_icon(driver: &str, size: gpui_kit::Rems, tint: Hsla
 }
 
 impl SettingsView {
-    fn instance_rows(&self, cx: &gpui_kit::App) -> Vec<InstanceRow> {
+    pub(crate) fn instance_rows(&self, cx: &gpui_kit::App) -> Vec<InstanceRow> {
         let vm = self.vm(cx);
         let instances = &vm.server.provider_instances;
         let mut rows: Vec<InstanceRow> = Vec::new();
@@ -228,7 +230,7 @@ impl SettingsView {
     }
 
     /// Replaces keys of an instance's envelope: `Some` sets, `None` removes.
-    fn update_instance(
+    pub(crate) fn update_instance(
         &mut self,
         row: &InstanceRow,
         patch: Vec<(&str, Option<Value>)>,
@@ -1030,17 +1032,13 @@ impl SettingsView {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(advisory.title.clone()),
                         )
-                        .child(
-                            div()
-                                .text_size(TEXT_XS.size)
-                                .line_height(rems(1.))
-                                .text_color(if has_warning {
-                                    theme.warning
-                                } else {
-                                    theme.muted_foreground
-                                })
-                                .child(advisory.detail.clone()),
-                        ),
+                        .child(self.expandable_text(
+                            &format!("advisory-detail-{id}"),
+                            &advisory.detail,
+                            "Show full error",
+                            false,
+                            cx,
+                        )),
                 )
                 .child(
                     Button::new(SharedString::from(format!("advisory-update-{id}")))
@@ -2051,6 +2049,27 @@ impl SettingsView {
             if model.is_custom {
                 let id = id.clone();
                 let slug = slug.clone();
+                if let Some(entry) = custom_models.iter().find(|entry| entry.slug == slug) {
+                    let entry = entry.clone();
+                    let slug_toggle = slug.clone();
+                    actions = actions.child(
+                        Button::new(SharedString::from(format!("model-edit-{id}-{slug}")))
+                            .variant(ButtonVariant::GhostMuted)
+                            .size(ButtonSize::IconMicro)
+                            .icon(IconName::SquarePen)
+                            .icon_size(rems(0.75))
+                            .tooltip(Tooltip::new("Edit name and options"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.panels.providers.editing_model.as_deref()
+                                    == Some(slug_toggle.as_str())
+                                {
+                                    this.cancel_custom_model_edit(cx);
+                                } else {
+                                    this.begin_custom_model_edit(&entry, cx);
+                                }
+                            })),
+                    );
+                }
                 let remove_row = row.id.clone();
                 let remaining: Vec<Value> = custom_models
                     .iter()
@@ -2174,6 +2193,23 @@ impl SettingsView {
                             .child(picker_switch),
                     ),
             );
+            if model.is_custom
+                && self.panels.providers.editing_model.as_deref() == Some(slug.as_str())
+            {
+                let built_in_live = live
+                    .map(|provider| provider.models.as_slice())
+                    .unwrap_or(&[]);
+                if let Some(editor) = self.render_custom_model_editor(
+                    &id,
+                    &row.id,
+                    &row.driver,
+                    built_in_live,
+                    window,
+                    cx,
+                ) {
+                    list = list.child(editor);
+                }
+            }
         }
 
         // Add custom model input.
@@ -2264,6 +2300,49 @@ impl SettingsView {
                     .children(error),
             )
             .into_any_element()
+    }
+
+    pub(crate) fn save_custom_model_draft(&mut self, row_id: &str, cx: &mut Context<Self>) {
+        use super::super::custom_model_editor_logic::{definition_from_draft, validate_draft};
+        let Some(draft) = self.panels.providers.custom_model_draft.clone() else {
+            return;
+        };
+        if let Some(problem) = validate_draft(&draft) {
+            self.panels.providers.custom_model_editor_error = Some(problem);
+            cx.notify();
+            return;
+        }
+        let definition = definition_from_draft(&draft);
+        let rows = self.instance_rows(cx);
+        let Some(row) = rows.iter().find(|row| row.id == row_id) else {
+            return;
+        };
+        let custom_models = read_config_custom_models(row.instance.config.as_ref());
+        let next: Vec<Value> = custom_models
+            .iter()
+            .map(|entry| {
+                if entry.slug == definition.slug {
+                    json!({
+                        "slug": definition.slug,
+                        "name": definition.name,
+                        "capabilities": definition.capabilities,
+                    })
+                } else {
+                    json!({
+                        "slug": entry.slug,
+                        "name": entry.name,
+                        "capabilities": entry.capabilities,
+                    })
+                }
+            })
+            .collect();
+        let config = next_config_blob_with_value(
+            row.instance.config.as_ref(),
+            "customModels",
+            Value::Array(next),
+        );
+        self.update_instance(row, vec![("config", Some(config))], cx);
+        self.cancel_custom_model_edit(cx);
     }
 
     /// `handleAdd`: validates and appends a custom model slug.

@@ -12,9 +12,11 @@
 
 pub mod add_provider_instance_logic;
 pub mod controls;
+pub mod custom_model_editor;
 pub mod custom_model_editor_logic;
 pub mod demo;
 pub mod dialog;
+pub mod expandable_text;
 pub mod github_account_logic;
 pub mod icons;
 pub mod keybindings_logic;

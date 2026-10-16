@@ -36,6 +36,8 @@ pub struct PanelState {
     /// renders left to apply it (the first layouts clamp it to zero).
     pub demo_scroll: Option<(f32, u8)>,
     pub page_scroll: gpui_kit::ScrollHandle,
+    /// [`super::expandable_text`] toggle state (element id → expanded).
+    pub expanded_text: std::collections::HashSet<String>,
 }
 
 /// `max-w-4xl`.

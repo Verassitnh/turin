@@ -33,13 +33,15 @@ use turin_contracts::{
     provider_policy::{ProviderInteractionMode, ProviderUserInputAnswers, RuntimeMode},
 };
 use turin_provider_core::provider_adapter::{
-    ProviderAdapterV2, ProviderAdapterV2EnsureThreadInput, ProviderAdapterV2Event,
-    ProviderAdapterV2ForkThreadInput, ProviderAdapterV2InterruptInput,
+    ProviderAdapterV2, ProviderAdapterV2AppContext, ProviderAdapterV2EnsureThreadInput,
+    ProviderAdapterV2Error, ProviderAdapterV2Event, ProviderAdapterV2ForkThreadInput,
+    ProviderAdapterV2HistoricalContext, ProviderAdapterV2InterruptInput,
     ProviderAdapterV2OpenSessionInput, ProviderAdapterV2ResumeThreadInput,
     ProviderAdapterV2RollbackTarget, ProviderAdapterV2RollbackThreadInput,
     ProviderAdapterV2RuntimePolicy, ProviderAdapterV2RuntimeRequestResponseInput,
     ProviderAdapterV2SteerInput, ProviderAdapterV2TurnInput, ProviderAdapterV2TurnMessage,
-    ProviderAdapterV2TurnTerminalStatus, ProviderEventStream, ProviderSessionRuntime,
+    ProviderAdapterV2TurnTerminalStatus, ProviderAdapterV2UploadFeedbackInput, ProviderEventStream,
+    ProviderSessionRuntime,
 };
 
 const CLIENT_VERSION: &str = "0.0.44";
@@ -1039,6 +1041,378 @@ async fn a_restart_continuation_sends_no_user_input() {
         ProviderAdapterV2TurnTerminalStatus::Completed
     );
     replay.driver.verify_complete().unwrap();
+}
+
+/// The `simple` transcript up to its `turn/start`: initialize and `thread/start`.
+/// Synthetic scenarios continue from here with request id 3.
+fn preamble() -> Vec<ReplayEntry> {
+    let transcript = fixture("simple");
+    let end = transcript
+        .entries
+        .iter()
+        .position(|entry| matches!(entry, ReplayEntry::ExpectOutbound { frame, .. } if frame["method"] == "turn/start"))
+        .expect("turn/start");
+    transcript.entries[..end].to_vec()
+}
+
+fn native_thread_of(entries: &[ReplayEntry]) -> String {
+    entries
+        .iter()
+        .find_map(|entry| match entry {
+            ReplayEntry::EmitInbound { frame, .. } => frame
+                .pointer("/result/thread/id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        })
+        .expect("thread id")
+}
+
+fn synthetic(scenario: &str, tail: Vec<ReplayEntry>) -> ReplayTranscript {
+    let mut entries = preamble();
+    entries.extend(tail);
+    ReplayTranscript {
+        scenario: scenario.into(),
+        ..fixture("simple")
+    }
+    .with_entries(entries)
+}
+
+trait WithEntries {
+    fn with_entries(self, entries: Vec<ReplayEntry>) -> Self;
+}
+
+impl WithEntries for ReplayTranscript {
+    fn with_entries(mut self, entries: Vec<ReplayEntry>) -> Self {
+        self.entries = entries;
+        self
+    }
+}
+
+fn expect(frame: Value) -> ReplayEntry {
+    ReplayEntry::ExpectOutbound { label: None, frame }
+}
+
+fn emit(frame: Value) -> ReplayEntry {
+    ReplayEntry::EmitInbound {
+        label: None,
+        frame,
+        after_ms: None,
+    }
+}
+
+fn compaction_turn(thread: &str, status: &str) -> Value {
+    json!({"id": "compact-turn", "status": status, "items": [], "startedAt": 1, "completedAt": null})
+        .as_object()
+        .map(|turn| {
+            let mut turn = turn.clone();
+            if status == "completed" {
+                turn.insert("completedAt".into(), json!(2));
+            }
+            let _ = thread;
+            Value::Object(turn)
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn compact_thread_uses_the_native_rpc_and_completes_the_compaction_turn() {
+    let thread = native_thread_of(&preamble());
+    let item = json!({"type": "contextCompaction", "id": "compact-item"});
+    let mut tail = vec![
+        expect(json!({"id": 3, "method": "thread/compact/start", "params": {"threadId": thread}})),
+        emit(json!({"id": 3, "result": {}})),
+        emit(
+            json!({"method": "turn/started", "params": {"threadId": thread, "turn": compaction_turn(&thread, "inProgress")}}),
+        ),
+    ];
+    for method in ["item/started", "item/completed"] {
+        tail.push(emit(json!({"method": method, "params": {"threadId": thread, "turnId": "compact-turn", "item": item}})));
+    }
+    tail.push(emit(json!({"method": "turn/completed", "params": {"threadId": thread, "turn": compaction_turn(&thread, "completed")}})));
+    let mut replay = open(synthetic("compaction", tail)).await;
+    let input = replay.turn_input(
+        "/compact",
+        policy(
+            RuntimeMode::FullAccess,
+            ProviderInteractionMode::Default,
+            None,
+            None,
+        ),
+    );
+    replay
+        .runtime
+        .compact_thread(input)
+        .expect("compact_thread")
+        .await
+        .unwrap();
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    let compactions: Vec<_> = seen
+        .iter()
+        .filter_map(|event| match event {
+            ProviderAdapterV2Event::TurnItemUpdated { turn_item, .. } => {
+                let value = serde_json::to_value(turn_item).unwrap();
+                (value["type"] == "compaction").then_some(value)
+            }
+            _ => None,
+        })
+        .collect();
+    let statuses: Vec<_> = compactions
+        .iter()
+        .map(|item| item["status"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(statuses, ["running", "completed"]);
+    assert_eq!(compactions[0]["id"], compactions[1]["id"]);
+    replay.driver.verify_complete().unwrap();
+}
+
+async fn inject(response: Value) -> (Result<bool, ProviderAdapterV2Error>, Replay) {
+    use turin_contracts::orchestration_v2::{
+        OrchestrationV2HistoricalMessage, OrchestrationV2HistoricalMessageRole,
+    };
+    let thread = native_thread_of(&preamble());
+    let messages = vec![OrchestrationV2HistoricalMessage {
+        role: OrchestrationV2HistoricalMessageRole::User,
+        text: "Original request".into(),
+        run_status: None,
+        thread_id: id("source"),
+        run_id: Some(id("source-run")),
+        item_id: id("source-user"),
+        provider_thread_id: None,
+        status: "completed".into(),
+        kind: "user_message".into(),
+    }];
+    let context = ProviderAdapterV2HistoricalContext {
+        messages,
+        context: "Summary of the source thread".into(),
+    };
+    let items = turin_provider_core::handoff_budget::history_response_items(
+        &context.messages,
+        &context.context,
+    );
+    let tail = vec![
+        expect(
+            json!({"id": 3, "method": "thread/inject_items", "params": {"threadId": thread, "items": items}}),
+        ),
+        emit(response),
+    ];
+    let replay = open(synthetic("inject", tail)).await;
+    let outcome = replay
+        .runtime
+        .inject_history(&replay.thread, &context)
+        .expect("inject_history")
+        .await;
+    (outcome, replay)
+}
+
+#[tokio::test]
+async fn inject_history_delivers_through_thread_inject_items() {
+    let (outcome, replay) = inject(json!({"id": 3, "result": {}})).await;
+    assert!(outcome.unwrap());
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn inject_history_reports_false_when_the_app_server_predates_it() {
+    let (outcome, replay) =
+        inject(json!({"id": 3, "error": {"code": -32601, "message": "Injection rejected"}})).await;
+    assert!(!outcome.unwrap());
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn inject_history_fails_on_any_other_rejection() {
+    let (outcome, _replay) =
+        inject(json!({"id": 3, "error": {"code": -32602, "message": "Injection rejected"}})).await;
+    let error = outcome.expect_err("invalid payload");
+    assert!(format!("{error:?}").contains("Failed to inject historical context"));
+}
+
+#[tokio::test]
+async fn upload_feedback_sends_the_thread_and_returns_the_feedback_id() {
+    let thread = native_thread_of(&preamble());
+    let tail = vec![
+        expect(json!({"id": 3, "method": "feedback/upload", "params": {
+            "classification": "bug", "includeLogs": true, "reason": "it broke", "threadId": thread
+        }})),
+        emit(json!({"id": 3, "result": {"threadId": "feedback-1"}})),
+    ];
+    let replay = open(synthetic("feedback", tail)).await;
+    let feedback_id = replay
+        .runtime
+        .upload_feedback(ProviderAdapterV2UploadFeedbackInput {
+            provider_thread: replay.thread.clone(),
+            reason: Some("it broke".into()),
+        })
+        .expect("upload_feedback")
+        .await
+        .unwrap();
+    assert_eq!(feedback_id, "feedback-1");
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn unload_thread_unsubscribes_and_forgets_session_approvals() {
+    let thread = native_thread_of(&preamble());
+    let tail = vec![
+        expect(json!({"id": 3, "method": "thread/unsubscribe", "params": {"threadId": thread}})),
+        emit(json!({"id": 3, "result": {"status": "unsubscribed"}})),
+    ];
+    let replay = open(synthetic("unload", tail)).await;
+    replay
+        .runtime
+        .unload_thread(&replay.thread)
+        .expect("unload_thread")
+        .await
+        .unwrap();
+    replay.driver.verify_complete().unwrap();
+}
+
+/// After a compaction Codex drops client developer messages and only resends
+/// `additionalContext` when it changes, so the adapter injects it again.
+#[tokio::test]
+async fn additional_context_is_restored_after_a_compaction() {
+    let mut transcript = fixture("simple");
+    let thread = native_thread_of(&transcript.entries);
+    let context = json!({
+        "mcp_app_notes": {"kind": "untrusted", "value": "The app saved a draft."}
+    });
+    let mut inject_id = 0;
+    for entry in &mut transcript.entries {
+        if let ReplayEntry::ExpectOutbound { frame, .. } = entry
+            && frame["method"] == "turn/start"
+        {
+            frame["params"]["additionalContext"] = context.clone();
+            inject_id = frame["id"].as_i64().unwrap() + 1;
+        }
+    }
+    // The turn's ids shift by one after the injection.
+    let completed = transcript
+        .entries
+        .iter()
+        .position(|entry| matches!(entry, ReplayEntry::EmitInbound { frame, .. } if frame["method"] == "turn/completed"))
+        .unwrap();
+    transcript.entries.splice(
+        completed..completed,
+        [
+            emit(json!({"method": "item/completed", "params": {
+                "threadId": thread, "turnId": recorded_turn_id(&fixture("simple")),
+                "item": {"type": "contextCompaction", "id": "compact-item"}
+            }})),
+            expect(json!({"id": inject_id, "method": "thread/inject_items", "params": {
+                "threadId": thread,
+                "items": [{"type": "message", "role": "user", "content": [
+                    {"type": "input_text",
+                     "text": "<external_mcp_app_notes>The app saved a draft.</external_mcp_app_notes>"}
+                ]}]
+            }})),
+            emit(json!({"id": inject_id, "result": {}})),
+        ],
+    );
+    let mut replay = open(transcript).await;
+    let mut input = replay.turn_input(
+        "Respond with the following text: fixture simple ok",
+        policy(
+            RuntimeMode::FullAccess,
+            ProviderInteractionMode::Default,
+            None,
+            None,
+        ),
+    );
+    input.app_context = Some(vec![ProviderAdapterV2AppContext {
+        key: "mcp_app_notes".into(),
+        text: "The app saved a draft.".into(),
+    }]);
+    replay.runtime.start_turn(input).await.unwrap();
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+fn recorded_turn_id(transcript: &ReplayTranscript) -> String {
+    transcript
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            ReplayEntry::EmitInbound { frame, .. } if frame["method"] == "turn/started" => frame
+                .pointer("/params/turn/id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        })
+        .expect("turn id")
+}
+
+#[test]
+fn pending_background_work_follows_running_commands_tools_and_subagents() {
+    use crate::projection::{has_pending_background_work, has_pending_background_work_for_thread};
+    let mut state = RuntimeState::default();
+    assert!(!has_pending_background_work(&state));
+    state
+        .turns
+        .insert("native-turn-1".into(), detached_turn("native-turn-1"));
+    assert!(
+        !has_pending_background_work(&state),
+        "an idle turn is not work"
+    );
+    assert!(!has_pending_background_work_for_thread(
+        &state,
+        "provider-thread-1"
+    ));
+
+    notify(
+        &mut state,
+        "item/started",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "startedAtMs": 1, "item": {
+            "type": "commandExecution", "id": "cmd-1", "command": "sleep 60", "cwd": "/w",
+            "processId": "p1", "status": "inProgress", "commandActions": [], "source": "agent",
+            "aggregatedOutput": null, "exitCode": null, "durationMs": null
+        }}),
+    );
+    assert!(has_pending_background_work(&state));
+    assert!(has_pending_background_work_for_thread(
+        &state,
+        "provider-thread-1"
+    ));
+    assert!(
+        !has_pending_background_work_for_thread(&state, "another-provider-thread"),
+        "other threads are unaffected"
+    );
+
+    // A clean turn end keeps the turn with its running command.
+    notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-1", "status": "completed", "completedAt": 2}}),
+    );
+    assert!(state.settled.contains_key("native-turn-1"));
+    assert!(has_pending_background_work(&state));
+    assert!(has_pending_background_work_for_thread(
+        &state,
+        "provider-thread-1"
+    ));
+
+    notify(
+        &mut state,
+        "item/completed",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "item": {
+            "type": "commandExecution", "id": "cmd-1", "command": "sleep 60", "cwd": "/w",
+            "processId": "p1", "status": "completed", "commandActions": [], "source": "agent",
+            "aggregatedOutput": "", "exitCode": 0, "durationMs": 5
+        }}),
+    );
+    assert!(!has_pending_background_work(&state));
+    assert!(!has_pending_background_work_for_thread(
+        &state,
+        "provider-thread-1"
+    ));
 }
 
 /// Policy with the approval and sandbox settings the upstream recorder sent, so

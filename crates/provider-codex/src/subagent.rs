@@ -129,8 +129,16 @@ pub fn subagent_node(state: &RuntimeState, turn: &TurnState) -> Option<NodeId> {
     node
 }
 
+/// Whether a subagent's task is running (`subagent.task.status === "running"`).
+pub fn has_running(state: &RuntimeState) -> bool {
+    state
+        .subagents
+        .values()
+        .any(|sub| sub.task.status == OrchestrationV2SubagentStatus::Running)
+}
+
 /// The turn and every turn above it, through the subagents it runs under.
-fn ancestors_of(state: &RuntimeState, turn: &TurnState) -> Vec<String> {
+pub(crate) fn ancestors_of(state: &RuntimeState, turn: &TurnState) -> Vec<String> {
     let mut ancestors = vec![turn.native_turn.clone()];
     if let Some(sub) = turn
         .subagent

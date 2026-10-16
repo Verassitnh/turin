@@ -163,6 +163,9 @@ pub struct RuntimeState {
     pub goal_activations: HashSet<String>,
     /// The model each thread reported, by native thread id.
     pub subagent_selections: HashMap<String, subagent::ReportedSelection>,
+    /// A compaction's turn is unknown until Codex reports it: the next `turn/started`
+    /// on the thread adopts this input (`pendingRootTurns`).
+    pub pending_root_turns: HashMap<String, ProviderAdapterV2TurnInput>,
 }
 
 fn group_of(kind: TextKind) -> usize {
@@ -567,6 +570,20 @@ pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderA
         if state.settled.contains_key(&native_turn) {
             return project_settled(&raw, &thread, &native_turn, state, now);
         }
+        // A compaction starts a turn nobody asked for by id: it belongs to the run that
+        // started the compaction.
+        if raw.method == "turn/started"
+            && let Some(input) = state.pending_root_turns.remove(&thread)
+        {
+            state
+                .goal_threads
+                .insert(thread.clone(), input.provider_thread.clone());
+            state.turns.insert(
+                native_turn.clone(),
+                TurnState::new(native_turn.clone(), input),
+            );
+            return project_event(raw, state);
+        }
         // Codex starts a held goal's next turn itself. That turn runs in the held run.
         if raw.method == "turn/started" && state.goal_holds.contains_key(&thread) {
             let mut events = goal::open_continuation(state, &thread, &native_turn);
@@ -677,6 +694,46 @@ pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderA
 /// command, or a persistent dynamic tool. Upstream's `turnHasRetainedBackgroundWork`.
 pub fn has_retained_work(turn: &TurnState) -> bool {
     !turn.running_commands.is_empty() || turn.running_tools.iter().any(is_persistent_tool)
+}
+
+/// `hasPendingBackgroundWork`: any running command or dynamic tool in any turn,
+/// or a subagent still running.
+pub fn has_pending_background_work(state: &RuntimeState) -> bool {
+    state
+        .turns
+        .values()
+        .chain(state.settled.values())
+        .any(|turn| !turn.running_commands.is_empty() || !turn.running_tools.is_empty())
+        || subagent::has_running(state)
+}
+
+/// `hasPendingBackgroundWorkForThread`: retained work in the thread's root turns or
+/// their descendants, or a child turn still active under one.
+pub fn has_pending_background_work_for_thread(state: &RuntimeState, thread: &str) -> bool {
+    let roots: Vec<&str> = state
+        .turns
+        .values()
+        .chain(state.settled.values())
+        .filter(|turn| turn.subagent.is_none() && turn.input.provider_thread.id.as_str() == thread)
+        .map(|turn| turn.native_turn.as_str())
+        .collect();
+    if roots.is_empty() {
+        return false;
+    }
+    state
+        .turns
+        .values()
+        .chain(state.settled.values())
+        .filter(|turn| {
+            let ancestors = subagent::ancestors_of(state, turn);
+            ancestors
+                .iter()
+                .any(|native| roots.contains(&native.as_str()))
+        })
+        .any(|turn| {
+            has_retained_work(turn)
+                || (turn.subagent.is_some() && state.turns.contains_key(&turn.native_turn))
+        })
 }
 
 /// A frame for a turn that completed with background work still running. Upstream

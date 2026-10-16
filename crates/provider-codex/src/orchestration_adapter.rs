@@ -41,22 +41,26 @@ use turin_contracts::{
 };
 use turin_provider_core::{
     failure::ProviderFailureCause,
+    handoff_budget::history_response_items,
     id_allocator::{IdAllocator, derive},
     provider_adapter::{
         ProviderAdapterErrorKind, ProviderAdapterV2, ProviderAdapterV2AppContext,
         ProviderAdapterV2EnsureThreadInput, ProviderAdapterV2Error, ProviderAdapterV2Event,
-        ProviderAdapterV2ForkThreadInput, ProviderAdapterV2InterruptInput,
-        ProviderAdapterV2OpenSessionInput, ProviderAdapterV2ReadThreadSnapshotInput,
-        ProviderAdapterV2ResumeThreadInput, ProviderAdapterV2RollbackTarget,
-        ProviderAdapterV2RollbackThreadInput, ProviderAdapterV2RuntimeRequestResponseInput,
-        ProviderAdapterV2SteerInput, ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2TurnInput,
-        ProviderEventStream, ProviderSessionRuntime,
+        ProviderAdapterV2ForkThreadInput, ProviderAdapterV2HistoricalContext,
+        ProviderAdapterV2InterruptInput, ProviderAdapterV2OpenSessionInput,
+        ProviderAdapterV2ReadThreadSnapshotInput, ProviderAdapterV2ResumeThreadInput,
+        ProviderAdapterV2RollbackTarget, ProviderAdapterV2RollbackThreadInput,
+        ProviderAdapterV2RuntimeRequestResponseInput, ProviderAdapterV2SteerInput,
+        ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2TurnInput,
+        ProviderAdapterV2UploadFeedbackInput, ProviderEventStream, ProviderSessionRuntime,
     },
+    rt::BoxFuture,
     selection_transition::{
         ProviderSelectionTransitionInput, ProviderSelectionTransitionPlan,
         turn_scoped_selection_transition,
     },
 };
+use turin_shared::model::model_selections_equal;
 
 pub(crate) fn driver() -> ProviderDriverKind {
     ProviderDriverKind::new("codex").expect("driver kind")
@@ -420,7 +424,8 @@ fn admitted(item: &Parked, state: &RuntimeState) -> bool {
                             .and_then(Value::as_str)
                             .unwrap_or_default();
                         event.method == "turn/started"
-                            && subagent::opens_child_turn(state, thread, turn)
+                            && (state.pending_root_turns.contains_key(thread)
+                                || subagent::opens_child_turn(state, thread, turn))
                     }
                     Parked::Request(_) => false,
                 }
@@ -488,13 +493,30 @@ async fn project_pump(
     usage_sink: Option<UsageLimitsSink>,
 ) {
     let mut parked = VecDeque::new();
+    // Owned by the pump, so ending the session aborts them.
+    let mut background = tokio::task::JoinSet::new();
     loop {
+        // Reap finished tasks so the set does not grow.
+        while background.try_join_next().is_some() {}
         let flush = projection::next_flush(&state.lock());
         let mut batch = tokio::select! {
             raw = recv_raw(&mut events) => match raw {
                 Some(raw) => {
                     if let Some(sink) = &usage_sink {
                         push_usage_limits(sink, &raw);
+                    }
+                    // The callback must not wait on the injection's response, which this
+                    // pump reads.
+                    if raw.method == "item/completed"
+                        && raw.params.pointer("/item/type").and_then(Value::as_str)
+                            == Some("contextCompaction")
+                        && let Some(thread) = raw.params.get("threadId").and_then(Value::as_str)
+                    {
+                        let session = session.clone();
+                        let thread = thread.to_owned();
+                        background.spawn(async move {
+                            session.restore_additional_context(&thread).await;
+                        });
                     }
                     ingest(&mut parked, Parked::Event(raw), &mut state.lock(), &session_id)
                 }
@@ -989,27 +1011,188 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
             rx.recv().await.map(|event| (Ok(event), rx))
         }))
     }
+    /// `canReuseCodexContextUsage`: the same selection, ignoring the reasoning effort.
     fn can_reuse_context_usage(
         &self,
         previous: &ModelSelection,
         next: &ModelSelection,
     ) -> Option<bool> {
-        Some(
-            previous.instance_id == next.instance_id
-                && previous.model == next.model
-                && previous
+        let without_effort = |selection: &ModelSelection| {
+            let mut selection = selection.clone();
+            selection.options = Some(
+                selection
                     .options
-                    .as_ref()
+                    .take()
                     .into_iter()
                     .flatten()
-                    .filter(|o| o.id.as_str() != "reasoningEffort")
-                    .eq(next
-                        .options
-                        .as_ref()
-                        .into_iter()
-                        .flatten()
-                        .filter(|o| o.id.as_str() != "reasoningEffort")),
-        )
+                    .filter(|option| option.id.as_str() != "reasoningEffort")
+                    .collect(),
+            );
+            selection
+        };
+        Some(model_selections_equal(
+            &without_effort(previous),
+            &without_effort(next),
+        ))
+    }
+
+    /// Idle release must not stop the app-server while a command, tool or subagent runs.
+    fn has_pending_background_work(
+        &self,
+    ) -> Option<BoxFuture<'_, Result<bool, ProviderAdapterV2Error>>> {
+        Some(Box::pin(async move {
+            Ok(projection::has_pending_background_work(&self.state.lock()))
+        }))
+    }
+
+    fn has_pending_background_work_for_thread(
+        &self,
+        provider_thread: &OrchestrationV2ProviderThread,
+    ) -> Option<BoxFuture<'_, Result<bool, ProviderAdapterV2Error>>> {
+        let thread = provider_thread.id.as_str().to_owned();
+        Some(Box::pin(async move {
+            Ok(projection::has_pending_background_work_for_thread(
+                &self.state.lock(),
+                &thread,
+            ))
+        }))
+    }
+
+    /// `compactThread`: `/compact` runs through `thread/compact/start`. The compaction's
+    /// turn is adopted when Codex reports it (`pendingRootTurns`).
+    fn compact_thread(
+        &self,
+        input: ProviderAdapterV2TurnInput,
+    ) -> Option<BoxFuture<'_, Result<(), ProviderAdapterV2Error>>> {
+        Some(Box::pin(async move {
+            let thread = native_id(&input.provider_thread)
+                .map_err(|cause| self.turn_start_error(&input, format!("{cause:?}")))?
+                .to_owned();
+            self.state
+                .lock()
+                .pending_root_turns
+                .insert(thread.clone(), input.clone());
+            // Cleared on failure too: an unstarted compaction must not adopt a later turn.
+            match self.session.compact_thread(&thread).await {
+                Ok(_) => Ok(()),
+                Err(cause) => {
+                    self.state.lock().pending_root_turns.remove(&thread);
+                    Err(self.turn_start_error(&input, cause))
+                }
+            }
+        }))
+    }
+
+    /// `injectHistory`: `thread/inject_items`. `false` when the app-server predates it
+    /// (-32601); other failures are ambiguous and must not fall through to a second delivery.
+    fn inject_history(
+        &self,
+        provider_thread: &OrchestrationV2ProviderThread,
+        context: &ProviderAdapterV2HistoricalContext,
+    ) -> Option<BoxFuture<'_, Result<bool, ProviderAdapterV2Error>>> {
+        let provider_thread = provider_thread.clone();
+        let items = history_response_items(&context.messages, &context.context);
+        Some(Box::pin(async move {
+            let protocol = |cause: &dyn std::fmt::Display| {
+                error(
+                    ProviderAdapterErrorKind::Protocol {
+                        driver: self.driver.clone(),
+                        detail: "Failed to inject historical context".to_owned(),
+                        payload: None,
+                    },
+                    cause,
+                )
+            };
+            let thread = native_id(&provider_thread)
+                .map_err(|cause| protocol(&format!("{cause:?}")))?
+                .to_owned();
+            match self
+                .session
+                .client()
+                .request(
+                    "thread/inject_items",
+                    Some(json!({"threadId": thread, "items": items})),
+                )
+                .await
+            {
+                Ok(_) => Ok(true),
+                Err(AppServerError::Request { error, .. }) if error.code == -32601 => Ok(false),
+                Err(cause) => Err(protocol(&cause)),
+            }
+        }))
+    }
+
+    /// `unloadThread`: forgets the thread's session approvals and drops this connection's
+    /// subscription, so the shared app-server can shut an idle thread down.
+    fn unload_thread(
+        &self,
+        provider_thread: &OrchestrationV2ProviderThread,
+    ) -> Option<BoxFuture<'_, Result<(), ProviderAdapterV2Error>>> {
+        let provider_thread = provider_thread.clone();
+        Some(Box::pin(async move {
+            let protocol = |cause: &dyn std::fmt::Display| {
+                error(
+                    ProviderAdapterErrorKind::Protocol {
+                        driver: self.driver.clone(),
+                        detail: format!(
+                            "Failed to unload Codex thread for provider thread {}",
+                            provider_thread.id
+                        ),
+                        payload: None,
+                    },
+                    cause,
+                )
+            };
+            let thread = native_id(&provider_thread)
+                .map_err(|cause| protocol(&format!("{cause:?}")))?
+                .to_owned();
+            self.session
+                .unload_thread(&thread)
+                .await
+                .map_err(|cause| protocol(&cause))
+        }))
+    }
+
+    /// `uploadFeedback`: `/feedback` uploads the thread and Codex logs. Returns the feedback id.
+    fn upload_feedback(
+        &self,
+        input: ProviderAdapterV2UploadFeedbackInput,
+    ) -> Option<BoxFuture<'_, Result<String, ProviderAdapterV2Error>>> {
+        Some(Box::pin(async move {
+            let protocol = |cause: &dyn std::fmt::Display| {
+                error(
+                    ProviderAdapterErrorKind::Protocol {
+                        driver: self.driver.clone(),
+                        detail: "Failed to upload Codex thread feedback.".to_owned(),
+                        payload: None,
+                    },
+                    cause,
+                )
+            };
+            let thread = native_id(&input.provider_thread)
+                .map_err(|cause| protocol(&format!("{cause:?}")))?
+                .to_owned();
+            let mut params = json!({
+                "classification": "bug",
+                "includeLogs": true,
+                "threadId": thread,
+            });
+            if let Some(reason) = input.reason.as_deref().filter(|reason| !reason.is_empty()) {
+                params["reason"] = json!(reason);
+            }
+            let response = self
+                .session
+                .client()
+                .request("feedback/upload", Some(params))
+                .await
+                .map_err(|cause| protocol(&cause))?;
+            response
+                .as_ref()
+                .and_then(|response| response.get("threadId"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| protocol(&"feedback/upload returned no thread id"))
+        }))
     }
     async fn ensure_thread(
         &self,

@@ -51,7 +51,7 @@ pub fn mode_text<T: serde::Serialize>(mode: &T) -> String {
 /// `OrchestratorV2Error`.
 #[derive(Debug, thiserror::Error)]
 pub enum OrchestratorError {
-    #[error("Orchestration command {command_type} ({command_id}) failed.")]
+    #[error("Failed to dispatch orchestration command {command_type} ({command_id}).")]
     Dispatch {
         command_id: CommandId,
         command_type: String,
@@ -169,6 +169,8 @@ pub enum RecordField {
     RuntimeRequests,
     Messages,
     TurnItems,
+    Checkpoints,
+    ContextTransfers,
 }
 
 /// `ProjectionRecordFilter`.
@@ -179,6 +181,14 @@ pub struct RecordFilter {
     pub message_ids: Option<Vec<turin_contracts::MessageId>>,
     pub run_ids: Option<Vec<RunId>>,
     pub turn_item_types: Option<Vec<String>>,
+    /// Only turn items in these statuses (`turnItemStatuses`).
+    pub turn_item_statuses:
+        Option<Vec<turin_contracts::orchestration_v2::OrchestrationV2TurnItemStatus>>,
+    /// Only turn items of these runs; `None` entries match items with no run
+    /// (`turnItemRunIds`).
+    pub turn_item_run_ids: Option<Vec<Option<RunId>>>,
+    /// Only messages of these runs (`messageRunIds`).
+    pub message_run_ids: Option<Vec<RunId>>,
     /// Skips finished tool call, assistant message and reasoning nodes of
     /// finished runs. Command decisions only read root, subagent and
     /// active-run nodes.
@@ -262,4 +272,26 @@ pub trait OrchestratorPort: Send + Sync {
     async fn stream_domain_events(
         &self,
     ) -> Result<futures::stream::BoxStream<'static, OrchestrationV2DomainEvent>, OrchestratorError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use turin_contracts::CommandId;
+
+    use super::OrchestratorError;
+
+    /// Upstream `OrchestratorDispatchError.message`. Rejected receipts store
+    /// this text, so the wording must match upstream exactly.
+    #[test]
+    fn dispatch_error_text_matches_upstream() {
+        let error = OrchestratorError::Dispatch {
+            command_id: CommandId::new("command:1").expect("command id"),
+            command_type: "thread.visit".to_owned(),
+            cause: "boom".into(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Failed to dispatch orchestration command thread.visit (command:1)."
+        );
+    }
 }

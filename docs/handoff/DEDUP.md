@@ -16,6 +16,7 @@ Rules applied: owner crate per the brief; loser deleted and callers repointed; a
 | `packages/shared/src/path.ts` (state helpers) | `app/state/support/path.rs` (239) | `shared/src/path.rs` | `file_basename` now returns `String` (was `&str`). 4 unique tests ported into shared. Callers in `app/state/**` repointed with `turin_shared::path::`. |
 | `packages/shared/src/path.ts` (normalize helpers) | `projects/src/project_path.rs` (102 lines removed; file keeps `expand_home_path`) | `shared/src/path.rs` | 2 unique tests ported into shared. |
 | `packages/shared/src/gitPatchPath.ts` | `git/src/git_patch_path.rs` (212) | `shared/src/git_patch_path.rs` | The git copy had no callers. 4 unique tests ported into shared. |
+| `packages/shared/src/gitPatchPath.ts` (`quoteGitPatchPath` only) | local fn in `source-control/src/github/pull_request_json/misc.rs` (main) | `shared/src/git_patch_path.rs` | Main added a quote-only copy inside the GitHub files decoder. The escape table matches shared (C escapes; non-ASCII stays literal). Replaced with `pub use turin_shared::git_patch_path::quote_git_patch_path`. The decoder and `quoting_follows_gits_c_style_escapes` keep that name. `turin-source-control` now depends on `turin-shared`. |
 | `packages/shared/src/orchestrationV2ThreadError.ts` | `orchestration/src/projection/shared/thread_error.rs` (308) | `shared/src/orchestration_v2_thread_error.rs` | 6 unique tests and the `run`/`failure_item` helpers ported. Added `Default` to `ThreadErrorSummary` (the orchestration copy derived it). |
 | `apps/server/src/orchestration-v2/ProjectCommands.ts` | `orchestration/src/projection/project_commands.rs` (627) | `orchestration/src/pipeline/project_commands.rs` | Pipeline copy is the one the orchestrator calls. Projection copy had no callers. Its 1 unique test (rejection receipt round-trip) moved to `pipeline/project_commands/tests.rs`. |
 
@@ -73,8 +74,20 @@ Each entry names the other copy and why it is not deduped yet.
 - `apps/server/src/project/AgentSessionScanner`: `projects/src/agent_session_discovery.rs` (1858, discovery impl) + `projects/src/agent_session_scanner.rs` (1060, trait and model types). The discovery header says the model lives in the scanner file. The scanner header still says "transcript scan follows in later slices". Merging the two is a restructure.
 
 **Not on this branch:**
-- N1 `shared_keybindings` vs `turin_shared::keybindings`: no `shared_keybindings` on this branch. Nothing to do here.
+- N1 `shared_keybindings` vs `turin_shared::keybindings`: main brought `runtime/src/shared_keybindings.rs` (server subset of `keybindings.ts`) plus runtime copies of `atomicWrite.ts`, `symlink.ts`, and `fromLenientJson` (`schemaJson.ts`). Still not this task. Left in place.
 - N5 `editor.rs`: `crates/launcher/src/editor.rs` and `contracts/src/editor.rs` exist, but they are not the N5 copy. Left alone.
+
+## Arrived with the main merge, left in place
+
+Main added `source-control/src/shared/` as a second port of several `packages/shared` files. These are the deferred or reverted pairs above, so they stay:
+
+- `change_request_url.rs` — GitHub-only, `authority` always `None` (same cut as shared). The app copy still keeps Forgejo port authority; that PM decision is unchanged, so this third copy stays until that lands.
+- `git.rs` — remote-URL helpers only. The git-crate vs shared divergence (GitLab detection, Azure SSH) is still open.
+- `thread_pull_requests.rs` — different function shape from shared (the deferred entry).
+- `path_expansion.rs` — `expand_home_path`. Owner is still `provider-core`; repointing needs that dep (existing deferral).
+- `composer_pull_request_matches.rs`, `github_markdown_links.rs`, `github_media.rs`, `source_control.rs` — also present in `turin-shared`. Not compared line by line here; the crate header says to delete each copy once shared provides the same function. Left for a follow-up so this merge does not change source-control behaviour.
+
+No new caller of a deleted module (`timeline::{file_preview,usage_format}`, `state::support::{path,timing}`, `git::git_patch_path`, `projection::project_commands`, `projection::shared::thread_error`). New path callers (`ui_state_store`, `first_run`) go through `state::projects`, which already re-exports `turin_shared::path`.
 
 **Copy without a header, found by grep:** `text-generation/src/git_branch_names.rs` (see Tried and reverted, item 3).
 
@@ -96,8 +109,7 @@ Checked against PORTING.md's cut list and `docs/inventory/upstream-coverage.md`.
 
 - `scripts/check.sh -p turin-shared -p turin-git -p turin-projects -p turin-review -p turin-text-generation -p turin-orchestration -p turin`: **green** (gate5, after reverting the three items above). Run before the final `project_commands` commit.
 - `scripts/check.sh -p turin-orchestration` after the `project_commands` commit: **green** (gate6, `GATE_EXIT=0`).
-- `cargo check --workspace`: see the final report.
-- Gate was run once for the whole touched set, not after each dedup. The copies share files, and each gate takes about 10 to 20 minutes.
+- After merging `main` (`435b069`): `cargo check --workspace --all-targets` **green**. Then `scripts/check.sh -p` one crate at a time, all **green**: `turin-shared`, `turin-git` (174 tests), `turin-projects` (170), `turin-orchestration` (387), `turin-source-control` (802, includes `quoting_follows_gits_c_style_escapes`), `turin` (2387). `scripts/dedupe-workspace-deps.py` dropped nothing.
 
 ## Not touched
 

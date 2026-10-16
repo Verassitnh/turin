@@ -11,6 +11,7 @@ pub mod locale_compare;
 pub mod process;
 pub mod remote_refs;
 pub mod shared_git;
+pub mod source_control_bridge;
 pub mod vcs_driver;
 pub mod vcs_driver_registry;
 pub mod vcs_process;

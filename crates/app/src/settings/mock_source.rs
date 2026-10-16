@@ -256,8 +256,7 @@ impl MockSettingsSource {
 /// What the live app does on every settings change: re-resolve the theme from
 /// the theme preference, contrast and font settings.
 pub fn apply_appearance(vm: &SettingsViewModel, cx: &mut App) {
-    use crate::theme::theme_palette::ThemePreferenceMode;
-    use crate::theme::{AppearancePreferences, appearance_fonts::AppearanceFontPreferences};
+    use crate::theme::appearance_fonts::AppearanceFontPreferences;
     let client = &vm.client;
     let fonts = AppearanceFontPreferences {
         sans: client.font_family_sans.as_str().to_owned(),
@@ -268,20 +267,12 @@ pub fn apply_appearance(vm: &SettingsViewModel, cx: &mut App) {
         size_code: client.font_size_code.get() as u32,
         smoothing: client.font_smoothing,
     };
-    let mode = match vm.appearance.mode.as_str() {
-        "light" => ThemePreferenceMode::Light,
-        "dark" => ThemePreferenceMode::Dark,
-        _ => ThemePreferenceMode::System,
-    };
-    crate::theme::set_preferences(
-        AppearancePreferences {
-            theme: vm.appearance.theme.clone(),
-            appearance_mode: Some(mode),
-            contrast: client.appearance_contrast.get() as u32,
-            fonts,
-        },
-        cx,
-    );
+    // The theme, appearance mode and light/dark mix belong to the theme runtime
+    // (device-local, `useTheme`); settings only own contrast and fonts.
+    let mut preferences = crate::theme::preferences(cx);
+    preferences.contrast = client.appearance_contrast.get() as u32;
+    preferences.fonts = fonts;
+    crate::theme::set_preferences(preferences, cx);
 }
 
 /// `{...target, ...patch}` over the settings' JSON, the way the client-settings

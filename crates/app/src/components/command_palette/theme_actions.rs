@@ -104,20 +104,14 @@ fn choice_name(choice: AppearanceModeChoice) -> &'static str {
 
 /// `setAppearanceMode(mode)`.
 pub fn apply_appearance_mode(choice: AppearanceModeChoice, cx: &mut App) {
-    let mut preferences = theme::preferences(cx);
-    preferences.appearance_mode = Some(preference_mode(choice));
-    if matches!(preferences.theme.as_str(), "system" | "light" | "dark") {
-        preferences.theme = choice_name(choice).to_owned();
-    }
-    theme::set_preferences(preferences, cx);
+    theme::theme_runtime::set_appearance_mode(preference_mode(choice), cx);
 }
 
 /// `setTheme(id ?? appearanceMode)`.
 pub fn apply_theme(id: Option<String>, cx: &mut App) {
-    let mut preferences = theme::preferences(cx);
-    let mode = mode_of(&preferences);
-    preferences.theme = id.unwrap_or_else(|| choice_name(mode).to_owned());
-    theme::set_preferences(preferences, cx);
+    let mode = mode_of(&theme::preferences(cx));
+    let next = id.unwrap_or_else(|| choice_name(mode).to_owned());
+    theme::theme_runtime::set_theme(&next, cx);
 }
 
 #[cfg(test)]

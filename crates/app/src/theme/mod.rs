@@ -35,6 +35,7 @@ pub mod theme_palette;
 pub mod theme_palette_library;
 pub mod theme_palettes;
 pub mod theme_preview;
+pub mod theme_runtime;
 pub mod tokens;
 pub mod use_custom_themes;
 pub mod use_default_theme;
@@ -65,6 +66,7 @@ pub use open_vsx_themes::{
     search_open_vsx_themes_live,
 };
 use sidebar_scope::SidebarScope;
+use theme_palette::ThemeHalves;
 use theme_palette::{
     ThemePreferenceMode, get_standard_theme_colors, get_theme_colors_for_mode,
     get_theme_definition, resolve_theme_appearance,
@@ -98,6 +100,17 @@ pub struct AppearancePreferences {
     pub appearance_mode: Option<ThemePreferenceMode>,
     pub contrast: u32,
     pub fonts: AppearanceFontPreferences,
+    /// Upstream `THEME_HALVES_STORAGE_KEY`: a different theme per appearance.
+    pub theme_halves: Option<ThemeHalves>,
+    /// The theme editor's unsaved draft, painted on the live app.
+    pub preview: Option<ThemePreviewDraft>,
+}
+
+/// `applyThemeColorPreview`: a draft palette worn instead of the stored theme.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThemePreviewDraft {
+    pub colors: ThemeColors,
+    pub appearance: ThemeAppearance,
 }
 
 impl Default for AppearancePreferences {
@@ -107,6 +120,8 @@ impl Default for AppearancePreferences {
             appearance_mode: None,
             contrast: appearance_contrast::DEFAULT_APPEARANCE_CONTRAST,
             fonts: AppearanceFontPreferences::default(),
+            theme_halves: None,
+            preview: None,
         }
     }
 }
@@ -416,33 +431,63 @@ fn resolve_fonts(preferences: &AppearanceFontPreferences, cx: &App) -> ResolvedF
 pub fn init(cx: &mut App) {
     cx.set_global(ThemeState::default());
     apply(None, cx);
+    theme_runtime::init(cx);
 }
 
 /// Re-resolves the theme for the current preferences and the given (or app)
 /// system appearance, and pushes it into gpui-component.
 pub fn apply(window_appearance: Option<WindowAppearance>, cx: &mut App) {
     let preferences = cx.global::<ThemeState>().preferences.clone();
-    let owned_definition = get_theme_definition(&preferences.theme);
-    let definition = owned_definition.as_ref();
+    let halves = preferences.theme_halves.as_ref();
     let system_dark =
         system_appearance(window_appearance.unwrap_or_else(|| cx.window_appearance())).is_dark();
-    let appearance = resolve_theme_appearance(
-        &preferences.theme,
-        system_dark,
-        None,
-        preferences.appearance_mode,
-        None,
-    );
+    // The editor's draft keeps the app on the draft's appearance, as upstream's
+    // preview toggles the `dark` class.
+    let appearance = match &preferences.preview {
+        Some(preview) => preview.appearance,
+        None => resolve_theme_appearance(
+            &preferences.theme,
+            system_dark,
+            None,
+            preferences.appearance_mode,
+            halves,
+        ),
+    };
     let fonts = resolve_fonts(&preferences.fonts, cx);
+    // Each appearance wears its own half of an automatic-mode mix.
+    let definition_for = |half_appearance: ThemeAppearance| -> Option<ThemeDefinition> {
+        match &preferences.preview {
+            Some(preview) if preview.appearance == half_appearance => Some(ThemeDefinition {
+                id: gpui_kit::SharedString::new_static(theme_palette::THEME_PREVIEW_ID),
+                label: gpui_kit::SharedString::new_static("Draft"),
+                appearance: preview.appearance,
+                colors: preview.colors.clone(),
+                variants: theme_palettes::ThemeVariants {
+                    light: None,
+                    dark: None,
+                },
+                collection: None,
+                managed: false,
+                sidebar_artwork: false,
+            }),
+            _ => get_theme_definition(&theme_palette::resolve_theme_half(
+                &preferences.theme,
+                halves,
+                half_appearance,
+            )),
+        }
+    };
+    let light_definition = definition_for(ThemeAppearance::Light);
+    let dark_definition = definition_for(ThemeAppearance::Dark);
 
     let light = AppTheme::resolve(
-        definition,
+        light_definition.as_ref(),
         ThemeAppearance::Light,
         preferences.contrast,
         fonts.clone(),
     );
     let dark = AppTheme::resolve(
-        definition,
+        dark_definition.as_ref(),
         ThemeAppearance::Dark,
         preferences.contrast,
         fonts,
@@ -485,5 +530,6 @@ pub fn set_preferences(preferences: AppearancePreferences, cx: &mut App) {
 /// Follow the OS light/dark switch for `window`, as upstream's
 /// `prefers-color-scheme` handling does.
 pub fn follow_system_appearance(window: &mut Window, cx: &mut App) {
+    theme_runtime::follow_system_appearance(window.appearance(), cx);
     apply(Some(window.appearance()), cx);
 }

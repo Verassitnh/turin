@@ -176,7 +176,10 @@ mod tests {
     //! Port of upstream/apps/server/src/provider/providerStatusCache.test.ts.
     //! The legacy `provider`-keyed cache shape from the upstream correlation case
     //! cannot be built as a typed `ServerProvider`, so it is covered by the
-    //! undecodable-file read below.
+    //! undecodable-file read below. The log assertions of "logs structural
+    //! diagnostics without retaining invalid cache contents" are ported with a
+    //! capturing `tracing` layer: the field is `error_kind` (a serde error class),
+    //! where upstream's is `errorTag`.
 
     use pretty_assertions::assert_eq;
     use serde_json::{Value, json};
@@ -220,7 +223,67 @@ mod tests {
         tokio::fs::write(&path, r#"{ "token": "secret-cache-value" }"#)
             .await
             .expect("write fixture");
+        let (_guard, captured) = capture_logs();
         assert!(read_provider_status_cache(&path).await.is_none());
+        let events = captured.lock().unwrap().clone();
+        let failure = events
+            .iter()
+            .find(|fields| fields.iter().any(|(name, _)| name == "path"))
+            .expect("the failure is logged with its path");
+        let field = |name: &str| {
+            failure
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(field("path"), Some(path.display().to_string().as_str()));
+        assert!(field("error_kind").is_some_and(|kind| !kind.is_empty()));
+        assert_eq!(field("cause"), None);
+        assert_eq!(field("issues"), None);
+        assert!(
+            events
+                .iter()
+                .flatten()
+                .all(|(_, value)| !value.contains("secret-cache-value")),
+            "the cache contents reached the log: {events:?}"
+        );
+    }
+
+    type CapturedEvents = std::sync::Arc<std::sync::Mutex<Vec<Vec<(String, String)>>>>;
+
+    /// Installs a thread-local `tracing` subscriber (until the guard drops) that
+    /// records every event's fields as `(name, rendered value)`. The test runtime
+    /// is current-thread, so awaited code logs on this thread.
+    fn capture_logs() -> (tracing::subscriber::DefaultGuard, CapturedEvents) {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::{Layer, layer::SubscriberExt};
+
+        #[derive(Default)]
+        struct Fields(Vec<(String, String)>);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push((field.name().to_owned(), format!("{value:?}")));
+            }
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.push((field.name().to_owned(), value.to_owned()));
+            }
+        }
+        struct Capture(CapturedEvents);
+        impl<S: tracing::Subscriber> Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut fields = Fields::default();
+                event.record(&mut fields);
+                self.0.lock().unwrap().push(fields.0);
+            }
+        }
+
+        let events: CapturedEvents = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture(Arc::clone(&events)));
+        (tracing::subscriber::set_default(subscriber), events)
     }
 
     #[tokio::test]

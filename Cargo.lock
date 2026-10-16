@@ -7662,6 +7662,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "turin-contracts",
  "turin-shared",
  "url",

@@ -54,16 +54,19 @@ fn stable_version_regex() -> &'static Regex {
 
 /// Same filter as upstream's `VersionRange`. Comparator groups are joined by
 /// `||`; each token is an optional operator, an optional `v`, then one to
-/// three numeric parts.
+/// three numeric parts. A group with no token ("1.0.0||", "||") fails: upstream
+/// splits the trimmed group on whitespace, and `"".split(/\s+/)` is `[""]`, which
+/// is not a token.
 fn is_version_range(value: &str) -> bool {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let token = RE.get_or_init(|| {
         Regex::new(r"^(?:\^|>=|>|<=|<|=)?v?\d+(?:\.\d+){0,2}$").expect("valid regex")
     });
     !value.trim().is_empty()
-        && value
-            .split("||")
-            .all(|group| group.split_whitespace().all(|part| token.is_match(part)))
+        && value.split("||").all(|group| {
+            let group = group.trim();
+            !group.is_empty() && group.split_whitespace().all(|part| token.is_match(part))
+        })
 }
 
 /// Decodes one policy from manifest JSON and applies the upstream schema
@@ -648,6 +651,31 @@ mod tests {
             );
             invalid = policy_json();
         }
+        // An empty comparator group fails the filter, as upstream's `[""]` token does.
+        for range in ["1.0.0||", "||", ">=1 || ", "||>=1", ">=1 ||  || <3"] {
+            for field in ["t3CodeRange", "recommendedRange"] {
+                let mut empty_group = policy_json();
+                empty_group[field] = json!(range);
+                assert!(
+                    decode_provider_compatibility_policy(&empty_group).is_err(),
+                    "{field}: {range:?}"
+                );
+            }
+            let mut empty_group = policy_json();
+            empty_group["ranges"] = json!([{ "range": range, "status": "supported" }]);
+            assert!(
+                decode_provider_compatibility_policy(&empty_group).is_err(),
+                "ranges: {range:?}"
+            );
+        }
+        assert!(
+            decode_provider_compatibility_policy(&{
+                let mut multi_group = policy_json();
+                multi_group["t3CodeRange"] = json!(">=0.0.42 <0.1.0 || >=1.0.0");
+                multi_group
+            })
+            .is_ok()
+        );
         let mut garbage = policy_json();
         garbage["ranges"] = json!([{ "range": ">=2.0.0 garbage", "status": "supported" }]);
         assert!(decode_provider_compatibility_policy(&garbage).is_err());

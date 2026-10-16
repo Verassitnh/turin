@@ -2129,3 +2129,125 @@ async fn a_remote_policy_refresh_preserves_a_newer_health_result_on_the_registry
         Some("Authentication failed")
     );
 }
+
+// ── Added: retired instances (QC wf_461dfbcb-a40, finding 1) ───────
+//
+// Upstream ends an instance's subscription when its scope closes. Here the
+// subscription task is owned by the registry's `LiveSub` and holds only the
+// stream receiver, so a rebuilt or removed instance is released and whatever it
+// still emits is dropped.
+
+fn codex_provider(checked_at: &str, status: &str) -> ServerProvider {
+    to_provider(&with(
+        &base("codex", "codex"),
+        json!({ "checkedAt": checked_at, "status": status }),
+    ))
+}
+
+#[tokio::test]
+async fn a_rebuilt_instance_releases_its_old_managed_provider() {
+    let old_provider = codex_provider("2026-06-10T00:00:00.000Z", "ready");
+    let rebuilt_provider = codex_provider("2026-06-10T00:02:00.000Z", "warning");
+    let old_snapshot = TestSnapshot::fixed(&old_provider);
+    let weak_old_snapshot = Arc::downgrade(&old_snapshot);
+    let source = TestSource::new(vec![make_instance(&old_provider, old_snapshot, None, None)]);
+    let dir = tempfile::tempdir().unwrap();
+    let registry = start_registry(source.clone(), dir.path()).await;
+    assert!(weak_old_snapshot.upgrade().is_some());
+
+    source.set_instances(vec![fixed_instance(&rebuilt_provider)]);
+    source.publish_change();
+    wait_until(|| registry.get_providers()[0].checked_at == rebuilt_provider.checked_at).await;
+    wait_until(|| weak_old_snapshot.upgrade().is_none()).await;
+}
+
+#[tokio::test]
+async fn a_rebuilt_instances_late_emission_does_not_overwrite_the_live_snapshot() {
+    let old_provider = codex_provider("2026-06-10T00:00:00.000Z", "ready");
+    let rebuilt_provider = codex_provider("2026-06-10T00:02:00.000Z", "warning");
+    let old_snapshot = TestSnapshot::fixed(&old_provider);
+    let source = TestSource::new(vec![make_instance(
+        &old_provider,
+        Arc::clone(&old_snapshot),
+        None,
+        None,
+    )]);
+    let dir = tempfile::tempdir().unwrap();
+    let registry = start_registry(source.clone(), dir.path()).await;
+
+    source.set_instances(vec![fixed_instance(&rebuilt_provider)]);
+    source.publish_change();
+    wait_until(|| registry.get_providers()[0].checked_at == rebuilt_provider.checked_at).await;
+
+    // The retired provider still holds its subscriber list and emits again.
+    let mut changes = registry.stream_changes();
+    old_snapshot.publish(&codex_provider("2099-01-01T00:00:00.000Z", "error"));
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+
+    let providers = registry.get_providers();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].checked_at, rebuilt_provider.checked_at);
+    // Updates from the rebuild itself may still be queued; none may carry the stale snapshot.
+    while let std::task::Poll::Ready(Some(update)) = futures::poll!(changes.next()) {
+        assert!(
+            update
+                .iter()
+                .all(|provider| provider.checked_at != "2099-01-01T00:00:00.000Z"),
+            "the stale emission must not publish"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_removed_instance_is_released_and_its_late_emission_does_not_bring_it_back() {
+    let old_provider = codex_provider("2026-06-10T00:00:00.000Z", "ready");
+    let old_snapshot = TestSnapshot::fixed(&old_provider);
+    let weak_old_snapshot = Arc::downgrade(&old_snapshot);
+    let source = TestSource::new(vec![make_instance(
+        &old_provider,
+        Arc::clone(&old_snapshot),
+        None,
+        None,
+    )]);
+    let dir = tempfile::tempdir().unwrap();
+    let registry = start_registry(source.clone(), dir.path()).await;
+
+    source.set_instances(Vec::new());
+    source.publish_change();
+    wait_until(|| registry.get_providers().is_empty()).await;
+
+    old_snapshot.publish(&codex_provider("2099-01-01T00:00:00.000Z", "error"));
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(registry.get_providers(), Vec::new(), "no ghost entry");
+
+    // Only the test's own handle is left.
+    drop(old_snapshot);
+    wait_until(|| weak_old_snapshot.upgrade().is_none()).await;
+}
+
+#[tokio::test]
+async fn an_upsert_from_a_retired_source_is_dropped() {
+    let provider = codex_provider("2026-06-10T00:00:00.000Z", "ready");
+    let source = TestSource::new(vec![fixed_instance(&provider)]);
+    let dir = tempfile::tempdir().unwrap();
+    let registry = start_registry(source, dir.path()).await;
+    let before = registry.get_providers();
+    let mut changes = registry.stream_changes();
+    let retired = Arc::new(AtomicBool::new(false));
+
+    let returned = registry
+        .inner
+        .upsert_providers(
+            vec![codex_provider("2099-01-01T00:00:00.000Z", "error")],
+            UpsertOptions::from_source(&retired),
+        )
+        .await;
+
+    assert_eq!(returned, before);
+    assert_eq!(registry.get_providers(), before);
+    assert!(futures::poll!(changes.next()).is_pending());
+}

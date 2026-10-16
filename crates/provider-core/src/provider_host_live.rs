@@ -28,6 +28,9 @@ pub type ShouldRunBackgroundWork =
 
 struct DesktopSettings {
     current: RwLock<ServerSettings>,
+    /// Upstream's `writeSemaphore`: a settings write waits for a running
+    /// snapshot job. Reads never take it, so a job can read settings freely.
+    write_gate: tokio::sync::Mutex<()>,
     subscribers: Mutex<Vec<mpsc::UnboundedSender<ServerSettings>>>,
 }
 
@@ -48,6 +51,7 @@ impl DesktopSettingsHandle {
     /// The app's settings writer calls this after persisting a new settings
     /// value. Publishing never waits on a provider driver.
     pub async fn update_settings(&self, next: ServerSettings) {
+        let _write = self.settings.write_gate.lock().await;
         *self.settings.current.write().await = next.clone();
         self.settings
             .subscribers
@@ -83,6 +87,7 @@ impl DesktopProviderHost {
             Arc::new(FileSecretStore::open(state_dir.join("secrets"))?);
         let settings = Arc::new(DesktopSettings {
             current: RwLock::new(initial_settings),
+            write_gate: tokio::sync::Mutex::new(()),
             subscribers: Mutex::new(Vec::new()),
         });
         let get_settings = {
@@ -92,15 +97,18 @@ impl DesktopProviderHost {
                 Box::pin(async move { Ok(settings.current.read().await.clone()) })
             })
         };
-        // Like upstream's `withSettingsSnapshot`, the read lock is held for the
-        // whole job, so a settings write cannot land while a provider reads.
+        // Like upstream's `withSettingsSnapshot`, a settings write cannot land
+        // while the job runs: the job holds the write gate, not the value's lock,
+        // so it can still read settings (`get_settings`) without waiting behind a
+        // queued write. As upstream, a job must not write settings itself.
         let with_snapshot = {
             let settings = Arc::clone(&settings);
             Arc::new(move |job: SettingsSnapshotJob| -> BoxFuture<'static, _> {
                 let settings = Arc::clone(&settings);
                 Box::pin(async move {
-                    let snapshot = settings.current.read().await;
-                    Ok(job(snapshot.clone()).await)
+                    let _write = settings.write_gate.lock().await;
+                    let snapshot = settings.current.read().await.clone();
+                    Ok(job(snapshot).await)
                 })
             })
         };
@@ -200,6 +208,63 @@ mod tests {
                 .unwrap()
                 .enable_provider_update_checks
         );
+        assert!(!handle.settings().await.enable_provider_update_checks);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_job_can_read_settings_while_a_write_is_queued() {
+        // The read lock must not be held across the job: a queued writer would
+        // block the job's own read, and the writer waits on the job.
+        let live = host(true);
+        let handle = live.settings_handle();
+        let shared = Arc::new(live.host);
+        let in_job = Arc::new(tokio::sync::Notify::new());
+        let write_queued = Arc::new(tokio::sync::Notify::new());
+
+        let job = {
+            let shared = Arc::clone(&shared);
+            let in_job = Arc::clone(&in_job);
+            let write_queued = Arc::clone(&write_queued);
+            tokio::spawn(async move {
+                let inner = Arc::clone(&shared);
+                shared
+                    .with_settings_snapshot(move |snapshot| async move {
+                        in_job.notify_one();
+                        write_queued.notified().await;
+                        // Let the write reach its wait.
+                        for _ in 0..20 {
+                            tokio::task::yield_now().await;
+                        }
+                        let read_during_job = inner.get_settings().await.unwrap();
+                        (
+                            snapshot.enable_provider_update_checks,
+                            read_during_job.enable_provider_update_checks,
+                        )
+                    })
+                    .await
+                    .unwrap()
+            })
+        };
+        in_job.notified().await;
+        let write = {
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                let mut next = default_server_settings();
+                next.enable_provider_update_checks = false;
+                handle.update_settings(next).await;
+            })
+        };
+        write_queued.notify_one();
+
+        let (snapshot_value, read_during_job) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), job)
+                .await
+                .expect("the job deadlocked behind the queued write")
+                .unwrap();
+        write.await.unwrap();
+        // The write waited for the job: the job saw the old value throughout.
+        assert!(snapshot_value);
+        assert!(read_during_job);
         assert!(!handle.settings().await.enable_provider_update_checks);
     }
 

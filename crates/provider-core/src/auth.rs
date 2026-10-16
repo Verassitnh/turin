@@ -160,6 +160,7 @@ pub struct ProviderCredentialBinding {
 }
 
 /// Sign-in controller owned by one provider instance.
+#[derive(Clone)]
 #[allow(clippy::type_complexity)]
 pub struct ProviderAuthController {
     /// Equal keys mean these instances share credentials on this environment.

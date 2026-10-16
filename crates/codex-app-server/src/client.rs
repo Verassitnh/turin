@@ -171,6 +171,18 @@ impl Client {
         environment: &[(&str, &str)],
         options: ProtocolOptions,
     ) -> Result<Self, AppServerError> {
+        Self::spawn_with_env_removed(command, args, cwd, environment, &[], options)
+    }
+    /// `spawn_with_env`, with `removed` taken out of the inherited environment first.
+    /// `environment` is applied after, so a name in both ends up set.
+    pub fn spawn_with_env_removed(
+        command: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+        environment: &[(&str, &str)],
+        removed: &[&str],
+        options: ProtocolOptions,
+    ) -> Result<Self, AppServerError> {
         let mut process = Command::new(command);
         process
             .args(args)
@@ -182,6 +194,9 @@ impl Client {
         process.as_std_mut().process_group(0);
         if let Some(cwd) = cwd {
             process.current_dir(cwd);
+        }
+        for key in removed {
+            process.env_remove(key);
         }
         for (key, value) in environment {
             process.env(key, value);

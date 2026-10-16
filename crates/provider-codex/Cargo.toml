@@ -11,16 +11,24 @@ turin-provider-core = { path = "../provider-core" }
 turin-shared = { path = "../shared" }
 anyhow.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 futures.workspace = true
+getrandom.workspace = true
 indexmap.workspace = true
+jsonwebtoken.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 reqwest.workspace = true
+url.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+rand = "0.8"
+rsa = { version = "0.9", features = ["pem", "sha2"] }

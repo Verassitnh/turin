@@ -1,8 +1,4 @@
-//! Port of upstream/packages/provider-acp/src/server/runtimeModel.ts
-//!
-//! Work in progress: session setup, mode, and config helpers are ported. The
-//! tool-call, terminal, content, plan, and MCP identity parts follow in later
-//! slices (see docs/handoff/R2.md).
+//! Session setup, mode, and config helpers from upstream runtimeModel.ts.
 
 use serde::Deserialize;
 use turin_contracts::base_schemas::js_trim;

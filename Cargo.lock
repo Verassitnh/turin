@@ -7348,6 +7348,7 @@ dependencies = [
 name = "turin-acp"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "libc",
  "parking_lot",
@@ -7360,6 +7361,7 @@ dependencies = [
  "tokio",
  "tracing",
  "turin-contracts",
+ "turin-shared",
 ]
 
 [[package]]

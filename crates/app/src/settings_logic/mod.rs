@@ -5,3 +5,4 @@ pub mod scoped_settings;
 pub mod settings_scope;
 pub mod settings_scope_axis;
 pub mod settings_scope_navigation;
+pub mod use_settings;

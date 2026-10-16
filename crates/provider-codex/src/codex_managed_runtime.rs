@@ -21,6 +21,7 @@ use turin_contracts::{
     settings::CodexSettings,
 };
 use turin_provider_core::{credential_store::SecretStore, host_process::ProcessEnv};
+use turin_shared::cli_args::tokenize_cli_args;
 
 use crate::{
     codex_chatgpt_auth::{CodexChatGptAuth, CodexChatGptAuthOptions, make, store::failure},
@@ -29,6 +30,7 @@ use crate::{
         materialize_codex_shadow_home, resolve_managed_codex_home_layout,
     },
     codex_installation::{CodexExecutable, CodexInstallation, CodexInstallationError},
+    runtime::{CodexRuntimeConfig, CodexRuntimeResolver, ResolvedCodexLaunch},
 };
 
 /// What one session launches with. `revision` changes whenever the access
@@ -82,6 +84,8 @@ pub struct CodexManagedHost {
     pub installation: Arc<dyn CodexExecutableSource>,
     /// Overrides OpenAI's discovery document. Tests point it at a mock server.
     pub discovery_url: Option<String>,
+    /// Overrides OpenAI's model catalog URL. Tests point it at a mock server.
+    pub catalog_url: Option<String>,
 }
 
 pub struct CodexManagedRuntimeOptions {
@@ -90,6 +94,34 @@ pub struct CodexManagedRuntimeOptions {
     pub environment: ProcessEnv,
     pub config: CodexSettings,
     pub host: CodexManagedHost,
+}
+
+/// Names `managed_runtime_environment` takes out of the environment. A spawn
+/// must remove them from the inherited process environment as well.
+pub const MANAGED_REMOVED_ENVIRONMENT: [&str; 3] = [
+    "T3CODE_CODEX_LAUNCH_ARGS",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+];
+
+/// The app-server launch for an effective runtime. `base` supplies the cwd and
+/// client version, which managed settings do not carry.
+pub fn managed_launch_config(
+    base: &CodexRuntimeConfig,
+    effective: &CodexEffectiveRuntime,
+) -> CodexRuntimeConfig {
+    CodexRuntimeConfig {
+        binary: PathBuf::from(effective.config.binary_path.as_str()),
+        cwd: base.cwd.clone(),
+        home_path: Some(effective.config.home_path.as_str().to_owned()),
+        launch_args: tokenize_cli_args(Some(effective.config.launch_args.as_str())),
+        environment: effective.environment.clone().into_iter().collect(),
+        remove_environment: MANAGED_REMOVED_ENVIRONMENT
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
+        client_version: base.client_version.clone(),
+    }
 }
 
 /// An effective runtime plus the executable lease it launched from. Keep the
@@ -105,6 +137,7 @@ pub struct CodexManagedRuntime {
     environment: ProcessEnv,
     pub auth: CodexChatGptAuth,
     pub installation: Arc<dyn CodexExecutableSource>,
+    pub catalog_url: Option<String>,
     /// `homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath`.
     pub home_path: PathBuf,
     pub home_layout: CodexHomeLayout,
@@ -163,6 +196,7 @@ impl CodexManagedRuntime {
             environment: options.environment,
             auth,
             installation: host.installation,
+            catalog_url: host.catalog_url,
             home_path,
             home_layout,
         })
@@ -215,6 +249,20 @@ impl CodexManagedRuntime {
                 revision: credentials.access_token,
             },
             lease,
+        })
+    }
+}
+
+#[async_trait]
+impl CodexRuntimeResolver for CodexManagedRuntime {
+    async fn resolve(
+        &self,
+        base: &CodexRuntimeConfig,
+    ) -> Result<ResolvedCodexLaunch, ProviderSetupError> {
+        let resolved = CodexManagedRuntime::resolve(self).await?;
+        Ok(ResolvedCodexLaunch {
+            config: managed_launch_config(base, &resolved.effective),
+            keepalive: resolved.lease,
         })
     }
 }
@@ -445,6 +493,7 @@ mod tests {
                 environment_id: "00000000-0000-4000-8000-000000000001".to_owned(),
                 installation,
                 discovery_url: Some(format!("{}/discovery", oauth.origin)),
+                catalog_url: None,
             },
         })
         .await
@@ -506,6 +555,42 @@ mod tests {
             assert!(!launch_args.contains("x-openai-chatpass-test"));
             assert!(!launch_args.contains("dummy-owned-access"));
             assert_eq!(ambient["CODEX_HOME"], "/user/.codex");
+
+            // The launch built from it: tokenized overrides, the owned token, and the
+            // inherited ambient overrides removed from the child's environment.
+            let base = CodexRuntimeConfig {
+                binary: PathBuf::from("codex"),
+                cwd: PathBuf::from("/workspace"),
+                home_path: None,
+                launch_args: Vec::new(),
+                environment: Default::default(),
+                remove_environment: Vec::new(),
+                client_version: "1".to_owned(),
+            };
+            let launch = managed_launch_config(&base, effective);
+            assert_eq!(launch.binary, executable.executable_path);
+            assert_eq!(launch.cwd, PathBuf::from("/workspace"));
+            assert_eq!(launch.home_path.as_deref(), Some(home_path));
+            assert_eq!(launch.environment["ACCESS_TOKEN"], "dummy-owned-access");
+            assert_eq!(launch.client_version, "1");
+            for name in [
+                "OPENAI_API_KEY",
+                "OPENAI_BASE_URL",
+                "T3CODE_CODEX_LAUNCH_ARGS",
+            ] {
+                assert!(
+                    launch
+                        .remove_environment
+                        .iter()
+                        .any(|removed| removed == name)
+                );
+            }
+            assert_eq!(launch.launch_args[0], "-c");
+            assert!(
+                launch
+                    .launch_args
+                    .contains(&r#"model_provider="openai_token_sharing""#.to_owned())
+            );
         }
         assert_eq!(leases.load(Ordering::SeqCst), 0);
         (runtime.auth.controller.logout)(Box::pin(async { Ok(()) }))

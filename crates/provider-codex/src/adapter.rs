@@ -97,7 +97,25 @@ impl CodexAdapter {
         cwd: &Path,
         environment: &[(&str, &str)],
     ) -> Result<Client, AppServerError> {
-        Client::spawn_with_env(binary, args, Some(cwd), environment, Default::default())
+        Self::spawn_removing(binary, args, cwd, environment, &[])
+    }
+
+    /// `spawn`, with `removed` taken out of the inherited environment first.
+    pub fn spawn_removing(
+        binary: &str,
+        args: &[&str],
+        cwd: &Path,
+        environment: &[(&str, &str)],
+        removed: &[&str],
+    ) -> Result<Client, AppServerError> {
+        Client::spawn_with_env_removed(
+            binary,
+            args,
+            Some(cwd),
+            environment,
+            removed,
+            Default::default(),
+        )
     }
 
     pub async fn initialize(client: Client, version: &str) -> Result<CodexSession, AppServerError> {

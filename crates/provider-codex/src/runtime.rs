@@ -1,11 +1,14 @@
 //! Port of upstream/apps/server/src/provider/CodexProvider.ts
 //! (`codexAppServerEnvironment`, launch/home setup) and `CodexManagedRuntime.ts`.
+#![allow(clippy::result_large_err)]
 use crate::{CodexAdapter, CodexSession};
+use async_trait::async_trait;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
 use turin_codex_app_server::{client::Client, errors::AppServerError};
+use turin_contracts::provider_setup::ProviderSetupError;
 
 // Kept byte-for-byte in behavior with provider-core's `expand_home_path` until
 // its in-progress crate compiles against the contracts used by this branch.
@@ -32,6 +35,9 @@ pub struct CodexRuntimeConfig {
     pub home_path: Option<String>,
     pub launch_args: Vec<String>,
     pub environment: BTreeMap<String, String>,
+    /// Names taken out of the inherited process environment before `environment`
+    /// applies. A managed launch uses it so ambient overrides cannot redirect its token.
+    pub remove_environment: Vec<String>,
     pub client_version: String,
 }
 
@@ -61,12 +67,40 @@ impl CodexRuntimeConfig {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect::<Vec<_>>();
-        CodexAdapter::spawn(&self.binary.to_string_lossy(), &args, &self.cwd, &pairs)
+        let removed = self
+            .remove_environment
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        CodexAdapter::spawn_removing(
+            &self.binary.to_string_lossy(),
+            &args,
+            &self.cwd,
+            &pairs,
+            &removed,
+        )
     }
 
     pub async fn connect(&self, user_home: &Path) -> Result<CodexSession, AppServerError> {
         CodexAdapter::initialize(self.spawn(user_home)?, &self.client_version).await
     }
+}
+
+/// One session's launch, with whatever must stay alive while it runs.
+pub struct ResolvedCodexLaunch {
+    pub config: CodexRuntimeConfig,
+    /// The managed executable lease. Dropped when the session closes.
+    pub keepalive: Box<dyn std::any::Any + Send + Sync>,
+}
+
+/// Upstream's `resolveRuntime` option of `createCodexAdapterV2`: launch settings
+/// resolved per session from the signed-in token instead of fixed at create time.
+#[async_trait]
+pub trait CodexRuntimeResolver: Send + Sync {
+    async fn resolve(
+        &self,
+        base: &CodexRuntimeConfig,
+    ) -> Result<ResolvedCodexLaunch, ProviderSetupError>;
 }
 
 #[cfg(test)]
@@ -80,6 +114,7 @@ mod tests {
             home_path: Some("~/.codex-work".into()),
             launch_args: vec![],
             environment: BTreeMap::new(),
+            remove_environment: vec![],
             client_version: "1".into(),
         };
         let env = config.environment(Path::new("/home/user"));

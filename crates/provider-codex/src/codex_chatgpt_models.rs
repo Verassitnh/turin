@@ -94,8 +94,18 @@ pub async fn chat_gpt_models(
     access_token: &str,
     native: &[ServerProviderModel],
 ) -> Result<Vec<ServerProviderModel>, ChatGptModelsError> {
+    chat_gpt_models_at(client, CATALOG_URL, access_token, native).await
+}
+
+/// `chat_gpt_models` against another catalog URL. Tests point it at a mock server.
+pub async fn chat_gpt_models_at(
+    client: &reqwest::Client,
+    url: &str,
+    access_token: &str,
+    native: &[ServerProviderModel],
+) -> Result<Vec<ServerProviderModel>, ChatGptModelsError> {
     let response = client
-        .get(CATALOG_URL)
+        .get(url)
         .bearer_auth(access_token)
         .timeout(CATALOG_TIMEOUT)
         .send()

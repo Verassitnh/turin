@@ -1,7 +1,6 @@
 //! Codex provider adapter, ported from `CodexAdapterV2.ts` and `provider/Codex*.ts`.
 pub mod adapter;
 pub mod approvals;
-pub mod cli_args;
 pub mod codex_auth_callback;
 pub mod codex_auth_callback_page;
 pub mod codex_chatgpt_auth;
@@ -13,6 +12,7 @@ pub mod codex_home_layout;
 pub mod codex_installation;
 pub mod codex_launch_args;
 pub mod codex_managed_errors;
+pub mod codex_managed_provider;
 pub mod codex_managed_runtime;
 pub mod codex_mcp_elicitation;
 pub mod codex_model;

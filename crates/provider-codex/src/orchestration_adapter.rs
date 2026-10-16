@@ -3,11 +3,12 @@
 use crate::{
     adapter::{CodexAdapter, CodexEvent, CodexSession},
     approvals::{Decision, PendingRequest},
+    codex_mcp_elicitation::describe_mcp_elicitation,
     goal::{self, GoalCommand},
     items,
-    params::RuntimePolicy,
+    params::{RuntimePolicy, TurnContext},
     projection::{self, RuntimeState, TurnState},
-    runtime::CodexRuntimeConfig,
+    runtime::{CodexRuntimeConfig, CodexRuntimeResolver},
     subagent,
 };
 use async_trait::async_trait;
@@ -39,14 +40,14 @@ use turin_provider_core::{
     failure::ProviderFailureCause,
     id_allocator::{IdAllocator, derive},
     provider_adapter::{
-        ProviderAdapterErrorKind, ProviderAdapterV2, ProviderAdapterV2EnsureThreadInput,
-        ProviderAdapterV2Error, ProviderAdapterV2Event, ProviderAdapterV2ForkThreadInput,
-        ProviderAdapterV2InterruptInput, ProviderAdapterV2OpenSessionInput,
-        ProviderAdapterV2ReadThreadSnapshotInput, ProviderAdapterV2ResumeThreadInput,
-        ProviderAdapterV2RollbackTarget, ProviderAdapterV2RollbackThreadInput,
-        ProviderAdapterV2RuntimeRequestResponseInput, ProviderAdapterV2SteerInput,
-        ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2TurnInput, ProviderEventStream,
-        ProviderSessionRuntime,
+        ProviderAdapterErrorKind, ProviderAdapterV2, ProviderAdapterV2AppContext,
+        ProviderAdapterV2EnsureThreadInput, ProviderAdapterV2Error, ProviderAdapterV2Event,
+        ProviderAdapterV2ForkThreadInput, ProviderAdapterV2InterruptInput,
+        ProviderAdapterV2OpenSessionInput, ProviderAdapterV2ReadThreadSnapshotInput,
+        ProviderAdapterV2ResumeThreadInput, ProviderAdapterV2RollbackTarget,
+        ProviderAdapterV2RollbackThreadInput, ProviderAdapterV2RuntimeRequestResponseInput,
+        ProviderAdapterV2SteerInput, ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2TurnInput,
+        ProviderEventStream, ProviderSessionRuntime,
     },
     selection_transition::{
         ProviderSelectionTransitionInput, ProviderSelectionTransitionPlan,
@@ -102,6 +103,8 @@ pub struct CodexProviderAdapter {
     driver: ProviderDriverKind,
     config: CodexRuntimeConfig,
     injected_client: Mutex<Option<Client>>,
+    /// Resolves the launch per session (managed Codex: the signed-in token).
+    resolver: Option<Arc<dyn CodexRuntimeResolver>>,
 }
 
 impl CodexProviderAdapter {
@@ -111,6 +114,19 @@ impl CodexProviderAdapter {
             driver: driver(),
             config,
             injected_client: Mutex::new(None),
+            resolver: None,
+        }
+    }
+    /// Upstream's `resolveRuntime` option: the launch settings come from `resolver`
+    /// for every session, with `config` supplying the cwd and client version.
+    pub fn with_runtime_resolver(
+        instance_id: ProviderInstanceId,
+        config: CodexRuntimeConfig,
+        resolver: Arc<dyn CodexRuntimeResolver>,
+    ) -> Self {
+        Self {
+            resolver: Some(resolver),
+            ..Self::new(instance_id, config)
         }
     }
     /// Test seam: use the pinned app-server replay transport without paid turns.
@@ -124,6 +140,7 @@ impl CodexProviderAdapter {
             driver: driver(),
             config,
             injected_client: Mutex::new(Some(client)),
+            resolver: None,
         }
     }
 }
@@ -168,11 +185,30 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
         &self,
         input: ProviderAdapterV2OpenSessionInput,
     ) -> Result<Arc<dyn ProviderSessionRuntime>, ProviderAdapterV2Error> {
+        let open_error = |cause: &dyn std::fmt::Display| {
+            error(
+                ProviderAdapterErrorKind::OpenSession {
+                    driver: self.driver.clone(),
+                    provider_session_id: input.provider_session_id.clone(),
+                },
+                cause,
+            )
+        };
+        let (config, keepalive) = match &self.resolver {
+            Some(resolver) => {
+                let launch = resolver
+                    .resolve(&self.config)
+                    .await
+                    .map_err(|e| open_error(&e))?;
+                (launch.config, Some(launch.keepalive))
+            }
+            None => (self.config.clone(), None),
+        };
         let client = if let Some(client) = self.injected_client.lock().take() {
             client
         } else {
             let home = std::env::var("HOME").unwrap_or_default();
-            self.config.spawn(Path::new(&home)).map_err(|e| {
+            config.spawn(Path::new(&home)).map_err(|e| {
                 error(
                     ProviderAdapterErrorKind::OpenSession {
                         driver: self.driver.clone(),
@@ -182,7 +218,7 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
                 )
             })?
         };
-        let session = CodexAdapter::initialize(client, &self.config.client_version)
+        let session = CodexAdapter::initialize(client, &config.client_version)
             .await
             .map_err(|e| {
                 error(
@@ -212,7 +248,7 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
             .runtime_policy
             .cwd
             .as_deref()
-            .unwrap_or_else(|| self.config.cwd.to_str().unwrap_or("."));
+            .unwrap_or_else(|| config.cwd.to_str().unwrap_or("."));
         let provider_session = OrchestrationV2ProviderSession {
             id: input.provider_session_id.clone(),
             driver: self.driver.clone(),
@@ -236,7 +272,8 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
             pump,
             turn_registered,
             state,
-            config: self.config.clone(),
+            config,
+            _keepalive: keepalive,
         }))
     }
 }
@@ -257,6 +294,8 @@ pub struct CodexProviderRuntime {
     turn_registered: Arc<tokio::sync::Notify>,
     state: Arc<Mutex<RuntimeState>>,
     config: CodexRuntimeConfig,
+    /// Held for the session: the managed executable lease.
+    _keepalive: Option<Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl Drop for CodexProviderRuntime {
@@ -491,6 +530,7 @@ fn thread_from(
 fn runtime_policy(
     policy: &turin_provider_core::provider_adapter::ProviderAdapterV2RuntimePolicy,
     fallback: &Path,
+    app_context: Option<&[ProviderAdapterV2AppContext]>,
 ) -> RuntimePolicy {
     RuntimePolicy {
         cwd: policy
@@ -501,9 +541,18 @@ fn runtime_policy(
         interaction_mode: policy.interaction_mode,
         approval_policy: policy.approval_policy.clone(),
         sandbox_policy: policy.sandbox_policy.clone(),
-        // The provider-core runtime policy does not yet carry whether the
-        // t3-code MCP server is attached or app context, so turns send neither.
-        turn_context: Default::default(),
+        // Turin has no T3 MCP server (mcp/* is cut), so `hasT3Mcp` is always false:
+        // no developer instructions and no T3 orchestration context. The turn still
+        // carries the interaction mode (plan sends `collaborationMode`) and the
+        // thread's app context.
+        turn_context: TurnContext {
+            app_context: app_context
+                .unwrap_or_default()
+                .iter()
+                .map(|entry| (entry.key.clone(), entry.text.clone()))
+                .collect(),
+            ..TurnContext::default()
+        },
     }
 }
 fn option<'a>(selection: &'a ModelSelection, key: &str) -> Option<&'a str> {
@@ -787,7 +836,11 @@ impl CodexProviderRuntime {
         input: ProviderAdapterV2TurnInput,
     ) -> Result<(), ProviderAdapterV2Error> {
         let thread = native_id(&input.provider_thread)?.to_owned();
-        let policy = runtime_policy(&input.runtime_policy, &self.config.cwd);
+        let policy = runtime_policy(
+            &input.runtime_policy,
+            &self.config.cwd,
+            input.app_context.as_deref(),
+        );
         let model = input.model_selection.model.as_str();
         // The thread is starting a turn until the turn is registered, so a child turn
         // that starts first waits for its parent rather than running under a stale one.
@@ -1317,12 +1370,37 @@ fn project_request(
         return vec![];
     };
     let owner_native = subagent::owner_native_turn(state, context);
-    let native_item = request.params.get("itemId").and_then(Value::as_str);
-    let native_req = request
-        .params
-        .get("approvalId")
-        .or_else(|| request.params.get("itemId"))
-        .and_then(Value::as_str);
+    // An MCP elicitation names no item or approval: upstream keys it by the
+    // elicitation id (url mode) or by its server.
+    let elicitation_request = (request.method == "mcpServer/elicitation/request").then(|| {
+        if request.params.get("mode").and_then(Value::as_str) == Some("url") {
+            request
+                .params
+                .get("elicitationId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        } else {
+            format!(
+                "mcp-elicitation:{}",
+                request
+                    .params
+                    .get("serverName")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+            )
+        }
+    });
+    let native_item = elicitation_request
+        .as_deref()
+        .or_else(|| request.params.get("itemId").and_then(Value::as_str));
+    let native_req = elicitation_request.as_deref().or_else(|| {
+        request
+            .params
+            .get("approvalId")
+            .or_else(|| request.params.get("itemId"))
+            .and_then(Value::as_str)
+    });
     let parent_node = subagent::subagent_node(state, context).unwrap_or_else(|| {
         derive::node_from_provider_item(&driver(), native_item.or(native_req).unwrap_or_default())
     });
@@ -1343,12 +1421,36 @@ fn project_request(
         native_req.unwrap_or_default()
     );
     let (ordinal, _) = items::resolve_position(owner, &ordinal_key, None, now);
-    let prompt = request
-        .params
-        .get("reason")
-        .or_else(|| request.params.get("command"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
+    let (prompt, app_name, options) = if elicitation_request.is_some() {
+        let (app_name, options) = describe_mcp_elicitation(
+            &request.params,
+            request
+                .params
+                .get("serverName")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
+        (
+            request
+                .params
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            Some(app_name),
+            Some(options),
+        )
+    } else {
+        (
+            request
+                .params
+                .get("reason")
+                .or_else(|| request.params.get("command"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            None,
+            None,
+        )
+    };
     let node_id = derive::approval_node(&id);
     let turn_item_id = derive::approval_turn_item(&id);
     let node = OrchestrationV2ExecutionNode {
@@ -1390,8 +1492,8 @@ fn project_request(
         request_id: id.clone(),
         request_kind: item_kind,
         prompt,
-        app_name: None,
-        options: None,
+        app_name,
+        options,
     };
     let runtime_request = OrchestrationV2RuntimeRequest {
         id,

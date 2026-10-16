@@ -1,8 +1,8 @@
 //! Codex model list mapping: `parseCodexModelListResponse`,
 //! `mapCodexModelCapabilities`, `applyPreferredCodexDefaultModel`, and
 //! `appendCustomCodexModels` from upstream/apps/server/src/provider/CodexProvider.ts,
-//! with `codexModelFamily` and `formatCodexModelName` from
-//! upstream/packages/shared/src/model.ts.
+//! `codexModelFamily` and `formatCodexModelName` (upstream/packages/shared/src/model.ts)
+//! live in `turin_shared::model`.
 use serde_json::Value;
 use turin_contracts::TrimmedNonEmptyString;
 use turin_contracts::model::{
@@ -11,6 +11,7 @@ use turin_contracts::model::{
 };
 use turin_provider_core::custom_models::provider_models_from_settings;
 use turin_provider_core::server_provider::ServerProviderModel;
+use turin_shared::model::{codex_model_family, format_codex_model_name};
 
 /// `DEFAULT_SERVICE_TIER_ID`.
 const DEFAULT_SERVICE_TIER_ID: &str = "default";
@@ -36,36 +37,6 @@ fn reasoning_effort_label(reasoning_effort: &str) -> &str {
         "ultra" => "Ultra",
         other => other,
     }
-}
-
-/// `codexModelFamily`: dated `openai.gpt-*` ids share their base family.
-pub fn codex_model_family(slug: &str) -> &str {
-    slug.strip_prefix("openai.")
-        .filter(|rest| rest.starts_with("gpt-"))
-        .unwrap_or(slug)
-}
-
-/// `formatCodexModelName`: `^gpt` becomes `GPT`, and `-x` becomes `-X` for
-/// lowercase letters, in that order.
-pub fn format_codex_model_name(name: &str) -> String {
-    let head = match name.get(..3) {
-        Some(prefix) if prefix.eq_ignore_ascii_case("gpt") => format!("GPT{}", &name[3..]),
-        _ => name.to_owned(),
-    };
-    let mut out = String::with_capacity(head.len());
-    let mut chars = head.chars().peekable();
-    while let Some(char) = chars.next() {
-        if char == '-'
-            && let Some(next) = chars.peek().copied().filter(char::is_ascii_lowercase)
-        {
-            out.push('-');
-            out.push(next.to_ascii_uppercase());
-            chars.next();
-            continue;
-        }
-        out.push(char);
-    }
-    out
 }
 
 fn tne(value: &str) -> Option<TrimmedNonEmptyString> {
@@ -285,21 +256,6 @@ mod tests {
             is_legacy: None,
             capabilities: None,
         }
-    }
-
-    #[test]
-    fn family_strips_only_the_openai_gpt_prefix() {
-        assert_eq!(codex_model_family("openai.gpt-5.5"), "gpt-5.5");
-        assert_eq!(codex_model_family("openai.other"), "openai.other");
-        assert_eq!(codex_model_family("gpt-5.5"), "gpt-5.5");
-    }
-
-    #[test]
-    fn names_capitalize_gpt_and_dash_letters() {
-        assert_eq!(format_codex_model_name("gpt-5.4-mini"), "GPT-5.4-Mini");
-        assert_eq!(format_codex_model_name("GPT 5"), "GPT 5");
-        assert_eq!(format_codex_model_name("Model-x"), "Model-X");
-        assert_eq!(format_codex_model_name("gp"), "gp");
     }
 
     #[test]

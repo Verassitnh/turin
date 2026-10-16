@@ -26,18 +26,20 @@ use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceId}
 use turin_contracts::provider_usage_limits::{
     ProviderUsageLimitsUpdate, ServerProviderUsageLimits, ServerProviderUsageUnavailableReason,
 };
-use turin_contracts::settings::CodexSettings;
+use turin_contracts::settings::{CodexSettings, CodexSetupMode};
 use turin_provider_core::driver::{
-    ProviderDriver, ProviderDriverCreateInput, ProviderDriverMetadata, ProviderInstance,
-    default_provider_continuation_identity, driver_error,
+    ProviderContinuationIdentity, ProviderDriver, ProviderDriverCreateInput,
+    ProviderDriverMetadata, ProviderInstance, driver_error,
 };
 use turin_provider_core::errors::ProviderDriverError;
+use turin_provider_core::instance_identity::{InstanceIdentity, with_instance_identity};
 use turin_provider_core::maintenance::ProviderMaintenanceCapabilities;
 use turin_provider_core::maintenance_resolver::make_manual_only_provider_maintenance_capabilities;
 use turin_provider_core::rt::BoxStream;
 use turin_provider_core::server_provider::{
     ServerProvider, ServerProviderAuth, ServerProviderAuthStatus, ServerProviderModel,
-    ServerProviderSkill, ServerProviderState,
+    ServerProviderSkill, ServerProviderSlashCommand, ServerProviderSlashCommandInput,
+    ServerProviderState,
 };
 use turin_provider_core::snapshot::ManagedServerProvider;
 use turin_provider_core::snapshot_probe::{
@@ -51,10 +53,15 @@ use turin_provider_core::text_generation::{
     ThreadTitleGenerationInput, ThreadTitleGenerationResult,
 };
 use turin_provider_core::usage_limits::make_unavailable_usage_limits;
+use turin_shared::cli_args::tokenize_cli_args;
 
 use crate::{
-    cli_args::tokenize_cli_args,
+    codex_home_layout::{
+        CodexHomeLayout, materialize_codex_shadow_home, resolve_codex_home_layout,
+    },
     codex_launch_args::resolve_codex_launch_args,
+    codex_managed_provider::make_managed_codex_provider,
+    codex_managed_runtime::CodexManagedHost,
     codex_model::{
         append_custom_codex_models, apply_preferred_codex_default_model, parse_codex_model,
     },
@@ -77,6 +84,9 @@ const DISABLED_MESSAGE: &str = "Codex is disabled in T3 Code settings.";
 pub struct CodexDriver {
     kind: ProviderDriverKind,
     metadata: ProviderDriverMetadata,
+    /// What a `setupMode: "managed"` instance needs from the host. Without it
+    /// those instances fail to create.
+    managed_host: Option<CodexManagedHost>,
 }
 
 impl CodexDriver {
@@ -84,6 +94,16 @@ impl CodexDriver {
         Self {
             kind: ProviderDriverKind::new("codex").expect("codex driver slug"),
             metadata: ProviderDriverMetadata::new("Codex"),
+            managed_host: None,
+        }
+    }
+
+    /// A driver that can also create managed instances: the server config,
+    /// secret store, environment id, and installation come from `host`.
+    pub fn with_managed_host(host: CodexManagedHost) -> Self {
+        Self {
+            managed_host: Some(host),
+            ..Self::new()
         }
     }
 }
@@ -126,31 +146,54 @@ impl ProviderDriver for CodexDriver {
     ) -> Result<ProviderInstance, ProviderDriverError> {
         let settings: CodexSettings = serde_json::from_value(input.config.clone())
             .map_err(|error| driver_error(&self.kind, &input.instance_id, error.to_string()))?;
-        let config = runtime_config(&settings, &input);
+        if settings.setup_mode == Some(CodexSetupMode::Managed) {
+            let Some(host) = self.managed_host.clone() else {
+                return Err(driver_error(
+                    &self.kind,
+                    &input.instance_id,
+                    "Managed Codex needs the host installation and credential store.",
+                ));
+            };
+            return make_managed_codex_provider(&self.kind, input, settings, host).await;
+        }
         let enabled = settings.enabled && input.enabled;
         let maintenance = make_manual_only_provider_maintenance_capabilities(self.kind.clone());
         let custom_models = settings.custom_models.clone();
+        let home = std::env::var("HOME").unwrap_or_default();
+        let layout = resolve_codex_home_layout(
+            settings.home_path.as_str(),
+            settings.shadow_home_path.as_str(),
+            &home,
+        );
+        materialize_codex_shadow_home(&layout)
+            .map_err(|error| driver_error(&self.kind, &input.instance_id, error.to_string()))?;
+        let config = runtime_config(&settings, &input, &layout);
+        let identity = SnapshotIdentity {
+            display_name: input
+                .display_name
+                .as_ref()
+                .map(|name| name.as_str().to_owned()),
+            accent_color: input
+                .accent_color
+                .as_ref()
+                .map(|color| color.as_str().to_owned()),
+            continuation_group_key: layout.continuation_key.clone(),
+        };
+        let pending = pending_provider(&self.kind, &input.instance_id, enabled, &custom_models);
         let snapshot = Arc::new(CodexSnapshot {
             kind: self.kind.clone(),
             instance_id: input.instance_id.clone(),
             enabled,
             config: config.clone(),
             custom_models: custom_models.clone(),
-            current: RwLock::new(pending_provider(
-                &self.kind,
-                &input.instance_id,
-                enabled,
-                &custom_models,
-            )),
+            current: RwLock::new(identity.stamp(&self.kind, &input.instance_id, pending)),
+            identity,
             maintenance,
         });
         Ok(ProviderInstance {
             instance_id: input.instance_id.clone(),
             driver_kind: self.kind.clone(),
-            continuation_identity: default_provider_continuation_identity(
-                &self.kind,
-                &input.instance_id,
-            ),
+            continuation_identity: codex_continuation_identity(&self.kind, &layout),
             display_name: input
                 .display_name
                 .as_ref()
@@ -175,14 +218,30 @@ impl ProviderDriver for CodexDriver {
     }
 }
 
+/// `codexContinuationIdentity`: instances that share a Codex home share a continuation.
+pub(crate) fn codex_continuation_identity(
+    kind: &ProviderDriverKind,
+    layout: &CodexHomeLayout,
+) -> ProviderContinuationIdentity {
+    ProviderContinuationIdentity {
+        driver_kind: kind.clone(),
+        continuation_key: layout.continuation_key.clone(),
+    }
+}
+
 /// `binaryPath`, `homePath`, and `launchArgs` from settings, plus the instance
 /// environment. `launchArgs` resolves like upstream's `resolveCodexLaunchArgs`
 /// (instance env, then process env, then settings) and shell-splits the result.
 fn runtime_config(
     settings: &CodexSettings,
     input: &ProviderDriverCreateInput,
+    layout: &CodexHomeLayout,
 ) -> CodexRuntimeConfig {
-    let home_path = Some(settings.home_path.as_str().to_owned()).filter(|home| !home.is_empty());
+    // `homePath: homeLayout.effectiveHomePath ?? ""`: a shadow home when there is one.
+    let home_path = layout
+        .effective_home_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
     let environment: BTreeMap<String, String> = input
         .environment
         .iter()
@@ -194,13 +253,14 @@ fn runtime_config(
             .cloned()
             .or_else(|| std::env::var(name).ok())
     });
-    let launch_args = tokenize_cli_args(&resolved);
+    let launch_args = tokenize_cli_args(Some(&resolved));
     CodexRuntimeConfig {
         binary: PathBuf::from(settings.binary_path.as_str()),
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         home_path,
         launch_args,
         environment,
+        remove_environment: Vec::new(),
         client_version: env!("CARGO_PKG_VERSION").to_owned(),
     }
 }
@@ -217,12 +277,13 @@ fn presentation() -> ServerProviderPresentation {
     }
 }
 
-fn provider_with(
+pub(crate) fn provider_with(
     kind: &ProviderDriverKind,
     instance_id: &ProviderInstanceId,
     enabled: bool,
     models: Vec<ServerProviderModel>,
     skills: Vec<ServerProviderSkill>,
+    slash_commands: Vec<ServerProviderSlashCommand>,
     probe: ProviderProbeResult,
 ) -> ServerProvider {
     let mut draft = build_server_provider(BuildServerProviderInput {
@@ -232,7 +293,7 @@ fn provider_with(
         checked_at: UtcDateTime::now().to_string(),
         models,
         update_required_models: Vec::new(),
-        slash_commands: Vec::new(),
+        slash_commands,
         skills,
         probe,
         maintenance: None,
@@ -245,9 +306,38 @@ fn provider_with(
     }
 }
 
+/// The slash commands a successful probe reports: `/compact`
+/// (`COMPACT_SLASH_COMMAND`), `/goal`, and `/feedback`.
+pub(crate) fn codex_slash_commands() -> Vec<ServerProviderSlashCommand> {
+    let command = |name: &str, description: &str, hint: Option<&str>| ServerProviderSlashCommand {
+        name: tne(name).expect("slash command name"),
+        description: tne(description),
+        input: hint.map(|hint| ServerProviderSlashCommandInput {
+            hint: tne(hint).expect("slash command hint"),
+        }),
+    };
+    vec![
+        command(
+            "compact",
+            "Summarize the conversation and reduce context usage",
+            None,
+        ),
+        command(
+            "goal",
+            "Set a goal Codex keeps working toward until it is done",
+            Some("Objective, or pause, resume, clear"),
+        ),
+        command(
+            "feedback",
+            "Send this thread and Codex logs to OpenAI",
+            Some("Describe the issue (optional)"),
+        ),
+    ]
+}
+
 /// `makePendingCodexProvider`: the snapshot before the first probe. Custom
 /// models show up before the first probe, as upstream's `emptyCodexModelsFromSettings` does.
-fn pending_provider(
+pub(crate) fn pending_provider(
     kind: &ProviderDriverKind,
     instance_id: &ProviderInstanceId,
     enabled: bool,
@@ -263,6 +353,7 @@ fn pending_provider(
         instance_id,
         enabled,
         append_custom_codex_models(&[], custom_models),
+        Vec::new(),
         Vec::new(),
         ProviderProbeResult {
             installed: false,
@@ -281,114 +372,182 @@ struct CodexSnapshot {
     enabled: bool,
     config: CodexRuntimeConfig,
     custom_models: Vec<CustomModelSetting>,
+    identity: SnapshotIdentity,
     current: RwLock<ServerProvider>,
     maintenance: ProviderMaintenanceCapabilities,
 }
 
+/// What `withInstanceIdentity` stamps on every snapshot of one instance.
+#[derive(Clone)]
+pub(crate) struct SnapshotIdentity {
+    pub display_name: Option<String>,
+    pub accent_color: Option<String>,
+    pub continuation_group_key: String,
+}
+
+impl SnapshotIdentity {
+    pub(crate) fn stamp(
+        &self,
+        kind: &ProviderDriverKind,
+        instance_id: &ProviderInstanceId,
+        provider: ServerProvider,
+    ) -> ServerProvider {
+        with_instance_identity(
+            &InstanceIdentity {
+                instance_id: instance_id.clone(),
+                driver_kind: kind.clone(),
+                display_name: self.display_name.clone(),
+                accent_color: self.accent_color.clone(),
+                continuation_group_key: self.continuation_group_key.clone(),
+            },
+            provider.draft,
+        )
+    }
+}
+
 impl CodexSnapshot {
-    /// `checkCodexProviderStatus`, minus usage limits and skills (not ported).
+    /// `checkCodexProviderStatus` for a native (non-managed) instance.
     async fn check(&self) -> ServerProvider {
-        if !self.enabled {
-            return pending_provider(&self.kind, &self.instance_id, false, &self.custom_models);
-        }
-        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
-        let checked = tokio::time::timeout(AUTH_PROBE_TIMEOUT, self.probe(&home)).await;
-        match checked {
-            Ok(provider) => provider,
-            Err(_) => self.failure(
-                true,
-                "Timed out while checking Codex app-server provider status.".to_owned(),
-            ),
-        }
+        let status = check_codex_provider_status(StatusInput {
+            kind: &self.kind,
+            instance_id: &self.instance_id,
+            enabled: self.enabled,
+            config: &self.config,
+            custom_models: &self.custom_models,
+            managed_auth: None,
+        })
+        .await;
+        self.identity.stamp(&self.kind, &self.instance_id, status)
     }
+}
 
-    async fn probe(&self, home: &Path) -> ServerProvider {
-        let session = match self.config.connect(home).await {
-            Ok(session) => session,
-            Err(error) => return self.spawn_or_probe_failure(&error),
-        };
-        let cwd = self.config.cwd.to_string_lossy().into_owned();
-        let snapshot = probe(&session, &cwd, false, now_ms()).await;
-        let version = session.version.clone();
-        let _ = session.shutdown().await;
-        let snapshot = match snapshot {
-            Ok(snapshot) => snapshot,
-            Err(error) => return self.spawn_or_probe_failure(&error),
-        };
-        let models = apply_preferred_codex_default_model(append_custom_codex_models(
-            &snapshot
-                .models
-                .iter()
-                .filter_map(parse_codex_model)
-                .collect::<Vec<_>>(),
-            &self.custom_models,
-        ));
-        let skills = parse_codex_skills_list_response(&snapshot.skills, &cwd);
-        let checked_at = UtcDateTime::now().to_string();
-        let usage = usage_limits_for_probe(
-            &snapshot.account,
-            snapshot.rate_limits.as_ref(),
-            &checked_at,
-        );
-        let account = account_probe(
-            &snapshot.account,
-            workspace_id(snapshot.rate_limits.as_ref()),
-        );
-        provider_with(
-            &self.kind,
-            &self.instance_id,
-            self.enabled,
-            models,
-            skills,
-            ProviderProbeResult {
-                installed: true,
-                version: version.or(snapshot.version),
-                status: account.status,
-                auth: account.auth,
-                message: account.message,
-                usage_limits: usage,
-            },
-        )
+/// `checkCodexProviderStatus`'s inputs. `managed_auth` is the account a managed
+/// instance signed in with: it replaces the app-server's own account and usage.
+pub(crate) struct StatusInput<'a> {
+    pub kind: &'a ProviderDriverKind,
+    pub instance_id: &'a ProviderInstanceId,
+    pub enabled: bool,
+    pub config: &'a CodexRuntimeConfig,
+    pub custom_models: &'a [CustomModelSetting],
+    pub managed_auth: Option<ServerProviderAuth>,
+}
+
+/// Port of `checkCodexProviderStatus`: probe a `codex app-server` and report
+/// installed/auth/models/skills, or why it could not.
+pub(crate) async fn check_codex_provider_status(input: StatusInput<'_>) -> ServerProvider {
+    if !input.enabled {
+        return pending_provider(input.kind, input.instance_id, false, input.custom_models);
     }
-
-    fn spawn_or_probe_failure(&self, error: &AppServerError) -> ServerProvider {
-        if let AppServerError::Spawn(_) = error {
-            let binary = self.config.binary.to_string_lossy().into_owned();
-            let hint = if binary == "codex" {
-                " Installing ChatGPT or Codex desktop may not add codex to PATH."
-            } else {
-                " Make sure the configured executable exists and can be run."
-            };
-            return self.failure(
-                false,
-                format!(
-                    "Could not start Codex CLI (`{binary}`). Check Settings → Providers → Codex → Binary path on the server.{hint}"
-                ),
-            );
-        }
-        self.failure(
+    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+    let checked = tokio::time::timeout(AUTH_PROBE_TIMEOUT, probe_provider(&input, &home)).await;
+    match checked {
+        Ok(provider) => provider,
+        Err(_) => failure(
+            &input,
             true,
-            format!("Codex app-server provider probe failed: {error}."),
-        )
+            "Timed out while checking Codex app-server provider status.".to_owned(),
+        ),
     }
+}
 
-    fn failure(&self, installed: bool, message: String) -> ServerProvider {
-        provider_with(
-            &self.kind,
-            &self.instance_id,
-            self.enabled,
-            append_custom_codex_models(&[], &self.custom_models),
-            Vec::new(),
-            ProviderProbeResult {
-                installed,
-                version: None,
-                status: ServerProviderState::Error,
-                auth: ServerProviderAuth::with_status(ServerProviderAuthStatus::Unknown),
-                message: Some(message),
-                usage_limits: None,
-            },
-        )
+async fn probe_provider(input: &StatusInput<'_>, home: &Path) -> ServerProvider {
+    let session = match input.config.connect(home).await {
+        Ok(session) => session,
+        Err(error) => return spawn_or_probe_failure(input, &error),
+    };
+    let cwd = input.config.cwd.to_string_lossy().into_owned();
+    // A managed account has no native usage to read.
+    let skip_native_usage = input.managed_auth.is_some();
+    let snapshot = probe(&session, &cwd, skip_native_usage, now_ms()).await;
+    let version = session.version.clone();
+    let _ = session.shutdown().await;
+    let snapshot = match snapshot {
+        Ok(snapshot) => snapshot,
+        Err(error) => return spawn_or_probe_failure(input, &error),
+    };
+    let models = apply_preferred_codex_default_model(append_custom_codex_models(
+        &snapshot
+            .models
+            .iter()
+            .filter_map(parse_codex_model)
+            .collect::<Vec<_>>(),
+        input.custom_models,
+    ));
+    let skills = parse_codex_skills_list_response(&snapshot.skills, &cwd);
+    let checked_at = UtcDateTime::now().to_string();
+    let (status, auth, message, usage_limits) = match &input.managed_auth {
+        Some(managed) => (ServerProviderState::Ready, managed.clone(), None, None),
+        None => {
+            let usage = usage_limits_for_probe(
+                &snapshot.account,
+                snapshot.rate_limits.as_ref(),
+                &checked_at,
+            );
+            let account = account_probe(
+                &snapshot.account,
+                workspace_id(snapshot.rate_limits.as_ref()),
+            );
+            (account.status, account.auth, account.message, usage)
+        }
+    };
+    provider_with(
+        input.kind,
+        input.instance_id,
+        input.enabled,
+        models,
+        skills,
+        codex_slash_commands(),
+        ProviderProbeResult {
+            installed: true,
+            version: version.or(snapshot.version),
+            status,
+            auth,
+            message,
+            usage_limits,
+        },
+    )
+}
+
+fn spawn_or_probe_failure(input: &StatusInput<'_>, error: &AppServerError) -> ServerProvider {
+    if let AppServerError::Spawn(_) = error {
+        let binary = input.config.binary.to_string_lossy().into_owned();
+        let hint = if binary == "codex" {
+            " Installing ChatGPT or Codex desktop may not add codex to PATH."
+        } else {
+            " Make sure the configured executable exists and can be run."
+        };
+        return failure(
+            input,
+            false,
+            format!(
+                "Could not start Codex CLI (`{binary}`). Check Settings → Providers → Codex → Binary path on the server.{hint}"
+            ),
+        );
     }
+    failure(
+        input,
+        true,
+        format!("Codex app-server provider probe failed: {error}."),
+    )
+}
+
+fn failure(input: &StatusInput<'_>, installed: bool, message: String) -> ServerProvider {
+    provider_with(
+        input.kind,
+        input.instance_id,
+        input.enabled,
+        append_custom_codex_models(&[], input.custom_models),
+        Vec::new(),
+        Vec::new(),
+        ProviderProbeResult {
+            installed,
+            version: None,
+            status: ServerProviderState::Error,
+            auth: ServerProviderAuth::with_status(ServerProviderAuthStatus::Unknown),
+            message: Some(message),
+            usage_limits: None,
+        },
+    )
 }
 
 struct AccountStatus {
@@ -550,7 +709,7 @@ impl ManagedServerProvider for CodexSnapshot {
 
 /// Text generation runs a one-shot Codex turn upstream. That needs a paid turn
 /// and is not ported yet, so it reports the gap instead of inventing output.
-struct CodexText;
+pub(crate) struct CodexText;
 
 fn text_error() -> TextGenerationError {
     TextGenerationError::TextGenerationError {

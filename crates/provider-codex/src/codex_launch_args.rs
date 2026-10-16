@@ -1,5 +1,5 @@
 //! Port of upstream/apps/server/src/provider/codexLaunchArgs.ts.
-use crate::cli_args::tokenize_cli_args;
+use turin_shared::cli_args::tokenize_cli_args;
 
 const T3CODE_CODEX_LAUNCH_ARGS_ENV: &str = "T3CODE_CODEX_LAUNCH_ARGS";
 
@@ -53,7 +53,7 @@ pub fn codex_exec_launch_args(launch_args: Option<&str>) -> Vec<String> {
 }
 
 fn codex_launch_argv(launch_args: Option<&str>) -> Vec<String> {
-    tokenize_cli_args(launch_args.unwrap_or(""))
+    tokenize_cli_args(launch_args)
 }
 
 #[cfg(test)]

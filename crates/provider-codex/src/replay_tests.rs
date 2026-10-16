@@ -257,6 +257,7 @@ async fn open_session(
         home_path: None,
         launch_args: vec![],
         environment: BTreeMap::new(),
+        remove_environment: vec![],
         client_version: CLIENT_VERSION.into(),
     };
     let adapter = CodexProviderAdapter::with_client(
@@ -600,6 +601,172 @@ async fn read_only_approval_replay_requests_and_accepts_command_approval() {
         replay.finish_turn().await,
         ProviderAdapterV2TurnTerminalStatus::Completed
     );
+    replay.driver.verify_complete().unwrap();
+}
+
+/// The approval fixture with its command approval swapped for an MCP form
+/// elicitation: the app asks "Allow ChatGPT to use Gmail?" and offers a once and
+/// a session choice. The fixture's turn and thread ids stay.
+fn elicitation_fixture() -> ReplayTranscript {
+    let mut transcript = fixture("tool_call_read_only_on_request");
+    for entry in &mut transcript.entries {
+        match entry {
+            ReplayEntry::EmitInbound { frame, .. }
+                if frame["method"] == "item/commandExecution/requestApproval" =>
+            {
+                let (thread_id, turn_id) = (
+                    frame["params"]["threadId"].clone(),
+                    frame["params"]["turnId"].clone(),
+                );
+                *frame = json!({
+                    "method": "mcpServer/elicitation/request",
+                    "id": 0,
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "serverName": "gmail-server",
+                        "mode": "form",
+                        "message": "Allow ChatGPT to use Gmail?",
+                        "requestedSchema": {
+                            "type": "object",
+                            "properties": {
+                                "scope": {
+                                    "type": "string",
+                                    "oneOf": [
+                                        {"const": "allow_once", "title": "Once"},
+                                        {"const": "allow_session", "title": "This session"}
+                                    ]
+                                }
+                            },
+                            "required": ["scope"]
+                        }
+                    }
+                });
+            }
+            ReplayEntry::ExpectOutbound { frame, .. }
+                if frame["id"] == 0 && frame.pointer("/result/decision").is_some() =>
+            {
+                *frame = json!({
+                    "id": 0,
+                    "result": {"action": "accept", "content": {"scope": "allow_once"}}
+                });
+            }
+            _ => {}
+        }
+    }
+    transcript
+}
+
+#[tokio::test]
+async fn mcp_elicitation_replay_raises_the_app_name_prompt_and_options() {
+    let transcript = elicitation_fixture();
+    let policy = read_only_policy(&transcript);
+    let text = recorded_turn_params(&transcript, 0)["input"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut replay = open(transcript).await;
+    replay.start(&text, policy).await;
+    let seen = replay
+        .next_until(|event| !runtime_requests(std::slice::from_ref(event)).is_empty())
+        .await;
+    let request = runtime_requests(&seen).remove(0);
+    assert_eq!(
+        request.kind,
+        OrchestrationV2RuntimeRequestKind::McpElicitation
+    );
+    // An elicitation names no item: it is keyed by its server.
+    assert_eq!(
+        request
+            .native_request_ref
+            .as_ref()
+            .unwrap()
+            .native_id
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "mcp-elicitation:gmail-server"
+    );
+    let item = seen
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::TurnItemUpdated {
+                turn_item:
+                    OrchestrationV2TurnItem::ApprovalRequest {
+                        prompt,
+                        app_name,
+                        options,
+                        ..
+                    },
+                ..
+            } => Some((prompt.clone(), app_name.clone(), options.clone())),
+            _ => None,
+        })
+        .expect("approval turn item");
+    assert_eq!(item.0.as_deref(), Some("Allow ChatGPT to use Gmail?"));
+    assert_eq!(item.1.as_deref(), Some("Gmail"));
+    let options: Vec<_> = item
+        .2
+        .expect("options")
+        .into_iter()
+        .map(|option| (option.decision, option.label.as_str().to_owned()))
+        .collect();
+    use turin_contracts::provider_policy::ProviderApprovalDecision as Decision;
+    assert_eq!(
+        options,
+        vec![
+            (Decision::Cancel, "Cancel".to_owned()),
+            (Decision::Decline, "Decline".to_owned()),
+            (Decision::AcceptForSession, "This session".to_owned()),
+            (Decision::Accept, "Approve".to_owned()),
+        ]
+    );
+    replay
+        .runtime
+        .respond_to_runtime_request(accept(&request))
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.finish_turn().await,
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn app_context_goes_out_as_untrusted_additional_context() {
+    let mut transcript = fixture("simple");
+    for entry in &mut transcript.entries {
+        if let ReplayEntry::ExpectOutbound { frame, .. } = entry
+            && frame["method"] == "turn/start"
+        {
+            frame["params"]["additionalContext"] = json!({
+                "mcp_app_notes": {"kind": "untrusted", "value": "The app saved a draft."}
+            });
+        }
+    }
+    let policy = policy(
+        RuntimeMode::FullAccess,
+        ProviderInteractionMode::Default,
+        None,
+        None,
+    );
+    let mut replay = open(transcript).await;
+    let mut input = replay.turn_input("Respond with the following text: fixture simple ok", policy);
+    input.app_context = Some(vec![
+        turin_provider_core::provider_adapter::ProviderAdapterV2AppContext {
+            key: "mcp_app_notes".to_owned(),
+            text: "The app saved a draft.".to_owned(),
+        },
+    ]);
+    replay.runtime.start_turn(input).await.unwrap();
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    // No T3 MCP server, so no developer instructions and no `collaborationMode`
+    // in a default-mode turn; the recorded frame carries neither.
     replay.driver.verify_complete().unwrap();
 }
 

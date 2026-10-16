@@ -2498,14 +2498,28 @@ mod tests {
         .await
         .unwrap();
         drop(session);
-        // The process guard kills and reaps the group before `drop` returns.
-        let alive = std::process::Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .status()
-            .unwrap()
-            .success();
-        assert!(!alive, "cursor-agent child {pid} survived the session drop");
+        // Dropping the guard SIGKILLs the group but does not reap it: tokio
+        // reaps the leader in the background, and until then `kill -0` still
+        // succeeds on the zombie. Wait for the pid to disappear, bounded.
+        let gone = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let alive = std::process::Command::new("kill")
+                    .arg("-0")
+                    .arg(pid.to_string())
+                    .status()
+                    .unwrap()
+                    .success();
+                if !alive {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            gone.is_ok(),
+            "cursor-agent child {pid} survived the session drop"
+        );
     }
 
     /// Peer side of `initialize` and `session/new`.

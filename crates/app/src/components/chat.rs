@@ -42,4 +42,6 @@ pub mod thread_find;
 pub mod thread_find_highlights;
 #[allow(dead_code)]
 pub mod thread_find_position;
+#[allow(dead_code)]
+pub mod thread_find_state;
 pub mod work_log;

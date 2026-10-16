@@ -7455,6 +7455,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "turin-contracts",
+ "turin-source-control",
  "uuid",
 ]
 
@@ -7768,12 +7769,32 @@ name = "turin-source-control"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "fancy-regex",
+ "futures",
+ "indexmap",
+ "markdown",
+ "parking_lot",
+ "percent-encoding",
+ "pretty_assertions",
+ "regex",
+ "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
  "turin-contracts",
+ "turin-persistence",
+ "turin-provider-core",
+ "uuid",
 ]
 
 [[package]]

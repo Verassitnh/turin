@@ -7,6 +7,8 @@ mod components;
 #[allow(dead_code)]
 mod composer;
 mod diff;
+#[cfg(target_os = "macos")]
+mod dock_icon;
 mod hooks;
 mod project_icon_colors;
 mod project_identity;
@@ -90,6 +92,8 @@ fn main() {
         .with_assets(assets::AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            #[cfg(target_os = "macos")]
+            dock_icon::set_unbundled_app_icon();
             theme::init(cx);
             let store = state::store::bind_client_store(client_state.handle.clone(), cx);
             cx.set_global(state::store::ClientStoreGlobal(store));

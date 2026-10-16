@@ -33,6 +33,7 @@ pub mod model_picker_keys;
 pub mod model_picker_search;
 pub mod primary_actions;
 pub mod prompt_history;
+pub mod proposed_plan;
 pub mod provider_options;
 pub mod provider_state;
 pub mod queued_edit;

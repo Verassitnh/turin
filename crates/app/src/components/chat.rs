@@ -10,6 +10,8 @@ pub mod chat_canvas_layout;
 #[allow(dead_code)]
 pub mod assistant_text_selection;
 #[allow(dead_code)]
+pub mod composer_context_undo;
+#[allow(dead_code)]
 pub mod composer_event_scope;
 #[allow(dead_code)]
 pub mod composer_focus_state;

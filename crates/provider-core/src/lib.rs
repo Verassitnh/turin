@@ -4,6 +4,7 @@ pub mod adapter_driver;
 pub mod attachment_paths;
 pub mod attachment_prompt;
 pub mod auth;
+pub mod auth_flow;
 pub mod background_scope;
 pub mod collect_stream_text;
 pub mod command_path;

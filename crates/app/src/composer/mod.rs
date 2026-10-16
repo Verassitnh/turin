@@ -19,6 +19,7 @@ pub mod composer_context_records;
 pub mod context_meter;
 pub mod dispatch;
 pub mod draft_store;
+pub mod editable_focus;
 pub mod editor_mentions;
 pub mod editor_state;
 pub mod file_link;

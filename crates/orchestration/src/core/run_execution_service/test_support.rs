@@ -275,6 +275,19 @@ pub(crate) struct ScriptedSession {
     session: OrchestrationV2ProviderSession,
     session_id: ProviderSessionId,
     pub starts: Mutex<Vec<ProviderAdapterV2TurnInput>>,
+    /// Scripted answers of `ensure_thread`, `resume_thread` and `fork_thread`,
+    /// front first. An empty script panics: the call was not expected.
+    pub ensure_results:
+        Mutex<VecDeque<Result<OrchestrationV2ProviderThread, ProviderAdapterV2Error>>>,
+    pub resume_results:
+        Mutex<VecDeque<Result<OrchestrationV2ProviderThread, ProviderAdapterV2Error>>>,
+    pub fork_results:
+        Mutex<VecDeque<Result<OrchestrationV2ProviderThread, ProviderAdapterV2Error>>>,
+    pub ensure_inputs: Mutex<Vec<ProviderAdapterV2EnsureThreadInput>>,
+    pub history_injections: Mutex<Vec<(usize, String)>>,
+    /// `inject_history` answers, front first. `None` in the script means the
+    /// runtime has no such hook.
+    pub inject_answers: Mutex<Option<VecDeque<bool>>>,
     pub compacts: Mutex<Vec<ProviderAdapterV2TurnInput>>,
     pub start_error: Mutex<Option<ProviderAdapterV2Error>>,
     pub supports_compact: AtomicBool,
@@ -366,6 +379,12 @@ impl ScriptedSession {
             .expect("session fixture"),
             session_id: ProviderSessionId::new("session:scripted").expect("session id"),
             starts: Mutex::default(),
+            ensure_results: Mutex::default(),
+            resume_results: Mutex::default(),
+            fork_results: Mutex::default(),
+            ensure_inputs: Mutex::default(),
+            history_injections: Mutex::default(),
+            inject_answers: Mutex::default(),
             compacts: Mutex::default(),
             start_error: Mutex::default(),
             supports_compact: AtomicBool::new(true),
@@ -443,15 +462,39 @@ impl ProviderSessionRuntime for ScriptedSession {
     }
     async fn ensure_thread(
         &self,
-        _input: ProviderAdapterV2EnsureThreadInput,
+        input: ProviderAdapterV2EnsureThreadInput,
     ) -> Result<OrchestrationV2ProviderThread, ProviderAdapterV2Error> {
-        unused()
+        self.ensure_inputs.lock().push(input);
+        self.ensure_results
+            .lock()
+            .pop_front()
+            .expect("ensure_thread was not expected")
     }
     async fn resume_thread(
         &self,
         _input: ProviderAdapterV2ResumeThreadInput,
     ) -> Result<OrchestrationV2ProviderThread, ProviderAdapterV2Error> {
-        unused()
+        self.resume_results
+            .lock()
+            .pop_front()
+            .expect("resume_thread was not expected")
+    }
+    fn inject_history(
+        &self,
+        _provider_thread: &OrchestrationV2ProviderThread,
+        context: &turin_provider_core::provider_adapter::ProviderAdapterV2HistoricalContext,
+    ) -> Option<BoxFuture<'_, Result<bool, ProviderAdapterV2Error>>> {
+        let mut answers = self.inject_answers.lock();
+        let answers = answers.as_mut()?;
+        // An empty probe context is the hook-presence check, not a delivery.
+        if context.messages.is_empty() && context.context.is_empty() {
+            return Some(Box::pin(async { Ok(false) }));
+        }
+        self.history_injections
+            .lock()
+            .push((context.messages.len(), context.context.clone()));
+        let answer = answers.pop_front().unwrap_or(true);
+        Some(Box::pin(async move { Ok(answer) }))
     }
     async fn start_turn(
         &self,
@@ -507,7 +550,10 @@ impl ProviderSessionRuntime for ScriptedSession {
         &self,
         _input: ProviderAdapterV2ForkThreadInput,
     ) -> Result<OrchestrationV2ProviderThread, ProviderAdapterV2Error> {
-        unused()
+        self.fork_results
+            .lock()
+            .pop_front()
+            .expect("fork_thread was not expected")
     }
 }
 

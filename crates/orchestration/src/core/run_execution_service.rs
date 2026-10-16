@@ -37,6 +37,7 @@ mod termination_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub(crate) use service::failure_cause;
 pub use service::{
     AfterTurnRefresh, AsyncBool, FailureAndWriteCause, InheritedBackgroundLoader,
     NoAfterTurnRefresh, RunBaselineCapture, RunEventIngest, RunEventWriter,

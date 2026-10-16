@@ -667,12 +667,18 @@ async fn interrupt_task(cancel: &CancellationToken, task: tokio::task::JoinHandl
 /// upstream walks through `.cause`. Adapter errors carry their own tag; this
 /// service's errors are tagged by name so the chain reaches the adapter error
 /// they wrap.
-fn failure_cause(error: &(dyn std::error::Error + 'static)) -> ProviderFailureCause {
+pub(crate) fn failure_cause(error: &(dyn std::error::Error + 'static)) -> ProviderFailureCause {
     if let Some(adapter_error) = error.downcast_ref::<ProviderAdapterV2Error>() {
         return adapter_error.as_cause();
     }
     let tag = if error.is::<RunExecutionIngestError>() {
         "RunExecutionIngestError"
+    } else if error.is::<turin_provider_core::failure::ContextHandoffBudgetError>() {
+        "ContextHandoffBudgetError"
+    } else if error
+        .is::<crate::core::context_handoff_delivery::ContextHandoffDeliveryUncertainError>()
+    {
+        "ContextHandoffDeliveryUncertainError"
     } else if error.is::<RunExecutionStartError>() {
         "RunExecutionStartError"
     } else {

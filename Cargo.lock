@@ -7357,6 +7357,8 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-bash",
  "turin-contracts",
  "turin-launcher",
  "turin-orchestration",

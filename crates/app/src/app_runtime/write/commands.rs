@@ -13,11 +13,14 @@ use turin_contracts::orchestration_v2::{OrchestrationV2Command, OrchestrationV2S
 use turin_contracts::{CommandId, EventId, MessageId, ProjectId, ThreadId, UtcDateTime};
 use turin_orchestration::pipeline::effect_worker::error_chain;
 use turin_orchestration::pipeline::event_sink::ProjectCommit;
-use turin_orchestration::pipeline::orchestrator_port::DispatchResult;
+use turin_orchestration::pipeline::orchestrator_port::{
+    DispatchResult, OrchestratorPort as _, RecordField, RecordFilter,
+};
 use turin_orchestration::pipeline::project_commands::{
     ProjectCommand, ProjectCommandRow, ProjectCommandState, ProjectCreateCommand,
     ProjectMetaUpdateCommand, plan_project_command,
 };
+use turin_orchestration::pipeline::thread_management_service::latest_active_run;
 
 use super::runtime::WriteRuntime;
 
@@ -276,13 +279,25 @@ impl Commands {
         })
     }
 
-    /// Stop button: `thread.stop` interrupts the running turn, holds the queue
-    /// and stops delegated tasks.
+    /// Stop button: `run.interrupt` on the thread's active run with
+    /// `holdQueue`, which also holds the queue, ends pull request watches and
+    /// stops delegated tasks. Nothing running is an accepted no-op.
     pub async fn stop_thread(&self, thread_id: &ThreadId) -> Result<(), CommandError> {
+        let records = self
+            .runtime
+            .orchestrator
+            .get_thread_records(thread_id, &[RecordField::Runs], &RecordFilter::default())
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        let Some(run) = latest_active_run(&records.runs) else {
+            return Ok(());
+        };
         self.dispatch(json!({
-            "type": "thread.stop",
+            "type": "run.interrupt",
             "commandId": command_id(),
             "threadId": thread_id,
+            "runId": run.id,
+            "holdQueue": true,
         }))
         .await
         .map(drop)

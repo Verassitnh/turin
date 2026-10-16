@@ -98,7 +98,7 @@ pub struct ChatComposer {
     /// The last `DraftRestore` applied.
     pub(super) restored_nonce: u64,
     pub(super) pre_edit_prompt: Option<String>,
-    pub(super) context_records: ComposerDraftContextRecords,
+    pub(super) context_records: std::rc::Rc<std::cell::RefCell<ComposerDraftContextRecords>>,
     pub(super) context_details: Option<(String, gpui_kit::Point<gpui_kit::Pixels>)>,
     page_scroll: Option<PageScrollBinding>,
     citation_comment: Option<OpenCitationComment>,
@@ -172,7 +172,9 @@ impl ChatComposer {
             editing_run_id: None,
             restored_nonce: 0,
             pre_edit_prompt: None,
-            context_records: ComposerDraftContextRecords::new(),
+            context_records: std::rc::Rc::new(std::cell::RefCell::new(
+                ComposerDraftContextRecords::new(),
+            )),
             context_details: None,
             page_scroll: None,
             citation_comment: None,
@@ -383,7 +385,21 @@ impl ChatComposer {
         records: ComposerDraftContextRecords,
         cx: &mut Context<Self>,
     ) {
-        self.context_records = records;
+        *self.context_records.borrow_mut() = records;
+        cx.notify();
+    }
+
+    pub fn insert_assistant_citation_from_selection(
+        &mut self,
+        citation: AssistantCitation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.update(cx, |editor, cx| {
+            editor.insert_assistant_citation(citation, window, cx);
+        });
+        let prompt = self.prompt(cx);
+        self.drafts.set_prompt(&self.thread_key, &prompt);
         cx.notify();
     }
 
@@ -606,6 +622,9 @@ impl ChatComposer {
             }
             // No file preview surface in the composer yet.
             PromptEditorEvent::OpenMention(_) => {}
+            PromptEditorEvent::OpenContextReference { context_id, anchor } => {
+                self.open_context_reference(context_id, *anchor, window, cx)
+            }
             PromptEditorEvent::CitationSubmitAndSend => {
                 let weak = cx.weak_entity();
                 window.defer(cx, move |window, cx| {
@@ -993,13 +1012,10 @@ impl ChatComposer {
             compact,
             can_operate_thread: vm.can_operate_thread,
             pending_action: vm.pending_answer.as_ref().map(|answer| {
-                crate::composer::primary_actions::PendingActionState {
-                    question_index: answer.question_index,
-                    is_last_question: answer.is_last_question,
-                    can_advance: answer.can_advance,
-                    is_responding: answer.is_responding,
-                    is_complete: answer.is_complete,
-                }
+                crate::components::chat::composer_pending_bridge::pending_action_state_for_prompt(
+                    answer,
+                    &self.prompt(cx),
+                )
             }),
             is_running: vm.phase == crate::composer::view_model::SessionPhase::Running,
             can_interrupt: vm.can_interrupt,
@@ -1226,6 +1242,7 @@ mod tests {
 
     fn pending(initial_answer: Option<&str>) -> PendingAnswer {
         PendingAnswer {
+            question_id: "q1".into(),
             request_id: "request-1".to_owned(),
             custom_answer: String::new(),
             initial_answer: initial_answer.map(str::to_owned),

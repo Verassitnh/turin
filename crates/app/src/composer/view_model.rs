@@ -193,6 +193,7 @@ pub struct ThreadRef {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingAnswer {
     pub request_id: String,
+    pub question_id: String,
     pub custom_answer: String,
     /// `activeQuestion.initialAnswer`. A pending answer that carries one is
     /// edited as literal text (`isLiteralPendingAnswer`).

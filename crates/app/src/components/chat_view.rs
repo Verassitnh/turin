@@ -266,7 +266,20 @@ impl ChatView {
             inputs
                 .first()
                 .cloned()
-                .map(|prompt| ComposerPendingUserInputBanner { prompt, source }.into_any_element())
+                .map(|prompt| {
+                    ComposerPendingUserInputBanner {
+                        prompt,
+                        source,
+                        environment_id: live_target.as_ref().map(|_| {
+                            crate::state::local_environment_id()
+                        }),
+                        thread_id: live_target
+                            .as_ref()
+                            .and_then(|live| live.thread.as_ref())
+                            .map(|id| id.to_string()),
+                    }
+                    .into_any_element()
+                })
         };
 
         let mut overlay_banners = live_target
@@ -346,10 +359,11 @@ impl ChatView {
                 bottom: layout.y + layout.height,
             })
         });
-        let selection_toolbar = live_target
-            .is_none()
-            .then(selection_toolbar_demo)
-            .flatten();
+        let selection_toolbar = if live_target.is_some() {
+            live_selection_toolbar(composer.clone(), canvas_width, canvas_height, window, cx)
+        } else {
+            selection_toolbar_demo()
+        };
         let details_card = demo_card.map(|(_, _, card)| card).or_else(|| {
             self.thread_details_open
                 .then(|| self.git_host.read(cx).details_card(cx))
@@ -516,6 +530,52 @@ pub fn subagent_bar_demo() -> Option<SubagentBarData> {
 
 /// `TURIN_CHAT_DEMO=selection-toolbar`: the cite button over a made-up selection, until a GPUI
 /// text selection in the assistant markdown reports captures.
+fn live_selection_toolbar(
+    composer: gpui_kit::Entity<crate::composer::views::chat_composer::ChatComposer>,
+    canvas_width: f64,
+    canvas_height: f64,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> Option<gpui_kit::AnyElement> {
+    use super::chat::assistant_selection_state::{
+        assistant_citation_from_capture, assistant_selection_capture, clear_assistant_selection,
+        selection_toolbar_point,
+    };
+    use super::chat::assistant_selection_toolbar::AssistantSelectionToolbar;
+    use crate::state::local_environment_id;
+    use crate::state::models::parse_scoped_thread_key;
+
+    let capture = assistant_selection_capture(cx).lock().ok()?.clone();
+    if capture.selected_text.is_empty() {
+        return None;
+    }
+    let position = selection_toolbar_point(&capture, canvas_width, canvas_height)?;
+    let thread_id = parse_scoped_thread_key(&composer.read(cx).thread_key)
+        .map(|(_, thread)| thread.to_string())
+        .unwrap_or_else(|| "thread-unknown".into());
+    let citation =
+        assistant_citation_from_capture(&capture, &local_environment_id(), &thread_id)?;
+    let composer = composer.clone();
+    let composer_focus = composer.read(cx).focus_handle(cx);
+    Some(
+        AssistantSelectionToolbar {
+            citation_text: capture.selected_text.clone().into(),
+            position,
+            on_cite: std::rc::Rc::new(move |window, cx| {
+                composer.update(cx, |composer, cx| {
+                    composer.insert_assistant_citation_from_selection(citation.clone(), window, cx);
+                });
+                clear_assistant_selection(cx);
+                window.focus(&composer_focus, cx);
+                true
+            }),
+            on_dismiss: std::rc::Rc::new(|_, cx| clear_assistant_selection(cx)),
+            on_clear_selection: std::rc::Rc::new(|_, cx| clear_assistant_selection(cx)),
+        }
+        .into_any_element(),
+    )
+}
+
 fn selection_toolbar_demo() -> Option<gpui_kit::AnyElement> {
     use super::chat::assistant_selection_toolbar::AssistantSelectionToolbar;
     use super::chat::selection_actions::SelectionActionPoint;

@@ -197,7 +197,7 @@ impl ChatComposer {
             thread_ref.context_id.as_str().to_owned(),
             ComposerDraftContextRecord::Thread(thread),
         );
-        self.context_records = records;
+        *self.context_records.borrow_mut() = records;
         cx.notify();
     }
 }

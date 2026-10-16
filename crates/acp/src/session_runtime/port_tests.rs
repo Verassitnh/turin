@@ -588,12 +588,27 @@ fn admits_live_child_when_stale_ledger_entry_still_occupies_reused_pid() {
 
 #[test]
 fn fails_closed_where_stable_posix_identity_provider_is_unavailable() {
-    match make_posix_process_tree_controller("darwin") {
+    match make_posix_process_tree_controller("haiku") {
         Err(error) => assert_eq!(
             error.detail,
-            "Detached ACP descendant ownership is unsupported on darwin"
+            "Detached ACP descendant ownership is unsupported on haiku"
         ),
-        Ok(_) => panic!("expected darwin controller to fail closed"),
+        Ok(_) => panic!("expected an unknown platform to fail closed"),
+    }
+    #[cfg(target_os = "macos")]
+    {
+        assert!(make_posix_process_tree_controller("darwin").is_ok());
+        assert!(make_posix_process_tree_controller("macos").is_ok());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        match make_posix_process_tree_controller("darwin") {
+            Err(error) => assert_eq!(
+                error.detail,
+                "Detached ACP descendant ownership is unsupported on darwin"
+            ),
+            Ok(_) => panic!("expected darwin to fail closed off macOS"),
+        }
     }
 }
 

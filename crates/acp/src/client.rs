@@ -567,7 +567,9 @@ impl AcpClient {
     }
 
     pub async fn cancel(&self, payload: Value) -> Result<(), AcpError> {
-        self.connection.notify(agent::SESSION_CANCEL, payload).await
+        self.connection
+            .notify_flushed(agent::SESSION_CANCEL, payload)
+            .await
     }
 
     pub async fn ext_request(&self, method: &str, payload: Value) -> Result<Value, AcpError> {

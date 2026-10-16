@@ -126,10 +126,15 @@ impl CursorKeychain {
             return Ok(Some(token));
         }
         let pending = self.ensure_pending();
-        let result = tokio::time::timeout(self.timeout, self.wait_pending(&pending))
-            .await
-            .map_err(|_| CursorKeychainAccessError::Timeout(CursorKeychainTimeoutError))??;
-        Ok(result)
+        match tokio::time::timeout(self.timeout, self.wait_pending(&pending)).await {
+            Ok(result) => result,
+            Err(_) => match pending.result.lock().expect("result lock").clone() {
+                Some(result) => result.map_err(CursorKeychainAccessError::Read),
+                None => Err(CursorKeychainAccessError::Timeout(
+                    CursorKeychainTimeoutError,
+                )),
+            },
+        }
     }
 
     fn cached_token(&self) -> Option<String> {
@@ -181,10 +186,16 @@ impl CursorKeychain {
         pending: &Arc<PendingRead>,
     ) -> Result<Option<String>, CursorKeychainAccessError> {
         loop {
+            // Enable the waiter before reading the slot. `notify_waiters` does
+            // not store a permit, so a result published between the check and
+            // `notified()` would otherwise be missed until the timeout.
+            let notified = pending.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(result) = pending.result.lock().expect("result lock").clone() {
                 return result.map_err(CursorKeychainAccessError::Read);
             }
-            pending.notify.notified().await;
+            notified.await;
         }
     }
 }
@@ -276,5 +287,30 @@ mod tests {
         let _ = release.send(());
         assert_eq!(retry.await.unwrap().unwrap(), Some("token-1".to_owned()));
         assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    struct ImmediateBackend;
+
+    impl CursorKeychainBackend for ImmediateBackend {
+        fn read_access_token(&self) -> KeychainReadFuture {
+            Box::pin(async { Ok(Some("token-ready".to_owned())) })
+        }
+    }
+
+    #[tokio::test]
+    async fn returns_a_token_stored_before_the_waiter_subscribes() {
+        for _ in 0..32 {
+            let keychain =
+                CursorKeychain::with_timeout(Arc::new(ImmediateBackend), Duration::from_millis(80));
+            let started = Instant::now();
+            assert_eq!(
+                keychain.access_token().await.unwrap().as_deref(),
+                Some("token-ready")
+            );
+            assert!(
+                started.elapsed() < Duration::from_millis(70),
+                "a finished keychain read waited out the timeout"
+            );
+        }
     }
 }

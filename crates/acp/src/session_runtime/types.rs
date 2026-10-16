@@ -45,7 +45,7 @@ impl From<AcpPosixProcessIdentity> for AcpOwnedPosixProcess {
 }
 
 /// Mutable root capture state for POSIX ownership tracking.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AcpPosixOwnershipRoot {
     pub capture_attempted: bool,
     pub value: Option<AcpOwnedPosixProcess>,

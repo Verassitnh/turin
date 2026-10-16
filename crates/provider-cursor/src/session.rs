@@ -1848,7 +1848,7 @@ fn cursor_agent_runtime_options(program: &str, cwd: PathBuf) -> AcpSessionRuntim
             args: auth::ACP_ARGS.iter().map(|arg| (*arg).to_owned()).collect(),
             cwd: Some(cwd.clone()),
             env: None,
-            extend_env: false,
+            extend_env: true,
         },
         cwd,
     )
@@ -1861,7 +1861,7 @@ fn connected_client_runtime_options() -> AcpSessionRuntimeOptions {
             args: Vec::new(),
             cwd: None,
             env: None,
-            extend_env: false,
+            extend_env: true,
         },
         PathBuf::from("/"),
     )
@@ -2379,6 +2379,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_turn_surfaces_a_failed_session_cancel() {
+        let (client, mut read, mut write) = pair();
+        let peer = tokio::spawn(async move {
+            let init = read_frame(&mut read).await;
+            write_frame(&mut write, v1_initialized(&init["id"])).await;
+            let created = read_frame(&mut read).await;
+            write_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id": created["id"], "result": {"sessionId": "sess-9"}}),
+            )
+            .await;
+            drop(read);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(write);
+        });
+        let session = CursorSession::from_client(client, None);
+        session.initialize().await.unwrap();
+        session.new_session(Path::new("/work")).await.unwrap();
+        peer.await.unwrap();
+        let error = session.cancel_turn().await.unwrap_err();
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[tokio::test]
     async fn runtime_trait_binds_the_native_session_and_refuses_fork() {
         use futures::StreamExt;
         use turin_contracts::provider_policy::{ProviderInteractionMode, RuntimeMode};
@@ -2560,13 +2584,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("pid");
         let script = format!("echo $$ > '{}'; exec sleep 60", pid_file.display());
-        let client = spawn(SpawnCommand {
-            program: "sh",
-            args: &["-c", script.as_str()],
-            cwd: None,
-        })
-        .await
-        .unwrap();
+        let client = spawn(SpawnCommand::new("sh", &["-c", script.as_str()]))
+            .await
+            .unwrap();
         let session = CursorSession::from_client(client, None);
         let pid = tokio::time::timeout(Duration::from_secs(5), async {
             loop {

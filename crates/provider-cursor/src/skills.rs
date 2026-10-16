@@ -519,6 +519,54 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn treats_a_symlinked_skill_outside_the_root_as_a_package_boundary() {
+        let user_home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let library = tempfile::tempdir().unwrap();
+        write_skill(
+            library.path(),
+            "shared-review",
+            "---\ndescription: shared\n---\n",
+        )
+        .await;
+        write_skill(
+            &library.path().join("shared-review"),
+            "hidden",
+            "---\n---\n",
+        )
+        .await;
+        let root = workspace.path().join(".cursor/skills");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        if std::os::unix::fs::symlink(library.path().join("shared-review"), root.join("review"))
+            .is_err()
+        {
+            return;
+        }
+        let skills = discover_cursor_skills(Some(workspace.path()), &env(user_home.path())).await;
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name.as_str(), "review");
+        assert_eq!(
+            skills[0].description.as_ref().map(Tne::as_str),
+            Some("shared")
+        );
+        assert!(
+            skills[0]
+                .path
+                .as_str()
+                .ends_with(".cursor/skills/review/SKILL.md")
+        );
+        assert_eq!(skills[0].scope.as_ref().map(Tne::as_str), Some("project"));
+        assert!(skills[0].enabled);
+        assert!(skills.iter().all(|skill| skill.name.as_str() != "hidden"));
+        assert!(
+            probe_cursor_skills(Some(workspace.path()), &env(user_home.path()))
+                .await
+                .is_ok()
+        );
+    }
+
     #[tokio::test]
     async fn still_fails_discovery_when_a_root_holds_more_entries_than_the_scan_allows() {
         let user_home = tempfile::tempdir().unwrap();

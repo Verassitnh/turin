@@ -243,16 +243,194 @@ impl AcpPosixProcessTreeController for LinuxProcessTreeController {
     }
 }
 
-/// Port of upstream `makePosixProcessTreeController`.
+/// macOS process table via `libproc`. The ownership ledger itself is
+/// platform-agnostic; only the snapshot source differs from Linux `/proc`.
+#[cfg(target_os = "macos")]
+mod macos_proc {
+    use super::*;
+
+    const PROC_ALL_PIDS: u32 = 1;
+    const PROC_PIDTBSDINFO: i32 = 3;
+    const PROC_PIDPATHINFO_MAXSIZE: u32 = 4096;
+    const MAXCOMLEN: usize = 16;
+    /// `SZOMB` from `<sys/proc.h>`.
+    const SZOMB: u32 = 5;
+
+    #[repr(C)]
+    struct ProcBsdinfo {
+        pbi_flags: u32,
+        pbi_status: u32,
+        pbi_xstatus: u32,
+        pbi_pid: u32,
+        pbi_ppid: u32,
+        pbi_uid: u32,
+        pbi_gid: u32,
+        pbi_ruid: u32,
+        pbi_rgid: u32,
+        pbi_svuid: u32,
+        pbi_svgid: u32,
+        rfu_1: u32,
+        pbi_comm: [u8; MAXCOMLEN],
+        pbi_name: [u8; 2 * MAXCOMLEN],
+        pbi_nfiles: u32,
+        pbi_pgid: u32,
+        pbi_pjobc: u32,
+        e_tdev: u32,
+        e_tpgid: u32,
+        pbi_nice: i32,
+        pbi_start_tvsec: u64,
+        pbi_start_tvusec: u64,
+    }
+
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        fn proc_listpids(
+            typ: u32,
+            typeinfo: u32,
+            buffer: *mut libc::c_void,
+            buffersize: i32,
+        ) -> i32;
+        fn proc_pidinfo(
+            pid: i32,
+            flavor: i32,
+            arg: u64,
+            buffer: *mut libc::c_void,
+            buffersize: i32,
+        ) -> i32;
+        fn proc_pidpath(pid: i32, buffer: *mut libc::c_void, buffersize: u32) -> i32;
+    }
+
+    pub struct MacOsProcessTreeController;
+
+    impl AcpPosixProcessTreeController for MacOsProcessTreeController {
+        fn child_pids_of(&self, pid: i32) -> Vec<i32> {
+            self.children_of(pid)
+                .into_iter()
+                .map(|child| child.pid)
+                .collect()
+        }
+
+        fn children_of(&self, pid: i32) -> Vec<AcpPosixProcessIdentity> {
+            self.snapshot()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|child| child.ppid == pid)
+                .collect()
+        }
+
+        fn identity(&self, pid: i32) -> Option<AcpPosixProcessIdentity> {
+            read_identity(pid)
+        }
+
+        fn snapshot(
+            &self,
+        ) -> Result<Vec<AcpPosixProcessIdentity>, AcpProcessGroupTerminationError> {
+            let mut out = Vec::new();
+            for pid in list_pids().map_err(|cause| {
+                AcpProcessGroupTerminationError::with_cause(
+                    "Failed to snapshot ACP process tree",
+                    cause,
+                )
+            })? {
+                if let Some(identity) = read_identity(pid) {
+                    out.push(identity);
+                }
+            }
+            Ok(out)
+        }
+
+        fn signal_process(&self, pid: i32, signal: i32) {
+            if pid > 0 {
+                unsafe {
+                    libc::kill(pid, signal);
+                }
+            }
+        }
+    }
+
+    fn list_pids() -> std::io::Result<Vec<i32>> {
+        let bytes = unsafe { proc_listpids(PROC_ALL_PIDS, 0, std::ptr::null_mut(), 0) };
+        if bytes <= 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let count = (bytes as usize / 4) + 64;
+        let mut buf = vec![0_i32; count];
+        let written = unsafe {
+            proc_listpids(
+                PROC_ALL_PIDS,
+                0,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 4) as i32,
+            )
+        };
+        if written <= 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let len = (written as usize / 4).min(buf.len());
+        Ok(buf[..len].iter().copied().filter(|pid| *pid > 0).collect())
+    }
+
+    fn read_identity(pid: i32) -> Option<AcpPosixProcessIdentity> {
+        if pid <= 0 {
+            return None;
+        }
+        let mut info = unsafe { std::mem::zeroed::<ProcBsdinfo>() };
+        let written = unsafe {
+            proc_pidinfo(
+                pid,
+                PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut ProcBsdinfo).cast(),
+                std::mem::size_of::<ProcBsdinfo>() as i32,
+            )
+        };
+        if written < std::mem::size_of::<ProcBsdinfo>() as i32 {
+            return None;
+        }
+        let mut path = vec![0_u8; PROC_PIDPATHINFO_MAXSIZE as usize];
+        let path_len =
+            unsafe { proc_pidpath(pid, path.as_mut_ptr().cast(), PROC_PIDPATHINFO_MAXSIZE) };
+        let executable = if path_len > 0 {
+            let len = path_len as usize;
+            Some(
+                String::from_utf8_lossy(&path[..len.min(path.len())])
+                    .trim_end_matches('\0')
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        let sid = unsafe { libc::getsid(pid) };
+        Some(AcpPosixProcessIdentity {
+            executable,
+            pgid: info.pbi_pgid as i32,
+            pid: info.pbi_pid as i32,
+            ppid: info.pbi_ppid as i32,
+            sid,
+            state: Some(if info.pbi_status == SZOMB {
+                "Z".to_owned()
+            } else {
+                "R".to_owned()
+            }),
+            start_time: format!("{}.{:06}", info.pbi_start_tvsec, info.pbi_start_tvusec),
+        })
+    }
+}
+
+/// Port of upstream `makePosixProcessTreeController`, extended so macOS can
+/// drive the same ownership ledger. Upstream's built-in controller is
+/// `/proc`-only; Turin reads the macOS process table instead.
 pub fn make_posix_process_tree_controller(
     platform: &str,
 ) -> Result<Box<dyn AcpPosixProcessTreeController>, AcpProcessGroupTerminationError> {
-    if platform == "linux" {
-        return Ok(Box::new(LinuxProcessTreeController));
+    match platform {
+        "linux" => Ok(Box::new(LinuxProcessTreeController)),
+        #[cfg(target_os = "macos")]
+        "macos" | "darwin" => Ok(Box::new(macos_proc::MacOsProcessTreeController)),
+        other => Err(AcpProcessGroupTerminationError::new(format!(
+            "Detached ACP descendant ownership is unsupported on {other}"
+        ))),
     }
-    Err(AcpProcessGroupTerminationError::new(format!(
-        "Detached ACP descendant ownership is unsupported on {platform}"
-    )))
 }
 
 pub fn observe_posix_ownership_ledger(

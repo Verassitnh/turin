@@ -4,10 +4,11 @@ mod events;
 mod helpers;
 mod session_update;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex as SyncMutex;
@@ -20,7 +21,9 @@ use crate::client::AcpClient;
 use crate::compat::{
     ClientCapabilities, ImplementationInfo, InitializeRequest, InitializeResponse,
 };
-use crate::errors::AcpError;
+use crate::errors::{
+    AcpError, AcpRequestError, AcpSpawnError, AcpTransportError, TransportOperation,
+};
 use crate::process::{SpawnCommand, spawn};
 use crate::runtime_model::{
     AcpSessionModeState, AcpSessionSetupResponse, SessionLoadGate, extract_model_config_id,
@@ -28,7 +31,14 @@ use crate::runtime_model::{
     session_update_is_replay, wait_for_session_load_replay_idle,
 };
 use crate::session_runtime::auth::select_acp_agent_auth_method;
-use crate::session_runtime::{AcpProcessGroupTerminationError, signal_process_group};
+use crate::session_runtime::{
+    AcpLinuxCgroupController, AcpLinuxCgroupLease, AcpOwnedPosixProcess, AcpPosixOwnershipRoot,
+    AcpPosixProcessTreeController, AcpProcessGroupTerminationError,
+    TerminatePosixOwnedProcessTreeInput, make_linux_cgroup_controller,
+    make_posix_process_tree_controller, observe_posix_ownership_ledger,
+    signal_linux_cgroup_root_term, signal_process_group, terminate_linux_cgroup_lease,
+    terminate_posix_owned_process_tree, wrap_command_for_linux_cgroup,
+};
 
 pub use events::AcpSessionRuntimeEvent;
 pub use helpers::{ConfigOptionValue, session_config_options_from_setup};
@@ -38,11 +48,12 @@ use helpers::{
     is_acp_authentication_required, is_startup_metadata_update,
 };
 use session_update::{
-    AssistantSegmentState, SessionUpdateContext, close_active_assistant_segment,
+    AssistantSegmentState, SessionUpdateContext, ShownToolCallIds, close_active_assistant_segment,
     handle_session_update,
 };
 
 const DEFAULT_SESSION_LOAD_TIMEOUT: Duration = Duration::from_secs(90);
+const DEFAULT_CANCEL_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_SESSION_LOAD_REPLAY_IDLE_GAP: Duration = Duration::from_secs(2);
 const MAX_STARTUP_METADATA_UPDATES: usize = 32;
 
@@ -146,7 +157,8 @@ pub struct AcpSessionActivationOptions {
 }
 
 struct ActivePrompt {
-    task: tokio::task::JoinHandle<Result<Value, AcpError>>,
+    abort: tokio::task::AbortHandle,
+    done: tokio::sync::watch::Receiver<bool>,
 }
 
 struct Inner {
@@ -154,6 +166,11 @@ struct Inner {
     client: AcpClient,
     pid: u32,
     process_containment: ProcessContainment,
+    cgroup_lease: Option<Arc<dyn AcpLinuxCgroupLease>>,
+    posix_controller: Option<Arc<dyn AcpPosixProcessTreeController>>,
+    ownership_ledger: Arc<SyncMutex<HashMap<String, AcpOwnedPosixProcess>>>,
+    ownership_root: Arc<SyncMutex<AcpPosixOwnershipRoot>>,
+    observe_stop: Arc<AtomicBool>,
     events: broadcast::Sender<AcpSessionRuntimeEvent>,
     mode_state: Mutex<Option<AcpSessionModeState>>,
     config_options: Mutex<Value>,
@@ -184,29 +201,31 @@ pub struct AcpSessionRuntime {
 impl AcpSessionRuntime {
     /// Wrap an already-connected client (duplex tests and injected transports).
     pub fn from_connected_client(client: AcpClient, options: AcpSessionRuntimeOptions) -> Self {
-        Self::from_client_with_containment(client, options, 0, ProcessContainment::None)
+        Self::from_client_with_containment(client, options, 0, SpawnedContainment::none())
     }
 
     pub async fn make(options: AcpSessionRuntimeOptions) -> Result<Self, AcpError> {
-        if options.own_descendant_process_groups {
-            let platform = options
-                .process_group_platform
-                .clone()
-                .unwrap_or_else(|| std::env::consts::OS.to_owned());
-            if platform != "linux" {
-                return Err(AcpError::from(crate::errors::AcpSpawnError {
-                    command: Some(options.spawn.command.clone()),
-                    cause: format!(
-                        "Detached ACP descendant ownership is unsupported on {platform}"
-                    ),
-                }));
-            }
+        let platform = options
+            .process_group_platform
+            .clone()
+            .unwrap_or_else(|| std::env::consts::OS.to_owned());
+        let containment = prepare_containment(&options, &platform)?;
+        let (program, args) = contained_spawn_command(&options, containment.lease.as_deref());
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut spawn_env = options.spawn.env.clone();
+        if containment.lease.is_some() {
+            let env = spawn_env.get_or_insert_with(HashMap::new);
+            env.insert("ELECTRON_RUN_AS_NODE".to_owned(), "1".to_owned());
+            env.insert("T3_ACP_CGROUP_WRAPPER".to_owned(), "1".to_owned());
         }
-        let args: Vec<&str> = options.spawn.args.iter().map(String::as_str).collect();
         let client = spawn(SpawnCommand {
-            program: &options.spawn.command,
-            args: &args,
+            program: &program,
+            args: &arg_refs,
             cwd: options.spawn.cwd.as_deref(),
+            env: spawn_env.as_ref(),
+            extend_env: options.spawn.extend_env,
+            detached: options.own_detached_process_group,
+            on_stderr: options.on_stderr.clone(),
         })
         .await?;
         let pid = client
@@ -214,18 +233,43 @@ impl AcpSessionRuntime {
             .and_then(|guard| guard.downcast_ref::<crate::process::ProcessGuard>())
             .map(|guard| guard.pid())
             .unwrap_or(0);
-        let process_containment = if options.own_descendant_process_groups {
-            ProcessContainment::ProcessLedgerReducedGuarantee
-        } else if options.own_detached_process_group {
-            ProcessContainment::ProcessGroup
-        } else {
-            ProcessContainment::None
-        };
+        if let Some(controller) = containment.controller.clone() {
+            let mut child_queues = HashMap::new();
+            let mut frontier = HashMap::new();
+            {
+                let mut ledger = containment.ledger.lock();
+                let mut root = containment.root.lock();
+                observe_posix_ownership_ledger(
+                    &mut child_queues,
+                    controller.as_ref(),
+                    &mut frontier,
+                    &mut ledger,
+                    &mut root,
+                    pid as i32,
+                    None,
+                )
+                .map_err(|error| {
+                    AcpError::from(AcpSpawnError {
+                        command: Some(options.spawn.command.clone()),
+                        cause: error.to_string(),
+                    })
+                })?;
+            }
+            spawn_ownership_observer(
+                controller,
+                Arc::clone(&containment.ledger),
+                Arc::clone(&containment.root),
+                Arc::clone(&containment.observe_stop),
+                child_queues,
+                frontier,
+                pid as i32,
+            );
+        }
         Ok(Self::from_client_with_containment(
             client,
             options,
             pid,
-            process_containment,
+            containment,
         ))
     }
 
@@ -233,7 +277,7 @@ impl AcpSessionRuntime {
         client: AcpClient,
         options: AcpSessionRuntimeOptions,
         pid: u32,
-        process_containment: ProcessContainment,
+        containment: SpawnedContainment,
     ) -> Self {
         let (events_tx, _events_rx) = broadcast::channel(256);
         let runtime_closed = Arc::new(tokio::sync::Notify::new());
@@ -242,7 +286,12 @@ impl AcpSessionRuntime {
             options,
             client,
             pid,
-            process_containment,
+            process_containment: containment.containment,
+            cgroup_lease: containment.lease,
+            posix_controller: containment.controller,
+            ownership_ledger: containment.ledger,
+            ownership_root: containment.root,
+            observe_stop: containment.observe_stop,
             events: events_tx,
             mode_state: Mutex::new(None),
             config_options: Mutex::new(session_config_options_from_setup(None)),
@@ -265,7 +314,7 @@ impl AcpSessionRuntime {
                 mode_state: None,
                 config_options: session_config_options_from_setup(None),
                 tool_calls: HashMap::new(),
-                shown_tool_call_ids: HashSet::new(),
+                shown_tool_call_ids: ShownToolCallIds::default(),
                 assistant_segment: AssistantSegmentState::default(),
                 assistant_item_runtime_id,
             }),
@@ -409,27 +458,76 @@ impl AcpSessionRuntime {
             .acquire()
             .await
             .map_err(|_| AcpError::transport("prompt serialization lock closed"))?;
-        let _dispatch = self
-            .inner
-            .prompt_dispatch_semaphore
-            .acquire()
-            .await
-            .map_err(|_| AcpError::transport("prompt dispatch lock closed"))?;
         let started = self.inner.get_started_state().await?;
+        let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+        let task = {
+            let _notify = self
+                .inner
+                .notification_semaphore
+                .acquire()
+                .await
+                .map_err(|_| AcpError::transport("prompt notification lock closed"))?;
+            let _dispatch = self
+                .inner
+                .prompt_dispatch_semaphore
+                .acquire()
+                .await
+                .map_err(|_| AcpError::transport("prompt dispatch lock closed"))?;
+            close_active_assistant_segment(&mut self.inner.update_ctx.lock(), &self.inner.events);
+            *self.inner.assistant_updates_open.lock().await = true;
+            let mut request = payload;
+            if let Some(object) = request.as_object_mut() {
+                object.insert("sessionId".to_owned(), json!(started.session_id));
+            }
+            let inner = Arc::clone(&self.inner);
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+            let task = tokio::spawn(async move {
+                if release_rx.await.is_err() {
+                    return Err(AcpError::transport(
+                        "The ACP prompt stopped before the agent confirmed completion.",
+                    ));
+                }
+                inner
+                    .run_logged_request("session/prompt", request.clone(), async {
+                        inner.client.prompt(request).await
+                    })
+                    .await
+            });
+            *self.inner.active_prompt.lock().await = Some(ActivePrompt {
+                abort: task.abort_handle(),
+                done: done_rx,
+            });
+            let _ = release_tx.send(());
+            task
+        };
+        let mut abort_on_drop = AbortOnDrop {
+            abort: Some(task.abort_handle()),
+        };
+        let mut retire_on_drop = PromptRetireOnDrop {
+            inner: Arc::clone(&self.inner),
+            armed: self.inner.options.cancel_behavior == CancelBehavior::WaitForPrompt,
+        };
+        let joined = task.await;
+        abort_on_drop.abort.take();
+        retire_on_drop.armed = false;
+        *self.inner.active_prompt.lock().await = None;
         close_active_assistant_segment(&mut self.inner.update_ctx.lock(), &self.inner.events);
-        *self.inner.assistant_updates_open.lock().await = true;
-        let mut request = payload;
-        if let Some(object) = request.as_object_mut() {
-            object.insert("sessionId".to_owned(), json!(started.session_id));
+        let _ = done_tx.send(true);
+        match joined {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(error),
+            Err(join)
+                if join.is_cancelled()
+                    && self.inner.options.cancel_behavior != CancelBehavior::WaitForPrompt =>
+            {
+                Ok(json!({ "stopReason": "cancelled" }))
+            }
+            Err(_) => {
+                let error = prompt_stopped_error(self.inner.pid);
+                self.inner.retire_runtime(error.clone()).await;
+                Err(error)
+            }
         }
-        let result = self
-            .inner
-            .run_logged_request("session/prompt", request.clone(), async {
-                self.inner.client.prompt(request).await
-            })
-            .await;
-        close_active_assistant_segment(&mut self.inner.update_ctx.lock(), &self.inner.events);
-        result
     }
 
     pub async fn cancel(&self) -> Result<(), AcpError> {
@@ -499,15 +597,43 @@ impl Inner {
             object.insert("_meta".to_owned(), meta.clone());
         }
         if self.options.cancel_behavior != CancelBehavior::WaitForPrompt {
-            if self.options.interrupt_prompt_on_cancel
-                && let Some(active) = self.active_prompt.lock().await.take()
-            {
-                active.task.abort();
+            if !self.options.interrupt_prompt_on_cancel {
+                return self.client.cancel(cancel_payload).await;
             }
-            let _ = self.client.cancel(cancel_payload).await;
-            return Ok(());
+            if let Some(active) = self.active_prompt.lock().await.as_ref() {
+                active.abort.abort();
+            }
+            return self.client.cancel(cancel_payload).await;
         }
-        self.client.cancel(cancel_payload).await
+        self.client.cancel(cancel_payload).await?;
+        let done = self
+            .active_prompt
+            .lock()
+            .await
+            .as_ref()
+            .map(|active| active.done.clone());
+        let Some(mut done) = done else {
+            return Ok(());
+        };
+        let limit = self
+            .options
+            .cancel_timeout
+            .unwrap_or(DEFAULT_CANCEL_TIMEOUT);
+        let completed = timeout(limit, async {
+            if !*done.borrow() {
+                let _ = done.changed().await;
+            }
+            if self.termination_error.lock().await.is_none() {
+                let _ = self.drain_events().await;
+            }
+        })
+        .await;
+        if completed.is_err() {
+            let error = cancel_timeout_error(self.pid);
+            self.retire_runtime(error.clone()).await;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn ensure_connected(&self) -> Result<(), AcpError> {
@@ -615,7 +741,13 @@ impl Inner {
 
     async fn start_once(&self) -> Result<AcpSessionRuntimeStartResult, AcpError> {
         *self.starting.lock().await = true;
-        let result = self.start_once_inner().await?;
+        let result = match self.start_once_inner().await {
+            Ok(result) => result,
+            Err(error) => {
+                self.reset_start_attempt().await;
+                return Err(error);
+            }
+        };
         *self.start_result.lock().await = Some(result.clone());
         *self.starting.lock().await = false;
         let metadata = std::mem::take(&mut *self.startup_metadata.lock().await);
@@ -709,6 +841,11 @@ impl Inner {
                 "mcpServers": mcp_servers,
             });
             merge_additional_into_payload(&mut payload, additional.as_ref());
+            if !session_resume_advertised(initialize_result) {
+                return Err(AcpError::from(AcpRequestError::method_unavailable(
+                    "ACP agent does not advertise session/load or session/resume support",
+                )));
+            }
             let response = self
                 .run_logged_request("session/resume", payload.clone(), async {
                     self.client.resume_session(payload).await
@@ -848,21 +985,13 @@ impl Inner {
                 idle = idle => Ok(idle),
             }
         })
-        .await
-        .map_err(|_| {
+        .await;
+        *self.session_load_gate.lock().await = None;
+        loaded.map_err(|_| {
             AcpError::transport(
                 "session/load timed out waiting for RPC response or replay idle gap",
             )
-        })?;
-        let loaded = match loaded {
-            Ok(value) => value,
-            Err(error) => {
-                *self.session_load_gate.lock().await = None;
-                return Err(error);
-            }
-        };
-        *self.session_load_gate.lock().await = None;
-        Ok(loaded)
+        })?
     }
 
     async fn drain_events(&self) -> Result<(), AcpError> {
@@ -874,6 +1003,9 @@ impl Inner {
         if self.active_prompt.lock().await.is_none() {
             *self.assistant_updates_open.lock().await = false;
             close_active_assistant_segment(&mut self.update_ctx.lock(), &self.events);
+        }
+        if self.events.receiver_count() == 0 {
+            return Ok(());
         }
         let _ = self
             .events
@@ -905,13 +1037,52 @@ impl Inner {
             .options
             .process_group_termination_grace
             .unwrap_or(Duration::from_secs(1));
-        let signaled = signal_process_group(i64::from(self.pid), libc::SIGTERM).is_ok();
-        if signaled && !grace.is_zero() {
+        self.observe_stop.store(true, Ordering::SeqCst);
+        if let Some(lease) = &self.cgroup_lease {
+            if let Some(controller) = &self.posix_controller {
+                let root = self.ownership_root.lock().clone();
+                signal_linux_cgroup_root_term(controller.as_ref(), lease.as_ref(), &root);
+            }
+            if !grace.is_zero() {
+                sleep(grace).await;
+            }
+            return terminate_linux_cgroup_lease(lease.as_ref()).await;
+        }
+        if self.options.own_descendant_process_groups {
+            let controller = match &self.posix_controller {
+                Some(controller) => Arc::clone(controller),
+                None => Arc::from(
+                    make_posix_process_tree_controller(platform)
+                        .map_err(|error| AcpProcessGroupTerminationError::new(error.to_string()))?,
+                ),
+            };
+            let mut ledger = std::mem::take(&mut *self.ownership_ledger.lock());
+            let mut root = std::mem::take(&mut *self.ownership_root.lock());
+            return terminate_posix_owned_process_tree(TerminatePosixOwnedProcessTreeInput {
+                controller: controller.as_ref(),
+                grace: Some(grace),
+                ledger: Some(&mut ledger),
+                root: Some(&mut root),
+                root_pid: self.pid as i32,
+                discovery_passes: None,
+            })
+            .await;
+        }
+        match signal_process_group(i64::from(self.pid), libc::SIGTERM) {
+            Ok(()) => {}
+            Err(error) if is_esrch(&error) => return Ok(()),
+            Err(error) => {
+                return Err(AcpProcessGroupTerminationError::new(error.to_string()));
+            }
+        }
+        if !grace.is_zero() {
             sleep(grace).await;
         }
-        signal_process_group(i64::from(self.pid), libc::SIGKILL)
-            .map_err(|error| AcpProcessGroupTerminationError::new(error.to_string()))?;
-        Ok(())
+        match signal_process_group(i64::from(self.pid), libc::SIGKILL) {
+            Ok(()) => Ok(()),
+            Err(error) if is_esrch(&error) => Ok(()),
+            Err(error) => Err(AcpProcessGroupTerminationError::new(error.to_string())),
+        }
     }
 
     async fn run_logged_request<T, Fut>(
@@ -1020,6 +1191,20 @@ impl Inner {
             .events
             .send(AcpSessionRuntimeEvent::ConnectionTerminated { error });
     }
+
+    async fn reset_start_attempt(&self) {
+        *self.starting.lock().await = false;
+        self.startup_metadata.lock().await.clear();
+        *self.session_load_gate.lock().await = None;
+    }
+
+    async fn retire_runtime(&self, error: AcpError) {
+        self.record_termination(error).await;
+        if signal_process_group(i64::from(self.pid), libc::SIGTERM).is_ok() {
+            sleep(Duration::from_secs(1)).await;
+            let _ = signal_process_group(i64::from(self.pid), libc::SIGKILL);
+        }
+    }
 }
 
 struct SessionSetup {
@@ -1054,9 +1239,570 @@ fn initialize_result_to_value(initialize_result: &InitializeResponse) -> Value {
     })
 }
 
+struct SpawnedContainment {
+    containment: ProcessContainment,
+    lease: Option<Arc<dyn AcpLinuxCgroupLease>>,
+    controller: Option<Arc<dyn AcpPosixProcessTreeController>>,
+    ledger: Arc<SyncMutex<HashMap<String, AcpOwnedPosixProcess>>>,
+    root: Arc<SyncMutex<AcpPosixOwnershipRoot>>,
+    observe_stop: Arc<AtomicBool>,
+}
+
+impl SpawnedContainment {
+    fn none() -> Self {
+        Self {
+            containment: ProcessContainment::None,
+            lease: None,
+            controller: None,
+            ledger: Arc::new(SyncMutex::new(HashMap::new())),
+            root: Arc::new(SyncMutex::new(AcpPosixOwnershipRoot::default())),
+            observe_stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+fn prepare_containment(
+    options: &AcpSessionRuntimeOptions,
+    platform: &str,
+) -> Result<SpawnedContainment, AcpError> {
+    let mut spawned = SpawnedContainment::none();
+    if options.own_descendant_process_groups {
+        if platform == "linux"
+            && let Some(lease) = make_linux_cgroup_controller().create()
+        {
+            spawned.lease = Some(Arc::from(lease));
+        }
+        match platform {
+            "linux" | "macos" | "darwin" => {
+                let controller = make_posix_process_tree_controller(platform).map_err(|error| {
+                    AcpError::from(AcpSpawnError {
+                        command: Some(options.spawn.command.clone()),
+                        cause: error.to_string(),
+                    })
+                })?;
+                spawned.controller = Some(Arc::from(controller));
+            }
+            other => {
+                return Err(AcpError::from(AcpSpawnError {
+                    command: Some(options.spawn.command.clone()),
+                    cause: format!("Detached ACP descendant ownership is unsupported on {other}"),
+                }));
+            }
+        }
+        spawned.containment = if spawned.lease.is_some() {
+            ProcessContainment::CgroupV2
+        } else {
+            ProcessContainment::ProcessLedgerReducedGuarantee
+        };
+    } else if options.own_detached_process_group {
+        spawned.containment = ProcessContainment::ProcessGroup;
+    }
+    Ok(spawned)
+}
+
+fn contained_spawn_command(
+    options: &AcpSessionRuntimeOptions,
+    lease: Option<&dyn AcpLinuxCgroupLease>,
+) -> (String, Vec<String>) {
+    match lease {
+        Some(lease) => {
+            wrap_command_for_linux_cgroup(lease, &options.spawn.command, &options.spawn.args)
+        }
+        None => (options.spawn.command.clone(), options.spawn.args.clone()),
+    }
+}
+
+fn spawn_ownership_observer(
+    controller: Arc<dyn AcpPosixProcessTreeController>,
+    ledger: Arc<SyncMutex<HashMap<String, AcpOwnedPosixProcess>>>,
+    root: Arc<SyncMutex<AcpPosixOwnershipRoot>>,
+    stop: Arc<AtomicBool>,
+    mut child_queues: HashMap<i32, Vec<i32>>,
+    mut frontier: HashMap<i32, AcpOwnedPosixProcess>,
+    root_pid: i32,
+) {
+    tokio::spawn(async move {
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            let started = tokio::time::Instant::now();
+            let frontier_len = {
+                let mut ledger = ledger.lock();
+                let mut root = root.lock();
+                if observe_posix_ownership_ledger(
+                    &mut child_queues,
+                    controller.as_ref(),
+                    &mut frontier,
+                    &mut ledger,
+                    &mut root,
+                    root_pid,
+                    Some(64),
+                )
+                .is_err()
+                {
+                    break;
+                }
+                frontier.len()
+            };
+            let target: u64 = if frontier_len <= 32 {
+                25
+            } else if frontier_len <= 128 {
+                50
+            } else {
+                100
+            };
+            let elapsed = started.elapsed().as_millis() as u64;
+            sleep(Duration::from_millis(target.saturating_sub(elapsed).max(5))).await;
+        }
+    });
+}
+
+fn session_resume_advertised(initialize_result: &InitializeResponse) -> bool {
+    initialize_result
+        .agent_capabilities
+        .get("sessionCapabilities")
+        .and_then(|capabilities| capabilities.get("resume"))
+        .is_some_and(|value| !value.is_null())
+}
+
+fn is_esrch(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(3) || error.kind() == std::io::ErrorKind::NotFound
+}
+
+fn cancel_timeout_error(pid: u32) -> AcpError {
+    AcpError::from(AcpTransportError {
+        operation: Some(TransportOperation::CallRpc),
+        method: Some("session/cancel".to_owned()),
+        detail: Some(
+            "The ACP agent did not finish cancellation. Its process was stopped.".to_owned(),
+        ),
+        pid: Some(i64::from(pid)),
+        cause: None,
+    })
+}
+
+fn prompt_stopped_error(pid: u32) -> AcpError {
+    AcpError::from(AcpTransportError {
+        operation: None,
+        method: Some("session/prompt".to_owned()),
+        detail: Some("The ACP prompt stopped before the agent confirmed completion.".to_owned()),
+        pid: Some(i64::from(pid)),
+        cause: None,
+    })
+}
+
+struct AbortOnDrop {
+    abort: Option<tokio::task::AbortHandle>,
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(abort) = self.abort.take() {
+            abort.abort();
+        }
+    }
+}
+
+struct PromptRetireOnDrop {
+    inner: Arc<Inner>,
+    armed: bool,
+}
+
+impl Drop for PromptRetireOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        if let Ok(mut active) = self.inner.active_prompt.try_lock() {
+            *active = None;
+        }
+        let inner = Arc::clone(&self.inner);
+        let error = prompt_stopped_error(inner.pid);
+        tokio::spawn(async move {
+            inner.retire_runtime(error).await;
+        });
+    }
+}
+
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compat::ImplementationInfo;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+    fn test_options() -> AcpSessionRuntimeOptions {
+        AcpSessionRuntimeOptions {
+            spawn: AcpSpawnInput {
+                command: String::new(),
+                args: Vec::new(),
+                cwd: None,
+                env: None,
+                extend_env: true,
+            },
+            cwd: PathBuf::from("/"),
+            protocol_version: None,
+            resume_session_id: None,
+            resume_method: None,
+            session_load_timeout: None,
+            session_load_replay_idle_gap: None,
+            interrupt_prompt_on_cancel: true,
+            cancel_meta: None,
+            initialize_meta: None,
+            own_detached_process_group: false,
+            own_descendant_process_groups: false,
+            process_group_platform: None,
+            process_group_termination_grace: None,
+            cancel_behavior: CancelBehavior::Interrupt,
+            cancel_timeout: None,
+            client_capabilities: None,
+            client_info: ImplementationInfo {
+                name: "turin".to_owned(),
+                version: "0".to_owned(),
+            },
+            auth_method_id: None,
+            authenticate_eagerly: false,
+            authenticate_on_auth_required: false,
+            mcp_servers: None,
+            acp_mcp_servers: None,
+            additional_directories: None,
+            custom_models: None,
+            transform_session_update: None,
+            on_stderr: None,
+            on_initialized: None,
+            on_termination: None,
+            request_logger: None,
+        }
+    }
+
+    fn pair() -> (crate::client::AcpClient, DuplexStream, DuplexStream) {
+        let (client_read, agent_write) = tokio::io::duplex(1 << 20);
+        let (agent_read, client_write) = tokio::io::duplex(1 << 20);
+        (
+            crate::client::AcpClient::connect(client_read, client_write),
+            agent_read,
+            agent_write,
+        )
+    }
+
+    async fn read_value(read: &mut DuplexStream) -> Value {
+        let mut line = Vec::new();
+        let mut byte = [0_u8; 1];
+        loop {
+            let n = read.read(&mut byte).await.unwrap();
+            if n == 0 || byte[0] == b'\n' {
+                break;
+            }
+            line.push(byte[0]);
+        }
+        serde_json::from_slice(line.trim_ascii()).unwrap()
+    }
+
+    async fn write_value(write: &mut DuplexStream, value: Value) {
+        let mut bytes = serde_json::to_vec(&value).unwrap();
+        bytes.push(b'\n');
+        write.write_all(&bytes).await.unwrap();
+    }
+
+    fn v1_initialized(id: &Value, capabilities: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "protocolVersion": 1,
+                "agentCapabilities": capabilities,
+            }
+        })
+    }
+
+    async fn start_new_session(
+        runtime: &AcpSessionRuntime,
+        read: &mut DuplexStream,
+        write: &mut DuplexStream,
+    ) {
+        let pending = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.start().await }
+        });
+        let init = read_value(read).await;
+        write_value(write, v1_initialized(&init["id"], json!({}))).await;
+        let created = read_value(read).await;
+        assert_eq!(created["method"], "session/new");
+        write_value(
+            write,
+            json!({"jsonrpc":"2.0","id": created["id"], "result": {"sessionId": "sess-1"}}),
+        )
+        .await;
+        pending.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupt_cancel_aborts_the_prompt_and_returns_cancelled() {
+        let (client, mut read, mut write) = pair();
+        let runtime = AcpSessionRuntime::from_connected_client(client, test_options());
+        start_new_session(&runtime, &mut read, &mut write).await;
+        let prompting = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.prompt(json!({"prompt": []})).await }
+        });
+        let prompt = read_value(&mut read).await;
+        assert_eq!(prompt["method"], "session/prompt");
+        runtime.cancel().await.unwrap();
+        let cancel = read_value(&mut read).await;
+        assert_eq!(cancel["method"], "session/cancel");
+        let outcome = tokio::time::timeout(Duration::from_secs(2), prompting)
+            .await
+            .expect("prompt waited for the agent")
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome["stopReason"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn interrupt_cancel_returns_a_session_cancel_write_failure() {
+        let (client, mut read, mut write) = pair();
+        let runtime = AcpSessionRuntime::from_connected_client(client, test_options());
+        start_new_session(&runtime, &mut read, &mut write).await;
+        drop(read);
+        let error = runtime.cancel().await.unwrap_err();
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_for_prompt_cancel_retires_the_runtime_after_the_timeout() {
+        let (client, mut read, mut write) = pair();
+        let mut options = test_options();
+        options.cancel_behavior = CancelBehavior::WaitForPrompt;
+        options.cancel_timeout = Some(Duration::from_millis(40));
+        let runtime = AcpSessionRuntime::from_connected_client(client, options);
+        start_new_session(&runtime, &mut read, &mut write).await;
+        let prompting = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.prompt(json!({"prompt": []})).await }
+        });
+        let prompt = read_value(&mut read).await;
+        assert_eq!(prompt["method"], "session/prompt");
+        let error = runtime.cancel().await.unwrap_err();
+        let AcpError::Transport(error) = error else {
+            panic!("expected a transport error");
+        };
+        assert_eq!(error.method.as_deref(), Some("session/cancel"));
+        assert_eq!(
+            error.detail.as_deref(),
+            Some("The ACP agent did not finish cancellation. Its process was stopped.")
+        );
+        let again = runtime.cancel().await.unwrap_err();
+        assert!(again.to_string().contains("session/cancel"));
+        drop(prompting);
+    }
+
+    #[tokio::test]
+    async fn start_failure_clears_startup_state_including_the_load_timeout() {
+        let (client, mut read, mut write) = pair();
+        let mut options = test_options();
+        options.resume_session_id = Some("sess".to_owned());
+        options.session_load_timeout = Some(Duration::from_millis(80));
+        let runtime = AcpSessionRuntime::from_connected_client(client, options);
+        let pending = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.start().await }
+        });
+        let init = read_value(&mut read).await;
+        write_value(
+            &mut write,
+            v1_initialized(&init["id"], json!({"loadSession": true})),
+        )
+        .await;
+        let load = read_value(&mut read).await;
+        assert_eq!(load["method"], "session/load");
+        write_value(
+            &mut write,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "sess",
+                    "update": {"sessionUpdate": "current_mode_update", "currentModeId": "stale"}
+                }
+            }),
+        )
+        .await;
+        let error = tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .expect("start hung")
+            .unwrap()
+            .unwrap_err();
+        let AcpError::Transport(transport) = &error else {
+            panic!("expected the load timeout, got {error}");
+        };
+        assert!(
+            transport
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("timed out"),
+            "{transport:?}"
+        );
+        assert!(!*runtime.inner.starting.lock().await);
+        assert!(runtime.inner.startup_metadata.lock().await.is_empty());
+        assert!(runtime.inner.session_load_gate.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resume_is_skipped_unless_the_agent_advertises_it() {
+        let (client, mut read, mut write) = pair();
+        let mut options = test_options();
+        options.resume_session_id = Some("sess".to_owned());
+        let runtime = AcpSessionRuntime::from_connected_client(client, options);
+        let pending = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.start().await }
+        });
+        let init = read_value(&mut read).await;
+        write_value(&mut write, v1_initialized(&init["id"], json!({}))).await;
+        let error = pending.await.unwrap().unwrap_err();
+        let AcpError::Request(error) = error else {
+            panic!("expected a request error, got {error}");
+        };
+        assert_eq!(error.code, -32601);
+        assert!(error.error_message.contains("session/resume"));
+    }
+
+    #[tokio::test]
+    async fn resume_is_sent_when_session_capabilities_advertise_it() {
+        let (client, mut read, mut write) = pair();
+        let mut options = test_options();
+        options.resume_session_id = Some("sess".to_owned());
+        let runtime = AcpSessionRuntime::from_connected_client(client, options);
+        let pending = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.start().await }
+        });
+        let init = read_value(&mut read).await;
+        write_value(
+            &mut write,
+            v1_initialized(&init["id"], json!({"sessionCapabilities": {"resume": {}}})),
+        )
+        .await;
+        let resume = read_value(&mut read).await;
+        assert_eq!(resume["method"], "session/resume");
+        assert_eq!(resume["params"]["sessionId"], "sess");
+        write_value(
+            &mut write,
+            json!({"jsonrpc":"2.0","id": resume["id"], "result": {"sessionId": "sess"}}),
+        )
+        .await;
+        pending.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn esrch_skips_the_grace_period_and_further_signals() {
+        let mut options = test_options();
+        options.own_detached_process_group = true;
+        options.process_group_termination_grace = Some(Duration::from_secs(5));
+        let runtime = AcpSessionRuntime::from_connected_client(
+            crate::client::AcpClient::connect(tokio::io::duplex(16).0, tokio::io::duplex(16).1),
+            options,
+        );
+        let started = tokio::time::Instant::now();
+        runtime.terminate_process_group().await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "ESRCH still waited out the grace period"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_and_darwin_build_a_posix_process_tree_controller() {
+        for platform in ["macos", "darwin"] {
+            let controller = make_posix_process_tree_controller(platform).unwrap();
+            let me = std::process::id() as i32;
+            let identity = controller.identity(me).expect("current process");
+            assert_eq!(identity.pid, me);
+            assert!(identity.sid > 0);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn linux_without_a_cgroup_lease_falls_back_to_the_ledger() {
+        let mut options = test_options();
+        options.own_descendant_process_groups = true;
+        options.spawn.command = "agent".to_owned();
+        let spawned = prepare_containment(&options, "linux").unwrap();
+        assert!(spawned.lease.is_none());
+        assert!(spawned.controller.is_some());
+        assert_eq!(
+            spawned.containment,
+            ProcessContainment::ProcessLedgerReducedGuarantee
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_descendant_ownership_terminates_through_the_posix_ledger() {
+        let dir = std::env::temp_dir().join(format!(
+            "turin-acp-ledger-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("child.pid");
+        let script = format!(
+            "python3 -c 'import os,sys,time\npath=sys.argv[1]\npid=os.fork()\nif pid==0:\n os.setsid()\n os.execv(\"/bin/sleep\",[\"sleep\",\"30\"])\nopen(path,\"w\").write(str(pid))\ntime.sleep(30)\n' '{}'",
+            pid_file.display()
+        );
+        let mut options = test_options();
+        options.spawn.command = "/bin/sh".to_owned();
+        options.spawn.args = vec!["-c".to_owned(), script];
+        options.own_descendant_process_groups = true;
+        options.own_detached_process_group = true;
+        options.process_group_platform = Some("macos".to_owned());
+        options.process_group_termination_grace = Some(Duration::from_millis(20));
+        let runtime = AcpSessionRuntime::make(options).await.unwrap();
+        assert_eq!(
+            runtime.process_containment(),
+            ProcessContainment::ProcessLedgerReducedGuarantee
+        );
+        let grandchild = {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_file)
+                    && let Ok(pid) = text.trim().parse::<i32>()
+                {
+                    break pid;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "grandchild never started"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        runtime.terminate_process_group().await.unwrap();
+        let mut gone = false;
+        for _ in 0..100 {
+            if unsafe { libc::kill(grandchild, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(gone, "grandchild {grandchild} survived ledger termination");
+    }
 }

@@ -1,6 +1,6 @@
 //! Session update parsing and event emission (upstream `handleSessionUpdate`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -28,11 +28,43 @@ pub(crate) struct ToolCallTrackedState {
     skipped_since_emit: usize,
 }
 
+/// Insertion-ordered set. Eviction drops the oldest id, matching a JS `Set`.
+#[derive(Debug, Clone, Default)]
+pub struct ShownToolCallIds {
+    order: VecDeque<String>,
+    membership: HashSet<String>,
+}
+
+impl ShownToolCallIds {
+    pub fn contains(&self, id: &str) -> bool {
+        self.membership.contains(id)
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub fn insert(&mut self, id: String) {
+        if self.membership.insert(id.clone()) {
+            self.order.push_back(id);
+        }
+    }
+
+    pub fn evict_oldest_past(&mut self, max: usize) {
+        while self.order.len() > max {
+            if let Some(oldest) = self.order.pop_front() {
+                self.membership.remove(&oldest);
+            }
+        }
+    }
+}
+
 pub struct SessionUpdateContext {
     pub mode_state: Option<AcpSessionModeState>,
     pub config_options: Value,
     pub tool_calls: HashMap<String, ToolCallTrackedState>,
-    pub shown_tool_call_ids: HashSet<String>,
+    pub shown_tool_call_ids: ShownToolCallIds,
     pub assistant_segment: AssistantSegmentState,
     pub assistant_item_runtime_id: String,
 }
@@ -114,11 +146,8 @@ pub fn handle_session_update(
                 }
                 if !ctx.shown_tool_call_ids.contains(&merged.tool_call_id) {
                     ctx.shown_tool_call_ids.insert(merged.tool_call_id.clone());
-                    if ctx.shown_tool_call_ids.len() > MAX_SHOWN_TOOL_CALL_IDS
-                        && let Some(oldest) = ctx.shown_tool_call_ids.iter().next().cloned()
-                    {
-                        ctx.shown_tool_call_ids.remove(&oldest);
-                    }
+                    ctx.shown_tool_call_ids
+                        .evict_oldest_past(MAX_SHOWN_TOOL_CALL_IDS);
                     if !active {
                         close_active_assistant_segment(ctx, events);
                     }
@@ -218,4 +247,46 @@ fn update_mode_state(mode_state: &mut AcpSessionModeState, next_mode_id: &str) {
 
 fn json_setup(config_options: &Value) -> Value {
     serde_json::json!({ "configOptions": config_options })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn evicts_shown_tool_calls_oldest_first() {
+        let (events, _rx) = broadcast::channel(8);
+        let mut ctx = SessionUpdateContext {
+            mode_state: None,
+            config_options: json!([]),
+            tool_calls: HashMap::new(),
+            shown_tool_call_ids: ShownToolCallIds::default(),
+            assistant_segment: AssistantSegmentState::default(),
+            assistant_item_runtime_id: "runtime".to_owned(),
+        };
+        for index in 0..=MAX_SHOWN_TOOL_CALL_IDS {
+            handle_session_update(
+                &mut ctx,
+                &events,
+                &json!({
+                    "sessionId": "session-1",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": format!("tool-{index}"),
+                        "title": "Terminal",
+                        "kind": "execute",
+                        "status": "pending",
+                    },
+                }),
+            );
+        }
+        assert_eq!(ctx.shown_tool_call_ids.len(), MAX_SHOWN_TOOL_CALL_IDS);
+        assert!(!ctx.shown_tool_call_ids.contains("tool-0"));
+        assert!(
+            ctx.shown_tool_call_ids
+                .contains(&format!("tool-{MAX_SHOWN_TOOL_CALL_IDS}"))
+        );
+        assert!(ctx.shown_tool_call_ids.contains("tool-1"));
+    }
 }

@@ -2,8 +2,11 @@
 //! header's variant, which already holds every check) and of the stale-branch warning popover
 //! `PullRequestBaseFreshnessWarning` from PullRequestDetailPanel.tsx.
 //!
+//! The `count` variant (the thread details panel's PR row) renders the rollup glyph and a count
+//! while checks run, or how many failed, inside a `ThreadDetailsControl` meta button.
+//!
 //! Not ported: the listing-row variant that reads the detail itself (`LazyChecksBody`; the list
-//! row shows the rollup glyph with its own tooltip), the `count` trigger, and the hover-open of
+//! row shows the rollup glyph with its own tooltip), and the hover-open of
 //! the freshness warning (`openOnHover`; GPUI popovers open on press, so the mark is pressed to
 //! see the sentence and the way out of it).
 
@@ -27,6 +30,7 @@ use super::pull_request_presentation::{
     pull_request_check_status_label, pull_request_checks_state_presentation,
     summarize_pull_request_checks,
 };
+use crate::components::chat::thread_details_control::{ThreadDetailsControl, ThreadDetailsPart};
 use crate::theme::tokens::{TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{
@@ -150,6 +154,26 @@ fn checks_body(
         .into_any_element()
 }
 
+/// The `count` variant's label: how many checks run out of all of them, else how many failed.
+pub fn checks_count_label(checks: &[PullRequestCheck]) -> Option<String> {
+    use turin_contracts::pull_request::PullRequestCheckStatus as Status;
+    let running = checks
+        .iter()
+        .filter(|c| c.status == Status::Pending)
+        .count();
+    let failed = checks
+        .iter()
+        .filter(|c| matches!(c.status, Status::Failure | Status::Cancelled))
+        .count();
+    if running > 0 {
+        Some(format!("{running}/{}", checks.len()))
+    } else if failed > 0 {
+        Some(format!("{failed} failed"))
+    } else {
+        None
+    }
+}
+
 /// `PullRequestChecksPopover` with the checks in hand: the rollup glyph, and what it opens.
 #[derive(IntoElement)]
 pub struct PullRequestChecksPopover {
@@ -157,6 +181,7 @@ pub struct PullRequestChecksPopover {
     checks: Vec<PullRequestCheck>,
     checks_state: PullRequestChecksState,
     stale: bool,
+    count: bool,
     on_open: Option<OpenUrl>,
 }
 
@@ -171,6 +196,7 @@ impl PullRequestChecksPopover {
             checks,
             checks_state,
             stale: false,
+            count: false,
             on_open: None,
         }
     }
@@ -178,6 +204,12 @@ impl PullRequestChecksPopover {
     /// Check details are out of date: the popover says so instead of listing them.
     pub fn stale(mut self, stale: bool) -> Self {
         self.stale = stale;
+        self
+    }
+
+    /// `variant="count"`: the trigger is a thread-details meta button with the count beside the glyph.
+    pub fn count_variant(mut self, count: bool) -> Self {
+        self.count = count;
         self
     }
 
@@ -195,14 +227,28 @@ impl RenderOnce for PullRequestChecksPopover {
         let tone = tone_color(presentation.tone_class_name, &theme);
         let summary = (!self.stale).then(|| summarize_pull_request_checks(&self.checks));
         let id = SharedString::from(format!("{:?}", self.id));
-        let trigger = TriggerBox::new(
-            SharedString::from(format!("{id}-trigger")),
-            Icon::new(glyph_icon(presentation.glyph))
-                .size(rems(0.875))
-                .color(tone)
-                .into_any_element(),
-        )
-        .tooltip(Tooltip::new(format!("Checks: {}", presentation.label)));
+        let glyph = Icon::new(glyph_icon(presentation.glyph))
+            .size(rems(0.875))
+            .color(tone);
+        let trigger = if self.count {
+            TriggerBox::new(
+                SharedString::from(format!("{id}-trigger")),
+                ThreadDetailsControl::new(SharedString::from(format!("{id}-count")))
+                    .part(ThreadDetailsPart::Meta)
+                    .child(glyph)
+                    .children(
+                        checks_count_label(&self.checks)
+                            .map(|label| div().flex_shrink_0().child(label).into_any_element()),
+                    )
+                    .into_any_element(),
+            )
+        } else {
+            TriggerBox::new(
+                SharedString::from(format!("{id}-trigger")),
+                glyph.into_any_element(),
+            )
+            .tooltip(Tooltip::new(format!("Checks: {}", presentation.label)))
+        };
         let checks = self.checks;
         let stale = self.stale;
         let on_open: OpenUrl = self

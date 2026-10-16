@@ -58,11 +58,28 @@ pub struct ProviderSlashCommand {
 }
 
 /// `ProviderInstanceEntry` plus the snapshot fields the picker reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CompatibilityAdvisoryStatus {
+    #[default]
+    Supported,
+    Unsupported,
+    Broken,
+    Graceful,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct CompatibilityAdvisory {
+    pub status: CompatibilityAdvisoryStatus,
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ProviderInstanceEntry {
     pub instance_id: String,
     pub driver_kind: String,
     pub display_name: String,
+    pub version: Option<String>,
+    pub compatibility_advisory: Option<CompatibilityAdvisory>,
     pub accent_color: Option<String>,
     pub continuation_group_key: Option<String>,
     pub enabled: bool,

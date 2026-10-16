@@ -21,6 +21,8 @@ pub mod git_actions_control;
 pub mod jetbrains_icons;
 pub mod keybindings_config_warning;
 pub mod keybindings_update_toast_logic;
+// Shown by the thread route when no thread is open; the shell always routes a thread today.
+#[allow(dead_code)]
 pub mod no_active_thread_state;
 pub mod onboarding;
 pub mod preview_panel_shell;

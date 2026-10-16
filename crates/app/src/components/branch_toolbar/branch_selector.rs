@@ -641,12 +641,12 @@ impl BranchToolbarBranchSelector {
 
     // ── Rendering ───────────────────────────────────────────────────────
 
-    fn render_pr_badge(
+    /// The thread's pull request as the toolbar shows it: the linked one, else the branch's own.
+    /// `(number, url, state, title)`.
+    fn displayed_pull_request(
         &self,
         derived: &Derived,
-        theme: &AppTheme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    ) -> Option<(u64, String, PullRequestBadgeState, Option<String>)> {
         // Branch status is the fallback when this thread has no linked pull requests.
         let thread = &self.props.thread;
         let linked = crate::components::sidebar::thread_status_indicators::current_link(
@@ -662,8 +662,8 @@ impl BranchToolbarBranchSelector {
                 .then(|| status.pr.clone())
                 .flatten()
         });
-        let (number, url, state) = match (linked, branch_pr) {
-            (Some(link), _) => (
+        match (linked, branch_pr) {
+            (Some(link), _) => Some((
                 link.number,
                 link.url.clone(),
                 match link.state {
@@ -676,8 +676,9 @@ impl BranchToolbarBranchSelector {
                     _ if link.is_draft => PullRequestBadgeState::Draft,
                     _ => PullRequestBadgeState::Open,
                 },
-            ),
-            (None, Some(pr)) => (
+                link.title.clone(),
+            )),
+            (None, Some(pr)) => Some((
                 pr.number.get(),
                 pr.url.clone(),
                 match pr.state {
@@ -690,9 +691,65 @@ impl BranchToolbarBranchSelector {
                     _ if pr.is_draft == Some(true) => PullRequestBadgeState::Draft,
                     _ => PullRequestBadgeState::Open,
                 },
-            ),
-            _ => return None,
+                Some(pr.title.as_str().to_owned()),
+            )),
+            _ => None,
+        }
+    }
+
+    /// `ThreadDetailsPrRows` in the panel layout, read from the linked snapshot: the host detail
+    /// (checks, actions) arrives with the pull request queries.
+    fn render_panel_pr_row(&self, derived: &Derived, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::components::chat::thread_details_pr_row::ThreadDetailsPrRow;
+        use crate::components::sidebar::thread_status_indicators::{
+            PrStatusIndicator, pull_request_state_label_and_icon,
         };
+        let (number, url, state, title) = self.displayed_pull_request(derived)?;
+        let (state_label, icon) = pull_request_state_label_and_icon(state);
+        let title = title.filter(|title| !title.trim().is_empty());
+        let label = match &title {
+            Some(title) => format!("#{number}: {title}"),
+            None => format!("#{number}"),
+        };
+        let tooltip_lead = format!("PR #{number} - {state_label}");
+        let status = PrStatusIndicator {
+            label: format!("PR {}", state_label.to_lowercase()),
+            state,
+            icon,
+            tooltip: match &title {
+                Some(title) => format!("{tooltip_lead}: {title}"),
+                None => tooltip_lead.clone(),
+            },
+            tooltip_lead,
+            tooltip_title: title.unwrap_or_default(),
+            url: url.clone(),
+        };
+        let git_backend = self.git_backend.clone();
+        let _ = cx;
+        Some(
+            ThreadDetailsPrRow::new(
+                "branch-pr-row",
+                number,
+                label,
+                std::rc::Rc::new(move |_, _, cx| git_backend.open_link(url.clone(), cx)),
+            )
+            .pr_state(Some(match state {
+                PullRequestBadgeState::Merged => turin_contracts::git::GitPullRequestState::Merged,
+                PullRequestBadgeState::Closed => turin_contracts::git::GitPullRequestState::Closed,
+                _ => turin_contracts::git::GitPullRequestState::Open,
+            }))
+            .status(Some(status))
+            .into_any_element(),
+        )
+    }
+
+    fn render_pr_badge(
+        &self,
+        derived: &Derived,
+        theme: &AppTheme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (number, url, state, _) = self.displayed_pull_request(derived)?;
         let tone = pull_request_state_tone(state, theme);
         let git_backend = self.git_backend.clone();
         let _ = cx;
@@ -1106,6 +1163,11 @@ impl Render for BranchToolbarBranchSelector {
                     .flatten(),
             )
             .child(div().flex().min_w_0().child(popover))
+            .children(
+                panel
+                    .then(|| self.render_panel_pr_row(&derived, cx))
+                    .flatten(),
+            )
     }
 }
 

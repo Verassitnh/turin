@@ -47,7 +47,7 @@ fn is_live_runtime_status(status: RuntimeSubagentStatus) -> bool {
     )
 }
 
-#[derive(IntoElement)]
+#[derive(Clone, IntoElement)]
 pub struct AgentElapsed {
     pub status: RuntimeSubagentStatus,
     pub started_at: Option<String>,
@@ -62,6 +62,12 @@ impl AgentElapsed {
             started_at: self.started_at.as_deref(),
             completed_at: self.completed_at.as_deref(),
         }
+    }
+
+    /// False when there is no span to show (`empty:hidden` upstream).
+    pub fn has_value(&self) -> bool {
+        let now_ms = chrono::Utc::now().timestamp_millis() as f64;
+        derive_subagent_elapsed_ms(self.timing(), now_ms).is_some()
     }
 
     fn format_seconds(&self, seconds: f64) -> String {

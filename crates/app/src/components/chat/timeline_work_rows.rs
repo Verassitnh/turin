@@ -8,21 +8,27 @@
 //! V2LifecycleRow.tsx (`SubagentTimelineLink`), TimelineSystemDivider.tsx and
 //! a reduced V2ItemInspector.tsx.
 
+use std::rc::Rc;
+
 use chrono::{DateTime, Utc};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    AnyElement, App, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
     relative, rems,
 };
 
+use super::agent_elapsed::AgentElapsed;
 use super::markdown::ChatMarkdown;
 use super::markdown::code_highlight::highlight_code;
 use super::markdown::inline_flow::{FlowSpan, FlowSpanStyle, FlowText, InlineFlow, WhiteSpace};
 use super::markdown::markdown_pipeline::{Block, parse_chat_markdown};
 use super::messages_timeline::{RowCx, TimelineUiState};
+use super::subagent_tooltip_content::{SubagentTooltipContent, with_subagent_tooltip};
 use super::timeline::file_path_display::format_workspace_relative_path;
-use super::timeline::item_detail::{ToolCallLinesInput, tool_call_lines, turn_item_output_text};
+use super::timeline::item_detail::{
+    ToolCallLinesInput, tool_call_lines, turn_item_has_detail, turn_item_output_text,
+};
 use super::timeline::messages_timeline_logic::{
     MessagesTimelineRow, MessagesTimelineRowContent, live_work_entry_label,
     work_entry_display_label, work_entry_is_visible_in_group, work_entry_read_output,
@@ -51,12 +57,14 @@ use super::timestamp_format::{format_chat_timestamp_tooltip, format_day_aware_ti
 use super::work_log::{
     WorkLogDetailsKind, WorkLogLine, timeline_row_group, work_log_details, work_log_row_frame,
 };
+use crate::state::subagent_display::subagent_detail_preview;
+use crate::state::subagent_runtime::RuntimeSubagentStatus;
 use crate::theme::AppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{
     LEADING_RELAXED, RADIUS_LG, RADIUS_MD, TEXT_2XS, TEXT_3XS, TEXT_SM, TEXT_XS,
 };
-use crate::ui::{Icon, IconName, Tooltip};
+use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 
 // ── Icons ───────────────────────────────────────────────────────────────────
 
@@ -925,8 +933,23 @@ fn inspector_has_detail(item: &TurnItem) -> bool {
         }
         TurnItemPayload::WebSearch { patterns, .. } => !patterns.is_empty(),
         TurnItemPayload::Reasoning { text, .. } => !text.trim().is_empty(),
-        _ => turn_item_output_text(item).is_some(),
+        _ => turn_item_has_detail(item) || turn_item_output_text(item).is_some(),
     }
+}
+
+/// `StructuredValue`: a muted monospace block, scrolling past `max-h-80`.
+fn inspector_text(id: (&'static str, u64), text: &str, cx: &RowCx) -> AnyElement {
+    div()
+        .id(id)
+        .max_h(rems(20.))
+        .overflow_y_scroll()
+        .child(mono_text(
+            (id.0, id.1 + 1),
+            text,
+            cx.theme.muted_foreground,
+            cx,
+        ))
+        .into_any_element()
 }
 
 /// `V2ItemInspector`, reduced to what the turn item already carries (Turin
@@ -1033,7 +1056,8 @@ fn v2_item_inspector(projected: &ProjectedTurnItem, cx: &RowCx) -> AnyElement {
             file_name,
             additions,
             deletions,
-            ..
+            diff,
+            changes,
         } => {
             let path = format_workspace_relative_path(file_name, cx.workspace_root());
             let source = cx.source.clone();
@@ -1082,6 +1106,51 @@ fn v2_item_inspector(projected: &ProjectedTurnItem, cx: &RowCx) -> AnyElement {
                         )
                     }),
             );
+            // A failed edit shows the diff it attempted.
+            if item.status == TurnItemStatus::Failed
+                && let Some(diff) = diff.as_deref().filter(|diff| !diff.trim().is_empty())
+            {
+                column = column.child(
+                    div()
+                        .id(("failed-diff", order))
+                        .max_h(rems(20.))
+                        .overflow_y_scroll()
+                        .child(mono_text(("failed-diff-text", order), diff, muted, cx)),
+                );
+            }
+            if let Some(changes) = changes.as_ref().filter(|changes| !changes.is_empty()) {
+                column = column.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(rems(0.25))
+                        .font_family(theme.fonts.mono.clone())
+                        .text_color(muted)
+                        .children(changes.iter().map(|change| {
+                            let kind = [change.file_type.as_deref(), change.mime_type.as_deref()]
+                                .into_iter()
+                                .flatten()
+                                .filter(|part| !part.is_empty())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            format!(
+                                "{} {}{}{}",
+                                change.operation,
+                                change
+                                    .old_path
+                                    .as_deref()
+                                    .map(|old| format!("{old} → "))
+                                    .unwrap_or_default(),
+                                format_workspace_relative_path(&change.path, cx.workspace_root()),
+                                if kind.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" ({kind})")
+                                }
+                            )
+                        })),
+                );
+            }
         }
         TurnItemPayload::FileSearch { pattern, results } => {
             if let Some(pattern) = pattern.as_deref().filter(|p| !p.trim().is_empty()) {
@@ -1140,6 +1209,119 @@ fn v2_item_inspector(projected: &ProjectedTurnItem, cx: &RowCx) -> AnyElement {
                             .line_breaks(true),
                     ),
             );
+        }
+        TurnItemPayload::ApprovalRequest { prompt, .. } => {
+            if let Some(prompt) = prompt.as_deref().filter(|p| !p.is_empty()) {
+                column = column.child(inspector_text(("approval", order), prompt, cx));
+            }
+        }
+        TurnItemPayload::UserInputRequest { questions, .. } => {
+            let text = questions
+                .iter()
+                .map(|question| question.question.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            column = column.child(inspector_text(("questions", order), &text, cx));
+        }
+        TurnItemPayload::Notification { detail, .. } => {
+            if let Some(detail) = detail.as_deref().filter(|d| !d.is_empty()) {
+                column = column.child(inspector_text(("notification", order), detail, cx));
+            }
+        }
+        TurnItemPayload::SystemNotice { message } => {
+            column = column.child(inspector_text(("notice", order), message, cx));
+        }
+        TurnItemPayload::Error { failure, .. } => {
+            column = column.child(inspector_text(("error", order), &failure.message, cx));
+        }
+        TurnItemPayload::ProposedPlan { markdown, .. } => {
+            column = column.child(inspector_text(("plan", order), markdown, cx));
+        }
+        TurnItemPayload::TodoList { steps, .. } => {
+            let text = steps
+                .iter()
+                .map(|step| {
+                    let mark =
+                        if step.status == super::timeline::turn_item::PlanStepStatus::Completed {
+                            "✓"
+                        } else {
+                            "○"
+                        };
+                    format!("{mark} {}", step.text)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            column = column.child(inspector_text(("todo", order), &text, cx));
+        }
+        TurnItemPayload::Checkpoint { files, .. } => {
+            column = column.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(rems(0.5))
+                    .child(div().text_color(muted).child(format!(
+                        "{} · {} files",
+                        item.status.as_str(),
+                        files.len()
+                    ))),
+            );
+        }
+        TurnItemPayload::Fork {
+            target_thread_id, ..
+        } => {
+            let source = cx.source.clone();
+            let target = target_thread_id.clone();
+            column = column.child(
+                div().child(
+                    crate::ui::Button::new(("open-fork", order))
+                        .variant(crate::ui::ButtonVariant::Outline)
+                        .size(crate::ui::ButtonSize::Xs)
+                        .icon(IconName::GitBranch)
+                        .icon_size(rems(0.75))
+                        .label("Open fork")
+                        .on_click(move |_, _, cx| {
+                            if let Some(source) = source.as_ref() {
+                                source.open_thread(&target, cx);
+                            }
+                        }),
+                ),
+            );
+        }
+        TurnItemPayload::Subagent {
+            child_thread_id: Some(child_thread_id),
+            ..
+        } => {
+            let source = cx.source.clone();
+            let target = child_thread_id.clone();
+            column = column.child(
+                div().child(
+                    crate::ui::Button::new(("open-subagent", order))
+                        .variant(crate::ui::ButtonVariant::Outline)
+                        .size(crate::ui::ButtonSize::Xs)
+                        .label("Open subagent thread")
+                        .on_click(move |_, _, cx| {
+                            if let Some(source) = source.as_ref() {
+                                source.open_thread(&target, cx);
+                            }
+                        }),
+                ),
+            );
+        }
+        TurnItemPayload::Handoff { endpoints, .. } => {
+            if let Some(endpoints) = endpoints {
+                let from = endpoints
+                    .from
+                    .iter()
+                    .map(|endpoint| endpoint.instance_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                column = column.child(
+                    div()
+                        .text_color(muted)
+                        .child(format!("{from} → {}", endpoints.to.instance_id.as_str())),
+                );
+            }
         }
         _ => {
             if let Some(output) = turn_item_output_text(item) {
@@ -1600,6 +1782,37 @@ pub fn context_compaction_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyEleme
         .into_any_element()
 }
 
+type DividerAction = Rc<dyn Fn(&mut App)>;
+
+/// The props of `TimelineSystemDivider`.
+struct SystemDivider<'a> {
+    label: &'a str,
+    /// A plain-string detail (`max-w-80 truncate`).
+    detail: Option<&'a str>,
+    /// A rich detail (`ReactNode`), such as the handoff's endpoints.
+    detail_element: Option<AnyElement>,
+    danger: bool,
+    icon: Option<IconName>,
+    /// `showDetailSeparator !== false`: the "·" before the detail.
+    show_detail_separator: bool,
+    /// `actionLabel` + `onAction`: the content becomes a pill button.
+    action: Option<(String, DividerAction)>,
+}
+
+impl<'a> SystemDivider<'a> {
+    fn new(label: &'a str) -> Self {
+        Self {
+            label,
+            detail: None,
+            detail_element: None,
+            danger: false,
+            icon: None,
+            show_detail_separator: true,
+            action: None,
+        }
+    }
+}
+
 /// `TimelineSystemDivider`.
 fn timeline_system_divider(
     label: &str,
@@ -1608,8 +1821,105 @@ fn timeline_system_divider(
     icon: Option<IconName>,
     cx: &RowCx,
 ) -> AnyElement {
+    system_divider(
+        SystemDivider {
+            detail,
+            danger,
+            icon,
+            ..SystemDivider::new(label)
+        },
+        cx,
+    )
+}
+
+fn system_divider(props: SystemDivider<'_>, cx: &RowCx) -> AnyElement {
     let theme = &cx.theme;
     let rule = || div().h(px(1.)).flex_1().bg(with_alpha(theme.border, 0.7));
+    let SystemDivider {
+        label,
+        detail,
+        detail_element,
+        danger,
+        icon,
+        show_detail_separator,
+        action,
+    } = props;
+    let separator = if show_detail_separator {
+        "·\u{a0}"
+    } else {
+        ""
+    };
+    let content = div()
+        .flex()
+        .min_w_0()
+        .flex_wrap()
+        .items_center()
+        .justify_center()
+        .gap(rems(0.375))
+        .when_some(icon, |this, icon| {
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .child(Icon::new(icon).size(rems(0.75))),
+            )
+        })
+        .child(
+            div()
+                .font_weight(FontWeight::MEDIUM)
+                .child(label.to_string()),
+        )
+        .when_some(detail, |this, detail| {
+            this.child(
+                div()
+                    .max_w(rems(20.))
+                    .truncate()
+                    .opacity(0.7)
+                    .child(format!("{separator}{detail}")),
+            )
+        })
+        .when_some(detail_element, |this, element| {
+            this.child(
+                div()
+                    .flex()
+                    .min_w_0()
+                    .items_center()
+                    .opacity(0.7)
+                    .child(separator)
+                    .child(element),
+            )
+        });
+    let middle = match action {
+        Some((action_label, on_action)) => {
+            let hover_bg = theme.accent;
+            let hover_fg = theme.foreground;
+            div()
+                .id(ElementId::Name(format!("system-divider-{label}").into()))
+                .flex()
+                .min_w_0()
+                .cursor_pointer()
+                .items_center()
+                .gap(rems(0.375))
+                .rounded_full()
+                .border_1()
+                .border_color(with_alpha(theme.border, 0.7))
+                .bg(theme.background)
+                .px(rems(0.625))
+                .py(rems(0.25))
+                .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
+                .child(content)
+                .on_click(move |_, _, cx| on_action(cx))
+                .tooltip({
+                    let action_label = action_label.clone();
+                    move |window, cx| Tooltip::new(action_label.clone()).build(window, cx)
+                })
+                .into_any_element()
+        }
+        None => content
+            .rounded_full()
+            .px(rems(0.5))
+            .py(rems(0.25))
+            .into_any_element(),
+    };
     div()
         .flex()
         .min_w_0()
@@ -1623,37 +1933,101 @@ fn timeline_system_divider(
             theme.muted_foreground
         })
         .child(rule())
-        .child(
-            div()
-                .flex()
-                .min_w_0()
-                .flex_wrap()
-                .items_center()
-                .justify_center()
-                .gap(rems(0.375))
-                .rounded_full()
-                .px(rems(0.5))
-                .py(rems(0.25))
-                .when_some(icon, |this, icon| {
-                    this.child(Icon::new(icon).size(rems(0.75)))
-                })
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(label.to_string()),
-                )
-                .when_some(detail, |this, detail| {
-                    this.child(
-                        div()
-                            .max_w(rems(20.))
-                            .truncate()
-                            .opacity(0.7)
-                            .child(format!("·\u{a0}{detail}")),
-                    )
-                }),
-        )
+        .child(middle)
         .child(rule())
         .into_any_element()
+}
+
+/// `HandoffEndpoint`: the provider glyph and the model (else the provider) name, with a tooltip.
+fn handoff_endpoint(
+    id: ElementId,
+    endpoint: &crate::state::helpers::handoff::HandoffEndpoint,
+    cx: &RowCx,
+) -> AnyElement {
+    let theme = &cx.theme;
+    let instance = endpoint.instance_id.as_str().to_owned();
+    let label = endpoint
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| instance.clone());
+    let glyph = crate::assets::provider_icon_path(&instance).map(|path| {
+        crate::ui::Icon::path(path)
+            .size(rems(0.75))
+            .color(theme.foreground)
+    });
+    let tooltip = format!("{instance} · {label}");
+    div()
+        .id(id)
+        .flex()
+        .min_w_0()
+        .items_center()
+        .gap(rems(0.25))
+        .rounded_sm()
+        .children(glyph)
+        .child(
+            div()
+                .truncate()
+                .font_weight(FontWeight::MEDIUM)
+                .child(label),
+        )
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .into_any_element()
+}
+
+/// `HandoffRow`.
+fn handoff_row(
+    endpoints: &crate::state::helpers::handoff::HandoffEndpoints,
+    failed: bool,
+    cx: &RowCx,
+) -> AnyElement {
+    let from = endpoints.from.iter().enumerate().map(|(index, endpoint)| {
+        div()
+            .flex()
+            .min_w_0()
+            .items_center()
+            .child(handoff_endpoint(
+                ElementId::Name(format!("handoff-from-{index}").into()),
+                endpoint,
+                cx,
+            ))
+            .when(index + 1 < endpoints.from.len(), |this| {
+                this.child(div().ml(rems(0.125)).child(","))
+            })
+    });
+    let detail = div()
+        .flex()
+        .min_w_0()
+        .flex_wrap()
+        .items_center()
+        .justify_center()
+        .gap(rems(0.375))
+        .children(from)
+        .when(!endpoints.from.is_empty(), |this| {
+            this.child(
+                div()
+                    .flex_shrink_0()
+                    .child(Icon::new(IconName::ArrowRight).size(rems(0.75))),
+            )
+        })
+        .child(handoff_endpoint(
+            ElementId::Name("handoff-to".into()),
+            &endpoints.to,
+            cx,
+        ))
+        .into_any_element();
+    system_divider(
+        SystemDivider {
+            detail_element: Some(detail),
+            danger: failed,
+            icon: Some(IconName::ArrowRightLeft),
+            show_detail_separator: false,
+            ..SystemDivider::new("Context handoff")
+        },
+        cx,
+    )
 }
 
 // ── Events and subagents ────────────────────────────────────────────────────
@@ -1753,6 +2127,7 @@ pub fn event_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
         created_at,
         projected_item,
         subagents,
+        resource_summary,
         ..
     } = &row.content
     else {
@@ -1851,7 +2226,14 @@ pub fn event_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
                 cx,
             );
         }
-        TurnItemPayload::Handoff { to_model, summary } => {
+        TurnItemPayload::Handoff {
+            to_model,
+            summary,
+            endpoints,
+        } => {
+            if let Some(endpoints) = endpoints {
+                return handoff_row(endpoints, item.status == TurnItemStatus::Failed, cx);
+            }
             let detail = summary
                 .clone()
                 .or_else(|| to_model.clone().map(|m| format!("→ {m}")));
@@ -1859,21 +2241,101 @@ pub fn event_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
                 "Context handoff",
                 detail.as_deref(),
                 item.status == TurnItemStatus::Failed,
-                Some(IconName::Zap),
+                Some(IconName::ArrowRightLeft),
                 cx,
             );
         }
-        TurnItemPayload::Fork { .. } => {
-            return timeline_system_divider(
-                "Conversation fork",
-                None,
-                false,
-                Some(IconName::GitFork),
+        TurnItemPayload::Fork {
+            target_thread_id,
+            source_thread_id,
+        } => {
+            let from_run = source_thread_id.is_some();
+            let related = source_thread_id
+                .clone()
+                .unwrap_or_else(|| target_thread_id.clone());
+            let source = cx.source.clone();
+            return system_divider(
+                SystemDivider {
+                    icon: Some(IconName::GitFork),
+                    action: Some((
+                        if from_run {
+                            "Open source conversation"
+                        } else {
+                            "Open fork"
+                        }
+                        .to_owned(),
+                        Rc::new(move |cx| {
+                            if let Some(source) = &source {
+                                source.open_thread(&related, cx);
+                            }
+                        }),
+                    )),
+                    ..SystemDivider::new(if from_run {
+                        "Forked from conversation"
+                    } else {
+                        "Conversation fork"
+                    })
+                },
                 cx,
             );
         }
-        TurnItemPayload::ThreadCreated { .. } => {
+        TurnItemPayload::ThreadCreated {
+            target_thread_id, ..
+        } => {
             let title = item.title.clone();
+            let source = cx.source.clone();
+            let target = target_thread_id.clone();
+            let open: Rc<dyn Fn(&mut App)> = Rc::new(move |cx| {
+                if let Some(source) = &source {
+                    source.open_thread(&target, cx);
+                }
+            });
+            if *resource_summary {
+                // The resource card: icon tile, title, "Open chat".
+                let open_chat = open.clone();
+                return div()
+                    .flex()
+                    .min_w_0()
+                    .items_center()
+                    .gap(rems(0.75))
+                    .rounded(RADIUS_LG)
+                    .border_1()
+                    .border_color(with_alpha(theme.border, 0.6))
+                    .p(rems(0.75))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_shrink_0()
+                            .size(rems(2.25))
+                            .items_center()
+                            .justify_center()
+                            .rounded(RADIUS_LG)
+                            .bg(with_alpha(theme.muted, 0.6))
+                            .child(
+                                Icon::new(IconName::MessageSquare)
+                                    .size(rems(1.))
+                                    .color(theme.muted_foreground),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_size(TEXT_SM.size)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(title.clone().unwrap_or_else(|| "Created thread".to_owned())),
+                    )
+                    .child(
+                        Button::new(("open-created-thread", cx.order as usize))
+                            .variant(ButtonVariant::Outline)
+                            .size(ButtonSize::Xs)
+                            .label("Open chat")
+                            .on_click(move |_, _, cx| open_chat(cx)),
+                    )
+                    .into_any_element();
+            }
+            let open_chat = open.clone();
             return WorkLogLine {
                 icon: Some(icon_box(WorkEntryIconName::T3Code, theme.icon_muted)),
                 label: div()
@@ -1882,7 +2344,19 @@ pub fn event_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
                         title.map(|t| format!(" · {t}")).unwrap_or_default()
                     ))
                     .into_any_element(),
-                trailing: Vec::new(),
+                trailing: vec![
+                    // `InlineButton`: `font-medium text-foreground`, underlined on hover.
+                    div()
+                        .id(("open-created-thread", cx.order as usize))
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.foreground)
+                        .hover(|style| style.underline())
+                        .child("Open chat")
+                        .on_click(move |_, _, cx| open_chat(cx))
+                        .into_any_element(),
+                ],
                 wrap_label: false,
             }
             .into_any_element();
@@ -2184,6 +2658,19 @@ pub fn format_elapsed_seconds(total: f64) -> String {
     format!("{hours}h {:02}m", minutes % 60)
 }
 
+fn runtime_status(status: TurnItemStatus) -> RuntimeSubagentStatus {
+    match status {
+        TurnItemStatus::Idle => RuntimeSubagentStatus::Idle,
+        TurnItemStatus::Pending => RuntimeSubagentStatus::Pending,
+        TurnItemStatus::Running => RuntimeSubagentStatus::Running,
+        TurnItemStatus::Waiting => RuntimeSubagentStatus::Waiting,
+        TurnItemStatus::Completed => RuntimeSubagentStatus::Completed,
+        TurnItemStatus::Failed => RuntimeSubagentStatus::Failed,
+        TurnItemStatus::Cancelled => RuntimeSubagentStatus::Cancelled,
+        TurnItemStatus::Interrupted => RuntimeSubagentStatus::Interrupted,
+    }
+}
+
 /// `SubagentTimelineLink`.
 fn subagent_link(item: &TurnItem, cx: &RowCx) -> AnyElement {
     let theme = &cx.theme;
@@ -2223,7 +2710,7 @@ fn subagent_link(item: &TurnItem, cx: &RowCx) -> AnyElement {
     let title = item.title.clone().unwrap_or_else(|| "Subagent".into());
     let source = cx.source.clone();
     let thread = child_thread_id.clone();
-    div()
+    let link = div()
         .id(ElementId::Name(format!("subagent-{}", item.id).into()))
         .group("subagent")
         .flex()
@@ -2284,7 +2771,17 @@ fn subagent_link(item: &TurnItem, cx: &RowCx) -> AnyElement {
                         } else {
                             theme.muted_foreground
                         })
-                        .child(detail.unwrap_or_else(|| status_label.to_string())),
+                        .child(match detail.as_deref() {
+                            // `MiddleTruncate` for a path-like detail (a slash, no spaces).
+                            Some(path) if path.contains('/') && !path.contains(' ') => {
+                                crate::ui::middle_truncate::MiddleTruncate::new(path.to_owned())
+                                    .into_any_element()
+                            }
+                            Some(detail) => {
+                                div().truncate().child(detail.to_owned()).into_any_element()
+                            }
+                            None => div().child(status_label.to_string()).into_any_element(),
+                        }),
                 ),
         )
         .child(
@@ -2305,8 +2802,53 @@ fn subagent_link(item: &TurnItem, cx: &RowCx) -> AnyElement {
             if let (Some(source), Some(thread)) = (source.as_ref(), thread.as_ref()) {
                 source.open_thread(thread, cx);
             }
-        })
-        .into_any_element()
+        });
+    // The hover card (`ThreadHoverCardPopup` + `SubagentTooltipContent`).
+    let preview = subagent_detail_preview(
+        runtime_status(status),
+        match &item.payload {
+            TurnItemPayload::Subagent { result, .. } => result.as_deref(),
+            _ => None,
+        },
+        match &item.payload {
+            TurnItemPayload::Subagent { progress, .. } => progress.as_deref(),
+            _ => None,
+        },
+    );
+    let tooltip = SubagentTooltipContent::new(
+        item.title.clone().unwrap_or_else(|| "Subagent".into()),
+        turn_status_to_contract(status),
+    )
+    .elapsed(Some(AgentElapsed {
+        status: runtime_status(status),
+        started_at: item.started_at.clone(),
+        completed_at: item.completed_at.clone(),
+        compact: false,
+    }))
+    .preview(preview);
+    with_subagent_tooltip(
+        ElementId::Name(format!("subagent-tip-{}", item.id).into()),
+        tooltip,
+        link,
+    )
+    .w_full()
+    .into_any_element()
+}
+
+fn turn_status_to_contract(
+    status: TurnItemStatus,
+) -> crate::state::contracts::OrchestrationV2TurnItemStatus {
+    use crate::state::contracts::OrchestrationV2TurnItemStatus as C;
+    match status {
+        TurnItemStatus::Idle => C::Idle,
+        TurnItemStatus::Pending => C::Pending,
+        TurnItemStatus::Running => C::Running,
+        TurnItemStatus::Waiting => C::Waiting,
+        TurnItemStatus::Completed => C::Completed,
+        TurnItemStatus::Failed => C::Failed,
+        TurnItemStatus::Cancelled => C::Cancelled,
+        TurnItemStatus::Interrupted => C::Interrupted,
+    }
 }
 
 /// `V2SubagentGroup`.

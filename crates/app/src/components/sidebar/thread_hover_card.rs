@@ -10,7 +10,7 @@
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext as _, Context, FontWeight, Hsla, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Window, div, px, rems,
+    ParentElement as _, Render, RenderOnce, SharedString, Styled as _, Window, div, px, rems,
 };
 
 use super::thread_status_indicators::pull_request_state_presentation;
@@ -194,88 +194,124 @@ impl Render for HoverCardView {
                 color,
             ));
         }
-        let footer = (!card.pull_requests.is_empty()).then(|| {
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .border_t_1()
-                .border_color(with_alpha(theme.border, 0.6))
-                .pt_2()
-                .pl(px(2.))
-                .children(card.pull_requests.iter().map(|link| {
-                    let (label, tone, icon) = pull_request_state_presentation(
-                        link.state.or(Some(PullRequestState::Open)),
-                        link.is_draft,
-                        theme,
-                    );
-                    div()
-                        .flex()
-                        .min_w_0()
-                        .items_center()
-                        .gap_1p5()
-                        .child(Icon::new(icon).size(small).color(tone))
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_color(tone)
-                                .child(format!("#{}", link.number)),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(muted)
-                                .child(link.title.clone().unwrap_or_else(|| label.to_string())),
-                        )
-                }))
-        });
-        // Offset from the pointer, as the anchored tooltip's `sideOffset`.
-        div().pl(px(4.)).pt(px(4.)).child(
-            div()
-                .rounded(RADIUS_MD)
-                .border_1()
-                .border_color(dropdown_glass_border(theme))
-                .bg(dropdown_glass_background(theme))
-                .shadow(tokens::shadow_xl(0.25))
-                .font_family(theme.fonts.sans.clone())
-                .px_2()
-                .py_1()
-                .max_w(rems(20.))
-                .child(
+        let footer =
+            (!card.pull_requests.is_empty())
+                .then(|| {
                     div()
                         .flex()
                         .flex_col()
-                        .min_w_0()
-                        .max_w(rems(20.))
-                        .gap_2()
-                        .px_1()
-                        .py_2()
-                        .text_size(TEXT_XS.size)
-                        .line_height(TEXT_XS.line_height)
-                        .child(
+                        .gap_1()
+                        .border_t_1()
+                        .border_color(with_alpha(theme.border, 0.6))
+                        .pt_2()
+                        .pl(px(2.))
+                        .children(card.pull_requests.iter().map(|link| {
+                            let (label, tone, icon) = pull_request_state_presentation(
+                                link.state.or(Some(PullRequestState::Open)),
+                                link.is_draft,
+                                theme,
+                            );
                             div()
+                                .flex()
                                 .min_w_0()
-                                .truncate()
-                                // `leading-tight` (1.25 × 12px), not the 1rem row height.
-                                .line_height(px(15.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.foreground)
-                                .child(card.title.clone()),
-                        )
-                        .when(!rows.is_empty(), |this| {
-                            this.child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(rems(0.375))
-                                    .pl(px(2.))
-                                    .text_color(muted)
-                                    .children(rows),
-                            )
-                        })
-                        .children(footer),
-                ),
-        )
+                                .items_center()
+                                .gap_1p5()
+                                .child(Icon::new(icon).size(small).color(tone))
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_color(tone)
+                                        .child(format!("#{}", link.number)),
+                                )
+                                .child(
+                                    div().min_w_0().truncate().text_color(muted).child(
+                                        link.title.clone().unwrap_or_else(|| label.to_string()),
+                                    ),
+                                )
+                        }))
+                })
+                .map(IntoElement::into_any_element);
+        thread_hover_card_popup(ThreadHoverCard {
+            title: card.title.clone(),
+            rows,
+            footer,
+        })
+    }
+}
+
+/// `ThreadHoverCardPopup`: the glass tooltip surface, `max-w-80 text-left`,
+/// offset from the pointer as the anchored tooltip's `sideOffset`.
+pub fn thread_hover_card_popup(content: impl IntoElement) -> impl IntoElement {
+    div()
+        .pl(px(4.))
+        .pt(px(4.))
+        .child(ThreadHoverCardPopup(content.into_any_element()))
+}
+
+#[derive(IntoElement)]
+struct ThreadHoverCardPopup(AnyElement);
+
+impl RenderOnce for ThreadHoverCardPopup {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.app_theme();
+        div()
+            .rounded(RADIUS_MD)
+            .border_1()
+            .border_color(dropdown_glass_border(theme))
+            .bg(dropdown_glass_background(theme))
+            .shadow(tokens::shadow_xl(0.25))
+            .font_family(theme.fonts.sans.clone())
+            .px_2()
+            .py_1()
+            .max_w(rems(20.))
+            .child(self.0)
+    }
+}
+
+/// `ThreadHoverCard`: shared title, metadata spacing and optional footer for
+/// thread previews.
+#[derive(IntoElement)]
+pub struct ThreadHoverCard {
+    pub title: SharedString,
+    pub rows: Vec<AnyElement>,
+    pub footer: Option<AnyElement>,
+}
+
+impl RenderOnce for ThreadHoverCard {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.app_theme();
+        let muted = theme.muted_foreground;
+        div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .max_w(rems(20.))
+            .gap_2()
+            .px_1()
+            .py_2()
+            .text_size(TEXT_XS.size)
+            .line_height(TEXT_XS.line_height)
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    // `leading-tight` (1.25 × 12px), not the 1rem row height.
+                    .line_height(px(15.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child(self.title),
+            )
+            .when(!self.rows.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(rems(0.375))
+                        .pl(px(2.))
+                        .text_color(muted)
+                        .children(self.rows),
+                )
+            })
+            .children(self.footer)
     }
 }

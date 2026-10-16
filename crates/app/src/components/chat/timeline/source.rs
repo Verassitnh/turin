@@ -24,6 +24,9 @@ use super::turn_item::{ProviderApprovalDecision, TurnItemPayload};
 use super::types::{RunStatus, ThreadTimelineSnapshot};
 
 /// User responses the view sends back to whatever owns the thread.
+/// Delivered with the saved relative path, or the failure message.
+pub type WriteDone = Box<dyn FnOnce(Result<String, String>, &mut App)>;
+
 pub trait TimelineSource: 'static {
     /// `onRespondToApproval`.
     fn respond_to_approval(
@@ -42,6 +45,23 @@ pub trait TimelineSource: 'static {
     fn open_turn_diff(&self, run_id: &str, file_path: Option<&str>, cx: &mut App);
     /// `onOpenThread`: navigate to another thread (subagents, created threads).
     fn open_thread(&self, thread_id: &str, cx: &mut App);
+    /// `AuthFilesystemWriteScope` for the thread's environment: whether the plan card may
+    /// save into the workspace.
+    fn can_write_workspace_files(&self) -> bool {
+        false
+    }
+    /// `projectEnvironment.writeFile`: writes `contents` to `relative_path` under `cwd` and
+    /// reports the saved relative path, or the failure message, to `on_done`.
+    fn write_workspace_file(
+        &self,
+        _cwd: &str,
+        _relative_path: &str,
+        _contents: &str,
+        on_done: WriteDone,
+        cx: &mut App,
+    ) {
+        on_done(Err("Saving to the workspace is not available.".into()), cx);
+    }
 }
 
 /// The observable snapshot holder.
@@ -143,6 +163,10 @@ impl MockTimelineSource {
     /// Creates the store for the startup fixture and starts streaming.
     pub fn start(cx: &mut App) -> Entity<ThreadTimelineStore> {
         let mut thread = startup_thread();
+        // `TURIN_PENDING=none` clears the pending approval, for shots of what sits behind it.
+        if std::env::var("TURIN_PENDING").is_ok_and(|v| v == "none") {
+            thread.pending_approvals.clear();
+        }
         if std::env::var("TURIN_PENDING").is_ok_and(|v| v == "question") {
             thread.pending_approvals.clear();
             thread = with_pending_question(thread);

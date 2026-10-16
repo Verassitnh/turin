@@ -4,9 +4,10 @@
 //! `Icon`, `Content`, `Actions`, `Body`): the drawer attached above the
 //! composer while the agent waits on the user.
 //!
-//! Selection drafts live in element state (upstream keeps them in the
-//! composer draft store). The approval "more options" menu is an inline
-//! disclosure, and the 1–9 option shortcuts are not bound yet.
+//! The answer drafts are `pending_user_input.rs`'s (U3a) `PendingUserInputDraftAnswer`s, held in
+//! element state (upstream keeps them in the composer draft store); the card reads its selection
+//! and progress through `derive_pending_user_input_progress`. The approval "more options" menu
+//! is an inline disclosure, and the 1–9 option shortcuts are not bound yet.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,6 +21,10 @@ use gpui_kit::{
 };
 
 use super::markdown::ChatMarkdown;
+use super::pending_user_input::{
+    PendingUserInputAnswer, PendingUserInputDraftAnswer, build_pending_user_input_answers,
+    derive_pending_user_input_progress, toggle_pending_user_input_option_selection,
+};
 use super::timeline::source::TimelineSource;
 use super::timeline::turn_item::{
     ProviderApprovalDecision, ProviderApprovalOption, ProviderRequestKind,
@@ -143,7 +148,6 @@ fn approval_labels(kind: ProviderRequestKind) -> (&'static str, &'static str) {
 #[derive(Default)]
 struct ApprovalState {
     responding: Option<String>,
-    more_open: bool,
 }
 
 /// The approval drawer: `ComposerBanner.Row layout="approval"` with the panel
@@ -231,7 +235,6 @@ impl RenderOnce for ComposerPendingApprovalBanner {
             .unwrap_or_else(default_approval_options);
         let can_respond = approval.response_capability == ResponseCapability::Live;
         let responding = state.read(cx).responding.as_deref() == Some(approval.request_id.as_str());
-        let more_open = state.read(cx).more_open;
         let respond = {
             let source = self.source.clone();
             let request_id = approval.request_id.clone();
@@ -239,7 +242,6 @@ impl RenderOnce for ComposerPendingApprovalBanner {
             move |decision: ProviderApprovalDecision, cx: &mut App| {
                 state.update(cx, |state, cx| {
                     state.responding = Some(request_id.clone());
-                    state.more_open = false;
                     cx.notify();
                 });
                 if let Some(source) = source.as_ref() {
@@ -301,24 +303,36 @@ impl RenderOnce for ComposerPendingApprovalBanner {
             .cloned()
             .collect();
         if !more.is_empty() {
-            let toggle = state.clone();
-            actions = actions.child(
+            // `<Menu>`: the rest of the decisions, opening above the trigger and aligned to its end.
+            let respond = respond.clone();
+            let menu_options = more.clone();
+            actions = actions.child(crate::pull_request::dropdown::dropdown(
+                "approval-more-menu",
+                gpui_kit::Anchor::BottomRight,
                 Button::new("approval-more")
                     .size(ButtonSize::IconXs)
                     .variant(ButtonVariant::Outline)
-                    .pressed(more_open)
                     .disabled(responding)
                     .tooltip(Tooltip::new("More approval options"))
-                    .child(Icon::new(IconName::Ellipsis).size(rems(1.)))
-                    .on_click(move |_, _, cx| {
-                        toggle.update(cx, |state, cx| {
-                            state.more_open = !state.more_open;
-                            cx.notify();
-                        })
-                    }),
-            );
+                    .child(Icon::new(IconName::Ellipsis).size(rems(1.))),
+                move |mut menu, _, _| {
+                    for option in &menu_options {
+                        let decision = option.decision;
+                        let respond = respond.clone();
+                        let mut item =
+                            gpui_kit::component::menu::PopupMenuItem::new(option.label.clone())
+                                .disabled(responding)
+                                .on_click(move |_, _, cx| respond(decision, cx));
+                        if option.warning.is_some() {
+                            item = item.icon(IconName::TriangleAlert);
+                        }
+                        menu = menu.item(item);
+                    }
+                    menu
+                },
+            ));
         }
-        let mut body = div().flex().flex_col().gap(rems(0.75)).child(
+        let body = div().flex().flex_col().gap(rems(0.75)).child(
             div()
                 .flex()
                 .w_full()
@@ -341,36 +355,6 @@ impl RenderOnce for ComposerPendingApprovalBanner {
                 .child(panel)
                 .child(actions),
         );
-        if more_open {
-            let mut list = div().ml(rems(2.)).flex().flex_col().gap(rems(0.25));
-            for (ix, option) in more.iter().enumerate() {
-                let decision = option.decision;
-                let respond = respond.clone();
-                list = list.child(
-                    div()
-                        .id(("approval-more-option", ix))
-                        .flex()
-                        .items_center()
-                        .gap(rems(0.5))
-                        .rounded(RADIUS_MD)
-                        .px(rems(0.5))
-                        .py(rems(0.375))
-                        .cursor_pointer()
-                        .text_size(TEXT_SM.size)
-                        .hover(|s| s.bg(theme.accent))
-                        .when(option.warning.is_some(), |this| {
-                            this.child(
-                                Icon::new(IconName::TriangleAlert)
-                                    .size(rems(0.75))
-                                    .color(theme.warning),
-                            )
-                        })
-                        .child(option.label.clone())
-                        .on_click(move |_, _, cx| respond(decision, cx)),
-                );
-            }
-            body = body.child(list);
-        }
         banner_surface(
             BannerVariant::Warning,
             true,
@@ -381,16 +365,43 @@ impl RenderOnce for ComposerPendingApprovalBanner {
     }
 }
 
-/// `PendingUserInputDraftAnswer` for one question.
-#[derive(Clone, Default)]
-struct DraftAnswer {
-    selected: Vec<String>,
+/// The timeline's question as the contract type U3a's draft logic reads.
+fn contract_questions(
+    questions: &[super::timeline::turn_item::UserInputQuestion],
+) -> Vec<turin_contracts::provider_runtime::UserInputQuestion> {
+    questions
+        .iter()
+        .filter_map(|question| {
+            serde_json::from_value(serde_json::json!({
+                "id": question.id,
+                "header": question.header,
+                "question": question.question,
+                "options": question.options.iter().map(|option| serde_json::json!({
+                    "label": option.label,
+                    "description": option.description,
+                    "value": option.value,
+                })).collect::<Vec<_>>(),
+                "allowCustomAnswer": question.allow_custom_answer,
+                "initialAnswer": question.initial_answer,
+                "multiSelect": question.multi_select,
+            }))
+            .ok()
+        })
+        .collect()
+}
+
+/// What the source takes for one answer: text as is, a choice list joined.
+fn answer_text(answer: &PendingUserInputAnswer) -> String {
+    match answer {
+        PendingUserInputAnswer::Text(text) => text.clone(),
+        PendingUserInputAnswer::Choices(choices) => choices.join(", "),
+    }
 }
 
 struct UserInputState {
     request_id: String,
     question_index: usize,
-    answers: HashMap<String, DraftAnswer>,
+    answers: HashMap<String, PendingUserInputDraftAnswer>,
     collapsed_question: Option<String>,
     responding: bool,
 }
@@ -402,29 +413,45 @@ pub struct ComposerPendingUserInputBanner {
     pub source: Option<Arc<dyn TimelineSource>>,
 }
 
+/// `onAdvanceActivePendingUserInput`: the next question, or the answers on the last one.
 fn advance(
     state: &Entity<UserInputState>,
     prompt: &PendingUserInput,
     source: Option<Arc<dyn TimelineSource>>,
     cx: &mut App,
 ) {
-    let last = prompt.questions.len().saturating_sub(1);
-    let finished = state.update(cx, |state, cx| {
-        let done = state.question_index >= last;
-        if !done {
-            state.question_index += 1;
-        } else {
-            state.responding = true;
-        }
+    if prompt.response_capability == ResponseCapability::NotResumable {
+        return;
+    }
+    let questions = contract_questions(&prompt.questions);
+    let (progress, answers) = {
+        let state = state.read(cx);
+        (
+            derive_pending_user_input_progress(&questions, &state.answers, state.question_index),
+            build_pending_user_input_answers(&questions, &state.answers),
+        )
+    };
+    if !progress.is_last_question {
+        state.update(cx, |state, cx| {
+            state.question_index = progress.question_index + 1;
+            cx.notify();
+        });
+        return;
+    }
+    // Every question must resolve before the answers go out.
+    let Some(answers) = answers else { return };
+    state.update(cx, |state, cx| {
+        state.responding = true;
         cx.notify();
-        done
     });
-    if finished && let Some(source) = source {
-        let answers = state
-            .read(cx)
-            .answers
+    if let Some(source) = source {
+        let answers = questions
             .iter()
-            .map(|(id, answer)| (id.clone(), answer.selected.join(", ")))
+            .filter_map(|question| {
+                answers
+                    .get(question.id.as_str())
+                    .map(|answer| (question.id.as_str().to_owned(), answer_text(answer)))
+            })
             .collect();
         source.respond_to_user_input(&prompt.request_id, answers, cx);
     }
@@ -446,22 +473,25 @@ impl RenderOnce for ComposerPendingUserInputBanner {
             },
         );
         let _ = &state.read(cx).request_id;
-        let index = state
-            .read(cx)
-            .question_index
-            .min(prompt.questions.len().saturating_sub(1));
+        let contract = contract_questions(&prompt.questions);
+        let progress = {
+            let state = state.read(cx);
+            derive_pending_user_input_progress(&contract, &state.answers, state.question_index)
+        };
+        let index = progress.question_index;
         let Some(question) = prompt.questions.get(index).cloned() else {
             return div().into_any_element();
         };
         let collapsed = state.read(cx).collapsed_question.as_deref() == Some(question.id.as_str());
         let responding = state.read(cx).responding;
         let disabled = responding || prompt.response_capability == ResponseCapability::NotResumable;
-        let selected: Vec<String> = state
-            .read(cx)
-            .answers
-            .get(&question.id)
-            .map(|a| a.selected.clone())
-            .unwrap_or_default();
+        // A typed custom answer outranks the options (`customAnswerActive`).
+        let custom_answer_active = !progress.custom_answer.trim().is_empty();
+        let selected: Vec<String> = if custom_answer_active {
+            Vec::new()
+        } else {
+            progress.selected_option_values.clone()
+        };
 
         let toggle_state = state.clone();
         let question_id: SharedString = question.id.clone().into();
@@ -572,6 +602,7 @@ impl RenderOnce for ComposerPendingUserInputBanner {
             let source = self.source.clone();
             let multi = question.multi_select;
             let qid = question.id.clone();
+            let question_for_click = question.clone();
             options = options.child(
                 div()
                     .id(("pending-option", ix))
@@ -645,18 +676,20 @@ impl RenderOnce for ComposerPendingUserInputBanner {
                             return;
                         }
                         let value = value.clone();
+                        let Some(contract_question) =
+                            contract_questions(std::slice::from_ref(&question_for_click))
+                                .into_iter()
+                                .next()
+                        else {
+                            return;
+                        };
                         state.update(cx, |state, cx| {
-                            let answer = state.answers.entry(qid.clone()).or_default();
-                            if multi {
-                                if let Some(pos) = answer.selected.iter().position(|v| *v == value)
-                                {
-                                    answer.selected.remove(pos);
-                                } else {
-                                    answer.selected.push(value);
-                                }
-                            } else {
-                                answer.selected = vec![value];
-                            }
+                            let draft = toggle_pending_user_input_option_selection(
+                                &contract_question,
+                                state.answers.get(&qid),
+                                &value,
+                            );
+                            state.answers.insert(qid.clone(), draft);
                             cx.notify();
                         });
                         if !multi {
@@ -733,6 +766,63 @@ mod tests {
             .count();
         assert_eq!(primary, 2);
         assert_eq!(options.len() - primary, 2);
+    }
+
+    fn question(multi_select: bool) -> super::super::timeline::turn_item::UserInputQuestion {
+        use super::super::timeline::turn_item::{UserInputQuestion, UserInputQuestionOption};
+        UserInputQuestion {
+            id: "scope".into(),
+            header: "Scope".into(),
+            question: "Which parts?".into(),
+            options: ["api", "ui"]
+                .into_iter()
+                .map(|label| UserInputQuestionOption {
+                    label: label.into(),
+                    description: String::new(),
+                    value: None,
+                })
+                .collect(),
+            multi_select,
+            allow_custom_answer: None,
+            initial_answer: None,
+            required: None,
+        }
+    }
+
+    #[test]
+    fn the_card_reads_selection_through_the_u3a_drafts() {
+        let questions = contract_questions(&[question(true)]);
+        assert_eq!(questions.len(), 1);
+        let mut answers = HashMap::new();
+        for value in ["api", "ui", "api"] {
+            let draft = toggle_pending_user_input_option_selection(
+                &questions[0],
+                answers.get("scope"),
+                value,
+            );
+            answers.insert("scope".to_owned(), draft);
+        }
+        // Toggling "api" twice leaves "ui".
+        let progress = derive_pending_user_input_progress(&questions, &answers, 0);
+        assert_eq!(progress.selected_option_values, vec!["ui".to_owned()]);
+        assert!(progress.is_last_question);
+        assert!(progress.can_advance);
+        assert_eq!(
+            build_pending_user_input_answers(&questions, &answers)
+                .unwrap()
+                .get("scope")
+                .map(answer_text)
+                .as_deref(),
+            Some("ui")
+        );
+    }
+
+    #[test]
+    fn nothing_is_sent_while_a_question_is_unanswered() {
+        let questions = contract_questions(&[question(false)]);
+        assert!(build_pending_user_input_answers(&questions, &HashMap::new()).is_none());
+        let progress = derive_pending_user_input_progress(&questions, &HashMap::new(), 0);
+        assert!(!progress.can_advance);
     }
 
     #[test]

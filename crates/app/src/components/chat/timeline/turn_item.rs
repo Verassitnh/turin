@@ -399,9 +399,15 @@ pub enum TurnItemPayload {
     Handoff {
         to_model: Option<String>,
         summary: Option<String>,
+        /// `resolveHandoffEndpoints(item, runs)`, resolved when the projection is converted
+        /// (the row has no runs); `None` falls back to the target model.
+        endpoints: Option<crate::state::helpers::handoff::HandoffEndpoints>,
     },
     Fork {
         target_thread_id: String,
+        /// `source.type === "run" ? source.threadId`: the conversation this one was forked
+        /// from. `None` is the source side of a fork (`source.type !== "run"`).
+        source_thread_id: Option<String>,
     },
     ThreadCreated {
         target_thread_id: String,

@@ -43,6 +43,9 @@ mod tests {
             dismissible: false,
             dismiss_label: None,
             actions: Vec::new(),
+            actions_ghost: false,
+            disabled_actions: Vec::new(),
+            error: None,
         }
     }
 

@@ -259,8 +259,13 @@ impl ChatComposer {
             let action_id = action_id.clone();
             actions.push(
                 Button::new(("banner-action", index))
-                    .variant(ButtonVariant::Outline)
+                    .variant(if item.actions_ghost {
+                        ButtonVariant::Ghost
+                    } else {
+                        ButtonVariant::Outline
+                    })
                     .size(ButtonSize::Xs)
+                    .disabled(item.disabled_actions.contains(&action_id))
                     .label(label.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(source) = this.source(cx) {
@@ -294,7 +299,23 @@ impl ChatComposer {
             .size(rems(0.75))
             .color(theme.muted_foreground)
             .into_any_element();
-        let row = banner_row(Some(icon), content, actions).into_any_element();
+        let row = banner_row(Some(icon), content, actions);
+        // The failure sits under the row, in the content column (`basis-full`).
+        let row = match item.error.clone() {
+            Some(error) => div()
+                .flex()
+                .flex_col()
+                .child(row)
+                .child(
+                    div()
+                        .pl(rems(1.5 + 0.25))
+                        .text_size(TEXT_XS.size)
+                        .text_color(theme.destructive)
+                        .child(error),
+                )
+                .into_any_element(),
+            None => row.into_any_element(),
+        };
         let surface = banner_surface(surface_variant(item.variant), false, row, window, &theme);
         if attached {
             div()

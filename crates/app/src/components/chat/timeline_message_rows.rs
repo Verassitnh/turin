@@ -24,6 +24,10 @@ use super::markdown::ChatMarkdown;
 use super::markdown::markdown_pipeline::should_preserve_assistant_line_breaks;
 use super::message_copy_button::MessageCopyButton;
 use super::messages_timeline::{RowCx, TimelineUiState};
+use super::proposed_plan::{
+    build_proposed_plan_markdown_filename, download_plan_as_text_file, downloads_dir,
+    normalize_plan_markdown_for_export,
+};
 use super::timeline::messages_timeline_logic::{
     MessagesTimelineRow, MessagesTimelineRowContent, resolve_assistant_message_copy_state,
     should_collapse_user_message,
@@ -671,8 +675,172 @@ pub fn build_collapsed_plan_preview(markdown: &str, max_lines: usize) -> String 
     out
 }
 
-/// `ProposedPlanCard`. Copy is the plan menu's "Copy to clipboard"; download
-/// and save-to-workspace need the file dialogs (not ported).
+/// `ProposedPlanCard`: the header's "Plan actions" menu (copy, download, save to workspace).
+/// The "Plan actions" `<Menu>`.
+fn plan_actions_menu(markdown: &str, cx: &RowCx) -> AnyElement {
+    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::component::menu::PopupMenuItem;
+    use gpui_kit::component::notification::Notification;
+
+    let contents = normalize_plan_markdown_for_export(markdown);
+    let filename = build_proposed_plan_markdown_filename(markdown);
+    let workspace_root = cx.workspace_root().map(str::to_owned);
+    let source = cx.source.clone();
+    let can_save = source
+        .as_ref()
+        .is_some_and(|source| source.can_write_workspace_files())
+        && workspace_root.is_some();
+    crate::pull_request::dropdown::dropdown(
+        ("plan-actions", cx.order as usize),
+        gpui_kit::Anchor::TopRight,
+        Button::new(("plan-actions-trigger", cx.order as usize))
+            .variant(ButtonVariant::Outline)
+            .size(ButtonSize::IconXs)
+            .tooltip(Tooltip::new("Plan actions"))
+            .child(Icon::new(IconName::Ellipsis).size(rems(1.))),
+        move |menu, _, _| {
+            let copy_contents = contents.clone();
+            let download_contents = contents.clone();
+            let download_filename = filename.clone();
+            let save_contents = contents.clone();
+            let save_filename = filename.clone();
+            let save_root = workspace_root.clone();
+            let save_source = source.clone();
+            menu.item(
+                PopupMenuItem::new("Copy to clipboard").on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                        copy_contents.clone(),
+                    ));
+                }),
+            )
+            .item(
+                PopupMenuItem::new("Download as markdown").on_click(move |_, window, cx| {
+                    let note = match downloads_dir()
+                        .ok_or_else(|| "The Downloads folder is unavailable.".to_owned())
+                        .and_then(|dir| {
+                            download_plan_as_text_file(&dir, &download_filename, &download_contents)
+                                .map_err(|error| error.to_string())
+                        }) {
+                        Ok(path) => Notification::success(path.display().to_string())
+                            .title("Plan downloaded"),
+                        Err(error) => Notification::error(error).title("Could not download plan"),
+                    };
+                    window.push_notification(note, cx);
+                }),
+            )
+            .item(
+                PopupMenuItem::new("Save to workspace")
+                    .disabled(!can_save)
+                    .on_click(move |_, window, cx| {
+                        if let (Some(root), Some(source)) = (&save_root, &save_source) {
+                            open_save_plan_dialog(
+                                root.clone(),
+                                save_filename.clone(),
+                                save_contents.clone(),
+                                source.clone(),
+                                window,
+                                cx,
+                            );
+                        }
+                    }),
+            )
+        },
+    )
+    .into_any_element()
+}
+
+/// The "Save plan to workspace" dialog.
+fn open_save_plan_dialog(
+    workspace_root: String,
+    default_path: String,
+    contents: String,
+    source: Arc<dyn super::timeline::source::TimelineSource>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use gpui_kit::AppContext as _;
+    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::component::input::{Input, InputState};
+    use gpui_kit::component::notification::Notification;
+
+    let placeholder = default_path.clone();
+    let input = cx.new(|cx| {
+        InputState::new(window, cx)
+            .default_value(default_path)
+            .placeholder(placeholder)
+    });
+    let focus_once = std::cell::Cell::new(true);
+    window.open_dialog(cx, move |dialog, window, cx| {
+        use gpui_kit::Focusable as _;
+        if focus_once.replace(false) {
+            input.focus_handle(cx).focus(window, cx);
+        }
+        let input_for_ok = input.clone();
+        let source = source.clone();
+        let root = workspace_root.clone();
+        let contents = contents.clone();
+        dialog
+            .title("Save plan to workspace")
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(rems(0.75))
+                    .child(
+                        div()
+                            .text_size(TEXT_SM.size)
+                            .child(format!("Enter a path relative to {workspace_root}.")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(rems(0.375))
+                            .child(
+                                div()
+                                    .text_size(TEXT_XS.size)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("Workspace path"),
+                            )
+                            .child(Input::new(&input)),
+                    ),
+            )
+            .on_ok(move |_, window, cx| {
+                let relative_path = input_for_ok.read(cx).value().trim().to_owned();
+                if relative_path.is_empty() {
+                    window.push_notification(
+                        Notification::warning("Enter a workspace path")
+                            .title("Enter a workspace path"),
+                        cx,
+                    );
+                    return false;
+                }
+                let window_handle = window.window_handle();
+                source.write_workspace_file(
+                    &root,
+                    &relative_path,
+                    &contents,
+                    Box::new(move |result, cx| {
+                        window_handle
+                            .update(cx, |_, window, cx| {
+                                let note = match result {
+                                    Ok(saved) => Notification::success(saved)
+                                        .title("Plan saved to workspace"),
+                                    Err(error) => {
+                                        Notification::error(error).title("Could not save plan")
+                                    }
+                                };
+                                window.push_notification(note, cx);
+                            })
+                            .ok();
+                    }),
+                    cx,
+                );
+                true
+            })
+    });
+}
+
 fn proposed_plan_card(plan_id: &str, markdown: &str, cx: &RowCx) -> AnyElement {
     let theme = &cx.theme;
     let title = proposed_plan_title(markdown).unwrap_or_else(|| "Proposed plan".into());
@@ -718,14 +886,7 @@ fn proposed_plan_card(plan_id: &str, markdown: &str, cx: &RowCx) -> AnyElement {
                                 .child(title),
                         ),
                 )
-                .child(
-                    MessageCopyButton::new(
-                        ("plan-copy", cx.order),
-                        format!("{}\n", markdown.trim_end()),
-                    )
-                    .label("Copy to clipboard")
-                    .size(ButtonSize::IconXs),
-                ),
+                .child(plan_actions_menu(markdown, cx)),
         )
         .child(
             div()

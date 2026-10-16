@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 turin-contracts.workspace = true
 turin-provider-core.workspace = true
+turin-runtime.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

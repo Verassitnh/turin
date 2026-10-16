@@ -849,12 +849,7 @@ impl SettingsView {
                 cx.notify();
             },
         );
-        let token_input = self.secret_input(
-            "github-token",
-            if is_saved { "Configured" } else { "" },
-            window,
-            cx,
-        );
+        let token_input = self.secret_input("github-token", is_saved, window, cx);
         let draft = token_input.read(cx).value().trim().to_owned();
         let save_tokens = tokens.clone();
         let remove_tokens = tokens.clone();

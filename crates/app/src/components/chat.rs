@@ -11,6 +11,8 @@ pub mod chat_canvas_layout;
 pub mod assistant_text_selection;
 pub mod composer_pending_panels;
 #[allow(dead_code)]
+#[allow(dead_code)]
+pub mod composer_focus_state;
 pub mod composer_menu_state;
 // Route handoff around the mobile composer morph. No view calls it yet.
 #[allow(dead_code)]

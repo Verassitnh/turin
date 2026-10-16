@@ -2,6 +2,7 @@
 //! context outside the decider: the workflow file readers, context handoff, and
 //! checkpoint rollback.
 
+pub mod checkpoint_rollback_service;
 pub mod context_handoff_delivery;
 pub mod context_handoff_service;
 pub mod unknown_field;

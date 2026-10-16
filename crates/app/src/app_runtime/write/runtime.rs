@@ -64,6 +64,13 @@ use turin_orchestration::reactors::workspace_claims::ProjectionWorkspaceClaims;
 use turin_provider_core::id_allocator::IdAllocator;
 use turin_provider_core::provider_adapter_registry::ProviderAdapterRegistry;
 use turin_provider_core::provider_continuation_requests::ProviderContinuationRequests;
+use turin_providers::provider_auth_service::ProviderAuthService;
+use turin_providers::provider_installation::ProviderInstallation;
+use turin_providers::provider_maintenance_runner::ProviderMaintenanceRunner;
+use turin_runtime::keybindings::Keybindings;
+use turin_runtime::server_settings::ServerSettingsService;
+use turin_runtime::storage_cleanup::StorageCleanup;
+use turin_source_control::source_control::discovery::SourceControlDiscovery;
 
 use super::adapters::{
     HostSettings, IntakeThreads, ManagerSessions, NoWorkspaceRefresh, ServiceCheckpointScopes,
@@ -85,6 +92,14 @@ pub struct WriteRuntime {
     /// `@` path completion over a workspace.
     pub workspace_entries: Arc<turin_git::workspace::workspace_entries::WorkspaceEntries>,
     pub sessions: Arc<ProviderSessionManager>,
+    /// Live settings bundle (WIRE-runtime Sol fills during `build`; see `settings/live_bindings.rs`).
+    pub server_settings: Option<Arc<ServerSettingsService>>,
+    pub keybindings: Option<Arc<Keybindings>>,
+    pub provider_auth: Option<Arc<ProviderAuthService>>,
+    pub provider_installation: Option<Arc<ProviderInstallation>>,
+    pub source_control: Option<Arc<SourceControlDiscovery>>,
+    pub storage_cleanup: Option<Arc<StorageCleanup>>,
+    pub provider_maintenance: Option<Arc<ProviderMaintenanceRunner>>,
     effects: EffectDaemon,
     _continuations: ProviderContinuationService,
     recovery: Arc<ProviderRuntimeRecoveryService>,
@@ -292,6 +307,13 @@ impl WriteRuntime {
             attachments_dir,
             workspace_entries: super::path_search::workspace_entries(),
             sessions,
+            server_settings: None,
+            keybindings: None,
+            provider_auth: None,
+            provider_installation: None,
+            source_control: None,
+            storage_cleanup: None,
+            provider_maintenance: None,
             effects,
             _continuations: continuations,
             recovery,

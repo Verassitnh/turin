@@ -56,6 +56,9 @@ use gpui_kit::*;
 use components::app_sidebar_layout::{self, AppSidebarLayout};
 use components::onboarding::first_run_gate::FirstRunGate;
 use components::onboarding::mock_source::{FirstRunScenario, MockOnboardingBackend};
+use desktop::desktop_client_settings::client_settings_path_for_home;
+use shell::client_settings_persistence::DesktopFileClientSettingsPersistence;
+use shell::live_settings::start_live_client_settings;
 
 /// Upstream's Electron window: 1100×780 default, 840×620 minimum,
 /// `titleBarStyle: "hiddenInset"` with the traffic lights centred in the
@@ -172,6 +175,14 @@ fn main() {
     // Opens Turin's database and feeds the store. Kept alive for the whole
     // process; dropping it aborts the feeds.
     let command_bus = app_runtime::write::bus::CommandBus::new(runtime.handle().clone());
+    if std::env::var("TURIN_MOCK_UI").ok().as_deref() != Some("1") {
+        let home = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let persistence =
+            DesktopFileClientSettingsPersistence::new(client_settings_path_for_home(&home));
+        start_live_client_settings(runtime.handle(), persistence);
+    }
     let _feeds =
         tokio_util::task::AbortOnDropHandle::new(runtime.handle().spawn(app_runtime::run(
             app_runtime::data_dir::resolve_data_dir(),

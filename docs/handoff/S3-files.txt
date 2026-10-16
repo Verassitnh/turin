@@ -1,0 +1,79 @@
+## T17 — 5482 lines, 47 files
+   461 apps/web/src/components/composerContextPresentation.tsx
+   430 apps/web/src/components/chat/DraftHeroHeadline.tsx
+   326 apps/web/src/components/chat/ProviderModelPicker.tsx
+   304 apps/web/src/components/contextChipParts.tsx
+   235 apps/web/src/components/chat/ComposerTasksBadge.tsx
+   137 apps/web/src/components/chat/ComposerUsageLimits.tsx
+   133 apps/web/src/components/ContextChip.tsx
+    95 apps/web/src/components/chat/CompactComposerControlsMenu.tsx
+    75 apps/web/src/components/chat/SkillInlineText.tsx
+    70 apps/web/src/components/chat/TraitsSpeed.tsx
+    67 apps/web/src/components/chat/ComposerCodeBlockNodeView.tsx
+    66 apps/web/src/components/chat/ComposerStashBadge.tsx
+    49 apps/web/src/components/chat/ComposerFeedback.tsx
+    39 apps/web/src/components/ThreadContextChip.tsx
+    29 apps/web/src/components/chat/ComposerImageThumbnail.tsx
+    26 apps/web/src/components/chat/ThreadContextDragGhost.tsx
+    23 apps/web/src/components/chat/ComposerActivityStatus.tsx
+    17 apps/web/src/components/ComposerPromptEditor.tsx
+    13 apps/web/src/components/chat/ComposerPromptLengthValidation.tsx
+## T03 — 4128 lines, 45 files
+   800 apps/web/src/components/ui/toast.tsx
+   285 apps/web/src/components/ui/combobox.tsx
+   257 apps/web/src/components/ui/autocomplete.tsx
+   225 apps/web/src/components/ui/color-picker.tsx
+   222 apps/web/src/components/ui/select.tsx
+   168 apps/web/src/components/ui/sheet.tsx
+   147 apps/web/src/components/ui/alert-dialog.tsx
+   123 apps/web/src/components/ui/input-group.tsx
+   112 apps/web/src/components/ui/calendar.tsx
+   101 apps/web/src/components/AnimatedHeight.tsx
+    97 apps/web/src/components/ui/number-field.tsx
+    78 apps/web/src/components/ui/toggle-group.tsx
+    73 apps/web/src/components/ui/group.tsx
+    67 apps/web/src/components/ui/standalone-page.tsx
+    67 apps/web/src/components/ui/table.tsx
+    48 apps/web/src/components/ui/switch.tsx
+    47 apps/web/src/components/ui/collapsible.tsx
+    46 apps/web/src/components/ui/textarea.tsx
+    44 apps/web/src/components/ui/preview-card.tsx
+    41 apps/web/src/components/ui/panel-tab-close-button.tsx
+    39 apps/web/src/components/AnimatedWidth.tsx
+    39 apps/web/src/components/ui/refresh-icon.tsx
+    37 apps/web/src/components/ui/discovery-list.tsx
+    37 apps/web/src/components/ui/radio-group.tsx
+    31 apps/web/src/components/RightPanelSheet.tsx
+    31 apps/web/src/components/WorkspacePageHeader.tsx
+    29 apps/web/src/components/WorkspacePageContainer.tsx
+    25 apps/web/src/components/StartTruncatedPath.tsx
+    24 apps/web/src/components/ui/label.tsx
+    21 apps/web/src/components/ui/draft-input.tsx
+    12 apps/web/src/components/T3Wordmark.tsx
+     6 apps/web/src/components/MorphIcon.tsx
+## T17 — 6296 lines, 20 files
+  1985 apps/web/src/components/ComposerPromptEditorTiptap.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   698 apps/web/src/components/chat/TraitsPicker.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   558 apps/web/src/lib/imageCompression.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+   496 apps/web/src/components/chat/QueuedRunsControl.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   396 apps/web/src/modelSelection.ts  <- ['DEDUP-1', 'N1b-async-fs']
+   369 apps/web/src/components/chat/ComposerBanner.tsx  <- ['DEDUP-1', 'N1b-async-fs']
+   274 apps/web/src/components/chat/ComposerCommandMenu.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   254 apps/web/src/components/chat/ModelPickerSidebar.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   227 apps/web/src/components/chat/ComposerStashMenu.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   173 apps/web/src/lib/composerContextReferences.ts  <- ['DEDUP-1', 'N1b-async-fs']
+   153 apps/web/src/components/chat/ModelListRow.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   121 apps/web/src/components/chat/ComposerCodeBlockLanguagePicker.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   114 apps/web/src/components/chat/composerSlashCommandSearch.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+   110 apps/web/src/components/chat/restingComposerControlsMeasurement.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+   108 apps/web/src/providerSkillSearch.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+   107 apps/web/src/providerModels.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+    86 apps/web/src/modelOrdering.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+    37 apps/web/src/components/ComposerContextLabel.tsx  <- ['U1-palette-git-toolbar']
+    25 apps/web/src/state/filesystem.ts  <- ['DEDUP-1', 'N1b-async-fs']
+     5 apps/web/src/state/attachments.ts  <- ['DEDUP-1', 'N1b-async-fs']
+## T03 — 1090 lines, 4 files
+   762 apps/web/src/components/Icons.tsx  <- ['T20-settings']
+   162 apps/web/src/components/preview/PreviewPanelShell.tsx  <- ['DEDUP-1', 'N1b-async-fs']
+   157 apps/web/src/components/ui/wizard.tsx  <- ['T20-settings']
+     9 apps/web/src/components/ui/sidebarState.ts  <- ['DEDUP-1', 'N1b-async-fs']

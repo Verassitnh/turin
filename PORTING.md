@@ -993,3 +993,20 @@ Each helper has one copy in `crates/app/src/state`. Its `turin-shared` counterpa
 | `hooks/useLiveRefresh.ts` | module-level `Map` and `lastInteractedAt`, `Date.now()`, `setInterval`, `focus`/`visibilitychange`/pointer/key/wheel listeners | `state/live_refresh.rs` (`LiveRefreshCadence`): per-view read times and last interaction, clock passed in as epoch ms; timers and listeners are the UI seam | no ambient timers, document or `Date.now()` in Rust |
 | `uiStateStore.ts` (persistence I/O) | `localStorage` read with legacy-key fallback and cleanup, `Debouncer` (500 ms) write, `beforeunload` flush, zustand store and subscription | `state/ui_state_store.rs` holds the state, the mutators and the persisted JSON shape (`parse_persisted_state`, `persisted_state_json`); the file I/O is the settings task's (T20) seam | no `window` or zustand in Rust. Persistence location and debounce belong to the settings store |
 | `uiStateStore.ts` (mutators) | each mutator returns the same object when nothing changed (identity checked by tests) | mutators take `&mut UiState` and return whether anything changed | Rust has no object identity; the boolean carries the same signal |
+| `components/MorphIcon.tsx` | `morphicons` path morph between lucide shapes | `ui/morph_icon.rs` swaps the glyph | GPUI has no path morph. `reducedMotion` is always on |
+| `components/ui/refresh-icon.tsx` | `animate-spin` while refreshing | `ui/refresh_icon.rs` keeps the flag and draws a static `RefreshCw` | GPUI has no element transforms |
+| `components/ui/toast.tsx` (motion) | swipe, enter, and exit transforms; collapsed stack uses `translate` and `scale` | `ui/toast.rs` places cards with `top` and a width scale from `ui/toast_logic.rs` | same transform limit. Copy-to-clipboard and thread routing stay with the caller |
+| `components/ui/toast.tsx` (manager) | viewport stack, anchored toasts, dismiss timer wired to the card | card plus the layout math and `VisibleDismissTimer` | the manager is not a view yet |
+| `components/ui/standalone-page.tsx` | radial glows | `ui/standalone_page.rs` uses two linear gradients | GPUI backgrounds are solid or linear |
+| `components/ui/number-field.tsx` | locale numeral parsing, scrub, and wheel | `ui/number_field.rs` ports step, clamp, snap, and en-US formatting | the Base UI parser's locale tables are not in this pass |
+| `components/ui/textarea.tsx` and `input-group.tsx` | focus ring | frame and group chrome only | the input inside owns focus |
+| `components/ui/collapsible.tsx` | 200ms height ease | `ui/collapsible.rs` sets the height; the 200ms ease is the `AnimatedHeight` helper | the panel does not run that animation itself |
+| `components/AnimatedHeight.tsx` | `ResizeObserver` measures the child | the caller passes `HeightState` | no observer in the element |
+| `components/RightPanelSheet.tsx` | top inset only under the Windows caption overlay | `ui/right_panel_sheet.rs` always insets by the 52px titlebar | Turin always draws that bar |
+| `components/ui/draft-input.tsx` | a live input | `ui/draft_input.rs` is the `CommitOnBlur` state machine; chrome is `text_input_frame` | the field entity already exists |
+| `components/StartTruncatedPath.tsx` | `dir=rtl` plus `text-ellipsis` | `text_ellipsis_start` | GPUI's start ellipsis |
+| `components/ui/group.tsx` | focus z-index and the dark separator recolor | edges and the separator only | no focus-within on a static group |
+| `components/ui/panel-tab-close-button.tsx` | `group-focus-visible` | hover of the `tab` group | no focus-visible group |
+| `components/ui/preview-card.tsx` | hover-card portal and enter scale | a positioned child of the trigger | no hover portal |
+| `components/ui/alert-dialog.tsx` and `sheet.tsx` | enter/exit translate | the surface appears in place | no element transforms |
+| `components/ui/table.tsx` | an HTML table | flex rows | GPUI has no table layout |

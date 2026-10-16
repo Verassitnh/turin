@@ -16,6 +16,7 @@ pub mod contracts;
 pub mod entities;
 pub mod events;
 pub mod file_context_menu;
+pub mod file_metadata;
 pub mod first_run;
 pub mod helpers;
 pub mod item_support;

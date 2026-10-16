@@ -7358,6 +7358,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "turin-contracts",
+ "turin-launcher",
  "turin-orchestration",
  "turin-persistence",
  "turin-provider-core",

@@ -12,7 +12,7 @@ use turin_contracts::settings::ServerSettings;
 
 pub const SETTINGS_FILE: &str = "settings.json";
 pub const CLAUDE_BINARY_ENV: &str = "TURIN_CLAUDE_BINARY";
-/// The text-generation model until the setting is editable (Claude is the only wired driver).
+/// Default title-generation model used when seeding a new desktop data directory.
 pub const DEFAULT_TEXT_GENERATION_MODEL: &str = "claude-haiku-5-5";
 
 pub fn load_server_settings(data_dir: &Path, claude_binary: Option<&str>) -> ServerSettings {
@@ -37,8 +37,8 @@ pub fn load_server_settings(data_dir: &Path, claude_binary: Option<&str>) -> Ser
             "config": { "binaryPath": binary },
         });
     }
-    // The contract default is a Codex model; Codex is not wired in this build,
-    // so titles and commit messages would fail on an unregistered instance.
+    // Preserve the desktop seed preference. Existing explicit selections survive;
+    // the persistent service owns all settings after startup.
     if document.get("textGenerationModelSelection").is_none() {
         document["textGenerationModelSelection"] =
             json!({"instanceId": "claudeAgent", "model": DEFAULT_TEXT_GENERATION_MODEL});

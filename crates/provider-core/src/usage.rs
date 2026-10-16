@@ -132,12 +132,14 @@ type UsageStateDecode = Arc<dyn Fn(&Value) -> Result<Value, String> + Send + Syn
 type ParseUsageLine = Arc<dyn Fn(&str, &mut Value) -> Vec<UsageRecord> + Send + Sync>;
 type ParseUsageProjected = Arc<dyn Fn(&Value, &mut Value) -> Vec<UsageRecord> + Send + Sync>;
 
+#[derive(Clone)]
 pub struct TranscriptUsageState {
     pub initial: UsageStateInit,
     pub encode: UsageStateEncode,
     pub decode: UsageStateDecode,
 }
 
+#[derive(Clone)]
 pub struct TranscriptUsageFormat {
     pub select_fields: SelectedFields,
     /// ASCII substrings. At least one must appear on every line that matters.
@@ -159,6 +161,7 @@ type UsageScan = Arc<
         + Sync,
 >;
 
+#[derive(Clone)]
 pub enum ProviderUsageReader {
     Transcripts {
         provider: UsageProviderKind,

@@ -15,29 +15,11 @@ use crate::settings::search::{SETTINGS_SEARCH_ITEMS, SettingsSearchItem};
 use crate::settings::view::SettingsRoute;
 use crate::settings::view_model::EnvironmentInfo;
 use crate::state::store::ClientStore;
-use turin_runtime::storage_cleanup::{CleanupHost, StorageCleanup};
-/// Until `WriteRuntime` exposes `storage_cleanup` (Sol follow-up), build a real
-/// service from the same settings snapshot the runtime already owns.
-fn storage_cleanup_for_runtime(bus: &CommandBus, rt: &WriteRuntime) -> Option<Arc<StorageCleanup>> {
-    let data_dir = crate::app_runtime::data_dir::resolve_data_dir()?;
-    bus.handle().block_on(async {
-        let settings = rt.server_settings.get_settings().await.ok()?;
-        let cwd = std::env::current_dir().ok()?;
-        let config = turin_runtime::config::ServerConfig::new_desktop(cwd, data_dir, None)
-            .await
-            .ok()?;
-        Some(Arc::new(StorageCleanup::new(
-            config,
-            CleanupHost::new(settings, Vec::new(), Vec::new()),
-        )))
-    })
-}
 
 /// Maps `WriteRuntime` per `settings/live_bindings.rs`.
 pub fn build_live_settings_services(
     bus: CommandBus,
     commands: &Commands,
-    storage_cleanup: Arc<StorageCleanup>,
     cx: &App,
 ) -> LiveSettingsServices {
     let rt = commands.runtime();
@@ -48,7 +30,7 @@ pub fn build_live_settings_services(
         provider_auth: Arc::clone(&rt.provider_auth),
         provider_installation: Arc::clone(&rt.provider_installation),
         source_control: Arc::clone(&rt.source_control_discovery),
-        storage_cleanup,
+        storage_cleanup: Arc::clone(&rt.storage_cleanup),
         provider_registry: Arc::clone(&rt.providers.registry),
         provider_maintenance: Arc::clone(&rt.provider_maintenance),
         environment: environment_info(&rt),
@@ -151,7 +133,6 @@ pub fn open_setting_by_id(
 pub struct LiveShellHandle {
     pub client: gpui_kit::Entity<ClientStore>,
     pub bus: CommandBus,
-    storage_cleanup: std::cell::OnceCell<Arc<StorageCleanup>>,
     services: std::cell::OnceCell<LiveSettingsServices>,
 }
 
@@ -160,7 +141,6 @@ impl LiveShellHandle {
         Self {
             client,
             bus,
-            storage_cleanup: std::cell::OnceCell::new(),
             services: std::cell::OnceCell::new(),
         }
     }
@@ -170,18 +150,7 @@ impl LiveShellHandle {
             return Some(services.clone());
         }
         let commands = self.bus.commands().ok()?;
-        let rt = commands.runtime();
-        if self.storage_cleanup.get().is_none() {
-            let built = storage_cleanup_for_runtime(&self.bus, &rt)?;
-            let _ = self.storage_cleanup.set(built);
-        }
-        let storage_cleanup = self.storage_cleanup.get()?.clone();
-        let services = build_live_settings_services(
-            self.bus.clone(),
-            &commands,
-            storage_cleanup,
-            cx,
-        );
+        let services = build_live_settings_services(self.bus.clone(), &commands, cx);
         let _ = self.services.set(services.clone());
         Some(services)
     }

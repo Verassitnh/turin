@@ -5,6 +5,7 @@
 
 pub mod legacy;
 pub mod service;
+pub use service::ServerSettingsService;
 
 pub use service::ServerSettingsService;
 

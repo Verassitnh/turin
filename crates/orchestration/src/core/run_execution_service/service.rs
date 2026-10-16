@@ -1,4 +1,6 @@
-//! The effectful layer of `RunExecutionService.ts` (488-1510): errors, the
+//! Port of upstream/apps/server/src/orchestration-v2/RunExecutionService.ts (lines 488-1510).
+//!
+//! The effectful layer of `RunExecutionService.ts`: errors, the
 //! seams it reads and writes through, and `startRootRun`.
 //!
 //! `startRootRun` prepares the run, subscribes to the session's events,
@@ -17,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use turin_contracts::{
     CommandId, NodeId, ProjectId, ProviderSessionId, ProviderThreadId, ProviderTurnId,
     RunAttemptId, RunId, ThreadId, TurnItemId,
+    base_schemas::js_trim,
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2AppThread, OrchestrationV2CheckpointScope, OrchestrationV2ExecutionNode,
@@ -521,7 +524,7 @@ impl RunExecutionService {
             app_context: None,
         };
         let compact = input.message.attachments.is_empty()
-            && input.message.text.trim().to_lowercase() == "/compact";
+            && js_trim(&input.message.text).to_lowercase() == "/compact";
         let started: Result<(), BoxError> = match &should_start {
             Err(_) => Ok(()),
             Ok(_) if compact => match input.session.compact_thread(turn_input) {

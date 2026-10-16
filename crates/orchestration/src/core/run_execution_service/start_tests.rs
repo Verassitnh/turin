@@ -101,6 +101,9 @@ async fn dispatches_only_attachment_free_compact_commands_through_native_compact
         (" /compact ", false, "compact"),
         ("/compact", true, "prompt"),
         ("Continue the work", false, "prompt"),
+        // JS `trim` strips U+FEFF but keeps U+0085.
+        ("\u{feff}/compact\u{feff}", false, "compact"),
+        ("\u{85}/compact", false, "prompt"),
     ];
     for (index, (text, with_attachment, expected)) in cases.into_iter().enumerate() {
         let recorder = Recorder::new();

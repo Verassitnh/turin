@@ -1082,7 +1082,12 @@ async fn rejects_compaction_without_conversation_context_after_0_prior_compactio
 
 #[tokio::test]
 async fn rejects_compaction_without_conversation_context_after_2_prior_compactions() {
-    rejects_compaction_without_conversation_context(vec!["/compact", " /COMPACT "]).await;
+    rejects_compaction_without_conversation_context(vec![
+        "/compact",
+        " /COMPACT ",
+        "\u{feff}/compact",
+    ])
+    .await;
 }
 
 // -- Own cases: the happy path the local-command harness never reaches. ------
@@ -1230,6 +1235,78 @@ async fn delivers_a_ready_handoff_with_the_first_provider_turn() {
 }
 
 #[tokio::test]
+async fn compacting_on_a_provider_that_cannot_compact_fails_before_any_handoff_is_delivered() {
+    let handoff = json!({
+        "id": "handoff:ready", "threadId": THREAD, "targetRunId": RUN,
+        "fromProviderThreadIds": [], "toProviderThreadId": PROVIDER_THREAD,
+        "coveredRunOrdinals": {"from": 1, "to": 1}, "strategy": "manual_context",
+        "status": "ready", "summaryMessageId": null, "summaryText": "Earlier we chose SQLite.",
+        "createdByProviderInstanceId": null, "createdAt": T0, "updatedAt": T0,
+    });
+    let harness = harness(Options {
+        text: "Why SQLite?",
+        healthy_session: true,
+        previous_native_thread_ref: true,
+        extra_events: vec![event("context-handoff.updated", THREAD, T0, handoff)],
+        ..Options::default()
+    })
+    .await;
+    harness
+        .session
+        .supports_compact
+        .store(false, Ordering::SeqCst);
+    harness.start().await.expect("start");
+    let started = harness
+        .starter
+        .inputs
+        .lock()
+        .pop()
+        .expect("run execution started");
+    let turn = ProviderAdapterV2TurnInput {
+        app_thread: started.app_thread.clone(),
+        thread_id: started.run.thread_id.clone(),
+        run_id: started.run.id.clone(),
+        run_ordinal: 2,
+        native_thread_has_turns: None,
+        provider_turn_ordinal: 1,
+        restart_continuation_of_run_id: None,
+        attempt_id: started.attempt_id.clone(),
+        root_node_id: started.root_node.id.clone(),
+        provider_thread: started.provider_thread.clone(),
+        message: started.message.clone(),
+        model_selection: started.model_selection.clone(),
+        runtime_policy: started.runtime_policy.clone(),
+        app_context: None,
+    };
+
+    let refused = started
+        .session
+        .compact_thread(turn.clone())
+        .expect("the wrapper offers compaction")
+        .await;
+
+    assert!(refused.is_err());
+    assert!(harness.session.compacts.lock().is_empty());
+    let records = harness
+        .store
+        .get_thread_records(
+            &ThreadId::new(THREAD).unwrap(),
+            vec![ProjectionRecordField::ContextHandoffs],
+            None,
+        )
+        .await
+        .expect("handoffs");
+    assert!(
+        serde_json::to_value(&records.context_handoffs[0]).unwrap()["delivery"].is_null(),
+        "nothing was delivered"
+    );
+    // The plan is still there for the next call.
+    started.session.start_turn(turn).await.expect("turn starts");
+    let sent = harness.session.starts.lock().pop().expect("provider call");
+    assert!(sent.message.text.contains("Earlier we chose SQLite."));
+}
+
+#[tokio::test]
 async fn skips_the_start_when_the_run_moved_while_the_thread_loaded() {
     let harness = harness(Options {
         text: "Continue",
@@ -1268,4 +1345,52 @@ async fn skips_the_start_when_the_run_moved_while_the_thread_loaded() {
     assert!(harness.starter.inputs.lock().is_empty());
     assert!(harness.writer.guarded.lock().is_empty());
     assert_eq!(harness.run().await["status"], "interrupted");
+}
+
+// --- `settledHandoffs` optional chaining (ProviderTurnStartService.ts 984-989) ---
+
+fn delivery(
+    native: &str,
+    status: OrchestrationV2ContextHandoffDeliveryStatus,
+) -> OrchestrationV2ContextHandoffDelivery {
+    OrchestrationV2ContextHandoffDelivery {
+        native_thread_id: native.to_owned(),
+        status,
+        item_ids: Vec::new(),
+        omitted_item_ids: None,
+    }
+}
+
+#[test]
+fn a_handoff_without_a_delivery_is_settled_only_when_the_running_thread_has_no_native_ref() {
+    // `undefined === undefined` and `undefined !== "pending"`.
+    assert!(handoff_settled_for(None, false, None));
+    // A native ref whose id is null: `undefined !== null`.
+    assert!(!handoff_settled_for(None, true, None));
+    assert!(!handoff_settled_for(None, true, Some("native")));
+}
+
+#[test]
+fn a_delivered_handoff_is_settled_for_the_running_native_thread_unless_pending() {
+    use OrchestrationV2ContextHandoffDeliveryStatus::{Injected as Sent, Pending};
+    assert!(handoff_settled_for(
+        Some(&delivery("native", Sent)),
+        true,
+        Some("native")
+    ));
+    assert!(!handoff_settled_for(
+        Some(&delivery("native", Pending)),
+        true,
+        Some("native")
+    ));
+    assert!(!handoff_settled_for(
+        Some(&delivery("other", Sent)),
+        true,
+        Some("native")
+    ));
+    assert!(!handoff_settled_for(
+        Some(&delivery("native", Sent)),
+        false,
+        None
+    ));
 }

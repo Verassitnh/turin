@@ -1,5 +1,5 @@
-//! `makeDeliverySession` and `startWithHandoffs` (upstream
-//! `ProviderTurnStartService.ts` 181-216 and 1092-1226).
+//! Port of upstream/apps/server/src/orchestration-v2/ProviderTurnStartService.ts
+//! (lines 181-216 and 1092-1226): `makeDeliverySession` and `startWithHandoffs`.
 //!
 //! When a run has context to deliver (ready handoffs, missed history, a
 //! restart note), the provider session handed to `RunExecutionService` is a
@@ -441,6 +441,17 @@ impl DeliverySession {
         input: ProviderAdapterV2TurnInput,
         compact: bool,
     ) -> Result<(), ProviderAdapterV2Error> {
+        // Upstream's wrapper has no `compactThread` when the session has none, so
+        // `RunExecutionService` fails the compaction before anything is delivered
+        // and the plan stays. Creating the future runs nothing; it is dropped.
+        if compact && self.inner.compact_thread(input.clone()).is_none() {
+            return Err(unsupported_compaction(
+                self.inner.driver(),
+                &input.thread_id,
+                &input.provider_thread.id,
+                &input.run_id,
+            ));
+        }
         // Only startup needs the handoff history: taking the plan releases it
         // when the call ends, success or not.
         let plan = self.plan.lock().take();

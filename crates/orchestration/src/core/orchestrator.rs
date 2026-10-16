@@ -14,6 +14,9 @@
 mod cohort;
 #[cfg(test)]
 mod cohort_tests;
+pub mod delegated_task;
+#[cfg(test)]
+mod delegated_task_tests;
 pub mod dispatch;
 #[cfg(test)]
 mod dispatch_limit_tests;
@@ -127,6 +130,20 @@ impl Orchestrator {
             recovery,
             seams: DispatchSeams::default(),
         }
+    }
+
+    /// Shares the per-thread lock executor, so command dispatch and anything
+    /// else that writes a thread (event ingest, provider-session release)
+    /// serialize on the same locks. Build the executor first and hand clones
+    /// to each writer; the clones share state.
+    pub fn with_thread_executor(mut self, executor: ThreadCommandExecutor) -> Self {
+        self.locks = executor;
+        self
+    }
+
+    /// The executor `dispatch` locks threads with.
+    pub fn thread_executor(&self) -> ThreadCommandExecutor {
+        self.locks.clone()
     }
 
     /// `dispatch` for a limited sender: refuses a thread that runs above

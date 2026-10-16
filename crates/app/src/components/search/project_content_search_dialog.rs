@@ -1,7 +1,7 @@
 //! Port of upstream/apps/web/src/components/search/ProjectContentSearchDialog.tsx
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -10,7 +10,8 @@ use gpui_kit::{
 use turin_contracts::EnvironmentId;
 use turin_contracts::project::ProjectContentMatch;
 
-use super::highlighted_search_line::HighlightedSearchLine;
+use super::highlighted_search_line::{HighlightedSearchLine, SearchLineHighlightCache};
+use crate::pull_request::presentation_view::Spinner;
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::{TEXT_SM, TEXT_XS};
 use crate::ui::{IconName, Toggle, ToggleSize, ToggleVariant};
@@ -37,7 +38,7 @@ pub fn split_search_path(path: &str) -> (String, String) {
 }
 
 pub fn group_content_matches(matches: &[ProjectContentMatch]) -> Vec<ContentSearchMatchGroup> {
-    let mut groups: HashMap<String, Vec<IndexedContentMatch>> = HashMap::new();
+    let mut groups: IndexMap<String, Vec<IndexedContentMatch>> = IndexMap::new();
     for (result_index, match_) in matches.iter().enumerate() {
         let path = match_.path.as_str().to_owned();
         groups
@@ -76,12 +77,58 @@ pub struct ProjectContentSearchBackendInput {
     pub query: ProjectContentSearchQuery,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ProjectContentSearchResults {
     pub matches: Vec<ProjectContentMatch>,
     pub can_read_files: bool,
     pub is_pending: bool,
+    pub is_checking_access: bool,
+    pub invalid_regex: bool,
+    pub truncated: bool,
     pub error: Option<String>,
+}
+
+pub fn show_content_search_status_bar(results: &ProjectContentSearchResults, has_query: bool) -> bool {
+    results.can_read_files
+        && (has_query
+            || results.is_pending
+            || results.error.is_some()
+            || results.invalid_regex)
+}
+
+pub fn content_search_center_message(
+    results: &ProjectContentSearchResults,
+    has_query: bool,
+) -> String {
+    if results.is_checking_access {
+        "Checking file access…".to_owned()
+    } else if !results.can_read_files {
+        results
+            .error
+            .clone()
+            .unwrap_or_else(|| "You do not have access to search this project.".to_owned())
+    } else if has_query && !results.is_pending && results.error.is_none() {
+        "No results found.".to_owned()
+    } else {
+        "Type to search across your project.".to_owned()
+    }
+}
+
+pub fn content_search_status_label(
+    results: &ProjectContentSearchResults,
+    match_count: usize,
+    file_count: usize,
+) -> String {
+    if results.is_pending {
+        "Searching…".to_owned()
+    } else if let Some(error) = &results.error {
+        error.clone()
+    } else if results.invalid_regex {
+        "Invalid regular expression".to_owned()
+    } else {
+        let suffix = if results.truncated { "+" } else { "" };
+        format!("{match_count}{suffix} results in {file_count} files")
+    }
 }
 
 #[derive(IntoElement)]
@@ -110,8 +157,16 @@ impl RenderOnce for ProjectContentSearchDialog {
                 .child("Open a project to search its files.")
                 .into_any_element();
         };
+        let has_query = !self.query.query.trim().is_empty();
         let visible = visible_content_matches(&self.results.matches, self.visible_count);
+        SearchLineHighlightCache::warm(&visible, &self.results.matches, self.dark);
         let groups = group_content_matches(&visible);
+        let file_count = visible
+            .iter()
+            .map(|match_| match_.path.as_str())
+            .collect::<indexmap::IndexSet<_>>()
+            .len();
+        let show_status = show_content_search_status_bar(&self.results, has_query);
         div()
             .flex()
             .flex_col()
@@ -129,70 +184,117 @@ impl RenderOnce for ProjectContentSearchDialog {
                             .variant(ToggleVariant::Segmented)
                             .size(ToggleSize::Sm)
                             .label("Aa")
-                            .pressed(self.query.case_sensitive),
+                            .pressed(self.query.case_sensitive)
+                            .disabled(!self.results.can_read_files),
                     )
                     .child(
                         Toggle::new("content-search-whole-word")
                             .variant(ToggleVariant::Segmented)
                             .size(ToggleSize::Sm)
                             .label("W")
-                            .pressed(self.query.whole_word),
+                            .pressed(self.query.whole_word)
+                            .disabled(!self.results.can_read_files),
                     )
                     .child(
                         Toggle::new("content-search-regex")
                             .variant(ToggleVariant::Segmented)
                             .size(ToggleSize::Sm)
                             .label(".*")
-                            .pressed(self.query.use_regex),
+                            .pressed(self.query.use_regex)
+                            .disabled(!self.results.can_read_files),
                     ),
             )
-            .child(
-                crate::ui::scroll_area::scroll_area("project-content-search-results").child(
-                    div().flex_1().children(groups.into_iter().map(|group| {
-                        let (name, directory) = split_search_path(&group.path);
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .py_2()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .px_3()
-                                    .child(crate::ui::Icon::new(IconName::FileCode).size(rems(1.)))
-                                    .child(
-                                        div()
-                                            .text_size(TEXT_SM.size)
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(name),
-                                    )
-                                    .when(!directory.is_empty(), |this| {
-                                        this.child(
+            .when(show_status, |this| {
+                let status = content_search_status_label(
+                    &self.results,
+                    self.results.matches.len(),
+                    file_count,
+                );
+                this.child(
+                    div()
+                        .flex()
+                        .h(rems(2.25))
+                        .flex_shrink_0()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .px_3()
+                        .text_size(TEXT_XS.size)
+                        .text_color(if self.results.error.is_some() || self.results.invalid_regex {
+                            theme.destructive
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .when(self.results.is_pending, |row| {
+                            row.gap_2().child(Spinner::new("content-search-spinner").size(rems(0.875)))
+                        })
+                        .child(status),
+                )
+            })
+            .child(if self.results.matches.is_empty() {
+                div()
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .px_6()
+                    .text_center()
+                    .text_size(TEXT_SM.size)
+                    .text_color(theme.muted_foreground)
+                    .child(content_search_center_message(
+                        &self.results,
+                        has_query,
+                    ))
+                    .into_any_element()
+            } else {
+                crate::ui::scroll_area::scroll_area("project-content-search-results")
+                    .child(
+                        div().flex_1().children(groups.into_iter().map(|group| {
+                            let (name, directory) = split_search_path(&group.path);
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .py_2()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .px_3()
+                                        .child(crate::ui::Icon::new(IconName::FileCode).size(rems(1.)))
+                                        .child(
                                             div()
-                                                .text_size(TEXT_XS.size)
-                                                .text_color(theme.muted_foreground)
-                                                .child(directory),
+                                                .text_size(TEXT_SM.size)
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child(name),
                                         )
-                                    }),
-                            )
-                            .children(group.matches.into_iter().map(|indexed| {
-                                div()
-                                    .px_3()
-                                    .py(rems(0.125))
-                                    .when(indexed.result_index == self.selected_index, |this| {
-                                        this.bg(theme.accent)
-                                    })
-                                    .child(HighlightedSearchLine {
-                                        match_: indexed.match_,
-                                        path: group.path.clone(),
-                                        dark: self.dark,
-                                    })
-                            }))
-                    })),
-                ),
-            )
+                                        .when(!directory.is_empty(), |this| {
+                                            this.child(
+                                                div()
+                                                    .text_size(TEXT_XS.size)
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(directory),
+                                            )
+                                        }),
+                                )
+                                .children(group.matches.into_iter().map(|indexed| {
+                                    div()
+                                        .px_3()
+                                        .py(rems(0.125))
+                                        .when(indexed.result_index == self.selected_index, |this| {
+                                            this.bg(theme.accent)
+                                        })
+                                        .child(HighlightedSearchLine {
+                                            match_: indexed.match_,
+                                            path: group.path.clone(),
+                                            dark: self.dark,
+                                        })
+                                }))
+                        })),
+                    )
+                    .into_any_element()
+            })
             .child(
                 div()
                     .px_3()
@@ -202,5 +304,69 @@ impl RenderOnce for ProjectContentSearchDialog {
                     .child(format!("Searching {cwd}")),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use turin_contracts::PositiveInt;
+    use turin_contracts::TrimmedNonEmptyString;
+    use turin_contracts::project::ProjectContentMatch;
+
+    fn match_at(path: &str) -> ProjectContentMatch {
+        ProjectContentMatch {
+            path: TrimmedNonEmptyString::new(path).unwrap(),
+            line_number: PositiveInt::new(1).unwrap(),
+            line_content: "needle".to_owned(),
+            match_ranges: vec![],
+        }
+    }
+
+    #[test]
+    fn groups_matches_in_first_seen_path_order() {
+        let grouped = group_content_matches(&[
+            match_at("b.rs"),
+            match_at("a.rs"),
+            match_at("b.rs"),
+        ]);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].path, "b.rs");
+        assert_eq!(grouped[1].path, "a.rs");
+    }
+
+    #[test]
+    fn center_message_follows_search_state() {
+        assert_eq!(
+            content_search_center_message(
+                &ProjectContentSearchResults {
+                    is_checking_access: true,
+                    ..Default::default()
+                },
+                false,
+            ),
+            "Checking file access…"
+        );
+        assert_eq!(
+            content_search_center_message(
+                &ProjectContentSearchResults {
+                    can_read_files: false,
+                    error: Some("denied".into()),
+                    ..Default::default()
+                },
+                false,
+            ),
+            "denied"
+        );
+        assert_eq!(
+            content_search_center_message(
+                &ProjectContentSearchResults {
+                    can_read_files: true,
+                    ..Default::default()
+                },
+                true,
+            ),
+            "No results found."
+        );
     }
 }

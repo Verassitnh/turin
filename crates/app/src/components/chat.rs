@@ -21,6 +21,15 @@ pub mod context_window;
 // Chat-lane geometry for the canvas.
 pub mod chat_canvas_layout;
 pub mod provider_status_banner;
+// Plain command text; the timeline's command rows do not use it until the highlighter lands.
+#[allow(dead_code)]
+pub mod shell_command_block;
+// Path-chip glyphs; the timeline's chips do not draw them yet.
+#[allow(dead_code)]
+pub mod pierre_entry_icon;
+// The provider picker's ChatGPT plan row; the picker does not host it yet.
+#[allow(dead_code)]
+pub mod chat_gpt_sharing_control;
 // Replaces the composer on a provider-native subagent thread; no thread route reads it yet.
 #[allow(dead_code)]
 pub mod provider_subagent_bar;

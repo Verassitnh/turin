@@ -117,9 +117,17 @@ pub fn provider_status_banner_title(entry: &ProviderInstanceEntry) -> String {
     format!("{provider_name} provider status")
 }
 
+/// `incompatible?.status !== "broken" && (status === "warning" || incompatible !== null)`: a
+/// broken version is an error even on a provider that is only warning.
 pub fn provider_status_banner_is_warning(entry: &ProviderInstanceEntry) -> bool {
-    incompatible_version(entry).is_some_and(|a| a.status != CompatibilityAdvisoryStatus::Broken)
-        || entry.status == ProviderStatus::Warning
+    let incompatible = incompatible_version(entry);
+    incompatible.is_none_or(|a| a.status != CompatibilityAdvisoryStatus::Broken)
+        && (entry.status == ProviderStatus::Warning || incompatible.is_some())
+}
+
+/// `hasProviderSetup`.
+pub fn has_provider_setup(entry: &ProviderInstanceEntry) -> bool {
+    entry.driver_kind == "antigravity" || entry.can_setup
 }
 
 #[cfg(test)]
@@ -226,6 +234,33 @@ mod tests {
             get_provider_status_message_with_compatibility(&unauth),
             broken.status_message.as_deref().unwrap()
         );
+    }
+
+    #[test]
+    fn a_broken_version_is_an_error_even_when_the_provider_only_warns() {
+        let mut entry = provider();
+        entry.status = ProviderStatus::Warning;
+        // Unsupported on a warning provider: not an incompatible version (it is not ready), so
+        // the provider's own warning decides.
+        assert!(provider_status_banner_is_warning(&entry));
+        entry.compatibility_advisory = Some(CompatibilityAdvisory {
+            status: CompatibilityAdvisoryStatus::Broken,
+            message: None,
+        });
+        assert!(!provider_status_banner_is_warning(&entry));
+        // An unsupported version on a ready provider is a warning.
+        assert!(provider_status_banner_is_warning(&provider()));
+    }
+
+    #[test]
+    fn provider_setup_is_offered_for_antigravity_or_setup_capable_providers() {
+        let mut entry = provider();
+        assert!(!has_provider_setup(&entry));
+        entry.can_setup = true;
+        assert!(has_provider_setup(&entry));
+        entry.can_setup = false;
+        entry.driver_kind = "antigravity".into();
+        assert!(has_provider_setup(&entry));
     }
 
     #[test]

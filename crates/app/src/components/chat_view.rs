@@ -19,14 +19,19 @@ use super::chat::composer_pending_panels::{
     ComposerPendingApprovalBanner, ComposerPendingUserInputBanner,
 };
 use super::chat::messages_timeline::MessagesTimeline;
-use super::chat::provider_status_banner::should_show_provider_status_banner;
+use super::chat::provider_status_banner::{
+    get_provider_status_banner_key, should_show_provider_status_banner,
+};
 use super::chat::thread_details_card::ThreadDetailsCard;
 use super::chat::thread_details_card_layout::{
     ThreadDetailsCardContainer, ThreadDetailsCardLane, ThreadDetailsCardLayout,
     ThreadDetailsCardLayoutInput, resolve_thread_details_card_layout,
 };
 use super::chat::thread_details_panel::ThreadDetailsPanel;
-use super::chat::thread_error_banner::should_show_thread_error_banner;
+use super::chat::thread_error_banner::{
+    dismiss_thread_error_banner_for_session, get_thread_error_banner_key,
+    is_thread_error_banner_dismissed_for_session, should_show_thread_error_banner,
+};
 use super::chat::timeline::session_logic::{derive_pending_approvals, derive_pending_user_inputs};
 use super::chat::timeline::source::MockTimelineSource;
 use super::drag_region::DragRegion as _;
@@ -95,7 +100,7 @@ impl RenderOnce for ChatView {
                 .map(|prompt| ComposerPendingUserInputBanner { prompt, source }.into_any_element())
         };
 
-        let overlay_banners = chat_overlay_banners();
+        let overlay_banners = chat_overlay_banners(window, cx);
         let composer_strip = self.git_host.read(cx).composer_strip();
         // `TURIN_CHAT_DEMO=thread-details` swaps in the lineage demo card.
         // `ChatCanvas` measures its container (ResizeObserver upstream); the
@@ -270,45 +275,75 @@ fn selection_toolbar_demo() -> Option<gpui_kit::AnyElement> {
     )
 }
 
-fn chat_overlay_banners() -> Vec<gpui_kit::AnyElement> {
+/// The alerts above the lane, with their dismissals: the provider status banner remembers the
+/// key it was dismissed under (a changed status shows again), the thread error banner the
+/// session-wide `thread key + message`.
+fn chat_overlay_banners(window: &mut Window, cx: &mut App) -> Vec<gpui_kit::AnyElement> {
+    use std::rc::Rc;
+
     let Ok(demo) = std::env::var("TURIN_CHAT_DEMO") else {
         return Vec::new();
     };
     let mut banners = Vec::new();
     if demo.contains("provider-status") {
+        let dismissed =
+            window.use_keyed_state("provider-status-dismissed", cx, |_, _| None::<String>);
         let mut entry = ProviderInstanceEntry::new("codex-work", "codex", "Codex");
         entry.version = Some("1.0.0".into());
         entry.compatibility_advisory = Some(CompatibilityAdvisory {
             status: CompatibilityAdvisoryStatus::Unsupported,
             message: Some("Unsupported version. Use 2.0.0.".into()),
         });
-        if should_show_provider_status_banner(&entry, None) {
-            banners.push(ProviderStatusBanner { entry }.into_any_element());
-        }
-    }
-    if demo.contains("thread-error") {
-        let error = "The first error line\ncontinues on a second line";
-        if should_show_thread_error_banner("demo:thread", Some(error), false) {
+        if should_show_provider_status_banner(&entry, dismissed.read(cx).as_deref()) {
+            let key = get_provider_status_banner_key(&entry);
             banners.push(
-                ThreadErrorBanner {
-                    error: error.into(),
-                    usage_limit: false,
-                }
-                .into_any_element(),
+                ProviderStatusBanner::new(entry)
+                    .on_dismiss(Rc::new(move |_, cx| {
+                        dismissed.update(cx, |dismissed, cx| {
+                            *dismissed = key.clone();
+                            cx.notify();
+                        });
+                    }))
+                    .into_any_element(),
             );
         }
+    }
+    let thread_error = |window: &mut Window,
+                        cx: &mut App,
+                        error: &'static str,
+                        usage_limit: bool|
+     -> Option<gpui_kit::AnyElement> {
+        let tick = window.use_keyed_state("thread-error-dismissed", cx, |_, _| 0_u32);
+        let _ = tick.read(cx);
+        let key = get_thread_error_banner_key("demo:thread", Some(error));
+        let dismissed = is_thread_error_banner_dismissed_for_session(key.as_deref());
+        should_show_thread_error_banner("demo:thread", Some(error), dismissed).then(|| {
+            ThreadErrorBanner::new(error, usage_limit)
+                .on_dismiss(Rc::new(move |_, cx| {
+                    dismiss_thread_error_banner_for_session(key.as_deref());
+                    tick.update(cx, |tick, cx| {
+                        *tick += 1;
+                        cx.notify();
+                    });
+                }))
+                .into_any_element()
+        })
+    };
+    if demo.contains("thread-error") {
+        banners.extend(thread_error(
+            window,
+            cx,
+            "The first error line\ncontinues on a second line",
+            false,
+        ));
     }
     if demo.contains("usage-limit-error") {
-        let error = "Usage limit reached for this provider.";
-        if should_show_thread_error_banner("demo:thread", Some(error), false) {
-            banners.push(
-                ThreadErrorBanner {
-                    error: error.into(),
-                    usage_limit: true,
-                }
-                .into_any_element(),
-            );
-        }
+        banners.extend(thread_error(
+            window,
+            cx,
+            "Usage limit reached for this provider.",
+            true,
+        ));
     }
     banners
 }

@@ -15,12 +15,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::stream;
-use parking_lot::RwLock;
 use serde_json::{Value, json};
 use turin_codex_app_server::errors::AppServerError;
 use turin_contracts::UtcDateTime;
-use turin_contracts::git::TextGenerationError;
 use turin_contracts::model::CustomModelSetting;
 use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceId};
 use turin_contracts::provider_usage_limits::{
@@ -29,31 +26,32 @@ use turin_contracts::provider_usage_limits::{
 use turin_contracts::settings::{CodexSettings, CodexSetupMode};
 use turin_provider_core::driver::{
     ProviderContinuationIdentity, ProviderDriver, ProviderDriverCreateInput,
-    ProviderDriverMetadata, ProviderInstance, driver_error,
+    ProviderDriverMetadata, ProviderInstance, SnapshotForCwd, driver_error,
 };
 use turin_provider_core::errors::ProviderDriverError;
 use turin_provider_core::instance_identity::{InstanceIdentity, with_instance_identity};
 use turin_provider_core::maintenance::ProviderMaintenanceCapabilities;
 use turin_provider_core::maintenance_resolver::make_manual_only_provider_maintenance_capabilities;
+use turin_provider_core::model_catalog::ModelCatalog;
+use turin_provider_core::path_expansion::expand_home_path;
 use turin_provider_core::rt::BoxStream;
 use turin_provider_core::server_provider::{
-    ServerProvider, ServerProviderAuth, ServerProviderAuthStatus, ServerProviderModel,
-    ServerProviderSkill, ServerProviderSlashCommand, ServerProviderSlashCommandInput,
-    ServerProviderState,
+    ProviderWorkspaceSnapshot, ServerProvider, ServerProviderAuth, ServerProviderAuthStatus,
+    ServerProviderModel, ServerProviderSkill, ServerProviderSlashCommand,
+    ServerProviderSlashCommandInput, ServerProviderState,
 };
 use turin_provider_core::snapshot::ManagedServerProvider;
 use turin_provider_core::snapshot_probe::{
     BuildServerProviderInput, ProviderProbeResult, ServerProviderPresentation,
     build_server_provider,
 };
-use turin_provider_core::text_generation::{
-    BranchNameGenerationInput, BranchNameGenerationResult, CommitMessageGenerationInput,
-    CommitMessageGenerationResult, PrContentGenerationInput, PrContentGenerationResult,
-    ProviderTextGeneration, ReviewGuideGenerationInput, ReviewGuideGenerationResult,
-    ThreadTitleGenerationInput, ThreadTitleGenerationResult,
-};
+use turin_provider_core::text_generation::ProviderTextGeneration;
 use turin_provider_core::usage_limits::make_unavailable_usage_limits;
 use turin_shared::cli_args::tokenize_cli_args;
+use turin_text_generation::codex_text_generation::{
+    AttachmentPathResolver, CodexModel, CodexModelSource, CodexTextGenerationOptions,
+    codex_text_generation,
+};
 
 use crate::{
     codex_home_layout::{
@@ -65,8 +63,10 @@ use crate::{
     codex_model::{
         append_custom_codex_models, apply_preferred_codex_default_model, parse_codex_model,
     },
+    codex_model_catalog::apply_codex_model_catalog,
     codex_provider::{now_ms, probe},
     codex_skills::parse_codex_skills_list_response,
+    codex_snapshot::SnapshotCell,
     codex_usage_limits::{
         CodexRateLimitSnapshot, CodexResetCreditsSummary, codex_rate_limits_to_limits,
         codex_usage_probe_failed_limits,
@@ -87,6 +87,12 @@ pub struct CodexDriver {
     /// What a `setupMode: "managed"` instance needs from the host. Without it
     /// those instances fail to create.
     managed_host: Option<CodexManagedHost>,
+    /// The model manifest's Codex catalog (`ModelCatalog`). Without it models
+    /// are not reclassified and no update-required models are named.
+    model_catalog: Option<Arc<ModelCatalog>>,
+    /// Maps an image attachment to its file for text generation. Without it
+    /// image attachments are skipped.
+    attachment_path: Option<AttachmentPathResolver>,
 }
 
 impl CodexDriver {
@@ -95,6 +101,8 @@ impl CodexDriver {
             kind: ProviderDriverKind::new("codex").expect("codex driver slug"),
             metadata: ProviderDriverMetadata::new("Codex"),
             managed_host: None,
+            model_catalog: None,
+            attachment_path: None,
         }
     }
 
@@ -105,6 +113,18 @@ impl CodexDriver {
             managed_host: Some(host),
             ..Self::new()
         }
+    }
+
+    /// `ModelCatalog` for the status check (`applyCodexModelCatalog`).
+    pub fn with_model_catalog(mut self, catalog: Arc<ModelCatalog>) -> Self {
+        self.model_catalog = Some(catalog);
+        self
+    }
+
+    /// `resolveAttachmentPath` for text generation.
+    pub fn with_attachment_resolver(mut self, resolver: AttachmentPathResolver) -> Self {
+        self.attachment_path = Some(resolver);
+        self
     }
 }
 
@@ -154,7 +174,14 @@ impl ProviderDriver for CodexDriver {
                     "Managed Codex needs the host installation and credential store.",
                 ));
             };
-            return make_managed_codex_provider(&self.kind, input, settings, host).await;
+            return make_managed_codex_provider(
+                &self.kind,
+                input,
+                settings,
+                host,
+                self.attachment_path.clone(),
+            )
+            .await;
         }
         let enabled = settings.enabled && input.enabled;
         let maintenance = make_manual_only_provider_maintenance_capabilities(self.kind.clone());
@@ -179,16 +206,40 @@ impl ProviderDriver for CodexDriver {
                 .map(|color| color.as_str().to_owned()),
             continuation_group_key: layout.continuation_key.clone(),
         };
-        let pending = pending_provider(&self.kind, &input.instance_id, enabled, &custom_models);
+        let catalog_now = match &self.model_catalog {
+            Some(catalog) => catalog.current(&self.kind).await,
+            None => None,
+        };
+        let mut pending = pending_provider(&self.kind, &input.instance_id, enabled, &custom_models);
+        pending.draft = apply_codex_model_catalog(pending.draft, catalog_now.as_ref());
         let snapshot = Arc::new(CodexSnapshot {
             kind: self.kind.clone(),
             instance_id: input.instance_id.clone(),
             enabled,
             config: config.clone(),
             custom_models: custom_models.clone(),
-            current: RwLock::new(identity.stamp(&self.kind, &input.instance_id, pending)),
+            cell: SnapshotCell::new(identity.stamp(&self.kind, &input.instance_id, pending)),
             identity,
             maintenance,
+            catalog: self.model_catalog.clone(),
+        });
+        let usage_target = Arc::clone(&snapshot);
+        let adapter = CodexProviderAdapter::new(input.instance_id.clone(), config.clone())
+            .with_usage_sink(Arc::new(move |update, checked_at| {
+                usage_target.cell.apply_usage_limits(&update, &checked_at);
+            }));
+        let text_generation = native_text_generation(
+            &settings,
+            &config,
+            &layout,
+            enabled,
+            Arc::clone(&snapshot),
+            self.attachment_path.clone(),
+        );
+        let for_cwd = Arc::clone(&snapshot);
+        let snapshot_for_cwd: SnapshotForCwd = Arc::new(move |cwd: String| {
+            let snapshot = Arc::clone(&for_cwd);
+            Box::pin(async move { snapshot.workspace_snapshot(&cwd).await })
         });
         Ok(ProviderInstance {
             instance_id: input.instance_id.clone(),
@@ -204,15 +255,12 @@ impl ProviderDriver for CodexDriver {
                 .map(|color| color.as_str().to_owned()),
             enabled: input.enabled,
             snapshot,
-            snapshot_for_cwd: None,
+            snapshot_for_cwd: Some(snapshot_for_cwd),
             refresh_models: None,
             invalidate_caches: None,
             consume_reset_credit: None,
-            orchestration_adapter: Arc::new(CodexProviderAdapter::new(
-                input.instance_id.clone(),
-                config,
-            )),
-            text_generation: Arc::new(CodexText),
+            orchestration_adapter: Arc::new(adapter),
+            text_generation,
             auth: None,
         })
     }
@@ -255,7 +303,10 @@ fn runtime_config(
     });
     let launch_args = tokenize_cli_args(Some(&resolved));
     CodexRuntimeConfig {
-        binary: PathBuf::from(settings.binary_path.as_str()),
+        binary: PathBuf::from(expand_home_path(
+            settings.binary_path.as_str(),
+            &std::env::var("HOME").unwrap_or_default(),
+        )),
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         home_path,
         launch_args,
@@ -373,8 +424,9 @@ struct CodexSnapshot {
     config: CodexRuntimeConfig,
     custom_models: Vec<CustomModelSetting>,
     identity: SnapshotIdentity,
-    current: RwLock<ServerProvider>,
+    cell: SnapshotCell,
     maintenance: ProviderMaintenanceCapabilities,
+    catalog: Option<Arc<ModelCatalog>>,
 }
 
 /// What `withInstanceIdentity` stamps on every snapshot of one instance.
@@ -406,8 +458,13 @@ impl SnapshotIdentity {
 }
 
 impl CodexSnapshot {
-    /// `checkCodexProviderStatus` for a native (non-managed) instance.
+    /// `checkProvider` for a native instance: `checkCodexProviderStatus`, then
+    /// `applyCodexModelCatalog`. The manifest refreshes in the background, so a
+    /// slow fetch never delays the check; the in-memory catalog classifies.
     async fn check(&self) -> ServerProvider {
+        if let Some(catalog) = &self.catalog {
+            catalog.refresh_in_background();
+        }
         let status = check_codex_provider_status(StatusInput {
             kind: &self.kind,
             instance_id: &self.instance_id,
@@ -415,10 +472,120 @@ impl CodexSnapshot {
             config: &self.config,
             custom_models: &self.custom_models,
             managed_auth: None,
-        })
-        .await;
+        });
+        let catalog = async {
+            match &self.catalog {
+                Some(catalog) => catalog.current(&self.kind).await,
+                None => None,
+            }
+        };
+        let (mut status, catalog) = tokio::join!(status, catalog);
+        status.draft = apply_codex_model_catalog(status.draft, catalog.as_ref());
         self.identity.stamp(&self.kind, &self.instance_id, status)
     }
+
+    /// `snapshotForCwd`: the machine snapshot with this workspace's skills.
+    #[allow(clippy::result_large_err)]
+    async fn workspace_snapshot(
+        &self,
+        cwd: &str,
+    ) -> Result<ProviderWorkspaceSnapshot, ProviderDriverError> {
+        let mut provider = self.cell.get();
+        if self.enabled {
+            provider.skills = tokio::time::timeout(
+                SKILLS_PROBE_TIMEOUT,
+                probe_skills_for_cwd(&self.config, cwd),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or_else(|| {
+                driver_error(
+                    &self.kind,
+                    &self.instance_id,
+                    format!("Failed to probe Codex skills for '{cwd}'"),
+                )
+            })?;
+        }
+        Ok(ProviderWorkspaceSnapshot {
+            provider,
+            slash_commands_pending: None,
+        })
+    }
+}
+
+/// `Effect.timeout("20 seconds")` around `probeCodexSkillsForCwd`.
+pub(crate) const SKILLS_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// `probeCodexSkillsForCwd`: one `skills/list` for `cwd` on a fresh app-server.
+pub(crate) async fn probe_skills_for_cwd(
+    config: &CodexRuntimeConfig,
+    cwd: &str,
+) -> Result<Vec<ServerProviderSkill>, AppServerError> {
+    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+    let session = config.connect(&home).await?;
+    let response = session
+        .client()
+        .request("skills/list", Some(json!({"cwds": [cwd]})))
+        .await;
+    let _ = session.shutdown().await;
+    let response = response?.ok_or_else(|| AppServerError::InvalidPayload {
+        method: "skills/list".into(),
+        detail: "missing response".into(),
+    })?;
+    Ok(parse_codex_skills_list_response(&response, cwd))
+}
+
+/// The live model list text generation resolves aliases against.
+struct SnapshotModels(Arc<CodexSnapshot>);
+
+#[async_trait]
+impl CodexModelSource for SnapshotModels {
+    async fn models(&self) -> Vec<CodexModel> {
+        self.0
+            .cell
+            .get()
+            .models
+            .iter()
+            .map(|model| CodexModel {
+                slug: model.slug.as_str().to_owned(),
+                is_custom: model.is_custom,
+            })
+            .collect()
+    }
+}
+
+/// `makeCodexTextGeneration(effectiveConfig, processEnv, models)`: one
+/// `codex exec` per request, from `turin-text-generation`.
+fn native_text_generation(
+    settings: &CodexSettings,
+    config: &CodexRuntimeConfig,
+    layout: &CodexHomeLayout,
+    enabled: bool,
+    snapshot: Arc<CodexSnapshot>,
+    attachment_path: Option<AttachmentPathResolver>,
+) -> Arc<dyn ProviderTextGeneration> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut effective = serde_json::to_value(settings).unwrap_or_default();
+    effective["enabled"] = json!(enabled);
+    effective["binaryPath"] = json!(config.binary.to_string_lossy());
+    effective["homePath"] = json!(
+        layout
+            .effective_home_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    );
+    let environment: std::collections::BTreeMap<String, String> =
+        std::env::vars().chain(config.environment.clone()).collect();
+    Arc::new(codex_text_generation(CodexTextGenerationOptions {
+        settings: serde_json::from_value(effective).unwrap_or_else(|_| settings.clone()),
+        environment: Some(environment),
+        models: Arc::new(SnapshotModels(snapshot)),
+        managed_runtime: None,
+        resolve_attachment_path: attachment_path.unwrap_or_else(|| Arc::new(|_| None)),
+        home_dir: home,
+    }))
 }
 
 /// `checkCodexProviderStatus`'s inputs. `managed_auth` is the account a managed
@@ -691,69 +858,21 @@ impl ManagedServerProvider for CodexSnapshot {
     }
 
     async fn get_snapshot(&self) -> ServerProvider {
-        self.current.read().clone()
+        self.cell.get()
     }
 
     async fn refresh(&self) -> ServerProvider {
         let next = self.check().await;
-        *self.current.write() = next.clone();
+        self.cell.publish(next.clone());
         next
     }
 
     fn stream_changes(&self) -> BoxStream<'static, ServerProvider> {
-        Box::pin(stream::empty())
+        self.cell.stream()
     }
 
-    async fn apply_usage_limits(&self, _update: ProviderUsageLimitsUpdate, _checked_at: &str) {}
-}
-
-/// Text generation runs a one-shot Codex turn upstream. That needs a paid turn
-/// and is not ported yet, so it reports the gap instead of inventing output.
-pub(crate) struct CodexText;
-
-fn text_error() -> TextGenerationError {
-    TextGenerationError::TextGenerationError {
-        operation: "codex".to_owned(),
-        detail: "Codex text generation is not ported to Turin yet.".to_owned(),
-        cause: None,
-    }
-}
-
-#[async_trait]
-impl ProviderTextGeneration for CodexText {
-    async fn generate_commit_message(
-        &self,
-        _input: CommitMessageGenerationInput,
-    ) -> Result<CommitMessageGenerationResult, TextGenerationError> {
-        Err(text_error())
-    }
-
-    async fn generate_pr_content(
-        &self,
-        _input: PrContentGenerationInput,
-    ) -> Result<PrContentGenerationResult, TextGenerationError> {
-        Err(text_error())
-    }
-
-    async fn generate_branch_name(
-        &self,
-        _input: BranchNameGenerationInput,
-    ) -> Result<BranchNameGenerationResult, TextGenerationError> {
-        Err(text_error())
-    }
-
-    async fn generate_thread_title(
-        &self,
-        _input: ThreadTitleGenerationInput,
-    ) -> Result<ThreadTitleGenerationResult, TextGenerationError> {
-        Err(text_error())
-    }
-
-    async fn generate_review_guide(
-        &self,
-        _input: ReviewGuideGenerationInput,
-    ) -> Result<ReviewGuideGenerationResult, TextGenerationError> {
-        Err(text_error())
+    async fn apply_usage_limits(&self, update: ProviderUsageLimitsUpdate, checked_at: &str) {
+        self.cell.apply_usage_limits(&update, checked_at);
     }
 }
 

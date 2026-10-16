@@ -5,7 +5,7 @@
 //! approval counts mirror `scenarioExpectations` there.
 use crate::{
     adapter::CodexEvent,
-    orchestration_adapter::CodexProviderAdapter,
+    orchestration_adapter::{CodexProviderAdapter, UsageLimitsSink},
     projection::{RuntimeState, TurnState, project_event},
     runtime::CodexRuntimeConfig,
 };
@@ -185,7 +185,11 @@ struct Replay {
 }
 
 async fn open(transcript: ReplayTranscript) -> Replay {
-    let (model, runtime, events, driver) = open_session(transcript).await;
+    open_with_sink(transcript, None).await
+}
+
+async fn open_with_sink(transcript: ReplayTranscript, sink: Option<UsageLimitsSink>) -> Replay {
+    let (model, runtime, events, driver) = open_session_with(transcript, sink).await;
     let thread = runtime
         .ensure_thread(ProviderAdapterV2EnsureThreadInput {
             thread_id: id("thread-1"),
@@ -248,6 +252,18 @@ async fn open_session(
     ProviderEventStream,
     ReplayDriver,
 ) {
+    open_session_with(transcript, None).await
+}
+
+async fn open_session_with(
+    transcript: ReplayTranscript,
+    sink: Option<UsageLimitsSink>,
+) -> (
+    String,
+    Arc<dyn ProviderSessionRuntime>,
+    ProviderEventStream,
+    ReplayDriver,
+) {
     // The replay runs on the model the upstream recorder used for this scenario.
     let model = recorded_model(&transcript);
     let (client, driver) = make_replay_client(transcript);
@@ -260,11 +276,14 @@ async fn open_session(
         remove_environment: vec![],
         client_version: CLIENT_VERSION.into(),
     };
-    let adapter = CodexProviderAdapter::with_client(
+    let mut adapter = CodexProviderAdapter::with_client(
         ProviderInstanceId::new("codex").unwrap(),
         config,
         client,
     );
+    if let Some(sink) = sink {
+        adapter = adapter.with_usage_sink(sink);
+    }
     let runtime = adapter
         .open_session(ProviderAdapterV2OpenSessionInput {
             thread_id: id("thread-1"),
@@ -767,6 +786,71 @@ async fn app_context_goes_out_as_untrusted_additional_context() {
     );
     // No T3 MCP server, so no developer instructions and no `collaborationMode`
     // in a default-mode turn; the recorded frame carries neither.
+    replay.driver.verify_complete().unwrap();
+}
+
+/// `account/rateLimits/updated` arrives mid-turn: the adapter hands the pushed
+/// windows to the snapshot's sink, and an update with no windows says nothing.
+#[tokio::test]
+async fn rate_limit_pushes_reach_the_usage_sink() {
+    let mut transcript = fixture("simple");
+    let completed = transcript
+        .entries
+        .iter()
+        .position(|entry| matches!(entry, ReplayEntry::EmitInbound { frame, .. } if frame["method"] == "turn/completed"))
+        .expect("turn/completed");
+    for (offset, rate_limits) in [
+        json!({"limitId": "codex", "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1790000000}, "secondary": null}),
+        // A model-specific allowance (such as Spark) names no windows.
+        json!({"limitId": "codex_spark", "primary": {"usedPercent": 99}}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        transcript.entries.insert(
+            completed + offset,
+            ReplayEntry::EmitInbound {
+                label: None,
+                frame: json!({
+                    "method": "account/rateLimits/updated",
+                    "params": {"rateLimits": rate_limits}
+                }),
+                after_ms: None,
+            },
+        );
+    }
+    let pushes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&pushes);
+    let mut replay = open_with_sink(
+        transcript,
+        Some(Arc::new(move |update, checked_at| {
+            seen.lock().push((update, checked_at));
+        })),
+    )
+    .await;
+    replay
+        .start(
+            "Respond with the following text: fixture simple ok",
+            policy(
+                RuntimeMode::FullAccess,
+                ProviderInteractionMode::Default,
+                None,
+                None,
+            ),
+        )
+        .await;
+    let events = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&events),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    let pushes = pushes.lock();
+    assert_eq!(pushes.len(), 1, "{pushes:?}");
+    let windows = &pushes[0].0.windows;
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].id.as_str(), "primary");
+    assert_eq!(windows[0].used_percent, 42.0);
+    assert_eq!(windows[0].window_duration_mins, Some(300));
     replay.driver.verify_complete().unwrap();
 }
 

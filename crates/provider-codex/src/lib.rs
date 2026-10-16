@@ -16,11 +16,15 @@ pub mod codex_managed_provider;
 pub mod codex_managed_runtime;
 pub mod codex_mcp_elicitation;
 pub mod codex_model;
+pub mod codex_model_catalog;
 pub mod codex_provider;
 pub mod codex_skills;
+mod codex_snapshot;
 pub mod codex_turn_token_usage;
 pub mod codex_usage_limits;
 pub mod driver;
+#[cfg(test)]
+mod driver_tests;
 pub mod goal;
 pub mod items;
 pub mod orchestration_adapter;

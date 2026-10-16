@@ -7830,11 +7830,13 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-stream",
  "tracing",
  "turin-codex-app-server",
  "turin-contracts",
  "turin-provider-core",
  "turin-shared",
+ "turin-text-generation",
  "url",
  "uuid",
 ]

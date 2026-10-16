@@ -21,6 +21,7 @@ turin-acp = { path = "crates/acp" }
 turin-provider-codex = { path = "crates/provider-codex" }
 turin-provider-claude = { path = "crates/provider-claude" }
 turin-provider-opencode = { path = "crates/provider-opencode" }
+turin-text-generation = { path = "crates/text-generation" }
 turin-provider-cursor = { path = "crates/provider-cursor" }
 turin-orchestration = { path = "crates/orchestration" }
 turin-hooks = { path = "crates/hooks" }

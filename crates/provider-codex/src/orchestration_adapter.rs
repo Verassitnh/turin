@@ -4,6 +4,7 @@ use crate::{
     adapter::{CodexAdapter, CodexEvent, CodexSession},
     approvals::{Decision, PendingRequest},
     codex_mcp_elicitation::describe_mcp_elicitation,
+    codex_usage_limits::{CodexRateLimitSnapshot, codex_rate_limits_to_update},
     goal::{self, GoalCommand},
     items,
     params::{RuntimePolicy, TurnContext},
@@ -35,6 +36,7 @@ use turin_contracts::{
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
     provider_policy::{ProviderApprovalDecision, ProviderRequestKind},
+    provider_usage_limits::ProviderUsageLimitsUpdate,
 };
 use turin_provider_core::{
     failure::ProviderFailureCause,
@@ -98,6 +100,9 @@ fn error(kind: ProviderAdapterErrorKind, cause: impl std::fmt::Display) -> Provi
     )
 }
 
+/// Receives a runtime rate-limit push (`onUsageLimits`): the update and when it arrived.
+pub type UsageLimitsSink = Arc<dyn Fn(ProviderUsageLimitsUpdate, String) + Send + Sync>;
+
 pub struct CodexProviderAdapter {
     instance_id: ProviderInstanceId,
     driver: ProviderDriverKind,
@@ -105,6 +110,7 @@ pub struct CodexProviderAdapter {
     injected_client: Mutex<Option<Client>>,
     /// Resolves the launch per session (managed Codex: the signed-in token).
     resolver: Option<Arc<dyn CodexRuntimeResolver>>,
+    usage_sink: Option<UsageLimitsSink>,
 }
 
 impl CodexProviderAdapter {
@@ -115,7 +121,13 @@ impl CodexProviderAdapter {
             config,
             injected_client: Mutex::new(None),
             resolver: None,
+            usage_sink: None,
         }
+    }
+    /// Upstream's `onUsageLimits` hook: where `account/rateLimits/updated` pushes go.
+    pub fn with_usage_sink(mut self, sink: UsageLimitsSink) -> Self {
+        self.usage_sink = Some(sink);
+        self
     }
     /// Upstream's `resolveRuntime` option: the launch settings come from `resolver`
     /// for every session, with `config` supplying the cwd and client version.
@@ -141,6 +153,7 @@ impl CodexProviderAdapter {
             config,
             injected_client: Mutex::new(Some(client)),
             resolver: None,
+            usage_sink: None,
         }
     }
 }
@@ -242,6 +255,7 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
             turn_registered.clone(),
             input.provider_session_id.clone(),
             out_tx,
+            self.usage_sink.clone(),
         ));
         let now = UtcDateTime::now();
         let cwd = input
@@ -301,6 +315,23 @@ pub struct CodexProviderRuntime {
 impl Drop for CodexProviderRuntime {
     fn drop(&mut self) {
         self.pump.abort();
+    }
+}
+
+/// `account/rateLimits/updated`: the pushed windows go to the snapshot.
+fn push_usage_limits(sink: &UsageLimitsSink, event: &CodexEvent) {
+    if event.method != "account/rateLimits/updated" {
+        return;
+    }
+    let Some(snapshot) = event
+        .params
+        .get("rateLimits")
+        .and_then(|value| serde_json::from_value::<CodexRateLimitSnapshot>(value.clone()).ok())
+    else {
+        return;
+    };
+    if let Some(update) = codex_rate_limits_to_update(&snapshot) {
+        sink(update, UtcDateTime::now().to_string());
     }
 }
 
@@ -430,6 +461,7 @@ fn drain_parked(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn project_pump(
     mut events: Option<tokio::sync::mpsc::UnboundedReceiver<CodexEvent>>,
     mut requests: Option<tokio::sync::mpsc::UnboundedReceiver<PendingRequest>>,
@@ -438,13 +470,19 @@ async fn project_pump(
     registered: Arc<tokio::sync::Notify>,
     session_id: ProviderSessionId,
     out: tokio::sync::mpsc::UnboundedSender<ProviderAdapterV2Event>,
+    usage_sink: Option<UsageLimitsSink>,
 ) {
     let mut parked = VecDeque::new();
     loop {
         let flush = projection::next_flush(&state.lock());
         let mut batch = tokio::select! {
             raw = recv_raw(&mut events) => match raw {
-                Some(raw) => ingest(&mut parked, Parked::Event(raw), &mut state.lock(), &session_id),
+                Some(raw) => {
+                    if let Some(sink) = &usage_sink {
+                        push_usage_limits(sink, &raw);
+                    }
+                    ingest(&mut parked, Parked::Event(raw), &mut state.lock(), &session_id)
+                }
                 None => return,
             },
             request = recv_request(&mut requests) => {

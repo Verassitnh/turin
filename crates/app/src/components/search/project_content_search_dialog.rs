@@ -88,12 +88,12 @@ pub struct ProjectContentSearchResults {
     pub error: Option<String>,
 }
 
-pub fn show_content_search_status_bar(results: &ProjectContentSearchResults, has_query: bool) -> bool {
+pub fn show_content_search_status_bar(
+    results: &ProjectContentSearchResults,
+    has_query: bool,
+) -> bool {
     results.can_read_files
-        && (has_query
-            || results.is_pending
-            || results.error.is_some()
-            || results.invalid_regex)
+        && (has_query || results.is_pending || results.error.is_some() || results.invalid_regex)
 }
 
 pub fn content_search_center_message(
@@ -220,13 +220,16 @@ impl RenderOnce for ProjectContentSearchDialog {
                         .border_color(theme.border)
                         .px_3()
                         .text_size(TEXT_XS.size)
-                        .text_color(if self.results.error.is_some() || self.results.invalid_regex {
-                            theme.destructive
-                        } else {
-                            theme.muted_foreground
-                        })
+                        .text_color(
+                            if self.results.error.is_some() || self.results.invalid_regex {
+                                theme.destructive
+                            } else {
+                                theme.muted_foreground
+                            },
+                        )
                         .when(self.results.is_pending, |row| {
-                            row.gap_2().child(Spinner::new("content-search-spinner").size(rems(0.875)))
+                            row.gap_2()
+                                .child(Spinner::new("content-search-spinner").size(rems(0.875)))
                         })
                         .child(status),
                 )
@@ -241,58 +244,53 @@ impl RenderOnce for ProjectContentSearchDialog {
                     .text_center()
                     .text_size(TEXT_SM.size)
                     .text_color(theme.muted_foreground)
-                    .child(content_search_center_message(
-                        &self.results,
-                        has_query,
-                    ))
+                    .child(content_search_center_message(&self.results, has_query))
                     .into_any_element()
             } else {
                 crate::ui::scroll_area::scroll_area("project-content-search-results")
-                    .child(
-                        div().flex_1().children(groups.into_iter().map(|group| {
-                            let (name, directory) = split_search_path(&group.path);
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .py_2()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .px_3()
-                                        .child(crate::ui::Icon::new(IconName::FileCode).size(rems(1.)))
-                                        .child(
+                    .child(div().flex_1().children(groups.into_iter().map(|group| {
+                        let (name, directory) = split_search_path(&group.path);
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .py_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_3()
+                                    .child(crate::ui::Icon::new(IconName::FileCode).size(rems(1.)))
+                                    .child(
+                                        div()
+                                            .text_size(TEXT_SM.size)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(name),
+                                    )
+                                    .when(!directory.is_empty(), |this| {
+                                        this.child(
                                             div()
-                                                .text_size(TEXT_SM.size)
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .child(name),
+                                                .text_size(TEXT_XS.size)
+                                                .text_color(theme.muted_foreground)
+                                                .child(directory),
                                         )
-                                        .when(!directory.is_empty(), |this| {
-                                            this.child(
-                                                div()
-                                                    .text_size(TEXT_XS.size)
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(directory),
-                                            )
-                                        }),
-                                )
-                                .children(group.matches.into_iter().map(|indexed| {
-                                    div()
-                                        .px_3()
-                                        .py(rems(0.125))
-                                        .when(indexed.result_index == self.selected_index, |this| {
-                                            this.bg(theme.accent)
-                                        })
-                                        .child(HighlightedSearchLine {
-                                            match_: indexed.match_,
-                                            path: group.path.clone(),
-                                            dark: self.dark,
-                                        })
-                                }))
-                        })),
-                    )
+                                    }),
+                            )
+                            .children(group.matches.into_iter().map(|indexed| {
+                                div()
+                                    .px_3()
+                                    .py(rems(0.125))
+                                    .when(indexed.result_index == self.selected_index, |this| {
+                                        this.bg(theme.accent)
+                                    })
+                                    .child(HighlightedSearchLine {
+                                        match_: indexed.match_,
+                                        path: group.path.clone(),
+                                        dark: self.dark,
+                                    })
+                            }))
+                    })))
                     .into_any_element()
             })
             .child(
@@ -325,11 +323,8 @@ mod tests {
 
     #[test]
     fn groups_matches_in_first_seen_path_order() {
-        let grouped = group_content_matches(&[
-            match_at("b.rs"),
-            match_at("a.rs"),
-            match_at("b.rs"),
-        ]);
+        let grouped =
+            group_content_matches(&[match_at("b.rs"), match_at("a.rs"), match_at("b.rs")]);
         assert_eq!(grouped.len(), 2);
         assert_eq!(grouped[0].path, "b.rs");
         assert_eq!(grouped[1].path, "a.rs");

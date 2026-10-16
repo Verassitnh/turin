@@ -91,10 +91,7 @@ mod tests {
         );
         assert!(matches!(
             effect,
-            ThreadLinkPromptEffect::Place(
-                PlaceLinkedPromptDecision::ConfirmReplaceDraft,
-                _
-            )
+            ThreadLinkPromptEffect::Place(PlaceLinkedPromptDecision::ConfirmReplaceDraft, _)
         ));
     }
 }

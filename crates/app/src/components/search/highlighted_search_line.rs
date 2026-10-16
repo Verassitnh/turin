@@ -5,12 +5,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock};
 use std::thread;
 
-use parking_lot::Mutex;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, FontWeight, Hsla, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div,
     rems,
 };
+use parking_lot::Mutex;
 use turin_contracts::project::ProjectContentMatch;
 
 use crate::components::chat::markdown::code_highlight;
@@ -195,14 +195,13 @@ impl HighlightCacheState {
     const MAX_ENTRIES: usize = 512;
 }
 
-static HIGHLIGHT_CACHE: LazyLock<Mutex<HighlightCacheState>> =
-    LazyLock::new(|| {
-        Mutex::new(HighlightCacheState {
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-            in_flight: HashSet::new(),
-        })
-    });
+static HIGHLIGHT_CACHE: LazyLock<Mutex<HighlightCacheState>> = LazyLock::new(|| {
+    Mutex::new(HighlightCacheState {
+        entries: HashMap::new(),
+        order: VecDeque::new(),
+        in_flight: HashSet::new(),
+    })
+});
 
 /// Warms syntax highlighting off the UI thread for visible rows (upstream Suspense).
 pub struct SearchLineHighlightCache;
@@ -268,8 +267,7 @@ impl RenderOnce for HighlightedSearchLine {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme();
         let primary_match_bg = with_alpha(theme.primary, 0.25);
-        let segments =
-            SearchLineHighlightCache::cached(&self.match_, &self.path, self.dark);
+        let segments = SearchLineHighlightCache::cached(&self.match_, &self.path, self.dark);
         div()
             .flex()
             .flex_wrap()

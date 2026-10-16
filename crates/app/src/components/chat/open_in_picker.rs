@@ -10,8 +10,8 @@ use gpui_kit::{
 use turin_contracts::editor::EditorId;
 
 use super::super::jetbrains_icons;
-use crate::assets::editor_icons;
 use crate::assets::PROVIDER_CURSOR;
+use crate::assets::editor_icons;
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +50,9 @@ fn editor_icon_path(editor: EditorId, platform: &str) -> SharedString {
         EditorId::Zed => editor_icons::ZED.into(),
         EditorId::Antigravity => editor_icons::ANTIGRAVITY.into(),
         EditorId::FileManager if is_mac_platform(platform) => editor_icons::FINDER.into(),
-        EditorId::FileManager if is_windows_platform(platform) => editor_icons::FILE_EXPLORER.into(),
+        EditorId::FileManager if is_windows_platform(platform) => {
+            editor_icons::FILE_EXPLORER.into()
+        }
         EditorId::FileManager => editor_icons::FOLDER_CLOSED.into(),
         _ => PROVIDER_CURSOR.into(),
     }
@@ -199,11 +201,7 @@ mod tests {
     fn maps_each_editor_to_its_own_icon() {
         let options = resolve_open_in_options(
             "MacIntel",
-            &[
-                EditorId::Vscode,
-                EditorId::Zed,
-                EditorId::FileManager,
-            ],
+            &[EditorId::Vscode, EditorId::Zed, EditorId::FileManager],
         );
         let vscode = options
             .iter()

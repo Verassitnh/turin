@@ -59,6 +59,7 @@ pub mod provider_auth_return_url;
 pub mod schema_json;
 pub mod search_ranking;
 pub mod semver;
+pub mod server_settings;
 pub mod shell;
 pub mod source_control;
 pub mod r#struct;

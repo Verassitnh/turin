@@ -1,0 +1,1300 @@
+//! Port of the logic-level cases in upstream/packages/shared/src/serverSettings.test.ts.
+//! Patches are written as JSON to match the upstream object literals.
+
+use serde_json::{Value, json};
+use turin_contracts::base_schemas::ProjectId;
+use turin_contracts::model_selection::ModelSelection;
+use turin_contracts::provider_instance::{
+    ProviderDriverKind, ProviderInstanceConfig, ProviderInstanceId,
+};
+use turin_contracts::settings::{ServerSettings, default_server_settings};
+
+use super::*;
+
+fn apply(current: &ServerSettings, patch: Value) -> ServerSettings {
+    let patch: ServerSettingsPatch = serde_json::from_value(patch).expect("valid patch");
+    apply_server_settings_patch(current, &patch).expect("patch applies")
+}
+
+fn defaults() -> ServerSettings {
+    default_server_settings()
+}
+
+fn background(settings: &ServerSettings) -> Value {
+    serde_json::to_value(&settings.background_activity).unwrap()
+}
+
+fn selection(instance: &str, model: &str, options: Option<Value>) -> Value {
+    let mut value = json!({ "instanceId": instance, "model": model });
+    if let Some(options) = options {
+        value["options"] = options;
+    }
+    value
+}
+
+struct Provider {
+    instance_id: ProviderInstanceId,
+    enabled: bool,
+    available: bool,
+    text_capable: bool,
+}
+
+impl ProviderStatus for Provider {
+    fn instance_id(&self) -> &ProviderInstanceId {
+        &self.instance_id
+    }
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+    fn is_available(&self) -> bool {
+        self.available
+    }
+    fn is_text_generation_capable(&self) -> bool {
+        self.text_capable
+    }
+}
+
+// fallbackTextGenerationModelSelection
+
+#[test]
+fn fallback_ignores_a_configured_non_default_instance_at_machine_scope() {
+    let configured = ProviderInstanceId::new("codex_work").unwrap();
+    let mut instances = indexmap::IndexMap::new();
+    instances.insert(
+        configured.clone(),
+        ProviderInstanceConfig {
+            driver: ProviderDriverKind::new("codex").unwrap(),
+            display_name: None,
+            accent_color: None,
+            environment: None,
+            enabled: None,
+            config: Some(json!({})),
+        },
+    );
+    let fallback = fallback_text_generation_model_selection(
+        &instances,
+        |id, _| *id == configured,
+        false,
+        None,
+    );
+    assert!(fallback.is_none());
+}
+
+#[test]
+fn fallback_considers_a_configured_non_default_instance_only_when_asked() {
+    let configured = ProviderInstanceId::new("codex_work").unwrap();
+    let mut instances = indexmap::IndexMap::new();
+    instances.insert(
+        configured.clone(),
+        ProviderInstanceConfig {
+            driver: ProviderDriverKind::new("codex").unwrap(),
+            display_name: None,
+            accent_color: None,
+            environment: None,
+            enabled: None,
+            config: Some(json!({})),
+        },
+    );
+    let fallback =
+        fallback_text_generation_model_selection(&instances, |id, _| *id == configured, true, None)
+            .expect("configured instance is a candidate");
+    assert_eq!(fallback.instance_id, configured);
+}
+
+// serverSettings helpers: legacy project maps
+
+#[test]
+fn auto_pull_inherits_while_keeping_legacy_opt_ins_and_overrides() {
+    let project = ProjectId::new("project-pull").unwrap();
+    let other = ProjectId::new("other-project").unwrap();
+    let base = defaults();
+    assert!(!resolve_project_auto_pull(&base, &project, false));
+    assert!(resolve_project_auto_pull(&base, &project, true));
+
+    let enabled = apply(&base, json!({ "defaultAutoPull": true }));
+    assert!(resolve_project_auto_pull(&enabled, &project, false));
+
+    let overridden = apply(
+        &enabled,
+        json!({ "projectAutoPullOverrides": { project.as_str(): false } }),
+    );
+    assert!(!resolve_project_auto_pull(&overridden, &project, true));
+
+    let reset = apply(
+        &overridden,
+        json!({ "projectAutoPullOverrides": { project.as_str(): null } }),
+    );
+    assert!(resolve_project_auto_pull(&reset, &project, false));
+
+    let disabled = apply(
+        &reset,
+        json!({
+            "defaultAutoPull": false,
+            "projectAutoPullOverrides": { project.as_str(): true },
+        }),
+    );
+    assert!(resolve_project_auto_pull(&disabled, &project, false));
+    assert!(!resolve_project_auto_pull(&disabled, &other, false));
+}
+
+#[test]
+fn browser_access_inherits_and_restores_inheritance_when_an_override_is_removed() {
+    let project = ProjectId::new("project-browser").unwrap();
+    let other = ProjectId::new("other-project").unwrap();
+    let overridden = apply(
+        &defaults(),
+        json!({ "projectAgentBrowserAccessOverrides": { project.as_str(): false } }),
+    );
+    assert!(!resolve_project_agent_browser_access(&overridden, &project));
+    assert!(resolve_project_agent_browser_access(&overridden, &other));
+
+    let reset = apply(
+        &overridden,
+        json!({ "projectAgentBrowserAccessOverrides": { project.as_str(): null } }),
+    );
+    assert!(resolve_project_agent_browser_access(&reset, &project));
+}
+
+#[test]
+fn boolean_overrides_of_other_projects_survive_separate_updates_and_resets() {
+    let first = ProjectId::new("first-project").unwrap();
+    let second = ProjectId::new("second-project").unwrap();
+    let first_update = apply(
+        &defaults(),
+        json!({
+            "defaultAutoPull": true,
+            "projectAutoPullOverrides": { first.as_str(): false },
+            "projectAgentBrowserAccessOverrides": { first.as_str(): false },
+        }),
+    );
+    let second_update = apply(
+        &first_update,
+        json!({
+            "projectAutoPullOverrides": { second.as_str(): false },
+            "projectAgentBrowserAccessOverrides": { second.as_str(): false },
+        }),
+    );
+    for project in [&first, &second] {
+        assert!(!resolve_project_auto_pull(&second_update, project, false));
+        assert!(!resolve_project_agent_browser_access(
+            &second_update,
+            project
+        ));
+    }
+
+    let reset = apply(
+        &second_update,
+        json!({
+            "projectAutoPullOverrides": { first.as_str(): null },
+            "projectAgentBrowserAccessOverrides": { first.as_str(): null },
+        }),
+    );
+    assert!(resolve_project_auto_pull(&reset, &first, false));
+    assert!(resolve_project_agent_browser_access(&reset, &first));
+    assert!(!resolve_project_auto_pull(&reset, &second, false));
+    assert!(!resolve_project_agent_browser_access(&reset, &second));
+    assert!(!reset.project_auto_pull_overrides.contains_key(&first));
+}
+
+#[test]
+fn conversation_model_default_is_replaced_and_cleared_without_stale_options() {
+    let current = apply(
+        &defaults(),
+        json!({
+            "defaultModelSelection": selection(
+                "codex",
+                "gpt-5.4",
+                Some(json!([{ "id": "reasoningEffort", "value": "high" }])),
+            ),
+        }),
+    );
+    let next = apply(
+        &current,
+        json!({ "defaultModelSelection": selection("claudeAgent", "sonnet", None) }),
+    );
+    assert_eq!(
+        serde_json::to_value(&next.default_model_selection).unwrap(),
+        selection("claudeAgent", "sonnet", None)
+    );
+    let cleared = apply(&next, json!({ "defaultModelSelection": null }));
+    assert!(cleared.default_model_selection.is_none());
+}
+
+// textGenerationModelSelection
+
+#[test]
+fn text_generation_selection_is_replaced_when_provider_and_model_are_given() {
+    let current = apply(
+        &defaults(),
+        json!({
+            "textGenerationModelSelection": selection(
+                "codex",
+                "gpt-5.4-mini",
+                Some(json!([
+                    { "id": "reasoningEffort", "value": "high" },
+                    { "id": "fastMode", "value": true },
+                ])),
+            ),
+        }),
+    );
+    let next = apply(
+        &current,
+        json!({
+            "textGenerationModelSelection": { "instanceId": "codex", "model": "gpt-5.4-mini" },
+        }),
+    );
+    assert_eq!(
+        serde_json::to_value(&next.text_generation_model_selection).unwrap(),
+        selection("codex", "gpt-5.4-mini", None)
+    );
+}
+
+#[test]
+fn text_generation_selection_still_deep_merges_when_only_options_are_given() {
+    let current = apply(
+        &defaults(),
+        json!({
+            "textGenerationModelSelection": selection(
+                "codex",
+                "gpt-5.4-mini",
+                Some(json!([
+                    { "id": "reasoningEffort", "value": "high" },
+                    { "id": "fastMode", "value": true },
+                ])),
+            ),
+        }),
+    );
+    let next = apply(
+        &current,
+        json!({
+            "textGenerationModelSelection": { "options": [{ "id": "fastMode", "value": false }] },
+        }),
+    );
+    assert_eq!(
+        serde_json::to_value(&next.text_generation_model_selection).unwrap(),
+        selection(
+            "codex",
+            "gpt-5.4-mini",
+            Some(json!([
+                { "id": "reasoningEffort", "value": "high" },
+                { "id": "fastMode", "value": false },
+            ])),
+        )
+    );
+}
+
+#[test]
+fn text_generation_selection_across_providers_drops_stale_options() {
+    let current = apply(
+        &defaults(),
+        json!({
+            "textGenerationModelSelection": selection(
+                "codex",
+                "gpt-5.4-mini",
+                Some(json!([{ "id": "fastMode", "value": true }])),
+            ),
+        }),
+    );
+    let next = apply(
+        &current,
+        json!({
+            "textGenerationModelSelection": { "instanceId": "opencode", "model": "openai/gpt-5" },
+        }),
+    );
+    assert_eq!(
+        serde_json::to_value(&next.text_generation_model_selection).unwrap(),
+        selection("opencode", "openai/gpt-5", None)
+    );
+}
+
+#[test]
+fn array_based_text_generation_selection_patches_are_accepted() {
+    let next = apply(
+        &defaults(),
+        json!({
+            "textGenerationModelSelection": {
+                "instanceId": "opencode",
+                "model": "openai/gpt-5",
+                "options": [
+                    { "id": "variant", "value": "prod" },
+                    { "id": "agent", "value": "build" },
+                ],
+            },
+        }),
+    );
+    assert_eq!(
+        serde_json::to_value(&next.text_generation_model_selection).unwrap(),
+        selection(
+            "opencode",
+            "openai/gpt-5",
+            Some(json!([
+                { "id": "variant", "value": "prod" },
+                { "id": "agent", "value": "build" },
+            ])),
+        )
+    );
+}
+
+// sourceControlWriterModelSelection
+
+#[test]
+fn writer_selection_is_replaced_without_stale_options_and_cleared_with_null() {
+    let current = apply(
+        &defaults(),
+        json!({
+            "sourceControlWriterModelSelection": selection(
+                "codex",
+                "gpt-5.4-mini",
+                Some(json!([{ "id": "reasoningEffort", "value": "high" }])),
+            ),
+        }),
+    );
+    let replaced = apply(
+        &current,
+        json!({
+            "sourceControlWriterModelSelection": { "instanceId": "opencode", "model": "openai/gpt-5" },
+        }),
+    );
+    assert_eq!(
+        serde_json::to_value(&replaced.source_control_writer_model_selection).unwrap(),
+        selection("opencode", "openai/gpt-5", None)
+    );
+    let cleared = apply(
+        &replaced,
+        json!({ "sourceControlWriterModelSelection": null }),
+    );
+    assert!(cleared.source_control_writer_model_selection.is_none());
+}
+
+#[test]
+fn writer_falls_back_from_a_disabled_provider_without_clearing_its_selection() {
+    let instance = ProviderInstanceId::new("codex_writer").unwrap();
+    let writer = ModelSelection {
+        instance_id: instance.clone(),
+        model: turin_contracts::base_schemas::TrimmedNonEmptyString::new("gpt-5.4-mini").unwrap(),
+        options: None,
+    };
+    let mut settings = defaults();
+    settings.provider_instances.insert(
+        instance.clone(),
+        ProviderInstanceConfig {
+            driver: ProviderDriverKind::new("codex").unwrap(),
+            display_name: None,
+            accent_color: None,
+            environment: None,
+            enabled: Some(false),
+            config: Some(json!({})),
+        },
+    );
+    settings.source_control_writer_model_selection = Some(writer.clone());
+
+    assert!(!is_model_selection_provider_enabled(&settings, &writer));
+    assert_eq!(
+        resolve_source_control_writer_model_selection(&settings, None::<&[Provider]>, None),
+        settings.text_generation_model_selection
+    );
+    assert_eq!(settings.source_control_writer_model_selection, Some(writer));
+}
+
+#[test]
+fn writer_falls_back_from_an_unavailable_or_text_incapable_provider() {
+    let settings = apply(
+        &defaults(),
+        json!({
+            "providerInstances": { "missing_writer": { "driver": "codex", "enabled": true, "config": {} } },
+            "sourceControlWriterModelSelection": selection("missing_writer", "missing-model", None),
+        }),
+    );
+    let unavailable = [Provider {
+        instance_id: ProviderInstanceId::new("missing_writer").unwrap(),
+        enabled: true,
+        available: false,
+        text_capable: true,
+    }];
+    assert_eq!(
+        resolve_source_control_writer_model_selection(&settings, Some(&unavailable), None),
+        settings.text_generation_model_selection
+    );
+    let incapable = [Provider {
+        instance_id: ProviderInstanceId::new("missing_writer").unwrap(),
+        enabled: true,
+        available: true,
+        text_capable: false,
+    }];
+    assert_eq!(
+        resolve_source_control_writer_model_selection(&settings, Some(&incapable), None),
+        settings.text_generation_model_selection
+    );
+    let ready = [Provider {
+        instance_id: ProviderInstanceId::new("missing_writer").unwrap(),
+        enabled: true,
+        available: true,
+        text_capable: true,
+    }];
+    assert_eq!(
+        resolve_source_control_writer_model_selection(&settings, Some(&ready), None)
+            .instance_id
+            .as_str(),
+        "missing_writer"
+    );
+}
+
+// providerInstances and usage sources
+
+#[test]
+fn provider_instances_are_replaced_so_omitted_fields_are_cleared() {
+    let with_fields = apply(
+        &defaults(),
+        json!({
+            "providerInstances": {
+                "codex_work": { "driver": "codex", "displayName": "Work", "enabled": true, "config": {} },
+            },
+        }),
+    );
+    let replaced = apply(
+        &with_fields,
+        json!({
+            "providerInstances": {
+                "codex_work": { "driver": "codex", "config": {} },
+            },
+        }),
+    );
+    let entry = replaced
+        .provider_instances
+        .get(&ProviderInstanceId::new("codex_work").unwrap())
+        .unwrap();
+    assert!(entry.display_name.is_none());
+    assert!(entry.enabled.is_none());
+}
+
+#[test]
+fn project_provider_instances_survive_a_patch_entry_that_omits_the_key() {
+    let project = ProjectId::new("project-1").unwrap();
+    let stored = apply(
+        &defaults(),
+        json!({
+            "projectSettingsOverrides": {
+                project.as_str(): {
+                    "providerInstances": { "codex_work": { "enabled": false } },
+                },
+            },
+        }),
+    );
+    let next = apply(
+        &stored,
+        json!({
+            "projectSettingsOverrides": { project.as_str(): { "defaultAutoPull": true } },
+        }),
+    );
+    let entry = &next.project_settings_overrides[&project];
+    assert_eq!(entry.default_auto_pull, Some(true));
+    assert!(entry.provider_instances.is_some());
+}
+
+#[test]
+fn usage_limit_sources_upsert_and_remove_per_entry() {
+    let first = apply(
+        &defaults(),
+        json!({ "usageLimitSources": { "alpha": { "kind": "cliproxy", "url": "https://a.example", "managementKey": "" }, "beta": { "kind": "cliproxy", "url": "https://a.example", "managementKey": "" } } }),
+    );
+    let next = apply(
+        &first,
+        json!({ "usageLimitSources": { "alpha": null, "gamma": { "kind": "cliproxy", "url": "https://a.example", "managementKey": "" } } }),
+    );
+    let value = serde_json::to_value(&next.usage_limit_sources).unwrap();
+    assert!(value.get("alpha").is_none());
+    assert!(value.get("beta").is_some());
+    assert!(value.get("gamma").is_some());
+}
+
+// writer selection with a project override
+
+#[test]
+fn writer_falls_back_for_a_project_that_turned_the_instance_off_and_keeps_it_elsewhere() {
+    let instance = ProviderInstanceId::new("codex_writer").unwrap();
+    let project = ProjectId::new("project-a").unwrap();
+    let writer = selection("codex_writer", "gpt-5.4-mini", None);
+    let settings = apply(
+        &defaults(),
+        json!({
+            "providerInstances": { "codex_writer": { "driver": "codex", "enabled": true, "config": {} } },
+            "projectSettingsOverrides": {
+                "project-a": { "providerInstances": { "codex_writer": { "enabled": false } } },
+            },
+            "sourceControlWriterModelSelection": writer,
+        }),
+    );
+    let providers = [Provider {
+        instance_id: instance,
+        enabled: true,
+        available: true,
+        text_capable: true,
+    }];
+    assert_eq!(
+        resolve_source_control_writer_model_selection(&settings, Some(&providers), Some(&project)),
+        settings.text_generation_model_selection
+    );
+    assert_eq!(
+        resolve_source_control_writer_model_selection(&settings, Some(&providers), None)
+            .instance_id
+            .as_str(),
+        "codex_writer"
+    );
+}
+
+#[test]
+fn writer_keeps_an_instance_the_project_turned_on_while_the_machine_has_it_off() {
+    let instance = ProviderInstanceId::new("codex_writer").unwrap();
+    let project = ProjectId::new("project-a").unwrap();
+    let settings = apply(
+        &defaults(),
+        json!({
+            "providerInstances": { "codex_writer": { "driver": "codex", "enabled": false, "config": {} } },
+            "projectSettingsOverrides": {
+                "project-a": { "providerInstances": { "codex_writer": { "enabled": true } } },
+            },
+            "sourceControlWriterModelSelection": selection("codex_writer", "gpt-5.4-mini", None),
+        }),
+    );
+    let providers = [Provider {
+        instance_id: instance,
+        enabled: true,
+        available: true,
+        text_capable: true,
+    }];
+    assert_eq!(
+        resolve_source_control_writer_model_selection(&settings, Some(&providers), Some(&project))
+            .instance_id
+            .as_str(),
+        "codex_writer"
+    );
+    assert_eq!(
+        resolve_source_control_writer_model_selection(&settings, Some(&providers), None),
+        settings.text_generation_model_selection
+    );
+}
+
+// source control hosts and provider instance overrides
+
+#[test]
+fn a_patched_source_control_host_field_replaces_the_saved_one() {
+    let pinned = apply(
+        &defaults(),
+        json!({
+            "sourceControlHosts": {
+                "github": { "hosts": { "github.com": { "account": "work", "enabled": true } }, "tokens": {} },
+            },
+        }),
+    );
+    let unpinned = apply(
+        &pinned,
+        json!({
+            "sourceControlHosts": { "github": { "hosts": { "github.com": { "enabled": false } } } },
+        }),
+    );
+    assert_eq!(
+        serde_json::to_value(&unpinned.source_control_hosts["github"]).unwrap(),
+        json!({ "hosts": { "github.com": { "enabled": false } }, "tokens": {} })
+    );
+}
+
+#[test]
+fn a_project_provider_instance_override_is_cleared_by_an_empty_map() {
+    let project = ProjectId::new("project-1").unwrap();
+    let stored = apply(
+        &defaults(),
+        json!({
+            "projectSettingsOverrides": {
+                "project-1": { "providerInstances": { "codex_work": { "enabled": false } } },
+            },
+        }),
+    );
+    let cleared = apply(
+        &stored,
+        json!({
+            "projectSettingsOverrides": { "project-1": { "providerInstances": {} } },
+        }),
+    );
+    let entry = &cleared.project_settings_overrides[&project];
+    assert_eq!(
+        entry.provider_instances.as_ref().map(|map| map.len()),
+        Some(0)
+    );
+}
+
+// usage prices
+
+#[test]
+fn usage_prices_are_replaced_and_removed_per_model() {
+    let price = |input: f64| {
+        json!({
+            "inputCostPerMillionTokens": input,
+            "outputCostPerMillionTokens": 2.0,
+        })
+    };
+    let first = apply(
+        &defaults(),
+        json!({ "usagePriceOverrides": { "model-a": price(1.0), "model-b": price(3.0) } }),
+    );
+    let next = apply(
+        &first,
+        json!({ "usagePriceOverrides": { "model-a": price(5.0), "model-b": null } }),
+    );
+    let value = serde_json::to_value(&next.usage_price_overrides).unwrap();
+    assert_eq!(
+        value["model-a"]["inputCostPerMillionTokens"].as_f64(),
+        Some(5.0)
+    );
+    assert!(value.get("model-b").is_none());
+}
+
+// model preferences
+
+#[test]
+fn replacing_visibility_records_clears_entries_that_were_removed() {
+    let initial = apply(
+        &defaults(),
+        json!({ "providerModelPreferences": legacy_preferences() }),
+    );
+    let cleared = apply(&initial, json!({ "providerModelPreferences": {} }));
+    assert_eq!(
+        serde_json::to_value(&cleared.provider_model_preferences).unwrap(),
+        json!({})
+    );
+}
+
+#[test]
+fn explicit_edits_win_when_the_same_patch_carries_a_legacy_migration() {
+    let migration = model_preferences_migration_patch(
+        Some(&Value::Null),
+        Some(&Value::Null),
+        Some(&legacy_favorites()),
+        Some(&legacy_preferences()),
+    )
+    .expect("migration patch");
+    let mut combined = serde_json::to_value(&migration).unwrap();
+    combined["favorites"] = json!([]);
+    combined["providerModelPreferences"] = json!({});
+    let edited = apply(&defaults(), combined);
+    let (favorites, preferences) = resolve_model_preferences(
+        serde_json::to_value(&edited.favorites).ok(),
+        serde_json::to_value(&edited.provider_model_preferences).ok(),
+        Some(legacy_favorites()),
+        Some(legacy_preferences()),
+    );
+    assert_eq!(favorites, json!([]));
+    assert_eq!(preferences, json!({}));
+}
+
+// worktreesDirectory
+
+#[test]
+fn a_previous_worktrees_directory_is_remembered() {
+    let next = apply(&defaults(), json!({ "worktreesDirectory": "/custom/a" }));
+    let moved = apply(&next, json!({ "worktreesDirectory": "/custom/b" }));
+    let previous = serde_json::to_value(&moved.previous_worktrees_directories).unwrap();
+    assert!(
+        previous
+            .as_array()
+            .unwrap()
+            .contains(&json!(next.worktrees_directory))
+    );
+}
+
+// background activity
+
+#[test]
+fn profiles_are_stored_as_a_versioned_object_and_legacy_aliases_follow() {
+    let next = apply(
+        &defaults(),
+        json!({
+            "backgroundActivity": { "schemaVersion": 1, "profile": "battery-saver", "overrides": {} },
+        }),
+    );
+    assert_eq!(
+        background(&next),
+        json!({ "schemaVersion": 1, "profile": "battery-saver", "overrides": {} })
+    );
+    assert_eq!(
+        next.background_activity_profile,
+        BackgroundActivityProfile::BatterySaver
+    );
+    assert_eq!(next.automatic_git_fetch_interval, 0);
+    assert_eq!(next.provider_health_refresh_interval, minutes(15));
+}
+
+#[test]
+fn legacy_interval_patches_become_custom_background_overrides() {
+    let next = apply(&defaults(), json!({ "automaticGitFetchInterval": 15_000 }));
+    assert_eq!(
+        background(&next),
+        json!({
+            "schemaVersion": 1,
+            "profile": "custom",
+            "baseProfile": "balanced",
+            "overrides": { "automaticGitFetchInterval": 15_000 },
+        })
+    );
+    let resolved = resolve_server_background_activity_settings(&next);
+    assert_eq!(resolved.profile, BackgroundActivityProfile::Balanced);
+    assert_eq!(resolved.automatic_git_fetch_interval, 15_000);
+}
+
+#[test]
+fn unrelated_patches_preserve_legacy_background_settings() {
+    let mut current = defaults();
+    current.background_activity_profile = BackgroundActivityProfile::Performance;
+    current.automatic_git_fetch_interval = 7_000;
+    current.provider_health_refresh_interval = 240_000;
+    let next = apply(
+        &current,
+        json!({
+            "sourceControlWriterModelSelection": selection("codex", "gpt-5.4-mini", None),
+        }),
+    );
+    assert_eq!(
+        background(&next),
+        json!({
+            "schemaVersion": 1,
+            "profile": "custom",
+            "baseProfile": "performance",
+            "overrides": {
+                "automaticGitFetchInterval": 7_000,
+                "providerHealthRefreshInterval": 240_000,
+            },
+        })
+    );
+    assert_eq!(
+        next.background_activity_profile,
+        BackgroundActivityProfile::Performance
+    );
+    assert_eq!(next.automatic_git_fetch_interval, 7_000);
+    assert_eq!(next.provider_health_refresh_interval, 240_000);
+}
+
+#[test]
+fn a_concrete_profile_does_not_reactivate_dormant_overrides() {
+    let current = apply(
+        &defaults(),
+        json!({
+            "backgroundActivity": {
+                "schemaVersion": 1,
+                "profile": "battery-saver",
+                "overrides": { "providerHealthRefreshInterval": 5_000 },
+            },
+        }),
+    );
+    let next = apply(&current, json!({ "automaticGitFetchInterval": 15_000 }));
+    assert_eq!(
+        background(&next),
+        json!({
+            "schemaVersion": 1,
+            "profile": "custom",
+            "baseProfile": "battery-saver",
+            "overrides": { "automaticGitFetchInterval": 15_000 },
+        })
+    );
+}
+
+#[test]
+fn structured_background_settings_win_over_legacy_aliases() {
+    let next = apply(
+        &defaults(),
+        json!({
+            "backgroundActivity": { "schemaVersion": 1, "profile": "battery-saver", "overrides": {} },
+            "automaticGitFetchInterval": 5_000,
+            "backgroundActivityProfile": "performance",
+        }),
+    );
+    assert_eq!(
+        background(&next),
+        json!({ "schemaVersion": 1, "profile": "battery-saver", "overrides": {} })
+    );
+    assert_eq!(
+        next.background_activity_profile,
+        BackgroundActivityProfile::BatterySaver
+    );
+    assert_eq!(next.automatic_git_fetch_interval, 0);
+}
+
+#[test]
+fn custom_background_settings_reconcile_back_to_a_preset() {
+    let custom = apply(&defaults(), json!({ "automaticGitFetchInterval": 15_000 }));
+    let next = apply(&custom, json!({ "automaticGitFetchInterval": 30_000 }));
+    assert_eq!(
+        background(&next),
+        json!({ "schemaVersion": 1, "profile": "balanced", "overrides": {} })
+    );
+    assert_eq!(
+        next.background_activity_profile,
+        BackgroundActivityProfile::Balanced
+    );
+    assert_eq!(next.automatic_git_fetch_interval, 30_000);
+}
+
+#[test]
+fn custom_overrides_that_duplicate_the_base_profile_are_dropped() {
+    let next = apply(
+        &defaults(),
+        json!({
+            "backgroundActivity": {
+                "schemaVersion": 1,
+                "profile": "custom",
+                "baseProfile": "balanced",
+                "overrides": { "automaticGitFetchInterval": 30_000 },
+            },
+        }),
+    );
+    assert_eq!(
+        background(&next),
+        json!({ "schemaVersion": 1, "profile": "balanced", "overrides": {} })
+    );
+}
+
+#[test]
+fn a_background_patch_replaces_the_complete_override_record() {
+    let current = apply(
+        &defaults(),
+        json!({
+            "backgroundActivity": {
+                "schemaVersion": 1,
+                "profile": "custom",
+                "baseProfile": "balanced",
+                "overrides": {
+                    "automaticGitFetchInterval": 15_000,
+                    "providerHealthRefreshInterval": 180_000,
+                },
+            },
+        }),
+    );
+    let next = apply(
+        &current,
+        json!({ "backgroundActivity": { "overrides": { "automaticGitFetchInterval": 10_000 } } }),
+    );
+    assert_eq!(
+        background(&next),
+        json!({
+            "schemaVersion": 1,
+            "profile": "custom",
+            "baseProfile": "balanced",
+            "overrides": { "automaticGitFetchInterval": 10_000 },
+        })
+    );
+}
+
+#[test]
+fn interval_overrides_supplied_with_a_profile_patch_are_kept() {
+    let next = apply(
+        &defaults(),
+        json!({
+            "backgroundActivityProfile": "performance",
+            "automaticGitFetchInterval": 0,
+            "providerHealthRefreshInterval": 240_000,
+        }),
+    );
+    assert_eq!(
+        background(&next),
+        json!({
+            "schemaVersion": 1,
+            "profile": "custom",
+            "baseProfile": "performance",
+            "overrides": {
+                "automaticGitFetchInterval": 0,
+                "providerHealthRefreshInterval": 240_000,
+            },
+        })
+    );
+}
+
+#[test]
+fn overrides_attached_to_a_concrete_background_profile_are_ignored() {
+    let mut settings = defaults();
+    settings.background_activity = serde_json::from_value(json!({
+        "schemaVersion": 1,
+        "profile": "balanced",
+        "overrides": { "pauseWhenOnBattery": true },
+    }))
+    .unwrap();
+    let resolved = resolve_server_background_activity_settings(&settings);
+    assert!(!resolved.pause_when_on_battery);
+}
+
+fn minutes(value: u64) -> u64 {
+    value * 60_000
+}
+
+// synchronized model preferences
+
+fn legacy_favorites() -> Value {
+    json!([{ "provider": "codex_work", "model": "sol" }])
+}
+
+fn legacy_preferences() -> Value {
+    json!({ "codex_work": { "hiddenModels": ["astra"], "modelOrder": ["sol"] } })
+}
+
+#[test]
+fn concurrent_adds_and_removes_of_the_same_favorite_are_idempotent() {
+    let add = json!({ "setModelFavorites": [{ "provider": "codex_work", "model": "sol", "favorite": true }] });
+    let first = apply(&defaults(), add.clone());
+    let again = apply(&first, add);
+    assert_eq!(
+        serde_json::to_value(&again.favorites).unwrap(),
+        json!([{ "provider": "codex_work", "model": "sol" }])
+    );
+    let remove = json!({ "setModelFavorites": [{ "provider": "codex_work", "model": "sol", "favorite": false }] });
+    let removed = apply(&first, remove.clone());
+    assert_eq!(
+        serde_json::to_value(&apply(&removed, remove).favorites).unwrap(),
+        json!([])
+    );
+}
+
+#[test]
+fn migration_patch_is_empty_for_empty_legacy_lists() {
+    assert!(
+        model_preferences_migration_patch(
+            Some(&Value::Null),
+            Some(&Value::Null),
+            Some(&json!([])),
+            Some(&json!({})),
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn migration_fills_only_the_lists_the_store_has_not_saved() {
+    let patch = model_preferences_migration_patch(
+        Some(&Value::Null),
+        Some(&Value::Null),
+        Some(&legacy_favorites()),
+        Some(&legacy_preferences()),
+    )
+    .expect("migration patch");
+    let migrated = apply(&defaults(), serde_json::to_value(&patch).unwrap());
+    assert_eq!(
+        serde_json::to_value(&migrated.favorites).unwrap(),
+        legacy_favorites()
+    );
+    assert_eq!(
+        serde_json::to_value(&migrated.provider_model_preferences).unwrap(),
+        legacy_preferences()
+    );
+}
+
+#[test]
+fn a_delayed_migration_does_not_overwrite_explicit_clears() {
+    let stale = model_preferences_migration_patch(
+        Some(&Value::Null),
+        Some(&Value::Null),
+        Some(&legacy_favorites()),
+        Some(&legacy_preferences()),
+    )
+    .expect("migration patch");
+    let cleared = apply(
+        &defaults(),
+        json!({ "favorites": [], "providerModelPreferences": {} }),
+    );
+    let merged = apply(&cleared, serde_json::to_value(&stale).unwrap());
+    let (favorites, preferences) = resolve_model_preferences(
+        serde_json::to_value(&merged.favorites).ok(),
+        serde_json::to_value(&merged.provider_model_preferences).ok(),
+        Some(legacy_favorites()),
+        Some(legacy_preferences()),
+    );
+    assert_eq!(favorites, json!([]));
+    assert_eq!(preferences, json!({}));
+}
+
+#[test]
+fn favorites_are_set_without_losing_other_clients_changes() {
+    let first = apply(
+        &defaults(),
+        json!({ "setModelFavorites": [{ "provider": "codex_work", "model": "sol", "favorite": true }] }),
+    );
+    let second = apply(
+        &first,
+        json!({
+            "setModelFavorites": [{ "provider": "codex_work", "model": "astra", "favorite": true }],
+            "migrateModelPreferences": { "favorites": [] },
+        }),
+    );
+    assert_eq!(
+        serde_json::to_value(&second.favorites).unwrap(),
+        json!([
+            { "provider": "codex_work", "model": "sol" },
+            { "provider": "codex_work", "model": "astra" },
+        ])
+    );
+    let removed = apply(
+        &second,
+        json!({ "setModelFavorites": [{ "provider": "codex_work", "model": "sol", "favorite": false }] }),
+    );
+    assert_eq!(
+        serde_json::to_value(&removed.favorites).unwrap(),
+        json!([{ "provider": "codex_work", "model": "astra" }])
+    );
+}
+
+#[test]
+fn visibility_is_set_against_the_latest_state_and_keeps_order() {
+    let initial = apply(
+        &defaults(),
+        json!({ "providerModelPreferences": legacy_preferences() }),
+    );
+    let first = apply(
+        &initial,
+        json!({ "setModelsHidden": [{ "provider": "codex_work", "model": "sol", "hidden": true }] }),
+    );
+    let second = apply(
+        &first,
+        json!({ "setModelsHidden": [{ "provider": "codex_work", "model": "luna", "hidden": true }] }),
+    );
+    let preferences = serde_json::to_value(&second.provider_model_preferences).unwrap();
+    assert_eq!(
+        preferences["codex_work"],
+        json!({ "hiddenModels": ["astra", "sol", "luna"], "modelOrder": ["sol"] })
+    );
+    let restored = apply(
+        &second,
+        json!({ "setModelsHidden": [{ "provider": "codex_work", "model": "sol", "hidden": false }] }),
+    );
+    let preferences = serde_json::to_value(&restored.provider_model_preferences).unwrap();
+    assert_eq!(
+        preferences["codex_work"],
+        json!({ "hiddenModels": ["astra", "luna"], "modelOrder": ["sol"] })
+    );
+}
+
+#[test]
+fn the_same_model_on_different_instances_is_a_separate_favorite() {
+    let first = apply(
+        &defaults(),
+        json!({ "setModelFavorites": [{ "provider": "codex_work", "model": "sol", "favorite": true }] }),
+    );
+    let second = apply(
+        &first,
+        json!({ "setModelFavorites": [{ "provider": "codex_personal", "model": "sol", "favorite": true }] }),
+    );
+    assert_eq!(
+        serde_json::to_value(&second.favorites).unwrap(),
+        json!([
+            { "provider": "codex_work", "model": "sol" },
+            { "provider": "codex_personal", "model": "sol" },
+        ])
+    );
+}
+
+// cleanup rules and bulk visibility (upstream serverSettings.test.ts 56, 1002)
+
+#[test]
+fn a_cleanup_rule_changes_without_replacing_the_other_rules() {
+    let enabled = apply(
+        &defaults(),
+        json!({"storageCleanup": {"worktreeAfterDays": 8, "worktreeOnMerge": true, "logsAfterDays": 30}}),
+    );
+    let next = apply(
+        &enabled,
+        json!({"storageCleanup": {"worktreeAfterDays": null}}),
+    );
+    assert_eq!(
+        serde_json::to_value(&next.storage_cleanup).unwrap(),
+        json!({
+            "worktreeAfterDays": null,
+            "worktreeOnMerge": true,
+            "worktreeOnDelete": false,
+            "worktreeUnchanged": false,
+            "worktreeKeepWhen": "uncommitted-changes",
+            "browserArtifactsAfterDays": null,
+            "logsAfterDays": 30,
+        })
+    );
+}
+
+#[test]
+fn bulk_visibility_and_order_edits_keep_unrelated_models_and_providers() {
+    let initial = apply(
+        &defaults(),
+        json!({"providerModelPreferences": {
+            "claude_work": {"hiddenModels": ["opus"], "modelOrder": ["sonnet", "opus"]},
+        }}),
+    );
+    let mobile = apply(
+        &initial,
+        json!({"setModelsHidden": [{"provider": "codex_work", "model": "luna", "hidden": true}]}),
+    );
+    let web = apply(
+        &mobile,
+        json!({
+            "setModelsHidden": [
+                {"provider": "codex_work", "model": "astra", "hidden": false},
+                {"provider": "codex_work", "model": "sol", "hidden": true},
+            ],
+            "setProviderModelOrder": {"provider": "codex_work", "modelOrder": ["sol", "luna", "astra"]},
+        }),
+    );
+    let value = serde_json::to_value(&web.provider_model_preferences).unwrap();
+    assert_eq!(
+        value["codex_work"],
+        json!({"hiddenModels": ["luna", "sol"], "modelOrder": ["sol", "luna", "astra"]})
+    );
+    assert_eq!(
+        value["claude_work"],
+        serde_json::to_value(&initial.provider_model_preferences).unwrap()["claude_work"]
+    );
+    let cleared_order = apply(
+        &web,
+        json!({"setProviderModelOrder": {"provider": "codex_work", "modelOrder": []}}),
+    );
+    assert_eq!(
+        serde_json::to_value(&cleared_order.provider_model_preferences).unwrap()["codex_work"],
+        json!({"hiddenModels": ["luna", "sol"], "modelOrder": []})
+    );
+}
+
+// project actions (upstream serverSettings.test.ts 98, 142)
+
+fn project_script(command: &str) -> turin_contracts::project::ProjectScript {
+    serde_json::from_value(json!({
+        "id": "check",
+        "name": "Check",
+        "command": command,
+        "icon": "play",
+        "runOnWorktreeCreate": false,
+    }))
+    .unwrap()
+}
+
+/// Defaults after the one-time project fold (upstream `FOLDED_SERVER_SETTINGS`).
+fn folded_defaults() -> ServerSettings {
+    let mut settings = defaults();
+    settings.project_settings_folded = true;
+    settings
+}
+
+fn project<'a>(
+    id: &'a turin_contracts::base_schemas::ProjectId,
+    scripts: &'a [turin_contracts::project::ProjectScript],
+) -> crate::project_scripts::ProjectScriptsProject<'a> {
+    crate::project_scripts::ProjectScriptsProject { id, scripts }
+}
+
+#[test]
+fn project_actions_inherit_defaults_and_keep_existing_ones_until_folded() {
+    use crate::project_scripts::{
+        project_scripts_inherit_defaults as inherits, resolve_project_scripts as resolve,
+    };
+    let id = turin_contracts::base_schemas::ProjectId::new("project-actions").unwrap();
+    let action = project_script("npm test");
+    let existing = vec![project_script("npm run lint")];
+    let none: Vec<turin_contracts::project::ProjectScript> = Vec::new();
+
+    // Before the one-time fold, scripts stored on the project aggregate still apply.
+    let unfolded = apply(&defaults(), json!({"defaultProjectScripts": [action]}));
+    assert_eq!(
+        resolve(&unfolded, project(&id, &existing)).to_vec(),
+        existing
+    );
+    assert!(!inherits(&unfolded, project(&id, &existing)));
+
+    let inherited = apply(
+        &folded_defaults(),
+        json!({"defaultProjectScripts": [action]}),
+    );
+    assert_eq!(
+        resolve(&inherited, project(&id, &none)).to_vec(),
+        vec![action.clone()]
+    );
+    assert!(inherits(&inherited, project(&id, &none)));
+    assert_eq!(
+        resolve(&inherited, project(&id, &existing)).to_vec(),
+        vec![action.clone()]
+    );
+
+    let disabled = apply(
+        &inherited,
+        json!({"projectScriptOverrides": {"project-actions": []}}),
+    );
+    assert!(resolve(&disabled, project(&id, &none)).is_empty());
+    assert!(!inherits(&disabled, project(&id, &none)));
+
+    let changed_default = apply(
+        &disabled,
+        json!({"defaultProjectScripts": [{
+            "id": "check", "name": "Check", "command": "npm run build",
+            "icon": "play", "runOnWorktreeCreate": false,
+        }]}),
+    );
+    assert!(resolve(&changed_default, project(&id, &none)).is_empty());
+
+    let reset = apply(
+        &changed_default,
+        json!({"projectScriptOverrides": {"project-actions": null}}),
+    );
+    assert_eq!(
+        resolve(&reset, project(&id, &existing)).to_vec(),
+        changed_default.default_project_scripts
+    );
+    assert!(inherits(&reset, project(&id, &existing)));
+    let emptied = apply(&reset, json!({"defaultProjectScripts": []}));
+    assert!(resolve(&emptied, project(&id, &existing)).is_empty());
+}
+
+#[test]
+fn other_projects_actions_survive_overriding_clearing_or_resetting_one_project() {
+    use crate::project_scripts::resolve_project_scripts as resolve;
+    let first = turin_contracts::base_schemas::ProjectId::new("first-project").unwrap();
+    let second = turin_contracts::base_schemas::ProjectId::new("second-project").unwrap();
+    let none: Vec<turin_contracts::project::ProjectScript> = Vec::new();
+    let default_action = project_script("npm test");
+    let first_action = project_script("npm run lint");
+    let second_action = project_script("npm run build");
+
+    let first_update = apply(
+        &folded_defaults(),
+        json!({
+            "defaultProjectScripts": [default_action],
+            "projectScriptOverrides": {"first-project": [first_action]},
+        }),
+    );
+    let second_update = apply(
+        &first_update,
+        json!({"projectScriptOverrides": {"second-project": [second_action]}}),
+    );
+    assert_eq!(
+        resolve(&second_update, project(&first, &none)).to_vec(),
+        vec![first_action.clone()]
+    );
+    assert_eq!(
+        resolve(&second_update, project(&second, &none)).to_vec(),
+        vec![second_action.clone()]
+    );
+
+    let cleared = apply(
+        &second_update,
+        json!({"projectScriptOverrides": {"first-project": []}}),
+    );
+    assert!(resolve(&cleared, project(&first, &none)).is_empty());
+    assert_eq!(
+        resolve(&cleared, project(&second, &none)).to_vec(),
+        vec![second_action.clone()]
+    );
+
+    let reset = apply(
+        &cleared,
+        json!({"projectScriptOverrides": {"first-project": null}}),
+    );
+    assert_eq!(
+        resolve(&reset, project(&first, std::slice::from_ref(&first_action))).to_vec(),
+        vec![default_action.clone()]
+    );
+    assert_eq!(
+        resolve(&reset, project(&second, &none)).to_vec(),
+        vec![second_action.clone()]
+    );
+    assert_eq!(
+        resolve(&second_update, project(&first, &none)).to_vec(),
+        vec![first_action]
+    );
+}

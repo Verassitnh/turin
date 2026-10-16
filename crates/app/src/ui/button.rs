@@ -391,6 +391,18 @@ impl Button {
     }
 }
 
+/// Lets a [`Button`] trigger gpui-component popovers: while the popup is open the trigger is
+/// marked `selected`, which here is upstream's `data-pressed`.
+impl gpui_kit::component::Selectable for Button {
+    fn selected(self, selected: bool) -> Self {
+        self.pressed(selected)
+    }
+
+    fn is_selected(&self) -> bool {
+        self.pressed
+    }
+}
+
 impl Styled for Button {
     fn style(&mut self) -> &mut StyleRefinement {
         &mut self.style

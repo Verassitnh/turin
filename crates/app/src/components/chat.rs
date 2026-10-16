@@ -7,12 +7,25 @@ pub mod agent_spawn_summary;
 #[allow(dead_code)]
 pub mod assistant_citation_navigation;
 pub mod changed_files_tree;
+pub mod chat_canvas;
+#[allow(dead_code)]
+pub mod chat_canvas_context;
 pub mod chat_header;
+pub mod chat_overlay_banners;
 #[allow(dead_code)]
 pub mod context_window;
-// Chat-lane geometry for the canvas; the canvas does not call it yet.
-#[allow(dead_code)]
+// Chat-lane geometry for the canvas.
 pub mod chat_canvas_layout;
+pub mod provider_status_banner;
+#[allow(dead_code)]
+pub mod subagent_tooltip_content;
+pub mod thread_error_banner;
+#[allow(dead_code)]
+pub mod thread_lineage_workflow_row;
+#[allow(dead_code)]
+pub mod thread_relationship_icon;
+#[allow(dead_code)]
+pub mod thread_relationships_control;
 // Pure citation-selector text logic; the DOM capture half is not ported yet.
 #[allow(dead_code)]
 pub mod assistant_text_selection;

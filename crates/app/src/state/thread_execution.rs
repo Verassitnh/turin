@@ -29,9 +29,9 @@ use crate::state::support::thread_error::{
     latest_root_provider_failure, latest_unheld_run, thread_error_summary,
     usage_limit_run_presented_as_latest,
 };
-use crate::state::support::timing::format_duration;
 use crate::state::thread_projection::ThreadProjection;
 use crate::state::time::{iso, nullable_iso, parse_ms};
+use turin_shared::orchestration_timing::format_duration;
 
 fn is_activity_run_status(status: OrchestrationV2RunStatus) -> bool {
     matches!(

@@ -373,4 +373,89 @@ mod tests {
         }
         assert_eq!(workspace_relative_file_path("/repo/a", None), None);
     }
+
+    #[test]
+    fn derives_project_folder_names() {
+        assert_eq!(new_project_folder_name("Pinball Stats"), "pinball-stats");
+        assert_eq!(new_project_folder_name("  Crème brûlée!! "), "creme-brulee");
+        assert_eq!(new_project_folder_name("***"), "project");
+        assert_eq!(new_project_folder_name("con"), "con-project");
+        assert_eq!(new_project_folder_name(&"a".repeat(80)), "a".repeat(64));
+    }
+
+    #[test]
+    fn basename_ignores_trailing_separators() {
+        assert_eq!(file_basename("/worktrees/agents"), "agents");
+        assert_eq!(file_basename("C:\\work\\agents\\"), "agents");
+        assert_eq!(file_basename("/"), "/");
+        assert_eq!(file_basename("plain"), "plain");
+    }
+
+    #[test]
+    fn comparison_normalizes_windows_paths() {
+        assert_eq!(
+            normalize_project_path_for_comparison("C:/Repo/"),
+            "c:\\repo"
+        );
+        assert_eq!(normalize_project_path_for_comparison(" /repo/ "), "/repo");
+        assert_eq!(normalize_project_path_for_comparison("C:"), "c:\\");
+        assert_eq!(normalize_project_path_for_comparison("/"), "/");
+    }
+
+    #[test]
+    fn relative_paths_resolve_against_the_workspace() {
+        assert_eq!(
+            workspace_relative_file_path("/repo/src/a.ts", Some("/repo")).as_deref(),
+            Some("src/a.ts")
+        );
+        assert_eq!(
+            workspace_relative_file_path("/repo", Some("/repo/")).as_deref(),
+            Some(".")
+        );
+        assert_eq!(
+            workspace_relative_file_path("/other/a", Some("/repo")),
+            None
+        );
+        assert_eq!(
+            workspace_relative_file_path("C:\\Repo\\a.ts", Some("c:/repo")).as_deref(),
+            Some("a.ts")
+        );
+        assert_eq!(resolve_workspace_file_path("a/b", "/repo/"), "/repo/a/b");
+        assert_eq!(
+            resolve_workspace_file_path("a/b", "C:\\repo"),
+            "C:\\repo\\a\\b"
+        );
+        assert_eq!(resolve_workspace_file_path("~/x", "/repo"), "~/x");
+    }
+
+    #[test]
+    fn dispatch_trims_whitespace_and_trailing_separators() {
+        assert_eq!(
+            normalize_project_path_for_dispatch("  /repo/app/  "),
+            "/repo/app"
+        );
+        assert_eq!(normalize_project_path_for_dispatch("/"), "/");
+        assert_eq!(normalize_project_path_for_dispatch("C:\\"), "C:\\");
+        assert_eq!(normalize_project_path_for_dispatch("C:"), "C:\\");
+        assert_eq!(
+            normalize_project_path_for_dispatch("C:\\work\\"),
+            "C:\\work"
+        );
+    }
+
+    #[test]
+    fn comparison_folds_case_only_for_windows_paths() {
+        assert_eq!(
+            normalize_project_path_for_comparison("/Repo/App"),
+            "/Repo/App"
+        );
+        assert_eq!(
+            normalize_project_path_for_comparison("C:/Work/App/"),
+            "c:\\work\\app"
+        );
+        assert_eq!(
+            normalize_project_path_for_comparison("\\\\Server\\Share/Dir"),
+            "\\\\server\\share\\dir"
+        );
+    }
 }

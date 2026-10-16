@@ -10,6 +10,10 @@ path = "src/main.rs"
 
 [dependencies]
 turin-contracts.workspace = true
+turin-review.workspace = true
+turin-shared.workspace = true
+turin-provider-core.workspace = true
+turin-runtime.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
@@ -25,8 +29,10 @@ url.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-turin-shared.workspace = true
-turin-provider-core.workspace = true
+turin-persistence.workspace = true
+turin-orchestration.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+turin-launcher.workspace = true
 gpui-kit = { workspace = true, features = [
     # Code block highlighting (ChatMarkdown). Not `tree-sitter-languages`:
     # its SQL grammar pins `cc ~1.2`, which conflicts with rusqlite.
@@ -63,7 +69,20 @@ gpui-kit = { workspace = true, features = [
 base64.workspace = true
 percent-encoding.workspace = true
 markdown.workspace = true
+# Shell parsing for embedded scripts (components/chat/embedded_scripts.rs). Same
+# versions gpui-kit already pins, so the lock gains no new packages.
+tree-sitter = "0.26"
+tree-sitter-bash = "0.23"
 similar = "2"
+uuid.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Locked to gpui's macOS platform versions (dock icon + shell).
+objc2 = "0.6"
+raw-window-handle = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3", features = ["NSBundle", "NSData", "NSString"] }
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+tempfile.workspace = true

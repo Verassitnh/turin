@@ -12,6 +12,9 @@ use super::symlink::resolve_symlink_target;
 /// target is resolved first so the link survives and its destination is
 /// rewritten, since renaming over the link itself would swap it for a regular
 /// file.
+///
+/// Blocking filesystem calls. From async code, run it on the blocking pool
+/// (`support::blocking::blocking`).
 pub fn write_file_string_atomically(file_path: &Path, contents: &str) -> io::Result<()> {
     let target_path = resolve_symlink_target(file_path)?;
     let target_directory = target_path
@@ -37,6 +40,7 @@ pub fn write_file_string_atomically(file_path: &Path, contents: &str) -> io::Res
         file.sync_all()?;
         drop(file);
         fs::rename(&temp_path, &target_path)?;
+        sync_parent_directory(&target_path);
         Ok(())
     })();
     // The temp directory is cleanup, not part of the write: failing to remove
@@ -44,6 +48,24 @@ pub fn write_file_string_atomically(file_path: &Path, contents: &str) -> io::Res
     let _ = fs::remove_dir_all(&temp_directory);
     write
 }
+
+/// Flushes the directory entry the rename just created, so the new file name
+/// survives a power loss as well as its contents. Unix only, best effort: a
+/// failure here leaves the file fully written, just not yet durable under its
+/// name, so it does not fail the write.
+#[cfg(unix)]
+fn sync_parent_directory(file_path: &Path) {
+    let parent = file_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if let Ok(directory) = fs::File::open(parent) {
+        let _ = directory.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_file_path: &Path) {}
 
 fn make_temp_directory(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
     for _ in 0..1024u32 {

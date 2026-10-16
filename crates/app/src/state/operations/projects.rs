@@ -15,7 +15,7 @@ use crate::state::projects::{
     is_explicit_relative_project_path, is_unsupported_windows_project_path,
     resolve_project_path_for_dispatch,
 };
-use crate::state::support::path::new_project_folder_name;
+use turin_shared::path::new_project_folder_name;
 
 /// The Scratch folder the environment offers threads without a project, if any.
 pub fn available_scratch_workspace_root(scratch_workspace_root: Option<&str>) -> Option<String> {

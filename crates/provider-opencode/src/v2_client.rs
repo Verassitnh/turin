@@ -42,6 +42,15 @@ impl V2Client {
         })
     }
 
+    /// Records every JSON exchange through `protocol` (see `protocol_log`).
+    pub fn with_protocol_log(
+        mut self,
+        protocol: std::sync::Arc<dyn crate::protocol_log::ProtocolLog>,
+    ) -> Self {
+        self.http = self.http.with_protocol_log(protocol);
+        self
+    }
+
     pub fn with_silent_timeout(mut self, timeout: Duration) -> Self {
         self.silent_timeout = timeout;
         self
@@ -86,6 +95,20 @@ impl V2Client {
             None,
             None,
             &[200],
+        )
+        .await
+    }
+
+    /// `session.remove`: deletes the session. A text generation session is removed
+    /// after its one prompt, so OpenCode does not keep it.
+    pub async fn remove_session(&self, session_id: &str) -> Result<(), OpenCodeRuntimeError> {
+        self.empty(
+            "session.remove",
+            Method::DELETE,
+            &format!("/api/session/{}", encode(session_id)),
+            &[],
+            None,
+            &[200, 204],
         )
         .await
     }
@@ -258,6 +281,18 @@ impl V2Client {
             None,
             Some(body),
             &[200],
+        )
+        .await
+    }
+
+    pub async fn revert_clear(&self, session_id: &str) -> Result<(), OpenCodeRuntimeError> {
+        self.empty(
+            "session.revert.clear",
+            Method::POST,
+            &format!("/api/session/{}/revert/clear", encode(session_id)),
+            &[],
+            None,
+            &[200, 204],
         )
         .await
     }
@@ -544,7 +579,13 @@ impl V2Client {
     > {
         let frames = self
             .http
-            .open_event_stream("event.subscribe", "/api/event", &[], self.silent_timeout)
+            .open_event_stream(
+                "event.subscribe",
+                "/api/event",
+                &[],
+                None,
+                self.silent_timeout,
+            )
             .await?;
         Ok(Box::pin(filter_frames(frames, events::decode_v2_event)))
     }
@@ -856,6 +897,25 @@ mod tests {
         assert_eq!(first["id"], "m1");
         assert_eq!(second["id"], "m2");
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_session_is_delete_on_the_session_path() {
+        let server = FakeServer::spawn(|request| {
+            assert_eq!(request.method, "DELETE");
+            assert_eq!(request.target, "/api/session/ses_1");
+            FakeResponse::empty(204)
+        })
+        .await;
+        let client = V2Client::connect(&server.url, "pw").unwrap();
+        client.remove_session("ses_1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remove_session_reports_a_missing_session() {
+        let server = FakeServer::spawn(|_| FakeResponse::json(404, r#"{"error":"missing"}"#)).await;
+        let client = V2Client::connect(&server.url, "pw").unwrap();
+        assert!(client.remove_session("ses_gone").await.is_err());
     }
 
     #[tokio::test]

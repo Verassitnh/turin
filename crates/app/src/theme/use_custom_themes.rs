@@ -1,5 +1,8 @@
 //! Port of upstream/apps/web/src/hooks/useCustomThemes.ts.
 
+// Ported ahead of the views that consume it (theme UI, T22 wiring).
+#![allow(dead_code)]
+
 use super::theme_palette_library::{get_custom_themes, subscribe_to_custom_themes};
 use super::theme_palettes::ThemeDefinition;
 

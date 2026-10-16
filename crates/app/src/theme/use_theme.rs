@@ -9,6 +9,9 @@
 //! [`ThemeStore::root`]. Browser-chrome syncing (`<meta name="theme-color">`)
 //! and the `no-transitions` class have no native counterpart and are omitted.
 
+// Ported ahead of the views that consume it (theme UI, T22 wiring).
+#![allow(dead_code)]
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

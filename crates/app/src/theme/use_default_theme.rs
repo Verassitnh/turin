@@ -1,6 +1,9 @@
 //! Port of upstream/apps/web/src/hooks/useDefaultTheme.ts — adopting the
 //! environment's `defaultTheme` (`t3 theme set <id>`) once per set.
 
+// Ported ahead of the views that consume it (theme UI, T22 wiring).
+#![allow(dead_code)]
+
 use super::theme_palette::{ThemePreferenceMode, get_theme_definition, single_appearance_of};
 use super::theme_palettes::ThemeAppearance;
 use super::use_theme::{ThemeStorage, ThemeStore};

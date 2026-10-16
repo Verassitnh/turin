@@ -4,6 +4,9 @@
 //! `environment_theme.rs`); the React hooks become [`EnvironmentThemeSync`] and
 //! [`use_environment_theme_definitions`].
 
+// Ported ahead of the views that consume it (theme UI, T22 wiring).
+#![allow(dead_code)]
+
 use serde_json::{Map, Value};
 
 use super::environment_theme::{EnvironmentTheme, EnvironmentThemeColors};

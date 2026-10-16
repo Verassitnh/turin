@@ -10,6 +10,9 @@
 //! light/dark halves, live previews and `applyThemePalette`'s CSS variables
 //! (here `AppTheme::resolve` plays that role).
 
+// Ported ahead of the views that consume it (theme UI, T22 wiring).
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

@@ -8,6 +8,9 @@
 //! Upstream's zustand store becomes a plain struct; the GPUI layer owns one in
 //! a global and notifies on change.
 
+// Ported ahead of the views that consume it (theme UI, T22 wiring).
+#![allow(dead_code)]
+
 use super::theme_palette::{ThemeHalves, ThemePreference, get_theme_definition};
 use super::theme_palettes::ThemeAppearance;
 

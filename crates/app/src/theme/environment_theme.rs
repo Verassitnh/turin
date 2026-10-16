@@ -12,6 +12,9 @@
 //! same theme across recolors. Theming is cosmetic, so every failure here
 //! degrades to "not published" rather than propagating.
 
+// Ported ahead of the views that consume it (theme UI, T22 wiring).
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;

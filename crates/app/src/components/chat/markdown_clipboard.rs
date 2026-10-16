@@ -333,36 +333,71 @@ fn wrap_inline_marker(content: &str, marker: &str) -> String {
     )
 }
 
-/// One run of text, or an image, in the order it renders.
+/// One run of text, or an image standing in for its alt, in the order it renders.
 enum Piece<'a> {
-    Text { text: &'a str, marks: Marks },
-    Image { alt: &'a str, src: &'a str },
+    Text {
+        text: &'a str,
+        marks: Marks,
+    },
+    Image {
+        alt: &'a str,
+        src: &'a str,
+        /// Link on the alt run, so an image inside a link stays inside it.
+        link: Option<usize>,
+    },
 }
 
 /// The inline content of a block: marks wrap their text, links wrap their label, and
-/// images render where they sit.
+/// `![alt](src)` replaces the alt span `push_image` left in the text.
 fn serialize_inlines(inlines: &Inlines) -> String {
     let mut pieces: Vec<(usize, Piece<'_>)> = Vec::new();
+    let mut image_index = 0;
     for (range, marks) in inlines.run_ranges() {
-        pieces.push((
-            range.start,
-            Piece::Text {
-                text: &inlines.text[range.clone()],
-                marks,
-            },
-        ));
+        let mut cursor = range.start;
+        while image_index < inlines.images.len() {
+            let (offset, alt, src) = &inlines.images[image_index];
+            if *offset >= range.end {
+                break;
+            }
+            if *offset < cursor {
+                image_index += 1;
+                continue;
+            }
+            if *offset > cursor {
+                pieces.push((
+                    cursor,
+                    Piece::Text {
+                        text: &inlines.text[cursor..*offset],
+                        marks,
+                    },
+                ));
+            }
+            // The alt occupies the bytes `push_image` appended at this offset.
+            let alt_end = match inlines.text.get(*offset..*offset + alt.len()) {
+                Some(span) if span == alt.as_str() => *offset + alt.len(),
+                _ => *offset,
+            };
+            pieces.push((
+                *offset,
+                Piece::Image {
+                    alt: alt.as_str(),
+                    src: src.as_str(),
+                    link: marks.link,
+                },
+            ));
+            cursor = alt_end.min(range.end);
+            image_index += 1;
+        }
+        if cursor < range.end {
+            pieces.push((
+                cursor,
+                Piece::Text {
+                    text: &inlines.text[cursor..range.end],
+                    marks,
+                },
+            ));
+        }
     }
-    for (offset, alt, src) in &inlines.images {
-        pieces.push((
-            *offset,
-            Piece::Image {
-                alt: alt.as_str(),
-                src: src.as_str(),
-            },
-        ));
-    }
-    // Stable on offset: a run ahead of an image at the same offset comes first.
-    pieces.sort_by_key(|(offset, _)| *offset);
 
     let mut out = String::new();
     let mut link: Option<usize> = None;
@@ -370,8 +405,8 @@ fn serialize_inlines(inlines: &Inlines) -> String {
     for (_, piece) in &pieces {
         let (piece_link, content) = match piece {
             Piece::Text { text, marks } => (marks.link, piece_text(text, *marks)),
-            Piece::Image { alt, src } => (
-                None,
+            Piece::Image { alt, src, link } => (
+                *link,
                 if alt.is_empty() || src.is_empty() {
                     String::new()
                 } else {
@@ -709,6 +744,25 @@ mod tests {
 
     fn serialize(blocks: &[Block]) -> String {
         serialize_rendered_markdown_fragment(blocks)
+    }
+
+    #[test]
+    fn copies_an_image_in_place_of_its_alt_and_keeps_one_inside_a_link() {
+        use super::super::markdown::markdown_pipeline::parse_chat_markdown;
+
+        let doc = parse_chat_markdown("See ![cat](http://example.com/c.png) now", false);
+        assert_eq!(
+            serialize(&doc.blocks),
+            "See ![cat](http://example.com/c.png) now"
+        );
+        let doc = parse_chat_markdown(
+            "[See ![cat](http://example.com/c.png) now](http://example.com)",
+            false,
+        );
+        assert_eq!(
+            serialize(&doc.blocks),
+            "[See ![cat](http://example.com/c.png) now](http://example.com)"
+        );
     }
 
     #[test]

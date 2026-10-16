@@ -600,8 +600,7 @@ pub fn expanded_image_dialog(
     let step_back = step.clone();
     div()
         .id("expanded-image-dialog")
-        .absolute()
-        .inset_0()
+        .size_full()
         .flex()
         .items_center()
         .justify_center()

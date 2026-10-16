@@ -68,7 +68,7 @@ pub fn chat_media_layer(
     ensure_demo(cx);
     let session = cx.default_global::<ChatMediaSession>().clone_view();
     let theme = cx.app_theme().clone();
-    let mut layer = div().absolute().inset_0();
+    let mut layer = div().absolute().top_0().left_0().size_full();
     if let Some(preview) = session.preview.clone() {
         layer = layer.child(expanded_image_dialog(
             &preview,
@@ -188,7 +188,7 @@ fn ensure_demo(cx: &mut App) {
     }
 }
 
-/// 64×48 blue PNG, generated without a crate.
+/// 640×360 blue PNG, generated without a crate.
 const DEMO_PNG: &[u8] = include_bytes!("demo_image.png");
 
 /// Citation chips scanned from a flat prompt. The composer is not a

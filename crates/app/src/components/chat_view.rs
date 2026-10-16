@@ -112,7 +112,6 @@ impl RenderOnce for ChatView {
                     // `MessagesTimeline`, owned by the chat column for now; the
                     // thread route will own it once threads are selectable.
                     .child(timeline.clone())
-                    .child(chat_media_layer(timeline, window, cx))
                     .child(
                         div()
                             .flex_shrink_0()
@@ -128,7 +127,8 @@ impl RenderOnce for ChatView {
                             )
                             // Bottom spacer: `h-[calc(env(safe-area-inset-bottom)+1.25rem)]`.
                             .child(div().h(rems(1.25))),
-                    ),
+                    )
+                    .child(chat_media_layer(timeline, window, cx)),
             )
     }
 }

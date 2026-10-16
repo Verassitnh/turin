@@ -135,7 +135,9 @@ fn resolve_friendly_host_label(host: &impl HostProbe) -> Option<String> {
 }
 
 /// `resolveServerEnvironmentLabel`. `cwd_base_name` is the working
-/// directory's last path component.
+/// directory's last path component. Blocking: the real host runs probes and
+/// reads `/etc/machine-info`. [`ServerEnvironment::load`] calls it on the
+/// blocking pool.
 pub fn resolve_server_environment_label(host: &impl HostProbe, cwd_base_name: &str) -> String {
     if let Some(friendly) = resolve_friendly_host_label(host) {
         return friendly;

@@ -3,6 +3,7 @@
 //! `server/adapter.ts`), `message.updated` for assistant text, and `plan.updated` for a
 //! todo list. Both generations build them here, so the field mapping lives in one place.
 
+use turin_contracts::base_schemas::js_trim;
 use turin_contracts::orchestration_v2::{
     OrchestrationV2ProviderRef, OrchestrationV2Subagent, OrchestrationV2SubagentOrigin,
     OrchestrationV2SubagentStatus,
@@ -144,17 +145,14 @@ pub fn todo_steps(
     todos
         .iter()
         .enumerate()
-        .map(|(index, (content, status))| {
-            let trimmed = content.trim();
-            let text = if trimmed.is_empty() {
-                format!("Todo {}", index + 1)
-            } else {
-                trimmed.to_owned()
-            };
-            OrchestrationV2PlanStep {
-                id: TrimmedNonEmptyString::new(format!("{native_item_id}:{}", index + 1))
-                    .expect("todo step id"),
-                text: TrimmedNonEmptyString::new(text).expect("todo step text"),
+        .filter_map(|(index, (content, status))| {
+            // Upstream `content.trim() || Todo ${n}`, with JS trimming.
+            let text = TrimmedNonEmptyString::new(js_trim(content))
+                .or_else(|_| TrimmedNonEmptyString::new(format!("Todo {}", index + 1)))
+                .ok()?;
+            Some(OrchestrationV2PlanStep {
+                id: TrimmedNonEmptyString::new(format!("{native_item_id}:{}", index + 1)).ok()?,
+                text,
                 status: match status.as_str() {
                     "completed" => OrchestrationV2PlanStepStatus::Completed,
                     "in_progress" => OrchestrationV2PlanStepStatus::Running,
@@ -162,7 +160,7 @@ pub fn todo_steps(
                 },
                 duration_anchor_at: None,
                 duration_ms: None,
-            }
+            })
         })
         .collect()
 }
@@ -447,18 +445,18 @@ pub fn user_input_questions(questions: &[Value]) -> Vec<OrchestrationV2UserInput
     questions
         .iter()
         .enumerate()
-        .map(|(index, question)| {
+        .filter_map(|(index, question)| {
+            // Upstream `header.trim() || Question ${n}`, and the question falls back to the header.
             let header = question
                 .get("header")
                 .and_then(Value::as_str)
-                .map(str::trim)
+                .map(js_trim)
                 .filter(|header| !header.is_empty())
-                .unwrap_or("Question")
-                .to_owned();
+                .map_or_else(|| format!("Question {}", index + 1), str::to_owned);
             let text = question
                 .get("question")
                 .and_then(Value::as_str)
-                .map(str::trim)
+                .map(js_trim)
                 .filter(|text| !text.is_empty())
                 .unwrap_or(&header)
                 .to_owned();
@@ -468,41 +466,45 @@ pub fn user_input_questions(questions: &[Value]) -> Vec<OrchestrationV2UserInput
                 .into_iter()
                 .flatten()
                 .filter_map(|option| {
-                    let label = option.get("label").and_then(Value::as_str)?.trim();
-                    let label = TrimmedNonEmptyString::new(label).ok()?;
+                    // A blank label is "Option", so the choice stays offered.
+                    let label = option
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .map(js_trim)
+                        .filter(|label| !label.is_empty())
+                        .unwrap_or("Option")
+                        .to_owned();
                     let description = option
                         .get("description")
                         .and_then(Value::as_str)
-                        .map(str::trim)
+                        .map(js_trim)
                         .filter(|text| !text.is_empty())
-                        .unwrap_or(label.as_str())
+                        .unwrap_or(&label)
                         .to_owned();
                     Some(OrchestrationV2UserInputQuestionOption {
                         description: TrimmedNonEmptyString::new(description).ok()?,
-                        label,
+                        label: TrimmedNonEmptyString::new(label).ok()?,
                         value: None,
                     })
                 })
                 .collect();
-            OrchestrationV2UserInputQuestion {
-                id: TrimmedNonEmptyString::new(open_code_question_id(index, &header))
-                    .expect("question id"),
-                header: TrimmedNonEmptyString::new(header).expect("header"),
-                question: TrimmedNonEmptyString::new(text).expect("question text"),
+            Some(OrchestrationV2UserInputQuestion {
+                id: TrimmedNonEmptyString::new(open_code_question_id(index, &header)).ok()?,
+                header: TrimmedNonEmptyString::new(header).ok()?,
+                question: TrimmedNonEmptyString::new(text).ok()?,
                 options,
                 multi_select: question.get("multiple").and_then(Value::as_bool),
                 allow_custom_answer: question.get("custom").and_then(Value::as_bool),
                 initial_answer: None,
                 required: None,
-            }
+            })
         })
         .collect()
 }
 
 /// The id of a question OpenCode asked: its index and header, as the answer map keys it.
 pub fn open_code_question_id(index: usize, header: &str) -> String {
-    let header = header
-        .trim()
+    let header = js_trim(header)
         .to_ascii_lowercase()
         .chars()
         .map(|c| {
@@ -712,5 +714,43 @@ pub fn root_turn_node(
         checkpoint_scope_id: None,
         started_at: Some(started_at),
         completed_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_byte_order_mark_only_todo_takes_its_fallback_text() {
+        let steps = todo_steps(
+            "native",
+            &[
+                ("\u{feff}".to_owned(), "pending".to_owned()),
+                ("  ".to_owned(), "completed".to_owned()),
+            ],
+        );
+        let texts: Vec<&str> = steps.iter().map(|step| step.text.as_str()).collect();
+        assert_eq!(texts, ["Todo 1", "Todo 2"]);
+    }
+
+    #[test]
+    fn a_byte_order_mark_only_question_takes_its_fallbacks() {
+        let questions = user_input_questions(&[json!({
+            "header": "\u{feff}",
+            "question": "\u{feff}",
+            "options": [{"label": "\u{feff}"}, {"label": "Yes"}],
+        })]);
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].header.as_str(), "Question 1");
+        assert_eq!(questions[0].question.as_str(), "Question 1");
+        let labels: Vec<&str> = questions[0]
+            .options
+            .iter()
+            .map(|option| option.label.as_str())
+            .collect();
+        assert_eq!(labels, ["Option", "Yes"]);
     }
 }

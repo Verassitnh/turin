@@ -7,6 +7,7 @@
 //! results, so the mapping can be tested without a server.
 
 use serde_json::Value;
+use turin_contracts::base_schemas::js_trim;
 use turin_contracts::{
     IsoDateTime, TrimmedNonEmptyString, provider_instance::ProviderDriverKind,
     provider_policy::RuntimeMode, provider_usage_limits::ServerProviderUsageLimits,
@@ -332,7 +333,7 @@ fn v2_draft(
             Vec::new(),
         );
     };
-    let mut listed: Vec<ServerProviderModel> = models.iter().map(v2_model).collect();
+    let mut listed: Vec<ServerProviderModel> = models.iter().filter_map(v2_model).collect();
     listed.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
     let count = listed.len();
     let probe = if count > 0 {
@@ -363,11 +364,11 @@ fn v2_draft(
 }
 
 /// One 2.x model. Its provider name is the sub-provider label, unless that is OpenCode itself.
-fn v2_model(model: &OpenCode2Model) -> ServerProviderModel {
+fn v2_model(model: &OpenCode2Model) -> Option<ServerProviderModel> {
     let label = model
         .provider_name
         .as_deref()
-        .map(str::trim)
+        .map(js_trim)
         .filter(|name| !name.is_empty())
         .unwrap_or(&model.provider_id);
     let sub_provider = if label.eq_ignore_ascii_case("opencode") {
@@ -375,12 +376,11 @@ fn v2_model(model: &OpenCode2Model) -> ServerProviderModel {
     } else {
         TrimmedNonEmptyString::new(label).ok()
     };
-    ServerProviderModel {
-        slug: TrimmedNonEmptyString::new(format!("{}/{}", model.provider_id, model.id))
-            .unwrap_or_else(|_| TrimmedNonEmptyString::new("model").expect("literal")),
-        name: TrimmedNonEmptyString::new(model.name.trim())
+    Some(ServerProviderModel {
+        slug: TrimmedNonEmptyString::new(format!("{}/{}", model.provider_id, model.id)).ok()?,
+        name: TrimmedNonEmptyString::new(js_trim(&model.name))
             .or_else(|_| TrimmedNonEmptyString::new(model.id.as_str()))
-            .expect("model id is not blank"),
+            .ok()?,
         short_name: None,
         sub_provider,
         aliases: None,
@@ -392,7 +392,7 @@ fn v2_model(model: &OpenCode2Model) -> ServerProviderModel {
             &model.provider_id,
             &model.variants,
         )),
-    }
+    })
 }
 
 /// `providerList.connected.length`, read from either
@@ -520,6 +520,24 @@ mod tests {
         assert_eq!(draft.status, ServerProviderState::Error);
         assert!(draft.models.is_empty());
         assert!(message(&draft).contains("too old"), "{}", message(&draft));
+    }
+
+    #[test]
+    fn a_2x_model_with_a_byte_order_mark_name_takes_its_id_and_one_blank_in_both_is_skipped() {
+        let blank_name = OpenCode2Model {
+            provider_id: "zen".to_owned(),
+            id: "zed".to_owned(),
+            name: "\u{feff}".to_owned(),
+            provider_name: None,
+            variants: Vec::new(),
+        };
+        let model = v2_model(&blank_name).expect("a model with an id is kept");
+        assert_eq!(model.name.as_str(), "zed");
+        let blank_both = OpenCode2Model {
+            id: "\u{feff}".to_owned(),
+            ..blank_name
+        };
+        assert!(v2_model(&blank_both).is_none());
     }
 
     fn v2_model_fixture(provider: Option<&str>, name: &str, variants: &[&str]) -> OpenCode2Model {

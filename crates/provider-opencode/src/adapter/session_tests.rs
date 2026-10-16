@@ -1910,6 +1910,37 @@ async fn v1_dropping_a_session_closes_its_event_stream() {
     assert_event_stream_closes(&script.frames).await;
 }
 
+/// A reconcile the server never answers gives up within its limit, so a reconnect does not
+/// hang on it. The limit is `RECONCILE_TIMEOUT` (15 seconds) in a real reconnect.
+#[tokio::test]
+async fn v2_reconcile_gives_up_when_the_server_never_answers() {
+    let script = script(|request| {
+        if request.method == "GET" && request.target.contains("/api/session/active") {
+            // The headers arrive, then the body never does.
+            return FakeResponse::sse(Vec::new(), true);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let result = session.reconcile_within(Duration::from_millis(200)).await;
+    assert!(result.is_err());
+    session.close().await;
+}
+
 /// A v2 session on a queue of continuation offers, with its thread ensured and idle.
 async fn v2_idle_session_with_offers() -> (
     Script,

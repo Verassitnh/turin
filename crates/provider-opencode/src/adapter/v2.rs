@@ -69,6 +69,8 @@ use crate::v2_client::{MessageQuery, V2Client};
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 /// Upstream `INTERRUPT_TIMEOUT`: a Stop does not wait longer than this for one session.
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upstream `RECONCILE_TIMEOUT`: a reconnect's reconcile fails after this, and the attempt with it.
+const RECONCILE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Upstream `REQUEST_REPLY_TIMEOUT`: one deadline over an answer and its one retry.
 const REQUEST_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 /// The answers OpenCode gives for a request it already dropped (upstream `permissionGone`,
@@ -329,12 +331,22 @@ impl OpenCodeV2Session {
             let Some(session) = this.upgrade() else {
                 return;
             };
-            let stream = match session.client.events().await {
+            // Subscribing and reconciling are one attempt, and a failed reconcile fails it too.
+            let attempt = match session.client.events().await {
+                Ok(stream) if failures > 0 => session
+                    .reconcile()
+                    .await
+                    .map(|()| stream)
+                    .map_err(|err| err.to_string()),
+                Ok(stream) => Ok(stream),
+                Err(err) => Err(err.detail),
+            };
+            let stream = match attempt {
                 Ok(stream) => stream,
-                Err(err) => {
+                Err(detail) => {
                     failures += 1;
                     if failures >= RECONNECT_ATTEMPTS {
-                        session.fail_stream(&err.detail).await;
+                        session.fail_stream(&detail).await;
                         return;
                     }
                     drop(session);
@@ -342,9 +354,6 @@ impl OpenCodeV2Session {
                     continue;
                 }
             };
-            if failures > 0 {
-                session.reconcile().await;
-            }
             failures = 0;
             drop(session);
             let mut stream = stream;
@@ -359,7 +368,7 @@ impl OpenCodeV2Session {
             };
             failures += 1;
             if failures >= RECONNECT_ATTEMPTS {
-                session.reconcile().await;
+                let _ = session.reconcile().await;
                 session
                     .fail_stream("The OpenCode event stream was lost and could not reconnect.")
                     .await;
@@ -370,8 +379,26 @@ impl OpenCodeV2Session {
         }
     }
 
-    async fn reconcile(&self) {
-        let active = self.client.session_active().await.unwrap_or_default();
+    /// Brings the threads back in line after a reconnect (upstream `reconcile`), within
+    /// `RECONCILE_TIMEOUT`. A server that never answers fails the attempt.
+    async fn reconcile(&self) -> Result<(), ProviderAdapterV2Error> {
+        self.reconcile_within(RECONCILE_TIMEOUT).await
+    }
+
+    pub(super) async fn reconcile_within(
+        &self,
+        limit: Duration,
+    ) -> Result<(), ProviderAdapterV2Error> {
+        match tokio::time::timeout(limit, self.reconcile_now()).await {
+            Ok(result) => result,
+            Err(_) => Err(ProviderAdapterV2Error::protocol(
+                "OpenCode did not answer the reconnect in time.",
+            )),
+        }
+    }
+
+    async fn reconcile_now(&self) -> Result<(), ProviderAdapterV2Error> {
+        let active = self.client.session_active().await.map_err(http_err)?;
         let sessions: Vec<String> = self.inner.lock().threads.keys().cloned().collect();
         for session_id in sessions {
             let prompt = {
@@ -437,6 +464,7 @@ impl OpenCodeV2Session {
                 }
             }
         }
+        Ok(())
     }
 
     fn project_backfill(&self, session_id: &str, start: &str, messages: &[Value]) {

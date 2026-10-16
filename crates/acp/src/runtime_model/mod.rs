@@ -24,7 +24,10 @@ pub use parse_update::{
     embedded_terminal_ids_from_session_update, parse_permission_request,
     parse_session_update_event,
 };
-pub use replay::{session_update_counts_as_load_replay_activity, session_update_is_replay};
+pub use replay::{
+    session_update_counts_as_load_replay_activity, session_update_is_replay,
+    wait_for_session_load_replay_idle,
+};
 pub use session_setup::{
     AcpSessionMode, AcpSessionModeState, AcpSessionModeStateWire, AcpSessionModeWire,
     AcpSessionSetupResponse, collect_session_config_option_values, extract_model_config_id,

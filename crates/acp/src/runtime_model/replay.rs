@@ -1,7 +1,51 @@
-use serde_json::Value;
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::{Map, Value};
+use tokio::sync::Mutex;
+use tokio::time::sleep;
 
 use super::content::{acp_content_block_display_text, content_has_text_blocks};
-use super::util::is_record;
+use super::initialize::synthetic_load_session_response_from_initialize;
+use super::util::{SessionLoadGate, is_record};
+
+const SESSION_LOAD_REPLAY_POLL: Duration = Duration::from_millis(25);
+
+/// Port of upstream `waitForSessionLoadReplayIdle`.
+pub async fn wait_for_session_load_replay_idle(
+    gate: &Arc<Mutex<Option<SessionLoadGate>>>,
+) -> Value {
+    loop {
+        sleep(SESSION_LOAD_REPLAY_POLL).await;
+        let initialize_result = {
+            let guard = gate.lock().await;
+            let Some(gate) = guard.as_ref() else {
+                continue;
+            };
+            if !gate.active {
+                continue;
+            }
+            let Some(last) = gate.last_activity_at_millis else {
+                continue;
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(last);
+            if now.saturating_sub(last) < gate.idle_gap_ms {
+                continue;
+            }
+            gate.initialize_result.clone()
+        };
+        let synthetic = synthetic_load_session_response_from_initialize(&initialize_result);
+        let mut response = Map::new();
+        if let Some(modes) = synthetic.modes {
+            response.insert("modes".to_owned(), modes);
+        }
+        response.insert("_meta".to_owned(), Value::Object(synthetic.meta));
+        return Value::Object(response);
+    }
+}
 
 pub fn session_update_is_replay(params: &Value) -> bool {
     let Some(meta) = params.get("_meta").and_then(is_record) else {

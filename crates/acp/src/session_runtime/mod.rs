@@ -1,10 +1,11 @@
-//! Port of upstream/packages/provider-acp/src/server/AcpSessionRuntime.ts (process control helpers).
+//! Port of upstream/packages/provider-acp/src/server/AcpSessionRuntime.ts.
 
 mod auth;
 mod error;
 mod linux_cgroup;
 mod posix_tree;
 mod process_group;
+mod runtime;
 mod types;
 
 #[cfg(test)]
@@ -25,6 +26,11 @@ pub use posix_tree::{
     terminate_posix_owned_process_tree,
 };
 pub use process_group::signal_process_group;
+pub use runtime::{
+    AcpSessionActivationOptions, AcpSessionRuntime, AcpSessionRuntimeEvent,
+    AcpSessionRuntimeOptions, AcpSessionRuntimeStartResult, AcpSpawnInput, CancelBehavior,
+    ConfigOptionValue, ProcessContainment, RequestLogEvent, RequestLogStatus, ResumeMethod,
+};
 pub use types::{
     AcpLinuxCgroupController, AcpLinuxCgroupLease, AcpOwnedPosixProcess, AcpPosixOwnershipRoot,
     AcpPosixProcessIdentity, AcpPosixProcessTreeController,

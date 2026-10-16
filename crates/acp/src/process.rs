@@ -166,7 +166,7 @@ fn missing_pipe(program: &str, stream: &str) -> AcpError {
     })
 }
 
-struct ProcessGuard {
+pub struct ProcessGuard {
     pid: u32,
     state: Mutex<ProcessState>,
     stderr_task: Mutex<Option<JoinHandle<()>>>,
@@ -180,9 +180,13 @@ struct ProcessState {
 }
 
 impl ProcessGuard {
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
     /// Reports the child's exit. The first call signals the process group and
     /// then reaps the leader. Later calls return the same status.
-    async fn exit_error(&self) -> AcpError {
+    pub async fn exit_error(&self) -> AcpError {
         let mut state = self.state.lock().await;
         if state.status.is_none() {
             let Some(child) = state.child.as_mut() else {

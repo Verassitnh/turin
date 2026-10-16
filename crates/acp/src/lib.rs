@@ -26,6 +26,9 @@ pub use process::{SpawnCommand, spawn};
 pub use session_runtime::{
     AcpAuthMethod, AcpLinuxCgroupLease, AcpOwnedPosixProcess, AcpPosixOwnershipRoot,
     AcpPosixProcessIdentity, AcpPosixProcessTreeController, AcpProcessGroupTerminationError,
+    AcpSessionActivationOptions, AcpSessionRuntime, AcpSessionRuntimeEvent,
+    AcpSessionRuntimeOptions, AcpSessionRuntimeStartResult, AcpSpawnInput, CancelBehavior,
+    ProcessContainment, RequestLogEvent, RequestLogStatus, ResumeMethod,
     TerminatePosixOwnedProcessTreeInput, capture_posix_ownership_ledger,
     make_posix_process_tree_controller, observe_posix_ownership_ledger, parse_unified_cgroup_path,
     select_acp_agent_auth_method, signal_process_group, terminate_posix_owned_process_tree,

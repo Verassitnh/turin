@@ -181,6 +181,14 @@ pub struct RecordFilter {
     pub message_ids: Option<Vec<turin_contracts::MessageId>>,
     pub run_ids: Option<Vec<RunId>>,
     pub turn_item_types: Option<Vec<String>>,
+    /// Only turn items in these statuses (`turnItemStatuses`).
+    pub turn_item_statuses:
+        Option<Vec<turin_contracts::orchestration_v2::OrchestrationV2TurnItemStatus>>,
+    /// Only turn items of these runs; `None` entries match items with no run
+    /// (`turnItemRunIds`).
+    pub turn_item_run_ids: Option<Vec<Option<RunId>>>,
+    /// Only messages of these runs (`messageRunIds`).
+    pub message_run_ids: Option<Vec<RunId>>,
     /// Skips finished tool call, assistant message and reasoning nodes of
     /// finished runs. Command decisions only read root, subagent and
     /// active-run nodes.

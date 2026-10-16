@@ -69,7 +69,7 @@ use super::message_steer::{SteerInput, steer_into_run};
 use super::services::PrepareRootRunScope;
 
 /// The workspace-preparation placeholder, upstream `WORKSPACE_PREPARATION_INPUT`.
-const WORKSPACE_PREPARATION_INPUT: &str = "Preparing workspace";
+pub(super) const WORKSPACE_PREPARATION_INPUT: &str = "Preparing workspace";
 
 /// Emits one run-scoped event. Every such event carries the same envelope.
 macro_rules! run_scoped_event {

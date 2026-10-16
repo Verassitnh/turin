@@ -26,6 +26,10 @@ mod message_steer;
 #[cfg(test)]
 mod message_steer_tests;
 mod provider_detach;
+mod queued_run;
+mod run_stop;
+#[cfg(test)]
+mod run_stop_tests;
 pub mod services;
 #[cfg(test)]
 pub(super) mod test_harness;
@@ -160,6 +164,12 @@ fn projection_record_filter(filter: &RecordFilter) -> ProjectionRecordFilter {
             .map(|ids| ids.iter().map(|id| id.as_str().to_owned()).collect()),
         run_ids: filter.run_ids.clone(),
         turn_item_types: filter.turn_item_types.clone(),
+        turn_item_statuses: filter.turn_item_statuses.clone(),
+        turn_item_run_ids: filter.turn_item_run_ids.clone(),
+        message_run_ids: filter
+            .message_run_ids
+            .as_ref()
+            .map(|ids| ids.iter().map(|id| id.as_str().to_owned()).collect()),
         omit_settled_leaf_nodes: filter.omit_settled_leaf_nodes,
         ..ProjectionRecordFilter::default()
     }

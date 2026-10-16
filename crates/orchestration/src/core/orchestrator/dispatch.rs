@@ -16,8 +16,8 @@ use turin_persistence::ReceiptStatus;
 use turin_provider_core::id_allocator::IdAllocator;
 
 use super::{
-    Orchestrator, message_dispatch, thread_archive, thread_delete, thread_fork, thread_lifecycle,
-    thread_merge_back, thread_metadata, thread_mutation,
+    Orchestrator, message_dispatch, queued_run, run_stop, thread_archive, thread_delete,
+    thread_fork, thread_lifecycle, thread_merge_back, thread_metadata, thread_mutation,
 };
 use crate::pipeline::command_receipt_store::CommandReceipt;
 use crate::pipeline::dispatch_mode_limit::{
@@ -62,6 +62,30 @@ impl Decision {
 
     pub fn command_id(&self) -> &CommandId {
         &self.command_id
+    }
+
+    /// An empty decision for the same command, so a step that may fail keeps
+    /// its partial writes apart (upstream's separate `Ref`s). Merge a
+    /// successful one back with [`Self::absorb`].
+    pub fn fork(&self) -> Self {
+        Self {
+            command_id: self.command_id.clone(),
+            now: self.now,
+            ids: self.ids,
+            limit: self.limit.clone(),
+            events: Vec::new(),
+            effects: Vec::new(),
+            cancel_unsettled_effects: None,
+        }
+    }
+
+    /// Appends what a [`Self::fork`] decided.
+    pub fn absorb(&mut self, other: Self) {
+        self.events.extend(other.events);
+        self.effects.extend(other.effects);
+        if other.cancel_unsettled_effects.is_some() {
+            self.cancel_unsettled_effects = other.cancel_unsettled_effects;
+        }
     }
 
     /// `DateTime.now` for this decision (see the field doc).
@@ -704,6 +728,12 @@ async fn decide(
         return Ok(true);
     }
     if message_dispatch::decide(orchestrator, command, decision).await? {
+        return Ok(true);
+    }
+    if queued_run::decide(orchestrator, command, decision).await? {
+        return Ok(true);
+    }
+    if run_stop::decide(orchestrator, command, decision).await? {
         return Ok(true);
     }
     if thread_delete::decide(orchestrator, command, decision).await? {

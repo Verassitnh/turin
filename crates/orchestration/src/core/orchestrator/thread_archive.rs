@@ -257,7 +257,7 @@ pub(super) async fn decide(
 
 /// Upstream `withPullRequestWatch(link, undefined)`: archive and settle drop
 /// every pull-request watch.
-fn without_watches(
+pub(super) fn without_watches(
     links: Option<Vec<turin_contracts::thread_pull_request::ThreadPullRequestLink>>,
 ) -> Option<Vec<turin_contracts::thread_pull_request::ThreadPullRequestLink>> {
     links.map(|links| {

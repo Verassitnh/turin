@@ -28,6 +28,7 @@ pub mod component_theme;
 pub mod sidebar_scope;
 pub mod theme_inspector;
 pub mod theme_palette;
+pub mod theme_palette_library;
 pub mod theme_palettes;
 pub mod theme_preview;
 pub mod tokens;
@@ -42,6 +43,16 @@ use sidebar_scope::SidebarScope;
 use theme_palette::{
     ThemePreferenceMode, get_standard_theme_colors, get_theme_colors_for_mode,
     get_theme_definition, resolve_theme_appearance,
+};
+#[allow(unused_imports)]
+pub use theme_palette_library::{
+    create_vivid_theme_colors, get_custom_themes, get_default_theme_colors,
+    get_environment_themes, get_stored_custom_theme_collection, install_custom_theme,
+    invalidate_custom_themes, is_reserved_theme_id, is_theme_color, lenient_theme_color_overrides,
+    parse_theme_file, remove_custom_theme, remove_custom_themes, replace_custom_theme_collection,
+    serialize_theme_file, set_environment_themes, set_theme_library_storage, theme_color_to_hex,
+    theme_id_from_name, to_canonical_theme_color, update_custom_theme, update_theme_color_family,
+    ThemeLibraryStorage, ThemeLibraryStorageError, CUSTOM_THEMES_STORAGE_KEY, THEME_FILE_VERSION,
 };
 use theme_palettes::{ThemeAppearance, ThemeColors, ThemeDefinition};
 use tokens::tw;

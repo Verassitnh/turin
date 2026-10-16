@@ -169,12 +169,21 @@ pub struct ThemeVariants {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThemeCollection {
+    pub id: SharedString,
+    pub label: SharedString,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThemeDefinition {
     pub id: SharedString,
     pub label: SharedString,
     pub appearance: ThemeAppearance,
     pub colors: ThemeColors,
     pub variants: ThemeVariants,
+    pub collection: Option<ThemeCollection>,
+    /// Server-managed themes from the environment publish path.
+    pub managed: bool,
     /// Allows reviewed built-ins to render product artwork over their sidebar.
     pub sidebar_artwork: bool,
 }
@@ -453,6 +462,8 @@ pub const T3_CHAT_THEME: ThemeDefinition = ThemeDefinition {
             terminal_scrollbar_hover: SharedString::new_static("oklch(0.360924 0.021469 316.83)"),
         }),
     },
+    collection: None,
+    managed: false,
     sidebar_artwork: true,
 };
 
@@ -593,6 +604,8 @@ pub const GROVE_THEME: ThemeDefinition = ThemeDefinition {
             terminal_scrollbar_hover: SharedString::new_static("oklch(0.687968 0.00354 193.55)"),
         }),
     },
+    collection: None,
+    managed: false,
     sidebar_artwork: true,
 };
 
@@ -733,6 +746,8 @@ pub const OCEAN_THEME: ThemeDefinition = ThemeDefinition {
             terminal_scrollbar_hover: SharedString::new_static("oklch(0.681569 0.010909 276.465)"),
         }),
     },
+    collection: None,
+    managed: false,
     sidebar_artwork: true,
 };
 
@@ -873,6 +888,8 @@ pub const EMBER_THEME: ThemeDefinition = ThemeDefinition {
             terminal_scrollbar_hover: SharedString::new_static("oklch(0.682876 0.009156 9.796)"),
         }),
     },
+    collection: None,
+    managed: false,
     sidebar_artwork: true,
 };
 
@@ -1013,6 +1030,8 @@ pub const IRIS_THEME: ThemeDefinition = ThemeDefinition {
             terminal_scrollbar_hover: SharedString::new_static("oklch(0.676012 0.015271 305.433)"),
         }),
     },
+    collection: None,
+    managed: false,
     sidebar_artwork: true,
 };
 

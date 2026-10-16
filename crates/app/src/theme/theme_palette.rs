@@ -10,6 +10,7 @@
 //! light/dark halves, live previews and `applyThemePalette`'s CSS variables
 //! (here `AppTheme::resolve` plays that role).
 
+use super::theme_palette_library::{get_custom_themes, get_environment_themes};
 use super::theme_palettes::{
     BUILT_IN_THEMES, T3_CODE_DARK_THEME_COLORS, T3_CODE_LIGHT_THEME_COLORS, ThemeAppearance,
     ThemeColors, ThemeDefinition,
@@ -83,13 +84,21 @@ pub fn get_standard_theme_colors(appearance: ThemeAppearance) -> ThemeColors {
     }
 }
 
-/// Built-ins only for now; custom and environment themes join with the
-/// settings task.
 pub fn get_theme_definition(theme: &ThemePreference) -> Option<ThemeDefinition> {
     let theme_id = theme_id_from_preference(theme);
     for definition in BUILT_IN_THEMES {
         if definition.id.as_str() == theme_id {
             return Some(definition.clone());
+        }
+    }
+    for definition in get_custom_themes() {
+        if definition.id.as_str() == theme_id {
+            return Some(definition);
+        }
+    }
+    for definition in get_environment_themes() {
+        if definition.id.as_str() == theme_id {
+            return Some(definition);
         }
     }
     None
@@ -443,6 +452,8 @@ mod tests {
                 light: None,
                 dark: None,
             },
+            collection: None,
+            managed: false,
             sidebar_artwork: false,
         };
         assert_eq!(get_theme_modes(&theme), vec![ThemeAppearance::Dark]);

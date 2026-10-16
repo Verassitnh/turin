@@ -6,7 +6,10 @@
 
 use turin_contracts::environment::ScopedThreadRef;
 
-use super::{ThreadUndo, ThreadUndoNotices, UndoAction, UndoPlan};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use super::{ThreadUndo, ThreadUndoNotices, UndoAction, UndoCommit, UndoPlan};
 
 fn thread(id: &str) -> ScopedThreadRef {
     ScopedThreadRef {
@@ -231,4 +234,58 @@ fn take_undo_returns_a_same_kind_group_newest_first() {
         runs.into_iter().map(|run| run.plan).collect::<Vec<_>>(),
         vec![unpin_plan("newer"), unpin_plan("older")]
     );
+}
+
+/// `UndoOptions.commit`: runs once the action can no longer be undone.
+fn show_with_counter(
+    undo: &ThreadUndo,
+    notices: &ThreadUndoNotices,
+    key: &str,
+) -> Arc<AtomicUsize> {
+    let commits = Arc::new(AtomicUsize::new(0));
+    let counter = commits.clone();
+    notices.show_with_commit(
+        UndoAction::Discarded,
+        undo.begin("discard", key),
+        unpin_plan(key),
+        "Restore failed",
+        Some(UndoCommit::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })),
+    );
+    commits
+}
+
+#[test]
+fn commits_when_the_notice_expires_and_not_before() {
+    let undo = ThreadUndo::default();
+    let notices = ThreadUndoNotices::default();
+    let commits = show_with_counter(&undo, &notices, "env/draft");
+    assert_eq!(commits.load(Ordering::SeqCst), 0);
+    notices.expire();
+    assert_eq!(commits.load(Ordering::SeqCst), 1);
+    notices.expire();
+    assert_eq!(commits.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn commits_an_offer_whose_claim_went_stale() {
+    let undo = ThreadUndo::default();
+    let notices = ThreadUndoNotices::default();
+    let first = show_with_counter(&undo, &notices, "env/draft");
+    let second = show_with_counter(&undo, &notices, "env/draft");
+    assert_eq!(first.load(Ordering::SeqCst), 1);
+    assert_eq!(second.load(Ordering::SeqCst), 0);
+    assert_eq!(notices.current_notice().unwrap().count, 1);
+}
+
+#[test]
+fn an_undone_offer_does_not_commit() {
+    let undo = ThreadUndo::default();
+    let notices = ThreadUndoNotices::default();
+    let commits = show_with_counter(&undo, &notices, "env/draft");
+    let ids = notices.current_notice().unwrap().ids;
+    assert_eq!(notices.take_undo(&ids).len(), 1);
+    notices.expire();
+    assert_eq!(commits.load(Ordering::SeqCst), 0);
 }

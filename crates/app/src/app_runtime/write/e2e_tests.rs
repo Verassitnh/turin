@@ -697,3 +697,65 @@ async fn queued_runs_can_be_reordered_edited_and_cancelled() {
     let remaining = queue().await;
     assert_eq!(remaining, vec![(second, "second, edited".to_owned())]);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn staged_uploads_are_claimed_into_the_thread_with_the_message() {
+    use turin_orchestration::pipeline::attachment_store::resolve_attachment_path;
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+    let image = harness
+        .commands
+        .stage_attachment(true, "shot.png", "image/png", png.clone())
+        .await
+        .expect("stage image");
+    let file = harness
+        .commands
+        .stage_attachment(false, "notes.txt", "text/plain", b"hello".to_vec())
+        .await
+        .expect("stage file");
+    assert!(image["id"].as_str().expect("id").starts_with("pending-"));
+
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Look at these".into(),
+            attachments: vec![image, file],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+        })
+        .await
+        .expect("send with attachments");
+
+    let records = harness
+        .commands
+        .runtime()
+        .orchestrator
+        .get_thread_records(&thread, &[RecordField::Messages], &RecordFilter::default())
+        .await
+        .expect("records");
+    let message = records
+        .messages
+        .iter()
+        .find(|message| message.text == "Look at these")
+        .expect("user message");
+    assert_eq!(message.attachments.len(), 2);
+    let dir = &harness.commands.runtime().attachments_dir;
+    for attachment in &message.attachments {
+        let id = serde_json::to_value(attachment).expect("json")["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+        assert!(!id.starts_with("pending-"), "claimed into the thread: {id}");
+        let path = resolve_attachment_path(dir, attachment).expect("path");
+        assert!(path.exists(), "{} exists", path.display());
+    }
+    let image_path = resolve_attachment_path(dir, &message.attachments[0]).expect("path");
+    assert_eq!(std::fs::read(image_path).expect("read"), png);
+}

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt as _;
 use tokio_util::task::AbortOnDropHandle;
-use turin_contracts::orchestration_v2::{OrchestrationV2DomainEvent, OrchestrationV2ServerCommand};
+use turin_contracts::orchestration_v2::{OrchestrationV2Command, OrchestrationV2DomainEvent};
 use turin_contracts::settings::ServerSettings;
 use turin_git::git_vcs_driver::GitVcsDriver;
 use turin_git::process::ProcessRunner;
@@ -46,6 +46,7 @@ use turin_orchestration::core::run_execution_service::{NoAfterTurnRefresh, RunEx
 use turin_orchestration::core::run_finalization_service::RunFinalizationService;
 use turin_orchestration::core::runtime_request_service::RuntimeRequestService;
 use turin_orchestration::core::session_sink::EventSessionSink;
+use turin_orchestration::pipeline::attachment_claims::AttachmentClaims;
 use turin_orchestration::pipeline::command_receipt_store::CommandReceiptStore;
 use turin_orchestration::pipeline::effect_worker::{
     EffectDaemon, EffectDaemonOptions, EffectWorker, EffectWorkerOptions,
@@ -54,9 +55,8 @@ use turin_orchestration::pipeline::event_sink::{EventSink, StreamOptions};
 use turin_orchestration::pipeline::hooks_bridge::NoHooks;
 use turin_orchestration::pipeline::orchestrator_port::{DispatchResult, OrchestratorPort};
 use turin_orchestration::pipeline::thread_command_executor::ThreadCommandExecutor;
-use turin_orchestration::pipeline::thread_management_service::{
-    ThreadManagementError, ThreadManagementService,
-};
+use turin_orchestration::pipeline::thread_management_service::ThreadManagementService;
+use turin_orchestration::pipeline::thread_message_intake::{IntakeError, ThreadMessageIntake};
 use turin_orchestration::reactors::checkpoint_capture_service::CheckpointCaptureService;
 use turin_orchestration::reactors::checkpoint_git::TurinCheckpointGit;
 use turin_orchestration::reactors::checkpoint_service::CheckpointService;
@@ -66,8 +66,8 @@ use turin_provider_core::provider_adapter_registry::ProviderAdapterRegistry;
 use turin_provider_core::provider_continuation_requests::ProviderContinuationRequests;
 
 use super::adapters::{
-    HostSettings, ManagerSessions, NoWorkspaceRefresh, ServiceCheckpointScopes, StoredProjects,
-    ThreadsForContinuations,
+    HostSettings, IntakeThreads, ManagerSessions, NoWorkspaceRefresh, ServiceCheckpointScopes,
+    StoredProjects, ThreadsForContinuations,
 };
 use super::effects::TurinEffectExecutor;
 use super::providers::Providers;
@@ -78,6 +78,10 @@ pub struct WriteRuntime {
     pub providers: Providers,
     pub orchestrator: Arc<Orchestrator>,
     pub threads: Arc<ThreadManagementService>,
+    /// Claims staged uploads before a message reaches the orchestrator.
+    intake: ThreadMessageIntake,
+    /// Where uploads are staged and claimed (`<data dir>/userdata/attachments`).
+    pub attachments_dir: std::path::PathBuf,
     pub sessions: Arc<ProviderSessionManager>,
     effects: EffectDaemon,
     _continuations: ProviderContinuationService,
@@ -208,6 +212,7 @@ impl WriteRuntime {
                 continuation_requests: continuation_requests.clone(),
             }),
         );
+        let attachments_dir = std::path::PathBuf::from(&providers.host.paths.attachments_dir);
         let threads = Arc::new(ThreadManagementService::new(
             ThreadCommandExecutor::new(),
             orchestrator.clone() as Arc<dyn OrchestratorPort>,
@@ -218,6 +223,10 @@ impl WriteRuntime {
             Arc::new(NoHooks),
         ));
 
+        let intake = ThreadMessageIntake::new(
+            AttachmentClaims::new(attachments_dir.clone()),
+            Arc::new(IntakeThreads(threads.clone())),
+        );
         late_threads.bind(threads.clone());
         let continuations = ProviderContinuationService::start(
             IdAllocator,
@@ -271,6 +280,8 @@ impl WriteRuntime {
             providers,
             orchestrator,
             threads,
+            intake,
+            attachments_dir,
             sessions,
             effects,
             _continuations: continuations,
@@ -294,14 +305,14 @@ impl WriteRuntime {
         }
     }
 
-    /// One command through the thread-management chokepoint (provider
-    /// instance check, workspace binding), then the orchestrator's receipt
-    /// and decider.
+    /// One client command through the message intake (attachment claims),
+    /// the thread-management chokepoint (provider instance check, workspace
+    /// binding), then the orchestrator's receipt and decider.
     pub async fn dispatch(
         &self,
-        command: OrchestrationV2ServerCommand,
-    ) -> Result<DispatchResult, ThreadManagementError> {
-        self.threads.dispatch(command).await
+        command: OrchestrationV2Command,
+    ) -> Result<DispatchResult, IntakeError> {
+        self.intake.dispatch_command(command).await
     }
 }
 

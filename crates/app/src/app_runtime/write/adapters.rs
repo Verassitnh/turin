@@ -21,13 +21,18 @@ use turin_orchestration::core::run_finalization_service::{
     RunFinalizationObserver, RunFinalizationRefreshError,
 };
 use turin_orchestration::pipeline::orchestrator_port::BoxError;
+use turin_orchestration::pipeline::orchestrator_port::DispatchResult;
 use turin_orchestration::pipeline::seams::{
     ProjectDirectory, ProjectSummary, ProviderSessionLookup, RuntimeTaskStopper,
     ServerSettingsSource, SessionTaskStopper, instance_enabled_for_project,
 };
 use turin_orchestration::pipeline::thread_management_service::{
+    SendInput, SendResult, ThreadManagementCore,
+};
+use turin_orchestration::pipeline::thread_management_service::{
     ThreadManagementError, ThreadManagementService,
 };
+use turin_orchestration::pipeline::thread_message_intake::IntakeDispatcher;
 use turin_orchestration::projection::project_store::ProjectStore;
 use turin_orchestration::reactors::checkpoint_service::{self, CheckpointService};
 use turin_provider_core::provider_host_live::DesktopSettingsHandle;
@@ -170,5 +175,29 @@ impl ContinuationThreads for ThreadsForContinuations {
         command: OrchestrationV2ServerCommand,
     ) -> Result<(), ThreadManagementError> {
         ContinuationThreads::dispatch(&**self.0, command).await
+    }
+}
+
+/// `IntakeDispatcher` for the thread-management service. The library's own
+/// impl (`impl IntakeDispatcher for ThreadManagementService`) calls
+/// `ThreadManagementService::dispatch`, which is defined on the deref target
+/// `ThreadManagementCore`, so it resolves back to the trait method and
+/// recurses until the stack overflows (docs/handoff/T22.md). This delegates
+/// through the core explicitly.
+pub struct IntakeThreads(pub Arc<ThreadManagementService>);
+
+#[async_trait]
+impl IntakeDispatcher for IntakeThreads {
+    async fn dispatch(
+        &self,
+        command: OrchestrationV2ServerCommand,
+    ) -> Result<DispatchResult, ThreadManagementError> {
+        let core: &ThreadManagementCore = &self.0;
+        core.dispatch(command).await
+    }
+
+    async fn send_to_thread(&self, input: SendInput) -> Result<SendResult, ThreadManagementError> {
+        let core: &ThreadManagementCore = &self.0;
+        core.send_to_thread(input).await
     }
 }

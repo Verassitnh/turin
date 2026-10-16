@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use gpui_kit::{App, Entity, SharedString, Window};
 use turin_contracts::ThreadId;
-use turin_contracts::orchestration_v2::ProviderFailureClass;
+use turin_contracts::orchestration_v2::OrchestrationV2ProviderFailureClass;
 
 use super::chat_overlay_banners::{ProviderStatusBanner, ThreadErrorBanner};
 use super::usage_limit_recovery_banner::{
@@ -83,7 +83,7 @@ pub fn usage_limit_recovery_props(
     if runtime.status != crate::state::models::RunStatus::Failed {
         return None;
     }
-    if runtime.last_error_class != Some(ProviderFailureClass::UsageLimit) {
+    if runtime.last_error_class != Some(OrchestrationV2ProviderFailureClass::UsageLimit) {
         return None;
     }
     let shell = state.shell_view.as_ref()?.thread(thread_id)?;
@@ -154,7 +154,7 @@ pub fn live_overlay_banners(
 
         if let Some(runtime) = derive_thread_runtime(projection) {
             let error = runtime.last_error.as_deref();
-            let usage_limit = runtime.last_error_class == Some(ProviderFailureClass::UsageLimit);
+            let usage_limit = runtime.last_error_class == Some(OrchestrationV2ProviderFailureClass::UsageLimit);
             let tick = window.use_keyed_state(
                 format!("thread-error-dismissed-{thread_key}"),
                 cx,

@@ -54,8 +54,11 @@ mod workspace_basename_lookup;
 use gpui_kit::*;
 
 use components::app_sidebar_layout::{self, AppSidebarLayout};
+use components::onboarding::backend::{FirstRunBackend, OnboardingBackend};
 use components::onboarding::first_run_gate::FirstRunGate;
+use components::onboarding::live_source::LiveOnboarding;
 use components::onboarding::mock_source::{FirstRunScenario, MockOnboardingBackend};
+use std::rc::Rc;
 use desktop::desktop_client_settings::client_settings_path_for_home;
 use shell::client_settings_persistence::DesktopFileClientSettingsPersistence;
 use shell::live_settings::start_live_client_settings;
@@ -266,9 +269,30 @@ fn main() {
                         }
                         layout
                     });
-                    // T22 swaps the mock backend for the live settings and workspace state.
-                    let backend = MockOnboardingBackend::shared(FirstRunScenario::from_env());
-                    cx.new(|_| FirstRunGate::new(backend.clone(), backend, true, layout))
+                    let (first, wizard): (Rc<dyn FirstRunBackend>, Rc<dyn OnboardingBackend>) =
+                        if std::env::var("TURIN_MOCK_UI").ok().as_deref() == Some("1")
+                            || std::env::var("TURIN_SHOT").is_ok()
+                            || std::env::var("TURIN_FIRST_RUN").is_ok()
+                        {
+                            let backend =
+                                MockOnboardingBackend::shared(FirstRunScenario::from_env());
+                            (backend.clone(), backend)
+                        } else if let (Some(data_dir), Some(bus), Some(store)) = (
+                            app_runtime::data_dir::resolve_data_dir(),
+                            cx.try_global::<app_runtime::write::bus::CommandBusGlobal>()
+                                .map(|global| global.0.clone()),
+                            cx.try_global::<state::store::ClientStoreGlobal>()
+                                .map(|global| global.0.clone()),
+                        ) {
+                            let backend =
+                                LiveOnboarding::start(store, bus, data_dir, cx);
+                            (backend.clone(), backend)
+                        } else {
+                            let backend =
+                                MockOnboardingBackend::shared(FirstRunScenario::from_env());
+                            (backend.clone(), backend)
+                        };
+                    cx.new(|_| FirstRunGate::new(first, wizard, true, layout))
                 },
             )
             .expect("failed to open window");

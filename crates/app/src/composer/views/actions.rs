@@ -466,7 +466,7 @@ impl ChatComposer {
     }
 }
 
-pub(super) fn read_picked_file(path: PathBuf) -> Option<(PickedFile, Vec<u8>)> {
+pub fn read_picked_file(path: PathBuf) -> Option<(PickedFile, Vec<u8>)> {
     let name = path.file_name()?.to_string_lossy().into_owned();
     let data = std::fs::read(&path).ok()?;
     let picked = PickedFile::new(&name, &guess_mime(&name), data.len() as u64);

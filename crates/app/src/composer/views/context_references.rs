@@ -22,10 +22,11 @@ fn draft_context_wire_record(
     entry: &ComposerDraftContextRecord,
 ) -> Option<turin_contracts::composer_context::ComposerContextRecord> {
     use crate::composer::composer_context_records::{
-        KnownComposerContextRecord, preview_annotation_context_record,
-        review_comment_context_record, terminal_context_record,
+        preview_annotation_context_record, review_comment_context_record, terminal_context_record,
     };
-    use turin_contracts::composer_context::ComposerContextRecord;
+    use turin_contracts::composer_context::{
+        ComposerContextRecord, KnownComposerContextRecord,
+    };
 
     if let Some(record) = uploaded_context_record_from_draft(entry) {
         return Some(record);

@@ -24,11 +24,13 @@ use turin_projects::agent_session_discovery::{
 use turin_projects::agent_session_importer::AgentSessionImporter;
 use turin_projects::agent_session_scanner::AgentSessionScanner;
 use turin_projects::project_ports::{
-    ImportedProviderRuntime, OrchestrationEventWriter, PortError, ProjectRow, ProjectServiceApi,
+    ImportedProviderRuntime, OrchestrationEventWriter, PortError, ProjectRow,
     ProjectStoreReads, ProviderRuntimeRows, ProviderThreadIds, ThreadRecordSummary,
     ThreadRecordReader,
 };
-use turin_projects::project_service::{ProjectOperation, ProjectOperationError};
+use turin_projects::project_service::{
+    ProjectOperation, ProjectOperationError, ProjectServiceApi,
+};
 use turin_provider_core::id_allocator::IdAllocator;
 
 use crate::app_runtime::write::runtime::WriteRuntime;

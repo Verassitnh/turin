@@ -1,7 +1,8 @@
-mod actions;
+pub mod actions;
 mod banners;
 pub mod block_flow;
 pub mod chat_composer;
+pub mod composer_context_presentation;
 mod context_references;
 pub mod chrome;
 pub mod composer_banner;

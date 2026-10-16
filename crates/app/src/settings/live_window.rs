@@ -16,7 +16,7 @@ pub fn open(
     route: SettingsRoute,
     options: WindowOptions,
     cx: &mut App,
-) -> (gpui_kit::WindowHandle, Entity<SettingsStore>) {
+) -> (gpui_kit::WindowHandle<SettingsView>, Entity<SettingsStore>) {
     let store = LiveSettingsSource::start(services, client, cx);
     let store_for_view = store.clone();
     let (handle, view) = gpui_kit::open_window(options, cx, move |window, cx| {
@@ -38,7 +38,7 @@ pub fn open_named(
     page: &str,
     options: WindowOptions,
     cx: &mut App,
-) -> (gpui_kit::WindowHandle, Entity<SettingsStore>) {
+) -> (gpui_kit::WindowHandle<SettingsView>, Entity<SettingsStore>) {
     let route = SettingsRoute::from_name(page).unwrap_or_else(|| {
         tracing::warn!(%page, "unknown settings page, showing General");
         SettingsRoute::from_name("general").expect("general route")

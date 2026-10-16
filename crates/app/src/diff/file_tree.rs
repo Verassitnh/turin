@@ -308,7 +308,7 @@ impl DiffPanel {
         };
         let icon_size = rems(0.875);
         let folder_muted: Hsla = with_alpha(theme.muted_foreground, 0.9).into();
-        let file_icon = if is_directory {
+        let file_icon = if row.is_directory {
             file_tree_folder_icon(closed, folder_muted, icon_size)
         } else {
             let mut icon = file_tree_file_icon(&row.path, dark, icon_size);

@@ -485,6 +485,84 @@ async fn v2_decline_posts_the_note_then_rejects_with_the_message() {
     session.close().await;
 }
 
+/// Accept-for-session with no save patterns grants nothing: no session allow rule is written.
+#[tokio::test]
+async fn v2_accept_for_session_without_save_patterns_grants_nothing() {
+    let mut script = script(|request| {
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.target.contains("/reply") {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::ApprovalRequired),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread, "edit")).await.unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            r#"{"id":"evt1","type":"permission.asked","data":{"id":"perm_1","sessionID":"ses_1","action":"edit","resources":["a.ts"],"save":[]}}"#,
+        )))
+        .unwrap();
+    let request_id = next_request(&mut events).await;
+    session
+        .respond_to_runtime_request(ProviderAdapterV2RuntimeRequestResponseInput {
+            request_id,
+            decision: Some(ProviderApprovalDecision::AcceptForSession),
+            answers: None,
+            response: None,
+        })
+        .await
+        .unwrap();
+    // Every permission write up to the reply, which follows the grant.
+    let patches = parking_lot::Mutex::new(Vec::new());
+    await_request(&mut script.server, |request| {
+        if request.method == "PATCH" {
+            patches.lock().push(body(request));
+        }
+        request.target.contains("/reply")
+    })
+    .await;
+    let patches = patches.into_inner();
+    assert!(!patches.is_empty(), "the grant writes the session rules");
+    for parsed in &patches {
+        let granted = parsed["permissions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|rule| rule["action"] == "edit" && rule["effect"] == "allow");
+        assert!(!granted, "{parsed:#?}");
+    }
+    session.close().await;
+}
+
 #[tokio::test]
 async fn v2_accept_for_session_writes_a_grant_and_replies_once() {
     let mut script = script(|request| {

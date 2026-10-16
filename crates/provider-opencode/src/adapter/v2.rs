@@ -1842,15 +1842,12 @@ impl OpenCodeV2Session {
                     ProviderApprovalDecision::AcceptForSession
                         | ProviderApprovalDecision::AcceptAlways
                 ) {
-                    let patterns = if save.is_empty() {
-                        vec!["*".to_owned()]
-                    } else {
-                        save.clone()
-                    };
+                    // Only the patterns OpenCode asked to save are granted. Empty `save` grants
+                    // nothing (upstream iterates `native.save`).
                     let rules = {
                         let mut guard = self.inner.lock();
                         guard.threads.get_mut(&pending.session_id).map(|thread| {
-                            for resource in &patterns {
+                            for resource in &save {
                                 let grant = SessionPermissionRule {
                                     action: action.clone(),
                                     resource: resource.clone(),

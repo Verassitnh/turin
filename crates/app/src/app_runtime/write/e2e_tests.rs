@@ -790,3 +790,35 @@ async fn the_first_message_gets_a_generated_title() {
     .expect("the generated title arrives");
     assert_eq!(title, "Fixture title");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn at_completion_finds_workspace_files_and_folders() {
+    let harness = harness().await;
+    std::fs::create_dir_all(harness.workspace.join("src/components")).expect("dirs");
+    std::fs::write(harness.workspace.join("src/components/Button.tsx"), "").expect("file");
+    std::fs::write(harness.workspace.join("README.md"), "").expect("file");
+    let cwd = harness.workspace.to_str().expect("utf-8");
+
+    let found = harness
+        .commands
+        .search_paths(cwd, "button", 20)
+        .await
+        .expect("search");
+    assert_eq!(
+        found.first(),
+        Some(&("src/components/Button.tsx".to_owned(), false)),
+        "{found:?}"
+    );
+
+    let folders = harness
+        .commands
+        .search_paths(cwd, "components", 20)
+        .await
+        .expect("search");
+    assert!(
+        folders
+            .iter()
+            .any(|(path, directory)| path == "src/components" && *directory),
+        "{folders:?}"
+    );
+}

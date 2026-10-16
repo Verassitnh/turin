@@ -27,13 +27,14 @@ use super::timeline::source::{ThreadTimelineStore, TimelineSource};
 use super::timeline::turn_item::ProviderApprovalDecision;
 use crate::app_runtime::write::bus::CommandBus;
 use crate::app_runtime::write::commands::{CommandError, Delivery, SendMessage};
+use crate::composer::command_items::PathKind;
 use crate::composer::dispatch::ComposerDispatchMode;
-use crate::composer::mock_source::fixture_providers;
+use crate::composer::live_catalog::provider_entries;
 use crate::composer::prompt_history::ComposerPromptHistoryMessage;
 use crate::composer::provider_options::{OptionSelection, OptionValue};
 use crate::composer::view_model::{
-    ComposerSource, ComposerStore, ComposerViewModel, DraftRestore, InteractionMode, QueueState,
-    QueuedRun, RuntimeMode, SendRequest, SessionPhase,
+    ComposerSource, ComposerStore, ComposerViewModel, DraftRestore, InteractionMode, PathEntry,
+    QueueState, QueuedRun, RuntimeMode, SendRequest, SessionPhase,
 };
 use crate::state::client_state::ClientState;
 use crate::state::local_environment_id;
@@ -61,6 +62,10 @@ struct Overrides {
     sending: bool,
     restore: Option<DraftRestore>,
     restore_nonce: u64,
+    path_entries: Vec<PathEntry>,
+    path_search_pending: bool,
+    /// Bumped per search; an older search's result is dropped.
+    path_search_generation: u64,
 }
 
 pub struct LiveChat {
@@ -131,6 +136,26 @@ impl LiveChat {
         });
         let state = client.read(cx).state().clone();
         source.refresh(&state, cx);
+        // The provider catalogue changes when the registry refreshes.
+        let mut providers = source.bus.providers();
+        let weak = source.me.clone();
+        let client = client.clone();
+        cx.spawn(async move |_, cx| {
+            while providers.changed().await.is_ok() {
+                let alive = cx.update(|cx| {
+                    let Some(source) = weak.upgrade() else {
+                        return false;
+                    };
+                    let state = client.read(cx).state().clone();
+                    source.refresh(&state, cx);
+                    true
+                });
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
         Self {
             source,
             timeline,
@@ -236,11 +261,7 @@ impl LiveSource {
                 thread.model_selection.model.to_string(),
             )
         });
-        // Only the Claude driver is wired to a live adapter in this build.
-        let providers = fixture_providers()
-            .into_iter()
-            .filter(|entry| entry.driver_kind == "claudeAgent")
-            .collect();
+        let providers = provider_entries(&self.bus.providers().borrow());
         ComposerViewModel {
             thread_key: scoped_thread_key(&local_environment_id(), &self.thread_id),
             phase: if running {
@@ -298,6 +319,8 @@ impl LiveSource {
                 .collect(),
             is_send_busy: overrides.sending,
             restore_draft: overrides.restore.clone(),
+            path_entries: overrides.path_entries.clone(),
+            path_search_pending: overrides.path_search_pending,
             ..ComposerViewModel::default()
         }
     }
@@ -586,8 +609,62 @@ impl ComposerSource for LiveSource {
 
     fn previous_pending_question(&self, _cx: &mut App) {}
 
-    /// `@` completion over the workspace needs the workspace search service.
-    fn search_paths(&self, _query: &str, _cx: &mut App) {}
+    /// `@` completion over the project's workspace.
+    fn search_paths(&self, query: &str, cx: &mut App) {
+        let state = self.handle.snapshot();
+        let Some(cwd) = state
+            .thread(&self.thread_id)
+            .and_then(|entry| entry.state.data.clone())
+            .and_then(|data| {
+                state
+                    .shell_view
+                    .as_ref()?
+                    .project(&data.thread.project_id)
+                    .map(|project| project.workspace_root.clone())
+            })
+        else {
+            return;
+        };
+        let query = query.to_owned();
+        let mut generation = 0;
+        self.update_overrides(cx, |overrides| {
+            overrides.path_search_generation += 1;
+            overrides.path_search_pending = true;
+            generation = overrides.path_search_generation;
+        });
+        let task = self.bus.task(cx, move |commands| async move {
+            commands.search_paths(&cwd, &query, 80).await
+        });
+        let source = self.me.clone();
+        cx.spawn(async move |cx| {
+            let found = task.await;
+            cx.update(|cx| {
+                let Some(source) = source.upgrade() else {
+                    return;
+                };
+                if source.overrides.borrow().path_search_generation != generation {
+                    return;
+                }
+                source.update_overrides(cx, |overrides| {
+                    overrides.path_search_pending = false;
+                    if let Ok(entries) = found {
+                        overrides.path_entries = entries
+                            .into_iter()
+                            .map(|(path, directory)| PathEntry {
+                                path,
+                                kind: if directory {
+                                    PathKind::Directory
+                                } else {
+                                    PathKind::File
+                                },
+                            })
+                            .collect();
+                    }
+                });
+            });
+        })
+        .detach();
+    }
 }
 
 impl LiveSource {

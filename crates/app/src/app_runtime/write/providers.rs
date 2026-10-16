@@ -77,3 +77,22 @@ impl Providers {
         })
     }
 }
+
+/// Publishes the registry's status list to the UI bus, and asks the registry
+/// for a first refresh: nothing probes in the background, so without it the
+/// list would hold only what the disk cache remembered.
+pub fn spawn_status_feed(providers: &Providers, bus: super::bus::CommandBus) {
+    use futures::StreamExt as _;
+    let registry = Arc::clone(&providers.registry);
+    bus.publish_providers(registry.get_providers());
+    let mut changes = registry.stream_changes();
+    tokio::spawn(async move {
+        while let Some(list) = changes.next().await {
+            bus.publish_providers(list);
+        }
+    });
+    let refresh = Arc::clone(&providers.registry);
+    tokio::spawn(async move {
+        refresh.refresh(None).await;
+    });
+}

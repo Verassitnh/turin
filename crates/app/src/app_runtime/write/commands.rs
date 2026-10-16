@@ -387,6 +387,36 @@ impl Commands {
         Ok(attachment)
     }
 
+    /// `@` completion: workspace files and folders matching `query`, as
+    /// `(relative path, is directory)`, best first.
+    pub async fn search_paths(
+        &self,
+        cwd: &str,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<(String, bool)>, CommandError> {
+        use turin_contracts::project::{ProjectEntryKind, ProjectSearchEntriesInput};
+        let input: ProjectSearchEntriesInput =
+            serde_json::from_value(json!({"cwd": cwd, "query": query, "limit": limit}))
+                .map_err(|error| CommandError::new(format!("Invalid path search: {error}")))?;
+        let result = self
+            .runtime
+            .workspace_entries
+            .search(&input)
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        Ok(result
+            .entries
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry.path.to_string(),
+                    entry.kind == ProjectEntryKind::Directory,
+                )
+            })
+            .collect())
+    }
+
     /// Cross-thread message search for the sidebar and palette
     /// (`ThreadSearch.ts`): the newest best message per thread.
     pub async fn search_messages(

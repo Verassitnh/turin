@@ -82,6 +82,8 @@ pub struct WriteRuntime {
     intake: ThreadMessageIntake,
     /// Where uploads are staged and claimed (`<data dir>/userdata/attachments`).
     pub attachments_dir: std::path::PathBuf,
+    /// `@` path completion over a workspace.
+    pub workspace_entries: Arc<turin_git::workspace::workspace_entries::WorkspaceEntries>,
     pub sessions: Arc<ProviderSessionManager>,
     effects: EffectDaemon,
     _continuations: ProviderContinuationService,
@@ -288,6 +290,7 @@ impl WriteRuntime {
             threads,
             intake,
             attachments_dir,
+            workspace_entries: super::path_search::workspace_entries(),
             sessions,
             effects,
             _continuations: continuations,

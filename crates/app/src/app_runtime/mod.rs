@@ -138,6 +138,7 @@ pub async fn run(
         Ok(runtime) => {
             let commands = write::commands::Commands::new(Arc::clone(&runtime));
             tokio::spawn(write::smoke::run_if_requested(commands.clone()));
+            write::providers::spawn_status_feed(&runtime.providers, bus.clone());
             bus.install(commands);
             Some(runtime)
         }

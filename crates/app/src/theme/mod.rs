@@ -26,6 +26,7 @@ pub mod appearance_fonts;
 pub mod color;
 pub mod component_theme;
 pub mod sidebar_scope;
+pub mod theme_inspector;
 pub mod theme_palette;
 pub mod theme_palettes;
 pub mod theme_preview;

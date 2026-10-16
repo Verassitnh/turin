@@ -39,5 +39,7 @@ pub mod timestamp_format;
 #[allow(dead_code)]
 pub mod thread_find;
 #[allow(dead_code)]
+pub mod thread_find_highlights;
+#[allow(dead_code)]
 pub mod thread_find_position;
 pub mod work_log;

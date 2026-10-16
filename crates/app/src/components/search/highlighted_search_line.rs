@@ -1,6 +1,11 @@
 //! Port of upstream/apps/web/src/components/search/HighlightedSearchLine.tsx
 #![allow(dead_code)]
 
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, LazyLock};
+use std::thread;
+
+use parking_lot::Mutex;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, FontWeight, Hsla, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div,
@@ -164,6 +169,94 @@ pub fn highlight_segments_for_match(
         .collect()
 }
 
+fn fallback_highlight_segments(match_: &ProjectContentMatch) -> Vec<HighlightSegment> {
+    let ranges = normalize_search_ranges(match_);
+    split_token_into_segments(
+        &match_.line_content,
+        &fallback_token(&match_.line_content),
+        &ranges,
+    )
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct HighlightCacheKey {
+    path: String,
+    line: String,
+    dark: bool,
+}
+
+struct HighlightCacheState {
+    entries: HashMap<HighlightCacheKey, Arc<Vec<HighlightSegment>>>,
+    order: VecDeque<HighlightCacheKey>,
+    in_flight: HashSet<HighlightCacheKey>,
+}
+
+impl HighlightCacheState {
+    const MAX_ENTRIES: usize = 512;
+}
+
+static HIGHLIGHT_CACHE: LazyLock<Mutex<HighlightCacheState>> =
+    LazyLock::new(|| {
+        Mutex::new(HighlightCacheState {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            in_flight: HashSet::new(),
+        })
+    });
+
+/// Warms syntax highlighting off the UI thread for visible rows (upstream Suspense).
+pub struct SearchLineHighlightCache;
+
+impl SearchLineHighlightCache {
+    pub fn warm(visible: &[ProjectContentMatch], all: &[ProjectContentMatch], dark: bool) {
+        let _ = all;
+        for match_ in visible {
+            Self::schedule(match_, match_.path.as_str(), dark);
+        }
+    }
+
+    fn schedule(match_: &ProjectContentMatch, path: &str, dark: bool) {
+        let key = HighlightCacheKey {
+            path: path.to_owned(),
+            line: match_.line_content.clone(),
+            dark,
+        };
+        let mut cache = HIGHLIGHT_CACHE.lock();
+        if cache.entries.contains_key(&key) || cache.in_flight.contains(&key) {
+            return;
+        }
+        cache.in_flight.insert(key.clone());
+        let match_ = match_.clone();
+        let path = path.to_owned();
+        drop(cache);
+        thread::spawn(move || {
+            let segments = Arc::new(highlight_segments_for_match(&match_, &path, dark));
+            let mut cache = HIGHLIGHT_CACHE.lock();
+            cache.in_flight.remove(&key);
+            if cache.entries.len() >= HighlightCacheState::MAX_ENTRIES
+                && let Some(oldest) = cache.order.pop_front()
+            {
+                cache.entries.remove(&oldest);
+            }
+            cache.order.push_back(key.clone());
+            cache.entries.insert(key, segments);
+        });
+    }
+
+    fn cached(match_: &ProjectContentMatch, path: &str, dark: bool) -> Arc<Vec<HighlightSegment>> {
+        let key = HighlightCacheKey {
+            path: path.to_owned(),
+            line: match_.line_content.clone(),
+            dark,
+        };
+        if let Some(segments) = HIGHLIGHT_CACHE.lock().entries.get(&key).cloned() {
+            return segments;
+        }
+        Self::schedule(match_, path, dark);
+        Arc::new(fallback_highlight_segments(match_))
+    }
+}
+
 #[derive(IntoElement)]
 pub struct HighlightedSearchLine {
     pub match_: ProjectContentMatch,
@@ -175,11 +268,12 @@ impl RenderOnce for HighlightedSearchLine {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme();
         let primary_match_bg = with_alpha(theme.primary, 0.25);
-        let segments = highlight_segments_for_match(&self.match_, &self.path, self.dark);
+        let segments =
+            SearchLineHighlightCache::cached(&self.match_, &self.path, self.dark);
         div()
             .flex()
             .flex_wrap()
-            .children(segments.into_iter().map(move |segment| {
+            .children(segments.iter().cloned().map(move |segment| {
                 let mut style = div().child(segment.content);
                 if segment.italic {
                     style = style.italic();
@@ -229,6 +323,14 @@ mod tests {
         let normalized =
             normalize_search_ranges(&sample_match("hello", &[(1, 3), (2, 5), (10, 12)]));
         assert_eq!(normalized, vec![SearchHighlightRange { start: 1, end: 5 }]);
+    }
+
+    #[test]
+    fn uses_fallback_segments_without_syntax_while_cache_warms() {
+        let match_ = sample_match("hello", &[(1, 4)]);
+        let segments = SearchLineHighlightCache::cached(&match_, "src/main.rs", false);
+        assert_eq!(segments.len(), 2);
+        assert!(segments.iter().any(|segment| segment.is_match));
     }
 
     #[test]

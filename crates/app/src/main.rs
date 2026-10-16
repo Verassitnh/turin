@@ -3,7 +3,6 @@
 mod assets;
 mod branding;
 mod desktop;
-mod dock_icon;
 mod shell;
 // Pure composer logic is ported ahead of the views that consume it.
 mod components;
@@ -96,7 +95,6 @@ fn main() {
             cx.set_global(state::store::ClientStoreGlobal(store));
             app_sidebar_layout::bind_keys(cx);
             desktop::bind_menu_keys(cx, app_sidebar_layout::KEY_CONTEXT);
-            dock_icon::set_unbundled_app_icon();
             let right_panel = dev_overrides(cx);
             // Dev hook: `TURIN_SETTINGS=<page>` shows the settings window on mock data.
             if settings::demo::open_if_requested(window_options(cx), cx) {

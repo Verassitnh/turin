@@ -7,6 +7,7 @@
 //! shapes. See PORTING.md "No client/server split".
 
 pub mod archived_threads;
+pub mod assets;
 pub mod checkpoint_diff;
 pub mod client_state;
 pub mod command_result;
@@ -24,6 +25,7 @@ pub mod item_support;
 pub mod live_refresh;
 pub mod models;
 pub mod orchestration_v2_projection;
+pub mod project_commands;
 pub mod project_grouping;
 pub mod projects;
 pub mod right_panel_store;

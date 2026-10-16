@@ -1878,6 +1878,38 @@ async fn v2_a_turn_ending_mid_compaction_closes_its_item() {
     }
 }
 
+/// The fake server writes each frame to the socket it serves the stream on. Once the reader has
+/// closed that socket, a write fails and the fake server drops the frames it reads from.
+async fn assert_event_stream_closes(frames: &mpsc::UnboundedSender<Option<Vec<u8>>>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !frames.is_closed() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the event stream stayed open after its session was dropped"
+        );
+        let _ = frames.send(Some(sse(
+            &json!({"id":"e0","type":"server.heartbeat","data":{}}).to_string(),
+        )));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Dropping a v2 session ends its event stream, so no subscription outlives it.
+#[tokio::test]
+async fn v2_dropping_a_session_closes_its_event_stream() {
+    let (script, session, _events, _offers, _thread) = v2_idle_session_with_offers().await;
+    drop(session);
+    assert_event_stream_closes(&script.frames).await;
+}
+
+/// Dropping a v1 session ends its event stream, so no subscription outlives it.
+#[tokio::test]
+async fn v1_dropping_a_session_closes_its_event_stream() {
+    let (script, session, _events) = v1_session_with_turn().await;
+    drop(session);
+    assert_event_stream_closes(&script.frames).await;
+}
+
 /// A v2 session on a queue of continuation offers, with its thread ensured and idle.
 async fn v2_idle_session_with_offers() -> (
     Script,

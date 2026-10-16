@@ -8,8 +8,8 @@
 //! seconds apart, then backfills messages, permissions, and forms.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -306,9 +306,11 @@ impl OpenCodeV2Session {
             rx: Mutex::new(Some(rx)),
             reader: Mutex::new(None),
         });
-        let this = Arc::clone(&session);
+        // The reader holds the session weakly: a strong reference would keep the session, and so
+        // its `Drop` that ends the stream, alive for as long as the stream is open.
+        let this = Arc::downgrade(&session);
         *session.reader.lock() = Some(tokio::spawn(async move {
-            this.follow_events().await;
+            OpenCodeV2Session::follow_events(this).await;
         }));
         Ok(session)
     }
@@ -319,36 +321,51 @@ impl OpenCodeV2Session {
         }
     }
 
-    async fn follow_events(self: Arc<Self>) {
+    /// Reads the event stream, reconnecting, until the session is gone. The session is upgraded
+    /// only while it is used, so the reader never keeps it alive.
+    async fn follow_events(this: Weak<Self>) {
         let mut failures = 0u32;
         loop {
-            let stream = match self.client.events().await {
+            let Some(session) = this.upgrade() else {
+                return;
+            };
+            let stream = match session.client.events().await {
                 Ok(stream) => stream,
                 Err(err) => {
                     failures += 1;
                     if failures >= RECONNECT_ATTEMPTS {
-                        self.fail_stream(&err.detail).await;
+                        session.fail_stream(&err.detail).await;
                         return;
                     }
+                    drop(session);
                     tokio::time::sleep(RECONNECT_DELAY).await;
                     continue;
                 }
             };
             if failures > 0 {
-                self.reconcile().await;
+                session.reconcile().await;
             }
             failures = 0;
+            drop(session);
             let mut stream = stream;
             while let Some(Ok(event)) = stream.next().await {
-                self.on_stream(event).await;
+                let Some(session) = this.upgrade() else {
+                    return;
+                };
+                session.on_stream(event).await;
             }
+            let Some(session) = this.upgrade() else {
+                return;
+            };
             failures += 1;
             if failures >= RECONNECT_ATTEMPTS {
-                self.reconcile().await;
-                self.fail_stream("The OpenCode event stream was lost and could not reconnect.")
+                session.reconcile().await;
+                session
+                    .fail_stream("The OpenCode event stream was lost and could not reconnect.")
                     .await;
                 return;
             }
+            drop(session);
             tokio::time::sleep(RECONNECT_DELAY).await;
         }
     }

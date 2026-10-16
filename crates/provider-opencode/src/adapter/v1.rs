@@ -9,7 +9,7 @@
 //! the 3s→30s backoff. Message history is not backfilled.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -224,9 +224,11 @@ impl OpenCodeV1Session {
             rx: Mutex::new(Some(rx)),
             reader: Mutex::new(None),
         });
-        let this = Arc::clone(&session);
+        // The reader holds the session weakly: a strong reference would keep the session, and so
+        // its `Drop` that ends the stream, alive for as long as the stream is open.
+        let this = Arc::downgrade(&session);
         *session.reader.lock() = Some(tokio::spawn(async move {
-            this.follow_events().await;
+            OpenCodeV1Session::follow_events(this).await;
         }));
         Ok(session)
     }
@@ -237,13 +239,18 @@ impl OpenCodeV1Session {
         }
     }
 
-    async fn follow_events(self: Arc<Self>) {
+    /// Reads the event stream until the session is gone. The session is upgraded only while an
+    /// event is handled, so the reader never keeps it alive.
+    async fn follow_events(this: Weak<Self>) {
         let mut last_event_id: Option<String> = None;
         let mut retry = RECONNECT_BASE;
         let mut attempt = 0u32;
         loop {
             attempt = attempt.saturating_add(1);
-            if let Ok(mut stream) = self.client.events_from(last_event_id.as_deref()).await {
+            let Some(client) = this.upgrade().map(|session| session.client.clone()) else {
+                return;
+            };
+            if let Ok(mut stream) = client.events_from(last_event_id.as_deref()).await {
                 loop {
                     match stream.next().await {
                         Some(Ok(frame)) => {
@@ -254,13 +261,19 @@ impl OpenCodeV1Session {
                                 retry = Duration::from_millis(ms);
                             }
                             if let Some(event) = frame.event {
-                                self.on_event(event).await;
+                                let Some(session) = this.upgrade() else {
+                                    return;
+                                };
+                                session.on_event(event).await;
                             }
                         }
                         Some(Err(_)) => break,
                         None => {
-                            self.fail_stream("OpenCode event stream ended unexpectedly.")
-                                .await;
+                            if let Some(session) = this.upgrade() {
+                                session
+                                    .fail_stream("OpenCode event stream ended unexpectedly.")
+                                    .await;
+                            }
                             return;
                         }
                     }

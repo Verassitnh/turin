@@ -78,28 +78,33 @@ fn legacy_theme_mode(theme: &ThemePreference) -> Option<ThemeAppearance> {
 /// The standard T3 Code look as a theme palette.
 pub fn get_standard_theme_colors(appearance: ThemeAppearance) -> ThemeColors {
     match appearance {
-        ThemeAppearance::Dark => T3_CODE_DARK_THEME_COLORS,
-        ThemeAppearance::Light => T3_CODE_LIGHT_THEME_COLORS,
+        ThemeAppearance::Dark => T3_CODE_DARK_THEME_COLORS.clone(),
+        ThemeAppearance::Light => T3_CODE_LIGHT_THEME_COLORS.clone(),
     }
 }
 
 /// Built-ins only for now; custom and environment themes join with the
 /// settings task.
-pub fn get_theme_definition(theme: &ThemePreference) -> Option<&'static ThemeDefinition> {
+pub fn get_theme_definition(theme: &ThemePreference) -> Option<ThemeDefinition> {
     let theme_id = theme_id_from_preference(theme);
-    BUILT_IN_THEMES
-        .iter()
-        .find(|definition| definition.id == theme_id)
+    for definition in BUILT_IN_THEMES {
+        if definition.id.as_str() == theme_id {
+            return Some(definition.clone());
+        }
+    }
+    None
 }
 
 /// Artwork palettes are reviewed alongside built-ins; user themes always use the pill fallback.
 #[allow(dead_code)] // sidebar artwork lands with the sidebar task.
 pub fn theme_allows_sidebar_artwork(theme: &ThemePreference) -> bool {
     let theme_id = theme_id_from_preference(theme);
-    BUILT_IN_THEMES
-        .iter()
-        .find(|definition| definition.id == theme_id)
-        .is_some_and(|definition| definition.sidebar_artwork)
+    for definition in BUILT_IN_THEMES.iter() {
+        if definition.id.as_str() == theme_id {
+            return definition.sidebar_artwork;
+        }
+    }
+    false
 }
 
 /// Which half a theme can claim, or `None` when it renders both appearances.
@@ -119,11 +124,11 @@ pub fn get_theme_colors_for_mode(
     mode: ThemeAppearance,
 ) -> Option<ThemeColors> {
     if mode == theme.appearance {
-        return Some(theme.colors);
+        return Some(theme.colors.clone());
     }
     match mode {
-        ThemeAppearance::Light => theme.variants.light,
-        ThemeAppearance::Dark => theme.variants.dark,
+        ThemeAppearance::Light => theme.variants.light.clone(),
+        ThemeAppearance::Dark => theme.variants.dark.clone(),
     }
 }
 
@@ -164,7 +169,7 @@ pub fn resolve_theme_appearance(
             .then_some(ThemePreferenceMode::System)
     });
     let resolve = |requested: ThemeAppearance| match get_theme_definition(theme) {
-        Some(definition) if get_theme_colors_for_mode(definition, requested).is_none() => {
+        Some(definition) if get_theme_colors_for_mode(&definition, requested).is_none() => {
             definition.appearance
         }
         _ => requested,
@@ -202,7 +207,7 @@ mod tests {
         }
     }
 
-    fn contrast_ratio(first: &str, second: &str) -> f32 {
+    fn contrast_ratio(first: impl AsRef<str>, second: impl AsRef<str>) -> f32 {
         let luminance = |value: &str| {
             let c = parse_color(value).unwrap();
             [c.r, c.g, c.b]
@@ -220,13 +225,13 @@ mod tests {
                 .map(|(channel, weight)| channel * weight)
                 .sum::<f32>()
         };
-        let (a, b) = (luminance(first), luminance(second));
+        let (a, b) = (luminance(first.as_ref()), luminance(second.as_ref()));
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
-    fn oklab_distance(first: &str, second: &str) -> f32 {
-        let a = rgba_to_oklab(parse_color(first).unwrap());
-        let b = rgba_to_oklab(parse_color(second).unwrap());
+    fn oklab_distance(first: impl AsRef<str>, second: impl AsRef<str>) -> f32 {
+        let a = rgba_to_oklab(parse_color(first.as_ref()).unwrap());
+        let b = rgba_to_oklab(parse_color(second.as_ref()).unwrap());
         ((a.l - b.l).powi(2) + (a.a - b.a).powi(2) + (a.b - b.b).powi(2)).sqrt()
     }
 
@@ -239,33 +244,37 @@ mod tests {
             get_standard_theme_colors(ThemeAppearance::Dark),
         ];
         for theme in BUILT_IN_THEMES {
-            palettes.push(theme.colors);
-            palettes.extend(theme.variants.light);
-            palettes.extend(theme.variants.dark);
+            palettes.push(theme.colors.clone());
+            palettes.extend(theme.variants.light.clone());
+            palettes.extend(theme.variants.dark.clone());
         }
         for colors in palettes {
             assert!(
                 contrast_ratio(
-                    colors.search_match_foreground,
-                    colors.search_match_background
+                    &colors.search_match_foreground,
+                    &colors.search_match_background
                 ) >= 4.5
             );
             assert!(
                 contrast_ratio(
-                    colors.search_match_active_foreground,
-                    colors.search_match_active_background
+                    &colors.search_match_active_foreground,
+                    &colors.search_match_active_background
                 ) >= 4.5
             );
             assert!(
                 oklab_distance(
-                    colors.search_match_background,
-                    colors.search_match_active_background
+                    &colors.search_match_background,
+                    &colors.search_match_active_background
                 ) > 0.14
             );
             // Check inline-code tints, code blocks, and user-message bubbles.
-            for background in [colors.muted, colors.message_surface, colors.code_background] {
-                assert!(oklab_distance(colors.search_match_background, background) > 0.08);
-                assert!(oklab_distance(colors.search_match_active_background, background) > 0.08);
+            for background in [
+                &colors.muted,
+                &colors.message_surface,
+                &colors.code_background,
+            ] {
+                assert!(oklab_distance(&colors.search_match_background, background) > 0.08);
+                assert!(oklab_distance(&colors.search_match_active_background, background) > 0.08);
             }
         }
     }
@@ -347,12 +356,12 @@ mod tests {
 
         for mode in [ThemeAppearance::Light, ThemeAppearance::Dark] {
             let colors = get_theme_colors_for_mode(&T3_CHAT_THEME, mode).expect("both halves");
-            assert!(contrast_ratio(colors.text, colors.canvas) >= 7.);
-            assert!(contrast_ratio(colors.text_muted, colors.canvas) >= 4.5);
-            assert!(contrast_ratio(colors.message_foreground, colors.message_surface) >= 4.5);
-            assert!(contrast_ratio(colors.secondary_foreground, colors.secondary) >= 4.5);
-            assert!(contrast_ratio(colors.sidebar_foreground, colors.sidebar) >= 4.5);
-            assert!(contrast_ratio(colors.accent_foreground, colors.accent) >= 4.5);
+            assert!(contrast_ratio(&colors.text, &colors.canvas) >= 7.);
+            assert!(contrast_ratio(&colors.text_muted, &colors.canvas) >= 4.5);
+            assert!(contrast_ratio(&colors.message_foreground, &colors.message_surface) >= 4.5);
+            assert!(contrast_ratio(&colors.secondary_foreground, &colors.secondary) >= 4.5);
+            assert!(contrast_ratio(&colors.sidebar_foreground, &colors.sidebar) >= 4.5);
+            assert!(contrast_ratio(&colors.accent_foreground, &colors.accent) >= 4.5);
         }
     }
 
@@ -365,27 +374,28 @@ mod tests {
             &EMBER_THEME,
             &IRIS_THEME,
         ] {
-            assert_eq!(get_theme_definition(theme.id), Some(theme));
+            assert_eq!(get_theme_definition(theme.id.as_str()), Some(theme.clone()));
             assert_eq!(
                 get_theme_modes(theme),
                 vec![ThemeAppearance::Light, ThemeAppearance::Dark]
             );
             assert!(theme.sidebar_artwork);
-            assert!(theme_allows_sidebar_artwork(theme.id));
+            assert!(theme_allows_sidebar_artwork(theme.id.as_str()));
             assert!(theme.colors.accent.starts_with("oklch("));
             assert!(
                 theme
                     .variants
                     .dark
+                    .as_ref()
                     .is_some_and(|dark| dark.accent.starts_with("oklch("))
             );
 
             for mode in [ThemeAppearance::Light, ThemeAppearance::Dark] {
                 let colors = get_theme_colors_for_mode(theme, mode).expect("both halves");
-                assert!(contrast_ratio(colors.text, colors.canvas) >= 4.5);
-                assert!(contrast_ratio(colors.text_muted, colors.canvas) >= 4.5);
-                if theme.id != T3_CHAT_THEME.id {
-                    let muted = contrast_ratio(colors.text_muted, colors.canvas);
+                assert!(contrast_ratio(&colors.text, &colors.canvas) >= 4.5);
+                assert!(contrast_ratio(&colors.text_muted, &colors.canvas) >= 4.5);
+                if theme.id.as_str() != T3_CHAT_THEME.id.as_str() {
+                    let muted = contrast_ratio(&colors.text_muted, &colors.canvas);
                     assert!(muted < 5.5);
                     let expected = if mode == ThemeAppearance::Dark {
                         5.082
@@ -393,25 +403,30 @@ mod tests {
                         4.705
                     };
                     // `toBeCloseTo(expected, 1)`: within 0.05.
-                    assert!((muted - expected).abs() < 0.05, "{}: {muted}", theme.id);
+                    assert!(
+                        (muted - expected).abs() < 0.05,
+                        "{}: {muted}",
+                        theme.id.as_str()
+                    );
                 }
-                assert!(contrast_ratio(colors.accent_foreground, colors.accent) >= 4.5);
+                assert!(contrast_ratio(&colors.accent_foreground, &colors.accent) >= 4.5);
                 assert!(
-                    contrast_ratio(colors.toolbar_control_foreground, colors.toolbar_control)
+                    contrast_ratio(&colors.toolbar_control_foreground, &colors.toolbar_control)
                         >= 4.5
                 );
-                assert!(contrast_ratio(colors.message_foreground, colors.message_surface) >= 4.5);
+                assert!(contrast_ratio(&colors.message_foreground, &colors.message_surface) >= 4.5);
                 assert!(
-                    contrast_ratio(colors.message_action_foreground, colors.message_action) >= 4.5
+                    contrast_ratio(&colors.message_action_foreground, &colors.message_action)
+                        >= 4.5
                 );
                 assert!(
                     contrast_ratio(
-                        colors.message_action_foreground,
-                        colors.message_action_hover
+                        &colors.message_action_foreground,
+                        &colors.message_action_hover
                     ) >= 4.5
                 );
-                assert!(contrast_ratio(colors.muted_foreground, colors.muted) >= 4.5);
-                assert!(contrast_ratio(colors.placeholder, colors.surface_raised) >= 4.5);
+                assert!(contrast_ratio(&colors.muted_foreground, &colors.muted) >= 4.5);
+                assert!(contrast_ratio(&colors.placeholder, &colors.surface_raised) >= 4.5);
             }
         }
         assert!(!theme_allows_sidebar_artwork("my-custom-theme"));
@@ -420,10 +435,10 @@ mod tests {
     #[test]
     fn keeps_a_single_mode_theme_on_its_only_palette() {
         let theme = ThemeDefinition {
-            id: "midnight-slate",
-            label: "Midnight Slate",
+            id: gpui_kit::SharedString::new_static("midnight-slate"),
+            label: gpui_kit::SharedString::new_static("Midnight Slate"),
             appearance: ThemeAppearance::Dark,
-            colors: T3_CODE_DARK_THEME_COLORS,
+            colors: T3_CODE_DARK_THEME_COLORS.clone(),
             variants: ThemeVariants {
                 light: None,
                 dark: None,
@@ -439,7 +454,10 @@ mod tests {
 
     #[test]
     fn resolves_the_legacy_t3_chat_dark_preference_to_dark_t3_chat() {
-        assert_eq!(get_theme_definition("t3-chat-dark"), Some(&T3_CHAT_THEME));
+        assert_eq!(
+            get_theme_definition("t3-chat-dark"),
+            Some(T3_CHAT_THEME.clone())
+        );
         assert_eq!(
             get_theme_preference_mode("t3-chat-dark"),
             Some(ThemeAppearance::Dark)
@@ -459,9 +477,9 @@ mod tests {
             ("t3-ember", &EMBER_THEME),
             ("t3-iris", &IRIS_THEME),
         ] {
-            assert_eq!(get_theme_definition(legacy), Some(theme));
+            assert_eq!(get_theme_definition(legacy), Some(theme.clone()));
             assert!(is_known_theme_preference(legacy));
-            assert_eq!(canonical_theme_preference(legacy), theme.id);
+            assert_eq!(canonical_theme_preference(legacy), theme.id.as_str());
         }
         // The dark-variant alias keeps its raw form: it still carries a mode hint.
         assert_eq!(canonical_theme_preference("t3-chat-dark"), "t3-chat-dark");
@@ -469,7 +487,13 @@ mod tests {
 
     #[test]
     fn recognizes_only_preferences_the_runtime_can_render() {
-        for preference in ["light", "dark", "system", T3_CHAT_THEME.id, GROVE_THEME.id] {
+        for preference in [
+            "light",
+            "dark",
+            "system",
+            T3_CHAT_THEME.id.as_str(),
+            GROVE_THEME.id.as_str(),
+        ] {
             assert!(is_known_theme_preference(preference));
         }
         assert!(!is_known_theme_preference("grove:dark"));
@@ -481,7 +505,7 @@ mod tests {
     #[test]
     fn reports_the_only_half_a_theme_can_claim_and_null_for_a_pair() {
         let single = ThemeDefinition {
-            id: "x",
+            id: gpui_kit::SharedString::new_static("x"),
             appearance: ThemeAppearance::Dark,
             variants: ThemeVariants {
                 light: None,

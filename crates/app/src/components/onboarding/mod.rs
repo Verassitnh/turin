@@ -5,5 +5,6 @@
 
 pub mod backend;
 pub mod first_run_gate;
+pub mod live_source;
 pub mod mock_source;
 pub mod welcome_wizard;

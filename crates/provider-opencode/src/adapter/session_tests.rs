@@ -1776,6 +1776,10 @@ async fn v2_idle_session_with_offers() -> (
         if request.method == "PUT" || request.method == "PATCH" {
             return FakeResponse::empty(204);
         }
+        if request.target.contains("/interrupt") {
+            // Nothing was running to stop.
+            return FakeResponse::json(200, r#"{"interrupted":false}"#);
+        }
         if request.method == "GET" && request.target.contains("/api/model") {
             return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
         }
@@ -1810,6 +1814,138 @@ async fn v2_idle_session_with_offers() -> (
         .await
         .unwrap();
     (script, session, events, offers, thread)
+}
+
+/// Each execution OpenCode starts on its own while idle gets its own wake. An earlier wake that
+/// ended without a continuation must not park the executions after it.
+#[tokio::test]
+async fn v2_each_idle_execution_is_offered_its_own_wake() {
+    let (script, session, _events, offers, _thread) = v2_idle_session_with_offers().await;
+    let frames = [
+        json!({"id":"e1","type":"session.execution.started","data":{"sessionID":"ses_1"}}),
+        json!({"id":"e2","type":"session.execution.succeeded","data":{"sessionID":"ses_1"}}),
+        json!({"id":"e3","type":"session.execution.started","data":{"sessionID":"ses_1"}}),
+    ];
+    for frame in frames {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let first = tokio::time::timeout(Duration::from_secs(3), offers.take())
+        .await
+        .expect("the first wake is offered");
+    let second = tokio::time::timeout(Duration::from_secs(3), offers.take())
+        .await
+        .expect("the second wake is offered");
+    assert_ne!(first.message_id, second.message_id);
+    session.close().await;
+}
+
+/// A Stop that restarts the runtime withdraws the offer of a wake it holds: the offer is not
+/// dispatched when the worker takes it.
+#[tokio::test]
+async fn v2_stop_withdraws_a_held_wake_offer() {
+    let (script, session, _events, offers, thread) = v2_idle_session_with_offers().await;
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e1","type":"session.execution.started","data":{"sessionID":"ses_1"}})
+                .to_string(),
+        )))
+        .unwrap();
+    let offer = tokio::time::timeout(Duration::from_secs(3), offers.take())
+        .await
+        .expect("a wake offer");
+    session
+        .interrupt_turn(ProviderAdapterV2InterruptInput {
+            provider_thread: thread,
+            provider_turn_id: turin_contracts::ProviderTurnId::new("turn_1").unwrap(),
+            request_runtime_restart: Some(true),
+        })
+        .await
+        .unwrap();
+    let dispatch = offer.dispatch_if_current.expect("a gated dispatch");
+    let dispatched = dispatch(Box::pin(async { Ok::<(), String>(()) })).await;
+    assert_eq!(dispatched, Ok(None));
+    session.close().await;
+}
+
+/// A report queued from a child a Stop ended answers that Stop: the execution it would start is
+/// stopped, so no wake is offered for it.
+#[tokio::test]
+async fn v2_stop_drops_queued_reports_from_its_children() {
+    let (script, session, _events, offers, thread) = v2_idle_session_with_offers().await;
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e1","type":"session.inbox.enqueued","data":{"sessionID":"ses_1","inboxID":"inbox_1","item":{"type":"synthetic","payload":{"text":"stale report","metadata":{"source":"subagent","childID":"ses_child"}}}}})
+                .to_string(),
+        )))
+        .unwrap();
+    // The report is queued before the Stop reaches the session.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    session
+        .interrupt_turn(ProviderAdapterV2InterruptInput {
+            provider_thread: thread,
+            provider_turn_id: turin_contracts::ProviderTurnId::new("turn_1").unwrap(),
+            request_runtime_restart: Some(true),
+        })
+        .await
+        .unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"e2","type":"session.execution.started","data":{"sessionID":"ses_1"}})
+                .to_string(),
+        )))
+        .unwrap();
+    let offered = tokio::time::timeout(Duration::from_millis(500), offers.take()).await;
+    assert!(offered.is_err(), "a stopped child's report offered a wake");
+    session.close().await;
+}
+
+/// An agent's continuation with no wake to drain finishes completed and submits no prompt.
+#[tokio::test]
+async fn v2_a_continuation_without_a_wake_finishes_without_a_prompt() {
+    let (script, session, mut events, _offers, thread) = v2_idle_session_with_offers().await;
+    let _ = script;
+    let mut input = turn(thread, "continue");
+    input.message.created_by = OrchestrationV2Actor::Agent;
+    input.message.creation_source = OrchestrationV2CreationSource::Provider;
+    input.message.message_id = MessageId::new("msg_missing").unwrap();
+    session.start_turn(input).await.unwrap();
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "provider_turn.updated" && value["provider_turn"]["status"] == "completed"
+    })
+    .await;
+    assert!(
+        of_type(&seen, "provider_turn.updated")
+            .iter()
+            .any(|event| event["provider_turn"]["status"] == "completed"),
+        "{seen:#?}"
+    );
+    session.close().await;
+}
+
+/// A report delivered into a running turn, or cancelled, is no longer queued for the next wake.
+#[tokio::test]
+async fn v2_delivered_and_cancelled_reports_leave_the_next_wake() {
+    let (script, session, _events, offers, _thread) = v2_idle_session_with_offers().await;
+    let report = |inbox: &str, text: &str| json!({"id":inbox,"type":"session.inbox.enqueued","data":{"sessionID":"ses_1","inboxID":inbox,"item":{"type":"synthetic","payload":{"text":text,"metadata":{"source":"subagent","childID":"ses_child"}}}}});
+    let frames = [
+        report("inbox_1", "delivered report"),
+        report("inbox_2", "cancelled report"),
+        report("inbox_3", "kept report"),
+        json!({"id":"e4","type":"session.inbox.delivered","data":{"sessionID":"ses_1","inboxID":"inbox_1"}}),
+        json!({"id":"e5","type":"session.inbox.cancelled","data":{"sessionID":"ses_1","inboxID":"inbox_2"}}),
+        json!({"id":"e6","type":"session.execution.started","data":{"sessionID":"ses_1"}}),
+    ];
+    for frame in frames {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let offer = tokio::time::timeout(Duration::from_secs(3), offers.take())
+        .await
+        .expect("a wake offer");
+    assert_eq!(offer.detail.as_deref(), Some("kept report"));
+    session.close().await;
 }
 
 #[tokio::test]
@@ -1886,6 +2022,7 @@ async fn v2_continuation_replays_the_parked_execution_without_a_prompt() {
 
     let mut input = turn(thread, "");
     input.message.created_by = OrchestrationV2Actor::Agent;
+    input.message.creation_source = OrchestrationV2CreationSource::Provider;
     input.message.message_id = offer.message_id.clone().expect("wake message");
     session.start_turn(input).await.unwrap();
     let seen = events_until(&mut events, |value| {

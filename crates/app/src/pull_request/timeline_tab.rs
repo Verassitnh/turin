@@ -21,6 +21,7 @@ use turin_contracts::pull_request::{
     PullRequestActor, PullRequestComment, PullRequestCommentKind, PullRequestCommentUpdateKind,
 };
 
+use super::activity_unavailable::{ACTIVITY_UNAVAILABLE_RETRY_LABEL, ACTIVITY_UNAVAILABLE_TITLE};
 use super::comment_body::{EditButton, ReactionBar};
 use super::comment_form::{MarkdownEditor, MarkdownEditorEvent};
 use super::detail_context::DetailContext;
@@ -840,7 +841,7 @@ impl TimelineTab {
                     .line_height(TEXT_SM.line_height)
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
-                    .child("Could not load pull request activity"),
+                    .child(ACTIVITY_UNAVAILABLE_TITLE),
             )
             .child(
                 text_size(
@@ -854,7 +855,7 @@ impl TimelineTab {
                     .size(ButtonSize::Sm)
                     .variant(ButtonVariant::Outline)
                     .icon(IconName::RefreshCw)
-                    .label("Retry")
+                    .label(ACTIVITY_UNAVAILABLE_RETRY_LABEL)
                     .on_click(cx.listener(move |_, _, _, cx| {
                         if let Some(source) = ctx.source(cx) {
                             source.refresh_detail(&ctx.reference, cx);

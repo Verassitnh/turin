@@ -8,6 +8,7 @@
 // return a concrete element type are the idiom of every view here.
 #![allow(clippy::type_complexity, refining_impl_trait)]
 
+pub mod activity_unavailable;
 pub mod checks_popover;
 pub mod code_tab;
 pub mod comment_body;
@@ -53,6 +54,7 @@ pub mod pull_requests_route_search;
 pub mod relative_time;
 pub mod review_annotation;
 pub mod review_form;
+pub mod speed_actions;
 pub mod stack_popover;
 pub mod summary_tab;
 pub mod thread_links;

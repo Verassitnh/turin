@@ -53,16 +53,17 @@ impl Deferred {
     }
 }
 
-/// Spins on `condition`, yielding between checks. Bounded so a regression fails
-/// instead of hanging.
+/// Spins on `condition`, yielding between checks. Bounded by attempts, not by
+/// a timer: a timer never fires while the paused clock has a task to run, so a
+/// timeout would turn a regression into a hang.
 async fn wait_until(mut condition: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !condition() {
-            tokio::task::yield_now().await;
+    for _ in 0..100_000 {
+        if condition() {
+            return;
         }
-    })
-    .await
-    .expect("condition was not met");
+        tokio::task::yield_now().await;
+    }
+    panic!("condition was not met");
 }
 
 // ── Fixtures ───────────────────────────────────────────────────────

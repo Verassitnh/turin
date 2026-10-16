@@ -463,3 +463,6 @@ impl<S: Clone + Send + Sync + 'static> ManagedServerProviderTrait for ManagedSer
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

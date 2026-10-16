@@ -9,9 +9,9 @@ pub mod chat_view;
 pub mod chat_view_logic;
 pub mod command_block;
 pub mod command_palette;
-pub mod confirm_dialog_host;
 #[allow(dead_code)]
 pub mod composer_inline_token_paste;
+pub mod confirm_dialog_host;
 pub mod context_presentation_registry;
 pub mod drag_region;
 pub mod git_actions_control;

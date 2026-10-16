@@ -56,6 +56,7 @@ pub mod thread_search;
 pub mod thread_shell;
 pub mod thread_state;
 pub mod thread_subagents;
+pub mod thread_sync;
 pub mod thread_workflows;
 pub mod time;
 pub mod turn_item_presentation;

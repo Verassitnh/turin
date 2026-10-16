@@ -57,12 +57,16 @@ icon_assets!(
         Eye,
         EyeOff,
         File,
+        MousePointerClick,
+        Quote,
+        Video,
         CornerDownRight,
         ExternalLink,
         FileCode,
         FileDiff,
         Files,
         FileText,
+        Film,
         Flag,
         Folder,
         FolderOpen,
@@ -94,6 +98,7 @@ icon_assets!(
         ListFilter,
         ListOrdered,
         ListPlus,
+        ListTodo,
         Lock,
         LockOpen,
         LoaderCircle,
@@ -330,6 +335,10 @@ const BRAND: &[(&str, &[u8])] = &[
     (GIT, include_bytes!("../assets/brand/git.svg")),
     (JUJUTSU, include_bytes!("../assets/brand/jujutsu.svg")),
     (
+        T3_WORDMARK,
+        include_bytes!("../assets/brand/t3-wordmark.svg"),
+    ),
+    (
         editor_icons::ANTIGRAVITY,
         include_bytes!("../assets/editors/antigravity.svg"),
     ),
@@ -416,10 +425,6 @@ const BRAND: &[(&str, &[u8])] = &[
     (
         editor_icons::ZED,
         include_bytes!("../assets/editors/zed.svg"),
-    ),
-    (
-        T3_WORDMARK,
-        include_bytes!("../assets/brand/t3-wordmark.svg"),
     ),
     (
         diff_icons::SYMBOL_ADDED,

@@ -192,6 +192,7 @@ fn main() {
                 command_bus.clone(),
             ));
             app_sidebar_layout::bind_keys(cx);
+            composer::views::prompt_editor::bind_keys(cx);
             desktop::bind_menu_keys(cx, app_sidebar_layout::KEY_CONTEXT);
             desktop::install_native_menus(cx);
             let right_panel = dev_overrides(cx);

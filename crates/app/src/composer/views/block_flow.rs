@@ -16,8 +16,9 @@ use crate::components::chat::markdown::inline_flow::{
 use crate::composer::js_string::utf16_len;
 use crate::composer::rich_doc::{Atom, DocPos, Inline, InlineContent, InlineNode, Marks};
 use crate::composer::rich_text::RichTextMark;
+use crate::composer::views::context_chip::ContextChipKind;
 use crate::theme::AppTheme;
-use crate::theme::color::{MixSpace, color, color_mix, with_alpha};
+use crate::theme::color::{MixSpace, color_mix, with_alpha};
 use crate::ui::IconName;
 
 /// What the painter needs from the environment.
@@ -161,11 +162,33 @@ pub struct BlockFlow {
     pub map: OffsetMap,
 }
 
-/// The accent a chip kind carries (`ContextChip` kinds).
-fn chip_accent(atom: &Atom) -> Hsla {
+/// The accent a chip kind carries (`ContextChip` kinds); `None` is the
+/// `neutral` kind.
+fn chip_accent(atom: &Atom) -> Option<Hsla> {
     match atom {
-        Atom::Mention { .. } => color("oklch(0.62 0.11 215)"),
-        Atom::Skill { .. } => color("oklch(0.62 0.16 322)"),
+        Atom::Mention { .. } => ContextChipKind::Mention.accent(),
+        Atom::Skill { .. } => ContextChipKind::Skill.accent(),
+        Atom::Citation { .. } => ContextChipKind::Citation.accent(),
+        Atom::ContextReference { kind, .. } => ContextChipKind::from_context_kind(kind).accent(),
+    }
+}
+
+fn chip_icon(atom: &Atom) -> IconName {
+    match atom {
+        Atom::Mention { .. } => IconName::FileText,
+        Atom::Skill { .. } => IconName::Package,
+        Atom::Citation { .. } => IconName::Quote,
+        Atom::ContextReference { kind, .. } => match kind.as_str() {
+            "image" => IconName::Image,
+            "video" => IconName::Video,
+            "file" => IconName::File,
+            "terminal" => IconName::Terminal,
+            "element" | "preview-annotation" => IconName::MousePointerClick,
+            "review-comment" => IconName::MessageCircle,
+            "pull-request" => IconName::GitPullRequest,
+            "thread" => IconName::MessageSquare,
+            _ => IconName::Link,
+        },
     }
 }
 
@@ -194,6 +217,12 @@ fn chip_label(atom: &Atom) -> String {
                 label.clone()
             }
         }
+        // `ContextChipLabel className="max-w-[16em]"` truncates; the label is
+        // already capped at 64 UTF-16 units with an ellipsis.
+        Atom::Citation { citation, .. } => {
+            turin_shared::assistant_citations::assistant_citation_label(citation)
+        }
+        Atom::ContextReference { label, .. } => label.clone(),
     }
 }
 
@@ -420,8 +449,12 @@ pub fn build_inline_flow(
                 let label = chip_label(atom);
                 let accent = chip_accent(atom);
                 let chip_size = typography.size * 0.86;
-                let foreground: Hsla =
-                    color_mix(MixSpace::Oklab, accent, 0.22, theme.foreground).into();
+                let foreground: Hsla = match accent {
+                    Some(accent) => {
+                        color_mix(MixSpace::Oklab, accent, 0.22, theme.foreground).into()
+                    }
+                    None => theme.foreground,
+                };
                 let mut style = base_style(node.marks);
                 style.family = env.sans.clone();
                 style.weight = FontWeight::MEDIUM;
@@ -430,13 +463,21 @@ pub fn build_inline_flow(
                 style.color = foreground;
                 style.strikethrough = false;
                 style.atomic = true;
-                let icon = match atom {
-                    Atom::Mention { .. } => IconName::FileText,
-                    Atom::Skill { .. } => IconName::Package,
+                let icon = chip_icon(atom);
+                let (background, border): (Hsla, Hsla) = match accent {
+                    Some(accent) => (
+                        with_alpha(accent, 0.11).into(),
+                        color_mix(MixSpace::Oklab, accent, 0.34, theme.border).into(),
+                    ),
+                    // `neutral`: border-border/70 bg-accent/40 text-foreground.
+                    None => (
+                        with_alpha(theme.accent, 0.40).into(),
+                        with_alpha(theme.border, 0.70).into(),
+                    ),
                 };
                 style.chrome = Some(SpanChrome {
-                    background: with_alpha(accent, 0.11).into(),
-                    border: Some(color_mix(MixSpace::Oklab, accent, 0.34, theme.border).into()),
+                    background,
+                    border: Some(border),
                     radius: chip_size * 0.5,
                     pad_x: chip_size * 0.5,
                     pad_y: chip_size * 0.1,

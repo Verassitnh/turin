@@ -181,6 +181,65 @@ impl ChatComposer {
     /// Debug aid for screenshots: `TURIN_COMPOSER_DEMO=<scenario>` preloads
     /// the prompt and opens a layer, since synthetic input is unavailable
     /// to the capture scripts.
+    /// `TURIN_COMPOSER_DEMO=citation[-comment]`: a quote chip and a terminal
+    /// context chip, optionally with the quote's comment editor open.
+    fn apply_citation_demo(
+        &mut self,
+        open_comment: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let citation: turin_contracts::assistant_citations::AssistantCitation =
+            serde_json::from_value(serde_json::json!({
+                "version": 1,
+                "environmentId": "local",
+                "threadId": "thread-1",
+                "messageId": "assistant-1",
+                "text": "The parser keeps a stack of open blocks",
+                "start": 0,
+                "end": 39,
+                "prefix": "",
+                "suffix": "",
+            }))
+            .expect("demo citation");
+        let quote = turin_shared::assistant_citations::serialize_assistant_citation(&citation);
+        let terminal = turin_shared::composer_context_references::format_composer_context_reference(
+            "terminal",
+            "terminal_ctx-1",
+            "Terminal 1 lines 3-4",
+        );
+        let prompt = format!("Why does {quote} fail with {terminal} here? ");
+        let key = "local:thread-1".to_owned();
+        self.drafts.set_prompt(&key, &prompt);
+        if !open_comment {
+            return;
+        }
+        let citation_start = crate::composer::js_string::utf16_len("Why does ");
+        let editor = self.editor.clone();
+        window
+            .spawn(cx, async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(600))
+                    .await;
+                cx.update(|window, cx| {
+                    editor.update(cx, |editor, cx| {
+                        editor.request_citation_comment(
+                            crate::composer::editor_state::CitationCommentRequest {
+                                previous_value: String::new(),
+                                value: prompt.clone(),
+                                citation_start,
+                                inserted_spaces: Default::default(),
+                            },
+                            window,
+                            cx,
+                        );
+                    });
+                })
+                .ok();
+            })
+            .detach();
+    }
+
     fn apply_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Ok(scenario) = std::env::var("TURIN_COMPOSER_DEMO") else {
             return;
@@ -197,6 +256,9 @@ impl ChatComposer {
         if let Some(prompt) = prompt {
             let key = "local:thread-1".to_owned();
             self.drafts.set_prompt(&key, prompt);
+        }
+        if scenario.starts_with("citation") {
+            self.apply_citation_demo(scenario == "citation-comment", window, cx);
         }
         let overlay = scenario.clone();
         self.store.update(cx, |store, cx| {
@@ -425,10 +487,20 @@ impl ChatComposer {
         self.validation = None;
         self.history_position = None;
         self.layer = None;
-        self.editor.update(cx, |editor, cx| {
+        let saved = self.editor.update(cx, |editor, cx| {
             let end = crate::composer::js_string::utf16_len(&prompt);
-            editor.set_value(&prompt, end, cx);
+            editor.set_value(&prompt, end, cx)
         });
+        // An unsaved citation comment belongs to the thread being left.
+        if let Some(saved) = saved
+            && !previous.is_empty()
+            && self
+                .drafts
+                .get_composer_draft(&previous)
+                .is_some_and(|draft| draft.prompt == saved.replaced_value)
+        {
+            self.drafts.set_prompt(&previous, &saved.saved_value);
+        }
         let _ = window;
     }
 
@@ -471,6 +543,28 @@ impl ChatComposer {
                 self.open_language_picker(*block, *anchor, window, cx)
             }
             PromptEditorEvent::VisibleSelectionChanged => cx.notify(),
+            // The timeline's page scroll is not wired to the composer yet
+            // (ChatView owns `PageScrollController`).
+            PromptEditorEvent::PageScrollKeyDown(_)
+            | PromptEditorEvent::PageScrollKeyUp(_)
+            | PromptEditorEvent::PageScrollRelease => {}
+            // No file preview surface in the composer yet.
+            PromptEditorEvent::OpenMention(_) => {}
+            PromptEditorEvent::CitationSubmitAndSend => {
+                let weak = cx.weak_entity();
+                window.defer(cx, move |window, cx| {
+                    weak.update(cx, |this, cx| {
+                        this.submit(ComposerSubmissionIntent::Foreground, window, cx)
+                    })
+                    .ok();
+                });
+            }
+            PromptEditorEvent::CitationDraftSaved(saved) => {
+                // `if (replacedValue === prompt) setPrompt(savedValue)`.
+                if self.prompt(cx) == saved.replaced_value {
+                    self.drafts.set_prompt(&self.thread_key, &saved.saved_value);
+                }
+            }
         }
     }
 

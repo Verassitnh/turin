@@ -48,8 +48,8 @@ pub fn format_provider_skill_display_name(skill: &InlineSkill) -> String {
     title_case_words(&skill.name)
 }
 
-/// One matched `$skill` token. `start..end` is the byte range of the whole token, including the
-/// whitespace before the `$`, so callers slice the text with it the way upstream does.
+/// One matched `$skill` token. `start..end` is the byte range of the token from its `$`: the
+/// whitespace the pattern consumes before it is not included (`match.index + match[1].length`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineSkillMatch<'a> {
     pub start: usize,
@@ -160,8 +160,13 @@ pub fn match_inline_skills<'a>(text: &str, skills: &'a [InlineSkill]) -> Vec<Inl
             continue;
         };
         if let Some(skill) = skills.iter().find(|candidate| candidate.name == name) {
+            // `match.index + match[1].length`: the token starts after the
+            // whitespace the pattern consumed.
+            let leading = char_at(text, position)
+                .filter(|ch| is_js_whitespace(*ch))
+                .map_or(0, char::len_utf8);
             matches.push(InlineSkillMatch {
-                start: position,
+                start: position + leading,
                 end,
                 skill,
                 raw_text: format!("${name}"),
@@ -207,7 +212,7 @@ mod tests {
         assert_eq!(matches[0].raw_text, "$test-t3-app");
         assert_eq!(
             &"Use $test-t3-app now"[matches[0].start..matches[0].end],
-            " $test-t3-app"
+            "$test-t3-app"
         );
         assert_eq!(
             match_inline_skills("$test-t3-app", &skills)

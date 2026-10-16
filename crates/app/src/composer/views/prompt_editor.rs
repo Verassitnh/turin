@@ -1,3 +1,6 @@
+//! Port of upstream/apps/web/src/components/ComposerPromptEditorTiptap.tsx
+//! Port of upstream/apps/web/src/components/ComposerPromptEditor.tsx
+//!
 //! The rich prompt editor view: port of ComposerPromptEditorTiptap.tsx's
 //! surface, built on [`EditorState`].
 //!
@@ -17,21 +20,31 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
-    SharedString, StatefulInteractiveElement as _, Styled as _, UTF16Selection, Window, canvas,
-    div, point, px, rems,
+    FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Pixels, Point, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, UTF16Selection, WeakEntity, Window,
+    canvas, div, point, px, rems,
 };
 
 use crate::components::chat::markdown::code_highlight::highlight_code;
 use crate::components::chat::markdown::inline_flow::{
     FlowCaret, FlowHighlight, FlowProbe, FlowSpan, FlowSpanStyle, InlineFlow, WhiteSpace,
 };
+use crate::components::chat::page_scroll_controller::{
+    PageScrollKey, PageScrollKeyEvent, get_timeline_page_scroll_key,
+};
 use crate::composer::catalog::ProviderSkill;
+use crate::composer::citation_comment_dismissal::{
+    AssistantCitationCommentDismissal, resolve_assistant_citation_comment_dismissal,
+};
 use crate::composer::code_languages::{code_language_label, language_of_info_string};
-use crate::composer::editor_state::{EdgeStop, EditorSnapshot, EditorState, Selection};
+use crate::composer::editor_state::{
+    CitationCommentRequest, CitationDraftSave, EdgeStop, EditorKey, EditorSnapshot, EditorState,
+    Selection,
+};
 use crate::composer::rich_doc::{
-    Block, CodeBlock, DocPos, ItemPrefix, Marks, SkillMeta, list_depths,
+    Atom, Block, CodeBlock, DocPos, InlineContent, ItemPrefix, Marks, SkillMeta, list_depths,
 };
 use crate::composer::rich_text::RichTextMark;
 use crate::composer::views::block_flow::{
@@ -41,7 +54,28 @@ use crate::composer::views::block_flow::{
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{LEADING_RELAXED, RADIUS_LG, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
-use crate::ui::{Icon, IconName};
+use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
+
+gpui_kit::actions!(
+    composer_editor,
+    [
+        /// StarterKit's Mod-B bold in the rich composer. Bound in the editor's
+        /// key context so it outranks `sidebar.toggle` there; plain mode
+        /// passes it on (AppSidebarLayout's `isRichTextBoldShortcut` carve-out).
+        ToggleBold,
+    ]
+);
+
+const KEY_CONTEXT: &str = "ComposerEditor";
+
+/// The editor's own chords.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([gpui_kit::KeyBinding::new(
+        "cmd-b",
+        ToggleBold,
+        Some(KEY_CONTEXT),
+    )]);
+}
 
 /// What the host is told.
 #[derive(Debug, Clone, PartialEq)]
@@ -52,6 +86,23 @@ pub enum PromptEditorEvent {
     VisibleSelectionChanged,
     /// The language control of a code block was clicked.
     OpenCodeLanguagePicker { block: usize, anchor: Point<Pixels> },
+    /// PageUp/PageDown the editor cannot scroll any further, for the timeline
+    /// (`onPageScrollKeyDown`).
+    PageScrollKeyDown(PageScrollKey),
+    /// A key went up (`onPageScrollKeyUp`).
+    PageScrollKeyUp(String),
+    /// A modifier changed, the page key no longer scrolls, or focus left
+    /// (`onPageScrollRelease`).
+    PageScrollRelease,
+    /// A file mention chip was clicked (`actions.openMention(path)`).
+    OpenMention(String),
+    /// A citation comment was saved with Cmd/Ctrl+Enter
+    /// (`onCitationSubmitAndSend`).
+    CitationSubmitAndSend,
+    /// A new controlled value replaced the document while a citation comment
+    /// was unsaved; the comment was saved into `replaced_value`, giving
+    /// `saved_value` (`onCitationDraftSave`).
+    CitationDraftSaved(CitationDraftSave),
 }
 
 impl EventEmitter<PromptEditorEvent> for PromptEditor {}
@@ -125,6 +176,12 @@ fn normalize_key(key: &str) -> String {
 
 pub type CommandKeyHandler =
     Rc<dyn Fn(&mut EditorState, &CommandKey, &mut Window, &mut App) -> bool>;
+pub type BuildContextFragment = Rc<dyn Fn(&[String]) -> Option<String>>;
+pub type ImportContextFragment = Rc<
+    dyn Fn(
+        &turin_contracts::composer_context_clipboard::ComposerContextClipboardFragment,
+    ) -> std::collections::HashMap<String, String>,
+>;
 pub type PasteHandler = Rc<dyn Fn(&mut EditorState, &ClipboardItem, &mut Window, &mut App) -> bool>;
 
 #[derive(Clone)]
@@ -179,6 +236,14 @@ pub struct PromptEditor {
     scroll_caret_into_view: bool,
     path_query_active: bool,
     was_focused: bool,
+    /// How many draft context records back the prompt (`contextRecords.size`).
+    context_record_count: usize,
+    /// The open citation's comment field (`AssistantCitationCommentEditor`).
+    comment_editor: Option<(String, Entity<PromptEditor>, Subscription)>,
+    /// Frames repainted while waiting for the chip's box to anchor to.
+    comment_anchor_retries: u8,
+    build_context_fragment: Option<BuildContextFragment>,
+    import_context_fragment: Option<ImportContextFragment>,
 }
 
 impl PromptEditor {
@@ -212,6 +277,11 @@ impl PromptEditor {
             scroll_caret_into_view: false,
             path_query_active: false,
             was_focused: false,
+            context_record_count: 0,
+            comment_editor: None,
+            comment_anchor_retries: 0,
+            build_context_fragment: None,
+            import_context_fragment: None,
         };
         this.last_snapshot = Some(this.state.snapshot());
         this
@@ -235,6 +305,18 @@ impl PromptEditor {
 
     pub fn set_paste_handler(&mut self, handler: Option<PasteHandler>) {
         self.paste_handler = handler;
+    }
+
+    /// `buildContextClipboardFragment`: the structured clipboard payload for
+    /// the referenced ids, or `None` to copy text only.
+    pub fn set_build_context_fragment(&mut self, build: Option<BuildContextFragment>) {
+        self.build_context_fragment = build;
+    }
+
+    /// `importContextFragment`: imports a structured paste's records and
+    /// returns the ids that changed.
+    pub fn set_import_context_fragment(&mut self, import: Option<ImportContextFragment>) {
+        self.import_context_fragment = import;
     }
 
     pub fn set_config(&mut self, config: EditorConfig, cx: &mut Context<Self>) {
@@ -269,20 +351,317 @@ impl PromptEditor {
         self.state.is_empty()
     }
 
+    /// The number of draft context records (`contextRecords.size`); the
+    /// placeholder hides while any exist.
+    pub fn set_context_record_count(&mut self, count: usize, cx: &mut Context<Self>) {
+        if self.context_record_count != count {
+            self.context_record_count = count;
+            cx.notify();
+        }
+    }
+
     pub fn is_focused(&self, window: &Window) -> bool {
         self.focus.is_focused(window)
     }
 
     /// Controlled value/cursor from the store (history recall, chip
     /// insertion…). A no-op when both already match.
-    pub fn set_value(&mut self, value: &str, cursor: usize, cx: &mut Context<Self>) {
+    ///
+    /// An unsaved citation comment is saved into the replaced value first
+    /// (`saveCitationDraft`); the save is returned and emitted so the owner
+    /// of the replaced value can keep it.
+    pub fn set_value(
+        &mut self,
+        value: &str,
+        cursor: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<CitationDraftSave> {
         let snapshot = self.state.snapshot();
         if snapshot.value == value && snapshot.cursor == cursor {
-            return;
+            return None;
         }
         let label_for = skill_label_fn(&self.skills);
-        self.state.set_value(value, Some(cursor), &*label_for);
+        let saved = self
+            .state
+            .apply_controlled_value(value, cursor, &*label_for);
+        if let Some(saved) = &saved {
+            cx.emit(PromptEditorEvent::CitationDraftSaved(saved.clone()));
+        }
+        self.sync_comment_editor(None, cx);
         self.after_change(cx);
+        saved
+    }
+
+    // ── Citation comments ──────────────────────────────────────────────────
+
+    /// `requestCitationComment`: open the comment editor of a citation just
+    /// inserted through the store, now or once its value is applied.
+    pub fn request_citation_comment(
+        &mut self,
+        request: CitationCommentRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.request_citation_comment(request);
+        self.sync_comment_editor(Some(window), cx);
+        cx.notify();
+    }
+
+    /// Open a citation's comment editor (the chip's comment trigger).
+    fn open_citation_comment(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.config.disabled {
+            return;
+        }
+        self.state.set_citation_comment_open(key, true);
+        self.sync_comment_editor(Some(window), cx);
+        cx.notify();
+    }
+
+    /// Mount or drop the comment field to match the open citation.
+    fn sync_comment_editor(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        let open = self
+            .state
+            .open_citation_comment()
+            .map(|open| open.key.clone());
+        if self.comment_editor.as_ref().map(|(key, ..)| key) == open.as_ref() {
+            return;
+        }
+        self.comment_editor = None;
+        let Some(key) = open else {
+            return;
+        };
+        let Some((_, citation)) = self.state.open_citation() else {
+            return;
+        };
+        let initial = citation.comment.clone().unwrap_or_default();
+        let config = EditorConfig {
+            placeholder: "Add an optional comment...".into(),
+            disabled: false,
+            rich_text: false,
+            literal_text: true,
+            // `min-h-16 max-h-40`, `sm:text-sm`.
+            min_height: 4.,
+            max_height: 10.,
+            font_size: Some(14.),
+        };
+        let field =
+            gpui_kit::AppContext::new(cx, |cx| PromptEditor::new(&initial, config, Vec::new(), cx));
+        let weak = cx.weak_entity();
+        field.update(cx, |field, _| {
+            field.set_command_handler(Some(Rc::new(move |state, key, window, cx| {
+                comment_field_key(&weak, state, key, window, cx)
+            })));
+        });
+        let draft_key = key.clone();
+        let subscription = cx.subscribe(&field, move |this, _, event: &PromptEditorEvent, cx| {
+            if let PromptEditorEvent::Changed(snapshot) = event {
+                this.state
+                    .set_citation_comment_draft(&draft_key, &snapshot.value);
+                cx.notify();
+            }
+        });
+        if let Some(window) = window {
+            field.update(cx, |field, cx| field.focus_at_end(window, cx));
+        }
+        self.comment_editor = Some((key, field, subscription));
+    }
+
+    /// `onSubmit` / `onSubmitAndSend`: save, close, and put the caret back
+    /// after the chip (`onRestoreFocus`).
+    fn submit_citation_comment(
+        &mut self,
+        comment: &str,
+        send: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = self.state.open_citation_comment().map(|o| o.key.clone()) else {
+            return;
+        };
+        if crate::composer::js_string::utf16_len(comment)
+            > turin_contracts::assistant_citations::ASSISTANT_CITATION_MAX_COMMENT_LENGTH
+        {
+            return;
+        }
+        if !self.state.save_citation_comment(&key, comment) {
+            return;
+        }
+        self.state.set_citation_comment_open(&key, false);
+        self.state.caret_after_citation(&key);
+        self.sync_comment_editor(None, cx);
+        window.focus(&self.focus, cx);
+        self.after_change(cx);
+        if send {
+            cx.emit(PromptEditorEvent::CitationSubmitAndSend);
+        }
+    }
+
+    /// `onCancel`: a fresh insertion is removed with its spaces; otherwise the
+    /// popover closes and the caret returns after the chip.
+    fn cancel_citation_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.state.open_citation_comment().map(|o| o.key.clone()) else {
+            return;
+        };
+        if !self.state.remove_citation_on_cancel(&key) {
+            self.state.set_citation_comment_open(&key, false);
+            self.state.caret_after_citation(&key);
+        }
+        self.sync_comment_editor(None, cx);
+        window.focus(&self.focus, cx);
+        self.after_change(cx);
+    }
+
+    /// A press outside the popover (`settleDraftOnClose("outside-press")`).
+    fn dismiss_citation_comment(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.state.open_citation_comment().map(|o| o.key.clone()) else {
+            return;
+        };
+        let draft = self
+            .comment_editor
+            .as_ref()
+            .map(|(_, field, _)| field.read(cx).state().doc().clone())
+            .map(|doc| crate::composer::rich_doc::serialize_doc(&doc).value);
+        let saved = self.state.open_citation().and_then(|(_, c)| c.comment);
+        match resolve_assistant_citation_comment_dismissal(
+            "outside-press",
+            draft.as_deref(),
+            saved.as_deref(),
+        ) {
+            AssistantCitationCommentDismissal::KeepOpen => return,
+            AssistantCitationCommentDismissal::Commit { comment } => {
+                self.state.save_citation_comment(&key, &comment);
+            }
+            AssistantCitationCommentDismissal::Close => {}
+        }
+        self.state.set_citation_comment_open(&key, false);
+        self.sync_comment_editor(None, cx);
+        self.after_change(cx);
+    }
+
+    /// The comment popover (`PopoverPopup side="top" align="end" width="md"
+    /// padding="compact"`), anchored to the chip.
+    fn citation_comment_popover(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (_, field, _) = self.comment_editor.as_ref()?;
+        let (pos, _) = self.state.open_citation()?;
+        let anchor = self.atom_bounds(pos)?;
+        let theme = cx.app_theme().clone();
+        let comment = crate::composer::rich_doc::serialize_doc(field.read(cx).state().doc()).value;
+        let too_long = crate::composer::js_string::utf16_len(&comment)
+            > turin_contracts::assistant_citations::ASSISTANT_CITATION_MAX_COMMENT_LENGTH;
+        let weak = cx.weak_entity();
+        let cancel = weak.clone();
+        let save = weak.clone();
+        let content = crate::composer::views::chrome::glass_surface(cx)
+            .id("citation-comment-popover")
+            .w(rems(20.))
+            .py(rems(0.5))
+            .px(rems(0.75))
+            .on_mouse_down_out(move |_, _, cx| {
+                weak.update(cx, |this, cx| this.dismiss_citation_comment(cx))
+                    .ok();
+            })
+            .child(div().px(rems(0.25)).py(rems(0.375)).child(field.clone()))
+            .when(too_long, |this| {
+                this.child(
+                    div()
+                        .pt(rems(0.25))
+                        .text_size(TEXT_XS.size)
+                        .line_height(TEXT_XS.line_height)
+                        .text_color(theme.destructive)
+                        .child(format!(
+                            "Comments can contain up to {} characters.",
+                            format_thousands(
+                                turin_contracts::assistant_citations::ASSISTANT_CITATION_MAX_COMMENT_LENGTH
+                            )
+                        )),
+                )
+            })
+            .child(
+                div()
+                    .mt(rems(0.5))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(rems(0.5))
+                    .child(
+                        Button::new("citation-comment-cancel")
+                            .variant(ButtonVariant::Outline)
+                            .size(ButtonSize::Xs)
+                            .label("Cancel")
+                            .on_click(move |_, window, cx| {
+                                cancel
+                                    .update(cx, |this, cx| this.cancel_citation_comment(window, cx))
+                                    .ok();
+                            }),
+                    )
+                    .child(
+                        Button::new("citation-comment-save")
+                            .size(ButtonSize::Xs)
+                            .label(if too_long { "Shorten comment" } else { "Save" })
+                            .disabled(too_long)
+                            .on_click(move |_, window, cx| {
+                                save.update(cx, |this, cx| {
+                                    let comment = this
+                                        .comment_editor
+                                        .as_ref()
+                                        .map(|(_, field, _)| {
+                                            crate::composer::rich_doc::serialize_doc(
+                                                field.read(cx).state().doc(),
+                                            )
+                                            .value
+                                        })
+                                        .unwrap_or_default();
+                                    this.submit_citation_comment(&comment, false, window, cx)
+                                })
+                                .ok();
+                            }),
+                    ),
+            );
+        Some(crate::composer::views::chrome::floating(
+            anchor, true, true, content,
+        ))
+    }
+
+    /// The painted box of the chip at `pos`, from its block's line boxes.
+    fn atom_bounds(&self, pos: DocPos) -> Option<Bounds<Pixels>> {
+        let flow = self.block_flow_for(pos.block)?;
+        let probe = self.probes.borrow().get(pos.block).cloned().flatten()?;
+        let seg = flow
+            .map
+            .segs
+            .iter()
+            .find(|seg| seg.kind == SegKind::Atom && seg.doc_start == pos.offset)?;
+        let start = probe.caret_bounds(seg.byte_start, px(1.))?;
+        let end = probe.caret_bounds(seg.byte_start + seg.byte_len, px(1.))?;
+        if (start.origin.y - end.origin.y).abs() > px(1.) {
+            return Some(start);
+        }
+        Some(Bounds::from_corners(
+            start.origin,
+            point(end.origin.x, end.bottom()),
+        ))
+    }
+
+    /// The chip under `position`, if any.
+    fn chip_at(&self, position: Point<Pixels>) -> Option<(DocPos, Atom)> {
+        let pos = self.pos_for_point(position)?;
+        let inline = self.state.doc().blocks.get(pos.block)?.inline()?;
+        let mut offset = 0usize;
+        for node in inline {
+            if let InlineContent::Atom(atom) = &node.content
+                && (offset + 1 == pos.offset || offset == pos.offset)
+            {
+                let at = DocPos::new(pos.block, offset);
+                if self
+                    .atom_bounds(at)
+                    .is_some_and(|bounds| bounds.contains(&position))
+                {
+                    return Some((at, atom.clone()));
+                }
+            }
+            offset += node.doc_len();
+        }
+        None
     }
 
     /// Place the caret at a collapsed cursor and focus.
@@ -412,8 +791,35 @@ impl PromptEditor {
             return;
         }
         let mut key = CommandKey::from_event(event);
+        key.is_composing = self.marked.is_some();
         let modifiers = event.keystroke.modifiers;
         let command = modifiers.platform;
+
+        // The editor's own rules first (`handleKeyDown` before
+        // `onCommandKeyDown`): styled-edge stops, chip skipping, Enter during
+        // composition, and Tab / Enter that belong to a fence.
+        let editor_key = EditorKey {
+            key: key.key.clone(),
+            shift: key.shift,
+            alt: key.alt,
+            meta: key.meta,
+            ctrl: key.ctrl,
+            is_composing: key.is_composing,
+        };
+        if self.state.handle_key_down(&editor_key) {
+            if !matches!(key.key.as_str(), "ArrowUp" | "ArrowDown") {
+                self.goal_x = None;
+            }
+            cx.stop_propagation();
+            self.restart_blink(window, cx);
+            self.after_change(cx);
+            return;
+        }
+        if matches!(key.key.as_str(), "PageUp" | "PageDown") {
+            self.on_page_key(&key, cx);
+            return;
+        }
+
         if matches!(key.key.as_str(), "ArrowUp" | "ArrowDown") {
             key.caret_on_first_line = self.is_caret_on_visual_edge(true);
             key.caret_on_last_line = self.is_caret_on_visual_edge(false);
@@ -497,12 +903,6 @@ impl PromptEditor {
                         selection.from()
                     };
                     self.state.move_caret(edge, false);
-                } else if !key.shift
-                    && self
-                        .state
-                        .step_caret_across_styled_edge(if forward { 1 } else { -1 })
-                {
-                    // Took the other stop of a styled edge.
                 } else {
                     let target = if forward {
                         self.state.next_cursor_pos(head)
@@ -531,7 +931,6 @@ impl PromptEditor {
                 let target = self.line_edge(head, key.key == "End");
                 self.state.move_caret(target, key.shift);
             }
-            "PageUp" | "PageDown" => handled = false,
             _ => {
                 if command {
                     match key.key.as_str() {
@@ -574,6 +973,46 @@ impl PromptEditor {
             cx.stop_propagation();
             self.restart_blink(window, cx);
             self.after_change(cx);
+        }
+    }
+
+    /// PageUp/PageDown (`EditorContent` `onKeyDown`): the editor keeps the key
+    /// while it can scroll that way; past its edge the timeline takes it.
+    fn on_page_key(&mut self, key: &CommandKey, cx: &mut Context<Self>) {
+        let client_height = f64::from(self.scroll.bounds().size.height);
+        let max_offset = f64::from(self.scroll.max_offset().y);
+        let scroll_top = -f64::from(self.scroll.offset().y);
+        let page_key = get_timeline_page_scroll_key(&PageScrollKeyEvent {
+            alt_key: key.alt,
+            ctrl_key: key.ctrl,
+            meta_key: key.meta,
+            shift_key: key.shift,
+            default_prevented: false,
+            is_composing: key.is_composing,
+            key: &key.key,
+            key_code: 0,
+            client_height,
+            scroll_height: client_height + max_offset,
+            scroll_top,
+        });
+        match page_key {
+            Some(page_key) => {
+                cx.stop_propagation();
+                cx.emit(PromptEditorEvent::PageScrollKeyDown(page_key));
+            }
+            None => {
+                cx.emit(PromptEditorEvent::PageScrollRelease);
+                // The browser scrolls the editor itself by a page.
+                if !(key.alt || key.ctrl || key.meta || key.shift) && max_offset > 0. {
+                    let direction = if key.key == "PageUp" { -1. } else { 1. };
+                    let next = (scroll_top + direction * client_height).clamp(0., max_offset);
+                    let mut offset = self.scroll.offset();
+                    offset.y = px(-(next as f32));
+                    self.scroll.set_offset(offset);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }
         }
     }
 
@@ -696,16 +1135,37 @@ impl PromptEditor {
 
     // ── Clipboard ──────────────────────────────────────────────────────────
 
+    /// `handleCopyCut`: the selection's markdown, plus the structured payload
+    /// of the context records it references.
+    fn clipboard_item(&self, text: String) -> ClipboardItem {
+        let ids = if self.state.is_literal() {
+            Vec::new()
+        } else {
+            crate::composer::rich_doc::collect_inline_context_ids(&text)
+        };
+        let fragment = (!ids.is_empty())
+            .then_some(self.build_context_fragment.as_ref())
+            .flatten()
+            .and_then(|build| build(&ids));
+        match fragment {
+            Some(fragment) => ClipboardItem::new_string_with_metadata(text, fragment),
+            None => ClipboardItem::new_string(text),
+        }
+    }
+
     fn copy(&mut self, cx: &mut Context<Self>) {
         let text = self.state.selected_markdown();
         if !text.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            cx.write_to_clipboard(self.clipboard_item(text));
         }
     }
 
     fn cut(&mut self, cx: &mut Context<Self>) {
+        if self.config.disabled {
+            return;
+        }
         if let Some(text) = self.state.cut_selection() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            cx.write_to_clipboard(self.clipboard_item(text));
         }
     }
 
@@ -720,17 +1180,32 @@ impl PromptEditor {
         {
             return true;
         }
-        let text = item
-            .entries()
-            .iter()
-            .find_map(|entry| match entry {
-                ClipboardEntry::String(string) => Some(string.text().to_owned()),
-                _ => None,
-            })
-            .unwrap_or_default();
+        let Some((text, metadata)) = item.entries().iter().find_map(|entry| match entry {
+            ClipboardEntry::String(string) => {
+                Some((string.text().to_owned(), string.metadata.clone()))
+            }
+            _ => None,
+        }) else {
+            return false;
+        };
         if text.is_empty() {
             return false;
         }
+        // A fence takes the clipboard verbatim; elsewhere a structured paste
+        // brings its context records and relinks to them.
+        let text = match &self.import_context_fragment {
+            Some(import) if !self.state.is_literal() && !self.state.in_code_block() => {
+                crate::composer::inline_token_paste::import_pasted_composer_text(
+                    crate::composer::inline_token_paste::PastedClipboard {
+                        text: &text,
+                        fragment: metadata.as_deref(),
+                        html: None,
+                    },
+                    Some(&**import),
+                )
+            }
+            _ => text,
+        };
         let label_for = self.skill_label();
         self.state.paste(&text, &*label_for, self.path_query_active)
     }
@@ -788,6 +1263,27 @@ impl PromptEditor {
             return;
         }
         window.focus(&self.focus, cx);
+        // Chips are buttons: a mention opens its file, a citation its comment.
+        if event.click_count == 1
+            && !event.modifiers.shift
+            && let Some((pos, atom)) = self.chip_at(event.position)
+        {
+            match atom {
+                Atom::Mention { path, .. } => {
+                    self.state.set_caret(DocPos::new(pos.block, pos.offset + 1));
+                    cx.emit(PromptEditorEvent::OpenMention(path));
+                    self.after_change(cx);
+                    return;
+                }
+                Atom::Citation { cite_key, .. } => {
+                    self.state.set_caret(DocPos::new(pos.block, pos.offset + 1));
+                    self.after_change(cx);
+                    self.open_citation_comment(&cite_key, window, cx);
+                    return;
+                }
+                _ => {}
+            }
+        }
         let Some(pos) = self.pos_for_point(event.position) else {
             let end = self.doc_end();
             self.state.move_caret(end, event.modifiers.shift);
@@ -1334,6 +1830,58 @@ fn code_flow(env: &FlowEnv<'_>, code: &CodeBlock) -> BlockFlow {
     }
 }
 
+/// `toLocaleString()` for a count (en-US grouping).
+fn format_thousands(value: usize) -> String {
+    let digits = value.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// Keys of the citation comment field (`AssistantCitationCommentEditor`):
+/// Enter saves, Cmd/Ctrl+Enter saves and sends, Shift+Enter is a new line,
+/// Escape cancels.
+fn comment_field_key(
+    parent: &WeakEntity<PromptEditor>,
+    state: &mut EditorState,
+    key: &CommandKey,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    if key.is_composing {
+        return false;
+    }
+    let parent = parent.clone();
+    match key.key.as_str() {
+        "Enter" if !key.shift => {
+            let comment = state.value();
+            let send = key.meta || key.ctrl;
+            window.defer(cx, move |window, cx| {
+                parent
+                    .update(cx, |this, cx| {
+                        this.submit_citation_comment(&comment, send, window, cx)
+                    })
+                    .ok();
+            });
+            true
+        }
+        "Escape" => {
+            window.defer(cx, move |window, cx| {
+                parent
+                    .update(cx, |this, cx| this.cancel_citation_comment(window, cx))
+                    .ok();
+            });
+            true
+        }
+        _ => false,
+    }
+}
+
 fn skill_label_fn(skills: &[ProviderSkill]) -> Rc<dyn Fn(&str) -> SkillMeta> {
     let skills = skills.to_vec();
     Rc::new(move |name: &str| {
@@ -1380,7 +1928,19 @@ impl Render for PromptEditor {
             self.was_focused = focused;
             if focused {
                 self.restart_blink(window, cx);
+            } else {
+                // `onBlur={onPageScrollRelease}`.
+                cx.emit(PromptEditorEvent::PageScrollRelease);
             }
+        }
+        // Anchored to the chip's box from the last painted frame; until one
+        // exists, paint again so the popover appears.
+        let comment_popover = self.citation_comment_popover(cx);
+        if comment_popover.is_some() || self.comment_editor.is_none() {
+            self.comment_anchor_retries = 0;
+        } else if self.comment_anchor_retries < 3 {
+            self.comment_anchor_retries += 1;
+            cx.on_next_frame(window, |_, _, cx| cx.notify());
         }
         let env = self.env(&theme, window);
         let doc = self.state.doc().clone();
@@ -1421,12 +1981,28 @@ impl Render for PromptEditor {
 
         let entity = cx.entity();
         let focus = self.focus.clone();
-        let empty = self.state.is_empty() && !self.config.placeholder.is_empty();
+        // `isEmpty && contextRecords.size === 0 && placeholder`.
+        let empty = self.state.is_empty()
+            && self.context_record_count == 0
+            && !self.config.placeholder.is_empty();
         let size = px(self.config.font_size.unwrap_or(theme.fonts.size_prompt));
         let line_height = size * LEADING_RELAXED;
         div()
             .id("composer-editor")
-            .key_context("ComposerEditor")
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &ToggleBold, window, cx| {
+                if !this.state.is_rich() {
+                    // Plain mode has no marks: the chord keeps its app meaning.
+                    cx.propagate();
+                    return;
+                }
+                // The rich composer claims the chord even where bold cannot
+                // apply (a fence, a read-only editor).
+                if !this.config.disabled && this.state.toggle_mark(RichTextMark::Bold) {
+                    this.restart_blink(window, cx);
+                    this.after_change(cx);
+                }
+            }))
             .track_focus(&self.focus)
             .relative()
             .w_full()
@@ -1440,6 +2016,14 @@ impl Render for PromptEditor {
             .text_color(theme.foreground)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_key_down(event, window, cx)
+            }))
+            .on_key_up(cx.listener(|_, event: &KeyUpEvent, _, cx| {
+                cx.emit(PromptEditorEvent::PageScrollKeyUp(normalize_key(
+                    &event.keystroke.key,
+                )));
+            }))
+            .on_modifiers_changed(cx.listener(|_, _: &ModifiersChangedEvent, _, cx| {
+                cx.emit(PromptEditorEvent::PageScrollRelease);
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -1473,6 +2057,7 @@ impl Render for PromptEditor {
                     .p(px(4.))
                     .child(div().flex().flex_col().w_full().children(rows).pb(bottom)),
             )
+            .children(comment_popover)
             .when(empty, |this| {
                 this.child(
                     div()

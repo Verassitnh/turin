@@ -233,7 +233,12 @@ impl ChatComposer {
         snapshot: &EditorSnapshot,
         cx: &mut Context<Self>,
     ) {
-        let detected = detect_composer_trigger(&snapshot.value, snapshot.expanded_cursor);
+        // `cursorAdjacentToMention ? null : detectComposerTrigger(…)`.
+        let detected = if snapshot.suppress_trigger {
+            None
+        } else {
+            detect_composer_trigger(&snapshot.value, snapshot.expanded_cursor)
+        };
         if let Some(dismissed) = &self.menu.dismissed {
             let same = detected.as_ref().is_some_and(|t| {
                 t.kind == dismissed.kind && t.range_start == dismissed.range_start

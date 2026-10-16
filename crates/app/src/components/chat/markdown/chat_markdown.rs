@@ -38,10 +38,15 @@ use crate::components::chat::message_copy_button::{CODE_COPY_TIMEOUT_MS, Message
 use crate::components::chat::timeline::assistant_citations::{
     assistant_citation_label, parse_assistant_citation_href,
 };
+use crate::composer::views::context_chip::ContextChipKind;
+use crate::composer::views::skill_inline_text::{
+    SKILL_CHIP_ICON, SkillSegment, split_skill_segments,
+};
 use crate::theme::color::{MixSpace, color, color_mix, with_alpha};
 use crate::theme::tokens::{RADIUS_LG, tw};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
+use turin_shared::inline_skills::InlineSkill;
 
 const MAX_DOCUMENT_CACHE_ENTRIES: usize = 2000;
 
@@ -119,6 +124,8 @@ pub struct ChatMarkdown {
     full_foreground: bool,
     document_order: u64,
     extra_remark_plugin: Option<ExtraRemarkPlugin>,
+    /// `$skill` tokens of these skills read as chips (`renderSkillInlineMarkdownChildren`).
+    skills: Vec<InlineSkill>,
 }
 
 impl ChatMarkdown {
@@ -131,12 +138,18 @@ impl ChatMarkdown {
             full_foreground: false,
             document_order: 0,
             extra_remark_plugin: None,
+            skills: Vec::new(),
         }
     }
 
     /// `extraRemarkPlugins`.
     pub fn extra_remark_plugin(mut self, plugin: ExtraRemarkPlugin) -> Self {
         self.extra_remark_plugin = Some(plugin);
+        self
+    }
+
+    pub fn skills(mut self, skills: Vec<InlineSkill>) -> Self {
+        self.skills = skills;
         self
     }
 
@@ -186,6 +199,7 @@ struct Md<'a> {
     order: u64,
     streaming: bool,
     selection: Hsla,
+    skills: &'a [InlineSkill],
 }
 
 /// Inherited text properties (`color`, `font-size`, `line-height`).
@@ -300,6 +314,31 @@ impl Md<'_> {
                     continue;
                 }
             }
+            // `renderSkillInlineMarkdownChildren` leaves code and links alone.
+            if !self.skills.is_empty() && !marks.code && marks.link.is_none() {
+                let segments = split_skill_segments(run_text, self.skills);
+                if segments
+                    .iter()
+                    .any(|s| matches!(s, SkillSegment::Skill { .. }))
+                {
+                    for segment in segments {
+                        match segment {
+                            SkillSegment::Text(piece) => {
+                                text.push_str(&piece);
+                                spans.push(FlowSpan {
+                                    len: piece.len(),
+                                    style: self.span_style(marks, inherit, theme),
+                                });
+                            }
+                            SkillSegment::Skill { label, .. } => {
+                                self.push_skill_chip(&mut text, &mut spans, &label, inherit);
+                            }
+                        }
+                    }
+                    ix += 1;
+                    continue;
+                }
+            }
             text.push_str(run_text);
             let mut style = self.span_style(marks, inherit, theme);
             let autolink = marks.link.and_then(|link| {
@@ -364,7 +403,9 @@ impl Md<'_> {
         inherit: Inherit,
     ) {
         let theme = self.theme;
-        let accent: Hsla = color("oklch(0.62 0.11 215)");
+        let accent: Hsla = ContextChipKind::Mention
+            .accent()
+            .expect("mention chips carry an accent");
         let size = inherit.size * 0.86;
         let foreground: Hsla = color_mix(MixSpace::Oklab, accent, 0.22, theme.foreground).into();
         text.push_str(label);
@@ -1282,7 +1323,9 @@ impl Md<'_> {
         inherit: Inherit,
     ) {
         let theme = self.theme;
-        let accent: Hsla = color("oklch(0.62 0.16 259)");
+        let accent: Hsla = ContextChipKind::Citation
+            .accent()
+            .expect("citation chips carry an accent");
         let size = inherit.size * 0.86;
         let foreground: Hsla = color_mix(MixSpace::Oklab, accent, 0.22, theme.foreground).into();
         text.push_str(label);
@@ -1306,6 +1349,49 @@ impl Md<'_> {
                     icon: Some((IconName::Quote, foreground, size * 1.17, px(0.))),
                 }),
                 link: Some(link),
+                background: None,
+                atomic: true,
+            },
+        });
+    }
+}
+
+impl Md<'_> {
+    /// `ContextChip kind="skill"` + `SkillChipIcon` + `ContextChipLabel`.
+    fn push_skill_chip(
+        &self,
+        text: &mut String,
+        spans: &mut Vec<FlowSpan>,
+        label: &str,
+        inherit: Inherit,
+    ) {
+        let theme = self.theme;
+        let accent: Hsla = ContextChipKind::Skill
+            .accent()
+            .expect("skill chips carry an accent");
+        let size = inherit.size * 0.86;
+        let foreground: Hsla = color_mix(MixSpace::Oklab, accent, 0.22, theme.foreground).into();
+        text.push_str(label);
+        spans.push(FlowSpan {
+            len: label.len(),
+            style: FlowSpanStyle {
+                family: self.fonts.sans.clone(),
+                weight: FontWeight::MEDIUM,
+                italic: false,
+                size,
+                line_height: 1.,
+                color: foreground,
+                strikethrough: false,
+                chrome: Some(SpanChrome {
+                    background: with_alpha(accent, 0.11).into(),
+                    border: Some(color_mix(MixSpace::Oklab, accent, 0.34, theme.border).into()),
+                    radius: size * 0.5,
+                    pad_x: size * 0.5,
+                    pad_y: size * 0.1,
+                    leading: size * 1.5,
+                    icon: Some((SKILL_CHIP_ICON, foreground, size * 1.17, px(0.))),
+                }),
+                link: None,
                 background: None,
                 atomic: true,
             },
@@ -1527,6 +1613,7 @@ impl RenderOnce for ChatMarkdown {
             order: self.document_order,
             streaming: self.is_streaming,
             selection,
+            skills: &self.skills,
         };
         let _ = md.streaming;
         let inherit = Inherit {

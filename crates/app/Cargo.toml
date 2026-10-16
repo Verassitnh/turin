@@ -78,6 +78,8 @@ gpui-kit = { workspace = true, features = [
     "tree-sitter-yaml",
     "tree-sitter-zig",
 ] }
+base64.workspace = true
+image.workspace = true
 percent-encoding.workspace = true
 markdown.workspace = true
 # Shell parsing for embedded scripts (components/chat/embedded_scripts.rs). Same

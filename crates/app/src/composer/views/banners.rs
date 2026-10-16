@@ -25,9 +25,10 @@ use crate::composer::stash::{missing_image_count, relative_time_label, stash_ent
 use crate::composer::view_model::{BannerItem, BannerVariant, ComposerViewModel, QueueState};
 use crate::composer::views::chat_composer::{ChatComposer, Layer};
 use crate::composer::views::chrome::{floating, glass_surface};
+use crate::composer::views::composer_banner::{banner_row, count_label, small_icon};
+use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_2XL, TEXT_2XS, TEXT_XS};
-use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 
 fn surface_variant(variant: BannerVariant) -> SurfaceVariant {
@@ -38,69 +39,6 @@ fn surface_variant(variant: BannerVariant) -> SurfaceVariant {
         BannerVariant::Success => SurfaceVariant::Success,
         BannerVariant::Warning => SurfaceVariant::Warning,
     }
-}
-
-/// `ComposerBanner.Row`: icon column, content, actions.
-fn banner_row(
-    icon: Option<AnyElement>,
-    content: AnyElement,
-    actions: Vec<AnyElement>,
-) -> gpui_kit::Div {
-    div()
-        .flex()
-        .w_full()
-        .min_w_0()
-        .min_h(rems(1.5))
-        .items_center()
-        .gap(px(4.))
-        .child(
-            div()
-                .flex()
-                .flex_none()
-                .w(rems(1.5))
-                .items_center()
-                .justify_center()
-                .children(icon),
-        )
-        .child(
-            div()
-                .flex()
-                .min_w_0()
-                .flex_1()
-                .items_center()
-                .gap_1()
-                .child(content),
-        )
-        .when(!actions.is_empty(), |this| {
-            this.child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .justify_end()
-                    .gap_1()
-                    .children(actions),
-            )
-        })
-}
-
-fn small_icon(name: IconName, theme: &AppTheme) -> AnyElement {
-    Icon::new(name)
-        .size(rems(0.75))
-        .color(theme.muted_foreground)
-        .into_any_element()
-}
-
-fn count_label(count: usize, theme: &AppTheme) -> AnyElement {
-    div()
-        .flex()
-        .min_w(rems(1.5))
-        .flex_none()
-        .justify_center()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme.muted_foreground)
-        .child(count.to_string())
-        .into_any_element()
 }
 
 impl ChatComposer {

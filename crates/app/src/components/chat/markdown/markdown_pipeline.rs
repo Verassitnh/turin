@@ -65,12 +65,21 @@ pub struct InlineRun {
     pub marks: Marks,
 }
 
+/// What an autolink plugin made a link from (`data-pull-request-autolink`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkAutolink {
+    PullRequestReference,
+    PullRequestCommit,
+}
+
 /// Collapsed inline content: text, runs covering it, and link targets.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Inlines {
     pub text: String,
     pub runs: Vec<InlineRun>,
     pub links: Vec<String>,
+    /// Links an extra remark plugin created: `(index into links, what it linked)`.
+    pub autolinks: Vec<(usize, LinkAutolink)>,
     /// Images that appear inline: `(byte offset, alt, url)`.
     pub images: Vec<(usize, String, String)>,
 }
@@ -777,6 +786,7 @@ impl<'a> InlineBuilder<'a> {
             text: self.text,
             runs: self.runs,
             links: self.links,
+            autolinks: Vec::new(),
             images: self.images,
         }
     }

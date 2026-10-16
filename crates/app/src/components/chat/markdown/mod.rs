@@ -7,5 +7,6 @@ pub mod file_link_meta;
 pub mod inline_flow;
 pub mod markdown_links;
 pub mod markdown_pipeline;
+pub mod mdast_find_and_replace;
 
-pub use chat_markdown::ChatMarkdown;
+pub use chat_markdown::{ChatMarkdown, ExtraRemarkPlugin};

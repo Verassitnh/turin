@@ -7336,6 +7336,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-bash",
  "turin-contracts",
  "turin-provider-core",
  "turin-shared",

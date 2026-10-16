@@ -61,6 +61,10 @@ gpui-kit = { workspace = true, features = [
     "tree-sitter-zig",
 ] }
 markdown.workspace = true
+# Shell parsing for embedded scripts (components/chat/embedded_scripts.rs). Same
+# versions gpui-kit already pins, so the lock gains no new packages.
+tree-sitter = "0.26"
+tree-sitter-bash = "0.23"
 similar = "2"
 
 [dev-dependencies]

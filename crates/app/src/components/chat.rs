@@ -10,6 +10,9 @@ pub mod chat_canvas_layout;
 pub mod assistant_text_selection;
 pub mod composer_pending_panels;
 pub mod composer_surface;
+// Embedded-script scan for command and tool views; no view calls it yet.
+#[allow(dead_code)]
+pub mod embedded_scripts;
 // Copy-as-markdown for selections over rendered blocks; nothing calls it yet.
 pub mod markdown;
 pub mod message_copy_button;

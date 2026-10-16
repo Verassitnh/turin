@@ -2,7 +2,10 @@
 
 pub mod app_sidebar_layout;
 pub mod chat;
+// First batch of ChatView.logic.ts; the chat view does not call these yet.
 pub mod chat_view;
+#[allow(dead_code)]
+pub mod chat_view_logic;
 pub mod drag_region;
 pub mod project_favicon;
 pub mod project_monogram;

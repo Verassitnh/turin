@@ -18,7 +18,7 @@ use gpui_kit::{
     IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     Window, div, px, rems,
 };
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use turin_contracts::base_schemas::ProjectId;
 use turin_contracts::provider_instance::{ProviderInstanceConfig, ProviderInstanceId};
 use turin_contracts::settings::{
@@ -60,6 +60,7 @@ use super::super::scope::LOCAL_ENVIRONMENT_ID;
 use super::super::search::searchable_setting;
 use super::super::time_format::{RelativeTimeState, get_relative_time_state};
 use super::super::view::{SettingsToastKind, SettingsView, Which};
+use super::super::view_model::ProviderInstanceMutation;
 use crate::components::provider_update_launch_notification_logic::is_provider_update_active;
 use crate::components::provider_updates_action::{
     ProviderUpdateEnvironmentInput, provider_update_action_tooltip, provider_update_machines,
@@ -77,6 +78,8 @@ use turin_shared::model::CustomModelDefinition;
 #[derive(Default)]
 pub struct ProvidersState {
     pub selected: Option<String>,
+    /// `targetInstanceId`: the instance a link or search asked to open.
+    pub target: Option<String>,
     /// Instance rows whose account email is revealed (`RedactedSensitiveText`).
     pub revealed_emails: std::collections::HashSet<String>,
     pub model_filter: String,
@@ -180,65 +183,99 @@ pub(super) fn provider_brand_icon(driver: &str, size: gpui_kit::Rems, tint: Hsla
     }
 }
 
-impl SettingsView {
-    pub(crate) fn instance_rows(&self, cx: &gpui_kit::App) -> Vec<InstanceRow> {
-        let vm = self.vm(cx);
-        let instances = &vm.server.provider_instances;
-        let mut rows: Vec<InstanceRow> = Vec::new();
-        let visible_drivers = ["codex", "claudeAgent", "cursor", "opencode"];
-        for driver in visible_drivers {
-            let default_id = driver;
-            let explicit = instances
-                .iter()
-                .find(|(id, _)| id.as_str() == default_id)
-                .map(|(_, instance)| instance.clone());
-            let is_dirty = explicit.is_some();
-            let effective = explicit.unwrap_or_else(|| {
-                serde_json::from_value(json!({ "driver": driver })).expect("driver envelope")
+/// The instance rows of `ProviderSettingsPanel`: the default slots worth
+/// showing, each followed by its custom instances, then instances of drivers
+/// without a slot. Codex and Claude always show; another default slot shows
+/// once configured, enabled, or asked for by `target_instance_id`.
+pub(crate) fn build_instance_rows(
+    instances: &turin_contracts::provider_instance::ProviderInstanceConfigMap,
+    live: &[ServerProvider],
+    target_instance_id: Option<&str>,
+) -> Vec<InstanceRow> {
+    let mut rows: Vec<InstanceRow> = Vec::new();
+    let visible_drivers = ["codex", "claudeAgent", "cursor", "opencode"];
+    for driver in visible_drivers {
+        let default_id = driver;
+        let explicit = instances
+            .iter()
+            .find(|(id, _)| id.as_str() == default_id)
+            .map(|(_, instance)| instance.clone());
+        let is_dirty = explicit.is_some();
+        // An unconfigured default slot runs with the driver's default config.
+        let effective = explicit.unwrap_or_else(|| {
+            serde_json::from_value(json!({ "driver": driver })).expect("driver envelope")
+        });
+        // Cursor appears once the server reports its default instance.
+        let has_default_slot = driver != "cursor"
+            || live.iter().any(|p| p.instance_id.as_str() == default_id)
+            || is_dirty;
+        if has_default_slot
+            && (driver == "codex"
+                || driver == "claudeAgent"
+                || is_dirty
+                || resolve_provider_instance_enabled(&effective)
+                || target_instance_id == Some(default_id))
+        {
+            rows.push(InstanceRow {
+                id: default_id.to_owned(),
+                driver: driver.to_owned(),
+                is_default: true,
+                is_dirty,
+                instance: effective,
             });
-            // Cursor appears once the server reports its default instance.
-            let has_default_slot = driver != "cursor"
-                || vm
-                    .providers
-                    .iter()
-                    .any(|p| p.instance_id.as_str() == default_id)
-                || is_dirty;
-            let enabled = resolve_provider_instance_enabled(&effective);
-            if has_default_slot
-                && (driver == "codex" || driver == "claudeAgent" || is_dirty || enabled)
-            {
-                rows.push(InstanceRow {
-                    id: default_id.to_owned(),
-                    driver: driver.to_owned(),
-                    is_default: true,
-                    is_dirty,
-                    instance: effective,
-                });
-            }
-            for (id, instance) in instances {
-                if id.as_str() != default_id && instance.driver.as_str() == driver {
-                    rows.push(InstanceRow {
-                        id: id.as_str().to_owned(),
-                        driver: driver.to_owned(),
-                        is_default: false,
-                        is_dirty: false,
-                        instance: instance.clone(),
-                    });
-                }
-            }
         }
         for (id, instance) in instances {
-            if !visible_drivers.contains(&instance.driver.as_str()) {
+            if id.as_str() != default_id && instance.driver.as_str() == driver {
                 rows.push(InstanceRow {
                     id: id.as_str().to_owned(),
-                    driver: instance.driver.as_str().to_owned(),
+                    driver: driver.to_owned(),
                     is_default: false,
                     is_dirty: false,
                     instance: instance.clone(),
                 });
             }
         }
-        rows
+    }
+    for (id, instance) in instances {
+        if !visible_drivers.contains(&instance.driver.as_str()) {
+            rows.push(InstanceRow {
+                id: id.as_str().to_owned(),
+                driver: instance.driver.as_str().to_owned(),
+                is_default: visible_drivers.contains(&id.as_str()),
+                is_dirty: false,
+                instance: instance.clone(),
+            });
+        }
+    }
+    rows
+}
+
+/// The row the editor shows: the selected one, else the first, except that a
+/// requested instance that is gone leaves the editor empty
+/// (`targetInstanceMissing`) rather than showing another account.
+pub(crate) fn selected_instance_row<'a>(
+    rows: &'a [InstanceRow],
+    selected: Option<&str>,
+    target_instance_id: Option<&str>,
+) -> Option<&'a InstanceRow> {
+    let target_missing = target_instance_id.is_some()
+        && selected == target_instance_id
+        && !rows
+            .iter()
+            .any(|row| Some(row.id.as_str()) == target_instance_id);
+    selected
+        .and_then(|selected| rows.iter().find(|row| row.id == selected))
+        .or_else(|| if target_missing { None } else { rows.first() })
+}
+
+impl SettingsView {
+    pub(crate) fn instance_rows(&self, cx: &gpui_kit::App) -> Vec<InstanceRow> {
+        let vm = self.vm(cx);
+        build_instance_rows(
+            &vm.server.provider_instances,
+            &vm.providers,
+            self.panels.providers.target.as_deref(),
+        )
     }
 
     pub(super) fn render_providers(
@@ -264,28 +301,24 @@ impl SettingsView {
         clear_text_generation: bool,
         cx: &mut Context<Self>,
     ) {
-        let vm = self.vm(cx);
-        let mut map: Map<String, Value> = serde_json::to_value(&vm.server.provider_instances)
-            .ok()
-            .and_then(|value| value.as_object().cloned())
-            .unwrap_or_default();
-        match next {
-            Some(next) => {
-                map.insert(id.to_owned(), next);
-            }
-            None => {
-                map.remove(id);
-            }
-        }
-        let mut patch = json!({ "providerInstances": Value::Object(map) });
-        if clear_text_generation {
+        let mutation = match next {
+            Some(instance) => ProviderInstanceMutation::Upsert {
+                instance_id: id.to_owned(),
+                instance,
+            },
+            None => ProviderInstanceMutation::Remove {
+                instance_id: id.to_owned(),
+            },
+        };
+        let patch = clear_text_generation.then(|| {
             let default = self
                 .json(cx)
                 .default_of(Which::Server, "textGenerationModelSelection")
                 .clone();
-            patch["textGenerationModelSelection"] = default;
-        }
-        self.update_server(patch, cx);
+            json!({ "textGenerationModelSelection": default })
+        });
+        let source = self.store.read(cx).source();
+        source.mutate_provider_instance(mutation, patch, cx);
     }
 
     fn instance_value(row: &InstanceRow) -> Value {
@@ -333,13 +366,13 @@ impl SettingsView {
         let theme = cx.app_theme().clone();
         let vm = self.vm(cx);
         let rows = self.instance_rows(cx);
-        let selected_id = self
-            .panels
-            .providers
-            .selected
-            .clone()
-            .filter(|id| rows.iter().any(|row| &row.id == id))
-            .or_else(|| rows.first().map(|row| row.id.clone()));
+        let selected_id = selected_instance_row(
+            &rows,
+            self.panels.providers.selected.as_deref(),
+            self.panels.providers.target.as_deref(),
+        )
+        .map(|row| row.id.clone());
+        let target_missing = selected_id.is_none() && self.panels.providers.target.is_some();
 
         let last_checked = vm.providers.iter().map(|p| p.checked_at.clone()).max();
         let checked_label =
@@ -462,10 +495,10 @@ impl SettingsView {
                 .p_6()
                 .text_size(TEXT_SM.size)
                 .text_color(theme.muted_foreground)
-                .child(match &self.panels.providers.selected {
-                    // `targetInstanceMissing`: the opened instance was deleted.
-                    Some(_) => "This provider instance is no longer available on this device.",
-                    None => "No providers configured.",
+                .child(if target_missing {
+                    "This provider instance is no longer available on this device."
+                } else {
+                    "No providers configured."
                 })
                 .into_any_element(),
         };
@@ -3013,5 +3046,119 @@ fn custom_model_placeholder(driver: &str) -> &'static str {
         "cursor" => "claude-sonnet-4-6",
         "opencode" => "openai/gpt-5",
         _ => "model-slug",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Port of the row-visibility and target cases of
+    //! upstream/apps/web/src/components/settings/ProviderSettingsPanel.environment.test.tsx
+    //! (the cases that do not depend on React rendering or auth-session scopes).
+
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+    use turin_contracts::provider_instance::ProviderInstanceConfigMap;
+
+    use super::*;
+
+    fn instances(value: Value) -> ProviderInstanceConfigMap {
+        serde_json::from_value(value).expect("provider instances decode")
+    }
+
+    fn ids(rows: &[InstanceRow]) -> Vec<&str> {
+        rows.iter().map(|row| row.id.as_str()).collect()
+    }
+
+    #[test]
+    fn shows_codex_and_claude_while_hiding_untouched_disabled_provider_slots() {
+        let rows = build_instance_rows(&instances(json!({})), &[], None);
+        assert_eq!(ids(&rows), vec!["codex", "claudeAgent"]);
+        for hidden in ["cursor", "grok", "pi", "opencode", "antigravity"] {
+            assert!(!ids(&rows).contains(&hidden), "{hidden}");
+        }
+    }
+
+    #[test]
+    fn keeps_explicitly_configured_providers_visible_when_disabled() {
+        let rows = build_instance_rows(
+            &instances(json!({ "opencode": { "driver": "opencode", "enabled": false } })),
+            &[],
+            None,
+        );
+        assert!(ids(&rows).contains(&"opencode"));
+        assert!(
+            rows.iter()
+                .find(|row| row.id == "opencode")
+                .unwrap()
+                .is_dirty
+        );
+    }
+
+    #[test]
+    fn keeps_legacy_provider_configuration_visible_when_disabled() {
+        let rows = build_instance_rows(
+            &instances(json!({
+                "opencode": {
+                    "driver": "opencode",
+                    "enabled": false,
+                    "config": { "binaryPath": "/custom/opencode" }
+                }
+            })),
+            &[],
+            None,
+        );
+        assert!(ids(&rows).contains(&"opencode"));
+    }
+
+    #[test]
+    fn lists_an_untouched_slot_only_when_it_is_the_requested_instance() {
+        let rows = build_instance_rows(&instances(json!({})), &[], Some("opencode"));
+        assert!(ids(&rows).contains(&"opencode"));
+    }
+
+    #[test]
+    fn follows_each_default_slot_with_its_custom_instances() {
+        let rows = build_instance_rows(
+            &instances(json!({ "codex_work": { "driver": "codex", "enabled": true } })),
+            &[],
+            None,
+        );
+        assert_eq!(ids(&rows), vec!["codex", "codex_work", "claudeAgent"]);
+        assert!(rows[0].is_default);
+        assert!(!rows[1].is_default);
+    }
+
+    #[test]
+    fn opens_the_requested_provider_instance_instead_of_the_first_provider() {
+        let rows = build_instance_rows(
+            &instances(json!({ "codex_work": { "driver": "codex", "enabled": true } })),
+            &[],
+            Some("codex_work"),
+        );
+        let selected = selected_instance_row(&rows, Some("codex_work"), Some("codex_work"));
+        assert_eq!(selected.map(|row| row.id.as_str()), Some("codex_work"));
+    }
+
+    #[test]
+    fn does_not_substitute_another_account_when_the_requested_instance_was_removed() {
+        let rows = build_instance_rows(&instances(json!({})), &[], Some("codex_work"));
+        assert_eq!(
+            selected_instance_row(&rows, Some("codex_work"), Some("codex_work")).map(|r| &r.id),
+            None
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_first_row_when_nothing_was_requested() {
+        let rows = build_instance_rows(&instances(json!({})), &[], None);
+        assert_eq!(
+            selected_instance_row(&rows, None, None).map(|row| row.id.as_str()),
+            Some("codex")
+        );
+        // A selection that vanished after a delete falls back too.
+        assert_eq!(
+            selected_instance_row(&rows, Some("gone"), None).map(|row| row.id.as_str()),
+            Some("codex")
+        );
     }
 }

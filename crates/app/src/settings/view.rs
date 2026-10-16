@@ -254,7 +254,9 @@ impl SettingsView {
                     .insert(other["expand:".len()..].to_owned());
             }
             other if other.starts_with("provider:") => {
-                self.panels.providers.selected = Some(other["provider:".len()..].to_owned());
+                let target = other["provider:".len()..].to_owned();
+                self.panels.providers.selected = Some(target.clone());
+                self.panels.providers.target = Some(target);
             }
             _ => self.menus.open(id),
         }

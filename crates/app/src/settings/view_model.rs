@@ -141,6 +141,10 @@ pub struct SettingsViewModel {
     /// (`useProjects`); the settings scope picks among their logical groups.
     pub environment_projects: Vec<crate::state::models::EnvironmentProject>,
     pub archived_threads: Vec<ArchivedThread>,
+    /// `useArchivedThreadSnapshots().isLoading`.
+    pub archived_threads_loading: bool,
+    /// `useArchivedThreadSnapshots().error`.
+    pub archived_threads_error: Option<String>,
     pub storage_cleanup: Option<CleanupReport>,
     pub licenses: Vec<LicenseEntry>,
 }
@@ -186,12 +190,34 @@ pub struct ProviderAuthDelivery {
 /// Progress itself arrives as a new view model.
 pub type SetupResult = Result<(), String>;
 
+/// `usePersistEnvironmentProviderInstanceMutation`'s operations: one instance is
+/// added, replaced or removed against the latest stored map, so a stale copy of
+/// the whole `providerInstances` map is never sent back.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProviderInstanceMutation {
+    Upsert {
+        instance_id: String,
+        instance: Value,
+    },
+    Remove {
+        instance_id: String,
+    },
+}
+
 /// The user's intent. Implemented by the mock here and by the live services in T22.
 pub trait SettingsSource {
     /// `useUpdateSettings` for client keys: a `ClientSettingsPatch` as JSON.
     fn update_client(&self, patch: Value, cx: &mut App);
     /// A `ServerSettingsPatch` as JSON (`updateSettings` RPC).
     fn update_server(&self, patch: Value, cx: &mut App);
+    /// Applies one [`ProviderInstanceMutation`], together with `patch` (a
+    /// `ServerSettingsPatch` as JSON, e.g. the text generation reset) when set.
+    fn mutate_provider_instance(
+        &self,
+        mutation: ProviderInstanceMutation,
+        patch: Option<Value>,
+        cx: &mut App,
+    );
     fn upsert_keybinding(&self, input: UpsertKeybinding, cx: &mut App);
     fn remove_keybinding(&self, input: RemoveKeybinding, cx: &mut App);
     /// `refreshServerProviders({ refreshModels: true })`.

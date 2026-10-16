@@ -27,8 +27,8 @@ use turin_shared::server_settings::apply_server_settings_patch;
 
 use super::view_model::{
     ArchivedThread, CleanupEntry, CleanupReport, EnvironmentInfo, KeybindingsViewModel,
-    LicenseEntry, RemoveKeybinding, SettingsSource, SettingsStore, SettingsViewModel, SetupResult,
-    UpsertKeybinding,
+    LicenseEntry, ProviderInstanceMutation, RemoveKeybinding, SettingsSource, SettingsStore,
+    SettingsViewModel, SetupResult, UpsertKeybinding,
 };
 
 fn provider(value: Value) -> turin_provider_core::server_provider::ServerProvider {
@@ -257,6 +257,8 @@ fn mock_view_model() -> SettingsViewModel {
         project_thread_counts: mock_project_thread_counts(),
         environment_projects: mock_environment_projects(),
         archived_threads: mock_archived_threads(),
+        archived_threads_loading: false,
+        archived_threads_error: None,
         storage_cleanup: None,
         licenses: mock_licenses(),
     }
@@ -476,6 +478,28 @@ impl SettingsSource for MockSettingsSource {
             }
         }
         self.publish(cx);
+    }
+
+    fn mutate_provider_instance(
+        &self,
+        mutation: ProviderInstanceMutation,
+        patch: Option<Value>,
+        cx: &mut App,
+    ) {
+        let patch = {
+            let state = self.state.borrow();
+            let mut map = serde_json::to_value(&state.vm.server.provider_instances)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default();
+            apply_provider_instance_mutation(&mut map, mutation);
+            let mut next = patch
+                .and_then(|patch| patch.as_object().cloned())
+                .unwrap_or_default();
+            next.insert("providerInstances".to_owned(), Value::Object(map));
+            Value::Object(next)
+        };
+        self.update_server(patch, cx);
     }
 
     fn upsert_keybinding(&self, input: UpsertKeybinding, cx: &mut App) {
@@ -1067,12 +1091,100 @@ fn mock_licenses() -> Vec<LicenseEntry> {
     ]
 }
 
+/// Applies `mutation` to the stored `providerInstances` map.
+fn apply_provider_instance_mutation(
+    map: &mut serde_json::Map<String, Value>,
+    mutation: ProviderInstanceMutation,
+) {
+    match mutation {
+        ProviderInstanceMutation::Upsert {
+            instance_id,
+            instance,
+        } => {
+            map.insert(instance_id, instance);
+        }
+        ProviderInstanceMutation::Remove { instance_id } => {
+            map.remove(&instance_id);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use turin_contracts::usage_limit_source_id::UsageLimitSourceId;
     use turin_runtime::settings_secrets::{SECRET_REDACTED, source_control_host_secret_name};
+
+    /// Port of "deletes and resets provider configuration without erasing
+    /// shared preferences" and "updates one provider instance without sending
+    /// a stale whole map"
+    /// (upstream/apps/web/src/components/settings/ProviderSettingsPanel.environment.test.tsx).
+    fn instance_map(server: &ServerSettings) -> serde_json::Map<String, Value> {
+        serde_json::to_value(&server.provider_instances)
+            .unwrap()
+            .as_object()
+            .cloned()
+            .unwrap()
+    }
+
+    fn server_with_two_codex_instances() -> ServerSettings {
+        apply_server_patch(
+            &default_server_settings(),
+            json!({
+                "providerInstances": {
+                    "codex": { "driver": "codex", "enabled": false },
+                    "codex_work": { "driver": "codex", "enabled": true, "displayName": "Work" }
+                },
+                "providerModelPreferences": {
+                    "codex_work": { "hiddenModels": ["hidden"], "modelOrder": ["model"] }
+                },
+                "favorites": [{ "provider": "codex_work", "model": "favorite" }]
+            }),
+        )
+    }
+
+    #[test]
+    fn removing_an_instance_leaves_shared_preferences_alone() {
+        let server = server_with_two_codex_instances();
+        for removed in ["codex_work", "codex"] {
+            let mut map = instance_map(&server);
+            apply_provider_instance_mutation(
+                &mut map,
+                ProviderInstanceMutation::Remove {
+                    instance_id: removed.to_owned(),
+                },
+            );
+            let next = apply_server_patch(&server, json!({ "providerInstances": map }));
+            assert!(
+                !instance_map(&next).contains_key(removed),
+                "{removed} removed"
+            );
+            assert_eq!(next.favorites, server.favorites);
+            assert_eq!(
+                next.provider_model_preferences,
+                server.provider_model_preferences
+            );
+        }
+    }
+
+    #[test]
+    fn upserting_one_instance_keeps_the_others() {
+        let server = server_with_two_codex_instances();
+        let mut map = instance_map(&server);
+        apply_provider_instance_mutation(
+            &mut map,
+            ProviderInstanceMutation::Upsert {
+                instance_id: "codex_work".to_owned(),
+                instance: json!({ "driver": "codex", "enabled": false, "displayName": "Work" }),
+            },
+        );
+        let next = apply_server_patch(&server, json!({ "providerInstances": map }));
+        let next_map = instance_map(&next);
+        assert_eq!(next_map["codex_work"]["enabled"], json!(false));
+        assert_eq!(next_map["codex_work"]["displayName"], json!("Work"));
+        assert_eq!(next_map["codex"], instance_map(&server)["codex"]);
+    }
 
     #[test]
     fn failures_reach_the_store_once() {

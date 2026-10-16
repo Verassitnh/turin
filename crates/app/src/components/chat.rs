@@ -12,7 +12,6 @@ pub mod assistant_text_selection;
 #[allow(dead_code)]
 pub mod assistant_citation_target;
 pub mod composer_pending_panels;
-pub mod composer_surface;
 // Embedded-script scan for command and tool views; no view calls it yet.
 #[allow(dead_code)]
 pub mod embedded_scripts;

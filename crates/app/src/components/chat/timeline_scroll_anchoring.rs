@@ -345,6 +345,158 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_stale_cached_run_keeps_the_end_position_while_it_is_replaced() {
+        let existing = input(
+            "thread-a",
+            true,
+            Some("existing-run"),
+            false,
+            Some("existing-message"),
+        );
+        let next = input(
+            "thread-a",
+            true,
+            Some("new-run"),
+            false,
+            Some("new-message"),
+        );
+        let cached = observe_timeline_run(
+            None,
+            TimelineRunInput {
+                hydrated: false,
+                ..existing
+            },
+        );
+        let synchronizing = observe_timeline_run(
+            Some(&cached.observation),
+            TimelineRunInput {
+                hydrated: false,
+                ..next.clone()
+            },
+        );
+        assert_eq!(synchronizing.anchor_message_id, None);
+        let live = observe_timeline_run(Some(&synchronizing.observation), next.clone());
+        assert_eq!(live.anchor_message_id, None);
+        let later = TimelineRunInput {
+            run_id: Some(run("later-run")),
+            message_id: Some(message("later-message")),
+            ..next
+        };
+        assert_eq!(
+            observe_timeline_run(Some(&live.observation), later).anchor_message_id,
+            Some(message("later-message"))
+        );
+    }
+
+    #[test]
+    fn an_existing_runs_late_user_message_does_not_anchor() {
+        let existing = input(
+            "thread-a",
+            true,
+            Some("existing-run"),
+            false,
+            Some("existing-message"),
+        );
+        let opened = observe_timeline_run(
+            None,
+            TimelineRunInput {
+                message_id: None,
+                ..existing.clone()
+            },
+        );
+        assert_eq!(
+            observe_timeline_run(Some(&opened.observation), existing).anchor_message_id,
+            None
+        );
+    }
+
+    #[test]
+    fn a_new_run_waits_for_its_user_message_and_frames_it_once() {
+        let existing = input(
+            "thread-a",
+            true,
+            Some("existing-run"),
+            false,
+            Some("existing-message"),
+        );
+        let next = input(
+            "thread-a",
+            true,
+            Some("new-run"),
+            false,
+            Some("new-message"),
+        );
+        let opened = observe_timeline_run(None, existing);
+        let waiting = observe_timeline_run(
+            Some(&opened.observation),
+            TimelineRunInput {
+                message_id: None,
+                ..next.clone()
+            },
+        );
+        assert_eq!(waiting.anchor_message_id, None);
+        let ready = observe_timeline_run(Some(&waiting.observation), next.clone());
+        assert_eq!(ready.anchor_message_id, Some(message("new-message")));
+        assert_eq!(
+            observe_timeline_run(Some(&ready.observation), next).anchor_message_id,
+            None
+        );
+    }
+
+    #[test]
+    fn the_first_new_run_in_an_empty_thread_is_framed() {
+        let existing = input(
+            "thread-a",
+            true,
+            Some("existing-run"),
+            false,
+            Some("existing-message"),
+        );
+        let next = input(
+            "thread-a",
+            true,
+            Some("new-run"),
+            false,
+            Some("new-message"),
+        );
+        let opened = observe_timeline_run(
+            None,
+            TimelineRunInput {
+                run_id: None,
+                message_id: None,
+                ..existing
+            },
+        );
+        assert_eq!(
+            observe_timeline_run(Some(&opened.observation), next).anchor_message_id,
+            Some(message("new-message"))
+        );
+    }
+
+    #[test]
+    fn a_queued_run_waits_to_start_before_it_is_framed() {
+        let existing = input(
+            "thread-a",
+            true,
+            Some("existing-run"),
+            false,
+            Some("existing-message"),
+        );
+        let opened = observe_timeline_run(
+            None,
+            TimelineRunInput {
+                queued: true,
+                ..existing.clone()
+            },
+        );
+        assert_eq!(opened.anchor_message_id, None);
+        assert_eq!(
+            observe_timeline_run(Some(&opened.observation), existing).anchor_message_id,
+            Some(message("existing-message"))
+        );
+    }
+
     fn list_state<'a>(
         data_len: usize,
         scroll: f64,

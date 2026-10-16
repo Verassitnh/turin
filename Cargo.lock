@@ -7713,7 +7713,9 @@ dependencies = [
  "tracing",
  "turin-contracts",
  "turin-orchestration",
+ "turin-provider-claude",
  "turin-provider-core",
+ "turin-provider-cursor",
  "turin-runtime",
  "turin-shared",
 ]

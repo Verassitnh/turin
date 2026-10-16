@@ -135,6 +135,9 @@ struct V2Thread {
     /// A running wake is replaying into this turn; live events defer until replay finishes.
     replaying: bool,
     replay_deferred: Vec<(String, Value)>,
+    /// Ordinals of a turn a background call still holds after that turn left `active`
+    /// (upstream `call.turn` outlives `state.active`).
+    held_ordinals: HashMap<ProviderTurnId, (HashMap<String, u64>, u64)>,
 }
 
 #[derive(Clone)]
@@ -1452,6 +1455,32 @@ impl OpenCodeV2Session {
         if guard.pending.contains_key(native_id) {
             return;
         }
+        // A background child's ask belongs to that call's turn, even after the parent
+        // turn that launched it has ended (upstream `requestTurn` / `callsAbove`).
+        if let Some(open) = background_call_above(&guard, session_id) {
+            let host = thread_session_of(&guard, &open.parent_session);
+            let same_turn = host.as_deref().is_some_and(|host| {
+                guard
+                    .threads
+                    .get(host)
+                    .and_then(|thread| thread.active.as_ref())
+                    .is_some_and(|turn| turn.provider_turn.id == open.provider_turn_id)
+            });
+            if !same_turn {
+                if let Some(host) = host {
+                    self.show_ask_on_held_turn(
+                        &mut guard,
+                        &host,
+                        session_id,
+                        &open,
+                        native_id,
+                        ask,
+                        kind,
+                    );
+                }
+                return;
+            }
+        }
         let owner = guard
             .children
             .get(session_id)
@@ -1551,6 +1580,122 @@ impl OpenCodeV2Session {
             },
         );
         drop(guard);
+        self.emit(ProviderAdapterV2Event::NodeUpdated {
+            driver: self.driver.clone(),
+            node,
+        });
+        self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+            driver: self.driver.clone(),
+            turn_item: item,
+        });
+        self.emit(ProviderAdapterV2Event::RuntimeRequestUpdated {
+            driver: self.driver.clone(),
+            thread_id: Some(thread_id),
+            runtime_request: request,
+        });
+    }
+
+    /// Shows an ask on the turn a background call still holds after `active` was taken.
+    fn show_ask_on_held_turn(
+        &self,
+        guard: &mut V2Inner,
+        host: &str,
+        session_id: &str,
+        open: &OpenSubagent,
+        native_id: &str,
+        ask: Ask,
+        kind: &str,
+    ) {
+        let now = UtcDateTime::now();
+        let (request, item, node, request_id, thread_id) = {
+            let Some(thread) = guard.threads.get_mut(host) else {
+                return;
+            };
+            let Some((ordinals, next)) = thread.held_ordinals.get_mut(&open.provider_turn_id)
+            else {
+                return;
+            };
+        let provider_turn_id = open.provider_turn_id.clone();
+        let thread_id = open.thread_id.clone();
+        let root_node_id = open.root_node_id.clone();
+        let provider_thread_id = open.provider_thread_id.clone();
+        let request_id =
+            IdAllocator.runtime_request(&self.driver, Some(&provider_turn_id), Some(native_id));
+        let ordinal = next_ordinal(ordinals, next, native_id);
+        let of = NodeOf {
+            thread_id: &thread_id,
+            root_node_id: &root_node_id,
+            provider_thread_id: &provider_thread_id,
+            provider_turn_id: &provider_turn_id,
+            native_item_id: native_id,
+            weak_ref: false,
+        };
+        let node = request_node(
+            &self.driver,
+            &of,
+            &request_id,
+            matches!(ask, Ask::Form(_)),
+            now,
+        );
+        let body = match &ask {
+            Ask::Permission {
+                action,
+                resources,
+                save,
+            } => RequestBody::Approval {
+                request_kind: match kind {
+                    "file-read" => ProviderRequestKind::FileRead,
+                    "file-change" => ProviderRequestKind::FileChange,
+                    _ => ProviderRequestKind::Command,
+                },
+                title: Some(action.clone()),
+                prompt: Some(if resources.is_empty() {
+                    action.clone()
+                } else {
+                    resources.join("\n")
+                }),
+                options: Some(permission_options(action, save)),
+            },
+            Ask::Form(form) => RequestBody::UserInput {
+                questions: form_questions(form).unwrap_or_default(),
+            },
+        };
+        let item = request_turn_item(&of, &request_id, ordinal, now, body);
+        let request = OrchestrationV2RuntimeRequest {
+            id: request_id.clone(),
+            node_id: node.id.clone(),
+            provider_turn_id: Some(provider_turn_id),
+            native_request_ref: Some(native_ref(native_id, false)),
+            kind: match kind {
+                "file-read" => OrchestrationV2RuntimeRequestKind::FileRead,
+                "file-change" => OrchestrationV2RuntimeRequestKind::FileChange,
+                "user_input" => OrchestrationV2RuntimeRequestKind::UserInput,
+                _ => OrchestrationV2RuntimeRequestKind::Command,
+            },
+            status: OrchestrationV2RuntimeRequestStatus::Pending,
+            response_capability: OrchestrationV2ResponseCapability::Live {
+                provider_session_id: self.provider_session_id.clone(),
+            },
+            created_at: now,
+            resolved_at: None,
+            decision: None,
+            answers: None,
+        };
+            thread.requests.push(request.clone());
+            (request, item, node, request_id, thread_id)
+        };
+        guard.pending.insert(
+            native_id.to_owned(),
+            Pending {
+                request_id,
+                native_id: native_id.to_owned(),
+                session_id: session_id.to_owned(),
+                ask,
+                node: node.clone(),
+                item: item.clone(),
+                answering: false,
+            },
+        );
         self.emit(ProviderAdapterV2Event::NodeUpdated {
             driver: self.driver.clone(),
             node,
@@ -2658,9 +2803,21 @@ impl OpenCodeV2Session {
         let provider_turn = turn.provider_turn.clone();
         let thread_id = turn.thread_id.clone();
         let run_ordinal = turn.run_ordinal.max(1) as u64;
+        let held_ordinals = {
+            let turn_id = provider_turn.id.clone();
+            let still = guard
+                .background
+                .values()
+                .chain(guard.unattached_background.values())
+                .any(|open| open.provider_turn_id == turn_id);
+            still.then(|| (turn_id, turn.item_ordinals.clone(), turn.next_item_ordinal))
+        };
         let Some(thread) = guard.threads.get_mut(session_id) else {
             return;
         };
+        if let Some((id, ordinals, next)) = held_ordinals {
+            thread.held_ordinals.insert(id, (ordinals, next));
+        }
         if let Some(stored) = thread
             .turns
             .iter_mut()
@@ -2859,6 +3016,7 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                 unsettled: false,
                 replaying: false,
                 replay_deferred: Vec::new(),
+                held_ordinals: HashMap::new(),
                 active: None,
                 turns: Vec::new(),
                 requests: Vec::new(),
@@ -2953,6 +3111,7 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                 unsettled: false,
                 replaying: false,
                 replay_deferred: Vec::new(),
+                held_ordinals: HashMap::new(),
                 active: None,
                 turns: Vec::new(),
                 requests: Vec::new(),
@@ -3576,6 +3735,7 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                 unsettled: false,
                 replaying: false,
                 replay_deferred: Vec::new(),
+                held_ordinals: HashMap::new(),
                 active: None,
                 turns: Vec::new(),
                 requests: Vec::new(),
@@ -3924,6 +4084,36 @@ fn session_owes_work(guard: &V2Inner, session_id: &str) -> bool {
             .unattached_background
             .values()
             .any(|open| open.parent_session == session_id)
+}
+
+/// The still-running background call above `session_id` (upstream `callsAbove` + `call.background`).
+fn background_call_above(guard: &V2Inner, session_id: &str) -> Option<OpenSubagent> {
+    let mut current = session_id.to_owned();
+    for _ in 0..16 {
+        if let Some(open) = guard.background.get(&current) {
+            return Some(open.clone());
+        }
+        match guard.children.get(&current).cloned() {
+            Some(parent) => current = parent,
+            None => return None,
+        }
+    }
+    None
+}
+
+/// The root thread session that owns `session_id`.
+fn thread_session_of(guard: &V2Inner, session_id: &str) -> Option<String> {
+    let mut current = session_id.to_owned();
+    for _ in 0..16 {
+        if guard.threads.contains_key(&current) {
+            return Some(current);
+        }
+        match guard.children.get(&current).cloned() {
+            Some(parent) => current = parent,
+            None => return None,
+        }
+    }
+    None
 }
 
 /// Whether `owner` is `root` or a subagent session under it (upstream `sessionsOf` membership

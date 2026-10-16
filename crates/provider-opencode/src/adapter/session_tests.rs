@@ -2911,6 +2911,47 @@ async fn v2_a_background_child_permission_survives_a_completed_parent_turn() {
     session.close().await;
 }
 
+/// A background child's permission after the parent turn ends still lands on that call's turn.
+#[tokio::test]
+async fn v2_a_background_child_permission_attaches_after_the_parent_turn_ends() {
+    let (script, session, mut events, _offers, thread) = v2_idle_session_with_offers().await;
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    for frame in [
+        json!({"id":"b1","type":"session.tool.called","data":{"sessionID":"ses_1","id":"call_bg","name":"subagent","input":{"background":true,"prompt":"work"}}}),
+        json!({"id":"b2","type":"session.tool.progress","data":{"sessionID":"ses_1","id":"call_bg","metadata":{"sessionID":"ses_child","status":"running"}}}),
+        json!({"id":"b3","type":"session.tool.success","data":{"sessionID":"ses_1","id":"call_bg","metadata":{"status":"running"}}}),
+        json!({"id":"b4","type":"session.execution.succeeded","data":{"sessionID":"ses_1"}}),
+    ] {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let finished = events_until(&mut events, |value| {
+        value["type"] == "provider_turn.updated" && value["provider_turn"]["status"] == "completed"
+    })
+    .await;
+    let turn_id = of_type(&finished, "provider_turn.updated")
+        .into_iter()
+        .find(|event| event["provider_turn"]["status"] == "completed")
+        .expect("completed turn")["provider_turn"]["id"]
+        .clone();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"b5","type":"permission.asked","data":{"sessionID":"ses_child","id":"perm_late","permission":"bash","patterns":["ls"]}}).to_string(),
+        )))
+        .unwrap();
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "runtime_request.updated"
+            && value["runtime_request"]["status"] == "pending"
+    })
+    .await;
+    let pending = of_type(&seen, "runtime_request.updated")
+        .into_iter()
+        .find(|event| event["runtime_request"]["status"] == "pending")
+        .expect("permission on the background call's turn");
+    assert_eq!(pending["runtime_request"]["providerTurnId"], turn_id);
+    session.close().await;
+}
+
 /// Reconcile settles a background subagent whose child session is no longer active upstream.
 #[tokio::test]
 async fn v2_reconcile_settles_a_background_child_gone_from_active() {

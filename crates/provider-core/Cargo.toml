@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 turin-contracts.workspace = true
+turin-shared.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

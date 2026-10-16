@@ -16,6 +16,7 @@ actions!(
         ZoomOut,
         ZoomReset,
         QuitApplication,
+        CloseWindow,
     ]
 );
 
@@ -31,6 +32,7 @@ pub fn bind_menu_keys(cx: &mut App, context: &'static str) {
         KeyBinding::new("cmd-=", ZoomIn, Some(context)),
         KeyBinding::new("cmd-plus", ZoomIn, Some(context)),
         KeyBinding::new("cmd--", ZoomOut, Some(context)),
+        KeyBinding::new("cmd-w", CloseWindow, Some(context)),
     ]);
 }
 
@@ -56,7 +58,7 @@ pub fn install_native_menus(cx: &mut App) {
         ]));
     }
 
-    menus.push(Menu::new("File").items([MenuItem::action("Close Window", gpui_kit::NoAction)]));
+    menus.push(Menu::new("File").items([MenuItem::action("Close Window", CloseWindow)]));
     menus.push(Menu::new("Edit").items([
         MenuItem::os_action("Undo", gpui_kit::NoAction, OsAction::Undo),
         MenuItem::os_action("Redo", gpui_kit::NoAction, OsAction::Redo),

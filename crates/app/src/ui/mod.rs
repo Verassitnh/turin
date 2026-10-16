@@ -10,6 +10,7 @@ pub mod collapsible_section_header;
 pub mod dialog;
 pub mod draft_input;
 pub mod empty;
+pub mod group;
 pub mod icon;
 pub mod kbd;
 pub mod label;

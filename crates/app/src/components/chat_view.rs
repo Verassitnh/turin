@@ -10,15 +10,22 @@ use gpui_kit::{
     Styled as _, Window, div, px, rems,
 };
 
+use super::chat::chat_canvas::{ChatCanvas, ChatCanvasMeasurements};
 use super::chat::chat_header::ChatHeader;
+use super::chat::chat_overlay_banners::{ProviderStatusBanner, ThreadErrorBanner};
 use super::chat::composer_pending_panels::{
     ComposerPendingApprovalBanner, ComposerPendingUserInputBanner,
 };
 use super::chat::messages_timeline::MessagesTimeline;
+use super::chat::provider_status_banner::should_show_provider_status_banner;
+use super::chat::thread_error_banner::should_show_thread_error_banner;
 use super::chat::timeline::session_logic::{derive_pending_approvals, derive_pending_user_inputs};
 use super::chat::timeline::source::MockTimelineSource;
 use super::drag_region::DragRegion as _;
 use super::workspace_titlebar::workspace_titlebar_content_left;
+use crate::composer::catalog::{
+    CompatibilityAdvisory, CompatibilityAdvisoryStatus, ProviderInstanceEntry,
+};
 use crate::composer::mock_source::MockComposerSource;
 use crate::composer::views::chat_composer::ChatComposer;
 use crate::theme::ActiveAppTheme;
@@ -75,6 +82,7 @@ impl RenderOnce for ChatView {
                 .map(|prompt| ComposerPendingUserInputBanner { prompt, source }.into_any_element())
         };
 
+        let overlay_banners = chat_overlay_banners();
         div()
             .flex()
             .flex_col()
@@ -101,15 +109,18 @@ impl RenderOnce for ChatView {
                     }))
                     .drag_region(window, cx),
             )
-            .child(
+            .child(ChatCanvas::from_measurements(
+                ChatCanvasMeasurements {
+                    width: 1200.0,
+                    ..Default::default()
+                },
+                None,
                 div()
-                    .relative()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h_0()
-                    // `MessagesTimeline`, owned by the chat column for now; the
-                    // thread route will own it once threads are selectable.
+                    .children(overlay_banners)
                     .child(timeline)
                     .child(
                         div()
@@ -124,9 +135,52 @@ impl RenderOnce for ChatView {
                                     .children(drawer)
                                     .child(composer),
                             )
-                            // Bottom spacer: `h-[calc(env(safe-area-inset-bottom)+1.25rem)]`.
                             .child(div().h(rems(1.25))),
-                    ),
-            )
+                    )
+                    .into_any_element(),
+            ))
     }
+}
+
+fn chat_overlay_banners() -> Vec<gpui_kit::AnyElement> {
+    let Ok(demo) = std::env::var("TURIN_CHAT_DEMO") else {
+        return Vec::new();
+    };
+    let mut banners = Vec::new();
+    if demo.contains("provider-status") {
+        let mut entry = ProviderInstanceEntry::new("codex-work", "codex", "Codex");
+        entry.version = Some("1.0.0".into());
+        entry.compatibility_advisory = Some(CompatibilityAdvisory {
+            status: CompatibilityAdvisoryStatus::Unsupported,
+            message: Some("Unsupported version. Use 2.0.0.".into()),
+        });
+        if should_show_provider_status_banner(&entry, None) {
+            banners.push(ProviderStatusBanner { entry }.into_any_element());
+        }
+    }
+    if demo.contains("thread-error") {
+        let error = "The first error line\ncontinues on a second line";
+        if should_show_thread_error_banner("demo:thread", Some(error), false) {
+            banners.push(
+                ThreadErrorBanner {
+                    error: error.into(),
+                    usage_limit: false,
+                }
+                .into_any_element(),
+            );
+        }
+    }
+    if demo.contains("usage-limit-error") {
+        let error = "Usage limit reached for this provider.";
+        if should_show_thread_error_banner("demo:thread", Some(error), false) {
+            banners.push(
+                ThreadErrorBanner {
+                    error: error.into(),
+                    usage_limit: true,
+                }
+                .into_any_element(),
+            );
+        }
+    }
+    banners
 }

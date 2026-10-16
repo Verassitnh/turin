@@ -1,4 +1,5 @@
 //! Port of upstream/apps/server/src/textGeneration/CodexTextGeneration.ts
+//! Also ports upstream/apps/server/src/codexModelOptions.ts.
 //!
 //! Text generation runs `codex exec` once per request: the prompt on stdin, the output
 //! schema and last message in temp files, and a read-only sandbox. Each run first

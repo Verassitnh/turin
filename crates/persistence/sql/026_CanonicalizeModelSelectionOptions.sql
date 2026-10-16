@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/026_CanonicalizeModelSelectionOptions.ts
 UPDATE projection_threads
     SET model_selection_json = json_set(
       model_selection_json,

@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/008_ProjectionThreadActivitySequence.ts
 ALTER TABLE projection_thread_activities
     ADD COLUMN sequence INTEGER;
 CREATE INDEX IF NOT EXISTS idx_projection_thread_activities_thread_sequence

@@ -1,4 +1,5 @@
 //! Child process launch for `cursor-agent acp` and other ACP binaries.
+//! Also ports upstream/packages/effect-acp/src/_internal/stdio.ts.
 //!
 //! `kill_on_drop` kills the direct child. The child also runs in its own
 //! process group (`process_group(0)`), and dropping the client signals that

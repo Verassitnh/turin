@@ -1,4 +1,5 @@
 //! Port of upstream/apps/server/src/persistence/Migrations.ts
+//! Also ports upstream/apps/server/src/persistence/Migrations/050_ProjectionThreadPullRequests.ts.
 //!
 //! Bookkeeping table and id rules match Effect's `Migrator.make` for SQLite:
 //! pending ids are inserted, then executed, in one transaction. An id at or

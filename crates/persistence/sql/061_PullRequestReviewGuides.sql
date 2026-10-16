@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/061_PullRequestReviewGuides.ts
 CREATE TABLE IF NOT EXISTS pull_request_review_guides (
       host TEXT NOT NULL,
       repository TEXT NOT NULL,

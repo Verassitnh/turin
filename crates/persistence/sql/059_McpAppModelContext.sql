@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/059_McpAppModelContext.ts
 CREATE TABLE IF NOT EXISTS mcp_app_model_context (
       thread_id TEXT NOT NULL,
       item_id TEXT NOT NULL,

@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/004_ProviderSessionRuntime.ts
 CREATE TABLE IF NOT EXISTS provider_session_runtime (
       thread_id TEXT PRIMARY KEY,
       provider_name TEXT NOT NULL,

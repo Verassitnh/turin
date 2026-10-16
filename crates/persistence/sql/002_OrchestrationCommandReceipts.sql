@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/002_OrchestrationCommandReceipts.ts
 CREATE TABLE IF NOT EXISTS orchestration_command_receipts (
       command_id TEXT PRIMARY KEY,
       aggregate_kind TEXT NOT NULL,

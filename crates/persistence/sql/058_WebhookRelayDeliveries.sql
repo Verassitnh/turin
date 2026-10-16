@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/058_WebhookRelayDeliveries.ts
 CREATE TABLE IF NOT EXISTS scheduled_task_webhook_relay_deliveries (
       relay_delivery_id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL,

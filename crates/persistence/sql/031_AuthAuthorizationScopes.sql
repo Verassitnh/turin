@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/031_AuthAuthorizationScopes.ts
 DROP TABLE IF EXISTS auth_pairing_links;
 DROP TABLE IF EXISTS auth_sessions;
 CREATE TABLE auth_pairing_links (

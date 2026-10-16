@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/053_PullRequestFilesViewed.ts
 CREATE TABLE IF NOT EXISTS pull_request_files_viewed (
       provider TEXT NOT NULL,
       host TEXT NOT NULL,

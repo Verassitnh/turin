@@ -1,4 +1,5 @@
 //! Port of upstream/packages/effect-codex-app-server/src/schema.ts
+//! Also ports upstream/packages/effect-codex-app-server/src/_internal/shared.ts.
 pub use crate::generated::types::*;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};

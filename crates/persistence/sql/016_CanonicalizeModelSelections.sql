@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/016_CanonicalizeModelSelections.ts
 ALTER TABLE projection_projects
     ADD COLUMN default_model_selection_json TEXT;
 UPDATE projection_projects

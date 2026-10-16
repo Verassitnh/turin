@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/001_OrchestrationEvents.ts
 CREATE TABLE IF NOT EXISTS orchestration_events (
       sequence INTEGER PRIMARY KEY AUTOINCREMENT,
       event_id TEXT NOT NULL UNIQUE,

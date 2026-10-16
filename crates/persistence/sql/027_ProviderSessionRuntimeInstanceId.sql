@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/027_ProviderSessionRuntimeInstanceId.ts
 -- Adds the nullable provider_instance_id routing column.
 -- The column is nullable and not backfilled: existing rows have only the
 -- driver name in provider_name, and which configured instance owned a

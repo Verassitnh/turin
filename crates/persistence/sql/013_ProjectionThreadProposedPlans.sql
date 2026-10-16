@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/013_ProjectionThreadProposedPlans.ts
 CREATE TABLE IF NOT EXISTS projection_thread_proposed_plans (
       plan_id TEXT PRIMARY KEY,
       thread_id TEXT NOT NULL,

@@ -13,6 +13,8 @@ pub mod composer_pending_panels;
 // Route handoff around the mobile composer morph. No view calls it yet.
 #[allow(dead_code)]
 pub mod draft_hero_transition;
+#[allow(dead_code)]
+pub mod folder_drop;
 pub mod markdown;
 pub mod message_copy_button;
 pub mod messages_timeline;

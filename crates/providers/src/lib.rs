@@ -4,5 +4,6 @@
 
 pub mod built_in_drivers;
 pub mod project_settings_override_sweep;
+pub mod provider_maintenance_runner;
 pub mod provider_orchestration_adapter_infrastructure;
 pub mod provider_registry;

@@ -11,8 +11,12 @@ chrono.workspace = true
 futures.workspace = true
 indexmap.workspace = true
 parking_lot.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+tokio-util.workspace = true
 turin-contracts.workspace = true
 turin-provider-claude.workspace = true
 turin-provider-core.workspace = true
@@ -23,6 +27,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 serde_json.workspace = true
 tempfile.workspace = true
 turin-shared.workspace = true

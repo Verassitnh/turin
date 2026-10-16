@@ -7341,6 +7341,9 @@ dependencies = [
  "gpui-kit",
  "indexmap",
  "markdown",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
  "pretty_assertions",
@@ -7354,6 +7357,7 @@ dependencies = [
  "tracing-subscriber",
  "turin-contracts",
  "turin-provider-core",
+ "turin-review",
  "turin-runtime",
  "turin-shared",
  "unicode-normalization",
@@ -7798,6 +7802,7 @@ dependencies = [
  "turin-contracts",
  "turin-persistence",
  "turin-provider-core",
+ "turin-shared",
  "uuid",
 ]
 

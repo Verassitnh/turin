@@ -7,12 +7,15 @@ mod components;
 #[allow(dead_code)]
 mod composer;
 mod diff;
+#[cfg(target_os = "macos")]
+mod dock_icon;
 mod hooks;
 mod logical_project;
 mod project_icon_colors;
 mod project_icon_options;
 mod project_identity;
 mod pull_request;
+mod pull_request_reference;
 mod settle_and_advance;
 mod sidebar_pending_file_drop_store;
 mod source_control_presentation;
@@ -29,6 +32,7 @@ mod timestamp_format;
 // ahead of its callers.
 #[allow(dead_code)]
 mod ui;
+mod utils;
 
 use gpui_kit::*;
 
@@ -93,6 +97,8 @@ fn main() {
         .with_assets(assets::AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            #[cfg(target_os = "macos")]
+            dock_icon::set_unbundled_app_icon();
             theme::init(cx);
             let store = state::store::bind_client_store(client_state.handle.clone(), cx);
             cx.set_global(state::store::ClientStoreGlobal(store));

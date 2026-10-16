@@ -1,7 +1,7 @@
 # U3d handoff: thread actions, right-panel state, menu plan, new-thread decisions
 
 Branch `task/U3d-thread-actions`, from `task/U3b-shell-state` (`9cd3f81`). Nothing pushed.
-Gate: `scripts/check.sh -p turin` exit 0 at the final tree. `cargo test -p turin`: 1645 passed, 0 failed.
+Gate: `scripts/check.sh -p turin` exit 0 after merging `main`. `cargo test -p turin`: 2542 passed, 0 failed, 1 ignored.
 Clippy `-D warnings` clean for `turin`, including tests.
 
 ## Ported

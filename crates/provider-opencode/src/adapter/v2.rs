@@ -68,6 +68,18 @@ use crate::v2_client::{MessageQuery, V2Client};
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 /// Upstream `INTERRUPT_TIMEOUT`: a Stop does not wait longer than this for one session.
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upstream `REQUEST_REPLY_TIMEOUT`: one deadline over an answer and its one retry.
+const REQUEST_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+/// The answers OpenCode gives for a request it already dropped (upstream `permissionGone`,
+/// `formGone`). Such an answer counts as delivered.
+const GONE_PERMISSION: [&str; 2] = ["PermissionNotFoundError", "SessionNotFoundError"];
+const GONE_FORM: [&str; 3] = [
+    "FormNotFoundError",
+    "FormAlreadySettledError",
+    "SessionNotFoundError",
+];
+/// The turn failure when a request could not be answered (upstream `abandonRequest`).
+const REQUEST_ABANDONED: &str = "OpenCode is waiting on a request T3 Code couldn't answer.";
 
 struct V2Turn {
     provider_turn: OrchestrationV2ProviderTurn,
@@ -1820,11 +1832,12 @@ impl OpenCodeV2Session {
 
     /// Sends the answer to OpenCode. Returns whether the request ends cancelled rather than
     /// resolved; the caller settles the request once the reply has landed.
+    /// Answers a request. Returns whether it was cancelled and whether the answer reached OpenCode.
     async fn answer(
         &self,
         pending: &Pending,
         input: &ProviderAdapterV2RuntimeRequestResponseInput,
-    ) -> Result<bool, ProviderAdapterV2Error> {
+    ) -> Result<(bool, bool), ProviderAdapterV2Error> {
         match pending.ask.clone() {
             Ask::Permission {
                 action,
@@ -1891,15 +1904,25 @@ impl OpenCodeV2Session {
                 if decision == ProviderApprovalDecision::Decline {
                     body["message"] = json!(DECLINED);
                 }
-                self.client
-                    .reply_permission(&pending.session_id, &pending.native_id, &body)
-                    .await
-                    .map_err(http_err)?;
                 let cancelled = matches!(
                     decision,
                     ProviderApprovalDecision::Decline | ProviderApprovalDecision::Cancel
                 );
-                Ok(cancelled)
+                let delivered = deliver(&GONE_PERMISSION, || {
+                    let (client, session_id, native_id, body) = (
+                        self.client.clone(),
+                        pending.session_id.clone(),
+                        pending.native_id.clone(),
+                        body.clone(),
+                    );
+                    async move {
+                        client
+                            .reply_permission(&session_id, &native_id, &body)
+                            .await
+                    }
+                })
+                .await;
+                Ok((cancelled, delivered))
             }
             Ask::Form(form) => {
                 let decline = matches!(
@@ -1907,11 +1930,16 @@ impl OpenCodeV2Session {
                     Some(ProviderApprovalDecision::Decline | ProviderApprovalDecision::Cancel)
                 );
                 let cancelled = input.answers.is_none() || decline;
-                if cancelled {
-                    self.client
-                        .cancel_form(&pending.session_id, &form.id, None)
-                        .await
-                        .map_err(http_err)?;
+                let delivered = if cancelled {
+                    deliver(&GONE_FORM, || {
+                        let (client, session_id, form_id) = (
+                            self.client.clone(),
+                            pending.session_id.clone(),
+                            form.id.clone(),
+                        );
+                        async move { client.cancel_form(&session_id, &form_id, None).await }
+                    })
+                    .await
                 } else {
                     let answers = input.answers.clone().unwrap_or_default();
                     let map = answers
@@ -1919,14 +1947,48 @@ impl OpenCodeV2Session {
                         .map(|(key, value)| (key.clone(), value.clone()))
                         .collect();
                     let answer = form_answer(&form, &map);
-                    self.client
-                        .reply_form(&pending.session_id, &form.id, &answer)
-                        .await
-                        .map_err(http_err)?;
-                }
-                Ok(cancelled)
+                    deliver(&GONE_FORM, || {
+                        let (client, session_id, form_id, answer) = (
+                            self.client.clone(),
+                            pending.session_id.clone(),
+                            form.id.clone(),
+                            answer.clone(),
+                        );
+                        async move { client.reply_form(&session_id, &form_id, &answer).await }
+                    })
+                    .await
+                };
+                Ok((cancelled, delivered))
             }
         }
+    }
+
+    /// Ends the turn a request OpenCode waits on would block, after the request could not be
+    /// answered (upstream `abandonRequest`). The stopped run is interrupted, so it is not the
+    /// next turn's.
+    fn abandon_request(&self, guard: &mut V2Inner, session_id: &str) {
+        if !guard
+            .threads
+            .get(session_id)
+            .is_some_and(|thread| thread.active.is_some())
+        {
+            return;
+        }
+        if let Some(thread) = guard.threads.get_mut(session_id) {
+            thread.unsettled = true;
+        }
+        self.finish(
+            guard,
+            session_id,
+            ProviderAdapterV2TurnTerminalStatus::Failed,
+            Some(REQUEST_ABANDONED.to_owned()),
+        );
+        let client = self.client.clone();
+        let session = session_id.to_owned();
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(Duration::from_secs(2), client.interrupt(&session, None))
+                .await;
+        });
     }
 
     /// `settleRequest`: the request ends, resolved or cancelled, with its node and item.
@@ -2745,7 +2807,7 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
         let outcome = self.answer(&pending, &input).await;
         let mut guard = self.inner.lock();
         match outcome {
-            Ok(cancelled) => {
+            Ok((cancelled, delivered)) => {
                 guard.pending.remove(&key);
                 self.settle_request(
                     &mut guard,
@@ -2753,8 +2815,12 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                     &pending.session_id,
                     &pending.node,
                     &pending.item,
-                    cancelled,
+                    cancelled || !delivered,
                 );
+                // OpenCode waits on a request nobody answered, so the turn it blocks ends failed.
+                if !delivered {
+                    self.abandon_request(&mut guard, &pending.session_id);
+                }
                 Ok(())
             }
             Err(err) => {
@@ -3188,6 +3254,27 @@ fn is_execution_end(event_type: &str) -> bool {
 fn is_continuation(input: &ProviderAdapterV2TurnInput) -> bool {
     input.message.created_by == OrchestrationV2Actor::Agent
         && input.message.creation_source == OrchestrationV2CreationSource::Provider
+}
+
+/// Whether an answer reached OpenCode (upstream `deliver`): retried once, under one deadline. An
+/// answer to a request OpenCode already dropped (`gone`) counts as delivered.
+async fn deliver<T, Fut>(gone: &[&str], mut send: impl FnMut() -> Fut) -> bool
+where
+    Fut: std::future::Future<Output = Result<T, crate::error::OpenCodeRuntimeError>>,
+{
+    let attempts = async {
+        for _ in 0..2 {
+            match send().await {
+                Ok(_) => return true,
+                Err(err) if gone.iter().any(|name| err.detail.contains(name)) => return true,
+                Err(_) => {}
+            }
+        }
+        false
+    };
+    tokio::time::timeout(REQUEST_REPLY_TIMEOUT, attempts)
+        .await
+        .unwrap_or(false)
 }
 
 /// The gate upstream `offerWake` puts on a wake: a wake a Stop or a later continuation dropped

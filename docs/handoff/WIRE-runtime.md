@@ -5,8 +5,8 @@ Worktree: `turin-wt/WIRE-runtime`, branch `task/WIRE-runtime`.
 Available immediately: `Commands::runtime(&self) -> Arc<WriteRuntime>` (owned clone).
 All backend calls run on Tokio; never block GPUI renders.
 
-Incoming public `WriteRuntime` services (same names will be retained):
-- `provider_auth: Arc<ProviderAuthService>`; `start/respond/complete/cancel/logout/stream`
+Public `WriteRuntime` services:
+- `provider_auth: Arc<ProviderAuthService>`; `start/respond/complete/cancel/logout/subscribe`
   use existing `turin_providers::provider_auth_service` signatures. Use one stable
   owner session ID for each settings UI's auth flow; explicit Client callback mode
   where supported. No HTTP callback listener is supplied by this runtime.
@@ -23,7 +23,7 @@ Incoming public `WriteRuntime` services (same names will be retained):
 - `git_manager: Arc<GitManager>`; real source-control-backed PR host.
 - `usage: Arc<UsageService>`; real provider usage readers.
 
-Incoming Commands facade methods:
+Commands facade methods:
 - `server_settings() -> Result<ServerSettings, CommandError>`
 - `update_server_settings(ServerSettingsPatch) -> Result<ServerSettings, CommandError>`
 - `update_provider_instance(ProviderInstanceMutation) -> Result<ServerSettings, CommandError>`
@@ -38,8 +38,7 @@ Draft undo: runtime does not own composer DraftStore. Existing seam is UI-owned
 `composer::draft_store::DraftStore` plus `discard_composer_draft`; shell/composer owner
 must retain and restore discarded draft there. Runtime must not invent another store.
 
-No cargo, tests, clippy run here: parent owns integrated build. Final names/types and
-limitations will be updated before completion.
+No cargo, tests, clippy run here: parent owns integrated build. Rustfmt and `git diff --check` only; parent owns compile validation.
 
 ## Available backend limitations
 
@@ -55,5 +54,14 @@ limitations will be updated before completion.
 - Managed Codex installer shares the driver's actual installer/lease state.
 - Review-guide generation uses actual TextGeneration provider adapter and reads current
   settings each request. GitHub auth uses real `gh`/environment/settings credentials.
-- Storage cleanup is being added; worktree deletion requires missing live lease/session
-  seam and will report unavailable; artifact/log cleanup will use real filesystem.
+- `storage_cleanup: Arc<StorageCleanup>` supports real artifact/log cleanup on demand and
+  hourly. Worktree deletion explicitly reports unavailable when policies request it:
+  live workspace lease, session, deleted-thread and PR snapshot ports are not complete.
+  `StorageCleanup::files_only` avoids interpreting empty fixtures as live state.
+- `config: ServerConfig` exposes actual settings/keybindings/DB paths; `worktrees_dir`
+  matches review-guide disposable worktrees. Shell builds EnvironmentInfo from this.
+- Settings bundle mapping: `source_control = rt.source_control_discovery.clone()`,
+  `provider_registry = rt.providers.registry.clone()`, other same-named fields clone
+  directly. Shell owns EnvironmentInfo/platform/client-settings initialization.
+- Settings facade waits for explicit instance reconciliation before returning (the
+  DesktopSettingsHandle watcher still handles external settings changes).

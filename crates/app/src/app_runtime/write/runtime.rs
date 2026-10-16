@@ -103,6 +103,9 @@ pub struct WriteRuntime {
         turin_source_control::pull_request::review_guide_service::PullRequestReviewGuideService,
     >,
     pub usage: Arc<turin_usage::usage_service::UsageService>,
+    pub storage_cleanup: Arc<turin_runtime::storage_cleanup::StorageCleanup>,
+    pub config: turin_runtime::config::ServerConfig,
+    _cleanup_schedule: AbortOnDropHandle<()>,
     pub(crate) usage_readers_available: bool,
     settings_sync: Arc<tokio::sync::Mutex<()>>,
     _settings_watcher: Option<turin_runtime::server_settings::service::SettingsWatcher>,
@@ -131,16 +134,46 @@ impl WriteRuntime {
         let keybindings =
             turin_runtime::keybindings::Keybindings::new(data_dir.join("keybindings.json"));
         let keybindings_watcher = keybindings.start().await.context("starting keybindings")?;
+        let mut config = turin_runtime::config::ServerConfig::new_desktop(
+            std::env::current_dir().context("reading runtime working directory")?,
+            data_dir.to_path_buf(),
+            None,
+        )
+        .await
+        .context("preparing runtime storage directories")?;
+        config.paths.db_path = crate::app_runtime::data_dir::database_path(data_dir);
+        config.paths.settings_path = server_settings.settings_path().to_path_buf();
+        config.paths.keybindings_config_path = keybindings.config_path().to_path_buf();
+        let storage_cleanup = Arc::new(turin_runtime::storage_cleanup::StorageCleanup::files_only(
+            config.clone(),
+            turin_runtime::storage_cleanup::CleanupHost::new(
+                providers.settings.settings().await,
+                Vec::new(),
+                Vec::new(),
+            ),
+            "Managed worktree cleanup unavailable: live workspace lease and provider-session snapshot adapters are not connected.",
+        ));
+        let cleanup_schedule = {
+            let cleanup = storage_cleanup.clone();
+            AbortOnDropHandle::new(tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    cleanup.run_automatic().await;
+                }
+            }))
+        };
         let settings_sync = Arc::new(tokio::sync::Mutex::new(()));
         let settings_feed = {
             let service = server_settings.clone();
             let desktop = providers.settings.clone();
             let sync = settings_sync.clone();
+            let cleanup = storage_cleanup.clone();
             AbortOnDropHandle::new(tokio::spawn(async move {
                 while settings_changes.recv().await.is_some() {
                     let _guard = sync.lock().await;
                     match service.get_settings().await {
                         Ok(settings) => {
+                            cleanup.note_settings(settings.clone());
                             desktop
                                 .update_settings(super::settings::effective_settings(settings))
                                 .await
@@ -362,6 +395,9 @@ impl WriteRuntime {
         }
 
         Ok(Arc::new(Self {
+            storage_cleanup,
+            config,
+            _cleanup_schedule: cleanup_schedule,
             provider_auth,
             provider_installation: providers.installation.clone(),
             provider_maintenance: providers.maintenance.clone(),
@@ -403,10 +439,14 @@ impl WriteRuntime {
         let _guard = self.settings_sync.lock().await;
         let settings =
             super::settings::effective_settings(self.server_settings.get_settings().await?);
+        self.storage_cleanup.note_settings(settings.clone());
         self.providers
             .settings
             .update_settings(settings.clone())
             .await;
+        self.providers.instances().reconcile(
+            turin_provider_core::provider_instance_registry_hydration::derive_provider_instance_config_map(&settings, &self.providers.defaults),
+        ).await;
         Ok(settings)
     }
 

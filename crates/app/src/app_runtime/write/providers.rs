@@ -48,6 +48,7 @@ pub struct Providers {
     pub installation: Arc<ProviderInstallation>,
     pub maintenance: Arc<turin_providers::provider_maintenance_runner::ProviderMaintenanceRunner>,
     pub usage_readers: Vec<turin_usage::usage_service::UsageReader>,
+    pub defaults: Vec<DefaultInstanceDriver>,
 }
 
 impl Providers {
@@ -79,7 +80,7 @@ impl Providers {
                 opencode: Some(Box::new(|_host| Arc::new(OpenCodeDriver::new()))),
             },
         );
-        let defaults = drivers
+        let defaults: Vec<_> = drivers
             .iter()
             .map(|driver| DefaultInstanceDriver {
                 driver_kind: driver.driver_kind().clone(),
@@ -120,7 +121,13 @@ impl Providers {
             hydration.registry.clone(),
             registry.clone(),
             host.clone(),
-            defaults,
+            defaults
+                .iter()
+                .map(|driver| DefaultInstanceDriver {
+                    driver_kind: driver.driver_kind.clone(),
+                    has_default_instance: driver.has_default_instance,
+                })
+                .collect(),
         ));
         use turin_providers::provider_maintenance_runner::{
             LiveMaintenanceVersions, ProviderMaintenanceRunner, ProviderMaintenanceRunnerDeps,
@@ -134,6 +141,7 @@ impl Providers {
         }));
         Ok(Self {
             maintenance,
+            defaults,
             installation,
             usage_readers,
             host,
@@ -167,7 +175,7 @@ pub fn spawn_status_feed(providers: &Providers, bus: super::bus::CommandBus) {
 /// touches lives under `base_dir`: the secrets dir, the managed install dir and
 /// the shadow `CODEX_HOME`s. Nothing is downloaded until a managed install is
 /// requested. Turin runs no HTTP server, so the sign-in return URL is a
-/// placeholder until managed ChatGPT sign-in is wired to a callback.
+/// absent: the desktop has no HTTP welcome page; sign-in uses client callbacks.
 async fn codex_driver(
     base_dir: &Path,
     host: &Arc<ProviderHost>,
@@ -196,7 +204,7 @@ async fn codex_driver(
     let driver = Arc::new(CodexDriver::with_managed_host(CodexManagedHost {
         state_dir,
         user_home: dirs_home(),
-        server_url: "http://localhost:3773".to_owned(),
+        server_url: String::new(),
         secrets,
         secrets_directory: Some(secrets_directory),
         environment_id: crate::state::local_environment_id().to_string(),

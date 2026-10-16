@@ -509,6 +509,13 @@ impl AppSidebarLayout {
         });
     }
 
+    fn notify_unavailable(label: &str, window: &mut Window, cx: &mut Context<Self>) {
+        window.push_notification(
+            Notification::info(format!("{label} is not available yet.")),
+            cx,
+        );
+    }
+
     /// The shell side of the palette's requests, handled like `SidebarEvent`s:
     /// navigation that has a screen goes there; the rest wait for their tasks.
     fn on_palette_event(
@@ -668,10 +675,10 @@ impl AppSidebarLayout {
                 self.new_thread_from_context(window, cx)
             }
             SidebarEvent::NewThread { .. } if self.live.is_none() => {
-                unavailable("New thread", window, cx);
+                Self::notify_unavailable("New thread", window, cx);
             }
             SidebarEvent::AddProject if self.live.is_none() => {
-                unavailable("Add project", window, cx);
+                Self::notify_unavailable("Add project", window, cx);
             }
             _ => {}
         }
@@ -1288,6 +1295,17 @@ impl Render for AppSidebarLayout {
         // "Open diff" on a turn's changed files card shows the right panel.
         if crate::diff::take_open_panel_request(cx) {
             self.right_panel_open = true;
+        }
+        if let Some(thread_id) =
+            crate::components::chat::thread_navigation::take_thread_open_request(cx)
+        {
+            if let Ok(thread_id) = ThreadId::new(&thread_id) {
+                self.clear_auxiliary_routes(cx);
+                let key = scoped_thread_key(&local_environment_id(), &thread_id);
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.navigate_to_thread(&key, cx));
+                self.sync_palette_context(cx);
+            }
         }
         let theme = cx.app_theme().clone();
         let viewport_width = f32::from(window.viewport_size().width);

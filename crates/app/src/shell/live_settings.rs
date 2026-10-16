@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::{App, Window, WindowOptions};
 
 use crate::app_runtime::write::bus::CommandBus;
@@ -15,8 +16,6 @@ use crate::settings::view::SettingsRoute;
 use crate::settings::view_model::EnvironmentInfo;
 use crate::state::store::ClientStore;
 use turin_runtime::storage_cleanup::{CleanupHost, StorageCleanup};
-use turin_shared::keybindings::is_mac_platform;
-
 /// Until `WriteRuntime` exposes `storage_cleanup` (Sol follow-up), build a real
 /// service from the same settings snapshot the runtime already owns.
 fn storage_cleanup_for_runtime(bus: &CommandBus, rt: &WriteRuntime) -> Option<Arc<StorageCleanup>> {
@@ -58,7 +57,7 @@ pub fn build_live_settings_services(
 }
 
 fn settings_platform(_cx: &App) -> String {
-    if is_mac_platform() {
+    if cfg!(target_os = "macos") {
         "MacIntel".into()
     } else {
         "Linux x86_64".into()

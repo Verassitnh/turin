@@ -134,7 +134,7 @@ impl PullRequestsRouteHost {
             &this.store,
             &this.panel,
             &deep_link_opened,
-            entity,
+            entity.clone(),
             cx,
         );
         this
@@ -232,9 +232,7 @@ fn try_open_deep_link(
         })
         .ok();
     opened.set(true);
-    entity
-        .update(cx, |_, cx| cx.emit(PullRequestsRouteEvent::OpenPanel))
-        .ok();
+    let _ = entity.update(cx, |_, cx| cx.emit(PullRequestsRouteEvent::OpenPanel));
 }
 
 fn list_scope_from_search(
@@ -337,11 +335,11 @@ fn deep_link_target(
     Some((project.environment_id.clone(), reference))
 }
 
-fn project_id_for_repository(
-    projects: &[PullRequestProject],
+fn project_id_for_repository<'a>(
+    projects: &'a [PullRequestProject],
     repository: &str,
     _search: &PullRequestsSearch,
-) -> Option<&str> {
+) -> Option<&'a str> {
     let repository = repository.to_lowercase();
     projects
         .iter()

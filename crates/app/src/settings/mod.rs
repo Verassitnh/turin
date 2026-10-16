@@ -3,8 +3,8 @@
 //!
 //! Rendering goes through [`view_model::SettingsStore`]: the panels read a
 //! [`view_model::SettingsViewModel`] and send intent through a
-//! [`view_model::SettingsSource`]. [`mock_source`] backs the demo; T22 wires
-//! the live services.
+//! [`view_model::SettingsSource`]. [`mock_source`] backs the demo;
+//! [`live_source`] wires the live services.
 
 // GPUI element builders take many handles and boxed callbacks; splitting them
 // into one-use structs would only move the arguments around.
@@ -29,6 +29,11 @@ pub mod github_account_logic;
 pub mod icons;
 pub mod keybindings_logic;
 pub mod layout;
+pub mod live_bindings;
+pub mod live_projects;
+pub mod live_snapshot;
+pub mod live_source;
+pub mod live_window;
 pub mod locale;
 pub mod mock_source;
 pub mod model_picker;

@@ -32,6 +32,7 @@ pub mod theme_palette_library;
 pub mod theme_palettes;
 pub mod theme_preview;
 pub mod tokens;
+pub mod vscode_theme_import;
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, Global, Hsla, Rgba, Window, WindowAppearance, px};
@@ -56,6 +57,11 @@ pub use theme_palette_library::{
 };
 use theme_palettes::{ThemeAppearance, ThemeColors, ThemeDefinition};
 use tokens::tw;
+#[allow(unused_imports)]
+pub use vscode_theme_import::{
+    ThemeImportEntry, humanize_theme_name, is_vscode_theme_file, pair_vscode_themes,
+    parse_vscode_theme_file, resolve_theme_label_collisions,
+};
 
 /// Which palette the user picked and how it follows the OS.
 #[derive(Clone, Debug, PartialEq)]

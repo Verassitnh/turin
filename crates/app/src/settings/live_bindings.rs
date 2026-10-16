@@ -1,5 +1,25 @@
 //! Services the composition root passes into live settings. See
 //! `docs/handoff/WIRE-settings.md` and `docs/handoff/WIRE-runtime.md`.
+//!
+//! ## WIRE-runtime Sol: populate from `WriteRuntime`
+//!
+//! Build [`LiveSettingsServices`] after `WriteRuntime::build` and `bus.install(commands)`:
+//!
+//! | Field | Source on `WriteRuntime` / composition root |
+//! |-------|---------------------------------------------|
+//! | `bus` | `CommandBus` with `Commands` installed |
+//! | `server_settings` | `runtime.server_settings` (reads + `subscribe`; writes use [`super::live_commands`]) |
+//! | `keybindings` | started `Keybindings` for `paths.keybindings_config_path` |
+//! | `provider_auth` | `runtime.provider_auth` |
+//! | `provider_installation` | `runtime.provider_installation` |
+//! | `source_control` | `SourceControlDiscovery::new(runtime.source_control_host, runtime.source_control, cwd)` |
+//! | `storage_cleanup` | started `StorageCleanup` |
+//! | `provider_registry` | `runtime.providers.registry` |
+//! | `provider_maintenance` | runner built with that registry |
+//! | `environment`, `platform` | shell (`EnvironmentInfo`, `navigator.platform`) |
+//!
+//! Shell must call [`super::live_init::initialize_live_settings`] with desktop
+//! client-settings persistence before opening settings.
 
 use std::sync::Arc;
 

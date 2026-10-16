@@ -21,6 +21,7 @@ use turin_runtime::keybindings::UpsertKeybindingInput;
 use crate::state::store::ClientStore;
 
 use super::live_bindings::{LiveSettingsServices, SETTINGS_AUTH_OWNER_SESSION};
+use super::live_commands::{self, update_provider_instance as persist_provider_instance, update_server_settings as persist_server_settings};
 use super::live_projects::{delete_project, set_project_icons};
 use super::live_snapshot::{build_snapshot, cleanup_report, read_client_settings, LiveSnapshotInput};
 use super::mock_source::apply_appearance;
@@ -67,7 +68,7 @@ impl LiveSettingsSource {
             .display()
             .to_string();
         let initial_server = handle
-            .block_on(services.server_settings.get_settings())
+            .block_on(live_commands::server_settings(&services.bus))
             .unwrap_or_default();
         let initial_keybindings = handle
             .block_on(services.keybindings.snapshot())
@@ -288,15 +289,15 @@ impl SettingsSource for LiveSettingsSource {
         let inner = self.inner.clone();
         let store_cell = self.store.clone();
         let client = self.client.clone();
+        let bus = inner.borrow().services.bus.clone();
         inner.borrow().services.bus.handle().spawn(async move {
-            let services = inner.borrow().services.clone();
-            let Ok(current) = services.server_settings.get_settings().await else {
+            let Ok(current) = live_commands::server_settings(&bus).await else {
                 return;
             };
             let Ok(patch) = prepare_model_preferences_patch(&current, patch).await else {
                 return;
             };
-            if let Ok(settings) = services.server_settings.update_settings(&patch).await {
+            if let Ok(settings) = persist_server_settings(&bus, patch).await {
                 inner.borrow_mut().server = settings;
             }
         });
@@ -326,16 +327,18 @@ impl SettingsSource for LiveSettingsSource {
                 return;
             }
         };
-        let patch = patch.and_then(|patch| serde_json::from_value(patch).ok());
+        let server_patch = patch.and_then(|patch| serde_json::from_value(patch).ok());
         let inner = self.inner.clone();
+        let bus = inner.borrow().services.bus.clone();
         inner.borrow().services.bus.handle().spawn(async move {
-            let services = inner.borrow().services.clone();
-            services
-                .server_settings
-                .update_provider_instance(&mutation, patch.as_ref())
-                .await
-                .map(|settings| inner.borrow_mut().server = settings)
-                .map_err(|error| error.to_string())
+            if let Some(patch) = server_patch {
+                if persist_server_settings(&bus, patch).await.is_err() {
+                    return;
+                }
+            }
+            if let Ok(settings) = persist_provider_instance(&bus, mutation).await {
+                inner.borrow_mut().server = settings;
+            }
         });
         self.publish(cx);
     }

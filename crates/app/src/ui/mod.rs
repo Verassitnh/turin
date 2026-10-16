@@ -26,6 +26,7 @@ pub mod popover;
 pub mod preview_card;
 pub mod radio_group;
 pub mod refresh_icon;
+pub mod right_panel_sheet;
 pub mod scroll_area;
 pub mod separator;
 pub mod sheet;

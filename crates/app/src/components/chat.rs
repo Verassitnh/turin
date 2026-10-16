@@ -25,6 +25,9 @@ pub mod page_scroll_controller;
 #[allow(dead_code)]
 pub mod pending_user_input;
 pub mod thread_details_control;
+// Sidebar thread drag into the composer. The sidebar view does not drive it yet.
+#[allow(dead_code)]
+pub mod thread_context_drag;
 // The ported timeline read model keeps upstream's full helper surface; the
 // view and T14's reducers call into it piecemeal.
 #[allow(dead_code)]

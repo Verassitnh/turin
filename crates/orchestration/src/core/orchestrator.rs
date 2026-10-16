@@ -26,6 +26,9 @@ mod message_steer;
 #[cfg(test)]
 mod message_steer_tests;
 mod provider_detach;
+mod queue_start;
+#[cfg(test)]
+mod queue_start_tests;
 mod queued_run;
 mod run_stop;
 #[cfg(test)]

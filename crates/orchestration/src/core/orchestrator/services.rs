@@ -328,6 +328,8 @@ pub struct DispatchSeams {
     pub sessions: Arc<dyn LiveSessions>,
     /// `ProviderSwitchServiceV2.plan`, for a steer that changes the provider.
     pub switch_planner: Arc<dyn ProviderSwitchPlanner>,
+    /// `ServerSettings`: whether a project has turned a provider instance off.
+    pub provider_instances: Arc<dyn ProviderInstanceSettings>,
 }
 
 impl Default for DispatchSeams {
@@ -338,7 +340,37 @@ impl Default for DispatchSeams {
             project_roots: Arc::new(UnwiredProjectRoots),
             sessions: Arc::new(NoLiveSessions),
             switch_planner: Arc::new(UnwiredProviderSwitchPlanner),
+            provider_instances: Arc::new(AllProviderInstancesEnabled),
         }
+    }
+}
+
+/// Whether the project's settings turn a provider instance off. A queued
+/// message for a disabled instance holds the queue instead of starting
+/// (`startNextQueuedRun`): the project may turn a provider off while a
+/// message waits, and only an explicit turn-off holds it.
+#[async_trait]
+pub trait ProviderInstanceSettings: Send + Sync {
+    async fn disabled_for_project(
+        &self,
+        project_id: &ProjectId,
+        instance_id: &ProviderInstanceId,
+    ) -> Result<bool, BoxError>;
+}
+
+/// [`ProviderInstanceSettings`] before server settings are handed in: nothing
+/// is turned off.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AllProviderInstancesEnabled;
+
+#[async_trait]
+impl ProviderInstanceSettings for AllProviderInstancesEnabled {
+    async fn disabled_for_project(
+        &self,
+        _project_id: &ProjectId,
+        _instance_id: &ProviderInstanceId,
+    ) -> Result<bool, BoxError> {
+        Ok(false)
     }
 }
 

@@ -16,8 +16,9 @@ use turin_persistence::ReceiptStatus;
 use turin_provider_core::id_allocator::IdAllocator;
 
 use super::{
-    Orchestrator, message_dispatch, queued_run, run_stop, thread_archive, thread_delete,
-    thread_fork, thread_lifecycle, thread_merge_back, thread_metadata, thread_mutation,
+    Orchestrator, message_dispatch, queue_start, queued_run, run_stop, thread_archive,
+    thread_delete, thread_fork, thread_lifecycle, thread_merge_back, thread_metadata,
+    thread_mutation,
 };
 use crate::pipeline::command_receipt_store::CommandReceipt;
 use crate::pipeline::dispatch_mode_limit::{
@@ -48,7 +49,11 @@ pub struct Decision {
 }
 
 impl Decision {
-    fn new(command_id: CommandId, ids: IdAllocator, limit: Option<DispatchModeLimit>) -> Self {
+    pub(super) fn new(
+        command_id: CommandId,
+        ids: IdAllocator,
+        limit: Option<DispatchModeLimit>,
+    ) -> Self {
         Self {
             command_id,
             now: UtcDateTime::now(),
@@ -603,7 +608,7 @@ async fn dispatch_locked(
         .sink
         .commit_command(CommandCommit {
             command_id: command_id.clone(),
-            thread_id,
+            thread_id: thread_id.clone(),
             command_type: command_type.clone(),
             accepted_at: decision.now(),
             events: decision.events,
@@ -622,10 +627,28 @@ async fn dispatch_locked(
                 .unwrap_or_else(|| "Previously rejected.".to_owned()),
         });
     }
+    run_post_commit_hooks(orchestrator, &command_id, &command_type, &thread_id).await?;
     Ok(DispatchResult {
         sequence: committed.receipt.result_sequence,
         stored_events: committed.stored_events,
     })
+}
+
+/// What upstream runs after a command commits (or replays). `queue.resume`
+/// starts the thread's next queued run, still under the command's lock.
+async fn run_post_commit_hooks(
+    orchestrator: &Orchestrator,
+    command_id: &CommandId,
+    command_type: &str,
+    thread_id: &ThreadId,
+) -> Result<(), OrchestratorError> {
+    if command_type == "queue.resume" {
+        orchestrator
+            .start_next_queued_run_locked(thread_id, &Default::default())
+            .await
+            .map_err(|cause| dispatch_error(command_id, command_type, cause))?;
+    }
+    Ok(())
 }
 
 /// A command whose receipt already exists answers with what it recorded. A
@@ -661,6 +684,7 @@ async fn replay_receipt(
         .read_by_command_id(&command_id)
         .await
         .map_err(|cause| dispatch_error(&command_id, &command_type, cause))?;
+    run_post_commit_hooks(orchestrator, &command_id, &command_type, &thread_id).await?;
     Ok(DispatchResult {
         sequence: receipt.result_sequence,
         stored_events,
@@ -728,6 +752,9 @@ async fn decide(
         return Ok(true);
     }
     if message_dispatch::decide(orchestrator, command, decision).await? {
+        return Ok(true);
+    }
+    if queue_start::decide(orchestrator, command, decision).await? {
         return Ok(true);
     }
     if queued_run::decide(orchestrator, command, decision).await? {

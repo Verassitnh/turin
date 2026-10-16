@@ -393,10 +393,14 @@ impl ThreadFindState {
         if progressive && remote.is_pending {
             return ThreadFindLiveRefresh::DeferUntilSettled;
         }
-        let navigation_id = self
-            .local_selection
+        let local = rebase_local_selection(
+            self.local_selection.as_ref(),
+            remote.data,
+            remote.navigation_id,
+        );
+        let navigation_id = local
             .as_ref()
-            .map_or(remote.navigation_id, |local| local.navigation_id);
+            .map_or(remote.navigation_id, |l| l.navigation_id);
         let Some(selected) = selected.filter(|_| self.navigation_id == navigation_id) else {
             return ThreadFindLiveRefresh::RemoteRefresh;
         };
@@ -781,6 +785,46 @@ mod tests {
         assert_eq!(
             state.live_refresh(true, true, pending, Some(&selected)),
             ThreadFindLiveRefresh::DeferUntilSettled
+        );
+    }
+
+    #[test]
+    fn live_refresh_reanchors_after_a_local_step_then_a_server_step_response() {
+        let mut state = open_state("COD4");
+        let loaded = result(0);
+        // Only entry "a" is loaded, so the second step leaves the window.
+        let mut window = loaded.clone();
+        window.navigation = Some(vec![nav("a", 0, 2)]);
+        state.step(1, remote(Some(&window), 1), true, false);
+        assert!(state.local_selection.is_some());
+        state.step(1, remote(Some(&window), 1), true, false);
+        assert_eq!(state.offset, 1);
+        assert!(state.local_selection.is_some());
+
+        // The server answers that step. Its navigation is newer than the local
+        // one, so the local step drops and the response match is the anchor.
+        let mut answered = result(2);
+        answered.r#match = Some(OrchestrationV2ThreadFindMatch {
+            entry_id: entry("b"),
+            run_id: None,
+            occurrence: 0,
+        });
+        let selected = ThreadFindMatch {
+            entry_id: entry("b"),
+            run_id: None,
+            occurrence: 0,
+        };
+        assert_eq!(
+            state.live_refresh(
+                true,
+                false,
+                remote(Some(&answered), state.navigation_id),
+                Some(&selected),
+            ),
+            ThreadFindLiveRefresh::Rebase(ThreadFindStart {
+                entry_id: entry("b"),
+                occurrence: 0,
+            })
         );
     }
 

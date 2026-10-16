@@ -224,8 +224,13 @@ fn new_and_reused_drafts_take_the_target_environment_runtime_mode() {
     ];
     for mode in modes {
         assert_eq!(
-            new_draft_fields(&NewThreadOptions::default(), ThreadEnvMode::Local, false, mode)
-                .runtime_mode,
+            new_draft_fields(
+                &NewThreadOptions::default(),
+                ThreadEnvMode::Local,
+                false,
+                mode
+            )
+            .runtime_mode,
             mode
         );
         let reused = reused_draft_workspace(

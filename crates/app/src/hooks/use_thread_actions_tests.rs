@@ -27,12 +27,14 @@ use super::{
     request_thread_unpin_confirmation,
 };
 use crate::components::sidebar::runtime::thread_sort::ThreadSortOrder;
-use crate::hooks::thread_undo::{ThreadUndo, ThreadUndoClaim, ThreadUndoNotices, UndoAction, UndoPlan};
-use crate::state::right_panel_store::thread_key;
+use crate::hooks::thread_undo::{
+    ThreadUndo, ThreadUndoClaim, ThreadUndoNotices, UndoAction, UndoPlan,
+};
 use crate::state::command_result::CommandFailure;
 use crate::state::models::{
     EnvironmentProject, EnvironmentThreadShell, RunStatus, ThreadRunSummary, ThreadRuntimeSummary,
 };
+use crate::state::right_panel_store::thread_key;
 
 /// Shared by every fake for one test: the grants, the command log, and the UI effects.
 #[derive(Default)]

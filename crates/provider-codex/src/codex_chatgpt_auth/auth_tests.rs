@@ -1,10 +1,10 @@
 //! Port of upstream/apps/server/src/provider/CodexChatGptAuth.test.ts.
 //!
-//! Telemetry cases (`track`, `accountCounts`) are cut. Handoff cases wait on
-//! `CodexChatGptHandoff`, which is the next module; import and export are
-//! covered here directly.
+//! Telemetry cases (`track`, `accountCounts`) are cut. The three handoff
+//! streams live here; their analytics assertions stay omitted.
 
 use std::{
+    pin::Pin,
     sync::{
         Arc, LazyLock,
         atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
@@ -14,6 +14,7 @@ use std::{
 
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use futures::Stream;
 use indexmap::IndexMap;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use parking_lot::Mutex;
@@ -22,9 +23,11 @@ use rsa::{RsaPrivateKey, pkcs8::EncodePrivateKey, traits::PublicKeyParts};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinSet};
+use turin_contracts::base_schemas::EnvironmentId;
 use turin_contracts::provider_instance::ProviderInstanceId;
 use turin_contracts::provider_setup::{
-    ProviderAuthInteraction, ProviderAuthMethod, ProviderAuthPhase, ProviderAuthState,
+    ChatGptHandoffInput, ChatGptHandoffState, ChatGptReconnectProfile, ProviderAuthInteraction,
+    ProviderAuthMethod, ProviderAuthPhase, ProviderAuthState, ProviderSetupError,
 };
 use turin_provider_core::auth::{ProviderAuthCallbackMode, ProviderAuthCompleteInput};
 use turin_provider_core::credential_store::{
@@ -37,6 +40,9 @@ use super::{
     earliest_millis, make,
 };
 use crate::codex_chatgpt_auth::mini_http;
+use crate::codex_chatgpt_handoff::{
+    ChatGptHandoffEndpoints, ChatGptHandoffSubscription, subscribe_chatgpt_handoff,
+};
 
 const DEFAULT_SCOPE: &str =
     "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
@@ -2050,6 +2056,207 @@ async fn transferred_profiles_reject_mismatched_identities() {
         assert!(result.is_err());
         assert_eq!(destination.read().await.unwrap().unwrap(), original);
     }
+}
+
+#[tokio::test]
+async fn primary_completes_oauth_and_destination_imports_and_owns_the_refresh_session() {
+    let h = Harness::start("managed-codex-test", Arc::new(OrderedSecrets::new())).await;
+    let before = h.secrets.values.lock().len();
+    let (destination, destination_secrets) = h.destination().await;
+    let mut subscription = handoff(&h, None);
+    let waiting = loop {
+        match next_handoff(&mut subscription).await.unwrap() {
+            ChatGptHandoffState::Auth { state } if state.phase == ProviderAuthPhase::Waiting => {
+                break state;
+            }
+            ChatGptHandoffState::Auth { .. } => {}
+            other => panic!("expected waiting, got {other:?}"),
+        }
+    };
+    let callback = h.prepare(&waiting);
+    reqwest::Client::new().get(&callback).send().await.unwrap();
+    let profile = loop {
+        match next_handoff(&mut subscription).await.unwrap() {
+            ChatGptHandoffState::Finished { profile } => break profile,
+            ChatGptHandoffState::Auth { state } if handoff_terminal(&state) => {
+                panic!("handoff ended {:?}", state.phase);
+            }
+            ChatGptHandoffState::Auth { .. } => {}
+        }
+    };
+    assert_eq!(h.secrets.values.lock().len(), before);
+    assert!(h.auth.read().await.unwrap().is_none());
+    let stopped = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stopped);
+    let imported = (destination.controller.import_profile.as_ref().unwrap())(
+        profile.clone(),
+        Box::pin(async move {
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(stopped.load(Ordering::SeqCst));
+    assert_eq!(imported.phase, ProviderAuthPhase::Succeeded);
+    let saved = destination.read().await.unwrap().unwrap();
+    assert_eq!(saved.client_id, profile.registration.client_id);
+    assert_eq!(saved.refresh_token.as_deref(), Some("initial-refresh"));
+    let reconnect =
+        (destination.controller.reconnect_profile.as_ref().unwrap())("chatgpt".to_owned())
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        reconnect.id_token_hint.as_deref(),
+        Some(profile.credentials.id_token.as_str())
+    );
+    assert!(
+        serde_json::to_value(&reconnect)
+            .unwrap()
+            .get("refreshToken")
+            .is_none()
+    );
+    let mut record = saved;
+    record.expires_at = 0.0;
+    let key = provider_credential_key("codex-chatgpt", h.instance.as_str());
+    destination_secrets
+        .set(&key, &serde_json::to_vec(&record).unwrap())
+        .await
+        .unwrap();
+    destination.access().await.unwrap();
+    let exchanges = h.mock.exchanges.lock().clone();
+    assert_eq!(
+        exchanges
+            .iter()
+            .filter(|entry| form_get(entry, "grant_type") == Some("authorization_code"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        exchanges
+            .iter()
+            .filter(|entry| form_get(entry, "grant_type") == Some("refresh_token"))
+            .count(),
+        1
+    );
+    h.check();
+}
+
+#[tokio::test]
+async fn primary_handoff_reuses_the_selected_registration_and_id_token_hint() {
+    let h = Harness::start("managed-codex-test", Arc::new(OrderedSecrets::new())).await;
+    succeeded(&h).await;
+    let profile = (h.auth.controller.reconnect_profile.as_ref().unwrap())("chatgpt".to_owned())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut subscription = handoff(&h, Some(profile.clone()));
+    let waiting = loop {
+        match next_handoff(&mut subscription).await.unwrap() {
+            ChatGptHandoffState::Auth { state } if state.phase == ProviderAuthPhase::Waiting => {
+                break state;
+            }
+            ChatGptHandoffState::Auth { .. } => {}
+            other => panic!("expected waiting, got {other:?}"),
+        }
+    };
+    let url = Url::parse(waiting.authorization_url.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        param(&url, "client_id").as_deref(),
+        Some(profile.client_id.as_str())
+    );
+    assert_eq!(
+        param(&url, "id_token_hint").as_deref(),
+        profile.id_token_hint.as_deref()
+    );
+    assert_eq!(
+        param(&url, "login_hint").as_deref(),
+        profile.email.as_ref().and_then(|email| email.as_deref())
+    );
+    assert_eq!(
+        param(&url, "ext_agent_host_id").as_deref(),
+        Some(format!("urn:uuid:{}", h.secrets.environment_id)).as_deref()
+    );
+    let callback = h.prepare(&waiting);
+    reqwest::Client::new().get(&callback).send().await.unwrap();
+    let finished = loop {
+        let item = next_handoff(&mut subscription).await.unwrap();
+        let closed = match &item {
+            ChatGptHandoffState::Finished { .. } => true,
+            ChatGptHandoffState::Auth { state } => handoff_terminal(state),
+        };
+        if closed {
+            break matches!(item, ChatGptHandoffState::Finished { .. });
+        }
+    };
+    assert!(finished);
+    h.check();
+}
+
+#[tokio::test]
+async fn cancelling_primary_handoff_closes_its_callback_listener_without_saving_credentials() {
+    let h = Harness::start("managed-codex-test", Arc::new(OrderedSecrets::new())).await;
+    let mut subscription = handoff(&h, None);
+    let waiting = loop {
+        match next_handoff(&mut subscription).await.unwrap() {
+            ChatGptHandoffState::Auth { state } if state.phase == ProviderAuthPhase::Waiting => {
+                break state;
+            }
+            ChatGptHandoffState::Auth { .. } => {}
+            other => panic!("expected waiting, got {other:?}"),
+        }
+    };
+    let authorize = Url::parse(waiting.authorization_url.as_deref().unwrap()).unwrap();
+    let redirect = param(&authorize, "redirect_uri").unwrap();
+    subscription.interrupt().await;
+    let request = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap()
+        .get(&redirect)
+        .send()
+        .await;
+    assert!(
+        request.is_err(),
+        "callback listener still accepted {request:?}"
+    );
+    assert!(h.auth.read().await.unwrap().is_none());
+}
+
+fn handoff(h: &Harness, profile: Option<ChatGptReconnectProfile>) -> ChatGptHandoffSubscription {
+    subscribe_chatgpt_handoff(
+        ChatGptHandoffInput {
+            instance_id: h.instance.clone(),
+            environment_id: EnvironmentId::new(&h.secrets.environment_id).unwrap(),
+            attempt_id: "test-handoff".to_owned(),
+            return_url: h.return_url.lock().clone(),
+            profile,
+        },
+        "owner",
+        Some(ChatGptHandoffEndpoints {
+            discovery_url: format!("{}/discovery", h.origin),
+            resource: format!("{}/v1", h.origin),
+        }),
+    )
+}
+
+async fn next_handoff(
+    subscription: &mut ChatGptHandoffSubscription,
+) -> Result<ChatGptHandoffState, ProviderSetupError> {
+    let wait = std::future::poll_fn(|cx| Pin::new(&mut *subscription).poll_next(cx));
+    match tokio::time::timeout(Duration::from_secs(20), wait).await {
+        Ok(Some(item)) => item,
+        Ok(None) => panic!("handoff subscription ended"),
+        Err(_) => panic!("timed out waiting for a handoff event"),
+    }
+}
+
+fn handoff_terminal(state: &ProviderAuthState) -> bool {
+    matches!(
+        state.phase,
+        ProviderAuthPhase::Failed | ProviderAuthPhase::Cancelled
+    )
 }
 
 #[test]

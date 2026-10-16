@@ -7,13 +7,13 @@
 //!
 //! Archive also disposes every delegated-completion cohort.
 //!
-//! Not ported, and refused loudly rather than skipped:
-//! * settle with a pending message-capable question (its cancel is the
-//!   runtime-request respond path, owned by T13e);
-//! * settle with an automatic queued run (its cancel is `queued-run.cancel`).
+//! Settle also cancels what only wakes the agent: pending message-capable
+//! questions (the runtime-request respond path with `cancel`) and queued
+//! notification or delegated-completion runs (`queued-run.cancel`).
 
 use std::collections::HashSet;
 
+use turin_contracts::provider_policy::ProviderApprovalDecision;
 use turin_contracts::{
     MessageId, UtcDateTime,
     orchestration_v2::{
@@ -209,21 +209,35 @@ pub(super) async fn decide(
                     format!("Thread {thread_id} {blocker}"),
                 ));
             }
-            if !pending.is_empty() {
-                return Err(dispatch_failure(
+            // Message-capable async questions do not keep provider callbacks
+            // alive. Resolve them in the settle transaction so a settled thread
+            // never has an actionable question attached to it.
+            for request in &pending {
+                super::runtime_request::respond(
+                    orchestrator,
                     command,
-                    format!(
-                        "Thread {thread_id} has a pending question; cancelling it needs the runtime-request port."
-                    ),
-                ));
+                    decision,
+                    super::runtime_request::Response {
+                        thread_id,
+                        request_id: &request.id,
+                        decision: Some(ProviderApprovalDecision::Cancel),
+                        answers: None,
+                        attachments_by_question_id: None,
+                    },
+                )
+                .await?;
             }
-            if !automatic_queued.is_empty() {
-                return Err(dispatch_failure(
+            // Queued notification and delegated-completion runs only wake the
+            // agent; they do not block settling and are cancelled instead.
+            for run in &automatic_queued {
+                super::queued_run::cancel_queued_run(
+                    orchestrator,
                     command,
-                    format!(
-                        "Thread {thread_id} has queued automatic work; cancelling it needs the queued-run port."
-                    ),
-                ));
+                    decision,
+                    thread_id,
+                    &run.id,
+                )
+                .await?;
             }
             let now = decision.now();
             // Settling again with the same settle time keeps updatedAt, so the repeat is a no-op.

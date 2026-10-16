@@ -6,9 +6,9 @@
 //! becomes a `starting` run with a `provider-turn.start` effect. These are
 //! system writes (no client command), under the thread's lock.
 //!
-//! Not ported, and failed loudly through [`Orchestrator::fail_queued_run_start`]
-//! rather than skipped: a queued run that needs a provider handoff
-//! (`ContextHandoffService` is not ported) or a legacy-import recovery handoff.
+//! A queued run that needs a provider handoff or a legacy-import recovery
+//! handoff prepares it through `ContextHandoffService`; a failure there ends
+//! that run through [`Orchestrator::fail_queued_run_start`].
 
 use turin_contracts::{
     CommandId, RunId, ThreadId, UtcDateTime,

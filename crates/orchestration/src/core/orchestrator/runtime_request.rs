@@ -70,15 +70,16 @@ pub(super) async fn decide(
     Ok(true)
 }
 
-struct Response<'a> {
-    thread_id: &'a ThreadId,
-    request_id: &'a RuntimeRequestId,
-    decision: Option<ProviderApprovalDecision>,
-    answers: Option<&'a ProviderUserInputAnswers>,
-    attachments_by_question_id: Option<&'a UserInputAttachments>,
+pub(super) struct Response<'a> {
+    pub(super) thread_id: &'a ThreadId,
+    pub(super) request_id: &'a RuntimeRequestId,
+    pub(super) decision: Option<ProviderApprovalDecision>,
+    pub(super) answers: Option<&'a ProviderUserInputAnswers>,
+    pub(super) attachments_by_question_id: Option<&'a UserInputAttachments>,
 }
 
-async fn respond(
+/// `dispatchRuntimeRequestRespond`.
+pub(super) async fn respond(
     orchestrator: &Orchestrator,
     command: &OrchestrationV2ServerCommand,
     decision: &mut Decision,

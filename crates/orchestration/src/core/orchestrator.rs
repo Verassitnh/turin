@@ -6,10 +6,8 @@
 //! [`orchestrator::dispatch`](self::dispatch), and each command group has its
 //! own file under `core/orchestrator/`, so parallel ports merge cleanly.
 //!
-//! Not ported yet: timeline and
-//! history paging, checkpoint context, and the thread-snapshot reads. Those
-//! return an error here. Command kinds not yet ported are rejected in
-//! `dispatch::decide`, which reports `OrchestratorError::CommandRejected`.
+//! Every read of the upstream shape delegates to the projection store; a
+//! failure is `OrchestratorError::Projection` for that thread.
 
 mod checkpoint_rollback;
 #[cfg(test)]
@@ -68,6 +66,8 @@ mod secret_request;
 #[cfg(test)]
 mod secret_request_tests;
 pub mod services;
+#[cfg(test)]
+mod settle_cleanup_tests;
 #[cfg(test)]
 pub(super) mod test_harness;
 #[cfg(test)]
@@ -267,6 +267,83 @@ impl OrchestratorPort for Orchestrator {
             .get_thread_records(thread_id, fields, Some(projection_record_filter(filter)))
             .await
             .map_err(|cause| Self::projection_error(thread_id, cause))
+    }
+
+    async fn get_thread_history_page(
+        &self,
+        thread_id: &ThreadId,
+        cursor: &str,
+        through_entry_id: Option<&str>,
+        conversation_only: bool,
+    ) -> Result<
+        turin_contracts::orchestration_v2::OrchestrationV2ThreadHistoryPage,
+        OrchestratorError,
+    > {
+        self.projection
+            .get_thread_history_page(thread_id, cursor, through_entry_id, conversation_only)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
+    }
+
+    async fn get_timeline_page(
+        &self,
+        thread_id: &ThreadId,
+        options: crate::projection::store::history::TimelinePageOptions,
+    ) -> Result<crate::projection::store::history::ProjectionTimelinePage, OrchestratorError> {
+        self.projection
+            .get_timeline_page(thread_id, options)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
+    }
+
+    async fn get_message_count(&self, thread_id: &ThreadId) -> Result<u64, OrchestratorError> {
+        self.projection
+            .get_message_count(thread_id)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
+    }
+
+    async fn get_turn_item(
+        &self,
+        thread_id: &ThreadId,
+        item_id: &turin_contracts::TurnItemId,
+    ) -> Result<Option<turin_contracts::orchestration_v2::OrchestrationV2TurnItem>, OrchestratorError>
+    {
+        self.projection
+            .get_turn_item(thread_id, item_id)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
+    }
+
+    async fn get_checkpoint_context(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<crate::projection::store::contexts::CheckpointContext, OrchestratorError> {
+        self.projection
+            .get_checkpoint_context(thread_id)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
+    }
+
+    async fn get_thread_snapshot(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<crate::projection::store::ThreadSnapshot, OrchestratorError> {
+        self.projection
+            .get_thread_snapshot(thread_id)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
+    }
+
+    async fn get_thread_snapshot_window(
+        &self,
+        thread_id: &ThreadId,
+        options: crate::projection::store::ThreadSnapshotWindowOptions,
+    ) -> Result<crate::projection::store::ThreadSnapshot, OrchestratorError> {
+        self.projection
+            .get_thread_snapshot_window(thread_id, options)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
     }
 
     async fn search_thread_stream(

@@ -25,7 +25,12 @@ fn cause(error: &OrchestratorError) -> String {
 /// A running run with a request open on a node under it. `capability` is
 /// `live` (answerable through the run's session), `message` or `not_resumable`;
 /// `item_kind` is `approval_request` or `user_input_request`.
-async fn request(h: &Steer, thread_id: &str, capability: &str, item_kind: &str) -> String {
+pub(super) async fn request(
+    h: &Steer,
+    thread_id: &str,
+    capability: &str,
+    item_kind: &str,
+) -> String {
     let run_id = h.running_run(thread_id).await;
     let projection = h
         .orchestrator

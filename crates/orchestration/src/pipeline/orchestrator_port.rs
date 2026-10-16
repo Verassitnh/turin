@@ -262,6 +262,55 @@ pub trait OrchestratorPort: Send + Sync {
     /// `source_run_id` declined or failed.
     async fn recover_delegated_task(&self, thread_id: &ThreadId, source_run_id: &RunId);
 
+    /// `getThreadHistoryPage`: the page of the thread's history after `cursor`.
+    async fn get_thread_history_page(
+        &self,
+        thread_id: &ThreadId,
+        cursor: &str,
+        through_entry_id: Option<&str>,
+        conversation_only: bool,
+    ) -> Result<
+        turin_contracts::orchestration_v2::OrchestrationV2ThreadHistoryPage,
+        OrchestratorError,
+    >;
+
+    /// `getTimelinePage`.
+    async fn get_timeline_page(
+        &self,
+        thread_id: &ThreadId,
+        options: crate::projection::store::history::TimelinePageOptions,
+    ) -> Result<crate::projection::store::history::ProjectionTimelinePage, OrchestratorError>;
+
+    /// `getMessageCount`.
+    async fn get_message_count(&self, thread_id: &ThreadId) -> Result<u64, OrchestratorError>;
+
+    /// `getTurnItem`: `None` when the thread has no such item.
+    async fn get_turn_item(
+        &self,
+        thread_id: &ThreadId,
+        item_id: &turin_contracts::TurnItemId,
+    ) -> Result<Option<turin_contracts::orchestration_v2::OrchestrationV2TurnItem>, OrchestratorError>;
+
+    /// `getCheckpointContext`.
+    async fn get_checkpoint_context(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<crate::projection::store::contexts::CheckpointContext, OrchestratorError>;
+
+    /// `getThreadSnapshot`: the full projection and the sequence it reflects.
+    async fn get_thread_snapshot(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<crate::projection::store::ThreadSnapshot, OrchestratorError>;
+
+    /// `getThreadSnapshotWindow`: the projection narrowed to recent turns or
+    /// an anchored page.
+    async fn get_thread_snapshot_window(
+        &self,
+        thread_id: &ThreadId,
+        options: crate::projection::store::ThreadSnapshotWindowOptions,
+    ) -> Result<crate::projection::store::ThreadSnapshot, OrchestratorError>;
+
     /// `searchThreadStream`: the frames of one message search. An initial
     /// search yields an early frame (`complete: false`) before the final one.
     async fn search_thread_stream(

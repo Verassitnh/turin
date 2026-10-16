@@ -54,3 +54,83 @@ async fn searching_an_unknown_thread_fails() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn the_port_reads_pages_snapshots_and_items_from_the_store() {
+    use crate::projection::store::ThreadSnapshotWindowOptions;
+    use crate::projection::store::history::TimelinePageOptions;
+    let h = harness(false, None).await;
+    h.running_run("thread:reads").await;
+    let id = super::tests::thread("thread:reads");
+
+    assert_eq!(
+        h.orchestrator.get_message_count(&id).await.expect("count"),
+        1
+    );
+
+    let page = h
+        .orchestrator
+        .get_timeline_page(
+            &id,
+            TimelinePageOptions {
+                limit: 10,
+                ..TimelinePageOptions::default()
+            },
+        )
+        .await
+        .expect("timeline page");
+    assert_eq!(page.items.len(), 1);
+    assert!(!page.has_more);
+
+    let item_id = turin_provider_core::turn_item::turn_item_common(&page.items[0].item)
+        .id
+        .clone();
+    let item = h
+        .orchestrator
+        .get_turn_item(&id, &item_id)
+        .await
+        .expect("turn item");
+    assert!(item.is_some());
+
+    let snapshot = h
+        .orchestrator
+        .get_thread_snapshot(&id)
+        .await
+        .expect("snapshot");
+    assert!(snapshot.snapshot_sequence > 0);
+    assert_eq!(snapshot.projection.runs.len(), 1);
+
+    let window = h
+        .orchestrator
+        .get_thread_snapshot_window(
+            &id,
+            ThreadSnapshotWindowOptions {
+                row_limit: 50,
+                user_turn_limit: Some(1),
+                ..ThreadSnapshotWindowOptions::default()
+            },
+        )
+        .await
+        .expect("window");
+    assert_eq!(window.projection.runs.len(), 1);
+
+    let context = h
+        .orchestrator
+        .get_checkpoint_context(&id)
+        .await
+        .expect("context");
+    assert_eq!(context.runs.len(), 1);
+
+    let history = h
+        .orchestrator
+        .get_thread_history_page(&id, "bogus", None, false)
+        .await;
+    assert!(history.is_err(), "a malformed cursor is a projection error");
+
+    assert!(
+        h.orchestrator
+            .get_message_count(&super::tests::thread("thread:none"))
+            .await
+            .is_ok()
+    );
+}

@@ -18,10 +18,13 @@ use async_trait::async_trait;
 use futures::stream::{self, unfold};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
+use turin_acp::compat::ImplementationInfo;
 use turin_acp::compat::InitializeResponse;
 use turin_acp::cursor::{AskQuestionParams, CreatePlanParams, UpdateTodosParams};
 use turin_acp::protocol::RequestContext;
-use turin_acp::{AcpClient, AcpError, SpawnCommand, spawn};
+use turin_acp::{
+    AcpClient, AcpError, AcpSessionRuntime, AcpSessionRuntimeOptions, AcpSpawnInput, CancelBehavior,
+};
 use turin_contracts::model_selection::ModelSelection;
 use turin_contracts::orchestration_v2::{
     OrchestrationV2ExecutionNodeKind, OrchestrationV2ProviderCapabilities,
@@ -135,7 +138,7 @@ struct ActiveTurn {
 }
 
 struct SessionInner {
-    client: AcpClient,
+    runtime: AcpSessionRuntime,
     provider_events: mpsc::UnboundedSender<ProviderAdapterV2Event>,
     pending: Mutex<HashMap<String, Pending>>,
     grants: Mutex<HashSet<String>>,
@@ -236,8 +239,10 @@ impl CursorSession {
         let instance_id = ProviderInstanceId::new("cursor").expect("cursor instance id");
         let driver = ProviderDriverKind::new("cursor").expect("cursor driver slug");
         let provider_session_id = derive::provider_session(&instance_id);
-        Self::from_client_with(
-            client,
+        let runtime =
+            AcpSessionRuntime::from_connected_client(client, connected_client_runtime_options());
+        Self::from_runtime_with(
+            runtime,
             cursor_home,
             instance_id,
             driver,
@@ -247,8 +252,8 @@ impl CursorSession {
         )
     }
 
-    fn from_client_with(
-        client: AcpClient,
+    fn from_runtime_with(
+        runtime: AcpSessionRuntime,
         cursor_home: Option<PathBuf>,
         instance_id: ProviderInstanceId,
         driver: ProviderDriverKind,
@@ -256,6 +261,7 @@ impl CursorSession {
         cwd: String,
         model: Option<TrimmedNonEmptyString>,
     ) -> Self {
+        let client = runtime.client().clone();
         let (provider_tx, provider_rx) = mpsc::unbounded_channel();
         let now = UtcDateTime::now();
         let provider_session = OrchestrationV2ProviderSession {
@@ -272,7 +278,7 @@ impl CursorSession {
             last_error: None,
         };
         let inner = Arc::new(SessionInner {
-            client: client.clone(),
+            runtime,
             provider_events: provider_tx,
             pending: Mutex::new(HashMap::new()),
             grants: Mutex::new(HashSet::new()),
@@ -301,11 +307,8 @@ impl CursorSession {
     pub async fn initialize(&self) -> Result<InitializeResponse, CursorError> {
         let response = self
             .inner
-            .client
-            .initialize(AcpClient::cursor_initialize(
-                "turin",
-                env!("CARGO_PKG_VERSION"),
-            ))
+            .runtime
+            .initialize()
             .await
             .map_err(|error| CursorError::from_acp(CursorOperation::Initialize, &error))?;
         self.inner.image_prompts.store(
@@ -334,7 +337,8 @@ impl CursorSession {
     /// Explicit browser sign-in. Never called from session open.
     pub async fn sign_in(&self) -> Result<Value, CursorError> {
         self.inner
-            .client
+            .runtime
+            .client()
             .authenticate(auth::authenticate_params())
             .await
             .map_err(|error| CursorError::from_acp(CursorOperation::Authenticate, &error))
@@ -351,7 +355,8 @@ impl CursorSession {
         &self,
     ) -> Result<turin_acp::cursor::ListAvailableModelsResult, CursorError> {
         self.inner
-            .client
+            .runtime
+            .client()
             .cursor_list_available_models()
             .await
             .map_err(|error| CursorError::from_acp(CursorOperation::Models, &error))
@@ -364,11 +369,12 @@ impl CursorSession {
         let session_id = self.session_id()?;
         let catalog = self.list_models().await?;
         let updates = config_updates(&catalog.models, selection);
-        let client = self.inner.client.clone();
+        let runtime = self.inner.runtime.clone();
         let home = self.inner.home.clone();
         with_user_config(home.as_deref(), || async move {
             for update in updates {
-                client
+                runtime
+                    .client()
                     .set_session_config_option(update.payload(&session_id))
                     .await
                     .map_err(|error| CursorError::from_acp(CursorOperation::Config, &error))?;
@@ -382,7 +388,8 @@ impl CursorSession {
         let session_id = self.session_id()?;
         let mode_id = mode_id.to_owned();
         self.inner
-            .client
+            .runtime
+            .client()
             .set_session_mode(json!({"sessionId": session_id, "modeId": mode_id}))
             .await
             .map_err(|error| CursorError::from_acp(CursorOperation::Config, &error))
@@ -418,7 +425,7 @@ impl CursorSession {
             capabilities::negotiate_capabilities(&initialize, setup);
     }
 
-    fn remember_thread(&self, setup: Value) -> Result<CursorThread, CursorError> {
+    async fn remember_thread(&self, setup: Value) -> Result<CursorThread, CursorError> {
         let session_id = setup
             .get("sessionId")
             .and_then(Value::as_str)
@@ -432,9 +439,17 @@ impl CursorSession {
             .to_owned();
         self.refresh_capabilities(Some(&setup));
         let thread = CursorThread {
-            session_id,
-            raw: setup,
+            session_id: session_id.clone(),
+            raw: setup.clone(),
         };
+        if let Err(error) = self
+            .inner
+            .runtime
+            .adopt_started_session(session_id, setup)
+            .await
+        {
+            return Err(CursorError::from_acp(CursorOperation::SessionNew, &error));
+        }
         *self.inner.thread.lock().expect("thread") = Some(thread.clone());
         let mut auth = self.inner.auth.lock().expect("auth");
         auth.phase = auth::SignInPhase::Authenticated;
@@ -459,7 +474,7 @@ impl CursorSession {
         F: FnOnce(AcpClient) -> Fut,
         Fut: std::future::Future<Output = Result<Value, AcpError>>,
     {
-        let client = self.inner.client.clone();
+        let client = self.inner.runtime.client().clone();
         match call(client).await {
             Ok(value) => Ok(value),
             Err(error) => Err(self.fail_auth(operation, error)),
@@ -475,7 +490,7 @@ impl CursorSession {
         F: FnOnce(AcpClient) -> Fut,
         Fut: std::future::Future<Output = Result<Value, AcpError>>,
     {
-        let client = self.inner.client.clone();
+        let client = self.inner.runtime.client().clone();
         let home = self.inner.home.clone();
         let setup = with_user_config(home.as_deref(), || async move {
             call(client)
@@ -488,7 +503,7 @@ impl CursorSession {
                 *self.inner.auth.lock().expect("auth") = CursorSignInStatus::not_signed_in();
             }
         })?;
-        self.remember_thread(setup)
+        self.remember_thread(setup).await
     }
 }
 
@@ -549,7 +564,7 @@ impl CursorSession {
         }
         let result = self
             .inner
-            .client
+            .runtime
             .prompt(json!({"sessionId": session_id, "prompt": prompt}))
             .await;
         // The turn is over either way. A card still waiting here would never get
@@ -572,10 +587,10 @@ impl CursorSession {
             active.stream.interrupted = true;
         }
         cancel_all(&self.inner);
-        let session_id = self.session_id()?;
+        let _session_id = self.session_id()?;
         self.inner
-            .client
-            .cancel(json!({"sessionId": session_id}))
+            .runtime
+            .cancel()
             .await
             .map_err(|error| CursorError::from_acp(CursorOperation::Cancel, &error))
     }
@@ -742,11 +757,11 @@ impl Drop for TurnGuard {
             .lock()
             .ok()
             .and_then(|thread| thread.as_ref().map(|thread| thread.session_id.clone()));
-        if let (Some(session_id), Ok(handle)) = (session_id, tokio::runtime::Handle::try_current())
+        if let (Some(_session_id), Ok(handle)) = (session_id, tokio::runtime::Handle::try_current())
         {
-            let client = self.inner.client.clone();
+            let runtime = self.inner.runtime.clone();
             handle.spawn(async move {
-                let _ = client.cancel(json!({"sessionId": session_id})).await;
+                let _ = runtime.cancel().await;
             });
         }
     }
@@ -1215,23 +1230,21 @@ impl ProviderAdapterV2 for CursorAdapter {
         let cwd = absolute_cwd(input.runtime_policy.cwd.as_deref())
             .display()
             .to_string();
-        let client = spawn(SpawnCommand {
-            program: &self.program,
-            args: auth::ACP_ARGS,
-            cwd: Some(Path::new(&cwd)),
-        })
-        .await
-        .map_err(|error| {
-            map_error(
-                ProviderAdapterErrorKind::OpenSession {
-                    driver: self.driver.clone(),
-                    provider_session_id: input.provider_session_id.clone(),
-                },
-                CursorError::from_acp(CursorOperation::Spawn, &error),
-            )
-        })?;
-        let session = CursorSession::from_client_with(
-            client,
+        let cwd_path = absolute_cwd(input.runtime_policy.cwd.as_deref());
+        let runtime =
+            AcpSessionRuntime::make(cursor_agent_runtime_options(&self.program, cwd_path))
+                .await
+                .map_err(|error| {
+                    map_error(
+                        ProviderAdapterErrorKind::OpenSession {
+                            driver: self.driver.clone(),
+                            provider_session_id: input.provider_session_id.clone(),
+                        },
+                        CursorError::from_acp(CursorOperation::Spawn, &error),
+                    )
+                })?;
+        let session = CursorSession::from_runtime_with(
+            runtime,
             self.cursor_home.clone(),
             self.instance_id.clone(),
             self.driver.clone(),
@@ -1785,12 +1798,82 @@ fn register_ack(client: &AcpClient, method: &str) {
     client.on_ext_request(method, |_params, _ctx| async { Ok(json!({})) });
 }
 
+fn cursor_initialize_request() -> turin_acp::compat::InitializeRequest {
+    AcpClient::cursor_initialize("turin", env!("CARGO_PKG_VERSION"))
+}
+
+fn cursor_session_runtime_options(spawn: AcpSpawnInput, cwd: PathBuf) -> AcpSessionRuntimeOptions {
+    let init = cursor_initialize_request();
+    AcpSessionRuntimeOptions {
+        spawn,
+        cwd,
+        protocol_version: Some(init.protocol_version),
+        resume_session_id: None,
+        resume_method: None,
+        session_load_timeout: None,
+        session_load_replay_idle_gap: None,
+        interrupt_prompt_on_cancel: true,
+        cancel_meta: None,
+        initialize_meta: init.meta,
+        own_detached_process_group: false,
+        own_descendant_process_groups: false,
+        process_group_platform: None,
+        process_group_termination_grace: None,
+        cancel_behavior: CancelBehavior::Interrupt,
+        cancel_timeout: None,
+        client_capabilities: init.client_capabilities,
+        client_info: init.client_info.unwrap_or(ImplementationInfo {
+            name: "turin".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        }),
+        auth_method_id: Some(auth::CURSOR_LOGIN_METHOD.to_owned()),
+        authenticate_eagerly: false,
+        authenticate_on_auth_required: auth::AUTHENTICATE_ON_AUTH_REQUIRED,
+        mcp_servers: None,
+        acp_mcp_servers: None,
+        additional_directories: None,
+        custom_models: None,
+        transform_session_update: None,
+        on_stderr: None,
+        on_initialized: None,
+        on_termination: None,
+        request_logger: None,
+    }
+}
+
+fn cursor_agent_runtime_options(program: &str, cwd: PathBuf) -> AcpSessionRuntimeOptions {
+    cursor_session_runtime_options(
+        AcpSpawnInput {
+            command: program.to_owned(),
+            args: auth::ACP_ARGS.iter().map(|arg| (*arg).to_owned()).collect(),
+            cwd: Some(cwd.clone()),
+            env: None,
+            extend_env: false,
+        },
+        cwd,
+    )
+}
+
+fn connected_client_runtime_options() -> AcpSessionRuntimeOptions {
+    cursor_session_runtime_options(
+        AcpSpawnInput {
+            command: String::new(),
+            args: Vec::new(),
+            cwd: None,
+            env: None,
+            extend_env: false,
+        },
+        PathBuf::from("/"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+    use turin_acp::{SpawnCommand, spawn};
     use turin_contracts::base_schemas::TrimmedNonEmptyString;
     use turin_contracts::model::ProviderOptionSelection;
     use turin_contracts::provider_policy::ProviderApprovalDecision as Decision;

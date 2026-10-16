@@ -84,6 +84,8 @@ pub enum ResumeMethod {
 pub struct AcpSessionRuntimeOptions {
     pub spawn: AcpSpawnInput,
     pub cwd: PathBuf,
+    /// When set, used for the ACP `initialize` request (Cursor uses protocol 1).
+    pub protocol_version: Option<i64>,
     pub resume_session_id: Option<String>,
     pub resume_method: Option<ResumeMethod>,
     pub session_load_timeout: Option<Duration>,
@@ -174,11 +176,17 @@ struct Inner {
     runtime_closed: Arc<tokio::sync::Notify>,
 }
 
+#[derive(Clone)]
 pub struct AcpSessionRuntime {
     inner: Arc<Inner>,
 }
 
 impl AcpSessionRuntime {
+    /// Wrap an already-connected client (duplex tests and injected transports).
+    pub fn from_connected_client(client: AcpClient, options: AcpSessionRuntimeOptions) -> Self {
+        Self::from_client_with_containment(client, options, 0, ProcessContainment::None)
+    }
+
     pub async fn make(options: AcpSessionRuntimeOptions) -> Result<Self, AcpError> {
         if options.own_descendant_process_groups {
             let platform = options
@@ -213,6 +221,20 @@ impl AcpSessionRuntime {
         } else {
             ProcessContainment::None
         };
+        Ok(Self::from_client_with_containment(
+            client,
+            options,
+            pid,
+            process_containment,
+        ))
+    }
+
+    fn from_client_with_containment(
+        client: AcpClient,
+        options: AcpSessionRuntimeOptions,
+        pid: u32,
+        process_containment: ProcessContainment,
+    ) -> Self {
         let (events_tx, _events_rx) = broadcast::channel(256);
         let runtime_closed = Arc::new(tokio::sync::Notify::new());
         let assistant_item_runtime_id = Uuid::new_v4().to_string();
@@ -252,13 +274,17 @@ impl AcpSessionRuntime {
         let runtime = Self {
             inner: Arc::clone(&inner),
         };
-        let hook_inner = Arc::clone(&inner);
+        let hook_inner = Arc::downgrade(&inner);
         let closed_hook = Arc::clone(&runtime_closed);
         inner.client.on_termination(move |error| {
             let error = error.clone();
-            let inner = Arc::clone(&hook_inner);
+            let inner = hook_inner.clone();
             let closed_hook = Arc::clone(&closed_hook);
             tokio::spawn(async move {
+                let Some(inner) = inner.upgrade() else {
+                    closed_hook.notify_waiters();
+                    return;
+                };
                 inner.record_termination(error.clone()).await;
                 if let Some(on_termination) = inner.options.on_termination.as_ref() {
                     on_termination(error);
@@ -266,10 +292,13 @@ impl AcpSessionRuntime {
                 closed_hook.notify_waiters();
             });
         });
-        let session_inner = Arc::clone(&inner);
+        let session_inner = Arc::downgrade(&inner);
         inner.client.on_session_update(move |notification| {
-            let inner = Arc::clone(&session_inner);
+            let inner = session_inner.clone();
             async move {
+                let Some(inner) = inner.upgrade() else {
+                    return Ok(());
+                };
                 let _sem = inner.notification_semaphore.acquire().await;
                 if inner.termination_error.lock().await.is_some() {
                     return Ok(());
@@ -278,7 +307,35 @@ impl AcpSessionRuntime {
                 Ok(())
             }
         });
-        Ok(runtime)
+        runtime
+    }
+
+    /// Records session setup after an external `session/new` or `session/load`.
+    pub async fn adopt_started_session(
+        &self,
+        session_id: String,
+        session_setup_result: Value,
+    ) -> Result<(), AcpError> {
+        let initialize_result = self
+            .inner
+            .initialize_result
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| AcpError::transport("ACP session runtime is not initialized"))?;
+        let setup_response: AcpSessionSetupResponse =
+            serde_json::from_value(session_setup_result.clone()).unwrap_or_default();
+        let mode_state = parse_session_mode_state(&setup_response);
+        *self.inner.mode_state.lock().await = mode_state;
+        *self.inner.config_options.lock().await =
+            session_config_options_from_setup(Some(&session_setup_result));
+        *self.inner.start_result.lock().await = Some(AcpSessionRuntimeStartResult {
+            session_id,
+            initialize_result,
+            model_config_id: extract_model_config_id(&setup_response),
+            session_setup_result,
+        });
+        Ok(())
     }
 
     pub fn process_containment(&self) -> ProcessContainment {
@@ -466,7 +523,7 @@ impl Inner {
     async fn initialize_once(&self) -> Result<InitializeResponse, AcpError> {
         let caps = self.options.client_capabilities.clone().unwrap_or_default();
         let request = InitializeRequest {
-            protocol_version: 2,
+            protocol_version: self.options.protocol_version.unwrap_or(2),
             client_capabilities: Some(caps),
             client_info: Some(self.options.client_info.clone()),
             meta: self.options.initialize_meta.clone(),

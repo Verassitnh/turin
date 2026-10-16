@@ -58,8 +58,8 @@ impl ProjectionStore {
             )?;
             let threads = rows.decode()?;
             let projects = list_shells_in(conn, None).map_err(ProjectionStoreError::Database)?;
-            let sequence = latest_application_sequence(conn)
-                .map_err(ProjectionStoreError::Database)?;
+            let sequence =
+                latest_application_sequence(conn).map_err(ProjectionStoreError::Database)?;
             Ok(build_active_shell_snapshot(
                 projects,
                 threads,

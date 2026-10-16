@@ -22,7 +22,7 @@ use gpui_kit::{App, AppContext as _, Context, Entity, Subscription, WeakEntity};
 use serde_json::{Value, json};
 use turin_contracts::ThreadId;
 
-use super::timeline::live_projection::snapshot_from_projection;
+use super::timeline::live_projection::{decision_wire, snapshot_from_projection};
 use super::timeline::source::{ThreadTimelineStore, TimelineSource};
 use super::timeline::turn_item::ProviderApprovalDecision;
 use crate::app_runtime::write::bus::CommandBus;
@@ -177,7 +177,11 @@ impl LiveSource {
             .as_ref()
             .and_then(|view| view.project(&projection.thread.project_id))
             .map(|project| project.workspace_root.clone());
-        let snapshot = snapshot_from_projection(projection, workspace_root);
+        let pending = entry
+            .detail
+            .as_ref()
+            .map(|detail| detail.pending_requests.clone());
+        let snapshot = snapshot_from_projection(projection, pending.as_deref(), workspace_root);
         self.timeline
             .update(cx, |store, cx| {
                 if **store.snapshot() != snapshot {
@@ -290,6 +294,27 @@ impl LiveSource {
                 }
             },
         ))
+    }
+
+    /// Runs a command off the UI thread; a failure toasts `title`.
+    fn run_command<Fut>(
+        &self,
+        title: &'static str,
+        cx: &mut App,
+        command: impl FnOnce(crate::app_runtime::write::commands::Commands) -> Fut + Send + 'static,
+    ) where
+        Fut: std::future::Future<
+                Output = Result<(), crate::app_runtime::write::commands::CommandError>,
+            > + Send
+            + 'static,
+    {
+        let task = self.bus.task(cx, command);
+        cx.spawn(async move |cx| {
+            if let Err(error) = task.await {
+                cx.update(|cx| push_error(cx, title, &error.message));
+            }
+        })
+        .detach();
     }
 
     fn not_wired(&self, what: &str, cx: &mut App) {
@@ -514,23 +539,55 @@ impl LiveSource {
 impl TimelineSource for LiveSource {
     fn respond_to_approval(
         &self,
-        _request_id: &str,
-        _decision: ProviderApprovalDecision,
+        request_id: &str,
+        decision: ProviderApprovalDecision,
         cx: &mut App,
     ) {
-        self.not_wired("Approvals", cx);
+        let (thread_id, request_id) = (self.thread_id.clone(), request_id.to_owned());
+        self.run_command(
+            "Failed to respond to approval",
+            cx,
+            move |commands| async move {
+                commands
+                    .respond_to_request(
+                        &thread_id,
+                        &request_id,
+                        Some(decision_wire(decision)),
+                        None,
+                    )
+                    .await
+            },
+        );
     }
 
     fn respond_to_user_input(
         &self,
-        _request_id: &str,
-        _answers: Vec<(String, String)>,
+        request_id: &str,
+        answers: Vec<(String, String)>,
         cx: &mut App,
     ) {
-        self.not_wired("Answering questions", cx);
+        let (thread_id, request_id) = (self.thread_id.clone(), request_id.to_owned());
+        let answers: serde_json::Map<String, Value> = answers
+            .into_iter()
+            .map(|(question, answer)| (question, Value::String(answer)))
+            .collect();
+        self.run_command(
+            "Failed to submit your answer",
+            cx,
+            move |commands| async move {
+                commands
+                    .respond_to_request(&thread_id, &request_id, None, Some(Value::Object(answers)))
+                    .await
+            },
+        );
     }
 
-    fn dismiss_user_input(&self, _request_id: &str, _cx: &mut App) {}
+    fn dismiss_user_input(&self, request_id: &str, cx: &mut App) {
+        let (thread_id, request_id) = (self.thread_id.clone(), request_id.to_owned());
+        self.run_command("Failed to dismiss the question", cx, move |commands| async move {
+            commands.dismiss_user_input(&thread_id, &request_id).await
+        });
+    }
 
     fn revert_to_turn_count(&self, _turn_count: u64, _message_id: &str, cx: &mut App) {
         self.not_wired("Reverting to a turn", cx);

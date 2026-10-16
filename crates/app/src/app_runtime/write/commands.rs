@@ -303,6 +303,47 @@ impl Commands {
         .map(drop)
     }
 
+    /// `runtime-request.respond`: an approval decision (`accept`,
+    /// `acceptForSession`, `acceptAlways`, `decline`, `cancel`) or the answers
+    /// to a user-input request (question id -> answer).
+    pub async fn respond_to_request(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+        decision: Option<&str>,
+        answers: Option<Value>,
+    ) -> Result<(), CommandError> {
+        let mut command = json!({
+            "type": "runtime-request.respond",
+            "commandId": command_id(),
+            "threadId": thread_id,
+            "requestId": request_id,
+        });
+        if let Some(object) = command.as_object_mut() {
+            if let Some(decision) = decision {
+                object.insert("decision".into(), json!(decision));
+            }
+            if let Some(answers) = answers {
+                object.insert("answers".into(), answers);
+            }
+        }
+        self.dispatch(command).await.map(drop)
+    }
+
+    /// `thread.user-input.dismiss`: gives up on a pending question.
+    pub async fn dismiss_user_input(
+        &self,
+        thread_id: &ThreadId,
+        request_id: &str,
+    ) -> Result<(), CommandError> {
+        self.thread_command(
+            "thread.user-input.dismiss",
+            thread_id,
+            json!({"requestId": request_id}),
+        )
+        .await
+    }
+
     /// Any thread command that is just `{type, commandId, threadId, ..extra}`
     /// (archive, delete, pin, ...).
     pub async fn thread_command(

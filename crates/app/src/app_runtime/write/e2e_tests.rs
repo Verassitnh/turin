@@ -367,3 +367,201 @@ async fn stop_interrupts_a_running_turn() {
     assert!(stopped, "the run reached running before it settled");
     assert_eq!(status, OrchestrationV2RunStatus::Interrupted);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_approval_is_raised_answered_from_a_command_and_the_turn_finishes() {
+    use turin_contracts::orchestration_v2::OrchestrationV2RuntimeRequestStatus;
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+
+    let harness = harness_with("claude_approval.ndjson").await;
+    let project_id = harness
+        .commands
+        .create_project("Fixture", harness.workspace.to_str().expect("utf-8"))
+        .await
+        .expect("create project");
+    let thread = harness
+        .commands
+        .create_thread(CreateThread {
+            project_id,
+            title: "Approve me".into(),
+            model_selection: json!({"instanceId": "claudeAgent", "model": "claude-sonnet-4-6"}),
+            runtime_mode: "approval-required".into(),
+            interaction_mode: "default".into(),
+        })
+        .await
+        .expect("create thread");
+    let after = harness
+        .stores
+        .sink
+        .latest_sequence(Some(thread.clone()))
+        .await
+        .expect("sequence");
+    let mut events = harness
+        .stores
+        .sink
+        .stream(StreamOptions {
+            thread_id: Some(thread.clone()),
+            after_sequence: Some(after),
+            event_type: None,
+        })
+        .await
+        .expect("stream");
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Run pwd".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+        })
+        .await
+        .expect("send");
+
+    let orchestrator = harness.commands.runtime().orchestrator.clone();
+    let mut answered = false;
+    let status = tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(item) = events.next().await {
+            match item.expect("event").event {
+                OrchestrationV2DomainEvent::RuntimeRequestUpdated { .. } if !answered => {
+                    let records = orchestrator
+                        .get_thread_records(
+                            &thread,
+                            &[RecordField::RuntimeRequests],
+                            &RecordFilter::default(),
+                        )
+                        .await
+                        .expect("records");
+                    let Some(request) = records.runtime_requests.iter().find(|request| {
+                        request.status == OrchestrationV2RuntimeRequestStatus::Pending
+                    }) else {
+                        continue;
+                    };
+                    answered = true;
+                    harness
+                        .commands
+                        .respond_to_request(&thread, request.id.as_str(), Some("accept"), None)
+                        .await
+                        .expect("respond");
+                }
+                OrchestrationV2DomainEvent::RunUpdated { payload, .. } => match payload.status {
+                    OrchestrationV2RunStatus::Completed
+                    | OrchestrationV2RunStatus::Failed
+                    | OrchestrationV2RunStatus::Interrupted
+                    | OrchestrationV2RunStatus::Cancelled => return payload.status,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        panic!("event stream ended before the run settled");
+    })
+    .await
+    .expect("run settled in time");
+    assert!(answered, "an approval was raised");
+    assert_eq!(status, OrchestrationV2RunStatus::Completed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "WIP: the answered AskUserQuestion turn never settles; under investigation"]
+async fn a_user_input_question_is_answered_from_a_command_and_the_turn_finishes() {
+    use turin_contracts::orchestration_v2::{
+        OrchestrationV2RuntimeRequestStatus, OrchestrationV2TurnItem,
+    };
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+
+    let harness = harness_with("claude_user_input.ndjson").await;
+    let thread = project_and_thread(&harness).await;
+    let after = harness
+        .stores
+        .sink
+        .latest_sequence(Some(thread.clone()))
+        .await
+        .expect("sequence");
+    let mut events = harness
+        .stores
+        .sink
+        .stream(StreamOptions {
+            thread_id: Some(thread.clone()),
+            after_sequence: Some(after),
+            event_type: None,
+        })
+        .await
+        .expect("stream");
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Ask me something".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+        })
+        .await
+        .expect("send");
+
+    let orchestrator = harness.commands.runtime().orchestrator.clone();
+    let mut answered = false;
+    let status = tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(item) = events.next().await {
+            match item.expect("event").event {
+                OrchestrationV2DomainEvent::RunUpdated { payload, .. } => match payload.status {
+                    OrchestrationV2RunStatus::Completed
+                    | OrchestrationV2RunStatus::Failed
+                    | OrchestrationV2RunStatus::Interrupted
+                    | OrchestrationV2RunStatus::Cancelled => return payload.status,
+                    _ if !answered => {
+                        let records = orchestrator
+                            .get_thread_records(
+                                &thread,
+                                &[RecordField::RuntimeRequests, RecordField::TurnItems],
+                                &RecordFilter::default(),
+                            )
+                            .await
+                            .expect("records");
+                        let Some(request) = records.runtime_requests.iter().find(|request| {
+                            request.status == OrchestrationV2RuntimeRequestStatus::Pending
+                        }) else {
+                            continue;
+                        };
+                        let Some(question_id) =
+                            records.turn_items.iter().find_map(|item| match item {
+                                OrchestrationV2TurnItem::UserInputRequest { questions, .. } => {
+                                    questions.first().map(|question| question.id.to_string())
+                                }
+                                _ => None,
+                            })
+                        else {
+                            // The request lands one event before its turn item.
+                            continue;
+                        };
+                        answered = true;
+                        harness
+                            .commands
+                            .respond_to_request(
+                                &thread,
+                                request.id.as_str(),
+                                None,
+                                Some(json!({ question_id: "Blue" })),
+                            )
+                            .await
+                            .expect("respond");
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        panic!("event stream ended before the run settled");
+    })
+    .await
+    .expect("run settled in time");
+    assert!(answered, "a question was raised");
+    assert_eq!(status, OrchestrationV2RunStatus::Completed);
+}

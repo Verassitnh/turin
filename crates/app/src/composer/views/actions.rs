@@ -628,6 +628,39 @@ impl ChatComposer {
         }
     }
 
+    /// Take back a draft whose send failed, unless the user already typed
+    /// something new.
+    pub(super) fn sync_restore(
+        &mut self,
+        vm: &ComposerViewModel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(restore) = vm.restore_draft.as_ref() else {
+            return;
+        };
+        if restore.nonce == self.restored_nonce {
+            return;
+        }
+        self.restored_nonce = restore.nonce;
+        if self.has_sendable_content(cx) {
+            return;
+        }
+        self.replace_prompt(&restore.prompt, window, cx);
+        let key = self.thread_key.clone();
+        self.drafts.add_images(
+            &key,
+            restore.images.clone(),
+            crate::composer::draft_store::AddAttachmentsOptions::default(),
+        );
+        self.drafts.add_files(
+            &key,
+            restore.files.clone(),
+            crate::composer::draft_store::AddAttachmentsOptions::default(),
+        );
+        cx.notify();
+    }
+
     /// Load a queued message into the composer while it is edited, and bring
     /// the previous draft back afterwards (`onEditQueuedRun`).
     pub(super) fn sync_queue_edit(

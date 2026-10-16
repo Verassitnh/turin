@@ -11,17 +11,18 @@ use std::{collections::HashSet, sync::Arc};
 use async_trait::async_trait;
 use turin_contracts::{
     CommandId, ProjectId, RunAttemptId, RunId, ThreadId, TurnItemId, UtcDateTime,
+    base_schemas::js_trim,
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2AppThread, OrchestrationV2ContextHandoff,
-        OrchestrationV2ContextHandoffDeliveryStatus, OrchestrationV2ContextHandoffStatus,
-        OrchestrationV2ContextHandoffStrategy, OrchestrationV2ContextTransfer,
-        OrchestrationV2ContextTransferResolution, OrchestrationV2ContextTransferStatus,
-        OrchestrationV2ContextTransferType, OrchestrationV2DomainEvent,
-        OrchestrationV2ProviderFailureClass, OrchestrationV2ProviderThread,
-        OrchestrationV2ProviderThreadStatus, OrchestrationV2ProviderTurn,
-        OrchestrationV2RunAttempt, OrchestrationV2RunStatus, OrchestrationV2ThreadProjection,
-        OrchestrationV2TurnItem,
+        OrchestrationV2ContextHandoffDelivery, OrchestrationV2ContextHandoffDeliveryStatus,
+        OrchestrationV2ContextHandoffStatus, OrchestrationV2ContextHandoffStrategy,
+        OrchestrationV2ContextTransfer, OrchestrationV2ContextTransferResolution,
+        OrchestrationV2ContextTransferStatus, OrchestrationV2ContextTransferType,
+        OrchestrationV2DomainEvent, OrchestrationV2ProviderFailureClass,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadStatus,
+        OrchestrationV2ProviderTurn, OrchestrationV2RunAttempt, OrchestrationV2RunStatus,
+        OrchestrationV2ThreadProjection, OrchestrationV2TurnItem,
     },
     provider_instance::ProviderInstanceId,
 };
@@ -32,6 +33,7 @@ use turin_provider_core::{
         handoff_token_cap_config, latest_native_context_usage,
     },
     id_allocator::{IdAllocator, derive},
+    js::js_trim_start,
     provider_adapter::{
         ProviderAdapterErrorKind, ProviderAdapterV2EnsureThreadInput, ProviderAdapterV2Error,
         ProviderAdapterV2ForkThreadInput, ProviderAdapterV2OpenSessionInput,
@@ -409,6 +411,25 @@ impl TurnStartWorkspace for LocalTurnStartWorkspace {
 // The service
 // ---------------------------------------------------------------------------
 
+/// `handoff.delivery?.nativeThreadId === runningProviderThread.nativeThreadRef?.nativeId
+/// && handoff.delivery?.status !== "pending"`. The optional chains matter: a
+/// handoff with no delivery is settled when the running thread has no native
+/// thread ref at all (`undefined === undefined`), but not when it has a ref
+/// whose id is null (`undefined !== null`).
+fn handoff_settled_for(
+    delivery: Option<&OrchestrationV2ContextHandoffDelivery>,
+    running_has_native_ref: bool,
+    running_native_id: Option<&str>,
+) -> bool {
+    match delivery {
+        Some(delivery) => {
+            Some(delivery.native_thread_id.as_str()) == running_native_id
+                && delivery.status != OrchestrationV2ContextHandoffDeliveryStatus::Pending
+        }
+        None => !running_has_native_ref,
+    }
+}
+
 /// `ProviderTurnStartServiceV2`.
 pub struct ProviderTurnStartService {
     events: Arc<dyn RunEventWriter>,
@@ -652,7 +673,7 @@ impl ProviderTurnStartService {
             root_node,
         };
 
-        if message.attachments.is_empty() && message.text.trim_start().starts_with('/') {
+        if message.attachments.is_empty() && js_trim_start(&message.text).starts_with('/') {
             let is_empty_compaction =
                 turin_contracts::base_schemas::js_trim(&message.text).to_lowercase() == "/compact"
                     && !projection.has_conversation;
@@ -1426,12 +1447,11 @@ impl ProviderTurnStartService {
             .iter()
             .filter(|handoff| {
                 handoff.to_provider_thread_id == provider_thread.id
-                    && handoff.delivery.as_ref().is_some_and(|delivery| {
-                        Some(delivery.native_thread_id.as_str())
-                            == running_native_id.as_ref().map(|id| id.as_str())
-                            && delivery.status
-                                != OrchestrationV2ContextHandoffDeliveryStatus::Pending
-                    })
+                    && handoff_settled_for(
+                        handoff.delivery.as_ref(),
+                        running_provider_thread.native_thread_ref.is_some(),
+                        running_native_id.as_ref().map(|id| id.as_str()),
+                    )
             })
             .collect();
         let delivered_item_ids: HashSet<TurnItemId> = settled_handoffs
@@ -1496,6 +1516,9 @@ impl ProviderTurnStartService {
             })
             .map(|source| source.id.clone())
             .collect();
+        // Replacing a native thread clears its usage, not the selected model's
+        // capacity: the budget thread below carries `handoff_usage`, and the
+        // window still falls back to the previous usage's maximum.
         let model_context_window = known_model_window.map(|window| window as i64).or_else(|| {
             if handoff_usage.is_some() || reuse_telemetry {
                 previous_usage
@@ -1589,6 +1612,8 @@ impl ProviderTurnStartService {
             ))
         };
 
+        // Legacy accepted attempts have no native id. They count only before a
+        // replacement, while no accepted attempt records a native identity.
         let native_thread_has_turns = !native_input_run_ids.is_empty()
             || (!legacy_input_run_ids.is_empty()
                 && same_native_thread

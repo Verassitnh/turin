@@ -18,15 +18,17 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt as _;
 use tokio_util::task::AbortOnDropHandle;
-use turin_contracts::orchestration_v2::{OrchestrationV2DomainEvent, OrchestrationV2ServerCommand};
+use turin_contracts::orchestration_v2::{OrchestrationV2Command, OrchestrationV2DomainEvent};
 use turin_contracts::settings::ServerSettings;
 use turin_git::git_vcs_driver::GitVcsDriver;
 use turin_git::process::ProcessRunner;
 use turin_orchestration::core::context_handoff_service::ContextHandoffService;
 use turin_orchestration::core::orchestrator::Orchestrator;
+use turin_orchestration::core::orchestrator::delegated_task::LateDelegatedTaskRecovery;
 use turin_orchestration::core::orchestrator::services::{
     DispatchSeams, ReconcileTrigger, RestartRecovery as _,
 };
+use turin_orchestration::core::provider_continuation_service::ProviderContinuationService;
 use turin_orchestration::core::provider_event_ingestor::ProviderEventIngestor;
 use turin_orchestration::core::provider_runtime_recovery_service::ProviderRuntimeRecoveryService;
 use turin_orchestration::core::provider_session_manager::{
@@ -38,12 +40,13 @@ use turin_orchestration::core::provider_turn_start_service::{
     LocalTurnStartWorkspace, NoPromptCommands, ProjectRootsRuntimePolicy, ProviderTurnStartService,
 };
 use turin_orchestration::core::restart_continuation_service::{
-    LateRestartThreads, NoDelegatedTaskRecovery, RestartContinuationService,
+    LateRestartThreads, RestartContinuationService,
 };
 use turin_orchestration::core::run_execution_service::{NoAfterTurnRefresh, RunExecutionService};
 use turin_orchestration::core::run_finalization_service::RunFinalizationService;
 use turin_orchestration::core::runtime_request_service::RuntimeRequestService;
 use turin_orchestration::core::session_sink::EventSessionSink;
+use turin_orchestration::pipeline::attachment_claims::AttachmentClaims;
 use turin_orchestration::pipeline::command_receipt_store::CommandReceiptStore;
 use turin_orchestration::pipeline::effect_worker::{
     EffectDaemon, EffectDaemonOptions, EffectWorker, EffectWorkerOptions,
@@ -52,16 +55,19 @@ use turin_orchestration::pipeline::event_sink::{EventSink, StreamOptions};
 use turin_orchestration::pipeline::hooks_bridge::NoHooks;
 use turin_orchestration::pipeline::orchestrator_port::{DispatchResult, OrchestratorPort};
 use turin_orchestration::pipeline::thread_command_executor::ThreadCommandExecutor;
-use turin_orchestration::pipeline::thread_management_service::{
-    ThreadManagementError, ThreadManagementService,
-};
+use turin_orchestration::pipeline::thread_management_service::ThreadManagementService;
+use turin_orchestration::pipeline::thread_message_intake::{IntakeError, ThreadMessageIntake};
 use turin_orchestration::reactors::checkpoint_capture_service::CheckpointCaptureService;
 use turin_orchestration::reactors::checkpoint_git::TurinCheckpointGit;
 use turin_orchestration::reactors::checkpoint_service::CheckpointService;
+use turin_orchestration::reactors::workspace_claims::ProjectionWorkspaceClaims;
+use turin_provider_core::id_allocator::IdAllocator;
 use turin_provider_core::provider_adapter_registry::ProviderAdapterRegistry;
+use turin_provider_core::provider_continuation_requests::ProviderContinuationRequests;
 
 use super::adapters::{
-    HostSettings, ManagerSessions, NoWorkspaceRefresh, ServiceCheckpointScopes, StoredProjects,
+    HostSettings, IntakeThreads, ManagerSessions, NoWorkspaceRefresh, ServiceCheckpointScopes,
+    StoredProjects, ThreadsForContinuations,
 };
 use super::effects::TurinEffectExecutor;
 use super::providers::Providers;
@@ -72,8 +78,15 @@ pub struct WriteRuntime {
     pub providers: Providers,
     pub orchestrator: Arc<Orchestrator>,
     pub threads: Arc<ThreadManagementService>,
+    /// Claims staged uploads before a message reaches the orchestrator.
+    intake: ThreadMessageIntake,
+    /// Where uploads are staged and claimed (`<data dir>/userdata/attachments`).
+    pub attachments_dir: std::path::PathBuf,
+    /// `@` path completion over a workspace.
+    pub workspace_entries: Arc<turin_git::workspace::workspace_entries::WorkspaceEntries>,
     pub sessions: Arc<ProviderSessionManager>,
     effects: EffectDaemon,
+    _continuations: ProviderContinuationService,
     recovery: Arc<ProviderRuntimeRecoveryService>,
     _terminal_runs: AbortOnDropHandle<()>,
 }
@@ -163,14 +176,16 @@ impl WriteRuntime {
         // construction and the service needs the thread-management service
         // (which holds the orchestrator), so the threads are bound late.
         let late_threads = LateRestartThreads::new();
+        let late_delegated = LateDelegatedTaskRecovery::new();
         let restart = Arc::new(RestartContinuationService::new(
             host_settings.clone(),
             late_threads.clone(),
             projection.clone(),
             stores.outbox.clone(),
-            // Delegated tasks (finalizeAppOwnedSubagent) are not ported yet.
-            Arc::new(NoDelegatedTaskRecovery),
+            late_delegated.clone(),
         ));
+
+        let continuation_requests = Arc::new(ProviderContinuationRequests::queue());
 
         // The decider.
         let switch_planner = Arc::new(ProviderSwitchService::new(Arc::new(
@@ -190,20 +205,37 @@ impl WriteRuntime {
                 sessions: sessions.clone(),
                 switch_planner,
                 provider_instances: host_settings.clone(),
-                ..DispatchSeams::default()
+                // `checkpoint.rollback` file restore: without these it fails closed.
+                workspace_claims: Arc::new(ProjectionWorkspaceClaims::new(
+                    projection.clone(),
+                    Arc::clone(&stores.projects),
+                )),
+                // Wake offers go to the continuation service started below.
+                continuation_requests: continuation_requests.clone(),
             }),
         );
+        let attachments_dir = std::path::PathBuf::from(&providers.host.paths.attachments_dir);
         let threads = Arc::new(ThreadManagementService::new(
             ThreadCommandExecutor::new(),
             orchestrator.clone() as Arc<dyn OrchestratorPort>,
             Arc::new(ManagerSessions(sessions.clone())),
             host_settings.clone(),
             CommandReceiptStore::new(stores.db.clone()),
-            projects,
+            projects.clone(),
             Arc::new(NoHooks),
         ));
 
+        let intake = ThreadMessageIntake::new(
+            AttachmentClaims::new(attachments_dir.clone()),
+            Arc::new(IntakeThreads(threads.clone())),
+        );
         late_threads.bind(threads.clone());
+        let continuations = ProviderContinuationService::start(
+            IdAllocator,
+            continuation_requests,
+            Arc::new(ThreadsForContinuations(threads.clone())),
+        );
+        late_delegated.bind(orchestrator.clone());
 
         // Startup order (upstream serverRuntimeStartup): reconcile runs that
         // were live when the last process died, settle delegated tasks, then
@@ -228,6 +260,12 @@ impl WriteRuntime {
             finalization,
             threads: threads.clone(),
             restart,
+            projects: projects.clone(),
+            settings: host_settings.clone(),
+            text_generation: Arc::new(super::text_generation::build(
+                &providers.settings.settings().await,
+                instances.clone(),
+            )),
         });
         let worker = EffectWorker::new(
             stores.outbox.clone(),
@@ -250,8 +288,12 @@ impl WriteRuntime {
             providers,
             orchestrator,
             threads,
+            intake,
+            attachments_dir,
+            workspace_entries: super::path_search::workspace_entries(),
             sessions,
             effects,
+            _continuations: continuations,
             recovery,
             _terminal_runs: terminal_runs,
         }))
@@ -272,14 +314,14 @@ impl WriteRuntime {
         }
     }
 
-    /// One command through the thread-management chokepoint (provider
-    /// instance check, workspace binding), then the orchestrator's receipt
-    /// and decider.
+    /// One client command through the message intake (attachment claims),
+    /// the thread-management chokepoint (provider instance check, workspace
+    /// binding), then the orchestrator's receipt and decider.
     pub async fn dispatch(
         &self,
-        command: OrchestrationV2ServerCommand,
-    ) -> Result<DispatchResult, ThreadManagementError> {
-        self.threads.dispatch(command).await
+        command: OrchestrationV2Command,
+    ) -> Result<DispatchResult, IntakeError> {
+        self.intake.dispatch_command(command).await
     }
 }
 

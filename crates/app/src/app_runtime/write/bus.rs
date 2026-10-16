@@ -9,13 +9,16 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock};
 
 use tokio::runtime::Handle;
+use turin_provider_core::server_provider::ServerProvider;
 
 use super::commands::{CommandError, Commands};
 
-#[derive(Default)]
 struct Shared {
     commands: OnceLock<Commands>,
     failure: OnceLock<String>,
+    /// The provider status list (`ProviderRegistry::get_providers`), kept
+    /// current by the composition root.
+    providers: tokio::sync::watch::Sender<Arc<Vec<ServerProvider>>>,
 }
 
 #[derive(Clone)]
@@ -28,7 +31,11 @@ impl CommandBus {
     pub fn new(handle: Handle) -> Self {
         Self {
             handle,
-            shared: Arc::default(),
+            shared: Arc::new(Shared {
+                commands: OnceLock::new(),
+                failure: OnceLock::new(),
+                providers: tokio::sync::watch::channel(Arc::default()).0,
+            }),
         }
     }
 
@@ -39,6 +46,15 @@ impl CommandBus {
     /// Startup failed: every command reports `message`.
     pub(crate) fn fail(&self, message: String) {
         let _ = self.shared.failure.set(message);
+    }
+
+    pub(crate) fn publish_providers(&self, providers: Vec<ServerProvider>) {
+        self.shared.providers.send_replace(Arc::new(providers));
+    }
+
+    /// Provider status snapshots; `changed()` wakes on every registry update.
+    pub fn providers(&self) -> tokio::sync::watch::Receiver<Arc<Vec<ServerProvider>>> {
+        self.shared.providers.subscribe()
     }
 
     pub fn handle(&self) -> &Handle {

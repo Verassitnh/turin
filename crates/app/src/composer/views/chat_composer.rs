@@ -90,6 +90,8 @@ pub struct ChatComposer {
     pub(super) queue_expanded: bool,
     pub(super) stash_highlight: Option<String>,
     pub(super) editing_run_id: Option<String>,
+    /// The last `DraftRestore` applied.
+    pub(super) restored_nonce: u64,
     pub(super) pre_edit_prompt: Option<String>,
     citation_comment: Option<OpenCitationComment>,
     _subscriptions: Vec<Subscription>,
@@ -155,6 +157,7 @@ impl ChatComposer {
             queue_expanded: true,
             stash_highlight: None,
             editing_run_id: None,
+            restored_nonce: 0,
             pre_edit_prompt: None,
             citation_comment: None,
             _subscriptions: subscriptions,
@@ -925,6 +928,7 @@ impl Render for ChatComposer {
         let vm = self.view_model(cx);
         self.sync_thread(&vm, window, cx);
         self.sync_queue_edit(&vm, window, cx);
+        self.sync_restore(&vm, window, cx);
         self.sync_editor_config(&vm, cx);
         let theme = cx.app_theme().clone();
         let dark = theme.is_dark();

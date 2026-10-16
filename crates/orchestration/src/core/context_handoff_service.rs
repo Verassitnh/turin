@@ -330,7 +330,9 @@ fn wire_text<T: Serialize>(value: &T) -> String {
         .unwrap_or_default()
 }
 
-/// `compactText`. Lengths are UTF-16 code units, as in JavaScript.
+/// `compactText`: `text.replace(/\s+/g, " ").trim()`, then a cut. `\s` is
+/// JavaScript's set (it has U+FEFF and not U+0085), not Unicode White_Space.
+/// Lengths are UTF-16 code units, as in JavaScript.
 fn compact_text(text: &str, max_length: usize) -> String {
     let compacted = text
         .split(turin_contracts::base_schemas::is_js_whitespace)
@@ -670,6 +672,14 @@ mod tests {
             handoff.strategy,
             OrchestrationV2ContextHandoffStrategy::DeltaSinceTargetLastSeen
         );
+    }
+    #[test]
+    fn compact_text_collapses_javascript_whitespace_not_unicode_whitespace() {
+        // JS `\s` has U+FEFF and not U+0085 (NEL).
+        assert_eq!(compact_text("\u{feff} a \n\t b\u{feff}c  ", 240), "a b c");
+        assert_eq!(compact_text("a\u{85}b", 240), "a\u{85}b");
+        // The cut counts UTF-16 units and appends "...".
+        assert_eq!(compact_text("abcdefghij", 8), "abcde...");
     }
 }
 

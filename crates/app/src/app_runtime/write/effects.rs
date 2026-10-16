@@ -30,7 +30,15 @@ use turin_orchestration::core::runtime_request_service::{
     RuntimeRequestResponse, RuntimeRequestService,
 };
 use turin_orchestration::core::steer_follow_up::after_steer;
-use turin_orchestration::pipeline::effect_outbox::{Effect, EffectRequest, SessionTransition};
+use turin_orchestration::pipeline::effect_outbox::{
+    Effect, EffectRequest, SessionTransition, ThreadTitleKind,
+};
+use turin_orchestration::pipeline::thread_title_regeneration_service::{
+    ThreadTitleRegenerationService, TitleRegenerationInput, TitleRegenerationKind,
+};
+use turin_text_generation::TextGeneration;
+
+use super::adapters::{HostSettings, StoredProjects};
 use turin_orchestration::pipeline::effect_worker::{
     EffectExecutionError, EffectExecutor, error_chain,
     is_non_retryable_provider_turn_control_failure,
@@ -51,6 +59,9 @@ pub struct TurinEffectExecutor {
     pub finalization: Arc<RunFinalizationService>,
     pub threads: Arc<ThreadManagementService>,
     pub restart: Arc<RestartContinuationService>,
+    pub projects: Arc<StoredProjects>,
+    pub settings: Arc<HostSettings>,
+    pub text_generation: Arc<TextGeneration>,
 }
 
 fn settle_outcome(
@@ -277,9 +288,26 @@ impl TurinEffectExecutor {
             EffectRequest::TerminalCleanup {} | EffectRequest::PreviewCleanup {} => Ok(()),
             // Attachment files are kept until the cleanup service is wired.
             EffectRequest::AttachmentCleanup { .. } => Ok(()),
-            // Title generation needs N3's text generation wired into the app.
-            EffectRequest::ThreadTitleGenerate { .. } => {
-                tracing::debug!(effect_id = %effect.id, "thread title generation is not wired; keeping the title");
+            EffectRequest::ThreadTitleGenerate { kind } => {
+                ThreadTitleRegenerationService::new(
+                    &self.threads,
+                    self.projects.as_ref(),
+                    self.settings.as_ref(),
+                    self.text_generation.as_ref(),
+                )
+                .execute(TitleRegenerationInput {
+                    thread_id,
+                    request_id: effect.command_id.clone(),
+                    kind: match kind {
+                        ThreadTitleKind::Initial { message_id } => {
+                            TitleRegenerationKind::Initial {
+                                message_id: message_id.clone(),
+                            }
+                        }
+                        ThreadTitleKind::Regenerate => TitleRegenerationKind::Regenerate,
+                    },
+                })
+                .await?;
                 Ok(())
             }
             EffectRequest::ProviderRuntimeContinue { source_run_id } => {

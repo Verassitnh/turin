@@ -3,8 +3,8 @@
 //!
 //! Decides which run a restart continues, from the persisted projection alone.
 //! The effectful half (`continueRestartedRun`, which dispatches the continuation
-//! prompt through `ThreadManagementService`) is not ported yet; it reuses the
-//! blocked check here.
+//! prompt through `ThreadManagementService`) is `restart_continuation_service.rs`;
+//! it reuses the blocked check here.
 
 use chrono::{DateTime, Utc};
 use turin_contracts::orchestration_v2::{

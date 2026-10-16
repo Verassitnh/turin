@@ -199,6 +199,16 @@ pub struct PendingAnswer {
     pub is_complete: bool,
 }
 
+/// A draft the composer takes back after a send failed (upstream restores the
+/// optimistic draft). `nonce` makes each restore apply once.
+#[derive(Debug, Clone)]
+pub struct DraftRestore {
+    pub nonce: u64,
+    pub prompt: String,
+    pub images: Vec<ComposerImageAttachment>,
+    pub files: Vec<ComposerFileAttachment>,
+}
+
 /// What `ChatComposerProps` carries into the composer.
 #[derive(Debug, Clone)]
 pub struct ComposerViewModel {
@@ -266,6 +276,9 @@ pub struct ComposerViewModel {
 
     /// Shortcut labels the composer shows, keyed by keybinding command.
     pub shortcut_labels: HashMap<String, String>,
+
+    /// Set by the source when a send failed after the composer cleared its draft.
+    pub restore_draft: Option<DraftRestore>,
 }
 
 impl Default for ComposerViewModel {
@@ -317,6 +330,7 @@ impl Default for ComposerViewModel {
             threads: Vec::new(),
             pull_requests: Vec::new(),
             shortcut_labels: HashMap::new(),
+            restore_draft: None,
         }
     }
 }

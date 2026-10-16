@@ -1,5 +1,6 @@
-//! `settleRunBeforeStart` (upstream `ProviderTurnStartService.ts` 283-372):
-//! settles a run that never reached the provider with one signal turn item
+//! Port of upstream/apps/server/src/orchestration-v2/ProviderTurnStartService.ts (lines 283-372).
+//!
+//! `settleRunBeforeStart`: settles a run that never reached the provider with one signal turn item
 //! and terminal run, attempt and root node events, written only while the run
 //! is still the current starting attempt.
 

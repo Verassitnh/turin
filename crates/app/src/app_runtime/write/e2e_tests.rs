@@ -43,16 +43,9 @@ fn fake_claude(dir: &Path, transcript: &str) -> PathBuf {
 }
 
 fn settings_with_claude(binary: &Path) -> ServerSettings {
-    serde_json::from_value(json!({
-        "providerInstances": {
-            "claudeAgent": {
-                "driver": "claudeAgent",
-                "enabled": true,
-                "config": { "binaryPath": binary.display().to_string() }
-            }
-        }
-    }))
-    .expect("settings")
+    // The app's own loader: the fake binary override plus the Claude text-generation default.
+    let empty = tempfile::tempdir().expect("settings dir");
+    super::settings::load_server_settings(empty.path(), binary.to_str())
 }
 
 struct Harness {
@@ -203,6 +196,13 @@ async fn send_message_streams_a_fake_claude_reply_into_the_store() {
         "Respond with exactly: first fixture turn complete"
     );
     assert_eq!(user.id, receipt.message_id);
+
+    // Sidebar message search finds the thread by its reply.
+    let found = commands
+        .search_messages("fixture turn", 10)
+        .await
+        .expect("search");
+    assert!(found.iter().any(|hit| hit.thread_id == thread), "{found:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -366,4 +366,459 @@ async fn stop_interrupts_a_running_turn() {
     .expect("run settled in time");
     assert!(stopped, "the run reached running before it settled");
     assert_eq!(status, OrchestrationV2RunStatus::Interrupted);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_approval_is_raised_answered_from_a_command_and_the_turn_finishes() {
+    use turin_contracts::orchestration_v2::OrchestrationV2RuntimeRequestStatus;
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+
+    let harness = harness_with("claude_approval.ndjson").await;
+    let project_id = harness
+        .commands
+        .create_project("Fixture", harness.workspace.to_str().expect("utf-8"))
+        .await
+        .expect("create project");
+    let thread = harness
+        .commands
+        .create_thread(CreateThread {
+            project_id,
+            title: "Approve me".into(),
+            model_selection: json!({"instanceId": "claudeAgent", "model": "claude-sonnet-4-6"}),
+            runtime_mode: "approval-required".into(),
+            interaction_mode: "default".into(),
+        })
+        .await
+        .expect("create thread");
+    let after = harness
+        .stores
+        .sink
+        .latest_sequence(Some(thread.clone()))
+        .await
+        .expect("sequence");
+    let mut events = harness
+        .stores
+        .sink
+        .stream(StreamOptions {
+            thread_id: Some(thread.clone()),
+            after_sequence: Some(after),
+            event_type: None,
+        })
+        .await
+        .expect("stream");
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Run pwd".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+        })
+        .await
+        .expect("send");
+
+    let orchestrator = harness.commands.runtime().orchestrator.clone();
+    let mut answered = false;
+    let status = tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(item) = events.next().await {
+            match item.expect("event").event {
+                OrchestrationV2DomainEvent::RuntimeRequestUpdated { .. } if !answered => {
+                    let records = orchestrator
+                        .get_thread_records(
+                            &thread,
+                            &[RecordField::RuntimeRequests],
+                            &RecordFilter::default(),
+                        )
+                        .await
+                        .expect("records");
+                    let Some(request) = records.runtime_requests.iter().find(|request| {
+                        request.status == OrchestrationV2RuntimeRequestStatus::Pending
+                    }) else {
+                        continue;
+                    };
+                    answered = true;
+                    harness
+                        .commands
+                        .respond_to_request(&thread, request.id.as_str(), Some("accept"), None)
+                        .await
+                        .expect("respond");
+                }
+                OrchestrationV2DomainEvent::RunUpdated { payload, .. } => match payload.status {
+                    OrchestrationV2RunStatus::Completed
+                    | OrchestrationV2RunStatus::Failed
+                    | OrchestrationV2RunStatus::Interrupted
+                    | OrchestrationV2RunStatus::Cancelled => return payload.status,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        panic!("event stream ended before the run settled");
+    })
+    .await
+    .expect("run settled in time");
+    assert!(answered, "an approval was raised");
+    assert_eq!(status, OrchestrationV2RunStatus::Completed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "provider-claude emits no user_input_request turn item (register_request drops the control request body), so the question id is unknowable; see docs/handoff/T22.md"]
+async fn a_user_input_question_is_answered_from_a_command_and_the_turn_finishes() {
+    use turin_contracts::orchestration_v2::{
+        OrchestrationV2RuntimeRequestStatus, OrchestrationV2TurnItem,
+    };
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+
+    let harness = harness_with("claude_user_input.ndjson").await;
+    let thread = project_and_thread(&harness).await;
+    let after = harness
+        .stores
+        .sink
+        .latest_sequence(Some(thread.clone()))
+        .await
+        .expect("sequence");
+    let mut events = harness
+        .stores
+        .sink
+        .stream(StreamOptions {
+            thread_id: Some(thread.clone()),
+            after_sequence: Some(after),
+            event_type: None,
+        })
+        .await
+        .expect("stream");
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Ask me something".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+        })
+        .await
+        .expect("send");
+
+    let orchestrator = harness.commands.runtime().orchestrator.clone();
+    let mut answered = false;
+    let status = tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(item) = events.next().await {
+            if let OrchestrationV2DomainEvent::RunUpdated { payload, .. } =
+                item.expect("event").event
+                && matches!(
+                    payload.status,
+                    OrchestrationV2RunStatus::Completed
+                        | OrchestrationV2RunStatus::Failed
+                        | OrchestrationV2RunStatus::Interrupted
+                        | OrchestrationV2RunStatus::Cancelled
+                )
+            {
+                return payload.status;
+            }
+            if answered {
+                continue;
+            }
+            let records = orchestrator
+                .get_thread_records(
+                    &thread,
+                    &[RecordField::RuntimeRequests, RecordField::TurnItems],
+                    &RecordFilter::default(),
+                )
+                .await
+                .expect("records");
+            let Some(request) = records
+                .runtime_requests
+                .iter()
+                .find(|request| request.status == OrchestrationV2RuntimeRequestStatus::Pending)
+            else {
+                continue;
+            };
+            // The request lands one event before its turn item.
+            let Some(question_id) = records.turn_items.iter().find_map(|item| match item {
+                OrchestrationV2TurnItem::UserInputRequest { questions, .. } => {
+                    questions.first().map(|question| question.id.to_string())
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+            answered = true;
+            harness
+                .commands
+                .respond_to_request(
+                    &thread,
+                    request.id.as_str(),
+                    None,
+                    Some(json!({ question_id: "Blue" })),
+                )
+                .await
+                .expect("respond");
+        }
+        panic!("event stream ended before the run settled");
+    })
+    .await
+    .expect("run settled in time");
+    assert!(answered, "a question was raised");
+    assert_eq!(status, OrchestrationV2RunStatus::Completed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_runs_can_be_reordered_edited_and_cancelled() {
+    use turin_contracts::orchestration_v2::OrchestrationV2ConversationMessageRole as Role;
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+
+    // The CLI never answers the first prompt, so later sends queue behind it.
+    let harness = harness_with("claude_turn_interrupt.ndjson").await;
+    let thread = project_and_thread(&harness).await;
+    let send = |text: &'static str, delivery: Delivery| {
+        let commands = harness.commands.clone();
+        let thread_id = thread.clone();
+        async move {
+            commands
+                .send_message(SendMessage {
+                    thread_id,
+                    text: text.into(),
+                    attachments: vec![],
+                    model_selection: None,
+                    delivery,
+                    title_seed: None,
+                })
+                .await
+                .expect("send")
+        }
+    };
+    send("first", Delivery::StartImmediately).await;
+    send("second", Delivery::QueueAfterActive).await;
+    send("third", Delivery::QueueAfterActive).await;
+
+    let orchestrator = harness.commands.runtime().orchestrator.clone();
+    // Queued runs in queue order, as `(run id, message text)`.
+    let queue = || {
+        let orchestrator = orchestrator.clone();
+        let thread = thread.clone();
+        async move {
+            let records = orchestrator
+                .get_thread_records(
+                    &thread,
+                    &[RecordField::Runs, RecordField::Messages],
+                    &RecordFilter::default(),
+                )
+                .await
+                .expect("records");
+            let mut queued: Vec<_> = records
+                .runs
+                .iter()
+                .filter(|run| run.status == OrchestrationV2RunStatus::Queued)
+                .collect();
+            queued.sort_by_key(|run| {
+                let ordinal = run.ordinal.get();
+                (
+                    run.queue_position
+                        .flatten()
+                        .map_or(ordinal, |position| position.get()),
+                    ordinal,
+                )
+            });
+            queued
+                .into_iter()
+                .map(|run| {
+                    let text = records
+                        .messages
+                        .iter()
+                        .find(|message| {
+                            message.run_id.as_ref() == Some(&run.id) && message.role == Role::User
+                        })
+                        .map(|message| message.text.clone())
+                        .unwrap_or_default();
+                    (run.id.to_string(), text)
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    let initial = queue().await;
+    assert_eq!(
+        initial
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["second", "third"]
+    );
+    let (second, third) = (initial[0].0.clone(), initial[1].0.clone());
+
+    // Move the third run in front of the second.
+    harness
+        .commands
+        .thread_command(
+            "queued-run.reorder",
+            &thread,
+            json!({"runId": third, "beforeRunId": second}),
+        )
+        .await
+        .expect("reorder");
+    let reordered = queue().await;
+    assert_eq!(
+        reordered
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["third", "second"]
+    );
+
+    harness
+        .commands
+        .thread_command(
+            "queued-run.edit",
+            &thread,
+            json!({"runId": second, "text": "second, edited"}),
+        )
+        .await
+        .expect("edit");
+    harness
+        .commands
+        .thread_command("queued-run.cancel", &thread, json!({"runId": third}))
+        .await
+        .expect("cancel");
+    let remaining = queue().await;
+    assert_eq!(remaining, vec![(second, "second, edited".to_owned())]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn staged_uploads_are_claimed_into_the_thread_with_the_message() {
+    use turin_orchestration::pipeline::attachment_store::resolve_attachment_path;
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+    let image = harness
+        .commands
+        .stage_attachment(true, "shot.png", "image/png", png.clone())
+        .await
+        .expect("stage image");
+    let file = harness
+        .commands
+        .stage_attachment(false, "notes.txt", "text/plain", b"hello".to_vec())
+        .await
+        .expect("stage file");
+    assert!(image["id"].as_str().expect("id").starts_with("pending-"));
+
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Look at these".into(),
+            attachments: vec![image, file],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+        })
+        .await
+        .expect("send with attachments");
+
+    let records = harness
+        .commands
+        .runtime()
+        .orchestrator
+        .get_thread_records(&thread, &[RecordField::Messages], &RecordFilter::default())
+        .await
+        .expect("records");
+    let message = records
+        .messages
+        .iter()
+        .find(|message| message.text == "Look at these")
+        .expect("user message");
+    assert_eq!(message.attachments.len(), 2);
+    let dir = &harness.commands.runtime().attachments_dir;
+    for attachment in &message.attachments {
+        let id = serde_json::to_value(attachment).expect("json")["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+        assert!(!id.starts_with("pending-"), "claimed into the thread: {id}");
+        let path = resolve_attachment_path(dir, attachment).expect("path");
+        assert!(path.exists(), "{} exists", path.display());
+    }
+    let image_path = resolve_attachment_path(dir, &message.attachments[0]).expect("path");
+    assert_eq!(std::fs::read(image_path).expect("read"), png);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_first_message_gets_a_generated_title() {
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Respond with exactly: first fixture turn complete".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: Some("Respond with exactly".into()),
+        })
+        .await
+        .expect("send");
+    let orchestrator = harness.commands.runtime().orchestrator.clone();
+    let title = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let records = orchestrator
+                .get_thread_records(&thread, &[RecordField::Messages], &RecordFilter::default())
+                .await
+                .expect("records");
+            if records.thread.title.as_str() == "Fixture title" {
+                return records.thread.title.to_string();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the generated title arrives");
+    assert_eq!(title, "Fixture title");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn at_completion_finds_workspace_files_and_folders() {
+    let harness = harness().await;
+    std::fs::create_dir_all(harness.workspace.join("src/components")).expect("dirs");
+    std::fs::write(harness.workspace.join("src/components/Button.tsx"), "").expect("file");
+    std::fs::write(harness.workspace.join("README.md"), "").expect("file");
+    let cwd = harness.workspace.to_str().expect("utf-8");
+
+    let found = harness
+        .commands
+        .search_paths(cwd, "button", 20)
+        .await
+        .expect("search");
+    assert_eq!(
+        found.first(),
+        Some(&("src/components/Button.tsx".to_owned(), false)),
+        "{found:?}"
+    );
+
+    let folders = harness
+        .commands
+        .search_paths(cwd, "components", 20)
+        .await
+        .expect("search");
+    assert!(
+        folders
+            .iter()
+            .any(|(path, directory)| path == "src/components" && *directory),
+        "{folders:?}"
+    );
 }

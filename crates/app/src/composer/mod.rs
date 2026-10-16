@@ -32,6 +32,7 @@ pub mod inline_chip;
 pub mod inline_tokens;
 pub mod js_string;
 pub mod list_continuation;
+pub mod live_catalog;
 pub mod logic;
 pub mod mention_drag;
 pub mod menu_highlight;

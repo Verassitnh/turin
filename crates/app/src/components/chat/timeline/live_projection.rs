@@ -5,8 +5,8 @@
 //! already guarantee), so a variant this build has not mapped yet drops out of
 //! the timeline instead of failing the thread. Mapped: user and assistant
 //! messages, reasoning, command execution, file changes, errors, system
-//! notices and the interrupt rows. Not mapped yet (see docs/handoff/T22.md):
-//! plans, todo lists, user-input and approval requests, search, subagents,
+//! notices, the interrupt rows, and approval and user-input requests. Not
+//! mapped yet (see docs/handoff/T22.md): plans, todo lists, search, subagents,
 //! checkpoints, compaction, handoff, fork, secret requests, dynamic tools and
 //! notifications.
 
@@ -16,16 +16,22 @@ use serde_json::Value;
 
 use super::session_logic::{TimelineEntriesInput, derive_timeline_entries_from_visible_turn_items};
 use super::turn_item::{
-    ProjectedTurnItem, ProjectedVisibility, ProviderFailure, ProviderFailureClass, ProviderRetry,
-    TurnItem, TurnItemPayload, TurnItemStatus,
+    ProjectedTurnItem, ProjectedVisibility, ProviderApprovalDecision, ProviderApprovalOption,
+    ProviderFailure, ProviderFailureClass, ProviderRequestKind, ProviderRetry, TurnItem,
+    TurnItemPayload, TurnItemStatus, UserInputQuestion, UserInputQuestionOption,
 };
 use super::types::{
-    Actor, CreationSource, InputIntent, RunStatus, ThreadTimelineSnapshot, TimelineLatestRun,
+    Actor, CreationSource, InputIntent, PendingApproval, PendingUserInput, ResponseCapability,
+    RunStatus, ThreadTimelineSnapshot, TimelineLatestRun,
 };
 use crate::state::thread_projection::ThreadProjection;
+use crate::state::thread_requests::{
+    ApprovalResponseCapability, PendingThreadRequests, UserInputResponseCapability,
+};
 use turin_contracts::orchestration_v2::{
     OrchestrationV2ProjectedTurnItemVisibility, OrchestrationV2Run, OrchestrationV2RunStatus,
 };
+use turin_contracts::provider_policy as policy;
 
 fn text(value: &Value, key: &str) -> Option<String> {
     value.get(key)?.as_str().map(str::to_owned)
@@ -90,6 +96,50 @@ fn failure_class(value: &str) -> ProviderFailureClass {
     }
 }
 
+fn approval_option(value: &Value) -> Option<ProviderApprovalOption> {
+    let decision = match value.get("decision")?.as_str()? {
+        "accept" => ProviderApprovalDecision::Accept,
+        "acceptForSession" => ProviderApprovalDecision::AcceptForSession,
+        "acceptAlways" => ProviderApprovalDecision::AcceptAlways,
+        "decline" => ProviderApprovalDecision::Decline,
+        "cancel" => ProviderApprovalDecision::Cancel,
+        _ => return None,
+    };
+    Some(ProviderApprovalOption {
+        decision,
+        label: text(value, "label")?,
+        warning: text(value, "warning"),
+    })
+}
+
+fn question(value: &Value) -> Option<UserInputQuestion> {
+    Some(UserInputQuestion {
+        id: text(value, "id")?,
+        header: text(value, "header")?,
+        question: text(value, "question")?,
+        options: value
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|option| {
+                        Some(UserInputQuestionOption {
+                            label: text(option, "label")?,
+                            description: text(option, "description").unwrap_or_default(),
+                            value: text(option, "value"),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        multi_select: flag(value, "multiSelect"),
+        allow_custom_answer: value.get("allowCustomAnswer").and_then(Value::as_bool),
+        initial_answer: text(value, "initialAnswer"),
+        required: value.get("required").and_then(Value::as_bool),
+    })
+}
+
 fn payload(value: &Value) -> Option<TurnItemPayload> {
     let kind = value.get("type")?.as_str()?;
     Some(match kind {
@@ -149,6 +199,32 @@ fn payload(value: &Value) -> Option<TurnItemPayload> {
                     }),
             }
         }
+        "approval_request" => TurnItemPayload::ApprovalRequest {
+            request_id: text(value, "requestId")?,
+            request_kind: match text(value, "requestKind")?.as_str() {
+                "command" => ProviderRequestKind::Command,
+                "file_read" => ProviderRequestKind::FileRead,
+                "file_change" => ProviderRequestKind::FileChange,
+                "mcp_elicitation" => ProviderRequestKind::McpElicitation,
+                _ => ProviderRequestKind::Permission,
+            },
+            prompt: text(value, "prompt"),
+            app_name: text(value, "appName"),
+            options: value
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|options| options.iter().filter_map(approval_option).collect())
+                .unwrap_or_default(),
+        },
+        "user_input_request" => TurnItemPayload::UserInputRequest {
+            request_id: text(value, "requestId")?,
+            questions: value
+                .get("questions")
+                .and_then(Value::as_array)
+                .map(|questions| questions.iter().filter_map(question).collect())
+                .unwrap_or_default(),
+            question_answer: None,
+        },
         "system_notice" => TurnItemPayload::SystemNotice {
             message: text(value, "message")?,
         },
@@ -236,8 +312,111 @@ pub fn projected_items(projection: &ThreadProjection) -> Vec<ProjectedTurnItem> 
         .collect()
 }
 
+fn request_kind(kind: policy::ProviderRequestKind) -> ProviderRequestKind {
+    match kind {
+        policy::ProviderRequestKind::Command => ProviderRequestKind::Command,
+        policy::ProviderRequestKind::FileRead => ProviderRequestKind::FileRead,
+        policy::ProviderRequestKind::FileChange => ProviderRequestKind::FileChange,
+        policy::ProviderRequestKind::McpElicitation => ProviderRequestKind::McpElicitation,
+        policy::ProviderRequestKind::Permission => ProviderRequestKind::Permission,
+    }
+}
+
+fn decision(value: policy::ProviderApprovalDecision) -> ProviderApprovalDecision {
+    match value {
+        policy::ProviderApprovalDecision::Accept => ProviderApprovalDecision::Accept,
+        policy::ProviderApprovalDecision::AcceptForSession => {
+            ProviderApprovalDecision::AcceptForSession
+        }
+        policy::ProviderApprovalDecision::AcceptAlways => ProviderApprovalDecision::AcceptAlways,
+        policy::ProviderApprovalDecision::Decline => ProviderApprovalDecision::Decline,
+        policy::ProviderApprovalDecision::Cancel => ProviderApprovalDecision::Cancel,
+    }
+}
+
+/// The wire name of a decision (`runtime-request.respond`'s `decision`).
+pub fn decision_wire(value: ProviderApprovalDecision) -> &'static str {
+    match value {
+        ProviderApprovalDecision::Accept => "accept",
+        ProviderApprovalDecision::AcceptForSession => "acceptForSession",
+        ProviderApprovalDecision::AcceptAlways => "acceptAlways",
+        ProviderApprovalDecision::Decline => "decline",
+        ProviderApprovalDecision::Cancel => "cancel",
+    }
+}
+
+pub fn pending_approvals(requests: &PendingThreadRequests) -> Vec<PendingApproval> {
+    requests
+        .approvals
+        .iter()
+        .map(|approval| PendingApproval {
+            request_id: approval.request_id.to_string(),
+            request_kind: request_kind(approval.request_kind),
+            created_at: approval.created_at.clone(),
+            detail: approval.detail.clone(),
+            app_name: approval.app_name.clone(),
+            options: approval.options.as_ref().map(|options| {
+                options
+                    .iter()
+                    .map(|option| ProviderApprovalOption {
+                        decision: decision(option.decision),
+                        label: option.label.to_string(),
+                        warning: option.warning.as_ref().map(ToString::to_string),
+                    })
+                    .collect()
+            }),
+            response_capability: match approval.response_capability {
+                ApprovalResponseCapability::Live => ResponseCapability::Live,
+                ApprovalResponseCapability::NotResumable => ResponseCapability::NotResumable,
+            },
+        })
+        .collect()
+}
+
+pub fn pending_user_inputs(requests: &PendingThreadRequests) -> Vec<PendingUserInput> {
+    requests
+        .user_inputs
+        .iter()
+        .map(|input| PendingUserInput {
+            request_id: input.request_id.to_string(),
+            created_at: input.created_at.clone(),
+            questions: input
+                .questions
+                .iter()
+                .map(|question| UserInputQuestion {
+                    id: question.id.to_string(),
+                    header: question.header.to_string(),
+                    question: question.question.to_string(),
+                    options: question
+                        .options
+                        .iter()
+                        .map(|option| UserInputQuestionOption {
+                            label: option.label.to_string(),
+                            description: option.description.to_string(),
+                            value: option.value.clone(),
+                        })
+                        .collect(),
+                    multi_select: question.multi_select,
+                    allow_custom_answer: question.allow_custom_answer,
+                    initial_answer: question.initial_answer.clone(),
+                    required: question.required,
+                })
+                .collect(),
+            // A "message" capability answers through the normal reply path.
+            response_capability: match input.response_capability {
+                UserInputResponseCapability::NotResumable => ResponseCapability::NotResumable,
+                UserInputResponseCapability::Live | UserInputResponseCapability::Message => {
+                    ResponseCapability::Live
+                }
+            },
+            dismissible: input.dismissible,
+        })
+        .collect()
+}
+
 pub fn snapshot_from_projection(
     projection: &ThreadProjection,
+    pending: Option<&PendingThreadRequests>,
     workspace_root: Option<String>,
 ) -> ThreadTimelineSnapshot {
     let timeline_entries = derive_timeline_entries_from_visible_turn_items(&TimelineEntriesInput {
@@ -258,6 +437,8 @@ pub fn snapshot_from_projection(
         is_working: running.is_some(),
         active_turn_started_at: running.and_then(|run| run.started_at.clone()),
         latest_run,
+        pending_approvals: pending.map(pending_approvals).unwrap_or_default(),
+        pending_user_inputs: pending.map(pending_user_inputs).unwrap_or_default(),
         workspace_root,
         ..Default::default()
     }

@@ -1,5 +1,6 @@
-//! `writeFinalRunEvents` (upstream `RunExecutionService.ts` 583-820): the
-//! terminal write of a root run. It settles the attempt, the run, its root
+//! Port of upstream/apps/server/src/orchestration-v2/RunExecutionService.ts (lines 583-820).
+//!
+//! `writeFinalRunEvents`: the terminal write of a root run. It settles the attempt, the run, its root
 //! node and the provider thread in one transaction together with the
 //! checkpoint capture effect.
 

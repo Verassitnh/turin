@@ -19,6 +19,8 @@ pub mod markdown;
 pub mod message_copy_button;
 pub mod messages_timeline;
 pub mod panel_layout_controls;
+#[allow(dead_code)]
+pub mod pending_draft_work;
 // Pure scroll state machine; the timeline view does not drive page keys yet.
 #[allow(dead_code)]
 pub mod page_scroll_controller;

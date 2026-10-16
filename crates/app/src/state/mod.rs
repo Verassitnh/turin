@@ -14,6 +14,7 @@ pub mod composer_dispatch;
 pub mod composer_path_search;
 pub mod contracts;
 pub mod entities;
+pub mod errors;
 pub mod events;
 pub mod file_context_menu;
 pub mod file_metadata;

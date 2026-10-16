@@ -32,6 +32,7 @@ pub mod link_dialog;
 pub mod link_preview;
 pub mod link_pull_request_dialog_logic;
 pub mod live_navigation;
+pub mod live_source;
 pub mod list_close_sweep;
 pub mod list_filters;
 pub mod list_page;

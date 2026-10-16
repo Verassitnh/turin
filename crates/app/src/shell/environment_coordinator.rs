@@ -20,8 +20,16 @@ pub fn poll_environment_notifications(
     coordinator.set_pending_count(pending, settings.notification_mode);
 }
 
-/// Placeholder until thread attention selectors from upstream land on live shell data.
+/// Threads that need attention for the dock badge (approvals and user input).
 fn pending_notification_count(state: &ClientState) -> u32 {
-    let _ = state;
-    0
+    let Some(view) = &state.shell_view else {
+        return 0;
+    };
+    view.threads
+        .iter()
+        .chain(view.navigation_threads.iter())
+        .filter(|thread| thread.has_pending_approvals || thread.has_pending_user_input)
+        .map(|thread| thread.id.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len() as u32
 }

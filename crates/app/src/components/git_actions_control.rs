@@ -21,6 +21,8 @@ pub mod backend;
 pub mod commit_dialog;
 pub mod default_branch_dialog;
 pub mod lifecycle;
+pub mod live_source;
+pub mod live_source;
 pub mod mock_source;
 pub mod publish_dialog;
 mod view;

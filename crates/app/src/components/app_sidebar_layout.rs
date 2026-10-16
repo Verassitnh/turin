@@ -22,6 +22,7 @@ use gpui_kit::{
     Styled as _, Subscription, Window, actions, div, px, rems,
 };
 
+use super::branch_toolbar::live_source::LiveBranchBackend;
 use super::branch_toolbar::mock_source::MockBranchBackend;
 use super::chat::chat_git_host::{ChatGitBackends, ChatGitHost, RoutedGitThread};
 use super::chat::panel_layout_controls::PanelLayoutControls;
@@ -36,6 +37,7 @@ use super::command_palette::{
     OpenTarget, SelectTheme, ToggleCommandPalette, ToggleFilePicker, ToggleProjectSearch,
 };
 use super::confirm_dialog_host::ConfirmDialogHost;
+use super::git_actions_control::live_source::LiveGitActionsBackend;
 use super::git_actions_control::mock_source::MockGitActionsBackend;
 use super::no_active_thread_state::NoActiveThreadState;
 use super::quit_hold_overlay::QuitHoldOverlay;
@@ -69,8 +71,11 @@ use crate::hooks::use_local_storage::MemoryLocalStorage;
 use crate::hooks::use_preview_panel_inline_size::{
     PREVIEW_PANEL_DEFAULT_WIDTH, clamp_preview_panel_width, get_preview_panel_max_width,
 };
+use crate::pull_request::live_navigation::{PullRequestsRouteEvent, mount_route};
+use crate::pull_request::pull_requests_route_search::validate_pull_requests_search;
 use crate::shell::chat_route_shortcuts::{OpenCommandPalette, ReopenClosedView};
 use crate::shell::environment_coordinator::poll_environment_notifications;
+use crate::shell::pr_preferences::LocalPreferenceStorage;
 use crate::shell::reopen_closed_view::{ReopenOwnerState, closed_view_entries_from_store};
 use crate::state::right_panel_store::RightPanelStore;
 use crate::state::store::ClientStoreGlobal;
@@ -84,6 +89,9 @@ use crate::ui::sidebar::{
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{AppContext as _, Entity, SharedString};
+use serde_json::Map;
+use std::rc::Rc;
+use std::sync::Arc;
 use turin_contracts::ThreadId;
 use turin_contracts::settings::{ClientSettings, QuitConfirmationMode};
 
@@ -156,6 +164,12 @@ struct UsageRoute {
     _subscription: Subscription,
 }
 
+/// `/_chat/pull-requests`: live list + detail panel host.
+struct PullRequestsRoute {
+    host: Entity<crate::pull_request::live_navigation::PullRequestsRouteHost>,
+    _subscription: Subscription,
+}
+
 /// What the shell needs to run against Turin's own data.
 #[derive(Clone)]
 struct LiveShell {
@@ -202,6 +216,8 @@ pub struct AppSidebarLayout {
     thread_details_open: bool,
     /// The routed page when it is not a thread (upstream: the router).
     usage: Option<UsageRoute>,
+    pull_requests: Option<PullRequestsRoute>,
+    pr_preferences: crate::hooks::use_local_storage::SharedLocalStorage,
     notifications: ThreadNotificationCoordinator,
     quit_handler: QuitShortcutHandler,
     quit_clock_start: std::time::Instant,
@@ -258,10 +274,17 @@ impl AppSidebarLayout {
         let sidebar_events = cx.subscribe_in(&sidebar, window, Self::on_sidebar_event);
         let palette = cx.new(|cx| CommandPalette::new(palette_backend, window, cx));
         let git_host = cx.new(|_| {
-            ChatGitHost::new(ChatGitBackends {
-                git: std::rc::Rc::new(MockGitActionsBackend::new()),
-                branch: std::rc::Rc::new(MockBranchBackend::new()),
-            })
+            let backends = match &live {
+                Some(live) => ChatGitBackends {
+                    git: Rc::new(LiveGitActionsBackend::new(live.bus.clone())),
+                    branch: Rc::new(LiveBranchBackend::new(live.bus.clone())),
+                },
+                None => ChatGitBackends {
+                    git: Rc::new(MockGitActionsBackend::new()),
+                    branch: Rc::new(MockBranchBackend::new()),
+                },
+            };
+            ChatGitHost::new(backends)
         });
         let palette_events = cx.subscribe_in(&palette, window, Self::on_palette_event);
         sidebar.update(cx, |sidebar, cx| sidebar.apply_dev_overrides(window, cx));
@@ -322,6 +345,8 @@ impl AppSidebarLayout {
             live,
             thread_details_open: std::env::var("TURIN_THREAD_DETAILS").is_ok_and(|v| v == "1"),
             usage: None,
+            pull_requests: None,
+            pr_preferences: MemoryLocalStorage::shared(),
             notifications: ThreadNotificationCoordinator::new(),
             quit_handler: QuitShortcutHandler::new(cfg!(target_os = "macos")),
             quit_clock_start: std::time::Instant::now(),
@@ -343,10 +368,76 @@ impl AppSidebarLayout {
     }
 
     /// `navigate({ to: "/usage" })`.
+    fn clear_auxiliary_routes(&mut self, cx: &mut Context<Self>) {
+        if self.usage.is_some() || self.pull_requests.is_some() {
+            self.usage = None;
+            self.pull_requests = None;
+            self.main_content = None;
+            self.right_panel_content = None;
+            cx.notify();
+        }
+    }
+
+    /// `/_chat/pull-requests` (live navigation host).
+    fn open_pull_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pull_requests.is_some() {
+            return;
+        }
+        let Some(live) = self.live.clone() else {
+            window.push_notification(
+                Notification::info("Pull requests are not available yet."),
+                cx,
+            );
+            return;
+        };
+        self.usage = None;
+        let search = validate_pull_requests_search(&Map::new());
+        let prefs = LocalPreferenceStorage(self.pr_preferences.clone());
+        let sidebar = self.sidebar.clone();
+        let open_thread = Arc::new(move |thread_id: &ThreadId, cx: &mut App| {
+            let key = scoped_thread_key(&local_environment_id(), thread_id);
+            sidebar.update(cx, |sidebar, cx| sidebar.navigate_to_thread(&key, cx));
+        });
+        let client = live.client.read(cx).handle().clone();
+        let host = mount_route(
+            live.bus.clone(),
+            client,
+            Some(open_thread),
+            search,
+            &prefs,
+            window,
+            cx,
+        );
+        self.set_main_content(Some(host.read(cx).page_view()), cx);
+        let layout = cx.entity().downgrade();
+        let host_for_sub = host.clone();
+        let subscription = cx.subscribe_in(&host, window, move |_, _, event, _, cx| {
+            if matches!(event, PullRequestsRouteEvent::OpenPanel) {
+                layout
+                    .update(cx, |this, cx| {
+                        if let Some(route) = &this.pull_requests {
+                            this.set_right_panel_content(
+                                Some(route.host.read(cx).panel_view()),
+                                cx,
+                            );
+                        }
+                    })
+                    .ok();
+            }
+        });
+        self.pull_requests = Some(PullRequestsRoute {
+            host: host_for_sub,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
     pub fn open_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.usage.is_some() {
             return;
         }
+        self.pull_requests = None;
+        self.main_content = None;
         // T22 swaps the mock backend for the live usage service.
         let backend = MockUsageBackend::shared(UsageScenario::from_env());
         let page = cx.new(|cx| {
@@ -448,12 +539,11 @@ impl AppSidebarLayout {
                 unavailable("New thread without a project", window, cx)
             }
             CommandPaletteEvent::FindInCurrentThread => unavailable("Find in thread", window, cx),
-            CommandPaletteEvent::LinkPullRequest => unavailable("Link pull request", window, cx),
+            CommandPaletteEvent::LinkPullRequest => self.open_pull_requests(window, cx),
             CommandPaletteEvent::ShowLinkedPullRequests => {
-                self.right_panel_open = true;
-                cx.notify();
+                self.open_pull_requests(window, cx);
             }
-            CommandPaletteEvent::OpenPullRequests => unavailable("Pull requests", window, cx),
+            CommandPaletteEvent::OpenPullRequests => self.open_pull_requests(window, cx),
             CommandPaletteEvent::OpenUsage => self.open_usage(window, cx),
             CommandPaletteEvent::OpenSettings | CommandPaletteEvent::OpenSetting { .. } => {
                 unavailable("Settings", window, cx)
@@ -509,15 +599,14 @@ impl AppSidebarLayout {
                 // Screenshot runs (`TURIN_PAGE`) keep their route: under load the
                 // sidebar's startup selection can land well after the window opens.
                 if std::env::var_os("TURIN_PAGE").is_none() {
-                    self.usage = None;
+                    self.clear_auxiliary_routes(cx);
                 }
                 self.sync_palette_context(cx);
                 cx.notify();
             }
             SidebarEvent::OpenUsage => self.open_usage(window, cx),
-            SidebarEvent::OpenPullRequests(_) => {
-                self.right_panel_open = true;
-                cx.notify();
+            SidebarEvent::OpenPullRequests(_) | SidebarEvent::OpenPullRequestsPage => {
+                self.open_pull_requests(window, cx);
             }
             SidebarEvent::AddProject if self.live.is_some() => self.open_command_palette(
                 CommandPaletteOpenDetail {
@@ -543,13 +632,15 @@ impl AppSidebarLayout {
                     SidebarEvent::AddProject => "Add project",
                     SidebarEvent::OpenProjectSettings(_) => "Project settings",
                     SidebarEvent::OpenSettings => "Settings",
-                    SidebarEvent::OpenPullRequestsPage => "Pull requests",
+                    SidebarEvent::OpenPullRequestsPage => "",
                     _ => "",
                 };
-                window.push_notification(
-                    Notification::info(format!("{label} is not available yet.")),
-                    cx,
-                );
+                if !label.is_empty() {
+                    window.push_notification(
+                        Notification::info(format!("{label} is not available yet.")),
+                        cx,
+                    );
+                }
             }
         }
     }

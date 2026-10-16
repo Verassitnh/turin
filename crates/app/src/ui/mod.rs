@@ -30,6 +30,7 @@ pub mod radio_group;
 pub mod refresh_icon;
 pub mod right_panel_sheet;
 pub mod scroll_area;
+pub mod select;
 pub mod separator;
 pub mod sheet;
 pub mod sidebar;

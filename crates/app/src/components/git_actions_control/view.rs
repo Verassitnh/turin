@@ -604,9 +604,8 @@ impl GitActionsControl {
                             let weak_content = weak.clone();
                             let panel_menu = panel;
                             move |_, _, cx| match weak_content.upgrade() {
-                                Some(control) => control.update(cx, |control, cx| {
-                                    control.menu_content(panel_menu, cx)
-                                }),
+                                Some(control) => control
+                                    .update(cx, |control, cx| control.menu_content(panel_menu, cx)),
                                 None => div().into_any_element(),
                             }
                         }),

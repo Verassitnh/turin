@@ -1144,12 +1144,10 @@ impl CommandPalette {
         if count == 0 {
             return;
         }
-        let highlighted = self.highlighted.as_ref().and_then(|value| {
-            self.rows
-                .item_values
-                .iter()
-                .position(|item| item == value)
-        });
+        let highlighted = self
+            .highlighted
+            .as_ref()
+            .and_then(|value| self.rows.item_values.iter().position(|item| item == value));
         let next = command_palette_logic::move_command_palette_highlight_index(
             count,
             highlighted,

@@ -163,17 +163,14 @@ impl FileMetadataCache {
             let misses = self.resolve_cached(&pending, thread_id, &mut resolved);
             let mut retry = Vec::new();
             for chunk in misses.chunks(FILESYSTEM_METADATA_BATCH_LIMIT) {
-                let tokens = self.begin_request(chunk);
-                let response = match self.source.get_metadata(chunk).await {
-                    Ok(response) => response,
-                    Err(error) => {
-                        self.end_request(&tokens);
-                        return Err(error);
-                    }
+                let guard = InFlightTokens {
+                    state: self.state.clone(),
+                    tokens: self.begin_request(chunk),
                 };
+                let response = self.source.get_metadata(chunk).await?;
                 let now = (self.clock)();
                 let mut state = self.state.lock();
-                for (index, (path, token)) in chunk.iter().zip(&tokens).enumerate() {
+                for (index, (path, token)) in chunk.iter().zip(&guard.tokens).enumerate() {
                     let valid = state
                         .in_flight
                         .remove(token)
@@ -309,10 +306,19 @@ impl FileMetadataCache {
             })
             .collect()
     }
+}
 
-    fn end_request(&self, tokens: &[u64]) {
+/// `Effect.ensuring` around a chunk: the in-flight tokens are released when
+/// the chunk finishes, errors, or the caller drops the future mid-request.
+struct InFlightTokens {
+    state: Arc<Mutex<State>>,
+    tokens: Vec<u64>,
+}
+
+impl Drop for InFlightTokens {
+    fn drop(&mut self) {
         let mut state = self.state.lock();
-        for token in tokens {
+        for token in &self.tokens {
             state.in_flight.remove(token);
         }
     }
@@ -358,19 +364,22 @@ fn remember(state: &mut State, key: &str, value: Option<FileMetadata>, now: u64,
         },
     );
     for thread in state.retained.values_mut() {
-        let Some(previous) = thread
-            .entries
-            .get(key)
-            .and_then(|entry| entry.value.clone())
-        else {
+        // Only a thread that holds the path is refreshed; a retained `None`
+        // (the thread saw it missing) is a held value and is refreshed too.
+        let Some(previous) = thread.entries.get(key) else {
             continue;
         };
-        let merged = match &value {
-            Some(next) if partial && previous.kind == next.kind => Some(FileMetadata {
-                kind: next.kind,
-                byte_length: next.byte_length.or(previous.byte_length),
-                mime_type: next.mime_type.clone().or(previous.mime_type),
-            }),
+        let merged = match (&value, &previous.value) {
+            (Some(next), Some(previous)) if partial && previous.kind == next.kind => {
+                Some(FileMetadata {
+                    kind: next.kind,
+                    byte_length: next.byte_length.or(previous.byte_length),
+                    mime_type: next
+                        .mime_type
+                        .clone()
+                        .or_else(|| previous.mime_type.clone()),
+                })
+            }
             _ => value.clone(),
         };
         thread.entries.insert(
@@ -814,5 +823,46 @@ mod tests {
         let state = h.cache.state.lock();
         assert_eq!(state.cache.len(), METADATA_CACHE_LIMIT);
         assert!(!state.cache.contains_key("/workspace/0"));
+    }
+
+    #[tokio::test]
+    async fn a_file_read_refreshes_a_path_the_thread_retained_as_missing() {
+        let h = harness();
+        let thread = "missing-then-written";
+        let _retained = h.cache.retain_thread(thread);
+        assert_eq!(h.read("/workspace/new.txt", Some(thread)).await, None);
+        h.cache.remember_file("/workspace", "new.txt", 10);
+        // Past the 60 s freshness window the thread still answers from what it
+        // retained, so the refresh must have replaced the retained `None`.
+        h.advance(HOUR_MS);
+        assert_eq!(
+            h.read("/workspace/new.txt", Some(thread)).await,
+            Some(file(10))
+        );
+        assert_eq!(h.batches().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_read_releases_its_in_flight_requests() {
+        let h = harness();
+        let gate = Arc::new(Gate {
+            started: Notify::new(),
+            release: Notify::new(),
+        });
+        *h.source.gate.lock() = Some(gate.clone());
+        let cache = h.cache.clone();
+        let read = tokio::spawn(async move {
+            cache
+                .metadata_many(
+                    &["/workspace/a".to_owned(), "/workspace/b".to_owned()],
+                    None,
+                )
+                .await
+        });
+        gate.started.notified().await;
+        assert_eq!(h.cache.state.lock().in_flight.len(), 2);
+        read.abort();
+        assert!(read.await.unwrap_err().is_cancelled());
+        assert!(h.cache.state.lock().in_flight.is_empty());
     }
 }

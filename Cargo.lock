@@ -7700,14 +7700,22 @@ name = "turin-providers"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
  "indexmap",
+ "parking_lot",
  "pretty_assertions",
+ "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-stream",
  "tracing",
  "turin-contracts",
  "turin-orchestration",
  "turin-provider-core",
  "turin-runtime",
+ "turin-shared",
 ]
 
 [[package]]

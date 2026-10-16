@@ -3,3 +3,4 @@
 //! that do live here. See `PORTING.md` (R1).
 
 pub mod project_settings_override_sweep;
+pub mod provider_registry;

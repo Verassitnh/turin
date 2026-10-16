@@ -12,6 +12,7 @@ path = "src/main.rs"
 unicode-segmentation.workspace = true
 uuid.workspace = true
 turin-contracts.workspace = true
+turin-source-control.workspace = true
 turin-review.workspace = true
 turin-shared.workspace = true
 turin-provider-core.workspace = true

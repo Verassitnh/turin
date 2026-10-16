@@ -133,6 +133,33 @@ impl IngestReads for ProjectionStore {
         }
     }
 
+    async fn rewind_records(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<super::provider_event_ingestor::RewindRecords, BoxError> {
+        let projection = self
+            .get_thread_records(
+                thread_id,
+                vec![
+                    ProjectionRecordField::Runs,
+                    ProjectionRecordField::Attempts,
+                    ProjectionRecordField::ProviderTurns,
+                    ProjectionRecordField::Nodes,
+                    ProjectionRecordField::Checkpoints,
+                ],
+                None,
+            )
+            .await
+            .map_err(|error| Box::new(error) as BoxError)?;
+        Ok(super::provider_event_ingestor::RewindRecords {
+            runs: projection.runs,
+            attempts: projection.attempts,
+            provider_turns: projection.provider_turns,
+            nodes: projection.nodes,
+            checkpoints: projection.checkpoints,
+        })
+    }
+
     async fn node_stored(&self, node: &OrchestrationV2ExecutionNode) -> Result<bool, BoxError> {
         let projection = self
             .get_thread_records(&node.thread_id, vec![ProjectionRecordField::Nodes], None)

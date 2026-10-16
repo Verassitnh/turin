@@ -49,7 +49,7 @@ use super::{
 use crate::{
     core::provider_event_ingestor::{
         IngestGuard, ProviderEventIngestor, ProviderEventInput, ProviderThreadOwnerGuard,
-        RunCurrentGuard,
+        ProviderTurnAnalyticsContext, RunCurrentGuard,
     },
     pipeline::{
         event_sink::{EventSink, RunCurrentWrite, WriteInput},
@@ -932,6 +932,11 @@ impl RunContext {
                         node_id: Some(input.root_node.id.clone()),
                         raw_event_id: None,
                         event: delivered.clone(),
+                        analytics_context: Some(ProviderTurnAnalyticsContext {
+                            model_selection: input.model_selection.clone(),
+                            runtime_mode: Some(input.runtime_policy.runtime_mode),
+                            interaction_mode: Some(input.runtime_policy.interaction_mode),
+                        }),
                     },
                     &guard,
                 )

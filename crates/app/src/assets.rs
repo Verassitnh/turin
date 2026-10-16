@@ -226,6 +226,42 @@ pub const LINUX: &str = "brand/linux.svg";
 pub const GIT: &str = "brand/git.svg";
 /// `JujutsuIcon`, a multi-colour mark: draw it with `img`, not the tinted `Icon`.
 pub const JUJUTSU: &str = "brand/jujutsu.svg";
+/// `GitLabIcon`, multi-colour. Draw it with `img`; [`GITLAB_MONOCHROME`] is the
+/// `monochrome` variant (every path `currentColor`) for the tinted `Icon::path`.
+pub const GITLAB: &str = "brand/gitlab.svg";
+/// `GitLabIcon` with `monochrome` set (`ThemeSearchSection` source links).
+pub const GITLAB_MONOCHROME: &str = "brand/gitlab-mono.svg";
+/// `AzureDevOpsIcon` (selfhst/icons, CC BY 4.0), gradient fills: draw it with `img`.
+/// The `useId` gradient ids are fixed (`azure-a`..`azure-i`).
+pub const AZURE_DEVOPS: &str = "brand/azure-devops.svg";
+/// `BitbucketIcon`, gradient fill (fixed id `bitbucket-a`): draw it with `img`.
+pub const BITBUCKET: &str = "brand/bitbucket.svg";
+/// `ForgejoIcon`, the official two-colour mark: draw it with `img`.
+pub const FORGEJO: &str = "brand/forgejo.svg";
+/// `GitCafeIcon`, the inset violet square: draw it with `img`.
+pub const GITCAFE: &str = "brand/gitcafe.svg";
+/// `ACPRegistryIcon` (`currentColor`; upstream's `fill-black dark:fill-white`
+/// becomes the tint the caller sets).
+pub const ACP_REGISTRY: &str = "brand/acp-registry.svg";
+/// `MacScreenRecordingIcon`, the System Settings pane mark (fixed id `mac-screen-recording-a`).
+pub const MAC_SCREEN_RECORDING: &str = "brand/mac-screen-recording.svg";
+/// `MacAccessibilityIcon`, the System Settings pane mark (fixed id `mac-accessibility-a`).
+pub const MAC_ACCESSIBILITY: &str = "brand/mac-accessibility.svg";
+
+/// `SOURCE_CONTROL_ICONS` (sourceControlPresentation.ts): the bundled art for a
+/// source-control definition `icon` key. `github` is not here: it is drawn from
+/// the shell's lucide `Github` glyph, as the settings rows already do. A key
+/// without art draws the change request glyph upstream.
+pub fn source_control_icon_path(icon: &str) -> Option<&'static str> {
+    match icon {
+        "gitlab" => Some(GITLAB),
+        "forgejo" => Some(FORGEJO),
+        "bitbucket" => Some(BITBUCKET),
+        "azure-devops" => Some(AZURE_DEVOPS),
+        "gitcafe" => Some(GITCAFE),
+        _ => None,
+    }
+}
 
 /// The pull request list's empty-state drawing: a branch stopped short of the base line
 /// (PullRequestListEmptyState.tsx `BranchMark`, unjoined).
@@ -322,6 +358,30 @@ const BRAND: &[(&str, &[u8])] = &[
     (LINUX, include_bytes!("../assets/brand/linux.svg")),
     (GIT, include_bytes!("../assets/brand/git.svg")),
     (JUJUTSU, include_bytes!("../assets/brand/jujutsu.svg")),
+    (GITLAB, include_bytes!("../assets/brand/gitlab.svg")),
+    (
+        GITLAB_MONOCHROME,
+        include_bytes!("../assets/brand/gitlab-mono.svg"),
+    ),
+    (
+        AZURE_DEVOPS,
+        include_bytes!("../assets/brand/azure-devops.svg"),
+    ),
+    (BITBUCKET, include_bytes!("../assets/brand/bitbucket.svg")),
+    (FORGEJO, include_bytes!("../assets/brand/forgejo.svg")),
+    (GITCAFE, include_bytes!("../assets/brand/gitcafe.svg")),
+    (
+        ACP_REGISTRY,
+        include_bytes!("../assets/brand/acp-registry.svg"),
+    ),
+    (
+        MAC_SCREEN_RECORDING,
+        include_bytes!("../assets/brand/mac-screen-recording.svg"),
+    ),
+    (
+        MAC_ACCESSIBILITY,
+        include_bytes!("../assets/brand/mac-accessibility.svg"),
+    ),
     (
         editor_icons::ANTIGRAVITY,
         include_bytes!("../assets/editors/antigravity.svg"),
@@ -499,12 +559,48 @@ mod tests {
 
     #[test]
     fn components_icons_marks_load_by_path() {
-        for path in [ULTRAFAST, LINUX, GIT, JUJUTSU] {
+        for path in [
+            ULTRAFAST,
+            LINUX,
+            GIT,
+            JUJUTSU,
+            GITLAB,
+            GITLAB_MONOCHROME,
+            AZURE_DEVOPS,
+            BITBUCKET,
+            FORGEJO,
+            GITCAFE,
+            ACP_REGISTRY,
+            MAC_SCREEN_RECORDING,
+            MAC_ACCESSIBILITY,
+        ] {
             let bytes = AppAssets
                 .load(path)
                 .unwrap()
                 .unwrap_or_else(|| panic!("{path} is not embedded"));
             assert!(bytes.starts_with(b"<svg"), "{path}");
         }
+    }
+
+    #[test]
+    fn source_control_icon_keys_map_to_bundled_art() {
+        for (key, path) in [
+            ("gitlab", GITLAB),
+            ("forgejo", FORGEJO),
+            ("bitbucket", BITBUCKET),
+            ("azure-devops", AZURE_DEVOPS),
+            ("gitcafe", GITCAFE),
+        ] {
+            assert_eq!(source_control_icon_path(key), Some(path), "{key}");
+        }
+        assert_eq!(source_control_icon_path("github"), None);
+        assert_eq!(source_control_icon_path("unknown"), None);
+    }
+
+    #[test]
+    fn gitlab_monochrome_has_no_fixed_colours() {
+        let bytes = AppAssets.load(GITLAB_MONOCHROME).unwrap().unwrap();
+        let svg = std::str::from_utf8(&bytes).unwrap();
+        assert!(!svg.contains("#E24329") && svg.matches("currentColor").count() == 4);
     }
 }

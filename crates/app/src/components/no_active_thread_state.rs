@@ -1,4 +1,7 @@
 //! Port of upstream/apps/web/src/components/NoActiveThreadState.tsx
+//! Also ports upstream/apps/web/src/components/WorkspacePageHeader.tsx (folded in:
+//! `WORKSPACE_TOPBAR_HEIGHT` in `theme/tokens.rs`, the titlebar inset in
+//! `components/workspace_titlebar.rs` and `components/drag_region.rs`).
 //!
 //! The empty state shown when no thread is selected: a `WorkspacePageHeader`
 //! reading "No active thread" over the `Empty` card "Pick a thread to

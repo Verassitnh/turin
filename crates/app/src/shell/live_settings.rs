@@ -168,6 +168,7 @@ pub fn start_live_client_settings(
     persistence: Arc<dyn crate::settings_logic::use_settings::ClientSettingsPersistence>,
 ) {
     crate::settings::live_init::boot_client_settings(persistence);
+    crate::settings_logic::use_settings::set_client_settings_runtime_handle(runtime.clone());
     runtime.spawn(async {
         if let Err(error) = crate::settings::live_init::hydrate_client_settings().await {
             tracing::warn!(%error, "client settings hydration failed");

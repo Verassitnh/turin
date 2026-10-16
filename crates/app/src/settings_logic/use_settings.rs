@@ -15,6 +15,7 @@ use futures::FutureExt;
 use futures::future::Shared;
 use parking_lot::Mutex;
 use serde_json::Value;
+use tokio::runtime::Handle;
 use turin_contracts::settings::{
     ClientSettings, ClientSettingsPatch, EnvironmentIdentificationMode, ServerSettings,
     ServerSettingsPatch, UnifiedSettings, default_client_settings,
@@ -273,6 +274,8 @@ struct ClientSettingsStore {
     hydration_in_flight: Mutex<Option<HydrationInFlight>>,
     deferred_patch_count: Mutex<u32>,
     persistence: Mutex<Arc<dyn ClientSettingsPersistence>>,
+    /// GPUI has no Tokio reactor; hydration and persistence queue through this.
+    runtime: Mutex<Option<Handle>>,
     /// Completion signal of the most recently enqueued persistence job.
     persistence_tail: Mutex<Option<Shared<tokio::sync::oneshot::Receiver<()>>>>,
 }
@@ -287,8 +290,17 @@ impl ClientSettingsStore {
             hydration_in_flight: Mutex::new(None),
             deferred_patch_count: Mutex::new(0),
             persistence: Mutex::new(persistence),
+            runtime: Mutex::new(None),
             persistence_tail: Mutex::new(None),
         }
+    }
+
+    fn runtime_handle_for_spawn(&self) -> Handle {
+        self.runtime
+            .lock()
+            .clone()
+            .or_else(|| Handle::try_current().ok())
+            .expect("client settings runtime not installed")
     }
 
     fn get_snapshot(&self) -> ClientSettings {
@@ -327,9 +339,10 @@ impl ClientSettingsStore {
 
         let id = self.hydration_seq.fetch_add(1, Ordering::SeqCst);
         let store = Arc::clone(self);
+        let runtime = self.runtime_handle_for_spawn();
         // The slot lock is held until after the task is registered, so the
         // task's own clean-up below cannot run before the slot is filled.
-        let task = tokio::spawn(async move {
+        let task = runtime.spawn(async move {
             let persistence = store.persistence.lock().clone();
             let result = match persistence.get_client_settings().await {
                 Ok(persisted) => {
@@ -387,7 +400,7 @@ impl ClientSettingsStore {
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
         let previous = self.persistence_tail.lock().replace(done_rx.shared());
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
+        self.runtime_handle_for_spawn().spawn(async move {
             if let Some(previous) = previous {
                 let _ = previous.await;
             }
@@ -423,6 +436,24 @@ impl ClientSettingsStore {
         patch: ClientSettingsPatch,
         persist: PersistClientSettings,
     ) -> BoxFut<()> {
+        let job = self.persist_patch_job(patch, persist);
+        Box::pin(async move {
+            if let Err(error) = job.await {
+                tracing::error!(
+                    scope = CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE,
+                    operation = "persist",
+                    error = %error,
+                    "persist failed"
+                );
+            }
+        })
+    }
+
+    fn persist_patch_job(
+        self: &Arc<Self>,
+        patch: ClientSettingsPatch,
+        persist: PersistClientSettings,
+    ) -> BoxFut<Result<(), ClientSettingsHydrationError>> {
         // Patches queued before hydration must publish before newer optimistic patches.
         let defer_patch = self.hydration_status() != ClientSettingsHydrationStatus::Ready
             || *self.deferred_patch_count.lock() > 0;
@@ -433,7 +464,7 @@ impl ClientSettingsStore {
             self.replace_snapshot(next);
         }
         let store = Arc::clone(self);
-        let job = self.enqueue(Box::pin(async move {
+        self.enqueue(Box::pin(async move {
             if defer_patch {
                 let published = async {
                     if store.hydration_status() != ClientSettingsHydrationStatus::Ready {
@@ -451,17 +482,7 @@ impl ClientSettingsStore {
                 published?;
             }
             persist(store.get_snapshot()).await
-        }));
-        Box::pin(async move {
-            if let Err(error) = job.await {
-                tracing::error!(
-                    scope = CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE,
-                    operation = "persist",
-                    error = %error,
-                    "persist failed"
-                );
-            }
-        })
+        }))
     }
 
     /// `persistClientSettingsUpdate`.
@@ -504,6 +525,11 @@ pub fn set_client_settings_persistence(persistence: Arc<dyn ClientSettingsPersis
     *client_settings_store().persistence.lock() = persistence;
 }
 
+/// Installs the shared Tokio runtime used for hydration and persistence jobs.
+pub fn set_client_settings_runtime_handle(handle: Handle) {
+    *client_settings_store().runtime.lock() = Some(handle);
+}
+
 fn default_client_settings_persistence() -> PersistClientSettings {
     Arc::new(|settings| {
         let persistence = client_settings_store().persistence.lock().clone();
@@ -544,6 +570,13 @@ pub fn persist_client_settings_patch_with(
     persist: PersistClientSettings,
 ) -> impl Future<Output = ()> + Send {
     client_settings_store().persist_patch(patch, persist)
+}
+
+/// Like [`persist_client_settings_patch`], but returns persistence failures.
+pub fn try_persist_client_settings_patch(
+    patch: ClientSettingsPatch,
+) -> impl Future<Output = Result<(), ClientSettingsHydrationError>> + Send {
+    client_settings_store().persist_patch_job(patch, default_client_settings_persistence())
 }
 
 /// Persists a client-settings update before publishing it to the in-memory

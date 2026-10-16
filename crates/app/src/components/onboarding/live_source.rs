@@ -32,7 +32,7 @@ use crate::onboarding::live_providers::{
 use crate::onboarding::project_import_logic::OnboardingKnownProject;
 use crate::onboarding::provider_readiness_logic::OnboardingProvider;
 use crate::settings_logic::use_settings::{
-    ensure_client_settings_hydrated, get_client_settings, persist_client_settings_patch,
+    ensure_client_settings_hydrated, get_client_settings, try_persist_client_settings_patch,
 };
 use crate::state::local_environment_id;
 use crate::state::store::ClientStore;
@@ -161,12 +161,15 @@ impl FirstRunBackend for LiveOnboardingBackend {
     fn complete_onboarding(&self, cx: &mut App) -> Task<Result<(), ()>> {
         let stamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         cx.spawn(async move |_| {
-            persist_client_settings_patch(ClientSettingsPatch {
+            try_persist_client_settings_patch(ClientSettingsPatch {
                 onboarding_completed_at: Some(Some(stamp)),
                 ..Default::default()
             })
-            .await;
-            Ok(())
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "onboarding completion persist failed");
+            })
+            .map_err(|_| ())
         })
     }
 

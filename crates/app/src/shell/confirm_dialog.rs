@@ -3,7 +3,8 @@
 //! Port of upstream/apps/web/src/confirmDialog.ts (+ confirmDialog.test.ts).
 
 use parking_lot::Mutex;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// `ConfirmDialogVariant` from upstream/packages/contracts/src/ipc.ts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +37,7 @@ struct ConfirmDialogInner {
     active: Option<PendingConfirmation>,
     queued: Vec<PendingConfirmation>,
     registered_hosts: u32,
+    listeners: Vec<(u64, Arc<dyn Fn() + Send + Sync>)>,
 }
 
 fn inner() -> &'static Mutex<ConfirmDialogInner> {
@@ -46,6 +48,7 @@ fn inner() -> &'static Mutex<ConfirmDialogInner> {
             active: None,
             queued: Vec::new(),
             registered_hosts: 0,
+            listeners: Vec::new(),
         })
     })
 }
@@ -61,6 +64,34 @@ fn resolve_pending(inner: &mut ConfirmDialogInner, confirmed: bool) {
             let _ = resolve.send(confirmed);
         }
     }
+}
+
+fn notify_listeners() {
+    let listeners: Vec<Arc<dyn Fn() + Send + Sync>> = inner()
+        .lock()
+        .listeners
+        .iter()
+        .map(|(_, listener)| Arc::clone(listener))
+        .collect();
+    for listener in listeners {
+        listener();
+    }
+}
+
+/// Wakes the confirm host when the queue changes. The listener must not
+/// re-enter the dialog lock on the calling stack.
+pub fn subscribe_confirm_dialog(listener: impl Fn() + Send + Sync + 'static) -> u64 {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    inner().lock().listeners.push((id, Arc::new(listener)));
+    id
+}
+
+pub fn unsubscribe_confirm_dialog(id: u64) {
+    inner()
+        .lock()
+        .listeners
+        .retain(|(existing, _)| *existing != id);
 }
 
 /// `readConfirmDialogState`.
@@ -90,6 +121,8 @@ impl Drop for ConfirmDialogHostGuard {
             resolve_pending(&mut guard, false);
             guard.state = ConfirmDialogState::Idle;
         }
+        drop(guard);
+        notify_listeners();
     }
 }
 
@@ -110,12 +143,16 @@ pub fn request_confirm_dialog(
         variant,
         resolve: Some(tx),
     };
-    if guard.active.is_some() || matches!(guard.state, ConfirmDialogState::Closing { .. }) {
+    let queued =
+        guard.active.is_some() || matches!(guard.state, ConfirmDialogState::Closing { .. });
+    if queued {
         guard.queued.push(pending);
-        return Some(ConfirmDialogRequest { receiver: rx });
+    } else {
+        guard.active = Some(pending);
+        guard.state = ConfirmDialogState::Confirming { message, variant };
     }
-    guard.active = Some(pending);
-    guard.state = ConfirmDialogState::Confirming { message, variant };
+    drop(guard);
+    notify_listeners();
     Some(ConfirmDialogRequest { receiver: rx })
 }
 
@@ -154,6 +191,8 @@ pub fn respond_to_confirm_dialog(confirmed: bool) {
         let _ = resolve.send(confirmed);
     }
     guard.state = ConfirmDialogState::Closing { message, variant };
+    drop(guard);
+    notify_listeners();
 }
 
 /// `completeConfirmDialogClose`.
@@ -162,7 +201,11 @@ pub fn complete_confirm_dialog_close() {
     if !matches!(guard.state, ConfirmDialogState::Closing { .. }) {
         return;
     }
-    let next = guard.queued.pop();
+    let next = if guard.queued.is_empty() {
+        None
+    } else {
+        Some(guard.queued.remove(0))
+    };
     match next {
         None => {
             guard.state = ConfirmDialogState::Idle;
@@ -175,6 +218,8 @@ pub fn complete_confirm_dialog_close() {
             guard.active = Some(pending);
         }
     }
+    drop(guard);
+    notify_listeners();
 }
 
 /// `resetConfirmDialogForTests`.
@@ -183,6 +228,7 @@ pub fn reset_confirm_dialog_for_tests() {
     resolve_pending(&mut guard, false);
     guard.registered_hosts = 0;
     guard.state = ConfirmDialogState::Idle;
+    guard.listeners.clear();
 }
 
 #[cfg(test)]
@@ -190,19 +236,26 @@ mod tests {
     use super::ConfirmDialogVariant;
     use super::*;
 
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
     fn require_confirmation(request: Option<ConfirmDialogRequest>) -> ConfirmDialogRequest {
         request.expect("expected a registered confirmation host")
     }
 
     #[test]
     fn returns_none_without_host() {
+        let _exclusive = exclusive();
         reset_confirm_dialog_for_tests();
         assert!(request_confirm_dialog("Confirm this action?", None).is_none());
         assert_eq!(read_confirm_dialog_state(), ConfirmDialogState::Idle);
     }
 
-    #[tokio::test]
-    async fn resolves_and_waits_for_close_transition() {
+    #[test]
+    fn resolves_and_waits_for_close_transition() {
+        let _exclusive = exclusive();
         reset_confirm_dialog_for_tests();
         let _host = register_confirm_dialog_host();
         let mut confirmation = require_confirmation(request_confirm_dialog(
@@ -231,8 +284,9 @@ mod tests {
         assert!(!is_confirm_dialog_active());
     }
 
-    #[tokio::test]
-    async fn serializes_concurrent_confirmations() {
+    #[test]
+    fn serializes_concurrent_confirmations() {
+        let _exclusive = exclusive();
         reset_confirm_dialog_for_tests();
         let _host = register_confirm_dialog_host();
         let mut first = require_confirmation(request_confirm_dialog("Delete the project?", None));
@@ -252,5 +306,31 @@ mod tests {
         assert_eq!(second.try_wait(), Some(true));
         complete_confirm_dialog_close();
         assert_eq!(read_confirm_dialog_state(), ConfirmDialogState::Idle);
+    }
+
+    #[test]
+    fn queued_confirmations_are_fifo() {
+        let _exclusive = exclusive();
+        reset_confirm_dialog_for_tests();
+        let _host = register_confirm_dialog_host();
+        let _a = require_confirmation(request_confirm_dialog("A", None));
+        let _b = require_confirmation(request_confirm_dialog("B", None));
+        let _c = require_confirmation(request_confirm_dialog("C", None));
+        assert!(matches!(
+            read_confirm_dialog_state(),
+            ConfirmDialogState::Confirming { ref message, .. } if message == "A"
+        ));
+        respond_to_confirm_dialog(true);
+        complete_confirm_dialog_close();
+        assert!(matches!(
+            read_confirm_dialog_state(),
+            ConfirmDialogState::Confirming { ref message, .. } if message == "B"
+        ));
+        respond_to_confirm_dialog(false);
+        complete_confirm_dialog_close();
+        assert!(matches!(
+            read_confirm_dialog_state(),
+            ConfirmDialogState::Confirming { ref message, .. } if message == "C"
+        ));
     }
 }

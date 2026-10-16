@@ -6,14 +6,14 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
+use super::theme_palettes::{
+    BUILT_IN_THEMES, RESERVED_THEME_IDS, T3_CHAT_THEME, THEME_COLOR_ROLES, ThemeAppearance,
+    ThemeCollection, ThemeColors, ThemeDefinition, ThemeVariants,
+};
 use csscolorparser::Color;
 use gpui_kit::SharedString;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
-use super::theme_palettes::{
-    ThemeAppearance, ThemeCollection, ThemeColors, ThemeDefinition, ThemeVariants, BUILT_IN_THEMES,
-    RESERVED_THEME_IDS, T3_CHAT_THEME, THEME_COLOR_ROLES,
-};
 
 pub const THEME_FILE_VERSION: u32 = 1;
 pub const CUSTOM_THEMES_STORAGE_KEY: &str = "t3code:themes:v1";
@@ -76,7 +76,9 @@ impl fmt::Display for ThemeLibraryStorageError {
         write!(
             f,
             "Failed to {} the theme library {} {}.",
-            self.operation, self.direction(), self.storage_key
+            self.operation,
+            self.direction(),
+            self.storage_key
         )
     }
 }
@@ -136,8 +138,7 @@ enum CustomThemeLibrarySnapshot {
     UnavailableStorage,
 }
 
-static CUSTOM_THEME_LIBRARY_SNAPSHOT: Mutex<Option<CustomThemeLibrarySnapshot>> =
-    Mutex::new(None);
+static CUSTOM_THEME_LIBRARY_SNAPSHOT: Mutex<Option<CustomThemeLibrarySnapshot>> = Mutex::new(None);
 
 static ENVIRONMENT_THEME_DEFINITIONS: Mutex<Vec<ThemeDefinition>> = Mutex::new(Vec::new());
 
@@ -209,7 +210,10 @@ fn camel_to_snake_role(camel: &str) -> Option<&'static str> {
             snake.push(ch);
         }
     }
-    THEME_COLOR_ROLES.iter().copied().find(|role| *role == snake.as_str())
+    THEME_COLOR_ROLES
+        .iter()
+        .copied()
+        .find(|role| *role == snake.as_str())
 }
 
 fn theme_color_role_set() -> HashSet<&'static str> {
@@ -421,10 +425,7 @@ fn format_oklch_theme_color(color: ThemeOklch, alpha: f64) -> String {
         format_theme_color_number(normalized_hue, 3)
     );
     if alpha < 1.0 {
-        format!(
-            "oklch({body} / {})",
-            format_theme_color_number(alpha, 4)
-        )
+        format!("oklch({body} / {})", format_theme_color_number(alpha, 4))
     } else {
         format!("oklch({body})")
     }
@@ -481,10 +482,7 @@ fn oklch_to_rgb_unclamped(color: ThemeOklch) -> ThemeRgbColor {
 
 fn map_theme_oklch_to_srgb_gamut(color: ThemeOklch) -> ThemeOklch {
     let is_in_gamut = |chroma: f64| {
-        let linear = oklch_to_rgb_unclamped(ThemeOklch {
-            c: chroma,
-            ..color
-        });
+        let linear = oklch_to_rgb_unclamped(ThemeOklch { c: chroma, ..color });
         [linear.r, linear.g, linear.b]
             .into_iter()
             .all(|channel| (-0.0001..=1.0001).contains(&channel))
@@ -495,8 +493,8 @@ fn map_theme_oklch_to_srgb_gamut(color: ThemeOklch) -> ThemeOklch {
     let mut low = 0.0;
     let mut high = color.c;
     let chroma_resolution = 0.000001;
-    let steps = ((color.c.max(chroma_resolution).log2() - chroma_resolution.log2()).ceil() as i32)
-        .max(1);
+    let steps =
+        ((color.c.max(chroma_resolution).log2() - chroma_resolution.log2()).ceil() as i32).max(1);
     for _ in 0..steps {
         let mid = (low + high) / 2.0;
         if is_in_gamut(mid) {
@@ -534,10 +532,7 @@ fn theme_rgb_to_hex_color(color: ThemeRgbColor) -> String {
 }
 
 fn theme_rgb_to_theme_color(color: ThemeRgbColor) -> SharedString {
-    SharedString::from(format_oklch_theme_color(
-        theme_rgb_to_oklch(color),
-        1.0,
-    ))
+    SharedString::from(format_oklch_theme_color(theme_rgb_to_oklch(color), 1.0))
 }
 
 fn parse_oklch_components(input: &str) -> Option<(ThemeOklch, f64)> {
@@ -693,10 +688,7 @@ pub fn lenient_theme_color_overrides(value: &Map<String, Value>) -> HashMap<Stri
         if !roles.contains(snake) {
             continue;
         }
-        let Some(normalized) = color
-            .as_str()
-            .and_then(|raw| to_canonical_theme_color(raw))
-        else {
+        let Some(normalized) = color.as_str().and_then(|raw| to_canonical_theme_color(raw)) else {
             continue;
         };
         overrides.insert(snake.to_string(), normalized);
@@ -802,11 +794,10 @@ fn parse_theme_collection(value: &Value) -> Option<ThemeCollection> {
     let id = object.get("id")?.as_str()?;
     if id.is_empty()
         || id.len() > 128
+        || !id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
         || !id
             .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
-        || !id.chars().all(|c| c.is_ascii_alphanumeric() || ".:-_".contains(c))
+            .all(|c| c.is_ascii_alphanumeric() || ".:-_".contains(c))
     {
         return None;
     }
@@ -846,14 +837,14 @@ fn parse_stored_theme(value: &Value) -> Option<ThemeDefinition> {
             light: None,
             dark: None,
         },
-        Some(value) => parse_stored_theme_variants(value, appearance).ok()?.unwrap_or(ThemeVariants {
-            light: None,
-            dark: None,
-        }),
+        Some(value) => parse_stored_theme_variants(value, appearance)
+            .ok()?
+            .unwrap_or(ThemeVariants {
+                light: None,
+                dark: None,
+            }),
     };
-    let collection = object
-        .get("collection")
-        .and_then(parse_theme_collection);
+    let collection = object.get("collection").and_then(parse_theme_collection);
     let managed = object.get("managed").and_then(Value::as_bool) == Some(true);
     Some(ThemeDefinition {
         id: SharedString::from(id),
@@ -951,9 +942,10 @@ pub fn get_stored_custom_theme_collection(collection_id: &str) -> Vec<ThemeDefin
             themes
                 .into_iter()
                 .filter(|theme| {
-                    theme.collection.as_ref().is_some_and(|collection| {
-                        collection.id.as_str() == collection_id
-                    })
+                    theme
+                        .collection
+                        .as_ref()
+                        .is_some_and(|collection| collection.id.as_str() == collection_id)
                 })
                 .collect()
         })
@@ -968,27 +960,31 @@ fn require_writable_custom_theme_library(
             stored_themes,
             themes,
         } => Ok((stored_themes, themes)),
-        CustomThemeLibrarySnapshot::UnavailableMalformed => {
-            Err(ThemeLibraryStorageError::read(ThemeLibraryStorageReason::Malformed))
-        }
+        CustomThemeLibrarySnapshot::UnavailableMalformed => Err(ThemeLibraryStorageError::read(
+            ThemeLibraryStorageReason::Malformed,
+        )),
         CustomThemeLibrarySnapshot::UnavailableStorage => Err(ThemeLibraryStorageError::read(
             ThemeLibraryStorageReason::StorageUnavailable,
         )),
     }
 }
 
-fn get_writable_custom_theme_library(
-) -> Result<(Vec<Value>, Vec<ThemeDefinition>), ThemeLibraryStorageError> {
+fn get_writable_custom_theme_library()
+-> Result<(Vec<Value>, Vec<ThemeDefinition>), ThemeLibraryStorageError> {
     require_writable_custom_theme_library(get_custom_theme_library_snapshot())
 }
 
-fn read_writable_custom_theme_library(
-) -> Result<(Vec<Value>, Vec<ThemeDefinition>), ThemeLibraryStorageError> {
+fn read_writable_custom_theme_library()
+-> Result<(Vec<Value>, Vec<ThemeDefinition>), ThemeLibraryStorageError> {
     require_writable_custom_theme_library(read_custom_theme_library_snapshot())
 }
 
-fn save_custom_themes(stored_themes: Vec<Value>, themes: Vec<ThemeDefinition>) -> Result<(), ThemeLibraryStorageError> {
-    let raw = serde_json::to_string(&stored_themes).map_err(|_| ThemeLibraryStorageError::write_unavailable())?;
+fn save_custom_themes(
+    stored_themes: Vec<Value>,
+    themes: Vec<ThemeDefinition>,
+) -> Result<(), ThemeLibraryStorageError> {
+    let raw = serde_json::to_string(&stored_themes)
+        .map_err(|_| ThemeLibraryStorageError::write_unavailable())?;
     theme_library_storage().write(&raw)?;
     *CUSTOM_THEME_LIBRARY_SNAPSHOT.lock() = Some(CustomThemeLibrarySnapshot::Ready {
         stored_themes,
@@ -1019,7 +1015,8 @@ pub fn install_custom_theme(theme: ThemeDefinition) -> Result<ThemeDefinition, S
     if is_reserved_theme_id_inner(theme.id.as_str()) {
         return Err(format!("The theme id \"{}\" is reserved.", theme.id));
     }
-    let (stored_themes, themes) = get_writable_custom_theme_library().map_err(|error| error.to_string())?;
+    let (stored_themes, themes) =
+        get_writable_custom_theme_library().map_err(|error| error.to_string())?;
     if BUILT_IN_THEMES
         .iter()
         .any(|existing| existing.id == theme.id)
@@ -1045,7 +1042,8 @@ pub fn update_custom_theme(theme: ThemeDefinition) -> Result<ThemeDefinition, St
     if is_reserved_theme_id_inner(theme.id.as_str()) {
         return Err(format!("The theme id \"{}\" is reserved.", theme.id));
     }
-    let (stored_themes, themes) = get_writable_custom_theme_library().map_err(|error| error.to_string())?;
+    let (stored_themes, themes) =
+        get_writable_custom_theme_library().map_err(|error| error.to_string())?;
     let Some(index) = themes.iter().position(|existing| existing.id == theme.id) else {
         return Err(format!("The theme \"{}\" is not installed.", theme.label));
     };
@@ -1128,7 +1126,8 @@ pub fn replace_custom_theme_collection(
         return Err("That theme collection is invalid.".to_string());
     }
     let replacement: Vec<ThemeDefinition> = validated.into_iter().flatten().collect();
-    let (stored_themes, current) = read_writable_custom_theme_library().map_err(|error| error.to_string())?;
+    let (stored_themes, current) =
+        read_writable_custom_theme_library().map_err(|error| error.to_string())?;
     let current_collection: Vec<_> = current
         .iter()
         .filter(|theme| {
@@ -1178,8 +1177,7 @@ pub fn replace_custom_theme_collection(
         }
     }
     if let Some(conflict) = replacement.iter().find(|theme| {
-        is_reserved_theme_id_inner(theme.id.as_str())
-            || occupied.contains(theme.id.as_str())
+        is_reserved_theme_id_inner(theme.id.as_str()) || occupied.contains(theme.id.as_str())
     }) {
         return Err(format!(
             "A theme named \"{}\" is already installed.",
@@ -1208,13 +1206,14 @@ pub fn replace_custom_theme_collection(
     Ok(replacement)
 }
 
-fn parse_theme_color_overrides(value: &Map<String, Value>) -> Result<HashMap<String, SharedString>, String> {
+fn parse_theme_color_overrides(
+    value: &Map<String, Value>,
+) -> Result<HashMap<String, SharedString>, String> {
     let roles = theme_color_role_set();
     let mut overrides = HashMap::new();
     for (role, color) in value {
-        let snake = camel_to_snake_role(role).ok_or_else(|| {
-            format!("\"{role}\" is not a supported theme color role.")
-        })?;
+        let snake = camel_to_snake_role(role)
+            .ok_or_else(|| format!("\"{role}\" is not a supported theme color role."))?;
         if !roles.contains(snake) {
             return Err(format!("\"{role}\" is not a supported theme color role."));
         }
@@ -1237,15 +1236,15 @@ fn parse_theme_color_overrides(value: &Map<String, Value>) -> Result<HashMap<Str
 }
 
 pub fn parse_theme_file(value: Value) -> Result<ThemeDefinition, String> {
-    let object = value.as_object().ok_or_else(|| {
-        "Theme files must contain a JSON object.".to_string()
-    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "Theme files must contain a JSON object.".to_string())?;
     let version = object
         .get("version")
         .and_then(Value::as_u64)
-        .ok_or_else(|| format!(
-            "This theme file uses an unsupported version. Expected {THEME_FILE_VERSION}."
-        ))?;
+        .ok_or_else(|| {
+            format!("This theme file uses an unsupported version. Expected {THEME_FILE_VERSION}.")
+        })?;
     if version != u64::from(THEME_FILE_VERSION) {
         return Err(format!(
             "This theme file uses an unsupported version. Expected {THEME_FILE_VERSION}."
@@ -1271,9 +1270,11 @@ pub fn parse_theme_file(value: Value) -> Result<ThemeDefinition, String> {
     let id = match object.get("id") {
         Some(Value::String(id)) => id.clone(),
         None => theme_id_from_name(name),
-        _ => return Err(
-            "Theme ids may only contain lowercase letters, numbers, and hyphens.".to_string(),
-        ),
+        _ => {
+            return Err(
+                "Theme ids may only contain lowercase letters, numbers, and hyphens.".to_string(),
+            );
+        }
     };
     if !is_theme_id(&id) {
         return Err(
@@ -1286,18 +1287,19 @@ pub fn parse_theme_file(value: Value) -> Result<ThemeDefinition, String> {
     let overrides = parse_theme_color_overrides(raw_colors)?;
     let collection = match object.get("collection") {
         None => None,
-        Some(value) => Some(parse_theme_collection(value).ok_or_else(|| {
-            "Theme collections need a valid id and label.".to_string()
-        })?),
+        Some(value) => Some(
+            parse_theme_collection(value)
+                .ok_or_else(|| "Theme collections need a valid id and label.".to_string())?,
+        ),
     };
     let mut variants = ThemeVariants {
         light: None,
         dark: None,
     };
     if let Some(raw_variants) = object.get("variants") {
-        let variant_object = raw_variants.as_object().ok_or_else(|| {
-            "Theme variants must be an object.".to_string()
-        })?;
+        let variant_object = raw_variants
+            .as_object()
+            .ok_or_else(|| "Theme variants must be an object.".to_string())?;
         for (variant_appearance, variant_colors) in variant_object {
             let Some(mode) = appearance_from_str(variant_appearance) else {
                 return Err("Theme variants may only be named \"light\" or \"dark\".".to_string());
@@ -1309,9 +1311,9 @@ pub fn parse_theme_file(value: Value) -> Result<ThemeDefinition, String> {
                 ));
             }
             let variant_overrides = parse_theme_color_overrides(
-                variant_colors.as_object().ok_or_else(|| {
-                    "Theme variants must be an object.".to_string()
-                })?,
+                variant_colors
+                    .as_object()
+                    .ok_or_else(|| "Theme variants must be an object.".to_string())?,
             )?;
             let merged = merge_overrides(get_default_theme_colors(mode), variant_overrides);
             match mode {
@@ -1336,10 +1338,7 @@ pub fn parse_theme_file(value: Value) -> Result<ThemeDefinition, String> {
 fn theme_colors_to_camel_map(colors: &ThemeColors) -> Map<String, Value> {
     let mut map = Map::new();
     for (role, value) in colors.entries() {
-        map.insert(
-            snake_to_camel_role(role),
-            Value::String(value.to_string()),
-        );
+        map.insert(snake_to_camel_role(role), Value::String(value.to_string()));
     }
     map
 }
@@ -1395,7 +1394,10 @@ pub fn serialize_theme_file(theme: ThemeDefinition) -> Result<String, String> {
         Value::Number(THEME_FILE_VERSION.into()),
     );
     file.insert("id".to_string(), Value::String(canonical.id.to_string()));
-    file.insert("name".to_string(), Value::String(canonical.label.to_string()));
+    file.insert(
+        "name".to_string(),
+        Value::String(canonical.label.to_string()),
+    );
     file.insert(
         "appearance".to_string(),
         Value::String(appearance_to_str(canonical.appearance).to_string()),
@@ -1432,7 +1434,10 @@ pub fn serialize_theme_file(theme: ThemeDefinition) -> Result<String, String> {
     if canonical.managed {
         file.insert("managed".to_string(), Value::Bool(true));
     }
-    Ok(format!("{}\n", serde_json::to_string_pretty(&Value::Object(file)).map_err(|error| error.to_string())?))
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string_pretty(&Value::Object(file)).map_err(|error| error.to_string())?
+    ))
 }
 
 pub fn theme_id_from_name(name: &str) -> String {
@@ -1603,11 +1608,7 @@ fn standard_status_colors(canvas: ThemeRgbColor) -> HashMap<String, SharedString
         0.08
     };
     let surface_of = |value: &str| {
-        mix_theme_rgb_colors(
-            canvas,
-            parse_theme_rgb_color(value, canvas),
-            surface_mix,
-        )
+        mix_theme_rgb_colors(canvas, parse_theme_rgb_color(value, canvas), surface_mix)
     };
     let readable_on = |foreground: &str, surface: ThemeRgbColor| {
         theme_oklch_to_theme_color(solve_oklch_lightness(
@@ -1660,9 +1661,17 @@ pub fn create_vivid_theme_colors(
     let canvas_rgb = parse_theme_rgb_color(
         background_value,
         if appearance == ThemeAppearance::Dark {
-            ThemeRgbColor { r: 24.0, g: 15.0, b: 27.0 }
+            ThemeRgbColor {
+                r: 24.0,
+                g: 15.0,
+                b: 27.0,
+            }
         } else {
-            ThemeRgbColor { r: 250.0, g: 245.0, b: 250.0 }
+            ThemeRgbColor {
+                r: 250.0,
+                g: 245.0,
+                b: 250.0,
+            }
         },
     );
     let accent_rgb = parse_theme_rgb_color(
@@ -1732,18 +1741,10 @@ pub fn create_vivid_theme_colors(
             if dark { "lighter" } else { "darker" },
         ))
     };
-    let muted_foreground = theme_rgb_to_theme_color(readable_theme_text(
-        muted_rgb,
-        text_rgb,
-        1.0,
-        4.6,
-    ));
-    let placeholder = theme_rgb_to_theme_color(readable_theme_text(
-        surface_raised_rgb,
-        text_rgb,
-        1.0,
-        4.6,
-    ));
+    let muted_foreground =
+        theme_rgb_to_theme_color(readable_theme_text(muted_rgb, text_rgb, 1.0, 4.6));
+    let placeholder =
+        theme_rgb_to_theme_color(readable_theme_text(surface_raised_rgb, text_rgb, 1.0, 4.6));
     let search_match = theme_oklch_to_rgb(surface_at(0.22, (accent.c * 0.12).min(0.12)));
     let search_match_active = theme_oklch_to_rgb(surface_at(0.4, (accent.c * 0.18).min(0.18)));
     let action_hover = ThemeOklch {
@@ -1759,10 +1760,14 @@ pub fn create_vivid_theme_colors(
     colors.chrome = colors.canvas.clone();
     colors.toolbar = colors.canvas.clone();
     colors.toolbar_foreground = theme_rgb_to_theme_color(text_rgb);
-    colors.toolbar_border = theme_color(surface_at(if dark { 0.14 } else { 0.1 }, (accent.c * 0.4).min(0.08)));
+    colors.toolbar_border = theme_color(surface_at(
+        if dark { 0.14 } else { 0.1 },
+        (accent.c * 0.4).min(0.08),
+    ));
     colors.toolbar_control = theme_color(surface_at(if dark { 0.09 } else { 0.05 }, tint_c * 1.3));
     colors.toolbar_control_foreground = theme_rgb_to_theme_color(text_rgb);
-    colors.toolbar_control_hover = theme_color(surface_at(if dark { 0.14 } else { 0.09 }, tint_c * 1.6));
+    colors.toolbar_control_hover =
+        theme_color(surface_at(if dark { 0.14 } else { 0.09 }, tint_c * 1.6));
     colors.surface = theme_color(surface);
     colors.surface_raised = theme_color(surface_raised);
     colors.surface_overlay = theme_color(surface_overlay);
@@ -1802,17 +1807,34 @@ pub fn create_vivid_theme_colors(
     colors.sidebar_foreground = foreground_on(sidebar_rgb);
     colors.sidebar_muted_foreground =
         theme_rgb_to_theme_color(standard_muted_theme_text(sidebar_rgb, text_rgb));
-    colors.sidebar_control_surface = theme_color(surface_at(if dark { 0.1 } else { 0.07 }, tint_c * 1.5));
-    colors.sidebar_row_hover = theme_color(surface_at(if dark { 0.08 } else { 0.06 }, (accent.c * 0.45).min(0.08)));
-    colors.sidebar_row_active = theme_color(surface_at(if dark { 0.12 } else { 0.09 }, (accent.c * 0.55).min(0.1)));
-    colors.sidebar_row_selected = theme_color(surface_at(if dark { 0.14 } else { 0.1 }, (accent.c * 0.6).min(0.11)));
-    colors.sidebar_border = theme_color(surface_at(if dark { 0.17 } else { 0.12 }, (accent.c * 0.4).min(0.08)));
+    colors.sidebar_control_surface =
+        theme_color(surface_at(if dark { 0.1 } else { 0.07 }, tint_c * 1.5));
+    colors.sidebar_row_hover = theme_color(surface_at(
+        if dark { 0.08 } else { 0.06 },
+        (accent.c * 0.45).min(0.08),
+    ));
+    colors.sidebar_row_active = theme_color(surface_at(
+        if dark { 0.12 } else { 0.09 },
+        (accent.c * 0.55).min(0.1),
+    ));
+    colors.sidebar_row_selected = theme_color(surface_at(
+        if dark { 0.14 } else { 0.1 },
+        (accent.c * 0.6).min(0.11),
+    ));
+    colors.sidebar_border = theme_color(surface_at(
+        if dark { 0.17 } else { 0.12 },
+        (accent.c * 0.4).min(0.08),
+    ));
     colors.terminal_background = theme_rgb_to_theme_color(canvas_rgb);
     colors.terminal_foreground = theme_rgb_to_theme_color(text_rgb);
     colors.terminal_cursor = theme_rgb_to_theme_color(accent_rgb);
-    colors.terminal_selection = theme_color(surface_at(if dark { 0.18 } else { 0.12 }, (accent.c * 0.55).min(0.12)));
+    colors.terminal_selection = theme_color(surface_at(
+        if dark { 0.18 } else { 0.12 },
+        (accent.c * 0.55).min(0.12),
+    ));
     colors.terminal_scrollbar = theme_color(surface_at(if dark { 0.22 } else { 0.16 }, tint_c));
-    colors.terminal_scrollbar_hover = theme_color(surface_at(if dark { 0.3 } else { 0.22 }, tint_c));
+    colors.terminal_scrollbar_hover =
+        theme_color(surface_at(if dark { 0.3 } else { 0.22 }, tint_c));
     colors
 }
 
@@ -1836,9 +1858,17 @@ pub fn update_theme_color_family(
     let canvas = parse_theme_rgb_color(
         colors.canvas.as_str(),
         if appearance == ThemeAppearance::Dark {
-            ThemeRgbColor { r: 24.0, g: 15.0, b: 27.0 }
+            ThemeRgbColor {
+                r: 24.0,
+                g: 15.0,
+                b: 27.0,
+            }
         } else {
-            ThemeRgbColor { r: 250.0, g: 245.0, b: 250.0 }
+            ThemeRgbColor {
+                r: 250.0,
+                g: 245.0,
+                b: 250.0,
+            }
         },
     );
     let selected = theme_oklch_to_rgb(parsed_selected.color);
@@ -1857,8 +1887,7 @@ pub fn update_theme_color_family(
     let canvas_is_dark = theme_relative_luminance(canvas) < 0.179;
     let terminal_is_dark = theme_relative_luminance(selected_on_canvas) < 0.179;
     let color_of = |color: ThemeRgbColor| theme_rgb_to_theme_color(color);
-    let foreground_on =
-        |background: ThemeRgbColor| color_of(readable_theme_foreground(background));
+    let foreground_on = |background: ThemeRgbColor| color_of(readable_theme_foreground(background));
     let selected_tone_on = |background: ThemeRgbColor| {
         theme_oklch_to_theme_color(solve_oklch_lightness(
             parsed_selected.color,
@@ -1973,16 +2002,10 @@ pub fn update_theme_color_family(
         "sidebar_row_selected" => {
             let sidebar = parse_theme_rgb_color(sidebar_source.as_str(), canvas);
             let selected_on_sidebar = selected_on(sidebar);
-            next.sidebar_row_hover = color_of(mix_theme_rgb_colors(
-                sidebar,
-                selected_on_sidebar,
-                0.5,
-            ));
-            next.sidebar_row_active = color_of(mix_theme_rgb_colors(
-                sidebar,
-                selected_on_sidebar,
-                0.8,
-            ));
+            next.sidebar_row_hover =
+                color_of(mix_theme_rgb_colors(sidebar, selected_on_sidebar, 0.5));
+            next.sidebar_row_active =
+                color_of(mix_theme_rgb_colors(sidebar, selected_on_sidebar, 0.8));
             next.sidebar_row_selected = normalized;
         }
         "terminal_background" => {
@@ -2095,7 +2118,8 @@ mod tests {
         }))
         .expect("search");
         let restored: ThemeDefinition = parse_theme_file(
-            serde_json::from_str(&serialize_theme_file(theme.clone()).expect("serialize")).expect("json"),
+            serde_json::from_str(&serialize_theme_file(theme.clone()).expect("serialize"))
+                .expect("json"),
         )
         .expect("restored");
         assert_eq!(restored.colors, theme.colors);
@@ -2143,8 +2167,14 @@ mod tests {
         .expect("theme");
         assert_eq!(theme.colors.canvas.as_str(), "oklch(0.62 0.2 280 / 0.5)");
         assert_eq!(theme.colors.accent.as_str(), canonical("#abcd"));
-        assert_eq!(theme_color_to_hex(theme.colors.accent.as_str()), Some("#aabbccdd".to_string()));
-        assert_eq!(theme_color_to_hex(theme.colors.focus.as_str()), Some("#0a141e80".to_string()));
+        assert_eq!(
+            theme_color_to_hex(theme.colors.accent.as_str()),
+            Some("#aabbccdd".to_string())
+        );
+        assert_eq!(
+            theme_color_to_hex(theme.colors.focus.as_str()),
+            Some("#0a141e80".to_string())
+        );
         assert_eq!(
             theme_color_to_hex(theme.colors.terminal_selection.as_str()),
             Some("#663399".to_string())
@@ -2196,7 +2226,12 @@ mod tests {
             assert_eq!(as_hex(colors.accent.as_str()), accent);
             assert!(contrast_ratio(colors.text.as_str(), colors.canvas.as_str()) >= 7.0);
             assert!(contrast_ratio(colors.text_muted.as_str(), colors.canvas.as_str()) >= 4.5);
-            assert!(contrast_ratio(colors.error_foreground.as_str(), colors.error_surface.as_str()) >= 4.5);
+            assert!(
+                contrast_ratio(
+                    colors.error_foreground.as_str(),
+                    colors.error_surface.as_str()
+                ) >= 4.5
+            );
         }
     }
 
@@ -2237,7 +2272,10 @@ mod tests {
         })
         .expect("update");
         assert_eq!(updated.label.as_str(), "Aurora Night");
-        assert_eq!(updated.colors.accent.as_str(), canonical("hsl(263 70% 58%)"));
+        assert_eq!(
+            updated.colors.accent.as_str(),
+            canonical("hsl(263 70% 58%)")
+        );
         remove_custom_theme("aurora");
         invalidate_custom_themes();
     }

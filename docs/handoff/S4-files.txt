@@ -1,0 +1,19 @@
+## N8 Provider maintenance and update UI — 1493 lines, 7 files
+   409 apps/web/src/components/ProviderUpdateEnvironmentRows.tsx
+   357 apps/web/src/components/ProviderUpdatePrimaryNotification.tsx
+   210 apps/web/src/components/sidebar/SidebarProviderUpdatePill.tsx
+   198 apps/web/src/components/ProviderUpdateLaunchNotification.tsx
+   128 apps/web/src/components/ProviderUpdatesAction.tsx
+    98 apps/web/src/components/ProviderUpdateLaunchNotification.environments.ts
+    93 apps/web/src/providerUpdateDismissal.ts
+## N5 Editor / Open-in integration — 1080 lines, 2 files
+   610 apps/web/src/components/JetBrainsIcons.tsx
+   470 apps/web/src/components/chat/OpenInPicker.tsx
+## N10 Prompt links — 573 lines, 4 files
+   379 apps/web/src/components/promptLinks/NewThreadLinkView.tsx
+    88 apps/web/src/components/promptLinks/copyPromptLink.ts
+    56 apps/web/src/components/promptLinks/linkedPrompt.ts
+    50 apps/web/src/components/promptLinks/ThreadLinkPrompt.tsx
+## N11 Project content search — 520 lines, 2 files
+   337 apps/web/src/components/search/ProjectContentSearchDialog.tsx
+   183 apps/web/src/components/search/HighlightedSearchLine.tsx

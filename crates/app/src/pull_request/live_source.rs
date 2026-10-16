@@ -1,4 +1,4 @@
-//! Port of upstream/packages/client-runtime/src/pullRequestEnvironment.ts.
+//! Port of upstream/packages/client-runtime/src/state/pullRequests.ts.
 //! In-process adapter: the existing GitHub services feed the PR view-model seam.
 
 use super::{pull_request_list_logic::merge_pull_request_lists, view_model::*};
@@ -18,7 +18,7 @@ use std::{
     future::Future,
     rc::Rc,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use turin_contracts::{ThreadId, pull_request::*};
 
@@ -34,6 +34,8 @@ pub struct LivePullRequestSource {
     list_generation: Rc<Cell<u64>>,
     detail_generations: Rc<RefCell<HashMap<String, u64>>>,
     opened: Rc<RefCell<HashMap<String, PullRequestRef>>>,
+    last_detail_read: Rc<RefCell<HashMap<String, Instant>>>,
+    pending_writes: Rc<RefCell<HashMap<String, usize>>>,
 }
 
 pub fn start(bus: CommandBus, client: ClientStateHandle, cx: &mut App) -> Entity<PullRequestStore> {
@@ -75,19 +77,28 @@ fn create(
         list_generation: Rc::new(Cell::new(0)),
         detail_generations: Rc::default(),
         opened: Rc::default(),
+        last_detail_read: Rc::default(),
+        pending_writes: Rc::default(),
     });
     store.update(cx, |store, _| store.set_source(source.clone()));
     source.refresh_list(cx);
     // Retry startup and keep project/thread choices current without making renders do IO.
     cx.spawn(async move |cx| {
+        let mut tick = 0_u64;
         loop {
             cx.background_executor()
-                .timer(Duration::from_secs(30))
+                .timer(Duration::from_secs(15))
                 .await;
             if source.store.upgrade().is_none() {
                 break;
             }
-            let _ = cx.update(|cx| source.refresh_list(cx));
+            tick += 1;
+            let _ = cx.update(|cx| {
+                if tick % 2 == 0 {
+                    source.read_list(false, false, cx);
+                }
+                source.poll_details(cx);
+            });
         }
     })
     .detach();
@@ -226,7 +237,7 @@ impl LivePullRequestSource {
         });
     }
 
-    fn read_list(&self, more: bool, cx: &mut App) {
+    fn read_list(&self, more: bool, invalidate: bool, cx: &mut App) {
         self.sync_choices(cx);
         let busy = self
             .store
@@ -271,7 +282,7 @@ impl LivePullRequestSource {
         self.task(
             cx,
             move |rt| async move {
-                if !more {
+                if invalidate {
                     rt.pull_requests
                         .invalidate(
                             &PullRequestInvalidateInput {
@@ -282,7 +293,60 @@ impl LivePullRequestSource {
                         )
                         .await;
                 }
-                rt.pull_requests.list(&query).await.map_err(failure)
+                let mut answer = rt.pull_requests.list(&query).await.map_err(failure)?;
+                // Search listings omit line counts. Resolve the real stats before publishing
+                // rows so the existing row UI never presents an unknown count as zero.
+                let requests: Vec<_> = answer
+                    .entries
+                    .chunks(500)
+                    .map(|entries| {
+                        let service = rt.pull_requests.clone();
+                        let refs = entries
+                            .iter()
+                            .map(|entry| PullRequestRef {
+                                project_id: entry.project_id.clone(),
+                                host: Some(entry.host.clone()),
+                                expected_account_id: None,
+                                allow_stale: None,
+                                repository: entry.repository.clone(),
+                                number: entry.number,
+                            })
+                            .collect();
+                        async move {
+                            service
+                                .list_stats(&PullRequestListStatsInput { refs })
+                                .await
+                                .map_err(failure)
+                        }
+                    })
+                    .collect();
+                let stats: HashMap<_, _> = futures::future::try_join_all(requests)
+                    .await?
+                    .into_iter()
+                    .flat_map(|result| result.stats)
+                    .map(|stat| {
+                        (
+                            (stat.project_id, stat.repository, stat.number),
+                            (stat.additions, stat.deletions),
+                        )
+                    })
+                    .collect();
+                for entry in &mut answer.entries {
+                    let Some(&(additions, deletions)) = stats.get(&(
+                        entry.project_id.clone(),
+                        entry.repository.clone(),
+                        entry.number,
+                    )) else {
+                        return Err(CommandError::new(format!(
+                            "GitHub did not return line counts for {}#{}. Refresh to try again.",
+                            entry.repository,
+                            entry.number.get()
+                        )));
+                    };
+                    entry.additions = additions;
+                    entry.deletions = deletions;
+                }
+                Ok(answer)
             },
             move |store, cx, result| {
                 if generations.get() != generation {
@@ -323,9 +387,29 @@ impl LivePullRequestSource {
         );
     }
 
+    fn poll_details(&self, cx: &mut App) {
+        let Some(store) = self.store.upgrade() else {
+            return;
+        };
+        let now = Instant::now();
+        let due: Vec<_> = self.opened.borrow().iter().filter_map(|(key, reference)| {
+            let snapshot = store.read(cx).detail(reference)?;
+            if snapshot.activity_pending || self.pending_writes.borrow().get(key).copied().unwrap_or(0) > 0 { return None; }
+            let checks = snapshot.checks.ready().map_or(&[][..], |checks| checks.checks.as_slice());
+            let interval = crate::hooks::use_pull_request_checks_refresh::pull_request_checks_refresh_interval_ms(checks) as u64;
+            self.last_detail_read.borrow().get(key).is_none_or(|last| now.duration_since(*last) >= Duration::from_millis(interval)).then(|| reference.clone())
+        }).collect();
+        for reference in due {
+            self.read_detail(&reference, false, cx);
+        }
+    }
+
     fn read_detail(&self, reference: &PullRequestRef, refresh: bool, cx: &mut App) {
         self.sync_choices(cx);
         let key = pull_request_key(reference);
+        self.last_detail_read
+            .borrow_mut()
+            .insert(key.clone(), Instant::now());
         self.opened
             .borrow_mut()
             .insert(key.clone(), reference.clone());
@@ -371,7 +455,16 @@ impl LivePullRequestSource {
                 }
                 let succeeded = result.is_ok();
                 store.update_detail(&reference, cx, |s| match result {
-                    Ok(detail) => {
+                    Ok(mut detail) => {
+                        if let Loadable::Ready(previous) = &s.detail {
+                            detail.comments = previous.comments.clone();
+                            detail.comment_count = previous.comment_count;
+                            detail.comments_truncated = previous.comments_truncated;
+                            detail.review_threads_truncated = previous.review_threads_truncated;
+                            detail.review_threads = previous.review_threads.clone();
+                            detail.commits = previous.commits.clone();
+                            detail.reactions = previous.reactions.clone();
+                        }
                         s.can_write = true;
                         s.detail = Loadable::Ready(detail);
                     }
@@ -533,6 +626,23 @@ impl LivePullRequestSource {
         F: FnOnce(Arc<WriteRuntime>, Value) -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), CommandError>> + Send + 'static,
     {
+        // Repeated action clicks must not start a second merge/revert while one is pending.
+        if action.is_some()
+            && self.store.upgrade().is_some_and(|store| {
+                store
+                    .read(cx)
+                    .detail(reference)
+                    .is_some_and(|s| s.pending_action.is_some())
+            })
+        {
+            return;
+        }
+        let key = pull_request_key(reference);
+        *self
+            .pending_writes
+            .borrow_mut()
+            .entry(key.clone())
+            .or_default() += 1;
         // Never retry a write implicitly. Refresh failures are separate from a successful write.
         self.with_store(cx, |store, cx| {
             store.update_detail(reference, cx, |s| {
@@ -548,6 +658,15 @@ impl LivePullRequestSource {
             move |rt| command(rt, value),
             move |store, cx, result| {
                 let succeeded = result.is_ok();
+                {
+                    let mut pending = source.pending_writes.borrow_mut();
+                    if let Some(count) = pending.get_mut(&key) {
+                        *count -= 1;
+                        if *count == 0 {
+                            pending.remove(&key);
+                        }
+                    }
+                }
                 store.update_detail(&reference, cx, |s| {
                     s.pending_action = None;
                     s.action_error = result.err().map(|e| e.message);
@@ -555,7 +674,7 @@ impl LivePullRequestSource {
                 if succeeded {
                     cx.defer(move |cx| {
                         source.read_detail(&reference, false, cx);
-                        source.read_list(false, cx);
+                        source.read_list(false, false, cx);
                     });
                 }
             },

@@ -1,12 +1,12 @@
-//! Port of upstream/packages/client-runtime/src/pullRequestEnvironment.ts commands.
+//! Port of upstream/packages/client-runtime/src/state/pullRequests.ts commands.
 use super::*;
 
 impl PullRequestSource for LivePullRequestSource {
     fn refresh_list(&self, cx: &mut App) {
-        self.read_list(false, cx);
+        self.read_list(false, true, cx);
     }
     fn load_more(&self, cx: &mut App) {
-        self.read_list(true, cx);
+        self.read_list(true, false, cx);
     }
     fn open_detail(&self, reference: &PullRequestRef, cx: &mut App) {
         self.read_detail(reference, false, cx);

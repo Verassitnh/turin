@@ -25,7 +25,12 @@ orchestrator commands. Persisted thread links also supply saved stack fallback.
 All IO uses CommandBus Tokio tasks. Weak store updates return to GPUI. Writes happen
 only on user commands and publish success after the service returns. No fixtures.
 Errors remain in list/detail/guide fields. A 30s list refresh retries startup and updates
-project/thread choices. Guide run coordinator already polls `refresh_guide`.
+project/thread choices, respecting service caches. Opened details refresh on the existing
+45s/60s checks policy (15s scheduling tick), pausing during active writes/activity reads.
+Guide run coordinator already polls `refresh_guide`. Cached activity stays visible while
+refreshing. Repeated pending host-action clicks do not execute duplicate merge/revert calls.
+Listings resolve existing batched `list_stats` before publishing rows, avoiding unknown
+search line counts displayed as zero; unavailable stats produce an explicit read error.
 
 Limits: current view-model seam filters/searches loaded rows locally (99/repository
 initially); load-more uses opaque host cursors, or raises limit to 500 when unavailable.

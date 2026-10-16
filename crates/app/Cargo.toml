@@ -32,6 +32,7 @@ tracing-subscriber.workspace = true
 turin-persistence.workspace = true
 turin-orchestration.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
+turin-launcher.workspace = true
 gpui-kit = { workspace = true, features = [
     # Code block highlighting (ChatMarkdown). Not `tree-sitter-languages`:
     # its SQL grammar pins `cc ~1.2`, which conflicts with rusqlite.

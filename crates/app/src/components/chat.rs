@@ -13,6 +13,7 @@ pub mod composer_pending_panels;
 pub mod markdown;
 pub mod message_copy_button;
 pub mod messages_timeline;
+pub mod open_in_picker;
 pub mod panel_layout_controls;
 // Pure scroll state machine; the timeline view does not drive page keys yet.
 #[allow(dead_code)]

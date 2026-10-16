@@ -342,8 +342,8 @@ async fn an_invalid_visit_time_is_refused_and_the_refusal_is_replayed() {
 }
 
 #[tokio::test]
-async fn an_imported_native_thread_is_not_ported_and_leaves_no_receipt() {
-    let (orchestrator, receipts) = harness().await;
+async fn an_imported_native_thread_creates_its_provider_thread() {
+    let (orchestrator, _) = harness().await;
     let mut command = serde_json::to_value(create_command(
         "command:import",
         "thread:import",
@@ -356,21 +356,36 @@ async fn an_imported_native_thread_is_not_ported_and_leaves_no_receipt() {
     let command: OrchestrationV2ServerCommand =
         serde_json::from_value(command).expect("imported create decodes");
 
-    let error = orchestrator
+    let result = orchestrator
         .dispatch(command)
         .await
-        .expect_err("imported threads are not ported");
-    assert!(
-        matches!(error, OrchestratorError::CommandRejected { .. }),
-        "{error:?}"
+        .expect("an imported thread is created");
+    let types: Vec<_> = result
+        .stored_events
+        .iter()
+        .map(|stored| serde_json::to_value(&stored.event).unwrap()["type"].clone())
+        .collect();
+    assert_eq!(
+        types,
+        vec![json!("thread.created"), json!("provider-thread.updated")]
     );
-    assert!(
-        receipts
-            .get_by_command_id(command_id("command:import"))
-            .await
-            .unwrap()
-            .is_none()
+    let projection = orchestrator
+        .get_thread_projection(&thread("thread:import"))
+        .await
+        .expect("projection reads");
+    let [provider_thread] = projection.provider_threads.as_slice() else {
+        panic!("one provider thread: {:?}", projection.provider_threads);
+    };
+    let reference = provider_thread
+        .native_thread_ref
+        .as_ref()
+        .expect("a native ref");
+    assert_eq!(
+        reference.native_id.as_ref().map(|id| id.as_str()),
+        Some("native-1")
     );
+    assert!(provider_thread.provider_session_id.is_none());
+    assert!(provider_thread.first_run_ordinal.is_none());
 }
 
 /// A thread-row command: `kind` is the wire type, `extra` adds its fields.

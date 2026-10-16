@@ -1,18 +1,20 @@
 //! Port of upstream/apps/server/src/orchestration-v2/Orchestrator.ts:
 //! `dispatchThreadCreate` and `dispatchThreadVisit`.
 //!
-//! Not ported yet: `thread.create` with `importedNativeThread` (it also writes
-//! a `provider-thread.updated`), and the rest of `dispatchThreadMutation`
-//! (archive, settle, pin, metadata, pull requests, mode and model updates).
-//! Those kinds are left to other groups, so `decide` returns `false` for them.
+//! `thread.create` with `importedNativeThread` also writes the imported
+//! `provider-thread.updated`. The rest of `dispatchThreadMutation` is in the
+//! sibling modules; `decide` returns `false` for kinds it does not own.
 
 use turin_contracts::{
     UtcDateTime,
     orchestration_v2::{
         OrchestrationV2AppThread, OrchestrationV2AppThreadLineage, OrchestrationV2Command,
-        OrchestrationV2DomainEvent, OrchestrationV2ServerCommand,
+        OrchestrationV2DomainEvent, OrchestrationV2NativeRefStrength, OrchestrationV2ProviderRef,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadStatus,
+        OrchestrationV2ServerCommand,
     },
 };
+use turin_provider_core::id_allocator::derive as ids;
 
 use super::Orchestrator;
 use super::dispatch::{Decision, dispatch_failure};
@@ -51,10 +53,6 @@ fn thread_create(command: &OrchestrationV2ServerCommand, decision: &mut Decision
     else {
         return false;
     };
-    if imported_native_thread.is_some() {
-        return false;
-    }
-
     let now = decision.now();
     let thread = OrchestrationV2AppThread {
         created_by: *created_by,
@@ -111,6 +109,51 @@ fn thread_create(command: &OrchestrationV2ServerCommand, decision: &mut Decision
         occurred_at: now,
         payload: thread,
     });
+    if let Some(imported) = imported_native_thread {
+        let native = &imported.ref_;
+        let id = decision.event_id(thread_id);
+        decision.emit(OrchestrationV2DomainEvent::ProviderThreadUpdated {
+            id,
+            thread_id: thread_id.clone(),
+            run_id: None,
+            node_id: None,
+            driver: Some(native.driver.clone()),
+            provider_instance_id: Some(model_selection.instance_id.clone()),
+            raw_event_id: None,
+            occurred_at: now,
+            payload: OrchestrationV2ProviderThread {
+                id: ids::provider_thread(
+                    &native.driver,
+                    Some(&model_selection.instance_id),
+                    native.native_id.as_str(),
+                ),
+                driver: native.driver.clone(),
+                provider_instance_id: model_selection.instance_id.clone(),
+                provider_session_id: None,
+                app_thread_id: Some(thread_id.clone()),
+                owner_node_id: None,
+                native_thread_ref: Some(OrchestrationV2ProviderRef {
+                    driver: native.driver.clone(),
+                    native_id: Some(native.native_id.clone()),
+                    strength: OrchestrationV2NativeRefStrength::Strong,
+                    fingerprint: None,
+                    ordinal: None,
+                }),
+                native_conversation_head_ref: None,
+                status: OrchestrationV2ProviderThreadStatus::NotLoaded,
+                first_run_ordinal: None,
+                last_run_ordinal: None,
+                handoff_ids: Vec::new(),
+                forked_from: None,
+                pending_background_tasks: Vec::new(),
+                context_usage: None,
+                native_metadata: imported.metadata.clone(),
+                goal: None,
+                created_at: now,
+                updated_at: now,
+            },
+        });
+    }
     true
 }
 

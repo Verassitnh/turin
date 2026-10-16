@@ -17,7 +17,7 @@ use turin_provider_core::id_allocator::IdAllocator;
 
 use super::{
     Orchestrator, message_dispatch, prepared_run, queue_start, queued_run, run_stop,
-    runtime_request, thread_archive, thread_delete, thread_fork, thread_lifecycle,
+    runtime_request, secret_request, thread_archive, thread_delete, thread_fork, thread_lifecycle,
     thread_merge_back, thread_metadata, thread_mutation,
 };
 use crate::pipeline::command_receipt_store::CommandReceipt;
@@ -761,6 +761,9 @@ async fn decide(
         return Ok(true);
     }
     if queued_run::decide(orchestrator, command, decision).await? {
+        return Ok(true);
+    }
+    if secret_request::decide(orchestrator, command, decision).await? {
         return Ok(true);
     }
     if runtime_request::decide(orchestrator, command, decision).await? {

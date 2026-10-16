@@ -48,6 +48,9 @@ mod run_stop_tests;
 mod runtime_request;
 #[cfg(test)]
 mod runtime_request_tests;
+mod secret_request;
+#[cfg(test)]
+mod secret_request_tests;
 pub mod services;
 #[cfg(test)]
 pub(super) mod test_harness;

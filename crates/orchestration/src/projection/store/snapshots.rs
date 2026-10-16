@@ -14,6 +14,7 @@ use turin_contracts::orchestration_v2::{
     OrchestrationV2ShellSnapshot, OrchestrationV2ThreadProjection, OrchestrationV2TurnItem,
 };
 use turin_contracts::{ThreadId, TurnItemId};
+use turin_persistence::latest_application_sequence;
 
 use crate::projection::error::ProjectionStoreError;
 use crate::projection::project_store::list_shells_in;
@@ -57,7 +58,7 @@ impl ProjectionStore {
             )?;
             let threads = rows.decode()?;
             let projects = list_shells_in(conn, None).map_err(ProjectionStoreError::Database)?;
-            let sequence = turin_persistence::latest_application_sequence(conn)
+            let sequence = latest_application_sequence(conn)
                 .map_err(ProjectionStoreError::Database)?;
             Ok(build_active_shell_snapshot(
                 projects,

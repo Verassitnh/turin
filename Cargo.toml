@@ -23,7 +23,6 @@ turin-acp = { path = "crates/acp" }
 turin-provider-codex = { path = "crates/provider-codex" }
 turin-provider-claude = { path = "crates/provider-claude" }
 turin-provider-opencode = { path = "crates/provider-opencode" }
-turin-text-generation = { path = "crates/text-generation" }
 turin-provider-cursor = { path = "crates/provider-cursor" }
 turin-orchestration = { path = "crates/orchestration" }
 turin-hooks = { path = "crates/hooks" }
@@ -55,7 +54,6 @@ toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 percent-encoding = "2"
 unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
@@ -65,6 +63,7 @@ indexmap = { version = "2", features = ["serde"] }
 iana-time-zone = "0.1"
 dirs = "6"
 fancy-regex = "0.14"
+html5ever = "0.27"
 libc = "0.2"
 notify = "8"
 tempfile = "3"

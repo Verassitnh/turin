@@ -1267,11 +1267,11 @@ impl Render for UsageLimitsPooled {
             );
         }
         if !notices.is_empty() {
-            let mut alert = Alert::new(AlertVariant::Warning)
-                .icon(IconName::TriangleAlert)
-                .first_line();
+            let mut alert = Alert::new()
+                .variant(AlertVariant::Warning)
+                .icon(IconName::TriangleAlert);
             for notice in &notices {
-                alert = alert.title(div().min_w_0().child(notice.clone()));
+                alert = alert.content(div().min_w_0().child(notice.clone()));
             }
             children.push(alert.into_any_element());
         }

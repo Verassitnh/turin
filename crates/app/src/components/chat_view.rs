@@ -332,7 +332,7 @@ impl ChatView {
                             .flex_1()
                             .min_h_0()
                             .children(overlay_banners)
-                            .child(timeline)
+                            .child(timeline.clone())
                             .child(
                                 div()
                                     .flex_shrink_0()

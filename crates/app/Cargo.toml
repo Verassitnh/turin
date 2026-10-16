@@ -22,7 +22,6 @@ turin-provider-codex.workspace = true
 turin-provider-opencode.workspace = true
 turin-git.workspace = true
 turin-hooks.workspace = true
-uuid.workspace = true
 turin-runtime.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
@@ -37,7 +36,6 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
-unicode-segmentation.workspace = true
 url.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -47,7 +45,6 @@ turin-orchestration.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 turin-launcher.workspace = true
 turin-projects.workspace = true
-turin-git.workspace = true
 gpui-kit = { workspace = true, features = [
     # Code block highlighting (ChatMarkdown). Not `tree-sitter-languages`:
     # its SQL grammar pins `cc ~1.2`, which conflicts with rusqlite.
@@ -81,8 +78,6 @@ gpui-kit = { workspace = true, features = [
     "tree-sitter-yaml",
     "tree-sitter-zig",
 ] }
-base64.workspace = true
-image.workspace = true
 percent-encoding.workspace = true
 markdown.workspace = true
 # Shell parsing for embedded scripts (components/chat/embedded_scripts.rs). Same
@@ -94,7 +89,6 @@ csscolorparser.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 zip.workspace = true
-uuid.workspace = true
 libc.workspace = true
 notify.workspace = true
 

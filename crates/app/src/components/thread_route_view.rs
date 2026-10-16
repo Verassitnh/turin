@@ -20,11 +20,13 @@ pub fn thread_route_view(
 ) -> gpui_kit::AnyElement {
     match render_state {
         ThreadRouteRenderState::Ready => ChatView {
+            live: None,
             sidebar_open,
             right_panel_open,
             thread: thread_header,
             git_host,
             thread_details_open,
+            subagent_bar: None,
         }
         .into_any_element(),
         ThreadRouteRenderState::Loading => div().flex_1().child("Loading…").into_any_element(),

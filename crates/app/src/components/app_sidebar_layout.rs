@@ -93,7 +93,7 @@ use crate::app_runtime::write::bus::{CommandBus, CommandBusGlobal};
 use crate::app_runtime::write::commands::CreateThread;
 use crate::state::local_environment_id;
 use crate::state::models::scoped_thread_key;
-use crate::state::store::{ClientStore, ClientStoreGlobal};
+use crate::state::store::ClientStore;
 
 actions!(
     turin,

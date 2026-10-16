@@ -6,6 +6,8 @@ pub mod chat;
 pub mod chat_view;
 pub mod command_block;
 pub mod command_palette;
+#[allow(dead_code)]
+pub mod composer_inline_token_paste;
 pub mod context_presentation_registry;
 pub mod drag_region;
 pub mod git_actions_control;

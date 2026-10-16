@@ -3,9 +3,9 @@
 //! Cursor paging over a thread's visible timeline. Cut (PORTING.md "No
 //! client/server split"): `buildBoundedThreadProjection`,
 //! `projectedRowBoundedSnapshotEncodedBytes`, `boundedTimelineEncodedBytes`,
-//! `computeLatestLocalTurnOrdinal` and `BoundedProjectionResult` exist only to
-//! fit a snapshot into a socket frame; the GPUI app reads projections
-//! in-process.
+//! `BoundedProjectionResult` exists only to fit a snapshot into a socket
+//! frame; the GPUI app reads projections in-process. `compute_latest_local_turn_ordinal`
+//! is still used by the in-process bounded snapshot watermark.
 
 use std::collections::HashSet;
 
@@ -133,6 +133,15 @@ pub struct SelectTimelinePageResult<Row> {
     pub items: Vec<Row>,
     pub next_cursor: Option<String>,
     pub has_more_history: bool,
+}
+
+/// Max ordinal over the full projection's `turnItems` before the bounded window
+/// trims them (`computeLatestLocalTurnOrdinal`).
+pub fn compute_latest_local_turn_ordinal(turn_items: &[OrchestrationV2TurnItem]) -> Option<u64> {
+    turn_items
+        .iter()
+        .map(|item| turn_item::common(item).ordinal)
+        .max()
 }
 
 /// Ordinary history-page cost: one projected row (item is nested once).

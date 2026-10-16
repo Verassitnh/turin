@@ -27,6 +27,7 @@ pub mod runtime_recovery;
 pub mod shell;
 #[cfg(test)]
 mod shell_tests;
+pub mod snapshots;
 pub mod unreadable;
 #[cfg(test)]
 mod upstream_tests;

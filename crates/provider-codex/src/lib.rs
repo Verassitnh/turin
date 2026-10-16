@@ -13,6 +13,7 @@ pub mod codex_home_layout;
 pub mod codex_installation;
 pub mod codex_launch_args;
 pub mod codex_managed_errors;
+pub mod codex_managed_runtime;
 pub mod codex_mcp_elicitation;
 pub mod codex_model;
 pub mod codex_provider;

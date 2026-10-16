@@ -16,7 +16,7 @@
     clippy::type_complexity
 )]
 
-mod mini_http;
+pub(crate) mod mini_http;
 pub mod records;
 pub mod store;
 

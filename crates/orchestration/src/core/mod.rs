@@ -3,6 +3,7 @@
 //! checkpoint rollback.
 
 
+pub mod context_handoff_service;
 pub mod unknown_field;
 pub mod workflow_agent_answers;
 pub mod workflow_file_read;

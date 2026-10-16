@@ -111,8 +111,8 @@ impl Commands {
         Self { runtime }
     }
 
-    pub fn runtime(&self) -> &Arc<WriteRuntime> {
-        &self.runtime
+    pub fn runtime(&self) -> Arc<WriteRuntime> {
+        Arc::clone(&self.runtime)
     }
 
     async fn dispatch(&self, command: Value) -> Result<DispatchResult, CommandError> {

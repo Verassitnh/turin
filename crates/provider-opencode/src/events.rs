@@ -128,6 +128,7 @@ mod tests {
             data: r#"{"id":"1","type":"server.connected","properties":{}}"#.to_string(),
             event: None,
             id: None,
+            retry: None,
         };
         let event = decode_v1_event(&frame).unwrap();
         assert_eq!(event.event_type, "server.connected");
@@ -140,6 +141,7 @@ mod tests {
             data: r#"{"id":"e1","created":10,"type":"session.execution.started","durable":{"aggregateID":"s","seq":1,"version":1},"data":{"sessionID":"s"}}"#.to_string(),
             event: None,
             id: None,
+            retry: None,
         };
         match decode_v2_event(&frame).unwrap() {
             V2StreamEvent::Event(event) => {
@@ -157,6 +159,7 @@ mod tests {
             data: r#"{"id":"e1","type":"server.connected","data":{}}"#.to_string(),
             event: None,
             id: None,
+            retry: None,
         };
         match decode_v2_event(&frame).unwrap() {
             V2StreamEvent::Event(event) => assert!(event.created.is_none()),
@@ -170,6 +173,7 @@ mod tests {
             data: r#"{"type":"session.execution.failed","data":{"sessionID":"sess"}}"#.to_string(),
             event: None,
             id: None,
+            retry: None,
         };
         match decode_v2_event(&frame).unwrap() {
             V2StreamEvent::UnreadableExecutionEnded {
@@ -189,6 +193,7 @@ mod tests {
             data: r#"{"type":"session.step.streamed"}"#.to_string(),
             event: None,
             id: None,
+            retry: None,
         };
         assert!(decode_v2_event(&frame).is_none());
     }

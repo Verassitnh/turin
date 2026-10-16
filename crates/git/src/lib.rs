@@ -3,7 +3,6 @@
 pub mod checkpointing;
 pub mod detach_stack_frame;
 pub mod git_manager;
-pub mod git_patch_path;
 pub mod git_vcs_driver;
 pub mod git_vcs_driver_core;
 pub mod git_workflow_service;
@@ -12,6 +11,7 @@ pub mod locale_compare;
 pub mod process;
 pub mod remote_refs;
 pub mod shared_git;
+pub mod source_control_bridge;
 pub mod vcs_driver;
 pub mod vcs_driver_registry;
 pub mod vcs_process;

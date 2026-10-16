@@ -44,6 +44,7 @@ use crate::settings_secrets::{
     SecretValue, SettingsSecret, SettingsSecretKind, map_settings_secrets,
 };
 use crate::support::atomic_write::write_file_string_atomically;
+use crate::support::blocking::blocking;
 use crate::support::file_watch::{WATCH_DEBOUNCE, next_debounced, watch_file};
 use crate::support::symlink::{lexical_absolute, resolve_symlink_target};
 
@@ -63,17 +64,6 @@ fn settings_error(
         environment_variable: environment_variable.map(str::to_owned),
         cause: Some(Value::String(cause.to_string())),
     }
-}
-
-/// Runs blocking filesystem work on the blocking pool, so the async workers stay free.
-async fn blocking<T, F>(work: F) -> T
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    tokio::task::spawn_blocking(work)
-        .await
-        .unwrap_or_else(|error| std::panic::resume_unwind(error.into_panic()))
 }
 
 /// What a settings-link change means for the destination watch.

@@ -8,7 +8,7 @@ use super::shared_support::{
     normalize_markdown_link_destination, parse_file_url_href, safe_decode_uri_component,
     split_markdown_link_search_and_hash,
 };
-use crate::state::support::path::{is_windows_absolute_path, strip_slash_prefixed_windows_drive};
+use turin_shared::path::{is_windows_absolute_path, strip_slash_prefixed_windows_drive};
 
 // `/i` without `u`: ASCII-only case folding.
 static DIRECT_IMAGE_SOURCE_PATTERN: LazyLock<Regex> =

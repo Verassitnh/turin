@@ -1284,8 +1284,14 @@ impl Inner {
             let default_ref = format!("refs/remotes/{remote}/{default_branch}");
             let refreshed = refreshed.entry(path_string(&repository)).or_default();
             if refreshed.insert(default_ref.clone()) {
+                let refspec =
+                    format!("+refs/heads/{default_branch}:refs/remotes/{remote}/{default_branch}");
                 let fetched = self
-                    .git(&repository, &["fetch", &remote, &default_branch], LONG_GIT)
+                    .git(
+                        &repository,
+                        &["fetch", "--quiet", "--no-tags", &remote, &refspec],
+                        SHORT_GIT,
+                    )
                     .await?;
                 if fetched.exit_code != 0 {
                     return Err(git_fail("git", &fetched.stderr));
@@ -2078,6 +2084,94 @@ mod tests {
             .iter()
             .find(|entry| entry.kind == StorageCleanupReportEntryKind::Worktree)
             .expect("worktree entry")
+    }
+
+    #[tokio::test]
+    async fn keeps_a_worktree_when_the_remote_default_branch_is_rewound() {
+        let base = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(base.path()).unwrap();
+        let config = ServerConfig::for_test(&root, &root).await.unwrap();
+        let origin = root.join("origin.git");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "cleanup@example.test"]);
+        git(&repo, &["config", "user.name", "Cleanup test"]);
+        std::fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        git(&repo, &["add", "tracked.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        let old = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        let old = old.trim();
+
+        git(
+            &root,
+            &["init", "--bare", "-b", "main", origin.to_str().unwrap()],
+        );
+        git(
+            &repo,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        // A plain `git fetch origin main` exits 0 without moving
+        // refs/remotes/origin/main when no fetch refspec is configured.
+        git(&repo, &["config", "--unset-all", "remote.origin.fetch"]);
+        git(&repo, &["push", "origin", "main"]);
+
+        std::fs::write(repo.join("tracked.txt"), "unique\n").unwrap();
+        git(&repo, &["commit", "-am", "unique"]);
+        let unique = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        let unique = unique.trim();
+        git(&repo, &["push", "origin", "main"]);
+        git(&origin, &["update-ref", "refs/heads/main", old]);
+        git(&repo, &["update-ref", "refs/remotes/origin/main", unique]);
+        git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+
+        let worktree = config.worktrees_dir.join("feature");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                worktree.to_str().unwrap(),
+                unique,
+            ],
+        );
+        let thread = shell(json!({
+            "branch": "feature",
+            "worktreePath": worktree.to_str().unwrap(),
+        }));
+        let mut settings = default_server_settings();
+        settings.storage_cleanup.worktree_after_days = None;
+        settings.storage_cleanup.worktree_on_delete = false;
+        settings.storage_cleanup.worktree_on_merge = false;
+        settings.storage_cleanup.worktree_unchanged = true;
+        let host = CleanupHost::new(
+            settings,
+            vec![CleanupProject {
+                id: thread.project_id.clone(),
+                workspace_root: path_string(&repo),
+            }],
+            vec![thread],
+        );
+        let service = StorageCleanup::new(config, host);
+        let report = service.run_now().await;
+        let entry = worktree_entry(&report);
+        assert_eq!(entry.outcome, StorageCleanupReportEntryOutcome::Kept);
+        assert_eq!(entry.reason, "Has commits beyond the default branch");
+        assert!(worktree.exists());
+        assert_eq!(git_stdout(&worktree, &["rev-parse", "HEAD"]).trim(), unique);
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "refs/remotes/origin/main"]).trim(),
+            old
+        );
     }
 
     #[tokio::test]

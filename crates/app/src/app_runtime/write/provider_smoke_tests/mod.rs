@@ -33,9 +33,6 @@ use turin_contracts::orchestration_v2::{
 };
 use turin_contracts::settings::ServerSettings;
 use turin_orchestration::pipeline::event_sink::StreamOptions;
-use turin_orchestration::pipeline::orchestrator_port::{
-    OrchestratorPort as _, RecordField, RecordFilter,
-};
 
 use super::commands::{Commands, CreateThread, Delivery, SendMessage};
 use super::runtime::WriteRuntime;
@@ -188,7 +185,6 @@ impl Smoke {
             .await
             .expect("send");
 
-        let orchestrator = self.commands.runtime().orchestrator.clone();
         let (mut stopped, mut answered) = (false, false);
         let status = tokio::time::timeout(Duration::from_secs(60), async {
             while let Some(item) = events.next().await {
@@ -212,24 +208,14 @@ impl Smoke {
                             _ => {}
                         }
                     }
-                    OrchestrationV2DomainEvent::RuntimeRequestUpdated { .. } if !answered => {
+                    OrchestrationV2DomainEvent::RuntimeRequestUpdated { payload, .. }
+                        if !answered
+                            && payload.status == OrchestrationV2RuntimeRequestStatus::Pending =>
+                    {
                         let Some(decision) = approve else { continue };
-                        let records = orchestrator
-                            .get_thread_records(
-                                thread,
-                                &[RecordField::RuntimeRequests],
-                                &RecordFilter::default(),
-                            )
-                            .await
-                            .expect("records");
-                        let Some(request) = records.runtime_requests.iter().find(|request| {
-                            request.status == OrchestrationV2RuntimeRequestStatus::Pending
-                        }) else {
-                            continue;
-                        };
                         answered = true;
                         self.commands
-                            .respond_to_request(thread, request.id.as_str(), Some(decision), None)
+                            .respond_to_request(thread, payload.id.as_str(), Some(decision), None)
                             .await
                             .expect("respond");
                     }

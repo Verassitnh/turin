@@ -23,9 +23,11 @@ use super::view_model::{
 };
 use crate::app_runtime::write::bus::CommandBus;
 use crate::app_runtime::write::commands::{CommandError, Commands};
+use crate::components::thread_search_match::SearchMatchSource;
 use crate::state::client_state::ClientState;
 use crate::state::local_environment_id;
 use crate::state::store::ClientStore;
+use turin_contracts::thread_search::OrchestrationThreadSearchSource;
 
 /// State the sidebar keeps for itself.
 #[derive(Default)]
@@ -319,8 +321,30 @@ impl SidebarBackend for LiveSidebarBackend {
         });
     }
 
-    /// Message search needs the orchestrator's `searchThread` (T13c open item).
-    fn search_messages(&self, _query: String, _cx: &mut App) -> Task<Vec<ThreadSearchMatch>> {
-        Task::ready(Vec::new())
+    /// Cross-thread message search (`useThreadSearch`): two-character floor,
+    /// the caller debounces.
+    fn search_messages(&self, query: String, cx: &mut App) -> Task<Vec<ThreadSearchMatch>> {
+        let query = query.trim().to_owned();
+        if query.chars().count() < 2 {
+            return Task::ready(Vec::new());
+        }
+        let task = self.bus.task(cx, move |commands| async move {
+            commands.search_messages(&query, 50).await
+        });
+        cx.spawn(async move |_| {
+            task.await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|found| ThreadSearchMatch {
+                    environment_id: local_environment_id(),
+                    thread_id: found.thread_id,
+                    source: match found.source {
+                        OrchestrationThreadSearchSource::User => SearchMatchSource::User,
+                        OrchestrationThreadSearchSource::Assistant => SearchMatchSource::Assistant,
+                    },
+                    snippet: found.snippet,
+                })
+                .collect()
+        })
     }
 }

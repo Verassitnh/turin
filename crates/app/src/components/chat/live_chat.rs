@@ -26,14 +26,14 @@ use super::timeline::live_projection::{decision_wire, snapshot_from_projection};
 use super::timeline::source::{ThreadTimelineStore, TimelineSource};
 use super::timeline::turn_item::ProviderApprovalDecision;
 use crate::app_runtime::write::bus::CommandBus;
-use crate::app_runtime::write::commands::{Delivery, SendMessage};
+use crate::app_runtime::write::commands::{CommandError, Delivery, SendMessage};
 use crate::composer::dispatch::ComposerDispatchMode;
 use crate::composer::mock_source::fixture_providers;
 use crate::composer::prompt_history::ComposerPromptHistoryMessage;
 use crate::composer::provider_options::{OptionSelection, OptionValue};
 use crate::composer::view_model::{
-    ComposerSource, ComposerStore, ComposerViewModel, InteractionMode, RuntimeMode, SendRequest,
-    SessionPhase,
+    ComposerSource, ComposerStore, ComposerViewModel, DraftRestore, InteractionMode, QueueState,
+    QueuedRun, RuntimeMode, SendRequest, SessionPhase,
 };
 use crate::state::client_state::ClientState;
 use crate::state::local_environment_id;
@@ -44,8 +44,8 @@ use turin_contracts::orchestration_v2::{
     OrchestrationV2ConversationMessageRole, OrchestrationV2RunStatus,
 };
 
-/// How long a send may hold the UI thread while the command commits.
-const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a send may run before it is reported as failed.
+const SEND_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Choices the user made in the composer that are not yet on the thread.
 #[derive(Default)]
@@ -55,6 +55,12 @@ struct Overrides {
     runtime_mode: Option<RuntimeMode>,
     interaction_mode: Option<InteractionMode>,
     favorites: std::collections::HashSet<String>,
+    /// The queued run whose message is loaded in the composer for editing.
+    editing_run: Option<String>,
+    /// A send is in flight (a second submit is refused until it settles).
+    sending: bool,
+    restore: Option<DraftRestore>,
+    restore_nonce: u64,
 }
 
 pub struct LiveChat {
@@ -73,6 +79,7 @@ struct LiveSource {
     timeline: WeakEntity<ThreadTimelineStore>,
     composer: WeakEntity<ComposerStore>,
     overrides: RefCell<Overrides>,
+    me: std::sync::Weak<LiveSource>,
 }
 
 impl Drop for LiveSource {
@@ -106,7 +113,8 @@ impl LiveChat {
         // `ComposerSource` / `TimelineSource` are `Arc<dyn _>` seams used on the
         // UI thread only, so the `RefCell` inside never crosses threads.
         #[allow(clippy::arc_with_non_send_sync)]
-        let source = Arc::new(LiveSource {
+        let source = Arc::new_cyclic(|me| LiveSource {
+            me: me.clone(),
             thread_id,
             bus,
             handle,
@@ -135,6 +143,21 @@ impl LiveChat {
     pub fn thread_id(&self) -> &ThreadId {
         &self.source.thread_id
     }
+}
+
+fn attachment_names(
+    attachments: &[turin_contracts::chat_attachment::ChatAttachment],
+    images: bool,
+) -> Vec<String> {
+    use turin_contracts::chat_attachment::ChatAttachment;
+    attachments
+        .iter()
+        .filter_map(|attachment| match attachment {
+            ChatAttachment::Image(image) if images => Some(image.name.to_string()),
+            ChatAttachment::File(file) if !images => Some(file.name.to_string()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn run_is_active(status: OrchestrationV2RunStatus) -> bool {
@@ -189,13 +212,17 @@ impl LiveSource {
                 }
             })
             .ok();
-        let view_model = self.view_model(projection);
+        let view_model = self.view_model(projection, entry.detail.as_ref());
         self.composer
             .update(cx, |store, cx| store.publish(view_model, cx))
             .ok();
     }
 
-    fn view_model(&self, projection: &ThreadProjection) -> ComposerViewModel {
+    fn view_model(
+        &self,
+        projection: &ThreadProjection,
+        detail: Option<&crate::state::thread_detail::ThreadDetailView>,
+    ) -> ComposerViewModel {
         let overrides = self.overrides.borrow();
         let thread = &projection.thread;
         let running = projection
@@ -240,6 +267,25 @@ impl LiveSource {
             selected_model: model,
             selected_model_options: overrides.model_options.clone().unwrap_or_default(),
             favorite_models: overrides.favorites.clone(),
+            queue: detail.and_then(|detail| {
+                let workflow = &detail.queue_workflow;
+                (!workflow.queued_runs.is_empty()).then(|| QueueState {
+                    queued: workflow
+                        .queued_runs
+                        .iter()
+                        .map(|queued| QueuedRun {
+                            run_id: queued.run.id.to_string(),
+                            message_id: queued.message_id.to_string(),
+                            text: queued.text.clone(),
+                            image_names: attachment_names(&queued.attachments, true),
+                            file_names: attachment_names(&queued.attachments, false),
+                            pending: false,
+                        })
+                        .collect(),
+                    can_reorder: workflow.can_reorder,
+                    editing_run_id: overrides.editing_run.clone(),
+                })
+            }),
             prompt_history_messages: projection
                 .messages
                 .iter()
@@ -250,6 +296,8 @@ impl LiveSource {
                     text: message.text.clone(),
                 })
                 .collect(),
+            is_send_busy: overrides.sending,
+            restore_draft: overrides.restore.clone(),
             ..ComposerViewModel::default()
         }
     }
@@ -296,6 +344,37 @@ impl LiveSource {
         ))
     }
 
+    fn queue_command(&self, title: &'static str, cx: &mut App, kind: &'static str, extra: Value) {
+        let thread_id = self.thread_id.clone();
+        self.run_command(title, cx, move |commands| async move {
+            commands.thread_command(kind, &thread_id, extra).await
+        });
+    }
+
+    /// `queued-run.edit`: replaces the queued message's text.
+    fn edit_queued(&self, run_id: String, text: String, cx: &mut App) -> bool {
+        let thread_id = self.thread_id.clone();
+        let result = self.bus.run_blocking(move |commands| async move {
+            commands
+                .thread_command(
+                    "queued-run.edit",
+                    &thread_id,
+                    json!({"runId": run_id, "text": text}),
+                )
+                .await
+        });
+        match result {
+            Ok(()) => {
+                self.update_overrides(cx, |overrides| overrides.editing_run = None);
+                true
+            }
+            Err(error) => {
+                push_error(cx, "Failed to edit the queued message", &error.message);
+                false
+            }
+        }
+    }
+
     /// Runs a command off the UI thread; a failure toasts `title`.
     fn run_command<Fut>(
         &self,
@@ -324,17 +403,12 @@ impl LiveSource {
 
 impl ComposerSource for LiveSource {
     fn send(&self, request: SendRequest, cx: &mut App) -> bool {
-        if !request.images.is_empty() || !request.files.is_empty() {
-            push_error(
-                cx,
-                "Failed to send message",
-                "Attachments are not wired to the orchestrator yet. Remove them to send.",
-            );
+        if request.answering_pending_user_input {
+            self.not_wired("Answering questions from the composer", cx);
             return false;
         }
-        if request.answering_pending_user_input || request.editing_queued_run.is_some() {
-            self.not_wired("Answering questions and editing queued messages", cx);
-            return false;
+        if let Some(run_id) = request.editing_queued_run.clone() {
+            return self.edit_queued(run_id, request.prompt, cx);
         }
         let delivery = match request.dispatch_mode {
             ComposerDispatchMode::Auto => Delivery::StartImmediately,
@@ -432,22 +506,59 @@ impl ComposerSource for LiveSource {
 
     fn banner_action(&self, _banner_id: &str, _action_id: &str, _cx: &mut App) {}
 
-    fn edit_queued_run(&self, _run_id: &str, cx: &mut App) {
-        self.not_wired("Editing queued messages", cx);
+    fn edit_queued_run(&self, run_id: &str, cx: &mut App) {
+        let run_id = run_id.to_owned();
+        self.update_overrides(cx, |overrides| overrides.editing_run = Some(run_id));
     }
 
-    fn cancel_queued_edit(&self, _cx: &mut App) {}
-
-    fn cancel_queued_run(&self, _run_id: &str, cx: &mut App) {
-        self.not_wired("Cancelling queued messages", cx);
+    fn cancel_queued_edit(&self, cx: &mut App) {
+        self.update_overrides(cx, |overrides| overrides.editing_run = None);
     }
 
-    fn promote_queued_run(&self, _run_id: &str, cx: &mut App) {
-        self.not_wired("Promoting queued messages", cx);
+    fn cancel_queued_run(&self, run_id: &str, cx: &mut App) {
+        self.queue_command(
+            "Failed to cancel the queued message",
+            cx,
+            "queued-run.cancel",
+            json!({"runId": run_id}),
+        );
     }
 
-    fn reorder_queued_run(&self, _run_id: &str, _to_index: usize, cx: &mut App) {
-        self.not_wired("Reordering queued messages", cx);
+    fn promote_queued_run(&self, run_id: &str, cx: &mut App) {
+        let Some(target) = self.active_run_id() else {
+            push_error(cx, "Failed to steer", "The turn already ended.");
+            return;
+        };
+        self.queue_command(
+            "Failed to steer with the queued message",
+            cx,
+            "queued-message.promote-to-steer",
+            json!({"queuedRunId": run_id, "targetRunId": target}),
+        );
+    }
+
+    fn reorder_queued_run(&self, run_id: &str, to_index: usize, cx: &mut App) {
+        // `beforeRunId`: the run the moved one lands in front of, `null` for the end.
+        let state = self.handle.snapshot();
+        let before = state
+            .thread(&self.thread_id)
+            .and_then(|entry| entry.detail.as_ref())
+            .map(|detail| {
+                detail
+                    .queue_workflow
+                    .queued_runs
+                    .iter()
+                    .filter(|queued| queued.run.id.as_str() != run_id)
+                    .nth(to_index)
+                    .map(|queued| queued.run.id.to_string())
+            })
+            .unwrap_or_default();
+        self.queue_command(
+            "Failed to reorder the queue",
+            cx,
+            "queued-run.reorder",
+            json!({"runId": run_id, "beforeRunId": before}),
+        );
     }
 
     fn respond_to_pending_input(&self, _request_id: &str, _answer: &str, cx: &mut App) {
@@ -461,9 +572,14 @@ impl ComposerSource for LiveSource {
 }
 
 impl LiveSource {
-    /// Dispatches `message.dispatch` (after any thread-mode change) and waits
-    /// for the command to commit. A refusal toasts and keeps the draft.
+    /// Dispatches `message.dispatch` (after any thread-mode change) on the
+    /// runtime, without blocking the UI thread. The composer clears its draft
+    /// when this returns; a failure toasts and hands the draft back
+    /// (`DraftRestore`), as upstream restores its optimistic send.
     fn send_with(&self, request: SendRequest, delivery: Delivery, cx: &mut App) -> bool {
+        if self.overrides.borrow().sending {
+            return false;
+        }
         let selection = {
             let mut selection = json!({
                 "instanceId": request.instance_id,
@@ -485,17 +601,42 @@ impl LiveSource {
                 ),
             )
         });
-        let message = SendMessage {
-            thread_id: self.thread_id.clone(),
-            text: request.prompt,
-            attachments: Vec::new(),
-            model_selection: Some(selection),
-            delivery,
-            title_seed: None,
-        };
+        let restore = (
+            request.prompt.clone(),
+            request.images.clone(),
+            request.files.clone(),
+        );
+        let (prompt, images, files) = (request.prompt, request.images, request.files);
         let thread_id = self.thread_id.clone();
-        let result = self.bus.run_blocking(move |commands| async move {
+        let task = self.bus.task(cx, move |commands| async move {
             let work = async {
+                // Uploads are staged first; the intake claims them with the message.
+                let mut attachments = Vec::new();
+                for image in &images {
+                    attachments.push(
+                        commands
+                            .stage_attachment(
+                                true,
+                                &image.name,
+                                &image.mime_type,
+                                (*image.data).clone(),
+                            )
+                            .await?,
+                    );
+                }
+                for file in &files {
+                    let Some(data) = &file.data else {
+                        return Err(CommandError::new(format!(
+                            "{} has no content to upload.",
+                            file.name
+                        )));
+                    };
+                    attachments.push(
+                        commands
+                            .stage_attachment(false, &file.name, &file.mime_type, (**data).clone())
+                            .await?,
+                    );
+                }
                 if let Some((runtime, interaction)) = mode_changes {
                     if let Some(runtime_mode) = runtime {
                         commands
@@ -516,23 +657,50 @@ impl LiveSource {
                             .await?;
                     }
                 }
-                commands.send_message(message).await
+                commands
+                    .send_message(SendMessage {
+                        thread_id: thread_id.clone(),
+                        text: prompt,
+                        attachments,
+                        model_selection: Some(selection),
+                        delivery,
+                        title_seed: None,
+                    })
+                    .await
             };
             tokio::time::timeout(SEND_TIMEOUT, work)
                 .await
                 .unwrap_or_else(|_| {
-                    Err(crate::app_runtime::write::commands::CommandError::new(
-                        "Timed out waiting for the orchestrator.",
-                    ))
+                    Err(CommandError::new("Timed out waiting for the orchestrator."))
                 })
         });
-        match result {
-            Ok(_) => true,
-            Err(error) => {
-                push_error(cx, "Failed to send message", &error.message);
-                false
-            }
-        }
+        self.update_overrides(cx, |overrides| overrides.sending = true);
+        let source = self.me.clone();
+        cx.spawn(async move |cx| {
+            let outcome = task.await;
+            cx.update(|cx| {
+                let Some(source) = source.upgrade() else {
+                    return;
+                };
+                source.update_overrides(cx, |overrides| {
+                    overrides.sending = false;
+                    if outcome.is_err() {
+                        overrides.restore_nonce += 1;
+                        overrides.restore = Some(DraftRestore {
+                            nonce: overrides.restore_nonce,
+                            prompt: restore.0,
+                            images: restore.1,
+                            files: restore.2,
+                        });
+                    }
+                });
+                if let Err(error) = outcome {
+                    push_error(cx, "Failed to send message", &error.message);
+                }
+            });
+        })
+        .detach();
+        true
     }
 }
 

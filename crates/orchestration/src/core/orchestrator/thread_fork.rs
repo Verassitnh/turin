@@ -197,7 +197,7 @@ pub(super) fn latest_turn_for_run(
 
 /// `providerTurnForRun`: the latest turn of the run's active attempt, or the
 /// turn the attempt itself names.
-fn provider_turn_for_run<'a>(
+pub(super) fn provider_turn_for_run<'a>(
     projection: &'a OrchestrationV2ThreadProjection,
     run: &OrchestrationV2Run,
 ) -> Option<&'a OrchestrationV2ProviderTurn> {

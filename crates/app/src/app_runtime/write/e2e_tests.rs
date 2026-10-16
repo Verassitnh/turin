@@ -203,6 +203,13 @@ async fn send_message_streams_a_fake_claude_reply_into_the_store() {
         "Respond with exactly: first fixture turn complete"
     );
     assert_eq!(user.id, receipt.message_id);
+
+    // Sidebar message search finds the thread by its reply.
+    let found = commands
+        .search_messages("fixture turn", 10)
+        .await
+        .expect("search");
+    assert!(found.iter().any(|hit| hit.thread_id == thread), "{found:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -567,4 +574,188 @@ async fn a_user_input_question_is_answered_from_a_command_and_the_turn_finishes(
     .expect("run settled in time");
     assert!(answered, "a question was raised");
     assert_eq!(status, OrchestrationV2RunStatus::Completed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_runs_can_be_reordered_edited_and_cancelled() {
+    use turin_contracts::orchestration_v2::OrchestrationV2ConversationMessageRole as Role;
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+
+    // The CLI never answers the first prompt, so later sends queue behind it.
+    let harness = harness_with("claude_turn_interrupt.ndjson").await;
+    let thread = project_and_thread(&harness).await;
+    let send = |text: &'static str, delivery: Delivery| {
+        let commands = harness.commands.clone();
+        let thread_id = thread.clone();
+        async move {
+            commands
+                .send_message(SendMessage {
+                    thread_id,
+                    text: text.into(),
+                    attachments: vec![],
+                    model_selection: None,
+                    delivery,
+                    title_seed: None,
+                })
+                .await
+                .expect("send")
+        }
+    };
+    send("first", Delivery::StartImmediately).await;
+    send("second", Delivery::QueueAfterActive).await;
+    send("third", Delivery::QueueAfterActive).await;
+
+    let orchestrator = harness.commands.runtime().orchestrator.clone();
+    // Queued runs in queue order, as `(run id, message text)`.
+    let queue = || {
+        let orchestrator = orchestrator.clone();
+        let thread = thread.clone();
+        async move {
+            let records = orchestrator
+                .get_thread_records(
+                    &thread,
+                    &[RecordField::Runs, RecordField::Messages],
+                    &RecordFilter::default(),
+                )
+                .await
+                .expect("records");
+            let mut queued: Vec<_> = records
+                .runs
+                .iter()
+                .filter(|run| run.status == OrchestrationV2RunStatus::Queued)
+                .collect();
+            queued.sort_by_key(|run| {
+                let ordinal = run.ordinal.get();
+                (
+                    run.queue_position
+                        .flatten()
+                        .map_or(ordinal, |position| position.get()),
+                    ordinal,
+                )
+            });
+            queued
+                .into_iter()
+                .map(|run| {
+                    let text = records
+                        .messages
+                        .iter()
+                        .find(|message| {
+                            message.run_id.as_ref() == Some(&run.id) && message.role == Role::User
+                        })
+                        .map(|message| message.text.clone())
+                        .unwrap_or_default();
+                    (run.id.to_string(), text)
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    let initial = queue().await;
+    assert_eq!(
+        initial
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["second", "third"]
+    );
+    let (second, third) = (initial[0].0.clone(), initial[1].0.clone());
+
+    // Move the third run in front of the second.
+    harness
+        .commands
+        .thread_command(
+            "queued-run.reorder",
+            &thread,
+            json!({"runId": third, "beforeRunId": second}),
+        )
+        .await
+        .expect("reorder");
+    let reordered = queue().await;
+    assert_eq!(
+        reordered
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["third", "second"]
+    );
+
+    harness
+        .commands
+        .thread_command(
+            "queued-run.edit",
+            &thread,
+            json!({"runId": second, "text": "second, edited"}),
+        )
+        .await
+        .expect("edit");
+    harness
+        .commands
+        .thread_command("queued-run.cancel", &thread, json!({"runId": third}))
+        .await
+        .expect("cancel");
+    let remaining = queue().await;
+    assert_eq!(remaining, vec![(second, "second, edited".to_owned())]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn staged_uploads_are_claimed_into_the_thread_with_the_message() {
+    use turin_orchestration::pipeline::attachment_store::resolve_attachment_path;
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+    let image = harness
+        .commands
+        .stage_attachment(true, "shot.png", "image/png", png.clone())
+        .await
+        .expect("stage image");
+    let file = harness
+        .commands
+        .stage_attachment(false, "notes.txt", "text/plain", b"hello".to_vec())
+        .await
+        .expect("stage file");
+    assert!(image["id"].as_str().expect("id").starts_with("pending-"));
+
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Look at these".into(),
+            attachments: vec![image, file],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+        })
+        .await
+        .expect("send with attachments");
+
+    let records = harness
+        .commands
+        .runtime()
+        .orchestrator
+        .get_thread_records(&thread, &[RecordField::Messages], &RecordFilter::default())
+        .await
+        .expect("records");
+    let message = records
+        .messages
+        .iter()
+        .find(|message| message.text == "Look at these")
+        .expect("user message");
+    assert_eq!(message.attachments.len(), 2);
+    let dir = &harness.commands.runtime().attachments_dir;
+    for attachment in &message.attachments {
+        let id = serde_json::to_value(attachment).expect("json")["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+        assert!(!id.starts_with("pending-"), "claimed into the thread: {id}");
+        let path = resolve_attachment_path(dir, attachment).expect("path");
+        assert!(path.exists(), "{} exists", path.display());
+    }
+    let image_path = resolve_attachment_path(dir, &message.attachments[0]).expect("path");
+    assert_eq!(std::fs::read(image_path).expect("read"), png);
 }

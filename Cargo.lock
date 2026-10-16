@@ -7714,6 +7714,7 @@ dependencies = [
  "futures",
  "indexmap",
  "libc",
+ "markdown",
  "parking_lot",
  "pretty_assertions",
  "regex",

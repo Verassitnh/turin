@@ -48,8 +48,8 @@ pub fn format_provider_skill_display_name(skill: &InlineSkill) -> String {
     title_case_words(&skill.name)
 }
 
-/// One matched `$skill` token. `start..end` is the byte range of the whole token, including the
-/// whitespace before the `$`, so callers slice the text with it the way upstream does.
+/// One matched `$skill` token. `start..end` is the byte range of `$name`; upstream's `start` is
+/// `match.index + match[1].length`, so the whitespace before the `$` is left out of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineSkillMatch<'a> {
     pub start: usize,
@@ -111,9 +111,9 @@ fn is_amount_at(text: &str, at: usize) -> bool {
     })
 }
 
-/// The token a `$` at `start` introduces, if the upstream pattern matches there. Returns the
-/// match end and the name.
-fn token_at(text: &str, start: usize) -> Option<(usize, &str)> {
+/// The token a `$` at `start` introduces, if the upstream pattern matches there. Returns where
+/// the `$` is (after any whitespace the match includes), the match end and the name.
+fn token_at(text: &str, start: usize) -> Option<(usize, usize, &str)> {
     // `^` (start of input) or a whitespace character, which the match then includes.
     let mut candidates = Vec::with_capacity(2);
     if start == 0 {
@@ -144,7 +144,7 @@ fn token_at(text: &str, start: usize) -> Option<(usize, &str)> {
         if !ends_word(text, run_end) {
             return None;
         }
-        Some((run_end, run))
+        Some((currency_at, run_end, run))
     })
 }
 
@@ -152,7 +152,7 @@ pub fn match_inline_skills<'a>(text: &str, skills: &'a [InlineSkill]) -> Vec<Inl
     let mut matches = Vec::new();
     let mut position = 0;
     while position <= text.len() {
-        let Some((end, name)) = token_at(text, position) else {
+        let Some((currency_at, end, name)) = token_at(text, position) else {
             match char_at(text, position) {
                 Some(ch) => position += ch.len_utf8(),
                 None => break,
@@ -161,7 +161,7 @@ pub fn match_inline_skills<'a>(text: &str, skills: &'a [InlineSkill]) -> Vec<Inl
         };
         if let Some(skill) = skills.iter().find(|candidate| candidate.name == name) {
             matches.push(InlineSkillMatch {
-                start: position,
+                start: currency_at,
                 end,
                 skill,
                 raw_text: format!("${name}"),
@@ -207,7 +207,7 @@ mod tests {
         assert_eq!(matches[0].raw_text, "$test-t3-app");
         assert_eq!(
             &"Use $test-t3-app now"[matches[0].start..matches[0].end],
-            " $test-t3-app"
+            "$test-t3-app"
         );
         assert_eq!(
             match_inline_skills("$test-t3-app", &skills)

@@ -16,13 +16,41 @@ pub struct CodexFileCitationAttributes<'a> {
     pub line_range_start: Option<&'a str>,
 }
 
+static JS_DECIMAL_LITERAL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
+        .expect("static regex")
+});
+
+/// JS `Number(value)` for a non-empty, already trimmed string.
+fn js_number(value: &str) -> f64 {
+    for (prefix, radix) in [("0x", 16), ("0o", 8), ("0b", 2)] {
+        if value.len() > 2 && value[..2].eq_ignore_ascii_case(prefix) {
+            let digits = &value[2..];
+            if !digits.chars().all(|c| c.is_digit(radix)) {
+                return f64::NAN;
+            }
+            // Overflow only happens far above the safe-integer range.
+            return u128::from_str_radix(digits, radix).map_or(f64::INFINITY, |n| n as f64);
+        }
+    }
+    match value {
+        "Infinity" | "+Infinity" => return f64::INFINITY,
+        "-Infinity" => return f64::NEG_INFINITY,
+        _ => {}
+    }
+    if !JS_DECIMAL_LITERAL.is_match(value) {
+        return f64::NAN;
+    }
+    value.parse().unwrap_or(f64::NAN)
+}
+
 fn positive_integer(value: Option<&str>) -> Option<u64> {
     let value = value?;
     let trimmed = js_trim(value);
     if trimmed.is_empty() {
         return None;
     }
-    let parsed: f64 = trimmed.parse().ok()?;
+    let parsed = js_number(trimmed);
     if !parsed.is_finite()
         || parsed.fract() != 0.0
         || parsed <= 0.0

@@ -64,6 +64,7 @@ tempfile = "3"
 pretty_assertions = "1"
 getrandom = "0.3"
 markdown = "1.0.0"
+html5ever = "0.27"
 
 gpui-kit = "0.7.3"
 

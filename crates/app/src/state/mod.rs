@@ -51,6 +51,7 @@ pub mod thread_workflows;
 pub mod time;
 pub mod turn_item_presentation;
 pub mod ui_state_store;
+pub mod workspace_basename_lookup;
 pub mod worktree_cleanup;
 
 /// The one environment a single-process Turin has: this machine.

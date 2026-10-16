@@ -6,6 +6,7 @@
 pub mod badge;
 pub mod button;
 pub mod collapsible_section_header;
+pub mod color;
 pub mod command;
 pub mod dialog;
 pub mod empty;

@@ -12,6 +12,8 @@
 //! `dispatch::decide`, which reports `OrchestratorError::CommandRejected`.
 
 pub mod dispatch;
+#[cfg(test)]
+mod dispatch_limit_tests;
 mod message_dispatch;
 #[cfg(test)]
 mod message_dispatch_tests;
@@ -44,6 +46,7 @@ use turin_contracts::{
 };
 
 use crate::pipeline::command_receipt_store::CommandReceiptStore;
+use crate::pipeline::dispatch_mode_limit::DispatchModeLimit;
 use crate::pipeline::event_sink::{EventSink, SinkStream, StreamOptions};
 use crate::pipeline::orchestrator_port::{
     BoxError, DispatchResult, OrchestratorError, OrchestratorPort, RecordField, RecordFilter,
@@ -90,6 +93,18 @@ impl Orchestrator {
             recovery,
             seams: DispatchSeams::default(),
         }
+    }
+
+    /// `dispatch` for a limited sender: refuses a thread that runs above
+    /// `limit` (`DispatchModeLimit`, upstream's ambient reference) under the
+    /// thread's lock. Additive: `OrchestratorPort::dispatch` is the unlimited
+    /// path.
+    pub async fn dispatch_with_limit(
+        &self,
+        command: OrchestrationV2ServerCommand,
+        limit: Option<&DispatchModeLimit>,
+    ) -> Result<DispatchResult, OrchestratorError> {
+        dispatch::dispatch_with_limit(self, command, limit).await
     }
 
     /// Hands in the checkpoint, adapter and project-root seams that message

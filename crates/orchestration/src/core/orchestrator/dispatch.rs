@@ -20,9 +20,14 @@ use super::{
     thread_merge_back, thread_metadata, thread_mutation,
 };
 use crate::pipeline::command_receipt_store::CommandReceipt;
+use crate::pipeline::dispatch_mode_limit::{
+    DispatchModeLimit, DispatchModeRefusal, DispatchModes, exceeded_dispatch_mode_limit,
+};
 use crate::pipeline::effect_outbox::PendingEffect;
 use crate::pipeline::event_sink::{CancelUnsettled, CommandCommit};
-use crate::pipeline::orchestrator_port::{BoxError, DispatchResult, OrchestratorError};
+use crate::pipeline::orchestrator_port::{
+    BoxError, DispatchResult, OrchestratorError, OrchestratorPort,
+};
 
 /// What one command decides to write: its events, the effects they queue, and
 /// any unsettled effects to cancel. Upstream's `dispatchOnce` result.
@@ -34,17 +39,21 @@ pub struct Decision {
     /// clock here.
     now: UtcDateTime,
     ids: IdAllocator,
+    /// The sender's mode limit (`DispatchModeLimit`, an ambient reference
+    /// upstream), for deciders that touch a thread outside this command's lock.
+    limit: Option<DispatchModeLimit>,
     pub events: Vec<OrchestrationV2DomainEvent>,
     pub effects: Vec<PendingEffect>,
     pub cancel_unsettled_effects: Option<CancelUnsettled>,
 }
 
 impl Decision {
-    fn new(command_id: CommandId, ids: IdAllocator) -> Self {
+    fn new(command_id: CommandId, ids: IdAllocator, limit: Option<DispatchModeLimit>) -> Self {
         Self {
             command_id,
             now: UtcDateTime::now(),
             ids,
+            limit,
             events: Vec::new(),
             effects: Vec::new(),
             cancel_unsettled_effects: None,
@@ -58,6 +67,11 @@ impl Decision {
     /// `DateTime.now` for this decision (see the field doc).
     pub fn now(&self) -> UtcDateTime {
         self.now
+    }
+
+    /// The limit a decider checks for a thread outside the command's lock.
+    pub fn mode_limit(&self) -> Option<&DispatchModeLimit> {
+        self.limit.as_ref()
     }
 
     /// `makeEvent`'s id: `idAllocator.allocate.event({threadId, commandId})`.
@@ -426,16 +440,58 @@ pub async fn dispatch_with_receipt(
     orchestrator: &Orchestrator,
     command: OrchestrationV2ServerCommand,
 ) -> Result<DispatchResult, OrchestratorError> {
+    dispatch_with_limit(orchestrator, command, None).await
+}
+
+/// `dispatchWithReceipt` for a limited sender (upstream: an MCP caller whose
+/// `DispatchModeLimit` is in context). The limit is re-checked under the
+/// thread's lock, where the thread's user cannot raise the modes meanwhile.
+pub async fn dispatch_with_limit(
+    orchestrator: &Orchestrator,
+    command: OrchestrationV2ServerCommand,
+    limit: Option<&DispatchModeLimit>,
+) -> Result<DispatchResult, OrchestratorError> {
     let thread_id = command_thread_id(&command).clone();
     orchestrator
         .locks
-        .with_lock(&thread_id, || dispatch_locked(orchestrator, command))
+        .with_lock(&thread_id, || dispatch_locked(orchestrator, command, limit))
         .await
+}
+
+/// `refuseAboveDispatchModeLimit`: fails when a limited sender's command would
+/// touch a thread running above its limit. The refusal is also recorded in the
+/// limit's slot, so the sender can report it whatever wraps the error.
+pub(super) fn refuse_above_dispatch_mode_limit(
+    limit: Option<&DispatchModeLimit>,
+    command: &OrchestrationV2ServerCommand,
+    thread_id: &ThreadId,
+    modes: DispatchModes,
+) -> Result<(), OrchestratorError> {
+    let Some(limit) = limit else {
+        return Ok(());
+    };
+    let Some(mode) = exceeded_dispatch_mode_limit(limit.modes, modes) else {
+        return Ok(());
+    };
+    limit.record_refusal(DispatchModeRefusal {
+        thread_id: thread_id.clone(),
+        runtime_mode: modes.runtime_mode,
+        interaction_mode: modes.interaction_mode,
+        mode,
+    });
+    Err(OrchestratorError::ThreadAboveModeLimit {
+        command_id: command_id(command).clone(),
+        thread_id: thread_id.clone(),
+        mode,
+        runtime_mode: modes.runtime_mode,
+        interaction_mode: modes.interaction_mode,
+    })
 }
 
 async fn dispatch_locked(
     orchestrator: &Orchestrator,
     command: OrchestrationV2ServerCommand,
+    limit: Option<&DispatchModeLimit>,
 ) -> Result<DispatchResult, OrchestratorError> {
     let command_id = command_id(&command).clone();
     let thread_id = command_thread_id(&command).clone();
@@ -450,7 +506,25 @@ async fn dispatch_locked(
         return replay_receipt(orchestrator, command_id, command_type, thread_id, receipt).await;
     }
 
-    let mut decision = Decision::new(command_id.clone(), orchestrator.ids);
+    // A limited sender checked these modes before dispatching; the thread's
+    // user may have raised them since, and only here can they not change. A
+    // fork or merge-back source is not under this lock: its decider checks the
+    // copy it reads instead.
+    if limit.is_some()
+        && let Some(shell) = orchestrator.get_thread_shell(&thread_id).await?
+    {
+        refuse_above_dispatch_mode_limit(
+            limit,
+            &command,
+            &thread_id,
+            DispatchModes {
+                runtime_mode: shell.runtime_mode,
+                interaction_mode: shell.interaction_mode,
+            },
+        )?;
+    }
+
+    let mut decision = Decision::new(command_id.clone(), orchestrator.ids, limit.cloned());
     let planned = match decide(orchestrator, &command, &mut decision).await {
         Ok(false) => {
             return Err(OrchestratorError::CommandRejected {

@@ -4,9 +4,8 @@
 //! thread and its pending fork transfer with [`thread_fork_service`], and
 //! records both. The source-point helpers here are shared with merge-back.
 //!
-//! Not ported: the dispatch mode limit check (`refuseAboveDispatchModeLimit`).
-//! `OrchestratorPort::dispatch` takes no `DispatchModeLimit` yet (message
-//! dispatch owns it), so a fork is never refused on that ground here.
+//! The source is not under the command's lock, so a limited sender's
+//! `DispatchModeLimit` is checked against the source copy read here.
 
 use turin_contracts::orchestration_v2::OrchestrationV2Command as C;
 use turin_contracts::orchestration_v2::{
@@ -17,7 +16,8 @@ use turin_contracts::orchestration_v2::{
 };
 
 use super::Orchestrator;
-use super::dispatch::{Decision, dispatch_failure};
+use super::dispatch::{Decision, dispatch_failure, refuse_above_dispatch_mode_limit};
+use crate::pipeline::dispatch_mode_limit::DispatchModes;
 use crate::pipeline::orchestrator_port::{
     OrchestratorError, OrchestratorPort, RecordField, RecordFilter,
 };
@@ -59,6 +59,17 @@ pub(super) async fn decide(
             &RecordFilter::default(),
         )
         .await?;
+    // The source is not under this command's lock, so check the modes this
+    // command copies, not an earlier read the source's user could outrun.
+    refuse_above_dispatch_mode_limit(
+        decision.mode_limit(),
+        command,
+        source_thread_id,
+        DispatchModes {
+            runtime_mode: source.thread.runtime_mode,
+            interaction_mode: source.thread.interaction_mode,
+        },
+    )?;
 
     let Some(source_run) = run_for_source_point(&source, source_point) else {
         return Err(dispatch_failure(

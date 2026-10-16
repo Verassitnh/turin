@@ -49,6 +49,20 @@ pub struct WorktreeSetupSnapshot {
     pub error: Option<String>,
 }
 
+/// The live stream wins while its sequence is newer or equal; otherwise the other side.
+fn newer_worktree_snapshot<'a>(
+    primary: Option<&'a WorktreeSetupSnapshot>,
+    secondary: Option<&'a WorktreeSetupSnapshot>,
+) -> Option<&'a WorktreeSetupSnapshot> {
+    match (primary, secondary) {
+        (Some(primary), Some(secondary)) if primary.sequence >= secondary.sequence => Some(primary),
+        (Some(_), Some(secondary)) => Some(secondary),
+        (Some(primary), None) => Some(primary),
+        (None, Some(secondary)) => Some(secondary),
+        (None, None) => None,
+    }
+}
+
 pub fn worktree_setup_agent_started(snapshot: &WorktreeSetupSnapshot) -> bool {
     snapshot.stages.iter().any(|stage| {
         stage.id == WorktreeSetupStageId::Agent && stage.status == WorktreeSetupStageStatus::Done
@@ -73,13 +87,7 @@ pub fn find_recorded_worktree_setup(
 pub fn resolve_visible_worktree_setup(
     input: ResolveVisibleWorktreeSetupInput<'_>,
 ) -> Option<WorktreeSetupSnapshot> {
-    let snapshot = match (input.live, input.recorded) {
-        (Some(live), Some(recorded)) if live.sequence >= recorded.sequence => Some(live.clone()),
-        (Some(live), Some(_)) => Some(live.clone()),
-        (Some(live), None) => Some(live.clone()),
-        (None, Some(recorded)) => Some(recorded.clone()),
-        (None, None) => None,
-    }?;
+    let snapshot = newer_worktree_snapshot(input.live, input.recorded).cloned()?;
     if snapshot.phase == WorktreeSetupPhase::Running {
         return Some(snapshot);
     }
@@ -128,13 +136,7 @@ pub fn resolve_worktree_setup_progress(
         .held
         .filter(|snapshot| snapshot.thread_id == *input.thread_id)
         .cloned();
-    let snapshot = match (&latest, &held) {
-        (Some(latest), Some(held)) if latest.sequence >= held.sequence => Some(latest.clone()),
-        (Some(latest), Some(_)) => Some(latest.clone()),
-        (Some(latest), None) => Some(latest.clone()),
-        (None, Some(held)) => Some(held.clone()),
-        (None, None) => None,
-    };
+    let snapshot = newer_worktree_snapshot(latest.as_ref(), held.as_ref()).cloned();
     let is_preparing_worktree = input.local_preparing
         || input.run_status == Some(RunStatus::Preparing)
         || snapshot.as_ref().is_some_and(|snapshot| {
@@ -259,7 +261,73 @@ mod tests {
                 ],
                 &thread_id,
             ),
-            Some(settled)
+            Some(settled.clone())
+        );
+        let recorded_newer = WorktreeSetupSnapshot {
+            sequence: 7,
+            ..settled
+        };
+        assert_eq!(
+            resolve_visible_worktree_setup(ResolveVisibleWorktreeSetupInput {
+                live: Some(&WorktreeSetupSnapshot {
+                    sequence: 3,
+                    ..base
+                }),
+                recorded: Some(&recorded_newer),
+                turn_started: false,
+                follow_up_sent: false,
+            }),
+            Some(recorded_newer)
+        );
+    }
+
+    #[test]
+    fn uses_streamed_setup_progress_without_reverting_to_an_older_held_snapshot() {
+        let thread_id = fixtures::thread_id("thread-1");
+        let base = base_snapshot(thread_id.clone());
+        let newest = WorktreeSetupSnapshot {
+            phase: WorktreeSetupPhase::Done,
+            sequence: 9,
+            stages: vec![stage(
+                WorktreeSetupStageId::Agent,
+                WorktreeSetupStageStatus::Done,
+            )],
+            ..base.clone()
+        };
+        let resolve = |latest: Option<&WorktreeSetupSnapshot>,
+                       held: Option<&WorktreeSetupSnapshot>| {
+            resolve_worktree_setup_progress(ResolveWorktreeSetupProgressInput {
+                thread_id: &thread_id,
+                local_preparing: false,
+                run_status: Some(RunStatus::Running),
+                latest,
+                held,
+            })
+        };
+        assert_eq!(
+            resolve(Some(&newest), Some(&base)),
+            WorktreeSetupProgress {
+                snapshot: Some(newest.clone()),
+                is_preparing_worktree: false,
+            }
+        );
+        assert_eq!(
+            resolve(Some(&base), Some(&newest)),
+            WorktreeSetupProgress {
+                snapshot: Some(newest),
+                is_preparing_worktree: false,
+            }
+        );
+        let other = WorktreeSetupSnapshot {
+            thread_id: fixtures::thread_id("another-thread"),
+            ..base
+        };
+        assert_eq!(
+            resolve(Some(&other), Some(&other)),
+            WorktreeSetupProgress {
+                snapshot: None,
+                is_preparing_worktree: false,
+            }
         );
     }
 }

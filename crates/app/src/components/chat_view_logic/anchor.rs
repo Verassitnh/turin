@@ -20,7 +20,7 @@ pub fn should_release_timeline_anchor_for_tool_activity(
         let TimelineEntryKind::Work { entry } = &timeline_entry.kind else {
             return false;
         };
-        entry.run_id.as_deref() != Some(running_turn_id) || work_entry_has_tool_activity(entry)
+        entry.run_id.as_deref() == Some(running_turn_id) && work_entry_has_tool_activity(entry)
     })
 }
 
@@ -94,6 +94,16 @@ mod tests {
             false,
             Some("active-turn"),
             &[tool_entry("active-turn")],
+        ));
+    }
+
+    #[test]
+    fn ignores_tool_activity_from_earlier_turns() {
+        assert!(!should_release_timeline_anchor_for_tool_activity(
+            Some("anchored-message"),
+            true,
+            Some("active-turn"),
+            &[tool_entry("previous-turn")],
         ));
     }
 }

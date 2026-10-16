@@ -38,15 +38,12 @@ pub enum RevertWaitError {
 
 pub fn evaluate_revert_wait(
     projection: Option<&RevertWaitProjection>,
-    message_id: &MessageId,
+    message_run_id: Option<&RunId>,
     turn_count: u64,
     request_id: &CommandId,
     accepted: bool,
 ) -> Option<Result<(), RevertWaitError>> {
     let projection = projection?;
-    if !projection.message_ids.iter().any(|id| id == message_id) {
-        return Some(Err(RevertWaitError::MessageUnavailable));
-    }
     if let Some(failure) = &projection.rollback_failure
         && failure.request_id == *request_id
     {
@@ -54,7 +51,7 @@ pub fn evaluate_revert_wait(
             failure.message.clone(),
         )));
     }
-    let message_run_id = projection.message_run_id.as_ref()?;
+    let message_run_id = message_run_id?;
     if accepted
         && projection.runs.iter().any(|run| {
             &run.id == message_run_id
@@ -79,25 +76,35 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = ()>,
 {
-    if read()
+    let initial = read();
+    if initial
         .as_ref()
         .is_none_or(|projection| !projection.message_ids.iter().any(|id| id == &message_id))
     {
         return Err(RevertWaitError::MessageUnavailable);
     }
+    let message_run_id = initial.and_then(|projection| projection.message_run_id);
 
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
 
-    if let Some(result) =
-        evaluate_revert_wait(read().as_ref(), &message_id, turn_count, &request_id, false)
-    {
+    if let Some(result) = evaluate_revert_wait(
+        read().as_ref(),
+        message_run_id.as_ref(),
+        turn_count,
+        &request_id,
+        false,
+    ) {
         return result;
     }
 
     revert().await;
-    if let Some(result) =
-        evaluate_revert_wait(read().as_ref(), &message_id, turn_count, &request_id, true)
-    {
+    if let Some(result) = evaluate_revert_wait(
+        read().as_ref(),
+        message_run_id.as_ref(),
+        turn_count,
+        &request_id,
+        true,
+    ) {
         return result;
     }
 
@@ -107,7 +114,7 @@ where
             _ = interval.tick() => {
                 if let Some(result) = evaluate_revert_wait(
                     read().as_ref(),
-                    &message_id,
+                    message_run_id.as_ref(),
                     turn_count,
                     &request_id,
                     true,
@@ -140,7 +147,13 @@ mod tests {
             runs: Vec::new(),
         };
         assert_eq!(
-            evaluate_revert_wait(Some(&projection), &message_id, 1, &request_id, false),
+            evaluate_revert_wait(
+                Some(&projection),
+                projection.message_run_id.as_ref(),
+                1,
+                &request_id,
+                false,
+            ),
             Some(Err(RevertWaitError::RollbackFailed(
                 "The provider could not roll back.".to_owned()
             )))
@@ -161,7 +174,13 @@ mod tests {
             runs: Vec::new(),
         };
         assert_eq!(
-            evaluate_revert_wait(Some(&projection), &message_id, 1, &request_id, true),
+            evaluate_revert_wait(
+                Some(&projection),
+                projection.message_run_id.as_ref(),
+                1,
+                &request_id,
+                true,
+            ),
             None
         );
     }
@@ -214,5 +233,39 @@ mod tests {
         let result =
             wait_for_reverted_message(message_id, 1, request_id, || async {}, read, 50).await;
         assert!(matches!(result, Err(RevertWaitError::TimedOut)));
+    }
+
+    #[tokio::test]
+    async fn wait_keeps_the_original_run_after_the_message_leaves() {
+        let message_id = MessageId::new("message-2").unwrap();
+        let request_id = CommandId::new("rollback-1").unwrap();
+        let run_id = RunId::new("run-2").unwrap();
+        let projection = Arc::new(std::sync::Mutex::new(RevertWaitProjection {
+            message_ids: vec![message_id.clone()],
+            message_run_id: Some(run_id.clone()),
+            rollback_failure: None,
+            runs: Vec::new(),
+        }));
+        let read = {
+            let projection = Arc::clone(&projection);
+            Arc::new(move || Some(projection.lock().expect("lock").clone()))
+        };
+        let request_for_wait = request_id.clone();
+        let handle = tokio::spawn(async move {
+            wait_for_reverted_message(message_id, 1, request_for_wait, || async {}, read, 120_000)
+                .await
+        });
+        tokio::task::yield_now().await;
+        {
+            let mut current = projection.lock().expect("lock");
+            current.message_ids.clear();
+            current.message_run_id = Some(RunId::new("other-run").unwrap());
+            current.runs.push(RevertWaitRun {
+                id: run_id,
+                ordinal: 2,
+                status: RunStatus::RolledBack,
+            });
+        }
+        assert_eq!(handle.await.expect("join"), Ok(()));
     }
 }

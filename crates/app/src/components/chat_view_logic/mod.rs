@@ -11,10 +11,12 @@
 #![allow(unused_imports)]
 
 mod anchor;
+mod artifact;
 mod checkout_memory;
 mod composer;
 mod dispatch;
 mod draft;
+mod metadata;
 mod model_change;
 mod plan_follow_up;
 mod preview_urls;
@@ -33,10 +35,12 @@ mod test_fixtures;
 mod composer_logic_matrix;
 
 pub use anchor::*;
+pub use artifact::*;
 pub use checkout_memory::*;
 pub use composer::*;
 pub use dispatch::*;
 pub use draft::*;
+pub use metadata::*;
 pub use model_change::*;
 pub use plan_follow_up::*;
 pub use preview_urls::*;

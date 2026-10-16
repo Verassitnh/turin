@@ -14,6 +14,15 @@ use gpui_kit::{AssetSource, Result, SharedString};
 icon_assets!(
     pub AppIcons,
     [
+        CloudCog,
+        Database,
+        FlaskConical,
+        Gamepad2,
+        Monitor,
+        Music,
+        Server,
+        ShoppingBag,
+        Workflow,
         AlarmClock,
         AlarmClockOff,
         Archive,

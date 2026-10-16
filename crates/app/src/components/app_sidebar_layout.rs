@@ -37,6 +37,7 @@ use super::command_palette::{
 };
 use super::confirm_dialog_host::ConfirmDialogHost;
 use super::git_actions_control::mock_source::MockGitActionsBackend;
+use super::no_active_thread_state::NoActiveThreadState;
 use super::quit_hold_overlay::QuitHoldOverlay;
 use super::reopen_closed_view_shortcut::try_reopen_closed_view;
 use super::right_panel_tabs::RightPanelTabs;
@@ -1184,6 +1185,8 @@ impl Render for AppSidebarLayout {
         let resizing = self.resizing.map(|drag| drag.target);
         let routed_thread = self.routed_thread(cx);
         let routed_thread_id = self.routed_thread_id(cx);
+        // `NoActiveThreadState`: the index route, with no thread or draft open.
+        let no_active_thread = self.sidebar.read(cx).route().is_none();
         let routed_git = self.routed_git_thread(cx);
         self.git_host
             .update(cx, |host, cx| host.sync(routed_git, window, cx));
@@ -1381,6 +1384,9 @@ impl Render for AppSidebarLayout {
                             .when(!maximized && !on_usage, |this| {
                                 match self.main_content.clone() {
                                     Some(content) => this.child(content),
+                                    None if no_active_thread => {
+                                        this.child(NoActiveThreadState { sidebar_open })
+                                    }
                                     None => this.child(ChatView {
                                         live: self.live.as_ref().map(|live| LiveChatTarget {
                                             client: live.client.clone(),
@@ -1392,6 +1398,7 @@ impl Render for AppSidebarLayout {
                                         thread: routed_thread.clone(),
                                         git_host: self.git_host.clone(),
                                         thread_details_open: self.thread_details_open,
+                                        subagent_bar: crate::components::chat_view::subagent_bar_demo(),
                                     }),
                                 }
                             })

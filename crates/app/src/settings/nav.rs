@@ -86,13 +86,8 @@ impl SettingsView {
         let theme = cx.app_theme().clone();
         let query = self.nav_query.clone();
         let searching = !query.trim().is_empty();
-        let vm = self.vm(cx);
-        let items = filter_available_settings_search_items(&SettingsSearchAvailability::default());
-        let results = if searching {
-            search_settings(&query, &items, &vm.platform)
-        } else {
-            Vec::new()
-        };
+        let results = self.settings_search_results(cx);
+        let active_result = self.nav_active_result.min(results.len().saturating_sub(1));
 
         let search_row = div()
             .flex()
@@ -125,12 +120,7 @@ impl SettingsView {
                 ),
             )
             .child(if searching {
-                let clear = cx.listener(|this, _, window, cx| {
-                    this.nav_query.clear();
-                    this.nav_search
-                        .update(cx, |state, cx| state.set_value("", window, cx));
-                    cx.notify();
-                });
+                let clear = cx.listener(|this, _, window, cx| this.clear_search(window, cx));
                 Button::new("clear-settings-search")
                     .variant(ButtonVariant::GhostMuted)
                     .size(ButtonSize::IconMicro)
@@ -170,7 +160,7 @@ impl SettingsView {
                         let route = SettingsRoute::Section(item.to);
                         menu_button(
                             SharedString::from(format!("settings-result-{}", item.id)),
-                            index == 0,
+                            index == active_result,
                             &theme,
                         )
                         .h_auto()
@@ -262,6 +252,97 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// The settings matching the query, in result order (`results`).
+    fn settings_search_results(
+        &self,
+        cx: &gpui_kit::App,
+    ) -> Vec<super::search::SettingsSearchItem> {
+        if self.nav_query.trim().is_empty() {
+            return Vec::new();
+        }
+        let items = filter_available_settings_search_items(&SettingsSearchAvailability::default());
+        search_settings(&self.nav_query, &items, &self.vm(cx).platform)
+    }
+
+    /// `clearSearch`.
+    pub(super) fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.nav_query.clear();
+        self.nav_active_result = 0;
+        self.nav_search
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        cx.notify();
+    }
+
+    /// Whether a text field of the page has the keyboard focus.
+    fn any_input_focused(&self, window: &Window, cx: &gpui_kit::App) -> bool {
+        self.nav_search.read(cx).focus_handle(cx).is_focused(window)
+            || self
+                .inputs
+                .values()
+                .any(|state| state.read(cx).focus_handle(cx).is_focused(window))
+            || self
+                .textareas
+                .values()
+                .any(|state| state.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// `handleSearchKeyDown` and the `/` / Cmd+F shortcut of the sidebar
+    /// search. Returns whether the key was used.
+    pub(super) fn handle_search_key(
+        &mut self,
+        event: &gpui_kit::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let modifiers = event.keystroke.modifiers;
+        let key = event.keystroke.key.as_str();
+        let search_focused = self.nav_search.read(cx).focus_handle(cx).is_focused(window);
+        if search_focused {
+            if key == "escape" && !self.nav_query.trim().is_empty() {
+                self.clear_search(window, cx);
+                return true;
+            }
+            let results = self.settings_search_results(cx);
+            if results.is_empty() {
+                return false;
+            }
+            let count = results.len();
+            match key {
+                "down" => self.nav_active_result = (self.nav_active_result + 1) % count,
+                "up" => self.nav_active_result = (self.nav_active_result + count - 1) % count,
+                "enter" => {
+                    if let Some(item) = results.get(self.nav_active_result.min(count - 1)) {
+                        let target = item.target_id.clone().unwrap_or_else(|| item.id.clone());
+                        self.nav_active_result = 0;
+                        self.open_search_target(SettingsRoute::Section(item.to), target, cx);
+                        self.nav_search
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                    }
+                    return true;
+                }
+                _ => return false,
+            }
+            cx.notify();
+            return true;
+        }
+        let is_find = key == "f"
+            && (modifiers.platform || modifiers.control)
+            && !modifiers.alt
+            && !modifiers.shift;
+        let is_slash = key == "/" && !modifiers.platform && !modifiers.control && !modifiers.alt;
+        if !(is_find || is_slash) || (is_slash && self.any_input_focused(window, cx)) {
+            return false;
+        }
+        if self.dialog.is_some() || self.menus.any_open() {
+            return false;
+        }
+        self.sidebar_open = true;
+        let handle = self.nav_search.read(cx).focus_handle(cx);
+        window.focus(&handle);
+        cx.notify();
+        true
+    }
+
     /// `handleSearchResultClick`: open the page and pulse the matched row.
     pub(super) fn open_search_target(
         &mut self,
@@ -270,6 +351,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         self.nav_query.clear();
+        self.nav_active_result = 0;
         self.route = route;
         self.menus.close();
         cx.set_global(super::layout::SettingsSearchTarget {

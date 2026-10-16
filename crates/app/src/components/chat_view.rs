@@ -7,6 +7,7 @@
 
 use std::rc::Rc;
 
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, Entity, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
     SharedString, Styled as _, Window, div, px, rems,
@@ -26,12 +27,14 @@ use super::chat::messages_timeline::MessagesTimeline;
 use super::chat::provider_status_banner::{
     get_provider_status_banner_key, should_show_provider_status_banner,
 };
+use super::chat::provider_subagent_bar::ProviderSubagentBar;
 use super::chat::thread_details_card::{ThreadDetailsCard, ThreadDetailsCardMeasurements};
 use super::chat::thread_details_card_layout::{
     ThreadDetailsCardContainer, ThreadDetailsCardLane, ThreadDetailsCardLayout,
     ThreadDetailsCardLayoutInput, resolve_thread_details_card_layout,
 };
 use super::chat::thread_details_panel::ThreadDetailsPanel;
+use super::chat::thread_details_pr_row::OpenHandler;
 use super::chat::thread_error_banner::{
     dismiss_thread_error_banner_for_session, get_thread_error_banner_key,
     is_thread_error_banner_dismissed_for_session, should_show_thread_error_banner,
@@ -47,6 +50,7 @@ use crate::composer::catalog::{
 use crate::composer::mock_source::MockComposerSource;
 use crate::composer::views::chat_composer::ChatComposer;
 use crate::state::store::ClientStore;
+use crate::state::thread_execution::ProviderSubagentStatus;
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::{CHAT_CONTENT_MAX_WIDTH, WORKSPACE_TOPBAR_HEIGHT};
 use turin_contracts::ThreadId;
@@ -73,6 +77,20 @@ pub struct ChatView {
     pub git_host: Entity<ChatGitHost>,
     /// The thread details card is shown (the titlebar toggle).
     pub thread_details_open: bool,
+    /// A provider-native subagent thread: the bar stands in for the composer. The owner of the
+    /// live thread data (T22b) fills this from the thread's projection.
+    pub subagent_bar: Option<SubagentBarData>,
+}
+
+/// What `ProviderSubagentBar` needs from the routed subagent thread.
+#[derive(Clone)]
+pub struct SubagentBarData {
+    pub provider: Option<ProviderInstanceEntry>,
+    pub model_label: SharedString,
+    pub effort_label: Option<SharedString>,
+    pub status: Option<ProviderSubagentStatus>,
+    /// The parent thread the bar leads back to (`onOpenParent`).
+    pub parent_thread_id: Option<String>,
 }
 
 impl ChatView {
@@ -184,6 +202,20 @@ impl ChatView {
         let store = timeline.read(cx).store().clone();
         let snapshot = store.read(cx).snapshot().clone();
         let source = store.read(cx).source();
+        let subagent_bar = self.subagent_bar.clone().map(|data| {
+            let open_parent = data.parent_thread_id.clone().zip(source.clone()).map(
+                |(parent, source)| -> OpenHandler {
+                    Rc::new(move |_, _, cx| source.open_thread(&parent, cx))
+                },
+            );
+            ProviderSubagentBar {
+                provider: data.provider,
+                model_label: data.model_label,
+                effort_label: data.effort_label,
+                status: data.status,
+                on_open_parent: open_parent,
+            }
+        });
         let approvals = derive_pending_approvals(&snapshot.pending_approvals);
         let inputs = derive_pending_user_inputs(&snapshot.pending_user_inputs);
         let drawer = if let Some(approval) = approvals.first().cloned() {
@@ -227,6 +259,26 @@ impl ChatView {
                 right: layout.x + layout.width,
                 bottom: bottom.unwrap_or(layout.y + layout.height),
             });
+        // The real card sits 12px from the top right, 280px wide (`THREAD_DETAILS_CARD_*`), when
+        // the layout places it inline.
+        let demo_lane_card = demo_lane_card.or_else(|| {
+            let layout = resolve_thread_details_card_layout(ThreadDetailsCardLayoutInput {
+                container: ThreadDetailsCardContainer {
+                    width: canvas_width,
+                    height: canvas_height,
+                },
+                lane: ThreadDetailsCardLane {
+                    padding: 48.0,
+                    min_chat_width: 640.0,
+                },
+                top_inset: 0.0,
+            })?;
+            self.thread_details_open.then_some(ChatCanvasDetailsCard {
+                left: layout.x,
+                right: layout.x + layout.width,
+                bottom: layout.y + layout.height,
+            })
+        });
         let selection_toolbar = selection_toolbar_demo();
         let details_card = demo_card.map(|(_, _, card)| card).or_else(|| {
             self.thread_details_open
@@ -291,10 +343,18 @@ impl ChatView {
                                             .mx_auto()
                                             .w_full()
                                             .max_w(CHAT_CONTENT_MAX_WIDTH)
-                                            .children(drawer)
-                                            .child(composer)
-                                            // The strip hangs under the composer, joined by the glass seam.
-                                            .children(composer_strip),
+                                            .children(
+                                                subagent_bar.is_none().then_some(drawer).flatten(),
+                                            )
+                                            // The provider runs a subagent thread, so there is
+                                            // nothing to send: the bar stands in for the composer.
+                                            .map(|this| match subagent_bar {
+                                                Some(bar) => this.child(bar),
+                                                None => this
+                                                    .child(composer)
+                                                    // The strip hangs under the composer, joined by the glass seam.
+                                                    .children(composer_strip),
+                                            }),
                                     )
                                     // Bottom spacer: `h-[calc(env(safe-area-inset-bottom)+1.25rem)]`.
                                     .child(div().h(rems(1.25))),
@@ -362,6 +422,26 @@ fn thread_details_card(
         }
         .into_any_element(),
     ))
+}
+
+/// `TURIN_CHAT_DEMO=subagent-bar`: the bar over a running Codex subagent.
+pub fn subagent_bar_demo() -> Option<SubagentBarData> {
+    use crate::state::contracts::OrchestrationV2ExecutionNodeStatus;
+    if !std::env::var("TURIN_CHAT_DEMO").is_ok_and(|demo| demo.contains("subagent-bar")) {
+        return None;
+    }
+    let started = chrono::Utc::now() - chrono::Duration::seconds(42);
+    Some(SubagentBarData {
+        provider: Some(ProviderInstanceEntry::new("codex", "codex", "Codex")),
+        model_label: "GPT-5.4".into(),
+        effort_label: Some("High".into()),
+        status: Some(ProviderSubagentStatus {
+            status: OrchestrationV2ExecutionNodeStatus::Running,
+            started_at: Some(started.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            completed_at: None,
+        }),
+        parent_thread_id: Some("thread-parent".into()),
+    })
 }
 
 /// `TURIN_CHAT_DEMO=selection-toolbar`: the cite button over a made-up selection, until a GPUI

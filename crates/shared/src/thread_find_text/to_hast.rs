@@ -1,3 +1,5 @@
+//! Port of upstream/packages/shared/src/markdownPipeline.ts (the remark half, with
+//! `remark-rehype`) as used by `threadFindText.ts`:
 //! `remark-parse` + `CHAT_MARKDOWN_REMARK_PLUGINS` + `remark-rehype` for thread find, over
 //! markdown-rs (the Rust port of micromark/mdast).
 //!
@@ -13,6 +15,9 @@
 //! - `remarkBreaks` (when `line_breaks`): [`newline_to_break`].
 //! - `remarkNormalizeLinksAndTagInlineCode`: Windows drive links become `file:` URLs and inline
 //!   code outside a link gets `dataInlineCode`.
+//!
+//! Also ports the `markdownPipeline.ts` plugins `remarkKeepWindowsPathDestinations` and
+//! `remarkNormalizeLinksAndTagInlineCode`.
 //!
 //! `remark-rehype` (`mdast-util-to-hast`) follows the upstream handlers exactly, including the
 //! `"\n"` text nodes `wrap` inserts between blocks: thread find segments include the space they
@@ -419,7 +424,7 @@ impl<'a> ToHast<'a> {
                 }
                 vec![Hast::Element(element)]
             }
-            Node::Text(value) => vec![text(trim_lines(&value.value))],
+            Node::Text(value) => vec![text(self.without_stray_tokens(trim_lines(&value.value)))],
             Node::Emphasis(emphasis) => vec![self.element("em", &emphasis.children, inside_link)],
             Node::Strong(strong) => vec![self.element("strong", &strong.children, inside_link)],
             Node::Delete(delete) => vec![self.element("del", &delete.children, inside_link)],
@@ -506,6 +511,23 @@ impl<'a> ToHast<'a> {
             element = element.with_prop("dataGalleryKind", gallery_kind.clone());
         }
         Some(Hast::Element(element))
+    }
+
+    /// A placeholder token that did not end up as a lone heading (the directive was somewhere
+    /// the heading did not parse as one) must not reach the find text: an unresolved directive
+    /// gives back its own text, a card gives nothing.
+    fn without_stray_tokens(&self, value: String) -> String {
+        if !value.contains('\u{E000}') {
+            return value;
+        }
+        let mut value = value;
+        for (index, literal) in self.literals.iter().enumerate() {
+            value = value.replace(&literal_token(index), literal);
+        }
+        for index in 0..self.templates.len() {
+            value = value.replace(&template_token(index), "");
+        }
+        value
     }
 
     /// An unresolved leaf directive placeholder heading as the paragraph of its text.

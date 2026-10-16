@@ -27,7 +27,8 @@ use crate::codex_artifact_templates::{
     codex_artifact_template_presentation_label, resolve_codex_artifact_template,
 };
 use crate::codex_markdown_directives::{
-    DirectiveReplacement, collect_directive_matches, render_codex_inline_directives_as_markdown,
+    DirectiveMatch, DirectiveReplacement, collect_directive_matches,
+    render_codex_inline_directives_as_markdown, to_mdast_guarded,
 };
 use crate::composer_context_legacy::upgrade_legacy_context_message;
 use crate::composer_context_references::parse_composer_context_href;
@@ -184,6 +185,117 @@ pub fn searchable_message_segments(
     }
 }
 
+/// What the placeholders in the prepared Markdown stand for.
+#[derive(Default)]
+struct DirectiveSubstitutions {
+    templates: Vec<CodexArtifactTemplate>,
+    literals: Vec<String>,
+}
+
+/// Backslash-escapes every ASCII punctuation character, so the text parses as itself.
+fn escape_markdown_punctuation(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len() * 2);
+    for ch in text.chars() {
+        if ch.is_ascii_punctuation() {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+/// `source[start..end]` with the directives in it replaced. `gap` rewrites the text between them.
+fn apply_directive_matches(
+    source: &str,
+    start: usize,
+    end: usize,
+    matches: &[DirectiveMatch],
+    gap: &dyn Fn(&str) -> String,
+    substitutions: &mut DirectiveSubstitutions,
+) -> String {
+    let mut ordered: Vec<&DirectiveMatch> = matches.iter().collect();
+    ordered.sort_by_key(|directive| directive.start);
+    let mut rendered = String::new();
+    let mut cursor = start;
+    for directive in ordered {
+        if directive.start < cursor || directive.end > end {
+            continue;
+        }
+        rendered.push_str(&gap(&source[cursor..directive.start]));
+        rendered.push_str(&match &directive.replacement {
+            DirectiveReplacement::Markdown(rendered) => rendered.clone(),
+            // The label is inline Markdown of its own, with the directives in it rendered. Text
+            // that would be a block on its own (a lone `*`) is escaped, and white space at the
+            // ends is kept as character references, since a paragraph would trim it.
+            DirectiveReplacement::LabelRange {
+                start: label_start,
+                end: label_end,
+                nested,
+            } => {
+                let label = &source[*label_start..*label_end];
+                let inline = matches!(
+                    to_mdast_guarded(label, &to_hast::parse_options()),
+                    Some(markdown::mdast::Node::Root(root))
+                        if matches!(root.children.as_slice(), [markdown::mdast::Node::Paragraph(_)])
+                );
+                let label_gap: &dyn Fn(&str) -> String = if inline {
+                    &|text| text.to_owned()
+                } else {
+                    &escape_markdown_punctuation
+                };
+                keep_edge_whitespace(&apply_directive_matches(
+                    source,
+                    *label_start,
+                    *label_end,
+                    nested,
+                    label_gap,
+                    substitutions,
+                ))
+            }
+            // A one-line heading that is only a token: it ends where the directive did, and
+            // `to_hast` turns it into the card.
+            DirectiveReplacement::Template(template) => {
+                substitutions.templates.push(template.clone());
+                format!(
+                    "# {}",
+                    to_hast::template_token(substitutions.templates.len() - 1)
+                )
+            }
+            // `restoreLeafDirective`: a paragraph of the directive's own text. The same heading
+            // placeholder makes it interrupt the surrounding paragraph.
+            DirectiveReplacement::Literal(text) => {
+                substitutions.literals.push(text.clone());
+                format!(
+                    "# {}",
+                    to_hast::literal_token(substitutions.literals.len() - 1)
+                )
+            }
+            // `restoreTextDirective`: the node's own text, which parses as itself once escaped.
+            DirectiveReplacement::InlineLiteral(text) => escape_markdown_punctuation(text),
+        });
+        cursor = directive.end;
+    }
+    rendered.push_str(&gap(&source[cursor..end]));
+    rendered
+}
+
+/// Leading and trailing spaces and tabs as character references.
+fn keep_edge_whitespace(text: &str) -> String {
+    let reference = |ch: char| if ch == '\t' { "&#9;" } else { "&#32;" };
+    let is_blank = |ch: char| ch == ' ' || ch == '\t';
+    let body = text.trim_matches(is_blank);
+    if body.is_empty() {
+        return text.to_owned();
+    }
+    let leading = text.len() - text.trim_start_matches(is_blank).len();
+    let trailing = text.len() - text.trim_end_matches(is_blank).len();
+    let mut kept = String::with_capacity(text.len() + 4 * (leading + trailing));
+    kept.extend(text[..leading].chars().map(reference));
+    kept.push_str(body);
+    kept.extend(text[text.len() - trailing..].chars().map(reference));
+    kept
+}
+
 /// The Markdown with each Codex directive replaced by what the renderer shows, the artifact
 /// template cards the replaced `::artifact-template` directives stand for, and the text of the
 /// unresolved ones, which become paragraphs of their own.
@@ -194,42 +306,24 @@ fn prepare_directives(markdown: &str) -> (String, Vec<CodexArtifactTemplate>, Ve
     {
         return (markdown.to_owned(), Vec::new(), Vec::new());
     }
-    let mut matches = collect_directive_matches(markdown);
-    matches.sort_by_key(|directive| directive.start);
-    let mut templates = Vec::new();
-    let mut literals = Vec::new();
-    let mut replacements = Vec::with_capacity(matches.len());
-    for directive in &matches {
-        let replacement = match &directive.replacement {
-            DirectiveReplacement::Markdown(rendered) => rendered.clone(),
-            DirectiveReplacement::LabelRange(start, end) => markdown[*start..*end].to_owned(),
-            // A one-line heading that is only a token: it ends where the directive did, and
-            // `to_hast` turns it into the card.
-            DirectiveReplacement::Template(template) => {
-                templates.push(template.clone());
-                format!("# {}", to_hast::template_token(templates.len() - 1))
-            }
-            // `restoreLeafDirective`: a paragraph of the directive's own text. The same heading
-            // placeholder makes it interrupt the surrounding paragraph.
-            DirectiveReplacement::Literal(text) => {
-                literals.push(text.clone());
-                format!("# {}", to_hast::literal_token(literals.len() - 1))
-            }
-        };
-        replacements.push(replacement);
-    }
-    let mut prepared = markdown.to_owned();
-    for (directive, replacement) in matches.iter().zip(&replacements).rev() {
-        prepared.replace_range(directive.start..directive.end, replacement);
-    }
-    (prepared, templates, literals)
+    let matches = collect_directive_matches(markdown, true);
+    let mut substitutions = DirectiveSubstitutions::default();
+    let prepared = apply_directive_matches(
+        markdown,
+        0,
+        markdown.len(),
+        &matches,
+        &|text| text.to_owned(),
+        &mut substitutions,
+    );
+    (prepared, substitutions.templates, substitutions.literals)
 }
 
 /// The hast tree the renderer is built from, for user messages (no rehype plugins) or assistant
 /// messages (`rehype-raw` and `rehype-sanitize`).
 fn render_tree(markdown: &str, user_message: bool, line_breaks: bool) -> Vec<Hast> {
     let (prepared, templates, literals) = prepare_directives(markdown);
-    let mut root = markdown::to_mdast(&prepared, &to_hast::parse_options()).unwrap_or_else(|_| {
+    let mut root = to_mdast_guarded(&prepared, &to_hast::parse_options()).unwrap_or_else(|| {
         markdown::mdast::Node::Root(markdown::mdast::Root {
             children: vec![markdown::mdast::Node::Text(markdown::mdast::Text {
                 value: markdown.to_owned(),
@@ -240,7 +334,7 @@ fn render_tree(markdown: &str, user_message: bool, line_breaks: bool) -> Vec<Has
     });
     remark_github_alerts(&mut root);
     remark_normalize_list_item_indentation(&mut root, &prepared, &|source| {
-        markdown::to_mdast(source, &to_hast::parse_options()).ok()
+        to_mdast_guarded(source, &to_hast::parse_options())
     });
     // `userProcessor` and `assistantBreaksProcessor` use `remarkBreaks`.
     if user_message || line_breaks {
@@ -451,4 +545,8 @@ pub fn markdown_thread_find_text(
 }
 
 #[cfg(test)]
+mod diff_tmp;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod upstream_parity;

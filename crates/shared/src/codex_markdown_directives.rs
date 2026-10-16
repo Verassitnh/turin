@@ -1,9 +1,9 @@
 //! Port of upstream/packages/shared/src/codexMarkdownDirectives.ts
 //!
-//! `renderCodexDirectivesForCopy` and `renderCodexInlineDirectivesAsMarkdown`, plus the directive
-//! matches thread find (`threadFindText.ts`) substitutes before parsing. The remark plugin
-//! (`remarkCodexDirectives`) and `splitCodexArtifactTemplateMarkdown` have no counterpart: the
-//! renderers work from the source ranges found here.
+//! `renderCodexDirectivesForCopy`, `renderCodexInlineDirectivesAsMarkdown` and
+//! `splitCodexArtifactTemplateMarkdown`, plus the directive matches thread find
+//! (`threadFindText.ts`) substitutes before parsing. The remark plugin (`remarkCodexDirectives`)
+//! has no counterpart: the renderers work from the source ranges found here.
 //!
 //! Moved here from `turin-app` (`components/chat/timeline`) so the thread find extractor in this
 //! crate shares one directive scanner with the copy adapter. The citation and template
@@ -13,14 +13,21 @@
 //! Upstream parses the whole message with remark (`remark-parse` plus a
 //! micromark directive extension restricted to Codex's three directive
 //! names), rewrites the directive nodes, and then splices replacements into
-//! the source at the nodes' offsets. There is no micromark here, so
-//! [`collect_directive_matches`] finds the same nodes with a small scanner
+//! the source at the nodes' offsets. There is no micromark directive extension
+//! here, so [`collect_directive_matches`] finds the same nodes with a small scanner
 //! that implements only the Markdown that decides whether a directive is a
 //! directive:
 //!
 //! - fenced code blocks (no directives inside), ATX headings, blank lines and
 //!   list items as block boundaries, with `>` and list markers stripped
-//!   before looking for fences and `::artifact-template` leaf directives;
+//!   before looking for fences and `::artifact-template` leaf directives, and
+//!   the indentation left over measured against the innermost container: four
+//!   columns is indented code (or a paragraph continuation), where no leaf
+//!   directive, heading or fence starts;
+//! - a parse of the whole document with markdown-rs ([`opaque_ranges`]) for what is not
+//!   text at all: indented code, HTML blocks, link reference definitions (title and
+//!   destination) and, for the GFM pipeline thread find uses, autolink literals, which run
+//!   through any directive text inside the URL;
 //! - inline backslash escapes, code spans, autolinks and raw HTML tags (no
 //!   directives inside), and links/images, because a citation inside link
 //!   text stays literal and image alt text has no directive nodes at all;
@@ -29,11 +36,11 @@
 //!   leaf directives alone on their line (which, like upstream, interrupt a
 //!   paragraph).
 //!
-//! Known gaps against CommonMark: indented code blocks and HTML blocks are
-//! not recognised (their text is scanned like a paragraph), container
-//! nesting is approximated by stripping prefixes, attribute values decode
-//! only numeric and the five XML named character references, and a
-//! follow-up's label text is its raw source rather than its rendered text.
+//! Known gaps against micromark: container nesting is approximated by stripping prefixes,
+//! attribute values decode only numeric and the five XML named character references, a
+//! follow-up's label is spliced back as source (thread find) rather than kept as a node,
+//! and markdown-rs differs from micromark in a few block corner cases (see PORTING.md
+//! Deviations).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -79,7 +86,7 @@ struct ParsedDirective {
     label: Option<(usize, usize)>,
     attributes: Option<Attributes>,
     /// The attributes in `Object.entries` order (first occurrence of each name), for
-    /// [`restored_leaf_directive_text`].
+    /// [`restored_directive_text`].
     attribute_list: Vec<(String, String)>,
 }
 
@@ -358,11 +365,21 @@ pub enum DirectiveReplacement {
     Markdown(String),
     /// A rendered artifact template card (`data.codexArtifactTemplate`).
     Template(CodexArtifactTemplate),
-    /// A follow-up suggestion: keep its label source (`labelRange`).
-    LabelRange(usize, usize),
+    /// A follow-up suggestion: keep its label source (`labelRange`). `nested` holds the
+    /// directives inside the label, which the rendered tree resolves too (thread find) but the
+    /// copy adapter leaves as written, as upstream's source splice does.
+    LabelRange {
+        start: usize,
+        end: usize,
+        nested: Vec<DirectiveMatch>,
+    },
     /// A leaf directive that did not resolve (`restoreLeafDirective`): its own paragraph holding
     /// this rebuilt source text. Copy and inline Markdown leave the source as written.
     Literal(String),
+    /// A text directive that did not resolve, or stays literal inside a link
+    /// (`restoreTextDirective`): text rebuilt from the parsed node. Copy and inline Markdown leave
+    /// the source as written.
+    InlineLiteral(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -371,6 +388,9 @@ pub struct DirectiveMatch {
     pub start: usize,
     pub end: usize,
     pub replacement: DirectiveReplacement,
+    /// For a text directive: what `restoreTextDirective` rebuilds it to, used when a resolved
+    /// citation ends up inside a link.
+    restored: Option<String>,
 }
 
 struct LinkOpener {
@@ -551,14 +571,23 @@ fn link_end(
         .then_some(after_close)
 }
 
+/// What the whole document says about its inline content.
+struct InlineContext {
+    /// Normalised labels of the link reference definitions.
+    definitions: HashSet<String>,
+    /// Ranges of GFM autolink literals: a URL runs through whatever directive text it holds.
+    autolinks: Vec<(usize, usize)>,
+}
+
 /// Scans one paragraph or heading's inline content.
 fn scan_inline(
     source: &str,
     start: usize,
     end: usize,
-    definitions: &HashSet<String>,
+    context: &InlineContext,
     matches: &mut Vec<DirectiveMatch>,
 ) {
+    let definitions = &context.definitions;
     let bytes = source.as_bytes();
     let mut openers: Vec<LinkOpener> = Vec::new();
     let mut previous_colon = false;
@@ -566,6 +595,11 @@ fn scan_inline(
     while i < end {
         let b = bytes[i];
         let mut literal_colon = false;
+        if let Some((_, autolink_end)) = context.autolinks.iter().find(|(from, _)| *from == i) {
+            i = (*autolink_end).clamp(i + 1, end);
+            previous_colon = false;
+            continue;
+        }
         match b {
             b'\\' if i + 1 < end && bytes[i + 1].is_ascii_punctuation() => {
                 // An escaped `:` does not block a following directive.
@@ -588,7 +622,7 @@ fn scan_inline(
             }
             b':' if !previous_colon => match parse_text_directive(source, i, end) {
                 Some((name, directive)) => {
-                    record_text_directive(source, i, name, &directive, matches);
+                    record_text_directive(source, i, name, &directive, context, matches);
                     i = directive.end;
                 }
                 None => {
@@ -633,17 +667,7 @@ fn scan_inline(
                             matches.truncate(opener.matches_len);
                         } else {
                             // `renderFileCitation(..., insideLink)` keeps these literal.
-                            let mut index = opener.matches_len;
-                            while index < matches.len() {
-                                if matches!(
-                                    matches[index].replacement,
-                                    DirectiveReplacement::Markdown(_)
-                                ) {
-                                    matches.remove(index);
-                                } else {
-                                    index += 1;
-                                }
-                            }
+                            literalize_citations(&mut matches[opener.matches_len..]);
                             for earlier in openers.iter_mut().filter(|opener| !opener.is_image) {
                                 earlier.active = false;
                             }
@@ -659,46 +683,132 @@ fn scan_inline(
     }
 }
 
+/// A resolved citation inside a link stays literal (`renderFileCitation(..., insideLink)`): the
+/// text rebuilt from the node, including citations in a follow-up label inside that link.
+fn literalize_citations(matches: &mut [DirectiveMatch]) {
+    for directive_match in matches {
+        match &mut directive_match.replacement {
+            DirectiveReplacement::Markdown(_) => {
+                if let Some(restored) = directive_match.restored.take() {
+                    directive_match.replacement = DirectiveReplacement::InlineLiteral(restored);
+                }
+            }
+            DirectiveReplacement::LabelRange { nested, .. } => literalize_citations(nested),
+            _ => {}
+        }
+    }
+}
+
+/// `textContent` of an inline label: the Markdown parsed on its own when that is one paragraph.
+/// Anything else (a lone `*`, `# x`) is a block on its own but inline text inside a directive,
+/// so its source stands for its text.
+fn inline_label_text(label: &str) -> String {
+    use markdown::mdast::Node;
+    match to_mdast_guarded(label, &markdown::ParseOptions::gfm()) {
+        Some(Node::Root(root)) if matches!(root.children.as_slice(), [Node::Paragraph(_)]) => {
+            root.children.iter().map(markdown_text_content).collect()
+        }
+        _ => label.to_string(),
+    }
+}
+
+/// `sourceForDirective` for a leaf or text directive. Upstream runs the directive plugin without a
+/// source file, so the text is always rebuilt from the node: `:name` or `::name`, `[label text]`
+/// when there is a label, and `{name="value" ...}` (JSON-quoted values, bare names as `name=""`)
+/// when there are attributes.
+fn restored_directive_text(
+    source: &str,
+    marker: &str,
+    name: &str,
+    directive: &ParsedDirective,
+) -> String {
+    let mut text = format!("{marker}{name}");
+    if let Some((start, end)) = directive.label.filter(|(start, end)| start < end) {
+        text.push('[');
+        text.push_str(&inline_label_text(&source[start..end]));
+        text.push(']');
+    }
+    if !directive.attribute_list.is_empty() {
+        let attributes: Vec<String> = directive
+            .attribute_list
+            .iter()
+            .map(|(name, value)| {
+                format!(
+                    "{name}={}",
+                    serde_json::to_string(value).unwrap_or_default()
+                )
+            })
+            .collect();
+        text.push('{');
+        text.push_str(&attributes.join(" "));
+        text.push('}');
+    }
+    text
+}
+
 /// `renderFileCitation` / `renderFollowUp` for a parsed text directive.
 fn record_text_directive(
     source: &str,
     start: usize,
     name: &str,
     directive: &ParsedDirective,
+    context: &InlineContext,
     matches: &mut Vec<DirectiveMatch>,
 ) {
     let empty = Attributes::new();
     let attributes = directive.attributes.as_ref().unwrap_or(&empty);
+    let restored = restored_directive_text(source, ":", name, directive);
+    let unresolved = |matches: &mut Vec<DirectiveMatch>| {
+        matches.push(DirectiveMatch {
+            start,
+            end: directive.end,
+            replacement: DirectiveReplacement::InlineLiteral(restored.clone()),
+            restored: None,
+        });
+    };
     if name == CODEX_FILE_CITATION_NAME {
         let citation_attributes = CodexFileCitationAttributes {
             path: attributes.get("path").map(String::as_str),
             line_range_start: attributes.get("line_range_start").map(String::as_str),
         };
-        if let Some(citation) = resolve_codex_file_citation_link(Some(&citation_attributes)) {
-            matches.push(DirectiveMatch {
+        match resolve_codex_file_citation_link(Some(&citation_attributes)) {
+            Some(citation) => matches.push(DirectiveMatch {
                 start,
                 end: directive.end,
                 replacement: DirectiveReplacement::Markdown(codex_file_citation_markdown(
                     &citation,
                 )),
-            });
+                restored: Some(restored),
+            }),
+            None => unresolved(matches),
         }
         return;
     }
-    // Shows only the label. T3 has no suggestion UI, so the hidden prompt is not shown.
+    // Shows only the label. T3 has no suggestion UI, so the hidden prompt is not shown. The label
+    // has to have text of its own (`textContent(node).trim()`): an image alone does not.
     let has_prompt = attributes
         .get("prompt")
         .is_some_and(|prompt| !js_trim(prompt).is_empty());
-    let label = directive
-        .label
-        .filter(|(label_start, label_end)| !js_trim(&source[*label_start..*label_end]).is_empty());
-    if let (true, Some((label_start, label_end))) = (has_prompt, label) {
-        matches.push(DirectiveMatch {
-            start,
-            end: directive.end,
-            replacement: DirectiveReplacement::LabelRange(label_start, label_end),
-        });
-    }
+    let label = directive.label.filter(|(label_start, label_end)| {
+        !js_trim(&inline_label_text(&source[*label_start..*label_end])).is_empty()
+    });
+    let (true, Some((label_start, label_end))) = (has_prompt, label) else {
+        unresolved(matches);
+        return;
+    };
+    // The label is inline Markdown of its own: the directives inside it render too.
+    let mut nested = Vec::new();
+    scan_inline(source, label_start, label_end, context, &mut nested);
+    matches.push(DirectiveMatch {
+        start,
+        end: directive.end,
+        replacement: DirectiveReplacement::LabelRange {
+            start: label_start,
+            end: label_end,
+            nested,
+        },
+        restored: Some(restored),
+    });
 }
 
 /// Strips leading indentation, `>` markers and list markers. Returns the
@@ -735,6 +845,112 @@ fn strip_container_prefix(line: &str) -> (usize, bool) {
             continue;
         }
         return (i, list_marker);
+    }
+}
+
+struct LineStructure {
+    /// Bytes of container markers and indentation before the content.
+    prefix: usize,
+    /// Whether a list marker started a new item on this line.
+    list_marker: bool,
+    /// Block quote markers on this line.
+    quotes: usize,
+    /// Columns of indentation before the content, relative to the innermost container. Four or
+    /// more is indented code, or a paragraph continuation: no block construct starts there.
+    indent: usize,
+}
+
+fn advance_column(column: usize, byte: u8) -> usize {
+    if byte == b'\t' {
+        column + 4 - column % 4
+    } else {
+        column + 1
+    }
+}
+
+/// Strips `>` markers and list markers like [`strip_container_prefix`], and measures the
+/// indentation left over. `list_columns` is the content column of each open list item, which
+/// continuation lines are indented to.
+fn line_structure(line: &str, list_columns: &mut Vec<usize>) -> LineStructure {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut column = 0;
+    let mut container_column = 0;
+    let mut list_marker = false;
+    let mut quotes = 0;
+    loop {
+        while i < bytes.len() && is_space_or_tab(bytes[i]) {
+            column = advance_column(column, bytes[i]);
+            i += 1;
+        }
+        while list_columns.last().is_some_and(|open| *open > column) {
+            list_columns.pop();
+        }
+        if let Some(open) = list_columns.last() {
+            container_column = container_column.max(*open);
+        }
+        let indent = column.saturating_sub(container_column);
+        let finished = |i: usize| LineStructure {
+            prefix: i,
+            list_marker,
+            quotes,
+            indent,
+        };
+        if indent >= 4 || i >= bytes.len() {
+            return finished(i);
+        }
+        if bytes[i] == b'>' {
+            quotes += 1;
+            i += 1;
+            column += 1;
+            if i < bytes.len() && is_space_or_tab(bytes[i]) {
+                column = advance_column(column, bytes[i]);
+                i += 1;
+            }
+            container_column = column;
+            continue;
+        }
+        let marker_length = if matches!(bytes[i], b'-' | b'*' | b'+') {
+            1
+        } else {
+            let digits = bytes[i..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            if (1..=9).contains(&digits) && matches!(bytes.get(i + digits), Some(b'.' | b')')) {
+                digits + 1
+            } else {
+                return finished(i);
+            }
+        };
+        if bytes
+            .get(i + marker_length)
+            .is_some_and(|b| !is_space_or_tab(*b))
+        {
+            return finished(i);
+        }
+        // The item's content starts one to four spaces after the marker; with more, or none,
+        // it starts one column after, and the rest is indentation.
+        let marker_end = column + marker_length;
+        let spaces = bytes[i + marker_length..]
+            .iter()
+            .take_while(|byte| is_space_or_tab(**byte))
+            .count();
+        let content_column = if bytes[i + marker_length..]
+            .iter()
+            .all(|byte| is_space_or_tab(*byte))
+            || spaces > 4
+        {
+            marker_end + 1
+        } else {
+            marker_end + spaces
+        };
+        let consumed = content_column - marker_end;
+        i += marker_length + consumed.min(spaces);
+        column = content_column;
+        container_column = content_column;
+        list_columns.push(content_column);
+        list_marker = true;
     }
 }
 
@@ -786,6 +1002,20 @@ fn line_ranges(source: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// `markdown::to_mdast`, but a parser panic is a failed parse. markdown-rs 1.0.0 panics on a few
+/// malformed list nestings (`mismatched (non-jsx): ListUnordered / ListOrdered`), and a Codex
+/// message is untrusted text.
+pub(crate) fn to_mdast_guarded(
+    source: &str,
+    options: &markdown::ParseOptions,
+) -> Option<markdown::mdast::Node> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        markdown::to_mdast(source, options)
+    }))
+    .ok()?
+    .ok()
+}
+
 /// `textContent` of the label's Markdown: text, code and raw HTML values, concatenated.
 fn markdown_text_content(node: &markdown::mdast::Node) -> String {
     use markdown::mdast::Node;
@@ -801,42 +1031,68 @@ fn markdown_text_content(node: &markdown::mdast::Node) -> String {
     }
 }
 
-/// `sourceForDirective` for a leaf directive. Upstream runs the directive plugin without a source
-/// file, so the text is always rebuilt from the node: `::name`, `[label text]` when there is a
-/// label, and `{name="value" ...}` (JSON-quoted values, bare names as `name=""`) when there are
-/// attributes.
-fn restored_leaf_directive_text(source: &str, directive: &ParsedDirective) -> String {
-    let mut text = format!("::{CODEX_ARTIFACT_TEMPLATE_NAME}");
-    if let Some((start, end)) = directive.label.filter(|(start, end)| start < end) {
-        let label = &source[start..end];
-        let content = markdown::to_mdast(label, &markdown::ParseOptions::gfm())
-            .map(|root| markdown_text_content(&root))
-            .unwrap_or_else(|_| label.to_string());
-        text.push('[');
-        text.push_str(&content);
-        text.push(']');
+/// Byte ranges where nothing is a directive, from a parse of the whole document: code (indented
+/// code included), HTML blocks, link reference definitions (a title or destination is not
+/// text), and GFM autolink literals (a URL runs through `:codex-file-citation{...}`).
+struct OpaqueRanges {
+    /// Code (indented code included) and HTML blocks.
+    blocks: Vec<(usize, usize)>,
+    /// Link reference definitions.
+    definitions: Vec<(usize, usize)>,
+    autolinks: Vec<(usize, usize)>,
+}
+
+fn opaque_ranges(source: &str, gfm: bool) -> OpaqueRanges {
+    use markdown::mdast::Node;
+
+    fn walk(node: &Node, flow_parent: bool, source: &str, ranges: &mut OpaqueRanges) {
+        if let Some((start, end)) = node
+            .position()
+            .and_then(|position| Some((position.start.offset, position.end.offset)))
+        {
+            match node {
+                Node::Code(_) => ranges.blocks.push((start, end)),
+                Node::Definition(_) => ranges.definitions.push((start, end)),
+                Node::Html(_) if flow_parent => ranges.blocks.push((start, end)),
+                // `[text](url)` starts with `[`; everything else is an autolink.
+                Node::Link(_) if source.as_bytes().get(start) != Some(&b'[') => {
+                    ranges.autolinks.push((start, end));
+                }
+                _ => {}
+            }
+        }
+        let flow = matches!(
+            node,
+            Node::Root(_)
+                | Node::Blockquote(_)
+                | Node::List(_)
+                | Node::ListItem(_)
+                | Node::FootnoteDefinition(_)
+        );
+        for child in node.children().into_iter().flatten() {
+            walk(child, flow, source, ranges);
+        }
     }
-    if !directive.attribute_list.is_empty() {
-        let attributes: Vec<String> = directive
-            .attribute_list
-            .iter()
-            .map(|(name, value)| {
-                format!(
-                    "{name}={}",
-                    serde_json::to_string(value).unwrap_or_default()
-                )
-            })
-            .collect();
-        text.push('{');
-        text.push_str(&attributes.join(" "));
-        text.push('}');
+
+    let mut ranges = OpaqueRanges {
+        blocks: Vec::new(),
+        definitions: Vec::new(),
+        autolinks: Vec::new(),
+    };
+    let options = if gfm {
+        markdown::ParseOptions::gfm()
+    } else {
+        markdown::ParseOptions::default()
+    };
+    if let Some(root) = to_mdast_guarded(source, &options) {
+        walk(&root, true, source, &mut ranges);
     }
-    text
+    ranges
 }
 
 /// The directives in `markdown` that render as something else, in source order within each
 /// paragraph. Ranges are byte offsets.
-pub fn collect_directive_matches(markdown: &str) -> Vec<DirectiveMatch> {
+pub fn collect_directive_matches(markdown: &str, gfm: bool) -> Vec<DirectiveMatch> {
     let lines = line_ranges(markdown);
     let definitions: HashSet<String> = lines
         .iter()
@@ -850,39 +1106,92 @@ pub fn collect_directive_matches(markdown: &str) -> Vec<DirectiveMatch> {
         })
         .collect();
 
+    let OpaqueRanges {
+        blocks,
+        definitions: definition_ranges,
+        autolinks,
+    } = opaque_ranges(markdown, gfm);
+    let overlaps = |ranges: &[(usize, usize)], from: usize, to: usize| {
+        ranges.iter().any(|(start, end)| *start < to && *end > from)
+    };
+    let context = InlineContext {
+        definitions,
+        autolinks,
+    };
+
     let mut matches = Vec::new();
-    let mut fence: Option<(u8, usize)> = None;
+    let mut fence: Option<(u8, usize, usize, usize)> = None;
     let mut paragraph: Option<(usize, usize)> = None;
     let flush = |paragraph: &mut Option<(usize, usize)>, matches: &mut Vec<DirectiveMatch>| {
         if let Some((start, end)) = paragraph.take() {
-            scan_inline(markdown, start, end, &definitions, matches);
+            scan_inline(markdown, start, end, &context, matches);
         }
     };
 
+    let mut list_columns: Vec<usize> = Vec::new();
+    let mut after_definition = false;
     for (line_start, line_end) in lines {
         let line = &markdown[line_start..line_end];
-        let (prefix, list_marker) = strip_container_prefix(line);
-        let content = &line[prefix..];
-        if let Some((fence_char, length)) = fence {
-            if fence_closes(content, fence_char, length) {
-                fence = None;
+        if line.bytes().all(is_space_or_tab) {
+            after_definition = false;
+            if fence.is_none() {
+                flush(&mut paragraph, &mut matches);
             }
             continue;
         }
+        if let Some((fence_char, length, depth, quotes)) = fence {
+            let mut scratch = list_columns.clone();
+            let inside = line_structure(line, &mut scratch);
+            // A fence ends with the list item or block quote it opened in.
+            if scratch.len() >= depth && inside.quotes >= quotes {
+                if inside.indent < 4 && fence_closes(&line[inside.prefix..], fence_char, length) {
+                    fence = None;
+                }
+                continue;
+            }
+            fence = None;
+        }
+        let LineStructure {
+            prefix,
+            list_marker,
+            indent,
+            quotes,
+        } = line_structure(line, &mut list_columns);
+        let content = &line[prefix..];
         if content.bytes().all(is_space_or_tab) {
+            after_definition = false;
             flush(&mut paragraph, &mut matches);
             continue;
         }
-        if let Some(opened) = fence_open(content) {
+        // Indented code cannot interrupt a paragraph, so four columns of indentation under one
+        // continue it. Otherwise (and in an HTML block or a definition) it is text, not a
+        // paragraph.
+        // A definition is only told apart from its paragraph when that ends, so a line under one
+        // continues it too.
+        let continues_paragraph =
+            indent >= 4 && (paragraph.is_some() || after_definition) && !list_marker;
+        let in_definition = overlaps(&definition_ranges, line_start + prefix, line_end);
+        let blocked = !continues_paragraph
+            && (indent >= 4 || in_definition || overlaps(&blocks, line_start + prefix, line_end));
+        after_definition = in_definition;
+        if blocked {
             flush(&mut paragraph, &mut matches);
-            fence = Some(opened);
+            continue;
+        }
+        if indent < 4
+            && let Some(opened) = fence_open(content)
+        {
+            flush(&mut paragraph, &mut matches);
+            fence = Some((opened.0, opened.1, list_columns.len(), quotes));
             continue;
         }
         if list_marker {
             flush(&mut paragraph, &mut matches);
         }
         let content_start = line_start + prefix;
-        if let Some(directive) = parse_leaf_directive(markdown, content_start, line_end) {
+        if indent < 4
+            && let Some(directive) = parse_leaf_directive(markdown, content_start, line_end)
+        {
             // A leaf directive interrupts a paragraph.
             flush(&mut paragraph, &mut matches);
             let empty = Attributes::new();
@@ -901,16 +1210,20 @@ pub fn collect_directive_matches(markdown: &str) -> Vec<DirectiveMatch> {
                 end: directive.end,
                 replacement: match resolve_codex_artifact_template(Some(&template_attributes)) {
                     Some(template) => DirectiveReplacement::Template(template),
-                    None => DirectiveReplacement::Literal(restored_leaf_directive_text(
-                        markdown, &directive,
+                    None => DirectiveReplacement::Literal(restored_directive_text(
+                        markdown,
+                        "::",
+                        CODEX_ARTIFACT_TEMPLATE_NAME,
+                        &directive,
                     )),
                 },
+                restored: None,
             });
             continue;
         }
-        if is_atx_heading(content) {
+        if indent < 4 && is_atx_heading(content) {
             flush(&mut paragraph, &mut matches);
-            scan_inline(markdown, line_start, line_end, &definitions, &mut matches);
+            scan_inline(markdown, line_start, line_end, &context, &mut matches);
             continue;
         }
         paragraph = Some((paragraph.map_or(line_start, |(start, _)| start), line_end));
@@ -923,12 +1236,14 @@ fn render_directive_matches(
     markdown: &str,
     replacement_for: impl Fn(&DirectiveMatch) -> Option<String>,
 ) -> String {
-    let mut matches = collect_directive_matches(markdown);
+    let mut matches = collect_directive_matches(markdown, false);
     matches.sort_by_key(|directive_match| std::cmp::Reverse(directive_match.start));
     let mut rendered = markdown.to_string();
     for directive_match in &matches {
         let replacement = match directive_match.replacement {
-            DirectiveReplacement::LabelRange(start, end) => Some(markdown[start..end].to_string()),
+            DirectiveReplacement::LabelRange { start, end, .. } => {
+                Some(markdown[start..end].to_string())
+            }
             _ => replacement_for(directive_match),
         };
         if let Some(replacement) = replacement {
@@ -972,9 +1287,78 @@ pub fn render_codex_directives_for_copy(markdown: &str) -> String {
                 codex_artifact_template_presentation_label(&template.artifact_kind)
                     .unwrap_or_default()
             )),
-            DirectiveReplacement::LabelRange(..) | DirectiveReplacement::Literal(_) => None,
+            DirectiveReplacement::LabelRange { .. }
+            | DirectiveReplacement::Literal(_)
+            | DirectiveReplacement::InlineLiteral(_) => None,
         }
     })
+}
+
+/// A piece of the Markdown around the artifact template cards (`CodexArtifactTemplateMarkdownSegment`).
+/// Offsets are byte offsets into the source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodexArtifactTemplateMarkdownSegment {
+    Markdown {
+        markdown: String,
+        source_offset: usize,
+    },
+    ArtifactTemplate {
+        source_offset: usize,
+        template: CodexArtifactTemplate,
+    },
+}
+
+/// Native renderers split cards out because they cannot host a view inside Markdown text.
+pub fn split_codex_artifact_template_markdown(
+    markdown: &str,
+) -> Vec<CodexArtifactTemplateMarkdownSegment> {
+    let whole = || {
+        vec![CodexArtifactTemplateMarkdownSegment::Markdown {
+            markdown: markdown.to_string(),
+            source_offset: 0,
+        }]
+    };
+    if !markdown.contains(&format!("::{CODEX_ARTIFACT_TEMPLATE_NAME}")) {
+        return whole();
+    }
+
+    let mut templates: Vec<(usize, usize, CodexArtifactTemplate)> =
+        collect_directive_matches(markdown, false)
+            .into_iter()
+            .filter_map(|directive_match| match directive_match.replacement {
+                DirectiveReplacement::Template(template) => {
+                    Some((directive_match.start, directive_match.end, template))
+                }
+                _ => None,
+            })
+            .collect();
+    if templates.is_empty() {
+        return whole();
+    }
+    templates.sort_by_key(|(start, _, _)| *start);
+
+    let mut segments = Vec::new();
+    let mut cursor = 0;
+    for (start, end, template) in templates {
+        if start > cursor {
+            segments.push(CodexArtifactTemplateMarkdownSegment::Markdown {
+                markdown: markdown[cursor..start].to_string(),
+                source_offset: cursor,
+            });
+        }
+        segments.push(CodexArtifactTemplateMarkdownSegment::ArtifactTemplate {
+            source_offset: start,
+            template,
+        });
+        cursor = end;
+    }
+    if cursor < markdown.len() {
+        segments.push(CodexArtifactTemplateMarkdownSegment::Markdown {
+            markdown: markdown[cursor..].to_string(),
+            source_offset: cursor,
+        });
+    }
+    segments
 }
 
 #[cfg(test)]
@@ -1030,24 +1414,27 @@ mod tests {
                 "[report%5C.md](</tmp/report%255C.md#L7>)",
             ),
         ] {
+            let markdown = format!(r#":codex-file-citation{{path="{path}" line_range_start="7"}}"#);
             assert_eq!(
-                render_codex_directives_for_copy(&format!(
-                    r#":codex-file-citation{{path="{path}" line_range_start="7"}}"#
-                )),
+                render_codex_directives_for_copy(&markdown),
+                expected,
+                "{path}"
+            );
+            assert_eq!(
+                render_codex_inline_directives_as_markdown(&markdown),
                 expected,
                 "{path}"
             );
         }
     }
 
-    // "native Markdown adapters": these exercise
-    // `renderCodexInlineDirectivesAsMarkdown`, which shares the matcher and
-    // the citation/follow-up replacements with the copy adapter.
+    // "native Markdown adapters": `renderCodexInlineDirectivesAsMarkdown`, which shares the
+    // matcher and the citation/follow-up replacements with the copy adapter.
 
     #[test]
     fn renders_file_citations_as_portable_links() {
         assert_eq!(
-            render_codex_directives_for_copy(&format!("Created {FILE_CITATION}.")),
+            render_codex_inline_directives_as_markdown(&format!("Created {FILE_CITATION}.")),
             "Created [report.xlsx](<outputs/report.xlsx>)."
         );
     }
@@ -1055,7 +1442,7 @@ mod tests {
     #[test]
     fn renders_follow_up_suggestions_as_their_label_markdown() {
         assert_eq!(
-            render_codex_directives_for_copy(&format!(
+            render_codex_inline_directives_as_markdown(&format!(
                 "- {FOLLOW_UP}\n- :codex-followup[Review **document**]{{prompt=\"Review it.\"}}"
             )),
             "- Prepare print version\n- Review **document**"
@@ -1065,7 +1452,10 @@ mod tests {
     #[test]
     fn does_not_render_excluded_follow_up_syntax() {
         for markdown in [format!("\\{FOLLOW_UP}"), format!("`{FOLLOW_UP}`")] {
-            assert_eq!(render_codex_directives_for_copy(&markdown), markdown);
+            assert_eq!(
+                render_codex_inline_directives_as_markdown(&markdown),
+                markdown
+            );
         }
     }
 
@@ -1077,7 +1467,60 @@ mod tests {
             format!("```text\n{FILE_CITATION}\n```"),
             format!("[See {FILE_CITATION}](https://example.com)"),
         ] {
-            assert_eq!(render_codex_directives_for_copy(&markdown), markdown);
+            assert_eq!(
+                render_codex_inline_directives_as_markdown(&markdown),
+                markdown
+            );
+        }
+    }
+
+    #[test]
+    fn splits_artifact_cards_from_surrounding_native_markdown() {
+        let template = CodexArtifactTemplate {
+            artifact_kind: "document".to_string(),
+            display_name: "Hello World".to_string(),
+            gallery_kind: None,
+            skill_directory: "/Users/test/.codex/skills/artifact-template-hello-world".to_string(),
+            skill_name: "artifact-template-hello-world".to_string(),
+        };
+        assert_eq!(
+            split_codex_artifact_template_markdown(&format!(
+                "Before\n\n{ARTIFACT_TEMPLATE}\n\nAfter"
+            )),
+            vec![
+                CodexArtifactTemplateMarkdownSegment::Markdown {
+                    markdown: "Before\n\n".to_string(),
+                    source_offset: 0,
+                },
+                CodexArtifactTemplateMarkdownSegment::ArtifactTemplate {
+                    source_offset: 8,
+                    template,
+                },
+                CodexArtifactTemplateMarkdownSegment::Markdown {
+                    markdown: "\n\nAfter".to_string(),
+                    source_offset: 8 + ARTIFACT_TEMPLATE.len(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_malformed_and_code_artifact_template_examples_in_one_markdown_segment() {
+        for markdown in [
+            r#"::artifact-template{display_name="Hello World"}"#.to_string(),
+            format!("`{ARTIFACT_TEMPLATE}`"),
+            // Indented code and HTML blocks are not directives either.
+            format!("    {ARTIFACT_TEMPLATE}"),
+            format!("<div>\n{ARTIFACT_TEMPLATE}\n</div>"),
+        ] {
+            assert_eq!(
+                split_codex_artifact_template_markdown(&markdown),
+                vec![CodexArtifactTemplateMarkdownSegment::Markdown {
+                    markdown: markdown.clone(),
+                    source_offset: 0,
+                }],
+                "{markdown}"
+            );
         }
     }
 

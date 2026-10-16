@@ -139,6 +139,7 @@ impl PullRequestsPage {
             cx.subscribe_in(&search, window, |this, state, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     let text = state.read(cx).value().to_string();
+                    this.cancel_sweep(cx);
                     ScopeChange::Query(text).apply(&mut this.scope);
                     cx.notify();
                 }
@@ -167,8 +168,21 @@ impl PullRequestsPage {
 
     /// Dev hook: start from a given scope (screenshots).
     pub fn set_scope(&mut self, scope: PullRequestListPreferences, cx: &mut Context<Self>) {
+        self.cancel_sweep(cx);
         self.scope = scope;
         cx.notify();
+    }
+
+    /// `useEffect(() => () => closeSensorRef.current?.cancel(), [filterKey, search.q, sort])`: a
+    /// sweep belongs to the list it was started over.
+    fn cancel_sweep(&mut self, cx: &mut Context<Self>) {
+        if self
+            .sweep
+            .as_ref()
+            .is_some_and(|sweep| !sweep.is_finished())
+        {
+            self.sweep_pointer(SweepPointer::Cancelled, cx);
+        }
     }
 
     pub fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -286,16 +300,12 @@ impl PullRequestsPage {
             return;
         };
         let host_actions_of = self.host_actions_of(cx);
-        let runner = self.runner.read(cx);
         let closable: HashSet<String> = group
             .entries
             .iter()
             .filter(|row| {
-                let key = entry_key(row);
                 row.state == PullRequestState::Open
                     && host_actions_of(&row.entry).contains(&PullRequestAction::Close)
-                    && !runner.closing(&key)
-                    && !runner.action_pending(&key)
             })
             .map(entry_key)
             .collect();
@@ -352,11 +362,19 @@ impl PullRequestsPage {
         let order = self.sweep_order(cx);
         let rows = self.row_tops(&order);
         let row_at = |y: f32| sidebar_thread_key_at_y(&rows, y, None);
+        // `canClose` is read as it is now: a row that began answering an action mid-drag is out.
+        let runner = self.runner.clone();
+        let can_close = |key: &str| {
+            let runner = runner.read(cx);
+            !runner.closing(key) && !runner.action_pending(key)
+        };
         let progress = match event {
             SweepPointer::Moved { position, primary } => {
-                sweep.pointer_moved(position, primary, row_at)
+                sweep.pointer_moved(position, primary, row_at, can_close)
             }
-            SweepPointer::Released { position } => sweep.pointer_released(position, row_at),
+            SweepPointer::Released { position } => {
+                sweep.pointer_released(position, row_at, can_close)
+            }
             SweepPointer::Cancelled => sweep.cancel(),
         };
         // Kept after it ends so the release click can be told from a plain one.
@@ -473,6 +491,7 @@ impl PullRequestsPage {
     }
 
     fn apply(&mut self, change: ScopeChange, cx: &mut Context<Self>) {
+        self.cancel_sweep(cx);
         change.apply(&mut self.scope);
         cx.notify();
     }

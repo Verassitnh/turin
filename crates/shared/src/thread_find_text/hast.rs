@@ -1,6 +1,9 @@
+//! Port of upstream/packages/shared/src/markdownPipeline.ts (the rehype half,
+//! `CHAT_MARKDOWN_REHYPE_PLUGINS` and `CHAT_MARKDOWN_SANITIZE_SCHEMA`) as used by
+//! `threadFindText.ts`.
+//!
 //! The slice of hast that thread find reads, plus the three rehype steps it applies to assistant
-//! Markdown: `rehypePreserveBareAnchorPlaceholders`, `rehype-raw` and `rehype-sanitize`
-//! (upstream/packages/shared/src/markdownPipeline.ts `CHAT_MARKDOWN_REHYPE_PLUGINS`).
+//! Markdown: `rehypePreserveBareAnchorPlaceholders`, `rehype-raw` and `rehype-sanitize`.
 //!
 //! `rehype-raw` feeds the whole tree to parse5, so a raw `<details>` in one node can wrap the
 //! Markdown paragraphs that follow it until a later raw `</details>`. The same result comes from

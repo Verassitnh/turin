@@ -130,6 +130,8 @@ pub struct SettingsView {
     pub(super) textareas: HashMap<SharedString, Entity<TextareaState>>,
     pub(super) nav_search: Entity<InputState>,
     pub(super) nav_query: String,
+    /// `activeResultIndex`.
+    pub(super) nav_active_result: usize,
     pub(super) sidebar_open: bool,
     pub(super) panels: super::panels::PanelState,
     pub(super) dialog: Option<super::dialog::Dialog>,
@@ -155,6 +157,7 @@ impl SettingsView {
                 |this, state, event: &InputEvent, _, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.nav_query = state.read(cx).value().to_string();
+                        this.nav_active_result = 0;
                         cx.notify();
                     }
                 },
@@ -173,6 +176,7 @@ impl SettingsView {
             textareas: HashMap::new(),
             nav_search,
             nav_query: String::new(),
+            nav_active_result: 0,
             sidebar_open: true,
             panels: Default::default(),
             dialog: None,
@@ -690,6 +694,13 @@ impl Render for SettingsView {
             .text_color(theme.foreground)
             .font_family(theme.fonts.sans.clone())
             .text_size(rems(1.))
+            .on_key_down(
+                cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    if this.handle_search_key(event, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .on_mouse_down(
                 gpui_kit::MouseButton::Left,
                 cx.listener(|this, _, _, cx| {

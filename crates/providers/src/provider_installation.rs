@@ -461,6 +461,23 @@ mod tests {
         detail
     }
 
+    // "allows explicit installation while the provider is disabled": routing reads the driver and
+    // the setup mode, never `enabled`.
+    #[tokio::test]
+    async fn allows_explicit_installation_while_the_provider_is_disabled() {
+        let harness = harness(
+            "codex",
+            &codex_id(),
+            json!({ "codex": {
+                "driver": "codex",
+                "enabled": false,
+                "config": { "setupMode": "managed" },
+            } }),
+        );
+        harness.router.start(&input(&codex_id())).await.unwrap();
+        assert_eq!(calls(&harness), vec!["codex-start".to_owned()]);
+    }
+
     #[tokio::test]
     async fn rejects_another_driver_and_unknown_instances_before_installation() {
         let harness = harness("claudeAgent", &codex_id(), managed_codex());

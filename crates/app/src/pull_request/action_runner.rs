@@ -104,6 +104,12 @@ pub struct BatchTally {
 }
 
 impl BatchTally {
+    /// A row the source never reported closing: counted as a failure so the sweep can finish.
+    pub fn record_did_not_start(&mut self, number: u64) {
+        self.failures
+            .push(format!("#{number}: The close did not start."));
+    }
+
     pub fn is_error(&self) -> bool {
         !self.failures.is_empty()
     }
@@ -147,6 +153,9 @@ struct InFlight {
     origin: Origin,
     /// The source has reported the action running; only then does its going away mean it ended.
     seen_pending: bool,
+    /// Which start this is, so a timer set for an earlier action on the same row cannot take a
+    /// newer one away.
+    token: u64,
 }
 
 /// What the detail snapshot says about the action in flight.
@@ -166,6 +175,7 @@ enum Outcome {
 #[derive(Default)]
 struct Tracker {
     in_flight: IndexMap<String, InFlight>,
+    next_token: u64,
 }
 
 impl Tracker {
@@ -174,9 +184,10 @@ impl Tracker {
         entry: EnvironmentPullRequestEntry,
         action: PullRequestAction,
         origin: Origin,
-    ) {
+    ) -> u64 {
         let key = entry_key(&entry);
         let reference = reference_of_entry(&entry);
+        let token = self.take_token();
         self.in_flight.insert(
             key,
             InFlight {
@@ -185,8 +196,16 @@ impl Tracker {
                 action,
                 origin,
                 seen_pending: false,
+                token,
             },
         );
+        token
+    }
+
+    fn take_token(&mut self) -> u64 {
+        let token = self.next_token;
+        self.next_token += 1;
+        token
     }
 
     /// Moves every action whose snapshot shows it ended out of the tracker, with how it ended.
@@ -220,11 +239,11 @@ impl Tracker {
     }
 
     /// Stops watching an action the source never reported running.
-    fn give_up_unseen(&mut self, key: &str) -> Option<InFlight> {
+    fn give_up_unseen(&mut self, key: &str, token: u64) -> Option<InFlight> {
         if self
             .in_flight
             .get(key)
-            .is_some_and(|flight| !flight.seen_pending)
+            .is_some_and(|flight| !flight.seen_pending && flight.token == token)
         {
             self.in_flight.shift_remove(key)
         } else {
@@ -247,7 +266,7 @@ pub struct PullRequestActionRunner {
     settings: MergeMethodSettings,
     tracker: Tracker,
     /// A merge clicked before the row's detail was read: sent once it lands.
-    awaiting_detail: IndexMap<String, EnvironmentPullRequestEntry>,
+    awaiting_detail: IndexMap<String, (u64, EnvironmentPullRequestEntry)>,
     batches: HashMap<u64, BatchTally>,
     next_batch: u64,
     toasts: ToastQueue,
@@ -324,7 +343,34 @@ impl PullRequestActionRunner {
                 if let Some(source) = self.store.read(cx).source() {
                     source.open_detail(&reference, cx);
                 }
-                self.awaiting_detail.insert(key, entry.clone());
+                let token = self.tracker.take_token();
+                self.awaiting_detail
+                    .insert(key.clone(), (token, entry.clone()));
+                // A detail that never answers must not leave the row spinning.
+                let runner = cx.entity().downgrade();
+                cx.spawn(async move |_, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(UNSEEN_GIVE_UP_MS))
+                        .await;
+                    runner
+                        .update(cx, |runner, cx| {
+                            if runner
+                                .awaiting_detail
+                                .get(&key)
+                                .is_some_and(|(awaited, _)| *awaited == token)
+                            {
+                                runner.awaiting_detail.shift_remove(&key);
+                                runner.fail(
+                                    PullRequestAction::Merge,
+                                    Some("The pull request did not load."),
+                                    cx,
+                                );
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                })
+                .detach();
                 cx.notify();
             }
         }
@@ -361,7 +407,7 @@ impl PullRequestActionRunner {
     ) {
         let key = entry_key(&entry);
         let reference = reference_of_entry(&entry);
-        self.tracker.begin(entry, action, origin);
+        let token = self.tracker.begin(entry, action, origin);
         if let Some(source) = self.store.read(cx).source() {
             source.run_action(&reference, action, method, None, cx);
         }
@@ -373,14 +419,25 @@ impl PullRequestActionRunner {
                 .timer(std::time::Duration::from_millis(UNSEEN_GIVE_UP_MS))
                 .await;
             runner
-                .update(cx, |runner, cx| {
-                    if runner.tracker.give_up_unseen(&key).is_some() {
-                        cx.notify();
-                    }
-                })
+                .update(cx, |runner, cx| runner.give_up(&key, token, cx))
                 .ok();
         })
         .detach();
+        cx.notify();
+    }
+
+    /// The give-up timer's end: stop watching an action the source never reported running. A row
+    /// of a close sweep that never started is counted against it, so the sweep still reports.
+    fn give_up(&mut self, key: &str, token: u64, cx: &mut Context<Self>) {
+        let Some(flight) = self.tracker.give_up_unseen(key, token) else {
+            return;
+        };
+        if let Origin::Batch(id) = flight.origin {
+            if let Some(tally) = self.batches.get_mut(&id) {
+                tally.record_did_not_start(flight.entry.number.get());
+            }
+            self.finish_batch_if_done(id, cx);
+        }
         cx.notify();
     }
 
@@ -421,7 +478,7 @@ impl PullRequestActionRunner {
         )> = self
             .awaiting_detail
             .iter()
-            .filter_map(|(key, entry)| {
+            .filter_map(|(key, (_, entry))| {
                 let load = self
                     .store
                     .read(cx)
@@ -640,9 +697,41 @@ mod tests {
         let key = entry_key(&entry);
         let mut tracker = Tracker::default();
         tracker.begin(entry.clone(), PullRequestAction::Close, Origin::Single);
-        assert!(tracker.give_up_unseen(&key).is_some());
-        tracker.begin(entry, PullRequestAction::Close, Origin::Single);
+        let token = tracker.begin(entry.clone(), PullRequestAction::Close, Origin::Single);
+        assert!(tracker.give_up_unseen(&key, token).is_some());
+        let token = tracker.begin(entry, PullRequestAction::Close, Origin::Single);
         tracker.settle(|_| Some(snapshot(Some(PullRequestAction::Close), None)));
-        assert!(tracker.give_up_unseen(&key).is_none());
+        assert!(tracker.give_up_unseen(&key, token).is_none());
+    }
+
+    #[test]
+    fn a_timer_for_an_earlier_action_does_not_take_a_newer_one_on_the_same_row() {
+        let entry = fixture_entry();
+        let key = entry_key(&entry);
+        let mut tracker = Tracker::default();
+        let first = tracker.begin(entry.clone(), PullRequestAction::Close, Origin::Single);
+        // The first ended and the row was acted on again before its timer fired.
+        tracker.in_flight.shift_remove(&key);
+        let second = tracker.begin(entry, PullRequestAction::Reopen, Origin::Single);
+        assert_ne!(first, second);
+        assert!(tracker.give_up_unseen(&key, first).is_none());
+        assert!(tracker.in_flight.contains_key(&key));
+        assert!(tracker.give_up_unseen(&key, second).is_some());
+    }
+
+    #[test]
+    fn a_close_that_never_started_still_lets_the_sweep_report() {
+        let mut tally = BatchTally {
+            total: 3,
+            closed: 2,
+            failures: Vec::new(),
+        };
+        tally.record_did_not_start(41);
+        assert!(tally.is_error());
+        assert_eq!(tally.title(), "Closed 2 of 3 pull requests");
+        assert_eq!(
+            tally.description().as_deref(),
+            Some("#41: The close did not start.")
+        );
     }
 }

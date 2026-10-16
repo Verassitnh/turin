@@ -7,6 +7,8 @@ pub use crate::project_icon_colors::{PROJECT_ICON_COLORS, project_icon_color};
 
 use crate::state::models::ProjectIconColor;
 use crate::ui::IconName;
+use regex::Regex;
+use std::sync::LazyLock;
 use unicode_segmentation::UnicodeSegmentation;
 
 const POPULAR_PROJECT_ICONS: &[IconName] = &[
@@ -14,21 +16,39 @@ const POPULAR_PROJECT_ICONS: &[IconName] = &[
     IconName::Code,
     IconName::Terminal,
     IconName::Globe,
-    IconName::Package,
-    IconName::BookOpen,
+    IconName::Server,
+    IconName::Database,
     IconName::Bot,
     IconName::Sparkles,
     IconName::Smartphone,
+    IconName::Monitor,
+    IconName::CloudCog,
+    IconName::Package,
+    IconName::BookOpen,
+    IconName::FlaskConical,
     IconName::ShieldCheck,
     IconName::Rocket,
+    IconName::Gamepad2,
+    IconName::Music,
     IconName::Image,
+    IconName::ShoppingBag,
     IconName::GitBranch,
+    IconName::Workflow,
     IconName::Wrench,
     IconName::Layers,
 ];
 
 /// Every embedded app icon, searchable by kebab-case name (Lucide paths).
 const SEARCHABLE_ICONS: &[IconName] = &[
+    IconName::Server,
+    IconName::Database,
+    IconName::Monitor,
+    IconName::CloudCog,
+    IconName::FlaskConical,
+    IconName::Gamepad2,
+    IconName::Music,
+    IconName::ShoppingBag,
+    IconName::Workflow,
     IconName::AlarmClock,
     IconName::AlarmClockOff,
     IconName::Archive,
@@ -334,31 +354,30 @@ pub fn filter_project_icon_names(query: &str) -> Vec<IconName> {
         .collect()
 }
 
+/// `/^\p{Regional_Indicator}{2}$/u`.
+static FLAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\p{Regional_Indicator}{2}$").expect("flag pattern"));
+/// `/^[#*0-9]\uFE0F?\u20E3$/u`: a keycap needs its combining enclosing keycap.
+static KEYCAP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[#*0-9]\x{FE0F}?\x{20E3}$").expect("keycap pattern"));
+/// `/\p{Extended_Pictographic}/u`.
+static EXTENDED_PICTOGRAPHIC: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\p{Extended_Pictographic}").expect("extended pictographic pattern")
+});
+
 pub fn first_emoji(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
     }
-    let segment = trimmed.graphemes(true).next()?.to_owned();
-    let is_flag = segment.chars().count() == 2
-        && segment
-            .chars()
-            .all(|ch| ('\u{1F1E6}'..='\u{1F1FF}').contains(&ch));
-    let is_keycap = segment.chars().count() <= 3
-        && segment
-            .chars()
-            .next()
-            .is_some_and(|ch| matches!(ch, '#' | '*' | '0'..='9'));
-    let extended_pictographic = segment.chars().any(|ch| {
-        matches!(
-            ch,
-            '\u{1F300}'..='\u{1FAFF}' | '\u{2600}'..='\u{27BF}'
-        )
-    });
-    if !extended_pictographic && !is_flag && !is_keycap {
+    let segment = trimmed.graphemes(true).next()?;
+    if !EXTENDED_PICTOGRAPHIC.is_match(segment)
+        && !FLAG.is_match(segment)
+        && !KEYCAP.is_match(segment)
+    {
         return None;
     }
-    Some(segment)
+    Some(segment.to_owned())
 }
 
 /// Tailwind class string persisted in settings (GPUI maps via [`project_icon_color`]).
@@ -410,6 +429,56 @@ mod tests {
         assert_eq!(first_emoji("🇺🇸 project").as_deref(), Some("🇺🇸"));
         assert_eq!(first_emoji("1️⃣ project").as_deref(), Some("1️⃣"));
         assert!(first_emoji("plain text").is_none());
+    }
+
+    #[test]
+    fn a_keycap_needs_its_enclosing_keycap() {
+        // Digits, `#` and `*` alone are text, however a name begins.
+        for text in ["1 project", "#", "# tag", "*", "7", "0day"] {
+            assert_eq!(first_emoji(text), None, "{text}");
+        }
+        assert_eq!(
+            first_emoji("#\u{FE0F}\u{20E3} tag").as_deref(),
+            Some("#\u{FE0F}\u{20E3}")
+        );
+        assert_eq!(first_emoji("*\u{20E3}").as_deref(), Some("*\u{20E3}"));
+        assert_eq!(first_emoji("9\u{20E3} nine").as_deref(), Some("9\u{20E3}"));
+        // The keycap is not the whole of what a segment may be: a digit with a stray mark is not it.
+        assert_eq!(first_emoji("1\u{FE0F} project"), None);
+    }
+
+    #[test]
+    fn every_extended_pictographic_counts_not_only_the_main_blocks() {
+        // Outside U+1F300..1FAFF and U+2600..27BF, which the hand-written ranges were.
+        for emoji in [
+            "\u{2B50}",
+            "\u{231A}",
+            "\u{25B6}\u{FE0F}",
+            "\u{1F170}\u{FE0F}",
+            "\u{00A9}",
+            "\u{2714}\u{FE0F}",
+            "\u{1F680}",
+        ] {
+            assert_eq!(
+                first_emoji(&format!("{emoji} app")).as_deref(),
+                Some(emoji),
+                "{emoji:?}"
+            );
+        }
+        // Dingbats that are plain symbols, not emoji.
+        assert_eq!(first_emoji("\u{2713} app"), None);
+        assert_eq!(first_emoji("\u{2192} app"), None);
+    }
+
+    #[test]
+    fn the_popular_icons_are_upstreams_twenty_four_in_order() {
+        let names: Vec<String> = filter_project_icon_names("")
+            .into_iter()
+            .map(icon_kebab_name)
+            .collect();
+        assert_eq!(names.len(), 24);
+        assert_eq!(&names[4..7], ["server", "database", "bot"]);
+        assert_eq!(names[21], "workflow");
     }
 
     #[test]

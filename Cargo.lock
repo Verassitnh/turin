@@ -7701,6 +7701,7 @@ dependencies = [
  "turin-provider-claude",
  "turin-provider-codex",
  "turin-provider-core",
+ "turin-provider-cursor",
  "turin-provider-opencode",
  "turin-providers",
  "turin-review",

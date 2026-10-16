@@ -114,6 +114,7 @@ pub struct WriteRuntime {
     pub config: turin_runtime::config::ServerConfig,
     _cleanup_schedule: AbortOnDropHandle<()>,
     pub(crate) usage_readers_available: bool,
+    pub usage_history_drivers: Vec<String>,
     settings_sync: Arc<tokio::sync::Mutex<()>>,
     _settings_watcher: Option<turin_runtime::server_settings::service::SettingsWatcher>,
     _keybindings_watcher: Option<turin_runtime::keybindings::KeybindingsWatcher>,
@@ -200,6 +201,11 @@ impl WriteRuntime {
             providers.instances(),
         )
         .await;
+        let usage_history_drivers = providers
+            .usage_readers
+            .iter()
+            .map(|reader| reader.driver_kind.clone())
+            .collect();
         let usage_readers_available = !providers.usage_readers.is_empty();
         let usage = Arc::new(turin_usage::usage_service::UsageService::new(
             turin_usage::usage_service::UsageServiceConfig {
@@ -420,6 +426,7 @@ impl WriteRuntime {
             review_guides: source_control.review_guides,
             usage,
             usage_readers_available,
+            usage_history_drivers,
             settings_sync,
             _settings_watcher: settings_watcher,
             _keybindings_watcher: keybindings_watcher,

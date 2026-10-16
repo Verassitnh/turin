@@ -591,7 +591,7 @@ impl Commands {
     ) -> Result<turin_contracts::usage::UsageSummary, CommandError> {
         if !self.runtime.usage_readers_available {
             return Err(CommandError::new(
-                "Usage history is unavailable: retained provider drivers do not supply production usage readers yet.",
+                "Usage history is unavailable: no production usage readers are connected.",
             ));
         }
         let settings = self.runtime.providers.settings.settings().await;
@@ -614,5 +614,102 @@ impl Commands {
                 [], |row| row.get::<_, i64>(0),
             ).map(|count| count as usize).map_err(|error| turin_persistence::PersistenceError::sql("runtime.pendingApprovalCount", &error))
         }).await.map_err(|error| CommandError::from_error(&error))
+    }
+}
+
+/// Scope of actual history reads. Missing readers must be shown as unavailable,
+/// rather than implying that an absent provider's usage was zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageReadiness {
+    pub history_driver_kinds: Vec<String>,
+    pub unavailable_history_driver_kinds: Vec<String>,
+}
+
+impl Commands {
+    pub fn usage_readiness(&self) -> UsageReadiness {
+        let history_driver_kinds = self.runtime.usage_history_drivers.clone();
+        let unavailable_history_driver_kinds =
+            turin_providers::built_in_drivers::BUILT_IN_USAGE_DRIVER_ORDER
+                .iter()
+                .filter(|kind| {
+                    !history_driver_kinds
+                        .iter()
+                        .any(|available| available == **kind)
+                })
+                .map(|kind| (*kind).to_owned())
+                .collect();
+        UsageReadiness {
+            history_driver_kinds,
+            unavailable_history_driver_kinds,
+        }
+    }
+
+    /// Latest real provider readiness + quota snapshots, safe to read in a UI
+    /// render. Subscribe to CommandBus::providers for subsequent changes.
+    pub fn provider_snapshots(&self) -> Vec<turin_provider_core::server_provider::ServerProvider> {
+        self.runtime.providers.registry.get_providers()
+    }
+
+    /// On-demand probes refresh actual install/auth/readiness and quota state.
+    /// Quota failures live on each provider snapshot; they are not zero windows.
+    pub async fn refresh_usage_limits(
+        &self,
+    ) -> Vec<turin_provider_core::server_provider::ServerProvider> {
+        self.runtime.providers.registry.refresh(None).await
+    }
+
+    /// Render redemption only when the actual instance supplies its hook.
+    pub fn can_consume_reset_credit(
+        &self,
+        instance_id: &turin_contracts::provider_instance::ProviderInstanceId,
+    ) -> bool {
+        self.runtime
+            .providers
+            .instances()
+            .get_instance(instance_id)
+            .is_some_and(|instance| instance.enabled && instance.consume_reset_credit.is_some())
+    }
+
+    pub async fn consume_reset_credit(
+        &self,
+        input: turin_contracts::provider_usage_limits::ProviderConsumeResetCreditInput,
+    ) -> Result<
+        turin_contracts::provider_usage_limits::ProviderConsumeResetCreditResult,
+        CommandError,
+    > {
+        use turin_contracts::provider_usage_limits::{
+            ProviderConsumeResetCreditInput, ProviderConsumeResetCreditResult,
+        };
+        let ProviderConsumeResetCreditInput::Instance { instance_id } = input else {
+            return Err(CommandError::new(
+                "External usage-limit sources are not connected in this desktop runtime.",
+            ));
+        };
+        let instance = self
+            .runtime
+            .providers
+            .instances()
+            .get_instance(&instance_id)
+            .ok_or_else(|| CommandError::new("This provider instance is no longer available."))?;
+        if !instance.enabled {
+            return Err(CommandError::new(
+                "Enable this provider instance before redeeming reset credits.",
+            ));
+        }
+        let consume = instance.consume_reset_credit.as_ref().ok_or_else(|| {
+            CommandError::new("This provider instance does not support reset credits.")
+        })?;
+        let outcome = consume()
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        self.runtime
+            .providers
+            .registry
+            .refresh_instance(&instance_id)
+            .await;
+        Ok(ProviderConsumeResetCreditResult {
+            outcome,
+            warning: None,
+        })
     }
 }

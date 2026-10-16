@@ -49,6 +49,7 @@ pub struct Providers {
     pub maintenance: Arc<turin_providers::provider_maintenance_runner::ProviderMaintenanceRunner>,
     pub usage_readers: Vec<turin_usage::usage_service::UsageReader>,
     pub defaults: Vec<DefaultInstanceDriver>,
+    _installation_feed: tokio_util::task::AbortOnDropHandle<()>,
 }
 
 impl Providers {
@@ -101,6 +102,16 @@ impl Providers {
                 }
             }
         }
+        // Cursor's account scanner is ported, but its driver does not yet expose
+        // `usage()`. Adapt that existing scanner once, in upstream usage order.
+        if !usage_readers
+            .iter()
+            .any(|reader| reader.driver_kind == "cursor")
+        {
+            usage_readers.push(super::usage::cursor_reader(Path::new(
+                &host.paths.state_dir,
+            ))?);
+        }
         let hydration = ProviderInstanceRegistryHydration::new(drivers, &host)
             .await
             .context("hydrating the provider instance registry")?;
@@ -117,7 +128,7 @@ impl Providers {
             .await,
         );
         let installation = Arc::new(ProviderInstallation::new(
-            Arc::new(CodexInstaller(codex_installation)),
+            Arc::new(CodexInstaller(codex_installation.clone())),
             hydration.registry.clone(),
             registry.clone(),
             host.clone(),
@@ -129,6 +140,29 @@ impl Providers {
                 })
                 .collect(),
         ));
+        // An install can finish without another sign-in event. Refresh the
+        // existing managed snapshots so the next Settings render sees the
+        // executable's real readiness rather than the pre-install probe.
+        let mut install_states = codex_installation.subscribe();
+        let install_registry = registry.clone();
+        let installation_feed =
+            tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                use turin_contracts::provider_setup::ProviderInstallPhase;
+                while install_states.changed().await.is_ok() {
+                    let phase = install_states.borrow_and_update().phase;
+                    if matches!(
+                        phase,
+                        ProviderInstallPhase::Succeeded
+                            | ProviderInstallPhase::Failed
+                            | ProviderInstallPhase::Cancelled
+                    ) {
+                        let kind =
+                            turin_contracts::provider_instance::ProviderDriverKind::new("codex")
+                                .expect("static driver");
+                        install_registry.refresh(Some(&kind)).await;
+                    }
+                }
+            }));
         use turin_providers::provider_maintenance_runner::{
             LiveMaintenanceVersions, ProviderMaintenanceRunner, ProviderMaintenanceRunnerDeps,
             TokioCommandSpawner,
@@ -140,6 +174,7 @@ impl Providers {
             t3_code_version: env!("CARGO_PKG_VERSION").to_owned(),
         }));
         Ok(Self {
+            _installation_feed: installation_feed,
             maintenance,
             defaults,
             installation,

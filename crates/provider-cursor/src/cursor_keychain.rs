@@ -51,6 +51,7 @@ impl CursorKeychainBackend for MacOsSecurityCliKeychain {
     fn read_access_token(&self) -> KeychainReadFuture {
         Box::pin(async move {
             let output = tokio::process::Command::new("security")
+                .kill_on_drop(true)
                 .args([
                     "find-generic-password",
                     "-s",

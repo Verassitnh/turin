@@ -1,10 +1,10 @@
 //! Port of upstream/apps/server/src/orchestration-v2/RunExecutionService.ts.
 //!
-//! Slice 1 ports the pure helpers at the top of the file and at the bottom
-//! (`cascadeTerminalizeRunOwnedSubagents`, `makeInterruptResultTurnItem`). The
-//! orchestrator's run-interrupt handler calls them, so they land first. The
-//! effectful `RunExecutionService` follows in file order (see
-//! docs/handoff/T13e.md).
+//! This file holds the pure helpers (`routeProviderEvent` and its routing
+//! state, `cascadeTerminalizeRunOwnedSubagents`, `makeInterruptResultTurnItem`,
+//! `selectInheritedBackgroundTurnItems`). The effectful service is in
+//! `service.rs` (`startRootRun` and the provider event loop, lines 488-1510)
+//! and `finalize.rs` (`writeFinalRunEvents`, 583-820).
 
 use std::collections::{HashMap, HashSet};
 
@@ -405,6 +405,8 @@ pub fn route_provider_event(
     let owns_run = |run_id: Option<&RunId>| run_id == Some(&input.run_id);
 
     match event {
+        // The session manager persists process-wide status once for every
+        // attached app thread before broadcasting the adapter event.
         ProviderAdapterV2Event::ProviderSessionUpdated { .. } => false,
         ProviderAdapterV2Event::AppThreadCreated { app_thread, .. } => {
             if app_thread.id == input.thread_id {
@@ -575,7 +577,11 @@ pub fn final_provider_thread_status(
     }
 }
 
-/// `canRouteRelatedSubagent`: only a completed subagent's child thread is resumed.
+/// `canRouteRelatedSubagent`: whether a new run takes over a subagent's child
+/// thread, so a later message can resume it there. A running subagent stays
+/// with the run that launched it, which keeps ingesting until it ends; taking
+/// it over too would store its events twice. An interrupted, failed or
+/// cancelled one is never resumed.
 pub fn can_route_related_subagent(status: OrchestrationV2SubagentStatus) -> bool {
     status == OrchestrationV2SubagentStatus::Completed
 }

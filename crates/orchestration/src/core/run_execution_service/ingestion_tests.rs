@@ -144,6 +144,38 @@ fn strings(labels: &[&str]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn releases_ingestion_after_idle_subagent_rows_and_items_settle() {
+    // The stream never ends, so only the run's own stop decision can release it.
+    let observed = scenario(
+        "subagent-idle",
+        |f| {
+            vec![
+                root_subagent(f, "running"),
+                root_item(f, "subagent", "running", 1, None),
+                root_subagent(f, "idle"),
+                root_item(f, "subagent", "idle", 2, None),
+                root_terminal(f, "completed"),
+            ]
+        },
+        Options {
+            keep_open: true,
+            ..Options::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        observed.background_log(),
+        strings(&[
+            "subagent:running",
+            "turn_item:running",
+            "subagent:idle",
+            "turn_item:idle",
+            "root-finalized",
+        ])
+    );
+}
+
+#[tokio::test]
 async fn keeps_ingesting_a_late_background_command_item_completion_after_root_terminal() {
     let observed = scenario(
         "bg-command",

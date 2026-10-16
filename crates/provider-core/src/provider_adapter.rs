@@ -753,6 +753,13 @@ pub trait ProviderSessionRuntime: Send + Sync {
         None
     }
 
+    /// Stops the process this session owns. The session manager calls it once
+    /// at release, before dropping the runtime. `None` means the runtime has no
+    /// explicit close, so dropping its last reference must stop the process.
+    fn close(&self) -> Option<BoxFuture<'_, Result<(), ProviderAdapterV2Error>>> {
+        None
+    }
+
     fn unload_thread(
         &self,
         _provider_thread: &OrchestrationV2ProviderThread,

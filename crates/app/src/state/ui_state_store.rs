@@ -112,15 +112,29 @@ fn sanitize_string_array(value: Option<&Value>) -> Vec<String> {
     unique
 }
 
+/// `Object.entries` for the sanitizers. Upstream guards with `typeof value === "object"`,
+/// which also admits arrays, so an array yields its index keys. Anything else yields none.
+fn object_entries(value: Option<&Value>) -> Vec<(String, &Value)> {
+    match value {
+        Some(Value::Object(entries)) => entries
+            .iter()
+            .map(|(key, entry)| (key.clone(), entry))
+            .collect(),
+        Some(Value::Array(entries)) => entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (index.to_string(), entry))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// `sanitizeBooleanRecord`: boolean values under non-empty keys.
 fn sanitize_boolean_record(value: Option<&Value>) -> IndexMap<String, bool> {
-    let Some(Value::Object(entries)) = value else {
-        return IndexMap::new();
-    };
-    entries
-        .iter()
+    object_entries(value)
+        .into_iter()
         .filter_map(|(key, entry)| match entry {
-            Value::Bool(expanded) if !key.is_empty() => Some((key.clone(), *expanded)),
+            Value::Bool(expanded) if !key.is_empty() => Some((key, *expanded)),
             _ => None,
         })
         .collect()
@@ -136,16 +150,13 @@ fn sanitize_optional_key(value: Option<&Value>) -> Option<String> {
 
 /// `sanitizeTimestampRecord`: string timestamps that `Date.parse` accepts.
 fn sanitize_timestamp_record(value: Option<&Value>) -> IndexMap<String, String> {
-    let Some(Value::Object(entries)) = value else {
-        return IndexMap::new();
-    };
-    entries
-        .iter()
+    object_entries(value)
+        .into_iter()
         .filter_map(|(key, entry)| match entry {
             Value::String(text)
                 if !key.is_empty() && !text.is_empty() && parse_ms(text).is_some() =>
             {
-                Some((key.clone(), text.clone()))
+                Some((key, text.clone()))
             }
             _ => None,
         })
@@ -166,26 +177,20 @@ fn is_pull_request_merge_method(value: &Value) -> Option<PullRequestMergeMethod>
 fn sanitize_thread_changed_files_expanded(
     value: Option<&Value>,
 ) -> IndexMap<String, IndexMap<String, bool>> {
-    let Some(Value::Object(threads)) = value else {
-        return IndexMap::new();
-    };
     let mut next = IndexMap::new();
-    for (thread_id, turns) in threads {
-        let Value::Object(turns) = turns else {
-            continue;
-        };
+    for (thread_id, turns) in object_entries(value) {
         if thread_id.is_empty() {
             continue;
         }
-        let next_turns: IndexMap<String, bool> = turns
-            .iter()
+        let next_turns: IndexMap<String, bool> = object_entries(Some(turns))
+            .into_iter()
             .filter_map(|(turn_id, expanded)| match expanded {
-                Value::Bool(expanded) if !turn_id.is_empty() => Some((turn_id.clone(), *expanded)),
+                Value::Bool(expanded) if !turn_id.is_empty() => Some((turn_id, *expanded)),
                 _ => None,
             })
             .collect();
         if !next_turns.is_empty() {
-            next.insert(thread_id.clone(), next_turns);
+            next.insert(thread_id, next_turns);
         }
     }
     next
@@ -908,5 +913,30 @@ mod tests {
             &reread.project_expanded_by_id,
             &["unknown"]
         ));
+    }
+
+    #[test]
+    fn sanitizers_read_array_entries_by_index_like_object_entries() {
+        // Upstream's `typeof value === "object"` admits arrays, so `Object.entries` yields index keys.
+        let parsed = parse(json!({
+            "projectExpandedById": [true, false, "no"],
+            "threadLastVisitedAtById": ["2026-02-25T12:35:00.000Z", ""],
+            "threadChangedFilesExpansionVersion": 2,
+            "threadChangedFilesExpandedById": [{ "turn-1": true }, ["not", "a", "record"]],
+        }));
+
+        let mut expanded = IndexMap::new();
+        expanded.insert("0".to_owned(), true);
+        expanded.insert("1".to_owned(), false);
+        let mut visited = IndexMap::new();
+        visited.insert("0".to_owned(), "2026-02-25T12:35:00.000Z".to_owned());
+        let mut turns = IndexMap::new();
+        turns.insert("turn-1".to_owned(), true);
+        let mut changed = IndexMap::new();
+        changed.insert("0".to_owned(), turns);
+
+        assert_eq!(parsed.project_expanded_by_id, expanded);
+        assert_eq!(parsed.thread_last_visited_at_by_id, visited);
+        assert_eq!(parsed.thread_changed_files_expanded_by_id, changed);
     }
 }

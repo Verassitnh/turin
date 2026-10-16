@@ -714,8 +714,9 @@ fn strip_one_trailing_quote(text: &str) -> &str {
 
 /// Skips `env FOO=1`, `sudo -u bob` and similar to the word naming the real program.
 fn program_index(level: &Level, words: &[Arg<'_>]) -> usize {
+    // JS `\w` stays ASCII under the `u` flag (`/^[A-Za-z_]\w*=/u`).
     static ASSIGNMENT: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^[A-Za-z_]\w*=").expect("valid regex"));
+        LazyLock::new(|| Regex::new(r"^[A-Za-z_](?-u:\w)*=").expect("valid regex"));
     let mut index = 0;
     while index < words.len() {
         let name = program_name(level, words[index]);
@@ -1262,6 +1263,12 @@ for p in sorted(Path('.').glob('**/package.json')):
             assert_eq!(found[0].0, *language, "{command}");
             assert_eq!(found[0].1, *script, "{command}");
         }
+    }
+
+    #[test]
+    fn a_non_ascii_assignment_name_is_the_program() {
+        // Upstream `/^[A-Za-z_]\w*=/u` keeps `\w` ASCII, so `NAÏVE=1` is not an assignment.
+        assert!(scripts_of("env NAÏVE=1 python3 -c 'print(1)'").is_empty());
     }
 
     #[test]

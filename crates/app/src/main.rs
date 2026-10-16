@@ -2,15 +2,22 @@
 
 mod assets;
 mod branding;
+// Pure composer logic is ported ahead of the views that consume it.
 mod components;
+#[allow(dead_code)]
+mod composer;
 mod diff;
 mod hooks;
 mod project_icon_colors;
 mod project_identity;
+mod pull_request;
 // The view-model layer is a library until the orchestrator and views are wired
 // to it; every upstream selector is ported ahead of its callers.
 #[allow(dead_code)]
 mod state;
+// Pure settings logic is ported ahead of the views that consume it.
+#[allow(dead_code)]
+mod settings;
 mod theme;
 mod timestamp_format;
 // The ui primitives are a library: every upstream variant and size is ported
@@ -86,7 +93,11 @@ fn main() {
             cx.set_global(state::store::ClientStoreGlobal(store));
             app_sidebar_layout::bind_keys(cx);
             let right_panel = dev_overrides(cx);
-            gpui_kit::open_window(window_options(cx), cx, |window, cx| {
+            // Dev hook: `TURIN_SETTINGS=<page>` shows the settings window on mock data.
+            if settings::demo::open_if_requested(window_options(cx), cx) {
+                return;
+            }
+            let handle = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
                 cx.new(|cx| {
                     let mut layout = AppSidebarLayout::new(window, cx);
                     layout.set_right_panel_open(right_panel);
@@ -94,6 +105,15 @@ fn main() {
                 })
             })
             .expect("failed to open window");
+            // Dev hook: `TURIN_PULL_REQUESTS_DEMO` shows the pull request views on the mock source.
+            if let Some(scenario) = pull_request::demo::scenario_from_env() {
+                let (window_handle, layout) = handle;
+                window_handle
+                    .update(cx, |_, window, cx| {
+                        pull_request::demo::install(&layout, scenario, window, cx)
+                    })
+                    .ok();
+            }
             cx.activate(true);
         });
 }

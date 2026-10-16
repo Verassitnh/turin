@@ -19,7 +19,7 @@ Commit trailer: `Model: claude-haiku-5-5 (claudeAgent)`.
 |---|---|---|
 | `pendingUserInput.ts` | `components/chat/pending_user_input.rs` | 27 (every upstream case, plus helper fixtures) |
 | `components/chat/pageScrollController.ts` | `components/chat/page_scroll_controller.rs` | 9 (all upstream cases; pull-based clock harness) |
-| `components/chat/timelineScrollAnchoring.ts` | `components/chat/timeline_scroll_anchoring.rs` | 10 (no upstream test file; written here) |
+| `components/chat/timelineScrollAnchoring.ts` | `components/chat/timeline_scroll_anchoring.rs` | 15 (upstream `timelineScrollAnchoring.test.tsx`; the five `observeTimelineRun` cases ported, 200/238/246 covered indirectly) |
 | `components/chat/chatCanvasLayout.ts` (chat lane only) | `components/chat/chat_canvas_layout.rs` | 5 (non-preview upstream cases) |
 | `lib/selectionActions.ts` (positioning and timing only) | `components/chat/selection_actions.rs` | 5 (3 upstream cases, 2 added) |
 | `lib/assistantTextSelection.ts` (pure text half) | `components/chat/assistant_text_selection.rs` | 22 (upstream selector and finder cases, minus the round-trip assertions) |

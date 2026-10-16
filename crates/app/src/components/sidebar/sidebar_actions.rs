@@ -32,7 +32,10 @@ use super::view_model::{Shelf, ThreadRef};
 use super::{RenameState, Sidebar, SidebarEvent, SidebarRoute};
 use crate::components::thread_action_menu_logic::{
     ProjectFilterState, ThreadActionMenuState, ThreadActionSupports, build_draft_action_menu_items,
-    build_thread_action_menu_items, thread_action_requires_operate,
+    build_thread_action_menu_items,
+};
+use crate::hooks::use_thread_action_menu::{
+    ThreadMenuInput, ThreadMenuPlan, ThreadMenuSurface, plan_thread_action,
 };
 use crate::state::models::{EnvironmentThreadShell, SettledOverride, thread_runtime_can_archive};
 use crate::timestamp_format::now_iso;
@@ -696,30 +699,38 @@ impl Sidebar {
             return;
         };
         let thread_ref = ThreadRef::of(&thread);
-        let _ = thread_action_requires_operate(id);
-        if let Some(preset) = id.strip_prefix("snooze:") {
-            if preset == "custom" {
-                self.open_custom_snooze(vec![thread_ref], window, cx);
-                return;
-            }
-            let format = self.snapshot(cx).settings.timestamp_format;
-            if let Some(preset) = resolve_snooze_presets_now(format)
-                .into_iter()
-                .find(|candidate| candidate.id.as_str() == preset)
-            {
-                self.attempt_snooze(thread_ref, preset.snoozed_until, None, window, cx);
-            }
-            return;
-        }
         let snapshot = self.snapshot(cx);
         let group = snapshot.project_group_for(&thread.project_key()).cloned();
-        let workspace_path = thread.worktree_path.clone().or_else(|| {
-            snapshot
-                .project(&thread.project_key())
-                .map(|p| p.workspace_root.clone())
-        });
-        match id {
-            "filter-by-project" => {
+        let project_cwd = snapshot
+            .project(&thread.project_key())
+            .map(|p| p.workspace_root.clone());
+        let presets = resolve_snooze_presets_now(snapshot.settings.timestamp_format);
+        // Turin is one environment, and this process holds its operate grant.
+        let plan = plan_thread_action(
+            id,
+            &ThreadMenuInput {
+                surface: ThreadMenuSurface::Sidebar,
+                can_operate: true,
+                thread_title: &thread.title,
+                thread_id: thread.id.as_str(),
+                branch: thread.branch.as_deref(),
+                worktree_path: thread.worktree_path.as_deref(),
+                project_cwd: project_cwd.as_deref(),
+                is_regenerating_title: thread.title_regeneration.is_some(),
+                confirm_thread_archive: snapshot.settings.confirm_thread_archive,
+                confirm_thread_delete: snapshot.settings.confirm_thread_delete,
+                snooze_presets: &presets,
+            },
+        );
+        match plan {
+            ThreadMenuPlan::Nothing => {}
+            ThreadMenuPlan::Unavailable => self.toast_error(
+                "Thread action unavailable",
+                "This connection cannot change threads.",
+                window,
+                cx,
+            ),
+            ThreadMenuPlan::FilterByProject => {
                 if let Some(group) = group {
                     // The only scope control here: picking the scoped
                     // project again goes back to all projects.
@@ -728,25 +739,26 @@ impl Sidebar {
                     self.set_project_scope((!active).then_some(group.project_key), cx);
                 }
             }
-            "project-settings" => {
+            ThreadMenuPlan::OpenProjectSettings => {
                 if let Some(group) = group {
                     cx.emit(SidebarEvent::OpenProjectSettings(group.project_key));
                 }
             }
-            "new-thread-on-branch" => cx.emit(SidebarEvent::NewThread {
+            ThreadMenuPlan::NewThreadOnBranch {
+                branch,
+                worktree_path,
+            } => cx.emit(SidebarEvent::NewThread {
                 project_key: Some(thread.project_key()),
-                branch: thread.branch.clone(),
-                worktree_path: thread.worktree_path.clone(),
+                branch,
+                worktree_path,
             }),
-            "settle" => self.attempt_settle(thread_ref, None, window, cx),
-            "unsettle" => self.attempt_unsettle(thread_ref, window, cx),
-            "unsnooze" => self.attempt_unsnooze(thread_ref, window, cx),
-            "pin" => self.attempt_pin(thread_ref, window, cx),
-            "unpin" => self.attempt_unpin(thread_ref, window, cx),
-            "auto-settle:enabled" | "auto-settle:disabled" => {
-                let task =
-                    self.backend
-                        .set_auto_settle(thread_ref, id == "auto-settle:enabled", cx);
+            ThreadMenuPlan::Settle { .. } => self.attempt_settle(thread_ref, None, window, cx),
+            ThreadMenuPlan::Unsettle => self.attempt_unsettle(thread_ref, window, cx),
+            ThreadMenuPlan::Unsnooze => self.attempt_unsnooze(thread_ref, window, cx),
+            ThreadMenuPlan::Pin => self.attempt_pin(thread_ref, window, cx),
+            ThreadMenuPlan::Unpin => self.attempt_unpin(thread_ref, window, cx),
+            ThreadMenuPlan::AutoSettle { enabled } => {
+                let task = self.backend.set_auto_settle(thread_ref, enabled, cx);
                 self.run_command(
                     task,
                     "Failed to update auto-settle",
@@ -755,45 +767,42 @@ impl Sidebar {
                     |_, _, _, _| {},
                 );
             }
-            "rename" => self.start_rename(key, window, cx),
-            "regenerate-title" => {
-                if thread.title_regeneration.is_none() {
-                    let task = self.backend.regenerate_title(thread_ref, cx);
-                    self.run_command(
-                        task,
-                        "Failed to regenerate thread title",
-                        window,
-                        cx,
-                        |_, _, _, _| {},
-                    );
-                }
-            }
-            "mark-unread" => self.backend.mark_unread(thread_ref, cx).detach(),
-            "copy-path" => match workspace_path {
-                Some(path) => {
-                    cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
-                    self.toast_success("Path copied", &path, window, cx);
-                }
-                None => self.toast_error(
-                    "Path unavailable",
-                    "This thread does not have a workspace path to copy.",
+            ThreadMenuPlan::Snooze {
+                snoozed_until,
+                navigate_after_park: _,
+            } => self.attempt_snooze(thread_ref, snoozed_until, None, window, cx),
+            ThreadMenuPlan::SnoozeCustom => self.open_custom_snooze(vec![thread_ref], window, cx),
+            ThreadMenuPlan::Rename => self.start_rename(key, window, cx),
+            ThreadMenuPlan::RegenerateTitle => {
+                let task = self.backend.regenerate_title(thread_ref, cx);
+                self.run_command(
+                    task,
+                    "Failed to regenerate thread title",
                     window,
                     cx,
-                ),
-            },
-            "copy-branch" => {
-                if let Some(branch) = &thread.branch {
-                    cx.write_to_clipboard(ClipboardItem::new_string(branch.clone()));
-                    self.toast_success("Branch copied", branch, window, cx);
-                }
+                    |_, _, _, _| {},
+                );
             }
-            "copy-thread-id" => {
-                cx.write_to_clipboard(ClipboardItem::new_string(thread.id.to_string()));
-                self.toast_success("Thread ID copied", thread.id.as_str(), window, cx);
+            ThreadMenuPlan::MarkUnread => self.backend.mark_unread(thread_ref, cx).detach(),
+            ThreadMenuPlan::CopyPath(path) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
+                self.toast_success("Path copied", &path, window, cx);
             }
-            "archive" => {
-                let title = thread.title.clone();
-                let confirm = self.snapshot(cx).settings.confirm_thread_archive;
+            ThreadMenuPlan::PathUnavailable => self.toast_error(
+                "Path unavailable",
+                "This thread does not have a workspace path to copy.",
+                window,
+                cx,
+            ),
+            ThreadMenuPlan::CopyBranch(branch) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(branch.clone()));
+                self.toast_success("Branch copied", &branch, window, cx);
+            }
+            ThreadMenuPlan::CopyThreadId(thread_id) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(thread_id.clone()));
+                self.toast_success("Thread ID copied", &thread_id, window, cx);
+            }
+            ThreadMenuPlan::Archive { confirm } => {
                 let run = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
                     let task = this.backend.archive(thread_ref.clone(), cx);
                     this.run_command(
@@ -804,22 +813,12 @@ impl Sidebar {
                         |_, _, _, _| {},
                     );
                 };
-                if confirm {
-                    self.confirm(
-                        format!("Archive thread \"{title}\"?"),
-                        None,
-                        false,
-                        window,
-                        cx,
-                        run,
-                    );
-                } else {
-                    run(self, window, cx);
+                match confirm {
+                    Some(message) => self.confirm(message, None, false, window, cx, run),
+                    None => run(self, window, cx),
                 }
             }
-            "delete" => {
-                let title = thread.title.clone();
-                let confirm = self.snapshot(cx).settings.confirm_thread_delete;
+            ThreadMenuPlan::Delete { confirm } => {
                 let deleted_key = key.to_string();
                 let run = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
                     let task = this.backend.delete(thread_ref.clone(), cx);
@@ -836,22 +835,18 @@ impl Sidebar {
                         },
                     );
                 };
-                if confirm {
-                    self.confirm(
-                        format!("Delete thread \"{title}\"?"),
-                        Some(
-                            "This permanently clears conversation history for this thread.".into(),
-                        ),
-                        true,
-                        window,
-                        cx,
-                        run,
-                    );
-                } else {
-                    run(self, window, cx);
+                match confirm {
+                    // The dialog's first line is its title; the rest is the detail.
+                    Some(message) => {
+                        let (title, detail) = match message.split_once('\n') {
+                            Some((title, detail)) => (title.to_owned(), Some(detail.to_owned())),
+                            None => (message, None),
+                        };
+                        self.confirm(title, detail, true, window, cx, run);
+                    }
+                    None => run(self, window, cx),
                 }
             }
-            _ => {}
         }
     }
 

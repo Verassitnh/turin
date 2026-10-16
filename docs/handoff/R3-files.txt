@@ -1,0 +1,25 @@
+## T20 — 13923 lines, 68 files
+   816 apps/web/src/hooks/useSettings.ts
+   780 apps/web/src/openVsxThemes.ts
+   679 apps/web/src/hooks/useTheme.ts
+   538 apps/web/src/vscodeThemeImport.ts
+   504 apps/web/src/components/settings/scopedSettings.ts
+   501 apps/web/src/components/settings/themeInspector.ts
+   307 apps/server/src/environmentTheme.ts
+   206 apps/web/src/components/settings/useProjectScriptSettings.ts
+   162 apps/web/src/components/settings/useScopedSettings.ts
+   156 apps/web/src/components/settings/settingsScope.ts
+   125 apps/web/src/hooks/useEnvironmentTheme.ts
+   123 apps/web/src/shortcutModifierState.ts
+   115 apps/web/src/hooks/useDefaultTheme.ts
+    77 apps/web/src/components/settings/settingsScopeAxis.ts
+    76 apps/web/src/components/settings/useAvailableSettingsSearchItems.ts
+    68 apps/web/src/components/settings/themeEditorStore.ts
+    57 apps/web/src/components/settings/useScopedModelAvailability.ts
+    50 apps/web/src/lib/archivedThreadsState.ts
+    45 apps/web/src/components/KeybindingsUpdateToast.logic.ts
+    32 apps/web/src/components/settings/settingsScopeNavigation.ts
+    24 apps/web/src/components/settings/useSettingsProjectGroups.ts
+     9 apps/web/src/hooks/useCustomThemes.ts
+     8 apps/web/src/components/settings/CodexSetupSection.logic.ts
+     5 apps/web/src/components/settings/itemRows.ts

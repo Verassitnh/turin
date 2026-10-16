@@ -25,11 +25,28 @@ pub mod appearance_contrast;
 pub mod appearance_fonts;
 pub mod color;
 pub mod component_theme;
+pub mod environment_theme;
+pub mod open_vsx;
+pub mod open_vsx_themes;
 pub mod sidebar_scope;
+pub mod theme_editor_store;
+pub mod theme_inspector;
 pub mod theme_palette;
+pub mod theme_palette_library;
 pub mod theme_palettes;
 pub mod theme_preview;
+pub mod theme_runtime;
 pub mod tokens;
+pub mod use_custom_themes;
+pub mod use_default_theme;
+pub mod use_environment_theme;
+pub mod use_theme;
+pub mod vscode_theme_import;
+
+/// Theme state (library, environment themes, live preview) is process-wide, as
+/// upstream's module state is; tests that touch it take this lock.
+#[cfg(test)]
+pub(crate) static THEME_GLOBALS_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, Global, Hsla, Rgba, Window, WindowAppearance, px};
@@ -37,13 +54,40 @@ use gpui_kit::{App, Global, Hsla, Rgba, Window, WindowAppearance, px};
 use appearance_contrast::AppearanceContrast;
 use appearance_fonts::{AppearanceFontPreferences, ResolvedFonts, resolve_appearance_fonts};
 use color::{MixSpace, color, color_mix, with_alpha};
+#[allow(unused_imports)]
+pub use open_vsx::{
+    FakeOpenVsxClient, OpenVsxClient, OpenVsxClientError, OpenVsxHeadResponse, OpenVsxHttpResponse,
+    ReqwestOpenVsxClient,
+};
+#[allow(unused_imports)]
+pub use open_vsx_themes::{
+    OpenVsxThemeExtension, OpenVsxThemeSearchOptions, OpenVsxThemeSort,
+    import_open_vsx_theme_extension, import_open_vsx_theme_extension_live, search_open_vsx_themes,
+    search_open_vsx_themes_live,
+};
 use sidebar_scope::SidebarScope;
+use theme_palette::ThemeHalves;
 use theme_palette::{
     ThemePreferenceMode, get_standard_theme_colors, get_theme_colors_for_mode,
     get_theme_definition, resolve_theme_appearance,
 };
+#[allow(unused_imports)]
+pub use theme_palette_library::{
+    CUSTOM_THEMES_STORAGE_KEY, THEME_FILE_VERSION, ThemeLibraryStorage, ThemeLibraryStorageError,
+    create_vivid_theme_colors, get_custom_themes, get_default_theme_colors, get_environment_themes,
+    get_stored_custom_theme_collection, install_custom_theme, invalidate_custom_themes,
+    is_reserved_theme_id, is_theme_color, lenient_theme_color_overrides, parse_theme_file,
+    remove_custom_theme, remove_custom_themes, replace_custom_theme_collection,
+    serialize_theme_file, set_environment_themes, set_theme_library_storage, theme_color_to_hex,
+    theme_id_from_name, to_canonical_theme_color, update_custom_theme, update_theme_color_family,
+};
 use theme_palettes::{ThemeAppearance, ThemeColors, ThemeDefinition};
 use tokens::tw;
+#[allow(unused_imports)]
+pub use vscode_theme_import::{
+    ThemeImportEntry, humanize_theme_name, is_vscode_theme_file, pair_vscode_themes,
+    parse_vscode_theme_file, resolve_theme_label_collisions,
+};
 
 /// Which palette the user picked and how it follows the OS.
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +100,17 @@ pub struct AppearancePreferences {
     pub appearance_mode: Option<ThemePreferenceMode>,
     pub contrast: u32,
     pub fonts: AppearanceFontPreferences,
+    /// Upstream `THEME_HALVES_STORAGE_KEY`: a different theme per appearance.
+    pub theme_halves: Option<ThemeHalves>,
+    /// The theme editor's unsaved draft, painted on the live app.
+    pub preview: Option<ThemePreviewDraft>,
+}
+
+/// `applyThemeColorPreview`: a draft palette worn instead of the stored theme.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThemePreviewDraft {
+    pub colors: ThemeColors,
+    pub appearance: ThemeAppearance,
 }
 
 impl Default for AppearancePreferences {
@@ -65,6 +120,8 @@ impl Default for AppearancePreferences {
             appearance_mode: None,
             contrast: appearance_contrast::DEFAULT_APPEARANCE_CONTRAST,
             fonts: AppearanceFontPreferences::default(),
+            theme_halves: None,
+            preview: None,
         }
     }
 }
@@ -75,7 +132,7 @@ impl Default for AppearancePreferences {
 pub struct AppTheme {
     /// The applied theme's id; `None` is the standard look (no
     /// `data-theme-id`).
-    pub theme_id: Option<&'static str>,
+    pub theme_id: Option<gpui_kit::SharedString>,
     pub appearance: ThemeAppearance,
     pub fonts: ResolvedFonts,
 
@@ -172,36 +229,38 @@ impl AppTheme {
     /// theme on its own half; any other half falls back to the standard
     /// palette, as upstream clears `data-theme-id` when a theme cannot render.
     pub fn resolve(
-        definition: Option<&'static ThemeDefinition>,
+        definition: Option<&ThemeDefinition>,
         appearance: ThemeAppearance,
         contrast: u32,
         fonts: ResolvedFonts,
     ) -> Self {
         let themed = definition
             .and_then(|definition| get_theme_colors_for_mode(definition, appearance))
-            .map(|colors| (definition.map(|d| d.id), colors));
-        let (theme_id, palette): (Option<&'static str>, ThemeColors) =
+            .map(|colors| (definition.map(|d| d.id.clone()), colors));
+        let (theme_id, palette): (Option<gpui_kit::SharedString>, ThemeColors) =
             themed.unwrap_or((None, get_standard_theme_colors(appearance)));
         let dark = appearance.is_dark();
         let contrast = AppearanceContrast::new(contrast);
         let target = if dark { tw::WHITE } else { tw::BLACK };
-        let c = |value: &str| -> Hsla { color(value) };
-        let fg = |value: &str, backdrop: &str| -> Hsla {
+        let c = |value: &gpui_kit::SharedString| -> Hsla { color(value.as_ref()) };
+        let fg = |value: &gpui_kit::SharedString, backdrop: &gpui_kit::SharedString| -> Hsla {
             contrast
-                .foreground(rgba(value), rgba(backdrop), target)
+                .foreground(rgba(value.as_ref()), rgba(backdrop.as_ref()), target)
                 .into()
         };
-        let line = |value: &str, foreground: &str| -> Hsla {
-            contrast.border(rgba(value), rgba(foreground)).into()
+        let line = |value: &gpui_kit::SharedString, foreground: &gpui_kit::SharedString| -> Hsla {
+            contrast
+                .border(rgba(value.as_ref()), rgba(foreground.as_ref()))
+                .into()
         };
         let p = &palette;
 
-        let sidebar_muted_foreground = fg(p.sidebar_muted_foreground, p.sidebar);
+        let sidebar_muted_foreground = fg(&p.sidebar_muted_foreground, &p.sidebar);
         let sidebar_icon_color: Hsla = color_mix(
             MixSpace::Srgb,
             sidebar_muted_foreground,
             0.6,
-            rgba(p.sidebar),
+            rgba(p.sidebar.as_ref()),
         )
         .into();
 
@@ -219,63 +278,65 @@ impl AppTheme {
             (color::hex(0xd9d9d9).into(), color::hex(0xbfbfbf).into())
         };
 
+        let themed = theme_id.is_some();
+        let sidebar_theme_id = theme_id.clone().map(|id| id.to_string());
         Self {
             theme_id,
             appearance,
             fonts,
-            background: c(p.canvas),
-            app_chrome_background: c(p.chrome),
-            toolbar_background: c(p.toolbar),
-            toolbar_foreground: fg(p.toolbar_foreground, p.toolbar),
-            toolbar_border: line(p.toolbar_border, p.toolbar_foreground),
-            toolbar_control: c(p.toolbar_control),
-            toolbar_control_foreground: fg(p.toolbar_control_foreground, p.toolbar_control),
-            toolbar_control_hover: c(p.toolbar_control_hover),
-            surface_raised: c(p.surface_raised),
-            foreground: fg(p.text, p.canvas),
-            card: c(p.surface),
-            card_foreground: fg(p.text, p.surface),
-            popover: c(p.surface_overlay),
-            popover_foreground: fg(p.text, p.surface_overlay),
-            primary: c(p.message_action),
-            primary_foreground: c(p.message_action_foreground),
-            secondary: c(p.secondary),
-            secondary_foreground: fg(p.secondary_foreground, p.secondary),
-            muted: c(p.muted),
-            muted_foreground: fg(p.muted_foreground, p.canvas),
-            placeholder: fg(p.placeholder, p.canvas),
-            secondary_label: fg(p.secondary_label, p.canvas),
-            icon_muted: fg(p.icon_muted, p.canvas),
-            accent: c(p.accent_surface),
-            accent_foreground: fg(p.accent_surface_foreground, p.accent_surface),
-            theme_accent: c(p.accent),
-            theme_accent_foreground: c(p.accent_foreground),
-            message_surface: c(p.message_surface),
-            message_foreground: fg(p.message_foreground, p.message_surface),
-            message_action: c(p.message_action),
-            message_action_foreground: c(p.message_action_foreground),
-            message_action_hover: c(p.message_action_hover),
-            error: c(p.error),
-            error_foreground: c(p.error_foreground),
-            error_surface: c(p.error_surface),
-            tool_error_icon: if theme_id.is_none() {
+            background: c(&p.canvas),
+            app_chrome_background: c(&p.chrome),
+            toolbar_background: c(&p.toolbar),
+            toolbar_foreground: fg(&p.toolbar_foreground, &p.toolbar),
+            toolbar_border: line(&p.toolbar_border, &p.toolbar_foreground),
+            toolbar_control: c(&p.toolbar_control),
+            toolbar_control_foreground: fg(&p.toolbar_control_foreground, &p.toolbar_control),
+            toolbar_control_hover: c(&p.toolbar_control_hover),
+            surface_raised: c(&p.surface_raised),
+            foreground: fg(&p.text, &p.canvas),
+            card: c(&p.surface),
+            card_foreground: fg(&p.text, &p.surface),
+            popover: c(&p.surface_overlay),
+            popover_foreground: fg(&p.text, &p.surface_overlay),
+            primary: c(&p.message_action),
+            primary_foreground: c(&p.message_action_foreground),
+            secondary: c(&p.secondary),
+            secondary_foreground: fg(&p.secondary_foreground, &p.secondary),
+            muted: c(&p.muted),
+            muted_foreground: fg(&p.muted_foreground, &p.canvas),
+            placeholder: fg(&p.placeholder, &p.canvas),
+            secondary_label: fg(&p.secondary_label, &p.canvas),
+            icon_muted: fg(&p.icon_muted, &p.canvas),
+            accent: c(&p.accent_surface),
+            accent_foreground: fg(&p.accent_surface_foreground, &p.accent_surface),
+            theme_accent: c(&p.accent),
+            theme_accent_foreground: c(&p.accent_foreground),
+            message_surface: c(&p.message_surface),
+            message_foreground: fg(&p.message_foreground, &p.message_surface),
+            message_action: c(&p.message_action),
+            message_action_foreground: c(&p.message_action_foreground),
+            message_action_hover: c(&p.message_action_hover),
+            error: c(&p.error),
+            error_foreground: c(&p.error_foreground),
+            error_surface: c(&p.error_surface),
+            tool_error_icon: if !themed {
                 if dark {
                     // index.css dark `--tool-error-icon: #fca5a5` (a literal).
                     color::hex(0xfca5a5).into()
                 } else {
-                    c(p.error)
+                    c(&p.error)
                 }
             } else {
-                c(p.error_foreground)
+                c(&p.error_foreground)
             },
-            destructive: c(p.error),
-            destructive_foreground: c(p.error_foreground),
-            warning: c(p.warning),
-            warning_foreground: c(p.warning_foreground),
-            warning_surface: c(p.warning_surface),
-            update: c(p.update),
-            update_foreground: c(p.update_foreground),
-            update_surface: c(p.update_surface),
+            destructive: c(&p.error),
+            destructive_foreground: c(&p.error_foreground),
+            warning: c(&p.warning),
+            warning_foreground: c(&p.warning_foreground),
+            warning_surface: c(&p.warning_surface),
+            update: c(&p.update),
+            update_foreground: c(&p.update_foreground),
+            update_surface: c(&p.update_surface),
             info: info.into(),
             info_foreground: info_foreground.into(),
             success: success.into(),
@@ -287,27 +348,33 @@ impl AppTheme {
             }
             .into(),
             diff_deletion_foreground: if dark { tw::RED_400 } else { tw::RED_600 }.into(),
-            border: line(p.border, p.text),
-            input: line(p.input, p.text),
-            ring: c(p.focus),
-            code_background: c(p.code_background),
-            code_foreground: c(p.code_foreground),
-            search_match_background: c(p.search_match_background),
-            search_match_foreground: c(p.search_match_foreground),
-            search_match_active_background: c(p.search_match_active_background),
-            search_match_active_foreground: c(p.search_match_active_foreground),
-            sidebar: c(p.sidebar),
-            sidebar_foreground: fg(p.sidebar_foreground, p.sidebar),
+            border: line(&p.border, &p.text),
+            input: line(&p.input, &p.text),
+            ring: c(&p.focus),
+            code_background: c(&p.code_background),
+            code_foreground: c(&p.code_foreground),
+            search_match_background: c(&p.search_match_background),
+            search_match_foreground: c(&p.search_match_foreground),
+            search_match_active_background: c(&p.search_match_active_background),
+            search_match_active_foreground: c(&p.search_match_active_foreground),
+            sidebar: c(&p.sidebar),
+            sidebar_foreground: fg(&p.sidebar_foreground, &p.sidebar),
             sidebar_muted_foreground,
-            sidebar_control_surface: c(p.sidebar_control_surface),
-            sidebar_row_hover: c(p.sidebar_row_hover),
-            sidebar_row_active: c(p.sidebar_row_active),
-            sidebar_row_selected: c(p.sidebar_row_selected),
-            sidebar_border: line(p.sidebar_border, p.sidebar_foreground),
+            sidebar_control_surface: c(&p.sidebar_control_surface),
+            sidebar_row_hover: c(&p.sidebar_row_hover),
+            sidebar_row_active: c(&p.sidebar_row_active),
+            sidebar_row_selected: c(&p.sidebar_row_selected),
+            sidebar_border: line(&p.sidebar_border, &p.sidebar_foreground),
             sidebar_icon_color,
             scrollbar_thumb,
             scrollbar_thumb_hover,
-            sidebar_scope: SidebarScope::resolve(p, theme_id.is_none(), theme_id, dark, contrast),
+            sidebar_scope: SidebarScope::resolve(
+                p,
+                !themed,
+                sidebar_theme_id.as_deref(),
+                dark,
+                contrast,
+            ),
         }
     }
 
@@ -364,31 +431,63 @@ fn resolve_fonts(preferences: &AppearanceFontPreferences, cx: &App) -> ResolvedF
 pub fn init(cx: &mut App) {
     cx.set_global(ThemeState::default());
     apply(None, cx);
+    theme_runtime::init(cx);
 }
 
 /// Re-resolves the theme for the current preferences and the given (or app)
 /// system appearance, and pushes it into gpui-component.
 pub fn apply(window_appearance: Option<WindowAppearance>, cx: &mut App) {
     let preferences = cx.global::<ThemeState>().preferences.clone();
-    let definition = get_theme_definition(&preferences.theme);
+    let halves = preferences.theme_halves.as_ref();
     let system_dark =
         system_appearance(window_appearance.unwrap_or_else(|| cx.window_appearance())).is_dark();
-    let appearance = resolve_theme_appearance(
-        &preferences.theme,
-        system_dark,
-        None,
-        preferences.appearance_mode,
-    );
+    // The editor's draft keeps the app on the draft's appearance, as upstream's
+    // preview toggles the `dark` class.
+    let appearance = match &preferences.preview {
+        Some(preview) => preview.appearance,
+        None => resolve_theme_appearance(
+            &preferences.theme,
+            system_dark,
+            None,
+            preferences.appearance_mode,
+            halves,
+        ),
+    };
     let fonts = resolve_fonts(&preferences.fonts, cx);
+    // Each appearance wears its own half of an automatic-mode mix.
+    let definition_for = |half_appearance: ThemeAppearance| -> Option<ThemeDefinition> {
+        match &preferences.preview {
+            Some(preview) if preview.appearance == half_appearance => Some(ThemeDefinition {
+                id: gpui_kit::SharedString::new_static(theme_palette::THEME_PREVIEW_ID),
+                label: gpui_kit::SharedString::new_static("Draft"),
+                appearance: preview.appearance,
+                colors: preview.colors.clone(),
+                variants: theme_palettes::ThemeVariants {
+                    light: None,
+                    dark: None,
+                },
+                collection: None,
+                managed: false,
+                sidebar_artwork: false,
+            }),
+            _ => get_theme_definition(&theme_palette::resolve_theme_half(
+                &preferences.theme,
+                halves,
+                half_appearance,
+            )),
+        }
+    };
+    let light_definition = definition_for(ThemeAppearance::Light);
+    let dark_definition = definition_for(ThemeAppearance::Dark);
 
     let light = AppTheme::resolve(
-        definition,
+        light_definition.as_ref(),
         ThemeAppearance::Light,
         preferences.contrast,
         fonts.clone(),
     );
     let dark = AppTheme::resolve(
-        definition,
+        dark_definition.as_ref(),
         ThemeAppearance::Dark,
         preferences.contrast,
         fonts,
@@ -431,5 +530,6 @@ pub fn set_preferences(preferences: AppearancePreferences, cx: &mut App) {
 /// Follow the OS light/dark switch for `window`, as upstream's
 /// `prefers-color-scheme` handling does.
 pub fn follow_system_appearance(window: &mut Window, cx: &mut App) {
+    theme_runtime::follow_system_appearance(window.appearance(), cx);
     apply(Some(window.appearance()), cx);
 }

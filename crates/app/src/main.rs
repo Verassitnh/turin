@@ -19,6 +19,7 @@ mod project_icon_colors;
 mod project_identity;
 mod pull_request;
 mod pull_request_reference;
+mod settings_logic;
 // The view-model layer is a library until the orchestrator and views are wired
 // to it; every upstream selector is ported ahead of its callers.
 #[allow(dead_code)]
@@ -166,6 +167,13 @@ fn main() {
             #[cfg(target_os = "macos")]
             dock_icon::set_unbundled_app_icon();
             theme::init(cx);
+            // Device-local theme state (useTheme's localStorage) persists next to the
+            // app data; the settings demo keeps it in memory.
+            if std::env::var_os("TURIN_SETTINGS").is_none()
+                && let Some(dir) = app_runtime::data_dir::resolve_data_dir()
+            {
+                theme::theme_runtime::persist_to(dir, cx);
+            }
             let store = state::store::bind_client_store(handle.clone(), cx);
             cx.set_global(state::store::ClientStoreGlobal(store));
             cx.set_global(app_runtime::write::bus::CommandBusGlobal(

@@ -83,7 +83,13 @@ markdown.workspace = true
 tree-sitter = "0.26"
 tree-sitter-bash = "0.23"
 similar = "2"
+csscolorparser.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+zip.workspace = true
 uuid.workspace = true
+libc.workspace = true
+notify.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Locked to gpui's macOS platform versions (dock icon + shell).
@@ -95,3 +101,4 @@ objc2-foundation = { version = "0.3", features = ["NSBundle", "NSData", "NSStrin
 [dev-dependencies]
 pretty_assertions.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

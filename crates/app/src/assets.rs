@@ -467,6 +467,9 @@ impl AssetSource for AppAssets {
         if let Some(bytes) = crate::settings::icons::SettingsIcons.load(path)? {
             return Ok(Some(bytes));
         }
+        if let Some(bytes) = crate::settings::theme_ui::icons::ThemeUiIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
         Assets.load(path)
     }
 
@@ -486,6 +489,7 @@ impl AssetSource for AppAssets {
         names.extend(AppIcons.list(path)?);
         names.extend(UsageIcons.list(path)?);
         names.extend(crate::settings::icons::SettingsIcons.list(path)?);
+        names.extend(crate::settings::theme_ui::icons::ThemeUiIcons.list(path)?);
         names.extend(Assets.list(path)?);
         names.sort();
         names.dedup();

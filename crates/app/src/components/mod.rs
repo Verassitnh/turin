@@ -2,6 +2,9 @@
 
 pub mod app_sidebar_layout;
 pub mod branch_toolbar;
+// Composer helpers are ported ahead of their callers; main's clippy gate flags
+// them dead until the chat view wires them (merge note from R3).
+#[allow(dead_code)]
 pub mod chat;
 // First batch of ChatView.logic.ts; the chat view does not call these yet.
 pub mod chat_view;

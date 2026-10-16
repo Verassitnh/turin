@@ -94,9 +94,9 @@ fn standard(palette: &ThemeColors, dark: bool) -> Raw {
             sidebar_muted_foreground: hex(0xa3a3a3),
             // --sidebar-control-surface: var(--muted)
             sidebar_control_surface: hex(0x0a0a0a),
-            sidebar_row_hover: rgba(palette.sidebar_row_hover),
-            sidebar_row_active: rgba(palette.sidebar_row_active),
-            sidebar_row_selected: rgba(palette.sidebar_row_selected),
+            sidebar_row_hover: rgba(&palette.sidebar_row_hover),
+            sidebar_row_active: rgba(&palette.sidebar_row_active),
+            sidebar_row_selected: rgba(&palette.sidebar_row_selected),
             sidebar_border: with_alpha(tw::WHITE, 0.08),
         }
     } else {
@@ -126,24 +126,24 @@ fn standard(palette: &ThemeColors, dark: bool) -> Raw {
 /// `html[data-theme-id] [data-app-sidebar]`: the scope is the palette.
 fn themed(p: &ThemeColors) -> Raw {
     Raw {
-        background: rgba(p.canvas),
-        foreground: rgba(p.text),
-        card: rgba(p.surface),
-        card_foreground: rgba(p.text),
-        accent: rgba(p.accent_surface),
-        accent_foreground: rgba(p.accent_surface_foreground),
-        muted: rgba(p.muted),
-        muted_foreground: rgba(p.muted_foreground),
-        border: rgba(p.border),
-        input: rgba(p.input),
-        sidebar: rgba(p.sidebar),
-        sidebar_foreground: rgba(p.sidebar_foreground),
-        sidebar_muted_foreground: rgba(p.sidebar_muted_foreground),
-        sidebar_control_surface: rgba(p.sidebar_control_surface),
-        sidebar_row_hover: rgba(p.sidebar_row_hover),
-        sidebar_row_active: rgba(p.sidebar_row_active),
-        sidebar_row_selected: rgba(p.sidebar_row_selected),
-        sidebar_border: rgba(p.sidebar_border),
+        background: rgba(&p.canvas),
+        foreground: rgba(&p.text),
+        card: rgba(&p.surface),
+        card_foreground: rgba(&p.text),
+        accent: rgba(&p.accent_surface),
+        accent_foreground: rgba(&p.accent_surface_foreground),
+        muted: rgba(&p.muted),
+        muted_foreground: rgba(&p.muted_foreground),
+        border: rgba(&p.border),
+        input: rgba(&p.input),
+        sidebar: rgba(&p.sidebar),
+        sidebar_foreground: rgba(&p.sidebar_foreground),
+        sidebar_muted_foreground: rgba(&p.sidebar_muted_foreground),
+        sidebar_control_surface: rgba(&p.sidebar_control_surface),
+        sidebar_row_hover: rgba(&p.sidebar_row_hover),
+        sidebar_row_active: rgba(&p.sidebar_row_active),
+        sidebar_row_selected: rgba(&p.sidebar_row_selected),
+        sidebar_border: rgba(&p.sidebar_border),
     }
 }
 
@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn themed_scope_maps_palette_roles_and_tints_the_container() {
-        let palette = OCEAN_THEME.colors;
+        let palette = OCEAN_THEME.colors.clone();
         let scope = SidebarScope::resolve(
             &palette,
             false,
@@ -243,10 +243,10 @@ mod tests {
             false,
             AppearanceContrast::default(),
         );
-        assert_eq!(to_hex(scope.foreground), to_hex(color(palette.text)));
+        assert_eq!(to_hex(scope.foreground), to_hex(color(&palette.text)));
         assert_eq!(
             to_hex(scope.muted_foreground),
-            to_hex(color(palette.muted_foreground))
+            to_hex(color(&palette.muted_foreground))
         );
         assert!((scope.container_border.a - 0.10).abs() < 0.01);
     }

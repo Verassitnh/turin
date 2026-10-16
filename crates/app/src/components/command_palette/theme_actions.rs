@@ -27,9 +27,9 @@ pub fn theme_cards() -> Vec<ThemeCard> {
             let colors = standard_theme_preview_colors(mode);
             ThemePreviewSpec {
                 dark: mode.is_dark(),
-                canvas: colors.canvas.to_owned(),
-                accent: colors.accent.to_owned(),
-                message_action: colors.message_action.to_owned(),
+                canvas: colors.canvas.to_string(),
+                accent: colors.accent.to_string(),
+                message_action: colors.message_action.to_string(),
             }
         })
         .collect();
@@ -42,19 +42,19 @@ pub fn theme_cards() -> Vec<ThemeCard> {
         let previews = get_theme_modes(definition)
             .into_iter()
             .map(|mode| {
-                let colors =
-                    get_theme_colors_for_mode(definition, mode).unwrap_or(definition.colors);
+                let colors = get_theme_colors_for_mode(definition, mode)
+                    .unwrap_or_else(|| definition.colors.clone());
                 ThemePreviewSpec {
                     dark: mode.is_dark(),
-                    canvas: colors.canvas.to_owned(),
-                    accent: colors.accent.to_owned(),
-                    message_action: colors.message_action.to_owned(),
+                    canvas: colors.canvas.to_string(),
+                    accent: colors.accent.to_string(),
+                    message_action: colors.message_action.to_string(),
                 }
             })
             .collect();
         cards.push(ThemeCard {
-            id: Some(definition.id.to_owned()),
-            label: definition.label.to_owned(),
+            id: Some(definition.id.to_string()),
+            label: definition.label.to_string(),
             previews,
         });
     }
@@ -83,7 +83,7 @@ pub fn current_appearance_mode(cx: &App) -> AppearanceModeChoice {
 pub fn active_theme_id(cx: &App) -> Option<String> {
     let preferences = theme::preferences(cx);
     crate::theme::theme_palette::get_theme_definition(&preferences.theme)
-        .map(|definition| definition.id.to_owned())
+        .map(|definition| definition.id.to_string())
 }
 
 fn preference_mode(choice: AppearanceModeChoice) -> ThemePreferenceMode {
@@ -104,20 +104,14 @@ fn choice_name(choice: AppearanceModeChoice) -> &'static str {
 
 /// `setAppearanceMode(mode)`.
 pub fn apply_appearance_mode(choice: AppearanceModeChoice, cx: &mut App) {
-    let mut preferences = theme::preferences(cx);
-    preferences.appearance_mode = Some(preference_mode(choice));
-    if matches!(preferences.theme.as_str(), "system" | "light" | "dark") {
-        preferences.theme = choice_name(choice).to_owned();
-    }
-    theme::set_preferences(preferences, cx);
+    theme::theme_runtime::set_appearance_mode(preference_mode(choice), cx);
 }
 
 /// `setTheme(id ?? appearanceMode)`.
 pub fn apply_theme(id: Option<String>, cx: &mut App) {
-    let mut preferences = theme::preferences(cx);
-    let mode = mode_of(&preferences);
-    preferences.theme = id.unwrap_or_else(|| choice_name(mode).to_owned());
-    theme::set_preferences(preferences, cx);
+    let mode = mode_of(&theme::preferences(cx));
+    let next = id.unwrap_or_else(|| choice_name(mode).to_owned());
+    theme::theme_runtime::set_theme(&next, cx);
 }
 
 #[cfg(test)]

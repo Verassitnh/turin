@@ -37,26 +37,26 @@ use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Icon, IconName};
 
 /// The seven roles `ThemeCardPreviewColors` carries.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PreviewColors {
-    sidebar: &'static str,
-    canvas: &'static str,
-    surface: &'static str,
-    accent_surface: &'static str,
-    accent: &'static str,
-    message_surface: &'static str,
-    message_action: &'static str,
+    sidebar: SharedString,
+    canvas: SharedString,
+    surface: SharedString,
+    accent_surface: SharedString,
+    accent: SharedString,
+    message_surface: SharedString,
+    message_action: SharedString,
 }
 
 fn preview_of(colors: &ThemeColors) -> PreviewColors {
     PreviewColors {
-        sidebar: colors.sidebar,
-        canvas: colors.canvas,
-        surface: colors.surface,
-        accent_surface: colors.accent_surface,
-        accent: colors.accent,
-        message_surface: colors.message_surface,
-        message_action: colors.message_action,
+        sidebar: colors.sidebar.clone(),
+        canvas: colors.canvas.clone(),
+        surface: colors.surface.clone(),
+        accent_surface: colors.accent_surface.clone(),
+        accent: colors.accent.clone(),
+        message_surface: colors.message_surface.clone(),
+        message_action: colors.message_action.clone(),
     }
 }
 
@@ -65,41 +65,42 @@ fn standard_preview(mode: ThemeAppearance) -> PreviewColors {
     let shared = standard_theme_preview_colors(mode);
     match mode {
         ThemeAppearance::Light => PreviewColors {
-            sidebar: "#fafafa",
-            surface: "#ffffff",
-            accent_surface: "#f4f4f5",
-            message_surface: "#e4e4e7",
-            canvas: shared.canvas,
-            accent: shared.accent,
-            message_action: shared.message_action,
+            sidebar: "#fafafa".into(),
+            surface: "#ffffff".into(),
+            accent_surface: "#f4f4f5".into(),
+            message_surface: "#e4e4e7".into(),
+            canvas: shared.canvas.into(),
+            accent: shared.accent.into(),
+            message_action: shared.message_action.into(),
         },
         ThemeAppearance::Dark => PreviewColors {
-            sidebar: "#0f0f10",
-            surface: "#121212",
-            accent_surface: "#27272a",
-            message_surface: "#27272a",
-            canvas: shared.canvas,
-            accent: shared.accent,
-            message_action: shared.message_action,
+            sidebar: "#0f0f10".into(),
+            surface: "#121212".into(),
+            accent_surface: "#27272a".into(),
+            message_surface: "#27272a".into(),
+            canvas: shared.canvas.into(),
+            accent: shared.accent.into(),
+            message_action: shared.message_action.into(),
         },
     }
 }
 
 struct ThemeCard {
     /// `None` is the standard "T3 Code" look.
-    id: Option<&'static str>,
-    label: &'static str,
+    id: Option<SharedString>,
+    label: SharedString,
     previews: Vec<(ThemeAppearance, PreviewColors)>,
 }
 
-fn card_of(theme: &'static ThemeDefinition) -> ThemeCard {
+fn card_of(theme: &ThemeDefinition) -> ThemeCard {
     ThemeCard {
-        id: Some(theme.id),
-        label: theme.label,
+        id: Some(theme.id.clone()),
+        label: theme.label.clone(),
         previews: get_theme_modes(theme)
             .into_iter()
             .map(|mode| {
-                let colors = get_theme_colors_for_mode(theme, mode).unwrap_or(theme.colors);
+                let colors =
+                    get_theme_colors_for_mode(theme, mode).unwrap_or_else(|| theme.colors.clone());
                 (mode, preview_of(&colors))
             })
             .collect(),
@@ -109,7 +110,7 @@ fn card_of(theme: &'static ThemeDefinition) -> ThemeCard {
 fn theme_cards() -> Vec<ThemeCard> {
     let mut cards = vec![ThemeCard {
         id: None,
-        label: "T3 Code",
+        label: "T3 Code".into(),
         previews: [ThemeAppearance::Light, ThemeAppearance::Dark]
             .into_iter()
             .map(|mode| (mode, standard_preview(mode)))
@@ -142,7 +143,7 @@ fn wireframe_pane(colors: &PreviewColors) -> gpui_kit::Div {
         .top_0()
         .left_0()
         .size_full()
-        .bg(c(colors.canvas))
+        .bg(c(&colors.canvas))
         .child(
             div()
                 .absolute()
@@ -150,34 +151,34 @@ fn wireframe_pane(colors: &PreviewColors) -> gpui_kit::Div {
                 .bottom_0()
                 .left_0()
                 .w(relative(0.22))
-                .bg(c(colors.sidebar))
+                .bg(c(&colors.sidebar))
                 .border_r_1()
                 .border_color(line),
         )
         .child(
-            region(0.03, 0.08, 0.16, 0.08, c(colors.surface))
+            region(0.03, 0.08, 0.16, 0.08, c(&colors.surface))
                 .rounded_md()
                 .border_1()
                 .border_color(line),
         )
-        .child(region(0.03, 0.22, 0.16, 0.07, c(colors.accent_surface)).rounded_md())
+        .child(region(0.03, 0.22, 0.16, 0.07, c(&colors.accent_surface)).rounded_md())
         .child(
-            region(0.03, 0.32, 0.16, 0.07, c(colors.message_surface))
+            region(0.03, 0.32, 0.16, 0.07, c(&colors.message_surface))
                 .rounded_md()
                 .opacity(0.7),
         )
         .child(
-            region(0.03, 0.42, 0.16, 0.07, c(colors.message_surface))
+            region(0.03, 0.42, 0.16, 0.07, c(&colors.message_surface))
                 .rounded_md()
                 .opacity(0.5),
         )
         // Conversation.
-        .child(region(0.48, 0.11, 0.24, 0.09, c(colors.message_surface)).rounded_lg())
+        .child(region(0.48, 0.11, 0.24, 0.09, c(&colors.message_surface)).rounded_lg())
         .child(region(0.27, 0.28, 0.34, 0.05, line).rounded_sm())
         .child(region(0.27, 0.38, 0.26, 0.05, line).rounded_sm())
         // Composer.
         .child(
-            region(0.26, 0.77, 0.68, 0.15, c(colors.surface))
+            region(0.26, 0.77, 0.68, 0.15, c(&colors.surface))
                 .rounded_md()
                 .border_1()
                 .border_color(line)
@@ -198,12 +199,12 @@ fn wireframe_pane(colors: &PreviewColors) -> gpui_kit::Div {
                         .h(relative(0.58))
                         .w(px(10.))
                         .rounded_full()
-                        .bg(c(colors.message_action)),
+                        .bg(c(&colors.message_action)),
                 ),
         )
         // Orchestrator island.
         .child({
-            let island = region(0.75, 0.08, 0.2, 0.46, c(colors.surface))
+            let island = region(0.75, 0.08, 0.2, 0.46, c(&colors.surface))
                 .rounded_lg()
                 .border_1()
                 .border_color(line);
@@ -225,7 +226,7 @@ fn wireframe_pane(colors: &PreviewColors) -> gpui_kit::Div {
                                 .opacity(0.55)
                                 .bg(match row {
                                     0 => c("#34d399"),
-                                    1 => c(colors.message_action),
+                                    1 => c(&colors.message_action),
                                     _ => c("#fbbf24"),
                                 }),
                         )
@@ -287,9 +288,9 @@ fn preview_circle(colors: &PreviewColors, mode: ThemeAppearance, theme: &AppThem
     let spec = theme_preview_render_spec(mode);
     let base = mix_theme_preview_base(
         &ThemePreviewColors {
-            canvas: colors.canvas,
-            accent: colors.accent,
-            message_action: colors.message_action,
+            canvas: &colors.canvas,
+            accent: &colors.accent,
+            message_action: &colors.message_action,
         },
         mode,
     );
@@ -302,8 +303,8 @@ fn preview_circle(colors: &PreviewColors, mode: ThemeAppearance, theme: &AppThem
             .rounded_full()
             .bg(tint)
     };
-    let accent = c(colors.accent);
-    let action = c(colors.message_action);
+    let accent = c(&colors.accent);
+    let action = c(&colors.message_action);
     // GPUI clips to rectangles, so the glows are pulled toward the centre to
     // stay inside the circle.
     let pull = |(x, y): (f32, f32)| (0.5 + (x - 0.5) * 0.45, 0.5 + (y - 0.5) * 0.45);
@@ -365,19 +366,22 @@ impl SettingsView {
         let theme = cx.app_theme().clone();
         let vm = self.vm(cx);
         let mode = vm.appearance.mode.clone();
-        let base_id: Option<&'static str> =
+        let base_id: Option<SharedString> =
             get_theme_definition(&vm.appearance.theme.clone()).map(|d| d.id);
         let cards = theme_cards();
 
         // Mode tiles.
-        let light_colors = standard_or_theme(base_id, ThemeAppearance::Light);
-        let dark_colors = standard_or_theme(base_id, ThemeAppearance::Dark);
+        let light_colors = standard_or_theme(base_id.as_ref(), ThemeAppearance::Light);
+        let dark_colors = standard_or_theme(base_id.as_ref(), ThemeAppearance::Dark);
         let tiles = ["system", "light", "dark"].into_iter().map(|tile| {
             let active = mode == tile;
             let panes = match tile {
-                "system" => vec![(light_colors, Some(true)), (dark_colors, Some(false))],
-                "dark" => vec![(dark_colors, None)],
-                _ => vec![(light_colors, None)],
+                "system" => vec![
+                    (light_colors.clone(), Some(true)),
+                    (dark_colors.clone(), Some(false)),
+                ],
+                "dark" => vec![(dark_colors.clone(), None)],
+                _ => vec![(light_colors.clone(), None)],
             };
             let label = match tile {
                 "system" => "System",
@@ -452,13 +456,13 @@ impl SettingsView {
                     .filter(|_| base_id == card.id)
                     .collect();
                 let active = false;
-                let id = card.id;
+                let id = card.id.clone();
                 let use_label = card.label;
                 let current_mode = mode.clone();
                 let use_card = cx.listener(move |this, _: &gpui_kit::ClickEvent, _, cx| {
                     let source = this.store.read(cx).source();
-                    match id {
-                        Some(id) => source.set_theme(id.to_owned(), cx),
+                    match id.clone() {
+                        Some(id) => source.set_theme(id.to_string(), cx),
                         // The standard look: the preference is named after the mode.
                         None => source.set_theme(current_mode.clone(), cx),
                     }
@@ -516,7 +520,7 @@ impl SettingsView {
                 div()
                     .id(SharedString::from(format!(
                         "theme-card-{}",
-                        card.id.unwrap_or("default")
+                        card.id.as_deref().unwrap_or("default")
                     )))
                     .w(px(card_width))
                     .overflow_hidden()
@@ -1221,10 +1225,12 @@ fn code_preview(theme: &AppTheme, family: &str, size: f32) -> AnyElement {
         .into_any_element()
 }
 
-fn standard_or_theme(base: Option<&'static str>, mode: ThemeAppearance) -> PreviewColors {
-    match base.and_then(|id| BUILT_IN_THEMES.iter().find(|theme| theme.id == id)) {
+fn standard_or_theme(base: Option<&SharedString>, mode: ThemeAppearance) -> PreviewColors {
+    match base.and_then(|id| get_theme_definition(id)) {
         Some(definition) => {
-            let colors = get_theme_colors_for_mode(definition, mode).unwrap_or(definition.colors);
+            let definition = &definition;
+            let colors = get_theme_colors_for_mode(definition, mode)
+                .unwrap_or_else(|| definition.colors.clone());
             preview_of(&colors)
         }
         None => standard_preview(mode),

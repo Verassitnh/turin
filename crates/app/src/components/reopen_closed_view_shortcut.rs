@@ -14,8 +14,15 @@ pub fn try_reopen_closed_view(
     workspace_available: bool,
 ) -> bool {
     let plan = plan_next_reopen(entries, owner_state);
+    for dropped in &plan.dropped {
+        panels.remove_closed_id(&dropped.id);
+    }
     if let Some(restore) = plan.restore {
-        return reopen_closed_panel_tab(panels, &restore, workspace_available);
+        if reopen_closed_panel_tab(panels, &restore, workspace_available) {
+            panels.remove_closed_id(&restore.id);
+            return true;
+        }
+        panels.defer_closed_id(&restore.id);
     }
     false
 }

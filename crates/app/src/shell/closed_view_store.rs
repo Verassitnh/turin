@@ -22,11 +22,8 @@ impl ClosedViewStore {
         thread_ref: turin_contracts::environment::ScopedThreadRef,
         surface: RightPanelSurface,
     ) -> String {
-        let id = uuid::Uuid::new_v4().to_string();
-        let view = ClosedPanelTab {
-            thread_ref,
-            surface,
-        };
+        let view = ClosedPanelTab::new(thread_ref, surface);
+        let id = view.id.clone();
         self.entries.retain(|entry| !same_target(entry, &view));
         self.entries.insert(
             0,

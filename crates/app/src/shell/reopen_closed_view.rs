@@ -4,9 +4,7 @@
 
 use turin_contracts::{EnvironmentId, ProjectId};
 
-use crate::state::right_panel_store::{
-    RightPanelStore, RightPanelSurface, ThreadRightPanelState, thread_key,
-};
+use crate::state::right_panel_store::{RightPanelStore, RightPanelSurface, ThreadRightPanelState};
 
 /// `ClosedViewEntry` (panel-tab only; browser entries are cut).
 #[derive(Clone, Debug, PartialEq)]
@@ -192,9 +190,8 @@ pub fn closed_view_entries_from_store(store: &RightPanelStore) -> Vec<ClosedView
     store
         .closed_panel_tabs
         .iter()
-        .enumerate()
-        .map(|(index, tab)| ClosedViewEntry {
-            id: format!("closed-{index}-{}", thread_key(&tab.thread_ref)),
+        .map(|tab| ClosedViewEntry {
+            id: tab.id.clone(),
             thread_ref: tab.thread_ref.clone(),
             surface: tab.surface.clone(),
         })
@@ -245,29 +242,125 @@ mod tests {
         }
     }
 
+    fn open_diff() -> ThreadRightPanelState {
+        ThreadRightPanelState {
+            is_open: true,
+            active_surface_id: Some("diff".into()),
+            surfaces: vec![RightPanelSurface::Diff],
+            maximized: false,
+        }
+    }
+
     #[test]
-    fn plan_next_reopen_scenarios() {
-        let entries = vec![
+    fn plan_next_reopen_matches_the_upstream_cases() {
+        let entries = [
             entry("a", RightPanelSurface::Diff),
             entry("b", RightPanelSurface::PullRequests),
         ];
-        let plan = plan_next_reopen(&entries, |_| known(empty_panel()));
-        assert!(plan.dropped.is_empty());
-        assert_eq!(plan.restore.as_ref().map(|e| e.id.as_str()), Some("a"));
-
-        let plan = plan_next_reopen(&entries, |entry| {
-            if entry.id == "a" {
-                ReopenOwnerState {
-                    environment_known: false,
-                    catalog_ready: true,
-                    ..known(empty_panel())
-                }
-            } else {
-                known(empty_panel())
-            }
-        });
-        assert_eq!(plan.dropped.len(), 1);
-        assert_eq!(plan.restore.as_ref().map(|e| e.id.as_str()), Some("b"));
+        struct Case {
+            name: &'static str,
+            owners: Vec<ReopenOwnerState>,
+            dropped: Vec<&'static str>,
+            restored: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "restores the newest entry",
+                owners: vec![known(empty_panel()), known(empty_panel())],
+                dropped: vec![],
+                restored: Some("a"),
+            },
+            Case {
+                name: "drops a removed environment once the catalog is ready",
+                owners: vec![
+                    ReopenOwnerState {
+                        environment_known: false,
+                        ..known(empty_panel())
+                    },
+                    known(empty_panel()),
+                ],
+                dropped: vec!["a"],
+                restored: Some("b"),
+            },
+            Case {
+                name: "waits for the catalog before dropping",
+                owners: vec![
+                    ReopenOwnerState {
+                        environment_known: false,
+                        catalog_ready: false,
+                        ..known(empty_panel())
+                    },
+                    known(empty_panel()),
+                ],
+                dropped: vec![],
+                restored: None,
+            },
+            Case {
+                name: "skips but keeps a thread deleted from a live shell",
+                owners: vec![
+                    ReopenOwnerState {
+                        owner_exists: false,
+                        ..known(empty_panel())
+                    },
+                    known(empty_panel()),
+                ],
+                dropped: vec![],
+                restored: Some("b"),
+            },
+            Case {
+                name: "waits when a cached shell lacks the thread",
+                owners: vec![
+                    ReopenOwnerState {
+                        owner_exists: false,
+                        shell_live: false,
+                        ..known(empty_panel())
+                    },
+                    known(empty_panel()),
+                ],
+                dropped: vec![],
+                restored: None,
+            },
+            Case {
+                name: "drops a tab that is already open",
+                owners: vec![known(open_diff()), known(empty_panel())],
+                dropped: vec!["a"],
+                restored: Some("b"),
+            },
+            Case {
+                name: "restores a tab whose panel is hidden",
+                owners: vec![known(ThreadRightPanelState {
+                    is_open: false,
+                    ..open_diff()
+                })],
+                dropped: vec![],
+                restored: Some("a"),
+            },
+        ];
+        for case in cases {
+            let Case {
+                name,
+                owners,
+                dropped,
+                restored,
+            } = case;
+            let slice = &entries[..owners.len()];
+            let plan = plan_next_reopen(slice, |entry| {
+                owners[slice.iter().position(|item| item.id == entry.id).unwrap()].clone()
+            });
+            assert_eq!(
+                plan.dropped
+                    .iter()
+                    .map(|entry| entry.id.as_str())
+                    .collect::<Vec<_>>(),
+                dropped,
+                "{name}"
+            );
+            assert_eq!(
+                plan.restore.as_ref().map(|entry| entry.id.as_str()),
+                restored,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -323,5 +416,81 @@ mod tests {
         let state = store.thread_state(&thread_ref());
         assert!(state.is_open);
         assert_eq!(state.surfaces.len(), 1);
+    }
+
+    #[test]
+    fn apply_drops_an_open_tab_and_restores_the_next() {
+        use crate::components::reopen_closed_view_shortcut::try_reopen_closed_view;
+        use crate::state::right_panel_store::{ClosedPanelTab, SingletonKind};
+
+        let mut store = RightPanelStore::default();
+        let thread = thread_ref();
+        store.open(&thread, SingletonKind::Diff);
+        store.closed_panel_tabs = vec![
+            ClosedPanelTab::new(thread.clone(), RightPanelSurface::Diff),
+            ClosedPanelTab::new(thread.clone(), RightPanelSurface::PullRequests),
+        ];
+        let entries = closed_view_entries_from_store(&store);
+        let owners: Vec<_> = entries
+            .iter()
+            .map(|entry| (entry.id.clone(), store.thread_state(&entry.thread_ref)))
+            .collect();
+        assert!(try_reopen_closed_view(
+            &entries,
+            |entry| ReopenOwnerState {
+                environment_known: true,
+                catalog_ready: true,
+                owner_exists: true,
+                shell_live: true,
+                panel: owners
+                    .iter()
+                    .find(|(id, _)| id == &entry.id)
+                    .unwrap()
+                    .1
+                    .clone(),
+            },
+            &mut store,
+            true,
+        ));
+        assert_eq!(store.closed_panel_tabs.len(), 0);
+        let state = store.thread_state(&thread);
+        assert!(
+            state
+                .surfaces
+                .iter()
+                .any(|surface| surface.id() == "pull-requests")
+        );
+    }
+
+    #[test]
+    fn apply_defers_a_file_when_the_workspace_is_unavailable() {
+        use crate::components::reopen_closed_view_shortcut::try_reopen_closed_view;
+        use crate::state::right_panel_store::{ClosedPanelTab, FileSurface};
+
+        let mut store = RightPanelStore::default();
+        let file = ClosedPanelTab::new(
+            thread_ref(),
+            RightPanelSurface::File(FileSurface {
+                id: "file:src/app.ts".into(),
+                relative_path: "src/app.ts".into(),
+                reveal_line: None,
+                reveal_request_id: 0,
+                attachment: None,
+            }),
+        );
+        let file_id = file.id.clone();
+        store.closed_panel_tabs = vec![
+            file,
+            ClosedPanelTab::new(thread_ref(), RightPanelSurface::Diff),
+        ];
+        let entries = closed_view_entries_from_store(&store);
+        assert!(!try_reopen_closed_view(
+            &entries,
+            |_| known(empty_panel()),
+            &mut store,
+            false,
+        ));
+        assert_eq!(store.closed_panel_tabs.last().unwrap().id, file_id);
+        assert_eq!(store.closed_panel_tabs[0].surface.id(), "diff");
     }
 }

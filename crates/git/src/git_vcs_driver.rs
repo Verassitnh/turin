@@ -848,8 +848,10 @@ impl GitVcsDriver {
                         ));
                     }
                 }
-                remove_force(temp_index);
-                remove_force(PathBuf::from(format!("{}.lock", temp_index.display())));
+                let _ = tokio::fs::remove_file(temp_index).await;
+                let _ =
+                    tokio::fs::remove_file(PathBuf::from(format!("{}.lock", temp_index.display())))
+                        .await;
                 let args = if sparse_checkout {
                     let mut args = INDEX_CONFIG.map(str::to_owned).to_vec();
                     args.extend(owned([
@@ -1113,7 +1115,9 @@ impl GitVcsDriver {
         let mut exclusions = Vec::new();
         for entry in &candidates {
             let nested = Path::new(&input.cwd).join(entry);
-            if nested.join(".git").exists()
+            if tokio::fs::try_exists(nested.join(".git"))
+                .await
+                .unwrap_or(false)
                 && !self
                     .has_head_commit(&nested.display().to_string(), None, clear.clone())
                     .await?

@@ -10,6 +10,7 @@ pub mod chat_canvas_layout;
 pub mod assistant_text_selection;
 pub mod composer_pending_panels;
 pub mod composer_surface;
+// Copy-as-markdown for selections over rendered blocks; nothing calls it yet.
 pub mod markdown;
 pub mod message_copy_button;
 pub mod messages_timeline;
@@ -34,4 +35,7 @@ pub mod timeline_scroll_anchoring;
 #[allow(dead_code)]
 pub mod selection_actions;
 pub mod timestamp_format;
+// Find-in-thread logic. The timeline does not drive find yet, so nothing calls these.
+#[allow(dead_code)]
+pub mod thread_find;
 pub mod work_log;

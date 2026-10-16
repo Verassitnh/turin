@@ -2,14 +2,16 @@
 //!
 //! Upstream highlights with Shiki using the `pierre-light` / `pierre-dark`
 //! themes (`resolveDiffThemeName`, upstream/apps/web/src/lib/diffRendering.ts)
-//! and caches highlighted HTML in an LRU (`MAX_HIGHLIGHT_CACHE_ENTRIES`).
+//! and caches highlighted HTML in an LRU bounded by entries and bytes
+//! (`MAX_HIGHLIGHT_CACHE_ENTRIES`, `MAX_HIGHLIGHT_CACHE_MEMORY_BYTES`;
+//! `crate::lru_cache`).
 //! Turin parses with tree-sitter (gpui-component's grammars) and maps capture
 //! names onto the same theme colors (values from `@pierre/theme`'s
 //! `tokenColors` / `semanticTokenColors`). Results are cached by
 //! (code hash, language, appearance) so a frame never re-highlights.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
@@ -18,10 +20,13 @@ use gpui_kit::component::Rope;
 use gpui_kit::component::highlighter::{LanguageRegistry, SyntaxHighlighter};
 use gpui_kit::{HighlightStyle, Hsla, Rgba};
 
+use crate::lru_cache::LruCache;
 use crate::theme::color::hex;
 
 /// `MAX_HIGHLIGHT_CACHE_ENTRIES`.
 const MAX_HIGHLIGHT_CACHE_ENTRIES: usize = 500;
+/// `MAX_HIGHLIGHT_CACHE_MEMORY_BYTES`.
+const MAX_HIGHLIGHT_CACHE_MEMORY_BYTES: usize = 50 * 1024 * 1024;
 
 /// Token colors of one pierre theme.
 struct PierreTheme {
@@ -162,14 +167,11 @@ struct CacheKey {
     dark: bool,
 }
 
-#[derive(Default)]
-struct Cache {
-    entries: HashMap<CacheKey, Arc<HighlightedCode>>,
-    order: VecDeque<CacheKey>,
-}
-
 thread_local! {
-    static CACHE: RefCell<Cache> = RefCell::default();
+    static CACHE: RefCell<LruCache<CacheKey, Arc<HighlightedCode>>> = RefCell::new(LruCache::new(
+        MAX_HIGHLIGHT_CACHE_ENTRIES,
+        MAX_HIGHLIGHT_CACHE_MEMORY_BYTES,
+    ));
     static HIGHLIGHTERS: RefCell<HashMap<String, SyntaxHighlighter>> = RefCell::default();
 }
 
@@ -195,6 +197,14 @@ fn registry_language(language: &str) -> String {
     }
 }
 
+/// `estimateHighlightedSize`: upstream sizes the HTML (`html.length * 2`) or the
+/// source (`code.length * 3`), whichever is larger; here the token list stands
+/// in for the HTML.
+fn estimate_highlighted_size(highlighted: &HighlightedCode, code: &str) -> usize {
+    let tokens_bytes = highlighted.tokens.len() * std::mem::size_of::<(Range<usize>, Hsla)>();
+    tokens_bytes.max(code.len() * 3)
+}
+
 /// Highlights `code` for `language`, cached.
 pub fn highlight_code(code: &str, language: &str, dark: bool) -> Arc<HighlightedCode> {
     let theme = if dark { &PIERRE_DARK } else { &PIERRE_LIGHT };
@@ -206,7 +216,7 @@ pub fn highlight_code(code: &str, language: &str, dark: bool) -> Arc<Highlighted
         language: registry_language(language),
         dark,
     };
-    if let Some(hit) = CACHE.with(|cache| cache.borrow().entries.get(&key).cloned()) {
+    if let Some(hit) = CACHE.with(|cache| cache.borrow_mut().get(&key).cloned()) {
         return hit;
     }
     let tokens = if LanguageRegistry::singleton()
@@ -235,14 +245,11 @@ pub fn highlight_code(code: &str, language: &str, dark: bool) -> Arc<Highlighted
         tokens,
     });
     CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.entries.len() >= MAX_HIGHLIGHT_CACHE_ENTRIES
-            && let Some(oldest) = cache.order.pop_front()
-        {
-            cache.entries.remove(&oldest);
-        }
-        cache.order.push_back(key.clone());
-        cache.entries.insert(key, result.clone());
+        cache.borrow_mut().set(
+            key,
+            result.clone(),
+            estimate_highlighted_size(&result, code),
+        );
     });
     result
 }

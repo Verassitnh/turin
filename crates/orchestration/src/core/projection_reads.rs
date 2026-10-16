@@ -6,12 +6,16 @@
 
 use async_trait::async_trait;
 use turin_contracts::{
-    PlanId, ProviderSessionId, ProviderTurnId, ThreadId,
+    MessageId, PlanId, ProviderSessionId, ProviderThreadId, ProviderTurnId, RunAttemptId, RunId,
+    ThreadId,
     orchestration_v2::{
-        OrchestrationV2AppThread, OrchestrationV2ExecutionNode,
+        OrchestrationV2AppThread, OrchestrationV2ConversationMessage,
+        OrchestrationV2DelegatedCompletionCohort, OrchestrationV2ExecutionNode,
         OrchestrationV2PendingBackgroundTask, OrchestrationV2PlanArtifact,
-        OrchestrationV2ProviderTurnStatus, OrchestrationV2RuntimeRequestKind,
-        OrchestrationV2RuntimeRequestStatus, OrchestrationV2TurnItem,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderTurn,
+        OrchestrationV2ProviderTurnStatus, OrchestrationV2Run, OrchestrationV2RunAttempt,
+        OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
+        OrchestrationV2TurnItem,
     },
 };
 
@@ -212,5 +216,137 @@ impl IngestReads for ProjectionStore {
                 .as_deref()
                 == Some(plan_id.as_str())
         }))
+    }
+}
+
+/// What a provider-turn control command targets: the provider thread and turn,
+/// and optionally the attempt and the steering message.
+#[derive(Debug, Clone)]
+pub struct ProviderControlTarget {
+    pub provider_thread_id: ProviderThreadId,
+    pub provider_turn_id: ProviderTurnId,
+    pub attempt_id: Option<RunAttemptId>,
+    pub message_id: Option<MessageId>,
+}
+
+/// The records a control command reads. `run` is the message's run, and only
+/// when the target names a message and the turn exists (upstream's rule).
+#[derive(Debug, Clone, Default)]
+pub struct ProviderControlContext {
+    pub provider_thread: Option<OrchestrationV2ProviderThread>,
+    pub provider_turn: Option<OrchestrationV2ProviderTurn>,
+    pub attempt: Option<OrchestrationV2RunAttempt>,
+    pub message: Option<OrchestrationV2ConversationMessage>,
+    pub run: Option<OrchestrationV2Run>,
+}
+
+/// The provider-control read (`getProviderControlContext`). Reads the whole
+/// record kinds through `get_thread_records`, narrowed by the target's ids. A
+/// targeted SQL read is a perf follow-up.
+#[async_trait]
+pub trait ProviderControlReads: Send + Sync {
+    async fn provider_control_context(
+        &self,
+        thread_id: &ThreadId,
+        target: &ProviderControlTarget,
+    ) -> Result<ProviderControlContext, BoxError>;
+
+    /// The delegated-completion cohort of a run, if it has one (steer ownership).
+    async fn run_delegated_completion(
+        &self,
+        thread_id: &ThreadId,
+        run_id: &RunId,
+    ) -> Result<Option<OrchestrationV2DelegatedCompletionCohort>, BoxError>;
+}
+
+#[async_trait]
+impl ProviderControlReads for ProjectionStore {
+    async fn provider_control_context(
+        &self,
+        thread_id: &ThreadId,
+        target: &ProviderControlTarget,
+    ) -> Result<ProviderControlContext, BoxError> {
+        let filter = ProjectionRecordFilter {
+            message_ids: target
+                .message_id
+                .as_ref()
+                .map(|id| vec![id.as_str().to_owned()]),
+            ..ProjectionRecordFilter::default()
+        };
+        let projection = self
+            .get_thread_records(
+                thread_id,
+                vec![
+                    ProjectionRecordField::ProviderThreads,
+                    ProjectionRecordField::ProviderTurns,
+                    ProjectionRecordField::Attempts,
+                    ProjectionRecordField::Messages,
+                    ProjectionRecordField::Runs,
+                ],
+                Some(filter),
+            )
+            .await
+            .map_err(|error| Box::new(error) as BoxError)?;
+        let provider_thread = projection
+            .provider_threads
+            .iter()
+            .find(|thread| thread.id == target.provider_thread_id)
+            .cloned();
+        let provider_turn = projection
+            .provider_turns
+            .iter()
+            .find(|turn| turn.id == target.provider_turn_id)
+            .cloned();
+        let attempt = target.attempt_id.as_ref().and_then(|id| {
+            projection
+                .attempts
+                .iter()
+                .find(|attempt| &attempt.id == id)
+                .cloned()
+        });
+        let message = target.message_id.as_ref().and_then(|id| {
+            projection
+                .messages
+                .iter()
+                .find(|message| &message.id == id)
+                .cloned()
+        });
+        let run = match (&message, &provider_turn) {
+            (Some(message), Some(_)) => message.run_id.as_ref().and_then(|run_id| {
+                projection
+                    .runs
+                    .iter()
+                    .find(|run| &run.id == run_id)
+                    .cloned()
+            }),
+            _ => None,
+        };
+        Ok(ProviderControlContext {
+            provider_thread,
+            provider_turn,
+            attempt,
+            message,
+            run,
+        })
+    }
+
+    async fn run_delegated_completion(
+        &self,
+        thread_id: &ThreadId,
+        run_id: &RunId,
+    ) -> Result<Option<OrchestrationV2DelegatedCompletionCohort>, BoxError> {
+        let filter = ProjectionRecordFilter {
+            run_ids: Some(vec![run_id.clone()]),
+            ..ProjectionRecordFilter::default()
+        };
+        let projection = self
+            .get_thread_records(thread_id, vec![ProjectionRecordField::Runs], Some(filter))
+            .await
+            .map_err(|error| Box::new(error) as BoxError)?;
+        Ok(projection
+            .runs
+            .into_iter()
+            .find(|run| &run.id == run_id)
+            .and_then(|run| run.delegated_completion))
     }
 }

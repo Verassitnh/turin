@@ -9,9 +9,8 @@
 //! the command commits. These traits are the contract the turn port (T13e)
 //! implements: an [`EffectExecutor`](crate::pipeline::effect_worker::EffectExecutor)
 //! calls the turn traits, and the composition root hands the decider a
-//! [`RestartRecovery`]. `ProviderSwitchPlanner` lands with the `provider.switch`
-//! handler, because its plan carries `ProviderSessionTransition`, which is not
-//! ported yet.
+//! [`RestartRecovery`]. `RuntimeRequestResponder` and `ProviderSwitchPlanner`
+//! are implemented by T13e's `RuntimeRequestService` and `ProviderSwitchService`.
 //!
 //! Errors are `BoxError` on purpose. The decider wraps them as
 //! `OrchestratorError::Dispatch` or `Projection`, so each service keeps its own
@@ -21,14 +20,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use turin_contracts::{
-    NodeId, ProjectId, ProviderSessionId, ProviderThreadId, ProviderTurnId, RunId,
-    RuntimeRequestId, ThreadId, UtcDateTime,
+    NodeId, ProjectId, ProviderSessionId, ProviderThreadId, ProviderTurnId, RunId, ThreadId,
+    UtcDateTime,
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2CheckpointScope, OrchestrationV2Run, OrchestrationV2ThreadProjection,
     },
     provider_instance::ProviderInstanceId,
-    provider_policy::ProviderApprovalDecision,
 };
 use turin_provider_core::provider_adapter::{ProviderAdapterV2, ProviderAdapterV2SubagentOutcome};
 
@@ -103,19 +101,22 @@ pub trait ProviderTurnControl: Send + Sync {
 }
 
 /// `RuntimeRequestServiceV2.respond`: answers an approval or a user-input
-/// request that a live session is waiting on.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RuntimeRequestResponse {
-    pub thread_id: ThreadId,
-    pub provider_session_id: ProviderSessionId,
-    pub request_id: RuntimeRequestId,
-    pub decision: Option<ProviderApprovalDecision>,
-    pub answers: Option<turin_contracts::provider_policy::ProviderUserInputAnswers>,
-}
+/// request that a live session is waiting on. Re-exported so the decider and
+/// the service share one type.
+pub use crate::core::runtime_request_service::RuntimeRequestResponse;
 
 #[async_trait]
 pub trait RuntimeRequestResponder: Send + Sync {
     async fn respond(&self, response: RuntimeRequestResponse) -> Result<(), BoxError>;
+}
+
+#[async_trait]
+impl RuntimeRequestResponder for crate::core::runtime_request_service::RuntimeRequestService {
+    async fn respond(&self, response: RuntimeRequestResponse) -> Result<(), BoxError> {
+        crate::core::runtime_request_service::RuntimeRequestService::respond(self, response)
+            .await
+            .map_err(|error| Box::new(error) as BoxError)
+    }
 }
 
 /// Why `ProviderRuntimeRecoveryService.reconcile` runs.
@@ -252,15 +253,8 @@ impl CheckpointScopes for UnwiredCheckpointScopes {
 
 /// The provider-session part of a model or provider change, the
 /// `ProviderSwitchServiceV2.plan` output. Used by `thread.model-selection.set`
-/// and `provider.switch`. The transition type (`ProviderSessionTransition`) is
-/// not ported yet, so only the fields the decider reads are here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderSwitchPlan {
-    pub instance_changed: bool,
-    pub model_changed: bool,
-    pub target_provider_thread_id: Option<ProviderThreadId>,
-    pub release_provider_session_ids: Vec<ProviderSessionId>,
-}
+/// and `provider.switch`. Re-exported from the switch service.
+pub use crate::core::provider_switch_service::ProviderSwitchPlan;
 
 #[async_trait]
 pub trait ProviderSwitchPlanner: Send + Sync {
@@ -269,6 +263,19 @@ pub trait ProviderSwitchPlanner: Send + Sync {
         thread: &OrchestrationV2ThreadProjection,
         target: &ModelSelection,
     ) -> Result<ProviderSwitchPlan, BoxError>;
+}
+
+#[async_trait]
+impl ProviderSwitchPlanner for crate::core::provider_switch_service::ProviderSwitchService {
+    async fn plan(
+        &self,
+        thread: &OrchestrationV2ThreadProjection,
+        target: &ModelSelection,
+    ) -> Result<ProviderSwitchPlan, BoxError> {
+        crate::core::provider_switch_service::ProviderSwitchService::plan(self, thread, target)
+            .await
+            .map_err(|error| Box::new(error) as BoxError)
+    }
 }
 
 /// [`ProviderSwitchPlanner`] before the switch port lands. Refuses every plan.

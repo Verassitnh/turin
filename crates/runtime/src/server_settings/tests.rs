@@ -1,5 +1,5 @@
 use serde_json::json;
-use turin_contracts::settings::default_server_settings;
+use turin_contracts::settings::{ServerSettingsPatch, default_server_settings};
 
 use super::*;
 
@@ -40,6 +40,17 @@ fn legacy_keys_must_be_objects_when_present() {
 fn defaults_serialize_to_an_empty_sparse_object() {
     let text = sparse_settings_json(&default_server_settings()).unwrap();
     assert_eq!(text, "{}\n");
+}
+
+#[test]
+fn seed_patch_uses_sparse_form_not_full_settings_json() {
+    let settings = default_server_settings();
+    let full = serde_json::to_value(&settings).unwrap();
+    assert!(
+        serde_json::from_value::<ServerSettingsPatch>(full).is_err(),
+        "a full settings document carries explicit nulls patch decoding rejects"
+    );
+    server_settings_patch_from_seed(&settings).unwrap();
 }
 
 #[test]

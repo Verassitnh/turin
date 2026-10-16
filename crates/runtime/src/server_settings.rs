@@ -11,7 +11,8 @@ pub use service::ServerSettingsService;
 use serde_json::{Map, Value, json};
 use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceConfig};
 use turin_contracts::settings::{
-    ServerSettings, default_server_settings, resolve_provider_instance_enabled,
+    ServerSettings, ServerSettingsPatch, default_server_settings,
+    resolve_provider_instance_enabled,
 };
 use turin_shared::server_settings::{
     derive_legacy_project_overrides, fallback_text_generation_model_selection,
@@ -121,6 +122,20 @@ pub fn strip_default(current: &Value, defaults: &Value) -> Option<Value> {
 /// The sparse JSON text written to the settings file, with a trailing newline.
 pub fn sparse_settings_json(settings: &ServerSettings) -> serde_json::Result<String> {
     sparse_settings_json_retaining(settings, &Map::new())
+}
+
+/// Builds a [`ServerSettingsPatch`] from a full settings snapshot using the
+/// same sparse representation as [`sparse_settings_json`]. Seeding a new data
+/// directory must not round-trip through an untyped full document: nullable
+/// settings fields serialize as explicit JSON nulls, which patch decoding
+/// rejects as invalid values for non-nullable keys.
+pub fn server_settings_patch_from_seed(
+    settings: &ServerSettings,
+) -> serde_json::Result<ServerSettingsPatch> {
+    let current = serde_json::to_value(settings)?;
+    let defaults = serde_json::to_value(default_server_settings())?;
+    let sparse = strip_default(&current, &defaults).unwrap_or_else(|| json!({}));
+    serde_json::from_value(sparse)
 }
 
 /// [`sparse_settings_json`] with `retained` keys written beside the settings

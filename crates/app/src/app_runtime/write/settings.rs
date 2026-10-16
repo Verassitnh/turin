@@ -125,7 +125,8 @@ pub async fn open_settings(
     let service = ServerSettingsService::new(path, secrets, db);
     let watcher = service.start().await.context("starting settings service")?;
     if !exists {
-        let patch = serde_json::from_value(serde_json::to_value(initial)?)?;
+        let patch = turin_runtime::server_settings::server_settings_patch_from_seed(initial)
+            .context("building initial settings patch from startup configuration")?;
         service
             .update_settings(&patch)
             .await

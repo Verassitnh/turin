@@ -11,6 +11,7 @@ mod diff;
 #[cfg(target_os = "macos")]
 mod dock_icon;
 mod hooks;
+mod onboarding;
 mod project_icon_colors;
 mod project_identity;
 mod pull_request;
@@ -33,6 +34,8 @@ mod utils;
 use gpui_kit::*;
 
 use components::app_sidebar_layout::{self, AppSidebarLayout};
+use components::onboarding::first_run_gate::FirstRunGate;
+use components::onboarding::mock_source::{FirstRunScenario, MockOnboardingBackend};
 
 /// Upstream's Electron window: 1100×780 default, 840×620 minimum,
 /// `titleBarStyle: "hiddenInset"` with the traffic lights centred in the
@@ -78,6 +81,59 @@ fn dev_overrides(cx: &mut App) -> bool {
     std::env::var("TURIN_RIGHT_PANEL").is_ok_and(|v| v == "1")
 }
 
+const FIRST_RUN_DECISION_TIMEOUT_MS: u64 = 4_000;
+
+/// Screenshot harness: `TURIN_SHOT=<file.png>` captures the app window once it
+/// settled (`TURIN_SHOT_DELAY_MS`, default 3500) and quits. `TURIN_WINID` names
+/// a helper that prints the CGWindowID of a pid's window, so only that window
+/// is captured, never the screen.
+fn schedule_screenshot(cx: &mut App) {
+    let Ok(path) = std::env::var("TURIN_SHOT") else {
+        return;
+    };
+    let mut delay = std::env::var("TURIN_SHOT_DELAY_MS")
+        .ok()
+        .and_then(|delay| delay.parse().ok())
+        .unwrap_or(3500);
+    match std::env::var("TURIN_FIRST_RUN").as_deref() {
+        Ok("stalled") => delay = delay.max(FIRST_RUN_DECISION_TIMEOUT_MS + 500),
+        Ok("settings-failed") => delay = delay.max(500),
+        _ => {}
+    }
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(delay))
+            .await;
+        let pid = std::process::id().to_string();
+        let tool = std::env::var("TURIN_WINID").unwrap_or_default();
+        let id = tool
+            .split_whitespace()
+            .next()
+            .map(|program| {
+                let mut winid = std::process::Command::new(program);
+                for arg in tool.split_whitespace().skip(1) {
+                    winid.arg(arg);
+                }
+                winid.arg(&pid).output()
+            })
+            .and_then(Result::ok)
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .map(|id| id.trim().to_owned())
+            .filter(|id| !id.is_empty());
+        match id {
+            Some(id) => {
+                let status = std::process::Command::new("screencapture")
+                    .args(["-x", "-o", "-l", &id, &path])
+                    .status();
+                tracing::info!(?status, %id, %path, "screenshot");
+            }
+            None => tracing::warn!("screenshot skipped: set TURIN_WINID"),
+        }
+        cx.update(|cx| cx.quit());
+    })
+    .detach();
+}
+
 fn main() {
     tracing_subscriber::fmt::init();
     // The view-model reducers and the read path run on tokio, off the UI thread.
@@ -108,25 +164,36 @@ fn main() {
             let right_panel = dev_overrides(cx);
             // Dev hook: `TURIN_SETTINGS=<page>` shows the settings window on mock data.
             if settings::demo::open_if_requested(window_options(cx), cx) {
+                schedule_screenshot(cx);
+                cx.activate(true);
                 return;
             }
             let handle = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
-                cx.new(|cx| {
+                let layout = cx.new(|cx| {
                     let mut layout = AppSidebarLayout::new(window, cx);
                     layout.set_right_panel_open(right_panel);
+                    // Screenshot harness: `TURIN_PAGE=usage` opens the Usage route.
+                    if std::env::var("TURIN_PAGE").is_ok_and(|page| page == "usage") {
+                        layout.open_usage(window, cx);
+                    }
                     layout
-                })
+                });
+                // T22 swaps the mock backend for the live settings and workspace state.
+                let backend = MockOnboardingBackend::shared(FirstRunScenario::from_env());
+                cx.new(|_| FirstRunGate::new(backend.clone(), backend, true, layout))
             })
             .expect("failed to open window");
             // Dev hook: `TURIN_PULL_REQUESTS_DEMO` shows the pull request views on the mock source.
             if let Some(scenario) = pull_request::demo::scenario_from_env() {
-                let (window_handle, layout) = handle;
+                let (window_handle, gate_entity) = handle;
+                let layout = gate_entity.read(cx).layout().clone();
                 window_handle
                     .update(cx, |_, window, cx| {
                         pull_request::demo::install(&layout, scenario, window, cx)
                     })
                     .ok();
             }
+            schedule_screenshot(cx);
             cx.activate(true);
         });
 }

@@ -42,7 +42,10 @@ use super::thread_sidebar_width::{
     THREAD_SIDEBAR_DEFAULT_WIDTH, THREAD_SIDEBAR_MIN_WIDTH, clamp_thread_sidebar_width,
     resolve_initial_thread_sidebar_width, resolve_thread_sidebar_maximum_width,
 };
+use super::usage::mock_source::{MockUsageBackend, UsageScenario};
+use super::usage::usage_page::{UsagePage, UsagePageEvent};
 use super::workspace_titlebar::workspace_controls_left;
+use crate::hooks::use_local_storage::MemoryLocalStorage;
 use crate::hooks::use_preview_panel_inline_size::{
     PREVIEW_PANEL_DEFAULT_WIDTH, clamp_preview_panel_width, get_preview_panel_max_width,
 };
@@ -66,6 +69,8 @@ actions!(
         ToggleRightPanel,
         /// `threadDetails.toggle` (mod+shift+b).
         ToggleThreadDetails,
+        /// `usage.open` (mod+u).
+        OpenUsage,
     ]
 );
 
@@ -78,6 +83,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-b", ToggleSidebar, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-b", ToggleThreadDetails, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-u", OpenUsage, Some(KEY_CONTEXT)),
     ]);
     thread_sidebar::bind_keys(cx, KEY_CONTEXT);
     command_palette::bind_keys(cx, KEY_CONTEXT);
@@ -102,6 +108,12 @@ struct ResizeDrag {
 /// useResizeDrag's 2px "moved" threshold.
 const RESIZE_CLICK_SLOP: f32 = 2.;
 
+/// `/usage`: the page and its Escape-to-go-back subscription.
+struct UsageRoute {
+    page: Entity<UsagePage>,
+    _subscription: Subscription,
+}
+
 pub struct AppSidebarLayout {
     focus_handle: FocusHandle,
     sidebar_open: bool,
@@ -125,6 +137,8 @@ pub struct AppSidebarLayout {
     palette: Entity<CommandPalette>,
     git_host: Entity<ChatGitHost>,
     thread_details_open: bool,
+    /// The routed page when it is not a thread (upstream: the router).
+    usage: Option<UsageRoute>,
     _appearance: Subscription,
     _sidebar_events: Subscription,
     _palette_events: Subscription,
@@ -177,10 +191,40 @@ impl AppSidebarLayout {
             palette,
             git_host,
             thread_details_open: std::env::var("TURIN_THREAD_DETAILS").is_ok_and(|v| v == "1"),
+            usage: None,
             _appearance: appearance,
             _sidebar_events: sidebar_events,
             _palette_events: palette_events,
         }
+    }
+
+    /// `navigate({ to: "/usage" })`.
+    pub fn open_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.usage.is_some() {
+            return;
+        }
+        // T22 swaps the mock backend for the live usage service.
+        let backend = MockUsageBackend::shared(UsageScenario::from_env());
+        let page = cx.new(|cx| {
+            let mut page = UsagePage::new(backend, MemoryLocalStorage::shared(), window, cx);
+            page.apply_dev_overrides(window, cx);
+            page
+        });
+        let subscription = cx.subscribe(&page, |this, _, event: &UsagePageEvent, cx| match event {
+            UsagePageEvent::Back => {
+                this.usage = None;
+                cx.notify();
+            }
+        });
+        self.usage = Some(UsageRoute {
+            page,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn open_usage_action(&mut self, _: &OpenUsage, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_usage(window, cx);
     }
 
     /// Hands the palette the routed thread so its contextual items target it.
@@ -257,7 +301,7 @@ impl AppSidebarLayout {
                 cx.notify();
             }
             CommandPaletteEvent::OpenPullRequests => unavailable("Pull requests", window, cx),
-            CommandPaletteEvent::OpenUsage => unavailable("Usage", window, cx),
+            CommandPaletteEvent::OpenUsage => self.open_usage(window, cx),
             CommandPaletteEvent::OpenSettings | CommandPaletteEvent::OpenSetting { .. } => {
                 unavailable("Settings", window, cx)
             }
@@ -309,9 +353,15 @@ impl AppSidebarLayout {
     ) {
         match event {
             SidebarEvent::Navigate(_) => {
+                // Screenshot runs (`TURIN_PAGE`) keep their route: under load the
+                // sidebar's startup selection can land well after the window opens.
+                if std::env::var_os("TURIN_PAGE").is_none() {
+                    self.usage = None;
+                }
                 self.sync_palette_context(cx);
                 cx.notify();
             }
+            SidebarEvent::OpenUsage => self.open_usage(window, cx),
             SidebarEvent::OpenPullRequests(_) => {
                 self.right_panel_open = true;
                 cx.notify();
@@ -324,7 +374,6 @@ impl AppSidebarLayout {
                     SidebarEvent::OpenProjectSettings(_) => "Project settings",
                     SidebarEvent::OpenSettings => "Settings",
                     SidebarEvent::OpenPullRequestsPage => "Pull requests",
-                    SidebarEvent::OpenUsage => "Usage",
                     _ => "",
                 };
                 window.push_notification(
@@ -533,7 +582,13 @@ impl Render for AppSidebarLayout {
             get_preview_panel_max_width(viewport_width, Some(self.main_width(viewport_width))),
         );
         let sidebar_open = self.sidebar_open;
-        let right_panel_open = self.right_panel_open;
+        // The usage route has no right panel or layout controls.
+        let usage_page = self.usage.as_ref().map(|route| route.page.clone());
+        if let Some(page) = &usage_page {
+            page.update(cx, |page, _| page.sidebar_open = sidebar_open);
+        }
+        let on_usage = usage_page.is_some();
+        let right_panel_open = self.right_panel_open && !on_usage;
         let maximized = right_panel_open && self.right_panel_maximized;
         let resizing = self.resizing.map(|drag| drag.target);
         let routed_thread = self.routed_thread(cx);
@@ -669,6 +724,7 @@ impl Render for AppSidebarLayout {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_right_panel))
             .on_action(cx.listener(Self::toggle_thread_details))
+            .on_action(cx.listener(Self::open_usage_action))
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_file_picker))
             .on_action(cx.listener(Self::toggle_project_search))
@@ -714,15 +770,18 @@ impl Render for AppSidebarLayout {
                     .child(
                         SidebarInset::new()
                             .with(|this| this.flex_row().h_full())
-                            .when(!maximized, |this| match self.main_content.clone() {
-                                Some(content) => this.child(content),
-                                None => this.child(ChatView {
-                                    sidebar_open,
-                                    right_panel_open,
-                                    thread: routed_thread.clone(),
-                                    git_host: self.git_host.clone(),
-                                    thread_details_open: self.thread_details_open,
-                                }),
+                            .when_some(usage_page.clone(), |this, page| this.child(page))
+                            .when(!maximized && !on_usage, |this| {
+                                match self.main_content.clone() {
+                                    Some(content) => this.child(content),
+                                    None => this.child(ChatView {
+                                        sidebar_open,
+                                        right_panel_open,
+                                        thread: routed_thread.clone(),
+                                        git_host: self.git_host.clone(),
+                                        thread_details_open: self.thread_details_open,
+                                    }),
+                                }
                             })
                             .when(right_panel_open, |this| {
                                 this.child(
@@ -753,7 +812,7 @@ impl Render for AppSidebarLayout {
                 this.child(right_panel_handle)
             })
             .child(sidebar_toggle)
-            .child(layout_controls)
+            .when(!on_usage, |this| this.child(layout_controls))
             .children(self.overlay.clone())
             // The ⌘K overlay renders last so it covers the whole window.
             .child(self.palette.clone())

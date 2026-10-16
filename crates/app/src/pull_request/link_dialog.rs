@@ -27,7 +27,8 @@ use super::link_pull_request_dialog_logic::{
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::TEXT_XS;
 use crate::ui::dialog::{
-    dialog_description, dialog_footer, dialog_header, dialog_overlay, dialog_panel, dialog_title,
+    dialog_description, dialog_overlay, dialog_title, overlay_dialog_footer, overlay_dialog_header,
+    overlay_dialog_panel,
 };
 use crate::ui::text_input::text_input_frame;
 use crate::ui::{Button, ButtonSize, ButtonVariant};
@@ -184,7 +185,7 @@ impl Render for LinkPullRequestDialog {
                 .flex()
                 .flex_col()
                 .child(
-                    dialog_header(true)
+                    overlay_dialog_header(true)
                         .child(dialog_title("Link pull request"))
                         .child(dialog_description(
                             "Attach a pull request to this thread by its URL, or by its number for this thread's repository.",
@@ -192,7 +193,7 @@ impl Render for LinkPullRequestDialog {
                         )),
                 )
                 .child(
-                    dialog_panel()
+                    overlay_dialog_panel()
                         .child(
                             text_input_frame(cx)
                                 .child(Input::new(&self.input).appearance(false).bordered(false)),
@@ -212,7 +213,7 @@ impl Render for LinkPullRequestDialog {
                         })),
                 )
                 .child(
-                    dialog_footer(cx)
+                    overlay_dialog_footer(cx)
                         .child(
                             Button::new("link-dialog-cancel")
                                 .variant(ButtonVariant::Outline)

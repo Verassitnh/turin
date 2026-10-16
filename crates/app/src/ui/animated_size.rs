@@ -8,7 +8,7 @@
 //! The CSS transition is [`css_ease_out`] (cubic-bezier(0, 0, 0.2, 1)) over
 //! 200ms (width: 150ms).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, App, ElementId, Entity, IntoElement, ParentElement,
@@ -110,12 +110,22 @@ pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
     from + (to - from) * t
 }
 
+/// The height a running travel `from -> to` has reached after `elapsed`.
+/// CSS `transition-[height]` retargets from this computed value, not from the
+/// previous end value.
+pub fn in_flight_height(from: f64, to: f64, elapsed: Duration) -> f64 {
+    let progress = (elapsed.as_secs_f32() / (HEIGHT_TRANSITION_MS as f32 / 1000.)).min(1.);
+    f64::from(lerp(from as f32, to as f32, css_ease_out(progress)))
+}
+
 /// Measured state behind one [`AnimatedHeight`]: upstream's `heightState`
 /// plus the height the current travel starts from.
 #[derive(Default)]
 struct AnimatedHeightState {
     height: HeightState,
     from: Option<f64>,
+    /// When the current travel began (for retargeting mid-flight).
+    started: Option<Instant>,
     epoch: u64,
 }
 
@@ -147,7 +157,14 @@ fn apply_measurement(state: &Entity<AnimatedHeightState>, content_height: f32, c
         return;
     }
     let epoch = state.update(cx, |state, cx| {
-        state.from = current.height;
+        let now = Instant::now();
+        state.from = match (state.from, current.height, state.started) {
+            (Some(from), Some(to), Some(started)) if current.is_clipping => {
+                Some(in_flight_height(from, to, now.duration_since(started)))
+            }
+            _ => current.height,
+        };
+        state.started = Some(now);
         state.height = updated;
         state.epoch += 1;
         cx.notify();
@@ -312,6 +329,20 @@ mod tests {
         assert!(!settled.is_clipping);
         assert_eq!(settled.height, Some(64.));
         assert_eq!(clear_clipping(settled), settled);
+    }
+
+    #[test]
+    fn retargeting_starts_from_the_in_flight_height() {
+        let half = Duration::from_millis(HEIGHT_TRANSITION_MS / 2);
+        let mid = in_flight_height(40., 100., half);
+        assert!(mid > 40. && mid < 100., "mid-flight height {mid}");
+        // ease-out is past the linear midpoint at half time.
+        assert!(mid > 70., "ease-out midpoint {mid}");
+        assert_eq!(in_flight_height(40., 100., Duration::ZERO), 40.);
+        assert_eq!(
+            in_flight_height(40., 100., Duration::from_millis(HEIGHT_TRANSITION_MS * 2)),
+            100.
+        );
     }
 
     #[test]

@@ -124,6 +124,10 @@ impl UiGallery {
     }
 }
 
+/// Window-relative origin and size of the anchor box the anchored toast sits under.
+type Xy = (gpui_kit::Pixels, gpui_kit::Pixels);
+const ANCHOR_BOUNDS: (Xy, Xy) = ((px(120.), px(180.)), (px(120.), px(32.)));
+
 fn seed_toasts(expanded: bool, _: &mut Window, cx: &mut Context<UiGallery>) {
     let stack = toast_manager(cx);
     let anchored = anchored_toast_manager(cx);
@@ -164,7 +168,10 @@ fn seed_toasts(expanded: bool, _: &mut Window, cx: &mut Context<UiGallery>) {
                 .type_(ToastType::Success)
                 .timeout(0)
                 .anchor(ToastAnchor {
-                    bounds: Bounds::new(point(px(120.), px(180.)), size(px(120.), px(32.))),
+                    bounds: Bounds::new(
+                        point(ANCHOR_BOUNDS.0.0, ANCHOR_BOUNDS.0.1),
+                        size(ANCHOR_BOUNDS.1.0, ANCHOR_BOUNDS.1.1),
+                    ),
                     side_offset: 4.,
                 }),
             cx,
@@ -218,6 +225,7 @@ impl Render for UiGallery {
             GalleryPage::Toasts => "Toasts (collapsed)",
             GalleryPage::ToastsExpanded => "Toasts (expanded)",
         };
+        let is_toasts = matches!(self.page, GalleryPage::Toasts | GalleryPage::ToastsExpanded);
         let stack = self.toast_viewport.clone();
         let anchored = self.anchored_viewport.clone();
         div()
@@ -245,6 +253,25 @@ impl Render for UiGallery {
                     )
                     .child(page),
             )
+            .when(is_toasts, |root| {
+                // Window-level so its bounds match the seeded anchor
+                // (`ANCHOR_BOUNDS`), not the padded page column.
+                root.child(
+                    div()
+                        .absolute()
+                        .top(ANCHOR_BOUNDS.0.1)
+                        .left(ANCHOR_BOUNDS.0.0)
+                        .w(ANCHOR_BOUNDS.1.0)
+                        .h(ANCHOR_BOUNDS.1.1)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(RADIUS_LG)
+                        .border_1()
+                        .border_color(theme.border)
+                        .child("Anchor"),
+                )
+            })
             .child(stack)
             .child(anchored)
     }
@@ -789,18 +816,6 @@ impl UiGallery {
             .text_color(theme.muted_foreground)
             .child("Success, stacked-action info, and a long error with a copy button.")
             .child("An anchored toast sits under the box at the left.")
-            .child(
-                div()
-                    .absolute()
-                    .top(px(180.))
-                    .left(px(120.))
-                    .w(px(120.))
-                    .h(px(32.))
-                    .rounded(RADIUS_LG)
-                    .border_1()
-                    .border_color(theme.border)
-                    .child("Anchor"),
-            )
             .into_any_element()
     }
 }

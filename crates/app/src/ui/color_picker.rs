@@ -116,6 +116,14 @@ pub fn hue_thumb_origin(hue: f64, span: f64) -> f64 {
     (hue / 360.) * (span - 16.) + 8.
 }
 
+/// Margin that moves a knob placed at `left = relative(amount)` so its centre
+/// lands on `amount * (span - size) + size / 2`, like upstream's
+/// `calc(amount * (100% - size) + size / 2)` with `-translate-1/2`.
+/// GPUI has no translate, so the left/top edge is `amount * span - size * amount`.
+pub fn thumb_margin(amount: f32, size: f32) -> f32 {
+    -size * amount
+}
+
 fn hue_color(hue: f64) -> Rgba {
     let (r, g, b) = hue_rgb(hue);
     solid(r, g, b, 1.)
@@ -295,8 +303,10 @@ impl RenderOnce for ColorSaturationValuePlane {
             let state = state.read(cx);
             (state.first.clone(), state.second.clone())
         };
-        let saturation_focused = saturation_focus.is_focused(window);
-        let brightness_focused = brightness_focus.is_focused(window);
+        // `focus-visible`: only keyboard focus draws the ring and readout.
+        let keyboard = window.last_input_was_keyboard();
+        let saturation_focused = saturation_focus.is_focused(window) && keyboard;
+        let brightness_focused = brightness_focus.is_focused(window) && keyboard;
         let focused = saturation_focused || brightness_focused;
         let height = if self.variant == PlaneVariant::Edge {
             px(144.)
@@ -404,8 +414,8 @@ impl RenderOnce for ColorSaturationValuePlane {
                     .absolute()
                     .left(relative(s))
                     .top(relative(1. - v))
-                    .ml(px(6. - 12. * s))
-                    .mt(px(6. - 12. * (1. - v)))
+                    .ml(px(thumb_margin(s, 12.)))
+                    .mt(px(thumb_margin(1. - v, 12.)))
                     .size(px(12.))
                     .rounded_full()
                     .border_2()
@@ -475,7 +485,7 @@ impl RenderOnce for ColorHueSlider {
         let theme = cx.app_theme().clone();
         let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| ColorControlState::new(cx));
         let focus = state.read(cx).first.clone();
-        let focused = focus.is_focused(window);
+        let focused = focus.is_focused(window) && window.last_input_was_keyboard();
         let value = self.value;
         let amount = (value / 360.) as f32;
         let stops = [0., 60., 120., 180., 240., 300., 360.];
@@ -564,7 +574,7 @@ impl RenderOnce for ColorHueSlider {
                     .absolute()
                     .top(relative(0.5))
                     .left(relative(amount))
-                    .ml(px(8. - 16. * amount))
+                    .ml(px(thumb_margin(amount, 16.)))
                     .mt(px(-8.))
                     .size(px(16.))
                     .rounded_full()
@@ -626,6 +636,20 @@ mod tests {
 
     #[test]
     fn thumbs_stay_inside_the_track() {
+        // Rendered left edge = amount * span + margin must equal the upstream
+        // centre (amount * (span - size) + size / 2) minus size / 2.
+        for span in [100.0_f32, 216., 288.] {
+            for amount in [0.0_f32, 0.25, 0.583, 1.] {
+                let plane_edge = amount * span + thumb_margin(amount, 12.);
+                let centre = plane_thumb_origin(f64::from(amount), f64::from(span)) as f32;
+                assert!((plane_edge - (centre - 6.)).abs() < 1e-3);
+                assert!(plane_edge >= 0. && plane_edge + 12. <= span + 1e-3);
+                let hue_edge = amount * span + thumb_margin(amount, 16.);
+                let hue_centre = hue_thumb_origin(f64::from(amount) * 360., f64::from(span)) as f32;
+                assert!((hue_edge - (hue_centre - 8.)).abs() < 1e-3);
+                assert!(hue_edge >= 0. && hue_edge + 16. <= span + 1e-3);
+            }
+        }
         assert_eq!(plane_thumb_origin(0., 100.), 6.);
         assert_eq!(plane_thumb_origin(1., 100.), 94.);
         assert_eq!(hue_thumb_origin(0., 200.), 8.);

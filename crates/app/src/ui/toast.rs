@@ -22,12 +22,12 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, Bounds, ClickEvent,
-    ClipboardItem, Context, CursorStyle, DispatchPhase, Div, Entity, FontWeight, Global,
-    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Render, SharedString, Stateful, StatefulInteractiveElement, Styled,
-    Subscription, Transformation, Window, anchored, canvas, deferred, div, percentage, point, px,
-    rems, svg,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, Bounds, BoxShadow,
+    ClickEvent, ClipboardItem, Context, CursorStyle, DispatchPhase, Div, Entity, FontWeight,
+    Global, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Render, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, Subscription, Transformation, Window, anchored, canvas,
+    deferred, div, percentage, point, px, rems, svg,
 };
 
 use super::animated_size::cubic_bezier;
@@ -650,6 +650,20 @@ pub fn anchored_toast_manager(cx: &App) -> Entity<ToastStore> {
 
 // ---- body -----------------------------------------------------------------
 
+/// `focus-visible:ring-2 ring-ring ring-offset-1 ring-offset-background`.
+/// GPUI has no inset rings, so the band is drawn outside the box with two
+/// zero-blur shadows (the wider ring colour first, the offset band over it).
+fn focus_ring(theme: &AppTheme) -> Vec<BoxShadow> {
+    let band = |spread: f32, color: Hsla| BoxShadow {
+        color,
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(spread),
+        inset: false,
+    };
+    vec![band(3., theme.ring), band(1., theme.background)]
+}
+
 /// `toastCornerOrbClass`, the dismiss-only circle on the card corner.
 fn corner_orb(
     id: ToastId,
@@ -658,6 +672,7 @@ fn corner_orb(
     theme: &AppTheme,
 ) -> Stateful<Div> {
     let store = store.clone();
+    let ring = focus_ring(theme);
     div()
         .id(SharedString::from(format!("toast-{id}-dismiss")))
         .on_mouse_down(MouseButton::Left, no_drag)
@@ -674,6 +689,8 @@ fn corner_orb(
         .shadow(tokens::shadow_sm(0.1))
         .cursor(CursorStyle::PointingHand)
         .hover(|style| style.bg(theme.popover).text_color(theme.foreground))
+        .tab_index(0)
+        .focus_visible(move |style| style.shadow(ring))
         .on_click(move |_: &ClickEvent, _, cx| {
             // `handleToastDismissClick`: the data callback, then close.
             if let Some(on_close) = &on_close {
@@ -751,13 +768,14 @@ fn copy_error_button(
 }
 
 /// `toastExpandablePanelClassName`.
-fn expandable_panel(content: AnyElement) -> impl IntoElement {
+fn expandable_panel(id: ToastId, content: AnyElement) -> impl IntoElement {
     div()
+        .id(SharedString::from(format!("toast-{id}-panel")))
         .mt_2()
         .max_h(rems(10.))
         .min_h_0()
         .pr(px(2.))
-        .overflow_hidden()
+        .overflow_y_scroll()
         .child(content)
 }
 
@@ -783,6 +801,7 @@ fn expandable_section(
     };
     let muted = theme.muted_foreground;
     let foreground = theme.foreground;
+    let ring = focus_ring(theme);
     div()
         .flex()
         .flex_col()
@@ -803,6 +822,8 @@ fn expandable_section(
                 .text_color(muted)
                 .cursor(CursorStyle::PointingHand)
                 .hover(move |style| style.text_color(foreground))
+                .tab_index(0)
+                .focus_visible(move |style| style.shadow(ring))
                 .on_click(move |_, window, cx| toggle(window, cx))
                 .child(
                     Icon::new(if open {
@@ -815,7 +836,7 @@ fn expandable_section(
                 )
                 .child(label),
         )
-        .when(open, |this| this.child(expandable_panel(content)))
+        .when(open, |this| this.child(expandable_panel(id, content)))
 }
 
 /// The card body, `ToastBodyContent` inside `Toast.Content`.
@@ -962,6 +983,7 @@ fn toast_body(
             };
             let hover = with_alpha(theme.muted, 0.4);
             let toggle_click = toggle.clone();
+            let ring = focus_ring(&theme);
             column = column
                 .child(
                     div()
@@ -975,6 +997,8 @@ fn toast_body(
                         .rounded(RADIUS_DEFAULT)
                         .cursor(CursorStyle::PointingHand)
                         .hover(move |style| style.bg(hover))
+                        .tab_index(0)
+                        .focus_visible(move |style| style.shadow(ring))
                         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
                         .on_click(move |_, window, cx| toggle_click(window, cx))
                         .child(div().min_w_0().flex_1().children(description_el))
@@ -990,7 +1014,7 @@ fn toast_body(
                             ),
                         ),
                 )
-                .when(open, |this| this.child(expandable_panel(content)));
+                .when(open, |this| this.child(expandable_panel(id, content)));
         }
     }
 

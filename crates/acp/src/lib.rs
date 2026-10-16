@@ -8,7 +8,9 @@ pub mod errors;
 pub mod meta;
 pub mod process;
 pub mod protocol;
+pub mod runtime_model;
 pub mod schema;
+pub mod session_config;
 pub mod stderr;
 
 pub use agent::AcpAgent;

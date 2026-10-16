@@ -7614,6 +7614,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "turin-contracts",
+ "turin-shared",
  "url",
  "uuid",
 ]
@@ -7660,6 +7661,21 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "turin-contracts",
+]
+
+[[package]]
+name = "turin-providers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "indexmap",
+ "pretty_assertions",
+ "tokio",
+ "tracing",
+ "turin-contracts",
+ "turin-orchestration",
+ "turin-provider-core",
+ "turin-runtime",
 ]
 
 [[package]]

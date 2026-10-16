@@ -1,0 +1,18 @@
+[package]
+name = "turin-providers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+indexmap.workspace = true
+turin-contracts.workspace = true
+turin-provider-core.workspace = true
+turin-runtime.workspace = true
+turin-orchestration.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tokio.workspace = true

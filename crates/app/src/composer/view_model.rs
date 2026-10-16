@@ -149,6 +149,12 @@ pub struct BannerItem {
     pub dismiss_label: Option<String>,
     /// Action buttons (label, id) the source resolves on click.
     pub actions: Vec<(String, String)>,
+    /// `variant="ghost"` actions instead of the default outline ones.
+    pub actions_ghost: bool,
+    /// Ids of `actions` rendered disabled.
+    pub disabled_actions: Vec<String>,
+    /// A failure shown under the actions (`<p role="alert" class="basis-full text-xs text-destructive">`).
+    pub error: Option<String>,
 }
 
 /// A queued run behind the active turn (`QueuedRunsControl`).

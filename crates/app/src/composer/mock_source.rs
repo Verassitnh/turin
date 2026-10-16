@@ -456,6 +456,9 @@ pub fn apply_demo_scenario(scenario: &str, vm: &mut ComposerViewModel) {
                     dismissible: true,
                     dismiss_label: Some("Dismiss usage limits".into()),
                     actions: Vec::new(),
+                    actions_ghost: false,
+                    disabled_actions: Vec::new(),
+                    error: None,
                 },
                 BannerItem {
                     id: "update".into(),
@@ -467,8 +470,23 @@ pub fn apply_demo_scenario(scenario: &str, vm: &mut ComposerViewModel) {
                     dismissible: true,
                     dismiss_label: None,
                     actions: vec![("Provider settings".into(), "open-settings".into())],
+                    actions_ghost: false,
+                    disabled_actions: Vec::new(),
+                    error: None,
                 },
             ];
+        }
+        "usage-limit" => {
+            use crate::components::chat::usage_limit_recovery_banner::{
+                RecoveryActionsState, demo_usage_limit_recovery_props,
+                usage_limit_recovery_banner_item,
+            };
+            let props = demo_usage_limit_recovery_props(3);
+            let state = RecoveryActionsState {
+                now_ms: chrono::Utc::now().timestamp_millis(),
+                ..Default::default()
+            };
+            vm.banners = vec![usage_limit_recovery_banner_item(&props, &state)];
         }
         "queue" => {
             vm.phase = SessionPhase::Running;

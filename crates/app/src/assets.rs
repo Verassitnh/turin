@@ -167,6 +167,8 @@ icon_assets!(
         CloudUpload,
         Computer,
         CornerLeftUp,
+        Gauge,
+        Quote,
         Unplug,
         FileSearch,
         FolderGit,

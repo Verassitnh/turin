@@ -117,6 +117,7 @@ impl RenderOnce for ChatView {
             right: layout.x + layout.width,
             bottom: layout.y + layout.height,
         });
+        let selection_toolbar = selection_toolbar_demo();
         let details_card = demo_card.map(|(_, card)| card).or_else(|| {
             self.thread_details_open
                 .then(|| self.git_host.read(cx).details_card(cx))
@@ -191,7 +192,8 @@ impl RenderOnce for ChatView {
                             .into_any_element(),
                     ))
                     // `ThreadDetailsCard` (inline): top right of the canvas.
-                    .children(details_card),
+                    .children(details_card)
+                    .children(selection_toolbar),
             )
     }
 }
@@ -240,6 +242,32 @@ fn thread_details_card(
         }
         .into_any_element(),
     ))
+}
+
+/// `TURIN_CHAT_DEMO=selection-toolbar`: the cite button over a made-up selection, until a GPUI
+/// text selection in the assistant markdown reports captures.
+fn selection_toolbar_demo() -> Option<gpui_kit::AnyElement> {
+    use super::chat::assistant_selection_toolbar::AssistantSelectionToolbar;
+    use super::chat::selection_actions::SelectionActionPoint;
+    if !std::env::var("TURIN_CHAT_DEMO").is_ok_and(|demo| demo.contains("selection-toolbar")) {
+        return None;
+    }
+    let long =
+        std::env::var("TURIN_CHAT_DEMO").is_ok_and(|demo| demo.contains("selection-too-long"));
+    Some(
+        AssistantSelectionToolbar {
+            citation_text: if long {
+                "word ".repeat(2_000).into()
+            } else {
+                "The timeline keeps following the bottom".into()
+            },
+            position: SelectionActionPoint { x: 640.0, y: 360.0 },
+            on_cite: std::rc::Rc::new(|_, _| true),
+            on_dismiss: std::rc::Rc::new(|_, _| {}),
+            on_clear_selection: std::rc::Rc::new(|_, _| {}),
+        }
+        .into_any_element(),
+    )
 }
 
 fn chat_overlay_banners() -> Vec<gpui_kit::AnyElement> {

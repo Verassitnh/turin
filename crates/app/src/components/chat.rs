@@ -2,10 +2,13 @@
 
 #[allow(dead_code)]
 pub mod agent_elapsed;
+// Needs a GPUI text selection to drive it; mounted from the demo until then.
 #[allow(dead_code)]
 pub mod agent_spawn_summary;
 #[allow(dead_code)]
 pub mod assistant_citation_navigation;
+#[allow(dead_code)]
+pub mod assistant_selection_toolbar;
 pub mod changed_files_tree;
 pub mod chat_canvas;
 #[allow(dead_code)]
@@ -20,12 +23,15 @@ pub mod chat_canvas_layout;
 pub mod provider_status_banner;
 pub mod subagent_tooltip_content;
 pub mod thread_error_banner;
+// The composer notice for a usage-limit stop; the composer source owns its action state.
 #[allow(dead_code)]
 pub mod thread_lineage_workflow_row;
 #[allow(dead_code)]
 pub mod thread_relationship_icon;
 #[allow(dead_code)]
 pub mod thread_relationships_control;
+#[allow(dead_code)]
+pub mod usage_limit_recovery_banner;
 // Pure citation-selector text logic; the DOM capture half is not ported yet.
 #[allow(dead_code)]
 pub mod assistant_text_selection;

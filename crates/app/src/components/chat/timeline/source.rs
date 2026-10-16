@@ -143,6 +143,10 @@ impl MockTimelineSource {
     /// Creates the store for the startup fixture and starts streaming.
     pub fn start(cx: &mut App) -> Entity<ThreadTimelineStore> {
         let mut thread = startup_thread();
+        // `TURIN_PENDING=none` clears the pending approval, for shots of what sits behind it.
+        if std::env::var("TURIN_PENDING").is_ok_and(|v| v == "none") {
+            thread.pending_approvals.clear();
+        }
         if std::env::var("TURIN_PENDING").is_ok_and(|v| v == "question") {
             thread.pending_approvals.clear();
             thread = with_pending_question(thread);

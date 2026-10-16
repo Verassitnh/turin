@@ -29,6 +29,7 @@ use turin_orchestration::core::run_finalization_service::{FinalizeInput, RunFina
 use turin_orchestration::core::runtime_request_service::{
     RuntimeRequestResponse, RuntimeRequestService,
 };
+use turin_orchestration::core::steer_follow_up::after_steer;
 use turin_orchestration::pipeline::effect_outbox::{Effect, EffectRequest, SessionTransition};
 use turin_orchestration::pipeline::effect_worker::{
     EffectExecutionError, EffectExecutor, error_chain,
@@ -174,12 +175,8 @@ impl TurinEffectExecutor {
                 provider_turn_id,
                 message_id,
             } => {
-                // Not ported: when the turn completed before the steer landed,
-                // upstream re-dispatches the message as a follow-up
-                // (`command:steer-follow-up:<effect>`); here that failure retries
-                // and then fails the effect. Also not ported: accepting a
-                // delegated completion notification after a steer.
-                self.turn_control
+                let steered = self
+                    .turn_control
                     .steer(SteerInput {
                         thread_id,
                         provider_session_id: provider_session_id.clone(),
@@ -187,8 +184,11 @@ impl TurinEffectExecutor {
                         provider_turn_id: provider_turn_id.clone(),
                         message_id: message_id.clone(),
                     })
-                    .await?;
-                Ok(())
+                    .await;
+                // A steer that met a completed turn re-dispatches the message as
+                // a follow-up; one a provider took for a delegated completion is
+                // accepted.
+                after_steer(self.threads.as_ref(), effect, steered).await
             }
             EffectRequest::ProviderTurnRestart {
                 provider_session_id,

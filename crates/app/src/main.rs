@@ -2,7 +2,10 @@
 
 mod assets;
 mod branding;
+// Pure composer logic is ported ahead of the views that consume it.
 mod components;
+#[allow(dead_code)]
+mod composer;
 mod diff;
 mod hooks;
 mod project_icon_colors;

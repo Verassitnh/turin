@@ -620,6 +620,118 @@ impl FlowLayout {
 
 type LinkHandler = Rc<dyn Fn(&SharedString, &mut Window, &mut App)>;
 
+/// A highlighted byte range painted behind the text (the composer's own
+/// selection, which does not take part in the window text selection).
+#[derive(Clone, Debug)]
+pub struct FlowHighlight {
+    pub range: Range<usize>,
+    pub color: Hsla,
+    /// The selection continues past the end of the text: cover the line end too.
+    pub through_line_end: bool,
+}
+
+/// A caret painted over the text at a byte index.
+#[derive(Clone, Copy, Debug)]
+pub struct FlowCaret {
+    pub index: usize,
+    pub color: Hsla,
+    pub width: Pixels,
+}
+
+/// Read access to the last laid-out geometry of an [`InlineFlow`], for editors
+/// that hit-test and move carets themselves. Window coordinates throughout.
+#[derive(Clone, Default)]
+pub struct FlowProbe(Rc<RefCell<FlowProbeState>>);
+
+#[derive(Default)]
+struct FlowProbeState {
+    cache: Option<Rc<RefCell<FlowCache>>>,
+    bounds: Bounds<Pixels>,
+}
+
+impl FlowProbe {
+    pub fn bounds(&self) -> Bounds<Pixels> {
+        self.0.borrow().bounds
+    }
+
+    fn with_layout<R>(&self, f: impl FnOnce(&FlowLayout, Bounds<Pixels>, usize) -> R) -> Option<R> {
+        let state = self.0.borrow();
+        let cache = state.cache.as_ref()?.borrow();
+        let layout = cache.layout.as_ref()?;
+        let len = cache.content.as_ref().map_or(0, |c| c.text.len());
+        Some(f(layout, state.bounds, len))
+    }
+
+    /// Byte index nearest to a window point.
+    pub fn index_for_point(&self, position: Point<Pixels>) -> Option<usize> {
+        self.with_layout(|layout, bounds, len| {
+            layout.index_for_position(position - bounds.origin, len)
+        })
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.with_layout(|layout, _, _| layout.lines.len().max(1))
+            .unwrap_or(1)
+    }
+
+    /// The visual line holding byte `index`; a wrap point belongs to the later
+    /// line, like a browser caret.
+    pub fn line_for_index(&self, index: usize) -> usize {
+        self.with_layout(|layout, _, len| {
+            layout
+                .lines
+                .iter()
+                .position(|line| {
+                    index < line.range.end || (index == len && index <= line.range.end)
+                })
+                .unwrap_or(layout.lines.len().saturating_sub(1))
+        })
+        .unwrap_or(0)
+    }
+
+    /// Visible byte range of a line (without hung trailing whitespace).
+    pub fn line_visible_range(&self, line: usize) -> Range<usize> {
+        self.with_layout(|layout, _, len| {
+            layout.lines.get(line).map_or(0..len, |line| {
+                let end = line
+                    .fragments
+                    .last()
+                    .map_or(line.range.start, |f| f.range.end);
+                line.range.start..end.max(line.range.start)
+            })
+        })
+        .unwrap_or(0..0)
+    }
+
+    /// Byte index on `line` nearest to window x.
+    pub fn index_for_x_on_line(&self, line: usize, x: Pixels) -> usize {
+        self.with_layout(|layout, bounds, len| {
+            let Some(target) = layout.lines.get(line) else {
+                return len;
+            };
+            layout.index_for_position(
+                point(x - bounds.origin.x, target.top + target.height / 2.),
+                len,
+            )
+        })
+        .unwrap_or(0)
+    }
+
+    /// The caret rectangle for byte `index` (window coordinates).
+    pub fn caret_bounds(&self, index: usize, width: Pixels) -> Option<Bounds<Pixels>> {
+        let line = self.line_for_index(index);
+        self.with_layout(|layout, bounds, _| {
+            let target = layout.lines.get(line)?;
+            let x = FlowLayout::x_for_index(target, index);
+            Some(Bounds::new(
+                bounds.origin + point(x, target.top),
+                size(width, target.height),
+            ))
+        })
+        .flatten()
+    }
+}
+
 /// Shared between the measure callback and prepaint/paint.
 #[derive(Default)]
 pub struct FlowCache {
@@ -658,6 +770,9 @@ pub struct InlineFlow {
     document_order: u64,
     selection_color: Hsla,
     on_link: Option<LinkHandler>,
+    highlights: Vec<FlowHighlight>,
+    caret: Option<FlowCaret>,
+    probe: Option<FlowProbe>,
 }
 
 impl InlineFlow {
@@ -673,7 +788,32 @@ impl InlineFlow {
             document_order: 0,
             selection_color: transparent_black(),
             on_link: None,
+            highlights: Vec::new(),
+            caret: None,
+            probe: None,
         }
+    }
+
+    /// Whether the flow takes part in the window text selection (default true).
+    pub fn selectable(mut self, selectable: bool) -> Self {
+        self.selectable = selectable;
+        self
+    }
+
+    /// Editor hooks: highlighted ranges, a caret, and a probe for hit testing.
+    pub fn highlights(mut self, highlights: Vec<FlowHighlight>) -> Self {
+        self.highlights = highlights;
+        self
+    }
+
+    pub fn caret(mut self, caret: Option<FlowCaret>) -> Self {
+        self.caret = caret;
+        self
+    }
+
+    pub fn probe(mut self, probe: FlowProbe) -> Self {
+        self.probe = Some(probe);
+        self
     }
 
     pub fn strut(mut self, family: SharedString, size: Pixels, line_height: f32) -> Self {
@@ -835,6 +975,11 @@ impl Element for InlineFlow {
             }
         }
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        if let Some(probe) = &self.probe {
+            let mut state = probe.0.borrow_mut();
+            state.cache = Some(cache.clone());
+            state.bounds = bounds;
+        }
         let c = cache.borrow();
         let layout = c.layout.as_ref()?;
         let mut link_hitboxes = Vec::new();
@@ -1010,6 +1155,39 @@ impl Element for InlineFlow {
             }
         }
 
+        // Highlights set by an editor.
+        for highlight in &self.highlights {
+            for line in &layout.lines {
+                let line_end = line
+                    .fragments
+                    .last()
+                    .map_or(line.range.start, |f| f.range.end);
+                if line_end < highlight.range.start || line.range.start > highlight.range.end {
+                    continue;
+                }
+                let start = highlight.range.start.max(line.range.start);
+                let end = highlight.range.end.min(line_end);
+                let x0 = FlowLayout::x_for_index(line, start);
+                let mut x1 = FlowLayout::x_for_index(line, end);
+                if highlight.through_line_end && highlight.range.end >= line_end {
+                    x1 = x1.max(line.width) + px(4.);
+                }
+                if x1 > x0 {
+                    window.paint_quad(PaintQuad {
+                        bounds: Bounds::new(
+                            bounds.origin + point(x0, line.top),
+                            size(x1 - x0, line.height),
+                        ),
+                        corner_radii: Corners::default(),
+                        background: highlight.color.into(),
+                        border_widths: Edges::default(),
+                        border_color: transparent_black(),
+                        border_style: Default::default(),
+                    });
+                }
+            }
+        }
+
         // Chrome boxes, then text.
         for line in &layout.lines {
             let baseline_y = bounds.origin.y + line.top + line.baseline;
@@ -1093,6 +1271,30 @@ impl Element for InlineFlow {
                         x += px(4.);
                     }
                 }
+            }
+        }
+        if let Some(caret) = self.caret {
+            let line_ix = layout
+                .lines
+                .iter()
+                .position(|line| {
+                    caret.index < line.range.end
+                        || (caret.index == text.len() && caret.index <= line.range.end)
+                })
+                .unwrap_or(layout.lines.len().saturating_sub(1));
+            if let Some(line) = layout.lines.get(line_ix) {
+                let x = FlowLayout::x_for_index(line, caret.index);
+                window.paint_quad(PaintQuad {
+                    bounds: Bounds::new(
+                        bounds.origin + point(x, line.top),
+                        size(caret.width, line.height),
+                    ),
+                    corner_radii: Corners::default(),
+                    background: caret.color.into(),
+                    border_widths: Edges::default(),
+                    border_color: transparent_black(),
+                    border_style: Default::default(),
+                });
             }
         }
         drop(c);

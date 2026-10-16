@@ -24,8 +24,11 @@ use turin_git::git_vcs_driver::GitVcsDriver;
 use turin_git::process::ProcessRunner;
 use turin_orchestration::core::context_handoff_service::ContextHandoffService;
 use turin_orchestration::core::orchestrator::Orchestrator;
-use turin_orchestration::core::orchestrator::services::{DispatchSeams, NoRestartRecovery};
+use turin_orchestration::core::orchestrator::services::{
+    DispatchSeams, ReconcileTrigger, RestartRecovery as _,
+};
 use turin_orchestration::core::provider_event_ingestor::ProviderEventIngestor;
+use turin_orchestration::core::provider_runtime_recovery_service::ProviderRuntimeRecoveryService;
 use turin_orchestration::core::provider_session_manager::{
     ProviderSessionManager, ProviderSessionManagerOptions,
 };
@@ -33,6 +36,9 @@ use turin_orchestration::core::provider_switch_service::ProviderSwitchService;
 use turin_orchestration::core::provider_turn_control_service::ProviderTurnControlService;
 use turin_orchestration::core::provider_turn_start_service::{
     LocalTurnStartWorkspace, NoPromptCommands, ProjectRootsRuntimePolicy, ProviderTurnStartService,
+};
+use turin_orchestration::core::restart_continuation_service::{
+    LateRestartThreads, NoDelegatedTaskRecovery, RestartContinuationService,
 };
 use turin_orchestration::core::run_execution_service::{NoAfterTurnRefresh, RunExecutionService};
 use turin_orchestration::core::run_finalization_service::RunFinalizationService;
@@ -67,7 +73,8 @@ pub struct WriteRuntime {
     pub orchestrator: Arc<Orchestrator>,
     pub threads: Arc<ThreadManagementService>,
     pub sessions: Arc<ProviderSessionManager>,
-    _effects: EffectDaemon,
+    effects: EffectDaemon,
+    recovery: Arc<ProviderRuntimeRecoveryService>,
     _terminal_runs: AbortOnDropHandle<()>,
 }
 
@@ -152,6 +159,19 @@ impl WriteRuntime {
             Arc::new(NoWorkspaceRefresh),
         ));
 
+        // Restart continuation: the orchestrator needs the service at
+        // construction and the service needs the thread-management service
+        // (which holds the orchestrator), so the threads are bound late.
+        let late_threads = LateRestartThreads::new();
+        let restart = Arc::new(RestartContinuationService::new(
+            host_settings.clone(),
+            late_threads.clone(),
+            projection.clone(),
+            stores.outbox.clone(),
+            // Delegated tasks (finalizeAppOwnedSubagent) are not ported yet.
+            Arc::new(NoDelegatedTaskRecovery),
+        ));
+
         // The decider.
         let switch_planner = Arc::new(ProviderSwitchService::new(Arc::new(
             ProviderAdapterRegistry::from_instances(instances.clone()),
@@ -161,7 +181,7 @@ impl WriteRuntime {
                 projection.clone(),
                 stores.sink.clone(),
                 CommandReceiptStore::new(stores.db.clone()),
-                Arc::new(NoRestartRecovery),
+                restart.clone(),
             )
             .with_dispatch_seams(DispatchSeams {
                 checkpoints: Arc::new(ServiceCheckpointScopes(checkpoints)),
@@ -176,11 +196,27 @@ impl WriteRuntime {
             ThreadCommandExecutor::new(),
             orchestrator.clone() as Arc<dyn OrchestratorPort>,
             Arc::new(ManagerSessions(sessions.clone())),
-            host_settings,
+            host_settings.clone(),
             CommandReceiptStore::new(stores.db.clone()),
             projects,
             Arc::new(NoHooks),
         ));
+
+        late_threads.bind(threads.clone());
+
+        // Startup order (upstream serverRuntimeStartup): reconcile runs that
+        // were live when the last process died, settle delegated tasks, then
+        // start the effect worker.
+        let recovery = Arc::new(ProviderRuntimeRecoveryService::new(
+            host_settings.clone(),
+            projection.clone(),
+            sink.clone(),
+        ));
+        match recovery.recover().await {
+            Ok(summary) => tracing::info!(?summary, "provider runtime recovery"),
+            Err(error) => tracing::warn!(%error, "provider runtime recovery failed"),
+        }
+        restart.recover_delegated_tasks().await;
 
         // Effects: claimed from the outbox the sink enqueues into.
         let executor = Arc::new(TurinEffectExecutor {
@@ -190,6 +226,7 @@ impl WriteRuntime {
             sessions: sessions.clone(),
             finalization,
             threads: threads.clone(),
+            restart,
         });
         let worker = EffectWorker::new(
             stores.outbox.clone(),
@@ -213,9 +250,25 @@ impl WriteRuntime {
             orchestrator,
             threads,
             sessions,
-            _effects: effects,
+            effects,
+            recovery,
             _terminal_runs: terminal_runs,
         }))
+    }
+
+    /// Shutdown order (upstream): stop the effect worker, let recovery queue
+    /// continuations for live runs, close provider sessions, then reconcile.
+    /// Failures are warnings, not crashes.
+    pub async fn shutdown(&self) {
+        self.effects.shutdown();
+        if let Err(error) = self.recovery.prepare_for_shutdown().await {
+            tracing::warn!(%error, "preparing for shutdown failed");
+        }
+        self.sessions.shutdown().await;
+        match self.recovery.reconcile(ReconcileTrigger::Shutdown).await {
+            Ok(summary) => tracing::info!(?summary, "shutdown reconciliation"),
+            Err(error) => tracing::warn!(%error, "shutdown reconciliation failed"),
+        }
     }
 
     /// One command through the thread-management chokepoint (provider

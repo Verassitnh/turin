@@ -24,6 +24,7 @@ use turin_orchestration::core::provider_turn_control_service::{
     AwaitTerminalInput, InterruptInput, ProviderTurnControlService, SteerInput, SubagentStop,
 };
 use turin_orchestration::core::provider_turn_start_service::ProviderTurnStartService;
+use turin_orchestration::core::restart_continuation_service::RestartContinuationService;
 use turin_orchestration::core::run_finalization_service::{FinalizeInput, RunFinalizationService};
 use turin_orchestration::core::runtime_request_service::{
     RuntimeRequestResponse, RuntimeRequestService,
@@ -48,6 +49,7 @@ pub struct TurinEffectExecutor {
     pub sessions: Arc<ProviderSessionManager>,
     pub finalization: Arc<RunFinalizationService>,
     pub threads: Arc<ThreadManagementService>,
+    pub restart: Arc<RestartContinuationService>,
 }
 
 fn settle_outcome(
@@ -280,8 +282,10 @@ impl TurinEffectExecutor {
                 tracing::debug!(effect_id = %effect.id, "thread title generation is not wired; keeping the title");
                 Ok(())
             }
-            EffectRequest::ProviderRuntimeContinue { .. } => {
-                Err("provider-runtime.continue is not wired: RestartContinuation dispatch (T13e item 2) is not ported".into())
+            EffectRequest::ProviderRuntimeContinue { source_run_id } => {
+                self.restart
+                    .execute_continue_effect(&thread_id, source_run_id, will_retry)
+                    .await
             }
             EffectRequest::ProviderThreadRollback { .. } => {
                 Err("provider-thread.rollback is not wired: CheckpointRollbackService is not ported (T13c item 2)".into())

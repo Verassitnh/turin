@@ -148,6 +148,9 @@ pub async fn run(
         }
     };
     serve(stores, sender, requests).await;
+    if let Some(write) = &_write {
+        write.shutdown().await;
+    }
 }
 
 /// Loads the shell, starts its feed after the snapshot's sequence, then serves

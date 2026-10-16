@@ -3,6 +3,8 @@
 mod app_runtime;
 mod assets;
 mod branding;
+mod desktop;
+mod shell;
 // Pure composer logic is ported ahead of the views that consume it.
 mod components;
 #[allow(dead_code)]
@@ -161,27 +163,36 @@ fn main() {
             let store = state::store::bind_client_store(handle.clone(), cx);
             cx.set_global(state::store::ClientStoreGlobal(store));
             app_sidebar_layout::bind_keys(cx);
+            desktop::bind_menu_keys(cx, app_sidebar_layout::KEY_CONTEXT);
+            desktop::install_native_menus(cx);
             let right_panel = dev_overrides(cx);
             // Dev hook: `TURIN_SETTINGS=<page>` shows the settings window on mock data.
-            if settings::demo::open_if_requested(window_options(cx), cx) {
+            if settings::demo::open_if_requested(
+                desktop::merge_window_options(window_options(cx), cx),
+                cx,
+            ) {
                 schedule_screenshot(cx);
                 cx.activate(true);
                 return;
             }
-            let handle = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
-                let layout = cx.new(|cx| {
-                    let mut layout = AppSidebarLayout::new(window, cx);
-                    layout.set_right_panel_open(right_panel);
-                    // Screenshot harness: `TURIN_PAGE=usage` opens the Usage route.
-                    if std::env::var("TURIN_PAGE").is_ok_and(|page| page == "usage") {
-                        layout.open_usage(window, cx);
-                    }
-                    layout
-                });
-                // T22 swaps the mock backend for the live settings and workspace state.
-                let backend = MockOnboardingBackend::shared(FirstRunScenario::from_env());
-                cx.new(|_| FirstRunGate::new(backend.clone(), backend, true, layout))
-            })
+            let handle = gpui_kit::open_window(
+                desktop::merge_window_options(window_options(cx), cx),
+                cx,
+                |window, cx| {
+                    let layout = cx.new(|cx| {
+                        let mut layout = AppSidebarLayout::new(window, cx);
+                        layout.set_right_panel_open(right_panel);
+                        // Screenshot harness: `TURIN_PAGE=usage` opens the Usage route.
+                        if std::env::var("TURIN_PAGE").is_ok_and(|page| page == "usage") {
+                            layout.open_usage(window, cx);
+                        }
+                        layout
+                    });
+                    // T22 swaps the mock backend for the live settings and workspace state.
+                    let backend = MockOnboardingBackend::shared(FirstRunScenario::from_env());
+                    cx.new(|_| FirstRunGate::new(backend.clone(), backend, true, layout))
+                },
+            )
             .expect("failed to open window");
             // Dev hook: `TURIN_PULL_REQUESTS_DEMO` shows the pull request views on the mock source.
             if let Some(scenario) = pull_request::demo::scenario_from_env() {

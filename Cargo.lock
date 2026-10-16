@@ -7360,6 +7360,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "pretty_assertions",
+ "raw-window-handle",
  "regex",
  "serde",
  "serde_json",
@@ -7382,6 +7383,7 @@ dependencies = [
  "turin-shared",
  "unicode-normalization",
  "url",
+ "uuid",
 ]
 
 [[package]]

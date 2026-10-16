@@ -33,11 +33,15 @@ use super::command_palette::{
     self, CommandPalette, CommandPaletteEvent, CommandPaletteOpenDetail, CycleAppearance,
     SelectTheme, ToggleCommandPalette, ToggleFilePicker, ToggleProjectSearch,
 };
+use super::confirm_dialog_host::ConfirmDialogHost;
 use super::git_actions_control::mock_source::MockGitActionsBackend;
+use super::quit_hold_overlay::QuitHoldOverlay;
+use super::reopen_closed_view_shortcut::try_reopen_closed_view;
 use super::right_panel_tabs::RightPanelTabs;
 use super::sidebar::mock_source::mock_sidebar;
 use super::sidebar::view_model::SidebarStore;
 use super::sidebar::{self as thread_sidebar, Sidebar, SidebarEvent, SidebarRoute};
+use super::thread_notification_coordinator::ThreadNotificationCoordinator;
 use super::thread_sidebar_width::{
     THREAD_SIDEBAR_DEFAULT_WIDTH, THREAD_SIDEBAR_MIN_WIDTH, clamp_thread_sidebar_width,
     resolve_initial_thread_sidebar_width, resolve_thread_sidebar_maximum_width,
@@ -45,10 +49,28 @@ use super::thread_sidebar_width::{
 use super::usage::mock_source::{MockUsageBackend, UsageScenario};
 use super::usage::usage_page::{UsagePage, UsagePageEvent};
 use super::workspace_titlebar::workspace_controls_left;
+use crate::desktop::desktop_app_settings::{read_desktop_app_settings, write_desktop_app_settings};
+use crate::desktop::desktop_application_menu::{CloseWindow, QuitApplication};
+use crate::desktop::desktop_client_settings::{
+    client_settings_path_for_home, read_client_settings,
+};
+use crate::desktop::notification_badge::clear_notification_badge_on_focus;
+use crate::desktop::quit_hold::{
+    QUIT_HOLD_CLOCK_MS, QuitHoldKey, QuitHoldKeyInput, QuitHoldKeyPhase, QuitShortcutCallbacks,
+    QuitShortcutEffect, QuitShortcutHandler, QuitShortcutHint,
+};
+use crate::desktop::window_bounds_persist::{
+    WindowBoundsPersist, debounce_delay, geometry_document,
+};
 use crate::hooks::use_local_storage::MemoryLocalStorage;
 use crate::hooks::use_preview_panel_inline_size::{
     PREVIEW_PANEL_DEFAULT_WIDTH, clamp_preview_panel_width, get_preview_panel_max_width,
 };
+use crate::shell::chat_route_shortcuts::{OpenCommandPalette, ReopenClosedView};
+use crate::shell::environment_coordinator::poll_environment_notifications;
+use crate::shell::reopen_closed_view::{ReopenOwnerState, closed_view_entries_from_store};
+use crate::state::right_panel_store::RightPanelStore;
+use crate::state::store::ClientStoreGlobal;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{WORKSPACE_CONTROLS_INSET, WORKSPACE_TOPBAR_HEIGHT};
 use crate::theme::{self, ActiveAppTheme};
@@ -59,6 +81,7 @@ use crate::ui::sidebar::{
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{AppContext as _, Entity, SharedString};
+use turin_contracts::settings::{ClientSettings, QuitConfirmationMode};
 
 actions!(
     turin,
@@ -71,10 +94,12 @@ actions!(
         ToggleThreadDetails,
         /// `usage.open` (mod+u).
         OpenUsage,
+        /// ⌘Q key-down (quit-hold handler).
+        QuitShortcut,
     ]
 );
 
-const KEY_CONTEXT: &str = "AppShell";
+pub const KEY_CONTEXT: &str = "AppShell";
 
 /// Upstream default keybindings (packages/shared/src/keybindings.ts) for the
 /// shell's actions.
@@ -84,9 +109,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-b", ToggleThreadDetails, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-u", OpenUsage, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-q", QuitShortcut, Some(KEY_CONTEXT)),
     ]);
     thread_sidebar::bind_keys(cx, KEY_CONTEXT);
     command_palette::bind_keys(cx, KEY_CONTEXT);
+    crate::shell::bind_chat_route_keys(cx);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,9 +166,23 @@ pub struct AppSidebarLayout {
     thread_details_open: bool,
     /// The routed page when it is not a thread (upstream: the router).
     usage: Option<UsageRoute>,
+    notifications: ThreadNotificationCoordinator,
+    quit_handler: QuitShortcutHandler,
+    quit_clock_start: std::time::Instant,
+    quit_clock_generation: u64,
+    quit_wake_generation: u64,
+    quit_overlay: Entity<QuitHoldOverlay>,
+    confirm_dialog: Entity<ConfirmDialogHost>,
+    client_settings: ClientSettings,
+    client_settings_path: std::path::PathBuf,
+    bounds_persist: WindowBoundsPersist,
+    right_panel_store: RightPanelStore,
     _appearance: Subscription,
     _sidebar_events: Subscription,
     _palette_events: Subscription,
+    _bounds: Subscription,
+    _store_watch: Subscription,
+    _activation: Subscription,
 }
 
 impl AppSidebarLayout {
@@ -174,6 +215,38 @@ impl AppSidebarLayout {
         if let Ok(spec) = std::env::var("TURIN_PALETTE") {
             palette.update(cx, |palette, cx| palette.run_demo_steps(spec, window, cx));
         }
+        let quit_overlay = cx.new(|_| QuitHoldOverlay::new());
+        let confirm_dialog = cx.new(|cx| ConfirmDialogHost::new(window, cx));
+        let home = turin_runtime::config::home_directory().unwrap_or_default();
+        let client_settings_path = client_settings_path_for_home(&home);
+        let bounds_persist =
+            WindowBoundsPersist::new(crate::desktop::desktop_app_settings::desktop_settings_path());
+        let bounds = cx.observe_window_bounds(window, |this, window, cx| {
+            this.schedule_bounds_write(window, cx);
+        });
+        {
+            let entity = cx.entity().downgrade();
+            window.on_window_should_close(cx, move |window, cx| {
+                entity
+                    .update(cx, |this, cx| {
+                        this.flush_bounds(window, cx);
+                    })
+                    .ok();
+                true
+            });
+        }
+        let store_watch = cx.observe_global::<ClientStoreGlobal>(|this, cx| {
+            this.sync_notifications(cx);
+        });
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                clear_notification_badge_on_focus();
+                this.notifications.clear();
+                this.reload_client_settings(cx);
+            }
+            cx.notify();
+        });
+        Self::watch_client_settings(client_settings_path.clone(), cx);
         Self {
             focus_handle,
             sidebar_open: true,
@@ -192,9 +265,23 @@ impl AppSidebarLayout {
             git_host,
             thread_details_open: std::env::var("TURIN_THREAD_DETAILS").is_ok_and(|v| v == "1"),
             usage: None,
+            notifications: ThreadNotificationCoordinator::new(),
+            quit_handler: QuitShortcutHandler::new(cfg!(target_os = "macos")),
+            quit_clock_start: std::time::Instant::now(),
+            quit_clock_generation: 0,
+            quit_wake_generation: 0,
+            quit_overlay,
+            confirm_dialog,
+            client_settings: ClientSettings::default(),
+            client_settings_path,
+            bounds_persist,
+            right_panel_store: RightPanelStore::default(),
             _appearance: appearance,
             _sidebar_events: sidebar_events,
             _palette_events: palette_events,
+            _bounds: bounds,
+            _store_watch: store_watch,
+            _activation: activation,
         }
     }
 
@@ -566,10 +653,349 @@ impl AppSidebarLayout {
             viewport_width
         }
     }
+
+    fn sync_notifications(&mut self, cx: &App) {
+        let environment_ids = vec![crate::state::local_environment_id()];
+        let snapshot = cx.global::<ClientStoreGlobal>().0.read(cx).state().clone();
+        poll_environment_notifications(
+            &mut self.notifications,
+            &environment_ids,
+            Some(snapshot.as_ref()),
+            &self.client_settings,
+        );
+    }
+
+    fn quit_confirmation_mode(&self) -> QuitConfirmationMode {
+        self.client_settings.confirm_quit
+    }
+
+    fn quit_now_ms(&self) -> u64 {
+        self.quit_clock_start.elapsed().as_millis() as u64
+    }
+
+    fn honor_quit(&self, effect: QuitShortcutEffect, cx: &mut Context<Self>) {
+        if effect == QuitShortcutEffect::Quit {
+            cx.quit();
+        }
+    }
+
+    fn run_quit_shortcut(
+        &mut self,
+        phase: QuitHoldKeyPhase,
+        key: QuitHoldKey,
+        is_auto_repeat: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let now_ms = self.quit_now_ms();
+        self.quit_handler.set_now_ms(now_ms);
+        let mode = self.quit_confirmation_mode();
+        let (effect, wake) = {
+            let mut notify = |hint: QuitShortcutHint| {
+                self.quit_overlay.update(cx, |overlay, cx| {
+                    overlay.apply_hint(hint, now_ms, cx);
+                });
+            };
+            let mut conceal = || {
+                crate::desktop::desktop_window::conceal_pending_quit_window(window);
+            };
+            let mut callbacks = QuitShortcutCallbacks {
+                notify: &mut notify,
+                conceal_window: &mut conceal,
+            };
+            let effect = if is_auto_repeat {
+                self.quit_handler.held_key_tick(mode, &mut callbacks)
+            } else {
+                self.quit_handler.handle(
+                    QuitHoldKeyInput {
+                        phase,
+                        key,
+                        meta: cfg!(target_os = "macos"),
+                        control: !cfg!(target_os = "macos"),
+                        alt: false,
+                        shift: false,
+                        is_auto_repeat,
+                    },
+                    mode,
+                    &mut callbacks,
+                )
+            };
+            let wake = self.quit_handler.poll_watchdog(&mut callbacks);
+            (effect, wake)
+        };
+        self.honor_quit(effect, cx);
+        self.honor_quit(wake, cx);
+        self.schedule_quit_wake(cx);
+        if phase == QuitHoldKeyPhase::KeyDown
+            && !is_auto_repeat
+            && self.quit_handler.clock_should_run()
+        {
+            self.start_hold_clock(cx);
+        }
+        cx.notify();
+    }
+
+    fn start_hold_clock(&mut self, cx: &mut Context<Self>) {
+        self.quit_clock_generation = self.quit_clock_generation.wrapping_add(1);
+        let generation = self.quit_clock_generation;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(QUIT_HOLD_CLOCK_MS))
+                    .await;
+                let keep = this
+                    .update_in(cx, |this, window, cx| {
+                        if this.quit_clock_generation != generation {
+                            return false;
+                        }
+                        this.run_quit_shortcut(
+                            QuitHoldKeyPhase::KeyDown,
+                            QuitHoldKey::Character('q'),
+                            true,
+                            window,
+                            cx,
+                        );
+                        this.quit_handler.clock_should_run()
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn schedule_quit_wake(&mut self, cx: &mut Context<Self>) {
+        let Some(deadline) = self.quit_handler.next_wake_ms() else {
+            return;
+        };
+        let delay = deadline.saturating_sub(self.quit_now_ms());
+        self.quit_wake_generation = self.quit_wake_generation.wrapping_add(1);
+        let generation = self.quit_wake_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(delay.max(1)))
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                if this.quit_wake_generation != generation {
+                    return;
+                }
+                let now_ms = this.quit_now_ms();
+                this.quit_handler.set_now_ms(now_ms);
+                let wake = {
+                    let mut notify = |hint: QuitShortcutHint| {
+                        this.quit_overlay.update(cx, |overlay, cx| {
+                            overlay.apply_hint(hint, now_ms, cx);
+                        });
+                    };
+                    let mut conceal = || {
+                        crate::desktop::desktop_window::conceal_pending_quit_window(window);
+                    };
+                    let mut callbacks = QuitShortcutCallbacks {
+                        notify: &mut notify,
+                        conceal_window: &mut conceal,
+                    };
+                    this.quit_handler.poll_watchdog(&mut callbacks)
+                };
+                this.honor_quit(wake, cx);
+                this.schedule_quit_wake(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn on_quit_shortcut(&mut self, _: &QuitShortcut, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_quit_shortcut(
+            QuitHoldKeyPhase::KeyDown,
+            QuitHoldKey::Character('q'),
+            false,
+            window,
+            cx,
+        );
+    }
+
+    fn on_quit_application(
+        &mut self,
+        _: &QuitApplication,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.quit();
+    }
+
+    fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush_bounds(window, cx);
+        window.remove_window();
+    }
+
+    fn on_open_command_palette(
+        &mut self,
+        _: &OpenCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = window;
+        crate::shell::chat_route_shortcuts::open_command_palette_if_closed();
+        cx.notify();
+    }
+
+    fn on_reopen_closed_view(
+        &mut self,
+        _: &ReopenClosedView,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entries = closed_view_entries_from_store(&self.right_panel_store);
+        let owners: Vec<_> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id.clone(),
+                    self.right_panel_store.thread_state(&entry.thread_ref),
+                )
+            })
+            .collect();
+        let reopened = try_reopen_closed_view(
+            &entries,
+            |entry| ReopenOwnerState {
+                environment_known: true,
+                catalog_ready: true,
+                owner_exists: true,
+                shell_live: true,
+                panel: owners
+                    .iter()
+                    .find(|(id, _)| id == &entry.id)
+                    .map(|(_, panel)| panel.clone())
+                    .unwrap_or_default(),
+            },
+            &mut self.right_panel_store,
+            true,
+        );
+        if reopened {
+            self.right_panel_open = true;
+        }
+        cx.notify();
+    }
+
+    fn schedule_bounds_write(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(generation) = self.bounds_persist.note_bounds_changed(window) else {
+            return;
+        };
+        let path = self.bounds_persist.path().to_path_buf();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(debounce_delay()).await;
+            let pending = this
+                .update(cx, |this, _| {
+                    this.bounds_persist.pending_if_current(generation)
+                })
+                .ok()
+                .flatten();
+            let Some(pending) = pending else {
+                return;
+            };
+            let document = geometry_document(&pending);
+            cx.background_executor()
+                .spawn(async move {
+                    let mut doc = read_desktop_app_settings(&path).unwrap_or_default();
+                    doc.main_window_bounds = document.main_window_bounds;
+                    doc.main_window_maximized = document.main_window_maximized;
+                    let _ = write_desktop_app_settings(&path, &doc);
+                })
+                .detach();
+        })
+        .detach();
+    }
+
+    fn flush_bounds(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.bounds_persist.flush(window) else {
+            return;
+        };
+        let path = self.bounds_persist.path().to_path_buf();
+        let document = geometry_document(&pending);
+        cx.background_executor()
+            .spawn(async move {
+                let mut doc = read_desktop_app_settings(&path).unwrap_or_default();
+                doc.main_window_bounds = document.main_window_bounds;
+                doc.main_window_maximized = document.main_window_maximized;
+                let _ = write_desktop_app_settings(&path, &doc);
+            })
+            .detach();
+    }
+
+    fn apply_client_settings(&mut self, settings: ClientSettings, cx: &mut Context<Self>) {
+        self.client_settings = settings;
+        self.sync_notifications(cx);
+        cx.notify();
+    }
+
+    fn reload_client_settings(&mut self, cx: &mut Context<Self>) {
+        let path = self.client_settings_path.clone();
+        cx.spawn(async move |this, cx| {
+            let settings = cx
+                .background_executor()
+                .spawn(async move { read_client_settings(&path).ok().flatten() })
+                .await;
+            if let Some(settings) = settings {
+                this.update(cx, |this, cx| this.apply_client_settings(settings, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn watch_client_settings(path: std::path::PathBuf, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let initial_path = path.clone();
+            let initial = cx
+                .background_executor()
+                .spawn(async move { read_client_settings(&initial_path).ok().flatten() })
+                .await;
+            if let Some(settings) = initial {
+                this.update(cx, |this, cx| this.apply_client_settings(settings, cx))
+                    .ok();
+            }
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let watched = path.clone();
+            let watcher =
+                cx.background_executor()
+                    .spawn(async move {
+                        turin_runtime::support::file_watch::watch_file(&watched, tx).ok()
+                    })
+                    .await;
+            let Some(watcher) = watcher else {
+                return;
+            };
+            while turin_runtime::support::file_watch::next_debounced(
+                &mut rx,
+                turin_runtime::support::file_watch::WATCH_DEBOUNCE,
+            )
+            .await
+            .is_some()
+            {
+                let path = path.clone();
+                let settings = cx
+                    .background_executor()
+                    .spawn(async move { read_client_settings(&path).ok().flatten() })
+                    .await;
+                if let Some(settings) = settings {
+                    this.update(cx, |this, cx| this.apply_client_settings(settings, cx))
+                        .ok();
+                }
+            }
+            drop(watcher);
+        })
+        .detach();
+    }
 }
 
 impl Render for AppSidebarLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now_ms = self.quit_clock_start.elapsed().as_millis() as u64;
+        self.quit_handler.set_now_ms(now_ms);
+        self.quit_overlay
+            .update(cx, |overlay, cx| overlay.tick(now_ms, cx));
         // "Open diff" on a turn's changed files card shows the right panel.
         if crate::diff::take_open_panel_request(cx) {
             self.right_panel_open = true;
@@ -730,11 +1156,26 @@ impl Render for AppSidebarLayout {
             .on_action(cx.listener(Self::toggle_project_search))
             .on_action(cx.listener(Self::select_theme))
             .on_action(cx.listener(Self::cycle_appearance))
+            .on_action(cx.listener(Self::on_quit_shortcut))
+            .on_action(cx.listener(Self::on_quit_application))
+            .on_action(cx.listener(Self::on_close_window))
+            .on_action(cx.listener(Self::on_open_command_palette))
+            .on_action(cx.listener(Self::on_reopen_closed_view))
             .on_modifiers_changed(cx.listener(
-                |this, event: &gpui_kit::ModifiersChangedEvent, _, cx| {
+                |this, event: &gpui_kit::ModifiersChangedEvent, window, cx| {
                     let modifiers = event.modifiers;
                     this.sidebar
                         .update(cx, |sidebar, cx| sidebar.modifiers_changed(&modifiers, cx));
+                    if !modifiers.platform {
+                        this.quit_clock_generation = this.quit_clock_generation.wrapping_add(1);
+                        this.run_quit_shortcut(
+                            QuitHoldKeyPhase::KeyUp,
+                            QuitHoldKey::Modifier,
+                            false,
+                            window,
+                            cx,
+                        );
+                    }
                 },
             ))
             .map(|this| forward_sidebar_actions(this, cx))
@@ -814,6 +1255,8 @@ impl Render for AppSidebarLayout {
             .child(sidebar_toggle)
             .when(!on_usage, |this| this.child(layout_controls))
             .children(self.overlay.clone())
+            .child(self.confirm_dialog.clone())
+            .child(self.quit_overlay.clone())
             // The ⌘K overlay renders last so it covers the whole window.
             .child(self.palette.clone())
     }

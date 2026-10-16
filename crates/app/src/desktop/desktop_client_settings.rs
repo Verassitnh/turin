@@ -32,9 +32,23 @@ pub enum DesktopClientSettingsError {
     },
 }
 
-/// Default desktop client settings path (`DesktopEnvironment` + `settings.json`).
+/// `~/.turin/userdata/client-settings.json` for a caller-supplied home.
+/// Tests pass a temp directory and must not resolve the real home directory.
+pub fn client_settings_path_for_home(home: &Path) -> PathBuf {
+    let base = turin_runtime::config::resolve_base_dir(None, home)
+        .unwrap_or_else(|_| home.join(turin_runtime::config::DEFAULT_BASE_DIR_NAME));
+    turin_runtime::config::derive_server_paths(
+        &base,
+        None,
+        turin_runtime::config::DeriveServerPathsOptions::default(),
+    )
+    .state_dir
+    .join("client-settings.json")
+}
+
+/// `DesktopEnvironment` client settings (`<state>/client-settings.json`).
 pub fn default_client_settings_path(home: &Path) -> PathBuf {
-    home.join(".t3code").join("settings.json")
+    client_settings_path_for_home(home)
 }
 
 /// Reads settings, accepting either `{ "settings": … }` or a bare document.
@@ -87,4 +101,34 @@ pub fn write_client_settings(
         path: path.to_path_buf(),
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use turin_contracts::settings::QuitConfirmationMode;
+
+    #[test]
+    fn confirm_quit_reads_turin_client_settings() {
+        let home =
+            std::env::temp_dir().join(format!("turin-client-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let path = client_settings_path_for_home(&home);
+        assert!(path.ends_with(".turin/userdata/client-settings.json"));
+        write_client_settings(
+            &path,
+            &ClientSettings {
+                confirm_quit: QuitConfirmationMode::Direct,
+                ..ClientSettings::default()
+            },
+        )
+        .unwrap();
+        let read = read_client_settings(&path).unwrap().unwrap();
+        assert_eq!(read.confirm_quit, QuitConfirmationMode::Direct);
+        let changed = r#"{"settings":{"confirmQuit":"double-click"}}"#;
+        std::fs::write(&path, changed).unwrap();
+        let read = read_client_settings(&path).unwrap().unwrap();
+        assert_eq!(read.confirm_quit, QuitConfirmationMode::DoubleClick);
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }

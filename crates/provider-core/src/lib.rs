@@ -6,6 +6,7 @@ pub mod attachment_prompt;
 pub mod auth;
 pub mod background_scope;
 pub mod built_in_provider_catalog;
+pub mod codex_model_catalog;
 pub mod collect_stream_text;
 pub mod command_path;
 pub mod credential_store;

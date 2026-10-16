@@ -8,9 +8,14 @@ mod components;
 mod composer;
 mod diff;
 mod hooks;
+mod logical_project;
 mod project_icon_colors;
+mod project_icon_options;
 mod project_identity;
 mod pull_request;
+mod settle_and_advance;
+mod sidebar_pending_file_drop_store;
+mod source_control_presentation;
 // The view-model layer is a library until the orchestrator and views are wired
 // to it; every upstream selector is ported ahead of its callers.
 #[allow(dead_code)]

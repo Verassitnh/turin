@@ -342,3 +342,55 @@ fn keeps_the_records_behind_a_stashed_prompts_chips() {
     let taken = store.take_entry("entry-records").entry.expect("records");
     assert_eq!(taken.records, [record]);
 }
+
+#[test]
+fn drops_a_malformed_record_and_restores_the_entries_and_records_around_it() {
+    let terminal = |id: &str| {
+        json!({
+            "version": 1,
+            "contextId": id,
+            "kind": "terminal",
+            "label": "Terminal 1 line 4",
+            "terminalId": "default",
+            "terminalLabel": "Terminal 1",
+            "lineStart": 4,
+            "lineEnd": 4,
+            "text": "boom",
+        })
+    };
+    let entry = |id: &str, records: serde_json::Value| {
+        let mut value = serde_json::to_value(make_entry(id)).unwrap();
+        value["records"] = records;
+        value
+    };
+    let raw = serde_json::to_string(&json!({
+        "version": 2,
+        "state": { "entries": [
+            entry("first", json!([terminal("ctx-1")])),
+            // An image record without its attachment id cannot decode.
+            entry("middle", json!([
+                terminal("ctx-2"),
+                { "version": 1, "contextId": "bad", "kind": "image", "label": "bad" },
+                terminal("ctx-3"),
+            ])),
+            entry("last", json!([])),
+        ] },
+    }))
+    .unwrap();
+    let mut store = memory_store();
+    store.write_storage_for_test(&raw);
+
+    let ids: Vec<_> = store.entries().iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids.len(), 3);
+    let middle = store
+        .entries()
+        .iter()
+        .find(|entry| entry.id == "middle")
+        .expect("middle entry restores");
+    let kept: Vec<_> = middle
+        .records
+        .iter()
+        .map(|record| record.context_id().as_str())
+        .collect();
+    assert_eq!(kept, ["ctx-2", "ctx-3"]);
+}

@@ -104,7 +104,13 @@ pub struct PromptStashEntry {
     pub unreadable_image_names: Vec<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub pending_image_count: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// `ForwardCompatibleArray(ComposerContextRecord)`: a record that does not
+    /// decode is dropped and the entry's other records still restore.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        with = "turin_contracts::base_schemas::forward_compatible_array"
+    )]
     pub records: Vec<ComposerContextRecord>,
 }
 

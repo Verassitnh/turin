@@ -13,16 +13,15 @@
 use turin_contracts::{
     CommandId, RunId, ThreadId, UtcDateTime,
     orchestration_v2::{
-        OrchestrationV2Command as C, OrchestrationV2ContextHandoffStrategy,
-        OrchestrationV2ContextTransfer, OrchestrationV2ContextTransferResolution,
-        OrchestrationV2ContextTransferStatus, OrchestrationV2ContextTransferType,
-        OrchestrationV2CoveredRunOrdinals, OrchestrationV2DomainEvent,
-        OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeStatus,
-        OrchestrationV2ProviderFailureClass, OrchestrationV2ProviderThread,
-        OrchestrationV2ProviderThreadStatus, OrchestrationV2Run, OrchestrationV2RunAttemptStatus,
-        OrchestrationV2RunStatus, OrchestrationV2ServerCommand, OrchestrationV2ThreadHistoryOrigin,
-        OrchestrationV2ThreadLaunchWorkspaceStrategy, OrchestrationV2ThreadProjection,
-        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
+        OrchestrationV2Command as C, OrchestrationV2ContextTransfer,
+        OrchestrationV2ContextTransferResolution, OrchestrationV2ContextTransferStatus,
+        OrchestrationV2ContextTransferType, OrchestrationV2CoveredRunOrdinals,
+        OrchestrationV2DomainEvent, OrchestrationV2ExecutionNode,
+        OrchestrationV2ExecutionNodeStatus, OrchestrationV2ProviderFailureClass,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadStatus, OrchestrationV2Run,
+        OrchestrationV2RunAttemptStatus, OrchestrationV2RunStatus, OrchestrationV2ServerCommand,
+        OrchestrationV2ThreadHistoryOrigin, OrchestrationV2ThreadLaunchWorkspaceStrategy,
+        OrchestrationV2ThreadProjection, OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
         OrchestrationV2UserMessageInputIntent,
     },
 };
@@ -45,7 +44,8 @@ use super::message_transfer::{
 use super::provider_detach;
 use super::thread_fork::context_source_point_for_run;
 use crate::core::context_handoff_service::{
-    ContextHandoffService, LegacyImportInput, ProviderHandoffInput,
+    ContextHandoffService, PrepareLegacyImportInput as LegacyImportInput,
+    PrepareProviderHandoffInput as ProviderHandoffInput, ProviderHandoffStrategy,
 };
 use crate::core::provider_session_transition_policy::{
     ProviderSessionTransition, model_selections_equal,
@@ -574,11 +574,11 @@ impl Orchestrator {
                         from: covered_runs[0].ordinal,
                         to: covered_runs[covered_runs.len() - 1].ordinal,
                     },
-                    runs: &projection.runs,
+                    runs: Some(&projection.runs),
                     strategy: if needs_full_context {
-                        OrchestrationV2ContextHandoffStrategy::FullThreadSummary
+                        ProviderHandoffStrategy::FullThreadSummary
                     } else {
-                        OrchestrationV2ContextHandoffStrategy::DeltaSinceTargetLastSeen
+                        ProviderHandoffStrategy::DeltaSinceTargetLastSeen
                     },
                     items: &items,
                     created_at: now,

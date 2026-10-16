@@ -33,21 +33,24 @@ use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 
 /// `--chat-composer-drawer-inset: 1.375rem`.
-const DRAWER_INSET_REM: f32 = 1.375;
+pub(crate) const DRAWER_INSET_REM: f32 = 1.375;
 /// `--chat-composer-attachment-overlap: calc(1rem + 1px)`.
-fn attachment_overlap(window: &Window) -> gpui_kit::Pixels {
+pub(crate) fn attachment_overlap(window: &Window) -> gpui_kit::Pixels {
     window.rem_size() + px(1.)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BannerVariant {
+pub(crate) enum BannerVariant {
     Default,
+    Error,
+    Info,
+    Success,
     Warning,
 }
 
 /// `ComposerBanner.Attachment` + `Root`: a surface that tucks under the
 /// composer's top edge by the overlap.
-fn banner_surface(
+pub(crate) fn banner_surface(
     variant: BannerVariant,
     spacious: bool,
     child: AnyElement,
@@ -65,7 +68,11 @@ fn banner_surface(
             with_alpha(theme.warning, 0.28).into(),
             Some(with_alpha(theme.warning, 0.08).into()),
         ),
-        BannerVariant::Default => (
+        BannerVariant::Error => (
+            with_alpha(theme.error, 0.32).into(),
+            Some(with_alpha(theme.error, 0.08).into()),
+        ),
+        BannerVariant::Default | BannerVariant::Info | BannerVariant::Success => (
             if dark {
                 with_alpha(crate::theme::tokens::tw::WHITE, 0.05).into()
             } else {

@@ -10,17 +10,16 @@ use turin_contracts::{
     chat_attachment::ChatAttachment,
     model_selection::ModelSelection,
     orchestration_v2::{
-        OrchestrationV2ContextHandoff, OrchestrationV2ContextHandoffStrategy,
-        OrchestrationV2ContextTransfer, OrchestrationV2ContextTransferResolution,
-        OrchestrationV2ContextTransferStatus, OrchestrationV2ContextTransferType,
-        OrchestrationV2ConversationMessage, OrchestrationV2CoveredRunOrdinals,
-        OrchestrationV2DomainEvent, OrchestrationV2ExecutionNode,
-        OrchestrationV2ExecutionNodeStatus, OrchestrationV2ProviderThread,
-        OrchestrationV2ProviderThreadStatus, OrchestrationV2ProviderTurnStatus, OrchestrationV2Run,
-        OrchestrationV2RunAttempt, OrchestrationV2RunAttemptReason,
-        OrchestrationV2RunAttemptStatus, OrchestrationV2RunStatus, OrchestrationV2ServerCommand,
-        OrchestrationV2ThreadProjection, OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
-        OrchestrationV2UserMessageInputIntent,
+        OrchestrationV2ContextHandoff, OrchestrationV2ContextTransfer,
+        OrchestrationV2ContextTransferResolution, OrchestrationV2ContextTransferStatus,
+        OrchestrationV2ContextTransferType, OrchestrationV2ConversationMessage,
+        OrchestrationV2CoveredRunOrdinals, OrchestrationV2DomainEvent,
+        OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeStatus,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadStatus,
+        OrchestrationV2ProviderTurnStatus, OrchestrationV2Run, OrchestrationV2RunAttempt,
+        OrchestrationV2RunAttemptReason, OrchestrationV2RunAttemptStatus, OrchestrationV2RunStatus,
+        OrchestrationV2ServerCommand, OrchestrationV2ThreadProjection, OrchestrationV2TurnItem,
+        OrchestrationV2TurnItemStatus, OrchestrationV2UserMessageInputIntent,
     },
 };
 use turin_provider_core::{
@@ -37,7 +36,10 @@ use super::message_dispatch::{
 };
 use super::message_transfer::read_handoff_items;
 use super::thread_fork::context_source_point_for_run;
-use crate::core::context_handoff_service::{ContextHandoffService, ProviderHandoffInput};
+use crate::core::context_handoff_service::{
+    ContextHandoffService, PrepareProviderHandoffInput as ProviderHandoffInput,
+    ProviderHandoffStrategy,
+};
 use crate::core::provider_session_transition_policy::{
     ProviderSessionTransition, model_selections_equal,
 };
@@ -449,8 +451,8 @@ pub(super) async fn steer_into_run(
                     from: turin_contracts::PositiveInt::new(1).expect("1 is positive"),
                     to: target_run.ordinal,
                 },
-                runs: &projection.runs,
-                strategy: OrchestrationV2ContextHandoffStrategy::FullThreadSummary,
+                runs: Some(&projection.runs),
+                strategy: ProviderHandoffStrategy::FullThreadSummary,
                 items: &items,
                 created_at: now,
             });

@@ -43,7 +43,9 @@ use super::message_dispatch::{
 };
 use super::thread_fork::{context_source_point_for_run, provider_thread_for_run};
 use crate::core::context_handoff_service::{
-    ContextHandoffService, ForkDeltaInput, LegacyImportInput, ProviderHandoffInput,
+    ContextHandoffService, PrepareForkDeltaInput as ForkDeltaInput,
+    PrepareLegacyImportInput as LegacyImportInput,
+    PrepareProviderHandoffInput as ProviderHandoffInput, ProviderHandoffStrategy,
 };
 use crate::core::provider_session_transition_policy::ProviderSessionTransition;
 use crate::pipeline::command_policy::{
@@ -516,8 +518,8 @@ pub(super) async fn start_run_with_transfers(
                 from_provider_instance_id: &source_run.provider_instance_id,
                 to_provider_instance_id: instance,
                 covered_run_ordinals: visible_delta_run_ordinals(source, &portable_fork_items),
-                runs: &source.runs,
-                strategy: OrchestrationV2ContextHandoffStrategy::FullThreadSummary,
+                runs: Some(&source.runs),
+                strategy: ProviderHandoffStrategy::FullThreadSummary,
                 items: &portable_fork_items,
                 created_at: now,
             }),
@@ -613,11 +615,11 @@ pub(super) async fn start_run_with_transfers(
                     from: switch_covered_runs[0].ordinal,
                     to: switch_covered_runs[switch_covered_runs.len() - 1].ordinal,
                 },
-                runs: &projection.runs,
+                runs: Some(&projection.runs),
                 strategy: if full_summary {
-                    OrchestrationV2ContextHandoffStrategy::FullThreadSummary
+                    ProviderHandoffStrategy::FullThreadSummary
                 } else {
-                    OrchestrationV2ContextHandoffStrategy::DeltaSinceTargetLastSeen
+                    ProviderHandoffStrategy::DeltaSinceTargetLastSeen
                 },
                 items: &switch_items,
                 created_at: now,

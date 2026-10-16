@@ -71,7 +71,9 @@ use super::message_transfer::{
 };
 use super::run_stop::stop_reached_run;
 use super::services::PrepareRootRunScope;
-use crate::core::context_handoff_service::{ContextHandoffService, LegacyImportInput};
+use crate::core::context_handoff_service::{
+    ContextHandoffService, PrepareLegacyImportInput as LegacyImportInput,
+};
 use crate::core::restart_background_note::{ProviderTurnState, is_restart_continuation_source};
 
 /// The workspace-preparation placeholder, upstream `WORKSPACE_PREPARATION_INPUT`.

@@ -33,12 +33,9 @@ impl TimelinePageScrollSession {
 
     pub fn handle_key_down(&mut self, key: PageScrollKey, metrics: PageScrollMetrics) -> bool {
         let now = self.now_ms();
-        let started = self.controller.handle_key_down(
-            key,
-            now,
-            metrics,
-            COMPOSER_SCROLL_PADDING_BOTTOM_PX,
-        );
+        let started =
+            self.controller
+                .handle_key_down(key, now, metrics, COMPOSER_SCROLL_PADDING_BOTTOM_PX);
         self.needs_notify = self.controller.needs_frame();
         started
     }
@@ -66,7 +63,9 @@ impl TimelinePageScrollSession {
     /// Returns the scroll delta to apply to the timeline list, if any.
     pub fn frame(&mut self, metrics: PageScrollMetrics) -> Option<Pixels> {
         let now = self.now_ms();
-        let next = self.controller.frame(now, metrics, COMPOSER_SCROLL_PADDING_BOTTOM_PX)?;
+        let next = self
+            .controller
+            .frame(now, metrics, COMPOSER_SCROLL_PADDING_BOTTOM_PX)?;
         let delta = next - metrics.scroll_top;
         self.needs_notify = self.controller.needs_frame();
         Some(px(delta as f32))
@@ -77,8 +76,8 @@ impl MessagesTimeline {
     pub fn page_scroll_metrics(&self, _window: &gpui_kit::Window) -> PageScrollMetrics {
         let viewport = self.list.viewport_bounds();
         let client_height = f64::from(viewport.size.height);
-        let scroll_top = f64::from(self.list.logical_scroll_top());
-        let scroll_height = scroll_top + client_height;
+        let scroll_top = -f64::from(self.list.scroll_px_offset_for_scrollbar().y);
+        let scroll_height = f64::from(self.list.max_offset_for_scrollbar().y) + client_height;
         PageScrollMetrics {
             bounding_height: client_height,
             client_height,

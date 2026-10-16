@@ -55,6 +55,16 @@ pub struct LiveSettingsSource {
     store: Rc<RefCell<Option<Entity<SettingsStore>>>>,
 }
 
+fn runtime_handle(inner: &Arc<Mutex<LiveState>>) -> tokio::runtime::Handle {
+    inner
+        .lock()
+        .expect("live settings state")
+        .services
+        .bus
+        .handle()
+        .clone()
+}
+
 impl LiveSettingsSource {
     /// Builds the store, attaches live feeds, and returns the settings entity.
     pub fn start(
@@ -271,7 +281,7 @@ impl SettingsSource for LiveSettingsSource {
         let inner = self.inner.clone();
         let store_cell = self.store.clone();
         let client = self.client.clone();
-        inner.lock().expect("live settings state").services.bus.handle().spawn(async move {
+        runtime_handle(&inner).spawn(async move {
             persist_client_settings_patch(patch).await;
         });
         let path = inner
@@ -300,7 +310,8 @@ impl SettingsSource for LiveSettingsSource {
         let store_cell = self.store.clone();
         let client = self.client.clone();
         let bus = inner.lock().expect("live settings state").services.bus.clone();
-        inner.lock().expect("live settings state").services.bus.handle().spawn(async move {
+        let inner_task = Arc::clone(&inner);
+        runtime_handle(&inner).spawn(async move {
             let Ok(current) = live_commands::server_settings(&bus).await else {
                 return;
             };
@@ -308,7 +319,10 @@ impl SettingsSource for LiveSettingsSource {
                 return;
             };
             if let Ok(settings) = persist_server_settings(&bus, patch).await {
-                inner.lock().expect("live settings state").server = settings;
+                inner_task
+                    .lock()
+                    .expect("live settings state")
+                    .server = settings;
             }
         });
         if let Some(store) = store_cell.borrow().clone() {
@@ -341,7 +355,7 @@ impl SettingsSource for LiveSettingsSource {
         let server_patch = patch.and_then(|patch| serde_json::from_value(patch).ok());
         let inner = self.inner.clone();
         let bus = inner.lock().expect("live settings state").services.bus.clone();
-        inner.lock().expect("live settings state").services.bus.handle().spawn(async move {
+        runtime_handle(&inner).spawn(async move {
             if let Some(patch) = server_patch {
                 if persist_server_settings(&bus, patch).await.is_err() {
                     return;
@@ -434,8 +448,8 @@ impl SettingsSource for LiveSettingsSource {
         self.inner.lock().expect("live settings state").providers_refreshing = true;
         self.publish(cx);
         let inner = self.inner.clone();
-        inner.lock().expect("live settings state").services.bus.handle().spawn(async move {
-            let services = inner.lock().expect("live settings state").services.clone();
+        let services = inner.lock().expect("live settings state").services.clone();
+        runtime_handle(&inner).spawn(async move {
             let _ = services.provider_registry.refresh(None).await;
             inner.lock().expect("live settings state").providers_refreshing = false;
         });
@@ -450,16 +464,10 @@ impl SettingsSource for LiveSettingsSource {
             .services
             .source_control
             .clone();
-        inner
-            .lock()
-            .expect("live settings state")
-            .services
-            .bus
-            .handle()
-            .spawn(async move {
-                let discovery = source_control.discover().await;
-                inner.lock().expect("live settings state").source_control = discovery;
-            });
+        runtime_handle(&inner).spawn(async move {
+            let discovery = source_control.discover().await;
+            inner.lock().expect("live settings state").source_control = discovery;
+        });
         self.publish(cx);
     }
 
@@ -974,10 +982,16 @@ impl SettingsSource for LiveSettingsSource {
 
     fn run_storage_cleanup(&self, cx: &mut App) {
         let inner = self.inner.clone();
-        let cleanup = inner.lock().expect("live settings state").services.storage_cleanup.clone();
-        inner.lock().expect("live settings state").services.bus.handle().spawn(async move {
+        let cleanup = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .storage_cleanup
+            .clone();
+        runtime_handle(&inner).spawn(async move {
             let report = cleanup.run_now().await;
-            inner.lock().expect("live settings state").storage_cleanup = Some(cleanup_report(&report));
+            inner.lock().expect("live settings state").storage_cleanup =
+                Some(cleanup_report(&report));
         });
         self.publish(cx);
     }

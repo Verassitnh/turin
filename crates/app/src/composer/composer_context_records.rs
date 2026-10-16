@@ -1198,11 +1198,9 @@ pub fn composer_context_draft_from_record(
 
     let known = as_known_context_record(record)?;
     Some(match known {
-        KnownComposerContextRecord::Terminal(record) => {
-            ComposerDraftContextRecord::Terminal(terminal_context_draft_from_record(
-                record, thread_id,
-            ))
-        }
+        KnownComposerContextRecord::Terminal(record) => ComposerDraftContextRecord::Terminal(
+            terminal_context_draft_from_record(record, thread_id),
+        ),
         KnownComposerContextRecord::ReviewComment(record) => {
             ComposerDraftContextRecord::ReviewComment(review_comment_from_record(record))
         }
@@ -1217,7 +1215,7 @@ pub fn composer_context_draft_from_record(
         }
         KnownComposerContextRecord::Image(record) => ComposerDraftContextRecord::Image {
             record: ComposerImageAttachment::new(
-                producer_id_from_composer_context_id("image", record.context_id.as_str()),
+                &producer_id_from_composer_context_id("image", record.context_id.as_str()),
                 record.name.as_str(),
                 record.mime_type.as_str(),
                 Vec::new(),

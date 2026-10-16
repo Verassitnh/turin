@@ -120,7 +120,7 @@ impl RowCx {
 
 pub struct MessagesTimeline {
     store: Entity<ThreadTimelineStore>,
-    list: ListState,
+    pub(super) list: ListState,
     projection: Option<MessagesTimelineRowsProjection>,
     stable: StableMessagesTimelineRowsState,
     rows: Arc<Vec<Arc<MessagesTimelineRow>>>,

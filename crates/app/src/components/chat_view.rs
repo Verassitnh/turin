@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Entity, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    App, Entity, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
     SharedString, Styled as _, Window, div, px, rems,
 };
 
@@ -24,7 +24,6 @@ use super::chat::composer_pending_panels::{
 };
 use super::chat::live_chat::LiveChat;
 use super::chat::live_wiring::{live_overlay_banners, subagent_bar_from_state};
-use super::chat::timeline_page_scroll::TimelinePageScrollSession;
 use super::chat::messages_timeline::MessagesTimeline;
 use super::chat::provider_status_banner::{
     get_provider_status_banner_key, should_show_provider_status_banner,
@@ -43,6 +42,7 @@ use super::chat::thread_error_banner::{
 };
 use super::chat::timeline::session_logic::{derive_pending_approvals, derive_pending_user_inputs};
 use super::chat::timeline::source::MockTimelineSource;
+use super::chat::timeline_page_scroll::TimelinePageScrollSession;
 use super::drag_region::DragRegion as _;
 use super::workspace_titlebar::workspace_titlebar_content_left;
 use crate::app_runtime::write::bus::CommandBus;
@@ -230,13 +230,13 @@ impl ChatView {
                 let state = live.client.read(cx).state();
                 subagent_bar_from_state(state, &live.bus, thread_id)
             })
+            .or_else(|| live_target.is_none().then(subagent_bar_demo).flatten())
             .or_else(|| {
                 live_target
                     .is_none()
-                    .then(subagent_bar_demo)
+                    .then(|| self.subagent_bar.clone())
                     .flatten()
-            })
-            .or_else(|| live_target.is_none().then(|| self.subagent_bar.clone()).flatten());
+            });
         let subagent_bar = subagent_bar_data.map(|data| {
             let open_parent = data.parent_thread_id.clone().zip(source.clone()).map(
                 |(parent, source)| -> OpenHandler {
@@ -263,23 +263,20 @@ impl ChatView {
                 .into_any_element(),
             )
         } else {
-            inputs
-                .first()
-                .cloned()
-                .map(|prompt| {
-                    ComposerPendingUserInputBanner {
-                        prompt,
-                        source,
-                        environment_id: live_target.as_ref().map(|_| {
-                            crate::state::local_environment_id()
-                        }),
-                        thread_id: live_target
-                            .as_ref()
-                            .and_then(|live| live.thread.as_ref())
-                            .map(|id| id.to_string()),
-                    }
-                    .into_any_element()
-                })
+            inputs.first().cloned().map(|prompt| {
+                ComposerPendingUserInputBanner {
+                    prompt,
+                    source,
+                    environment_id: live_target
+                        .as_ref()
+                        .map(|_| crate::state::local_environment_id().to_string()),
+                    thread_id: live_target
+                        .as_ref()
+                        .and_then(|live| live.thread.as_ref())
+                        .map(|id| id.to_string()),
+                }
+                .into_any_element()
+            })
         };
 
         let mut overlay_banners = live_target
@@ -306,9 +303,9 @@ impl ChatView {
                         timeline.apply_page_scroll_delta(delta, cx);
                     });
                 }
-                window.defer(cx, |_, cx| cx.notify());
-            } else if page_scroll.read(cx).take_notify() {
-                window.defer(cx, |_, cx| cx.notify());
+                window.request_animation_frame();
+            } else if page_scroll.update(cx, |session, _| session.take_notify()) {
+                window.request_animation_frame();
             }
             let _ = live;
         }
@@ -542,7 +539,6 @@ fn live_selection_toolbar(
         selection_toolbar_point,
     };
     use super::chat::assistant_selection_toolbar::AssistantSelectionToolbar;
-    use crate::state::local_environment_id;
     use crate::state::models::parse_scoped_thread_key;
 
     let capture = assistant_selection_capture(cx).lock().ok()?.clone();
@@ -550,11 +546,9 @@ fn live_selection_toolbar(
         return None;
     }
     let position = selection_toolbar_point(&capture, canvas_width, canvas_height)?;
-    let thread_id = parse_scoped_thread_key(&composer.read(cx).thread_key)
-        .map(|(_, thread)| thread.to_string())
-        .unwrap_or_else(|| "thread-unknown".into());
+    let (environment_id, thread_id) = parse_scoped_thread_key(composer.read(cx).thread_key())?;
     let citation =
-        assistant_citation_from_capture(&capture, &local_environment_id(), &thread_id)?;
+        assistant_citation_from_capture(&capture, environment_id.as_str(), thread_id.as_str())?;
     let composer = composer.clone();
     let composer_focus = composer.read(cx).focus_handle(cx);
     Some(

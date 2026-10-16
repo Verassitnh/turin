@@ -32,12 +32,12 @@ use turin_projects::project_ports::{
 use turin_projects::project_service::{
     ProjectOperation, ProjectOperationError, ProjectServiceApi,
 };
-use turin_provider_core::id_allocator::IdAllocator;
+use turin_provider_core::id_allocator::derive;
 
 use crate::app_runtime::write::runtime::WriteRuntime;
 
 pub struct AgentSessionLive {
-    discovery: Arc<AgentSessionDiscovery>,
+    discovery: Arc<dyn AgentSessionScanner>,
     importer: Arc<AgentSessionImporter>,
 }
 
@@ -48,11 +48,13 @@ impl AgentSessionLive {
             service: Arc::clone(&runtime.server_settings),
         });
         let projects = Arc::new(StoreReads(Arc::clone(&runtime.stores.projects)));
-        let discovery = Arc::new(AgentSessionDiscovery::with_local_filesystem(
-            host, settings, projects,
+        let discovery: Arc<dyn AgentSessionScanner> = Arc::new(
+            AgentSessionDiscovery::with_local_filesystem(host, settings, projects),
+        );
+        let importer = Arc::new(build_importer(
+            Arc::clone(&discovery),
+            Arc::clone(&runtime),
         ));
-        let scanner: Arc<dyn AgentSessionScanner> = Arc::clone(&discovery);
-        let importer = Arc::new(build_importer(scanner, Arc::clone(&runtime)));
         Self {
             discovery,
             importer,
@@ -372,7 +374,7 @@ impl ProviderThreadIds for ProviderThreadIdsLive {
         driver: &ProviderDriverKind,
         native_thread_id: &str,
     ) -> turin_contracts::ProviderThreadId {
-        IdAllocator::provider_thread(driver, None, native_thread_id)
+        derive::provider_thread(driver, None, native_thread_id)
     }
 }
 

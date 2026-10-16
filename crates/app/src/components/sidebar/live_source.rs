@@ -310,14 +310,15 @@ impl SidebarBackend for LiveSidebarBackend {
     }
 
     fn discard_draft(&self, draft_id: String, cx: &mut App) {
-        if let Some(global) = cx.try_global::<crate::shell::composer_draft_host::ComposerDraftHostGlobal>()
-        {
-            global.0.update(cx, |host, cx| {
-                host.discard_draft_id(&draft_id);
-                cx.notify();
-            });
-        }
-        self.local(cx, |ui| ui.drafts.retain(|draft| draft.draft_id != draft_id));
+        let Some(global) = cx.try_global::<crate::shell::composer_draft_host::ComposerDraftHostGlobal>()
+        else {
+            return;
+        };
+        let host = global.0.clone();
+        host.update(cx, |host, cx| {
+            host.discard_draft_id(&draft_id);
+            cx.notify();
+        });
     }
 
     fn set_project_scope(&self, project_key: Option<String>, cx: &mut App) {

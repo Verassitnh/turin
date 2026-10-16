@@ -23,6 +23,10 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 use turin_contracts::ThreadId;
 
+use super::composer_pending_bridge::{
+    PendingSubmitPlan, apply_composer_prompt_to_session, message_mode_pending_input,
+    pending_answer_for_message_input, sync_pending_input_session,
+};
 use super::timeline::live_projection::{decision_wire, snapshot_from_projection};
 use super::timeline::source::{ThreadTimelineStore, TimelineSource};
 use super::timeline::turn_item::ProviderApprovalDecision;
@@ -36,10 +40,6 @@ use crate::composer::provider_options::{OptionSelection, OptionValue};
 use crate::composer::view_model::{
     ComposerSource, ComposerStore, ComposerViewModel, DraftRestore, InteractionMode, PathEntry,
     QueueState, QueuedRun, RuntimeMode, SendRequest, SessionPhase,
-};
-use super::composer_pending_bridge::{
-    apply_composer_prompt_to_session, message_mode_pending_input, pending_answer_for_message_input,
-    sync_pending_input_session, PendingSubmitPlan,
 };
 use crate::state::client_state::ClientState;
 use crate::state::local_environment_id;
@@ -341,14 +341,14 @@ impl LiveSource {
                     .into_iter()
                     .collect()
             },
-            environment_id: local_environment_id(),
+            environment_id: local_environment_id().to_string(),
             pending_answer: detail.and_then(|detail| {
                 let pending = message_mode_pending_input(&detail.pending_requests)?;
                 let session = self.overrides.borrow().pending_input.clone();
                 Some(pending_answer_for_message_input(
                     pending,
                     &session,
-                    &local_environment_id(),
+                    local_environment_id().as_str(),
                     self.thread_id.as_str(),
                     "",
                     cx,
@@ -776,18 +776,19 @@ impl LiveSource {
             .collect();
         let draft_attachments = super::question_attachment_submit::load_question_drafts(
             cx,
-            &environment_id,
+            environment_id.as_str(),
             self.thread_id.as_str(),
             request_id,
             &question_ids,
         );
         let thread_id = self.thread_id.clone();
         let request_id = request_id.to_owned();
+        let request_to_send = request_id.clone();
         let result = self.bus.run_blocking(move |commands| async move {
             super::question_attachment_submit::respond_to_pending_user_input_with_attachments(
                 &commands,
                 &thread_id,
-                request_id.as_str(),
+                request_to_send.as_str(),
                 answers,
                 &draft_attachments,
             )
@@ -797,7 +798,7 @@ impl LiveSource {
             Ok(()) => {
                 super::question_attachment_submit::clear_question_attachment_drafts_for_request(
                     cx,
-                    &environment_id,
+                    environment_id.as_str(),
                     self.thread_id.as_str(),
                     request_id.as_str(),
                     &question_ids,
@@ -827,7 +828,7 @@ impl LiveSource {
             apply_composer_prompt_to_session(
                 input,
                 &mut overrides.pending_input,
-                &local_environment_id(),
+                local_environment_id().as_str(),
                 self.thread_id.as_str(),
                 composer_prompt,
                 cx,
@@ -836,7 +837,10 @@ impl LiveSource {
         match plan {
             PendingSubmitPlan::Rejected => false,
             PendingSubmitPlan::Advanced => true,
-            PendingSubmitPlan::Submit { request_id, answers } => {
+            PendingSubmitPlan::Submit {
+                request_id,
+                answers,
+            } => {
                 self.update_overrides(cx, |overrides| overrides.pending_input.responding = true);
                 let answers: IndexMap<_, _> = answers.into_iter().collect();
                 let delivered = self.deliver_pending_user_input(request_id.as_str(), answers, cx);

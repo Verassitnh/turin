@@ -20,7 +20,7 @@ pub fn file_tree_file_icon(path: &str, dark: bool, size: Rems) -> Icon {
     if let Some(token) = resolved.token.as_deref()
         && let Some(rgb) = pierre_icon_token_color(token, dark)
     {
-        icon = icon.color(hex(rgb));
+        icon = icon.color(hex(rgb).into());
     }
     icon
 }

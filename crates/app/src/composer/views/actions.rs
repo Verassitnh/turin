@@ -208,8 +208,8 @@ impl ChatComposer {
         _vm: &ComposerViewModel,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let images = self.draft_images(cx);
-        let files = self.draft_files(cx);
+        let images = self.draft_images();
+        let files = self.draft_files();
         if images.is_empty() && files.is_empty() {
             return None;
         }
@@ -416,7 +416,7 @@ impl ChatComposer {
         if vm.has_pending_approval || vm.pending_answer.is_some() {
             return false;
         }
-        if !self.draft_images(cx).is_empty() || !self.draft_files(cx).is_empty() {
+        if !self.draft_images().is_empty() || !self.draft_files().is_empty() {
             return false;
         }
         if self.history_position.is_none() && !snapshot.value.is_empty() {
@@ -486,8 +486,8 @@ impl ChatComposer {
     /// ⌘S: stash the draft; on an empty composer restore the lone entry or
     /// open the menu when there are several.
     pub(super) fn stash_or_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let images = self.draft_images(cx);
-        let files = self.draft_files(cx);
+        let images = self.draft_images();
+        let files = self.draft_files();
         let prompt = self.prompt(cx);
         if !prompt.trim().is_empty() || !images.is_empty() || !files.is_empty() {
             let entry = PromptStashEntry {

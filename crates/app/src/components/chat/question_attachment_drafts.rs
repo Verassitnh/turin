@@ -2,7 +2,7 @@
 
 use gpui_kit::{App, Global, PathPromptOptions, Window};
 
-use crate::composer::attachment_files::{PickedFile, classify_composer_attachment_file};
+use crate::composer::attachment_files::classify_composer_attachment_file;
 use crate::composer::draft_store::{
     AddAttachmentsOptions, ComposerDraftStore, ComposerFileAttachment, ComposerImageAttachment,
 };
@@ -27,18 +27,20 @@ pub fn question_draft_attachment_count(
     question_id: &str,
 ) -> usize {
     let key = question_attachment_draft_id(environment_id, thread_id, request_id, question_id);
-    let drafts = cx.default_global::<QuestionAttachmentDrafts>();
+    let Some(drafts) = cx.try_global::<QuestionAttachmentDrafts>() else {
+        return 0;
+    };
     count_question_attachments(&drafts.store, &drafts.preparation, &[&key])
 }
 
-pub fn pick_question_attachments(window: &mut Window, cx: &mut App, draft_key: String) {
+pub fn pick_question_attachments(_window: &mut Window, cx: &mut App, draft_key: String) {
     let paths = cx.prompt_for_paths(PathPromptOptions {
         files: true,
         directories: false,
         multiple: true,
         prompt: Some("Attach to question".into()),
     });
-    cx.spawn_in(window, async move |_, cx| {
+    cx.spawn(async move |cx| {
         let Ok(Ok(Some(paths))) = paths.await else {
             return;
         };
@@ -81,17 +83,15 @@ pub fn pick_question_attachments(window: &mut Window, cx: &mut App, draft_key: S
                 }
             }
             if !images.is_empty() || !files.is_empty() {
-                drafts.store.add_attachments(
-                    &draft_key,
-                    AddAttachmentsOptions {
-                        images: &images,
-                        files: &files,
-                    },
-                );
+                drafts
+                    .store
+                    .add_images(&draft_key, images, AddAttachmentsOptions::default());
+                drafts
+                    .store
+                    .add_files(&draft_key, files, AddAttachmentsOptions::default());
             }
             cx.refresh_windows();
-        })
-        .ok();
+        });
     })
     .detach();
 }

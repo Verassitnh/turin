@@ -176,10 +176,6 @@ impl ComposerDraftStore {
         }
     }
 
-    pub fn clear_composer_content(&mut self, thread_key: &str) {
-        self.set_prompt(thread_key, "");
-    }
-
     /// `setModelSelection`.
     pub fn set_model_selection(
         &mut self,

@@ -1,18 +1,13 @@
-//! Live [`GitActionsBackend`] via `turin-git`. Switches to
-//! `Commands::git_status` when the runtime facade lands (see WIRE-runtime.md).
+//! Live [`GitActionsBackend`] via `Commands::git_status`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
 
-use gpui_kit::{App, AppContext as _, Task};
+use gpui_kit::{App, Task};
 use turin_contracts::TrimmedNonEmptyString;
 use turin_contracts::git::{GitRunStackedActionResult, VcsPullResult, VcsStatusInput};
 use turin_contracts::source_control::SourceControlPublishRepositoryResult;
-use turin_git::git_vcs_driver::GitVcsDriver;
-use turin_git::process::ProcessRunner;
-use turin_git::vcs_process::VcsProcess;
 
 use super::backend::{
     GitActionTarget, GitActionsBackend, GitStatusView, PublishProviderState,
@@ -20,13 +15,8 @@ use super::backend::{
 };
 use crate::app_runtime::write::bus::CommandBus;
 
-fn shared_driver() -> Arc<GitVcsDriver> {
-    Arc::new(GitVcsDriver::new(VcsProcess::new(ProcessRunner)))
-}
-
 pub struct LiveGitActionsBackend {
     bus: CommandBus,
-    driver: Arc<GitVcsDriver>,
     status_by_cwd: Rc<RefCell<HashMap<String, GitStatusView>>>,
     action: Rc<RefCell<VcsActionState>>,
 }
@@ -35,7 +25,6 @@ impl LiveGitActionsBackend {
     pub fn new(bus: CommandBus) -> Self {
         Self {
             bus,
-            driver: shared_driver(),
             status_by_cwd: Rc::new(RefCell::new(HashMap::new())),
             action: Rc::new(RefCell::new(VcsActionState::default())),
         }
@@ -43,19 +32,18 @@ impl LiveGitActionsBackend {
 
     fn fetch_status(&self, cwd: &str, cx: &mut App) {
         let cwd = cwd.to_owned();
-        let driver = Arc::clone(&self.driver);
         let cache = self.status_by_cwd.clone();
-        let handle = self.bus.handle().clone();
+        let bus = self.bus.clone();
         cx.spawn(async move |cx| {
-            let result = handle
-                .spawn(async move {
+            let result = match bus.commands() {
+                Ok(commands) => {
                     let input = VcsStatusInput {
                         cwd: TrimmedNonEmptyString::new(cwd.clone()).expect("non-empty cwd"),
                     };
-                    driver.status(&input).await
-                })
-                .await
-                .ok();
+                    Some(commands.git_status(input.cwd.as_str()).await)
+                }
+                Err(error) => Some(Err(error)),
+            };
             let view = match result {
                 Some(Ok(status)) => GitStatusView {
                     status: Some(status),
@@ -63,7 +51,7 @@ impl LiveGitActionsBackend {
                 },
                 Some(Err(error)) => GitStatusView {
                     status: None,
-                    error: Some(error.to_string()),
+                    error: Some(error.message),
                 },
                 None => GitStatusView {
                     status: None,
@@ -71,7 +59,7 @@ impl LiveGitActionsBackend {
                 },
             };
             cache.borrow_mut().insert(cwd, view);
-            cx.update(|cx| cx.notify());
+            cx.update(|_| ());
         })
         .detach();
     }
@@ -126,6 +114,7 @@ impl GitActionsBackend for LiveGitActionsBackend {
             hint: Some("Connect GitHub in Settings.".into()),
             account: None,
             host: "github.com".into(),
+            label: "GitHub".into(),
         }
     }
 

@@ -1,18 +1,13 @@
-//! Live [`BranchBackend`] via `turin-git` (`list_refs`). Switches to
-//! `Commands::git_branches` when the runtime facade lands.
+//! Live [`BranchBackend`] via `Commands::git_list_refs` / `git_switch_branch`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
 
-use gpui_kit::{App, AppContext as _, Task};
+use gpui_kit::{App, Task};
 use turin_contracts::TrimmedNonEmptyString;
 use turin_contracts::git::{VcsListRefsInput, VcsRef};
 use turin_contracts::{EnvironmentId, ThreadId};
-use turin_git::git_vcs_driver::GitVcsDriver;
-use turin_git::process::ProcessRunner;
-use turin_git::vcs_process::VcsProcess;
 
 use super::backend::{BranchBackend, RefPage, SwitchRefResult};
 use super::branch_toolbar_logic::EnvironmentOption;
@@ -27,7 +22,6 @@ struct RefQuery {
 
 pub struct LiveBranchBackend {
     bus: CommandBus,
-    driver: Arc<GitVcsDriver>,
     pages: Rc<RefCell<HashMap<(String, String), RefQuery>>>,
 }
 
@@ -35,7 +29,6 @@ impl LiveBranchBackend {
     pub fn new(bus: CommandBus) -> Self {
         Self {
             bus,
-            driver: Arc::new(GitVcsDriver::new(VcsProcess::new(ProcessRunner))),
             pages: Rc::new(RefCell::new(HashMap::new())),
         }
     }
@@ -48,13 +41,14 @@ impl LiveBranchBackend {
         let key = Self::page_key(cwd, query);
         {
             let mut pages = self.pages.borrow_mut();
+            let refs = pages
+                .get(&key)
+                .map(|page| page.refs.clone())
+                .unwrap_or_default();
             pages.insert(
                 key.clone(),
                 RefQuery {
-                    refs: pages
-                        .get(&key)
-                        .map(|page| page.refs.clone())
-                        .unwrap_or_default(),
+                    refs,
                     total_count: 0,
                     pending: true,
                 },
@@ -62,12 +56,11 @@ impl LiveBranchBackend {
         }
         let cwd = cwd.to_owned();
         let query = query.to_owned();
-        let driver = Arc::clone(&self.driver);
         let pages = self.pages.clone();
-        let handle = self.bus.handle().clone();
+        let bus = self.bus.clone();
         cx.spawn(async move |cx| {
-            let list = handle
-                .spawn(async move {
+            let list = match bus.commands() {
+                Ok(commands) => {
                     let input = VcsListRefsInput {
                         cwd: TrimmedNonEmptyString::new(cwd.clone()).expect("cwd"),
                         query: (!query.is_empty()).then(|| {
@@ -77,11 +70,12 @@ impl LiveBranchBackend {
                         include_matching_remote_refs: Some(true),
                         ref_kind: None,
                         refresh: Some(true),
+                        limit: None,
                     };
-                    driver.list_refs(&input).await
-                })
-                .await
-                .ok();
+                    Some(commands.git_list_refs(&input).await)
+                }
+                Err(_) => None,
+            };
             let mut pages = pages.borrow_mut();
             let entry = pages.entry(key).or_insert(RefQuery {
                 refs: Vec::new(),
@@ -92,16 +86,16 @@ impl LiveBranchBackend {
             match list {
                 Some(Ok(result)) => {
                     entry.refs = result.refs;
-                    entry.total_count = result.total_count.get() as usize;
+                    entry.total_count = result.total_count as usize;
                 }
                 Some(Err(error)) => {
                     entry.refs.clear();
                     entry.total_count = 0;
-                    tracing::warn!(%error, "list refs failed");
+                    tracing::warn!(%error.message, "list refs failed");
                 }
                 None => {}
             }
-            cx.update(|cx| cx.notify());
+            cx.update(|_| ());
         })
         .detach();
     }

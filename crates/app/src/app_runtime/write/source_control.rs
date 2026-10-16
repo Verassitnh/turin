@@ -278,7 +278,7 @@ impl ReviewGuideSettings for LiveSettings {
                 Some(&providers),
                 Some(id),
             ),
-            instructions: Some(settings.review_guide_instructions.to_string())
+            instructions: Some(settings.review_guide_instructions.as_str().to_owned())
                 .filter(|text| !text.trim().is_empty()),
         })
     }

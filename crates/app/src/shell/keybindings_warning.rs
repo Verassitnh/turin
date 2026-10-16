@@ -4,18 +4,17 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use gpui_kit::{App, AppContext as _, Subscription};
+use gpui_kit::{App, AsyncApp, Subscription};
 use turin_contracts::editor::EditorId;
 use turin_runtime::keybindings::{KeybindingsConfigState, ServerConfigIssue};
 
-use crate::app_runtime::write::bus::CommandBus;
+use crate::app_runtime::write::bus::{CommandBus, CommandBusGlobal};
 use crate::components::keybindings_config_warning::{
     KeybindingsConfigWarningState, OpenInEditorFailure, OpenInPreferredEditor,
     OPEN_KEYBINDINGS_BUTTON_LABEL, open_keybindings_file,
 };
-use crate::ui::toast::toast_manager;
-use crate::ui::toast_logic::{ToastOptions, ToastType};
-use crate::ui::toast::ToastActionSpec;
+use crate::ui::toast::{ToastActionSpec, ToastOptions, toast_manager};
+use crate::ui::toast_logic::ToastType;
 
 struct ShellEditorOpener;
 
@@ -75,14 +74,14 @@ pub fn start(bus: CommandBus, cx: &mut App) -> Subscription {
         }
     })
     .detach();
-    Subscription::empty()
+    cx.observe_global::<CommandBusGlobal>(|_| {})
 }
 
 fn maybe_show(
     config_path: &str,
     state: KeybindingsConfigState,
     shown: &AtomicBool,
-    cx: &mut App,
+    cx: &mut AsyncApp,
 ) {
     if state.issues.is_empty() || shown.swap(true, Ordering::SeqCst) {
         return;
@@ -97,36 +96,39 @@ fn maybe_show(
         return;
     }
     let path = config_path.to_owned();
-    cx.update(move |cx| {
-        toast_manager(cx).update(cx, |store, cx| {
+    cx.update(|app| {
+        toast_manager(app).update(app, |store, cx| {
             store.add(
                 ToastOptions::new("Keybindings configuration")
                     .type_(ToastType::Error)
                     .description(message)
                     .timeout(0)
                     .action(
-                        ToastActionSpec::new("keybindings-config-warning-open", OPEN_KEYBINDINGS_BUTTON_LABEL)
-                            .on_click(move |_, cx| {
-                                let path = path.clone();
-                                cx.spawn(async move |cx| {
-                                    let opener = ShellEditorOpener;
-                                    if let Some(toast) =
-                                        open_keybindings_file(&opener, Some(&path)).await
-                                    {
-                                        cx.update(|cx| {
-                                            toast_manager(cx).update(cx, |store, cx| {
-                                                store.add(
-                                                    ToastOptions::new(toast.title)
-                                                        .type_(ToastType::Error)
-                                                        .description(toast.description),
-                                                    cx,
-                                                );
-                                            });
+                        ToastActionSpec::new(
+                            "keybindings-config-warning-open",
+                            OPEN_KEYBINDINGS_BUTTON_LABEL,
+                        )
+                        .on_click(move |_, cx| {
+                            let path = path.clone();
+                            cx.spawn(async move |cx| {
+                                let opener = ShellEditorOpener;
+                                if let Some(toast) =
+                                    open_keybindings_file(&opener, Some(&path)).await
+                                {
+                                    cx.update(|app| {
+                                        toast_manager(app).update(app, |store, cx| {
+                                            store.add(
+                                                ToastOptions::new(toast.title)
+                                                    .type_(ToastType::Error)
+                                                    .description(toast.description),
+                                                cx,
+                                            );
                                         });
-                                    }
-                                })
-                                .detach();
-                            }),
+                                    });
+                                }
+                            })
+                            .detach();
+                        }),
                     ),
                 cx,
             );

@@ -228,7 +228,10 @@ impl LivePullRequestSource {
                         &thread.id,
                         crate::state::support::thread_pull_requests::thread_pull_requests_of(
                             source.pull_requests.as_deref(),
-                            source.linked_pull_request.as_ref(),
+                            source
+                                .linked_pull_request
+                                .as_ref()
+                                .and_then(|linked| linked.as_ref()),
                         ),
                         cx,
                     );

@@ -80,11 +80,15 @@ impl LiveUsageBackend {
         let key = Self::window_key(&window);
         {
             let mut state = self.state.borrow_mut();
+            let summary = state
+                .windows
+                .get(&key)
+                .and_then(|entry| entry.summary.clone());
             state.windows.insert(
                 key.clone(),
                 WindowCache {
                     pending: true,
-                    summary: state.windows.get(&key).and_then(|entry| entry.summary.clone()),
+                    summary,
                 },
             );
         }
@@ -104,7 +108,7 @@ impl LiveUsageBackend {
                     summary: Some(summary),
                 },
             );
-            cx.update(|cx| cx.notify());
+            cx.update(|_| ());
         })
         .detach();
     }

@@ -243,7 +243,7 @@ pub struct AppSidebarLayout {
     toast_viewport: Entity<crate::ui::toast::ToastViewport>,
     anchored_toast_viewport: Entity<crate::ui::toast::AnchoredToastViewport>,
     draft_host: Entity<crate::shell::composer_draft_host::ComposerDraftHost>,
-    _keybindings_warning: Subscription,
+    _keybindings_warning: Option<Subscription>,
 }
 
 impl AppSidebarLayout {
@@ -341,8 +341,7 @@ impl AppSidebarLayout {
         crate::shell::composer_draft_host::ComposerDraftHost::register(draft_host.clone(), cx);
         let _keybindings_warning = live
             .as_ref()
-            .map(|live| crate::shell::keybindings_warning::start(live.bus.clone(), cx))
-            .unwrap_or_else(Subscription::empty);
+            .map(|live| crate::shell::keybindings_warning::start(live.bus.clone(), cx));
         Self {
             focus_handle,
             sidebar_open: true,
@@ -398,7 +397,7 @@ impl AppSidebarLayout {
             if let Some(message) = host.undo_latest() {
                 crate::ui::toast::toast_manager(cx).update(cx, |store, cx| {
                     store.add(
-                        crate::ui::toast_logic::ToastOptions::new("Failed to restore draft")
+                        crate::ui::toast::ToastOptions::new("Failed to restore draft")
                             .type_(crate::ui::toast_logic::ToastType::Error)
                             .description(message),
                         cx,

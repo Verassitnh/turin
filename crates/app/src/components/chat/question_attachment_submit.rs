@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use gpui_kit::App;
 use indexmap::IndexMap;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use turin_contracts::ThreadId;
 
 use crate::app_runtime::write::commands::{CommandError, Commands};
@@ -29,7 +29,9 @@ pub fn pending_user_input_attachments_enabled(prompt: &PendingUserInput) -> bool
     prompt.response_capability != ResponseCapability::NotResumable
 }
 
-pub fn pending_user_input_attachments_disabled_reason(prompt: &PendingUserInput) -> Option<&'static str> {
+pub fn pending_user_input_attachments_disabled_reason(
+    prompt: &PendingUserInput,
+) -> Option<&'static str> {
     if prompt.response_capability == ResponseCapability::NotResumable {
         Some("This question cannot accept attachments.")
     } else {
@@ -44,8 +46,10 @@ pub fn load_question_drafts(
     request_id: &str,
     question_ids: &[String],
 ) -> HashMap<String, QuestionDraftAttachments> {
-    let drafts = cx.default_global::<QuestionAttachmentDrafts>();
     let mut loaded = HashMap::new();
+    let Some(drafts) = cx.try_global::<QuestionAttachmentDrafts>() else {
+        return loaded;
+    };
     for question_id in question_ids {
         let key = question_attachment_draft_id(environment_id, thread_id, request_id, question_id);
         let Some(draft) = drafts.store.get_composer_draft(&key) else {
@@ -111,8 +115,8 @@ pub async fn respond_to_pending_user_input_with_attachments(
             .collect(),
     );
     let attachments_by_question_id = stage_drafts(commands, draft_attachments).await?;
-    let attachments = (!attachments_by_question_id.is_empty())
-        .then(|| Value::Object(attachments_by_question_id));
+    let attachments =
+        (!attachments_by_question_id.is_empty()).then(|| Value::Object(attachments_by_question_id));
     commands
         .respond_to_user_input_request(thread_id, request_id, answers_value, attachments)
         .await
@@ -128,8 +132,10 @@ pub fn clear_question_attachment_drafts_for_request(
     let drafts = cx.default_global::<QuestionAttachmentDrafts>();
     for question_id in question_ids {
         let key = question_attachment_draft_id(environment_id, thread_id, request_id, question_id);
+        if let Some(count) = drafts.preparation.count(&key) {
+            drafts.preparation.change(&key, -(count as i64));
+        }
         drafts.store.clear_composer_content(&key);
-        drafts.preparation.counts.remove(&key);
     }
     cx.refresh_windows();
 }

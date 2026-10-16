@@ -10,8 +10,8 @@ use crate::shell::composer_draft_host::ComposerDraftHostGlobal;
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::{CONTROL_RADIUS, TEXT_SM};
 use crate::ui::{Button, ButtonSize, ButtonVariant};
-use crate::ui::toast_logic::{ToastOptions, ToastType};
-use crate::ui::toast::toast_manager;
+use crate::ui::toast::{ToastOptions, toast_manager};
+use crate::ui::toast_logic::ToastType;
 
 #[derive(IntoElement)]
 pub struct SidebarThreadUndoNotice;
@@ -32,12 +32,16 @@ impl RenderOnce for SidebarThreadUndoNotice {
         } else {
             "threads"
         };
-        let label = default_shortcut_label_for_command("thread.undo", is_mac_platform())
+        let mac = is_mac_platform(if cfg!(target_os = "macos") {
+            "MacIntel"
+        } else {
+            "Linux x86_64"
+        });
+        let label = default_shortcut_label_for_command("thread.undo", mac)
             .map(|label| format!("{label} to undo"))
             .unwrap_or_else(|| "Undo".to_owned());
         let host = global.0.clone();
         div()
-            .id("sidebar-thread-undo-notice")
             .mx_2()
             .mb_2()
             .rounded(CONTROL_RADIUS)

@@ -146,8 +146,8 @@ impl ChatComposer {
     pub(super) fn composer_context_records(
         &self,
     ) -> crate::composer::views::composer_context_presentation::ComposerDraftContextRecords {
-        let images = self.draft_images(cx);
-        let files = self.draft_files(cx);
+        let images = self.draft_images();
+        let files = self.draft_files();
         let mut records = composer_context_records_from_draft(&DraftContextInput {
             images: &images,
             files: &files,
@@ -171,7 +171,7 @@ impl ChatComposer {
         match context_reference_click(context_id, &records) {
             ContextClick::ExpandImage(id) => {
                 let gallery: Vec<PreviewAttachment> = self
-                    .draft_images(cx)
+                    .draft_images()
                     .iter()
                     .map(|image| PreviewAttachment {
                         id: image.id.clone(),

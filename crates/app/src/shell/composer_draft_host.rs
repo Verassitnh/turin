@@ -43,7 +43,7 @@ pub struct ComposerDraftHost {
     pub undo: ThreadUndo,
     pub notices: ThreadUndoNotices,
     discarded: DiscardedDrafts<()>,
-    releaser: Arc<NoopReleaser>,
+    releaser: Arc<dyn DraftAttachmentReleaser + Send + Sync>,
 }
 
 impl ComposerDraftHost {
@@ -55,7 +55,7 @@ impl ComposerDraftHost {
             undo: ThreadUndo::default(),
             notices: ThreadUndoNotices::default(),
             discarded: DiscardedDrafts::default(),
-            releaser: Arc::new(NoopReleaser),
+            releaser: Arc::new(NoopReleaser) as Arc<dyn DraftAttachmentReleaser + Send + Sync>,
         }
     }
 
@@ -64,26 +64,32 @@ impl ComposerDraftHost {
     }
 
     pub fn discard_draft_id(&mut self, draft_id: &str) {
+        let undo = self.undo.clone();
+        let notices = self.notices.clone();
+        let discarded = self.discarded.clone();
+        let releaser = Arc::clone(&self.releaser);
         discard_composer_draft(
             self,
             &ComposerThreadTarget::Draft(draft_id.to_owned()),
-            &self.undo,
-            &self.notices,
-            &self.discarded,
-            Arc::clone(&self.releaser),
+            &undo,
+            &notices,
+            &discarded,
+            releaser,
         );
     }
 
     pub fn undo_latest(&mut self) -> Option<String> {
         let notice = self.notices.current_notice()?;
         let ids = notice.ids;
+        let releaser = Arc::clone(&self.releaser);
+        let discarded = self.discarded.clone();
         let mut failure: Option<String> = None;
         for run in self.notices.take_undo(&ids) {
             let UndoPlan::RestoreDraft { discard_id } = run.plan else {
                 continue;
             };
             if let Err(message) =
-                restore_discarded_draft(self, &self.discarded, self.releaser.as_ref(), &discard_id)
+                restore_discarded_draft(self, &discarded, releaser.as_ref(), &discard_id)
             {
                 failure = Some(message);
             }

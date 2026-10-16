@@ -3,7 +3,7 @@
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
-use gpui_kit::{App, Global, Point, Pixels};
+use gpui_kit::{App, Global, Pixels, Point};
 
 use super::assistant_text_selection::create_assistant_text_selector;
 use super::selection_actions::SelectionActionPoint;
@@ -24,14 +24,14 @@ struct AssistantSelectionGlobal {
 
 impl Global for AssistantSelectionGlobal {}
 
-pub fn assistant_selection_capture(cx: &App) -> Arc<Mutex<AssistantSelectionCapture>> {
+pub fn assistant_selection_capture(cx: &mut App) -> Arc<Mutex<AssistantSelectionCapture>> {
     cx.default_global::<AssistantSelectionGlobal>()
         .capture
         .clone()
 }
 
 pub fn report_flow_selection(
-    cx: &App,
+    cx: &mut App,
     message_id: &str,
     message_text: &str,
     flow_text: &str,
@@ -43,21 +43,30 @@ pub fn report_flow_selection(
         .unwrap_or("")
         .trim()
         .to_string();
-    let mut capture = assistant_selection_capture(cx).lock().expect("selection lock");
+    let shared_capture = assistant_selection_capture(cx);
+    let mut capture = shared_capture.lock().expect("selection lock");
     if selected.is_empty() {
         if capture.message_id.as_deref() == Some(message_id) {
             capture.selected_text.clear();
         }
         return;
     }
+    if capture.message_id.as_deref() == Some(message_id)
+        && capture.message_text.as_deref() == Some(message_text)
+        && capture.selected_text == selected
+        && capture.anchor == Some(anchor)
+    {
+        return;
+    }
     capture.message_id = Some(message_id.to_owned());
     capture.message_text = Some(message_text.to_owned());
     capture.selected_text = selected;
     capture.anchor = Some(anchor);
+    drop(capture);
     cx.refresh_windows();
 }
 
-pub fn clear_assistant_selection(cx: &App) {
+pub fn clear_assistant_selection(cx: &mut App) {
     *assistant_selection_capture(cx)
         .lock()
         .expect("selection lock") = AssistantSelectionCapture::default();

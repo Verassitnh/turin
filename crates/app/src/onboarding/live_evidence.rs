@@ -20,7 +20,9 @@ pub fn first_run_evidence(
     let hydration = match client_settings_hydration_status() {
         ClientSettingsHydrationStatus::Ready => HydrationStatus::Ready,
         ClientSettingsHydrationStatus::Failed => HydrationStatus::Failed,
-        ClientSettingsHydrationStatus::Pending => HydrationStatus::Loading,
+        ClientSettingsHydrationStatus::Pending | ClientSettingsHydrationStatus::Retrying => {
+            HydrationStatus::Loading
+        }
     };
     let shell_live = matches!(
         state.shell.status,

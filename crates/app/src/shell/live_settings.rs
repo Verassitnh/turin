@@ -40,7 +40,12 @@ pub fn build_live_settings_services(
 }
 
 fn settings_platform(_cx: &App) -> String {
-    if is_mac_platform() {
+    let platform = if cfg!(target_os = "macos") {
+        "MacIntel"
+    } else {
+        "Linux x86_64"
+    };
+    if is_mac_platform(platform) {
         "MacIntel".into()
     } else {
         "Linux x86_64".into()

@@ -23,7 +23,6 @@ turin-provider-claude.workspace = true
 turin-provider-codex.workspace = true
 turin-provider-opencode.workspace = true
 turin-git.workspace = true
-turin-usage.workspace = true
 turin-hooks.workspace = true
 turin-runtime.workspace = true
 anyhow.workspace = true

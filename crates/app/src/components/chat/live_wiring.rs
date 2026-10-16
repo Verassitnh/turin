@@ -2,25 +2,23 @@
 
 use std::rc::Rc;
 
-use gpui_kit::{App, Entity, SharedString, Window};
+use crate::state::models::ProviderFailureClass;
+use gpui_kit::{App, Entity, IntoElement, SharedString, Window};
 use turin_contracts::ThreadId;
-use turin_contracts::orchestration_v2::OrchestrationV2ProviderFailureClass;
 
 use super::chat_overlay_banners::{ProviderStatusBanner, ThreadErrorBanner};
 use super::usage_limit_recovery_banner::{
     RecoveryActionsState, UsageLimitRecoveryProps, usage_limit_recovery_banner_item,
 };
 use crate::app_runtime::write::bus::CommandBus;
+use crate::components::chat_view::SubagentBarData;
 use crate::composer::live_catalog::provider_entries;
 use crate::composer::model_display::get_trigger_display_model_name;
 use crate::composer::view_model::BannerItem;
-use crate::components::chat_view::SubagentBarData;
 use crate::state::client_state::ClientState;
 use crate::state::models::scoped_thread_key;
 use crate::state::store::ClientStore;
-use crate::state::thread_execution::{
-    derive_provider_subagent_status, derive_thread_runtime,
-};
+use crate::state::thread_execution::{derive_provider_subagent_status, derive_thread_runtime};
 
 use super::provider_status_banner::{
     get_provider_status_banner_key, should_show_provider_status_banner,
@@ -83,7 +81,7 @@ pub fn usage_limit_recovery_props(
     if runtime.status != crate::state::models::RunStatus::Failed {
         return None;
     }
-    if runtime.last_error_class != Some(OrchestrationV2ProviderFailureClass::UsageLimit) {
+    if runtime.last_error_class != Some(ProviderFailureClass::UsageLimit) {
         return None;
     }
     let shell = state.shell_view.as_ref()?.thread(thread_id)?;
@@ -96,11 +94,14 @@ pub fn usage_limit_recovery_props(
             .clone()
             .unwrap_or_else(|| shell.updated_at.clone()),
         snoozed_until: shell.snoozed_until.clone(),
-        recovery: shell.limit_recovery.clone().flatten(),
+        recovery: shell.limit_recovery.clone(),
     })
 }
 
-pub fn usage_limit_recovery_banner(state: &ClientState, thread_id: &ThreadId) -> Option<BannerItem> {
+pub fn usage_limit_recovery_banner(
+    state: &ClientState,
+    thread_id: &ThreadId,
+) -> Option<BannerItem> {
     let props = usage_limit_recovery_props(state, thread_id)?;
     Some(usage_limit_recovery_banner_item(
         &props,
@@ -154,7 +155,7 @@ pub fn live_overlay_banners(
 
         if let Some(runtime) = derive_thread_runtime(projection) {
             let error = runtime.last_error.as_deref();
-            let usage_limit = runtime.last_error_class == Some(OrchestrationV2ProviderFailureClass::UsageLimit);
+            let usage_limit = runtime.last_error_class == Some(ProviderFailureClass::UsageLimit);
             let tick = window.use_keyed_state(
                 format!("thread-error-dismissed-{thread_key}"),
                 cx,

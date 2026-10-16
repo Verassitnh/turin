@@ -84,6 +84,7 @@ impl PullRequestsRouteHost {
 
         let deep_link_opened = Rc::new(Cell::new(false));
         let entity = cx.entity();
+        let entity_for_deep_link = entity.clone();
         let panel_for_select = panel.clone();
         let mut subscriptions = vec![cx.subscribe_in(
             &page,
@@ -134,7 +135,7 @@ impl PullRequestsRouteHost {
             &this.store,
             &this.panel,
             &deep_link_opened,
-            entity.clone(),
+            entity_for_deep_link,
             cx,
         );
         this
@@ -303,7 +304,7 @@ fn deep_link_target(
     );
     let scoped_id = resolve_project_scope(search.project_id.as_deref(), &project_ids, true);
     let repository_owner = project_id_for_repository(&list.projects, repository, search)?;
-    let selected_id = linked_id.or(repository_owner).or(scoped_id);
+    let selected_id = linked_id.or(Some(repository_owner)).or(scoped_id);
     let selected_host = search
         .selected_host
         .as_deref()

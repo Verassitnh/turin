@@ -203,6 +203,8 @@ struct V2Inner {
     /// Background calls seen at `tool.called` before a child session is attached (upstream
     /// `state.calls` with `child === undefined`). Keyed by call id.
     unattached_background: HashMap<String, OpenSubagent>,
+    /// Foreground subagent calls still running, keyed by call id. Turn end settles them.
+    foreground: HashMap<String, OpenSubagent>,
     /// Call ids already settled. A later progress must not start them again.
     settled_calls: HashSet<String>,
 }
@@ -317,6 +319,7 @@ impl OpenCodeV2Session {
                 background_calls: HashSet::new(),
                 background: HashMap::new(),
                 unattached_background: HashMap::new(),
+                foreground: HashMap::new(),
                 settled_calls: HashSet::new(),
                 stopped_children: HashSet::new(),
             }),
@@ -1227,6 +1230,7 @@ impl OpenCodeV2Session {
                 let result = output.as_deref().map(subagent_output);
                 let ordinal = item_ordinal(turn, call_id);
                 if status == OrchestrationV2TurnItemStatus::Running && background && is_root {
+                    inner.foreground.remove(call_id);
                     let mut tracked = OpenSubagent {
                         parent_session: session_id.to_owned(),
                         child_session: child_session.unwrap_or("").to_owned(),
@@ -1261,9 +1265,28 @@ impl OpenCodeV2Session {
                             .unattached_background
                             .insert(call_id.to_owned(), tracked);
                     }
+                } else if status == OrchestrationV2TurnItemStatus::Running {
+                    inner.foreground.insert(
+                        call_id.to_owned(),
+                        OpenSubagent {
+                            parent_session: session_id.to_owned(),
+                            child_session: child_session.unwrap_or("").to_owned(),
+                            thread_id: thread_id.clone(),
+                            root_node_id: root_node_id.clone(),
+                            provider_thread_id: provider_thread_id.clone(),
+                            provider_turn_id: provider_turn_id.clone(),
+                            native_item_id: call_id.to_owned(),
+                            ordinal,
+                            prompt: prompt.clone(),
+                            title: title.map(str::to_owned),
+                            started_at,
+                            child: child.clone(),
+                        },
+                    );
                 } else if status != OrchestrationV2TurnItemStatus::Running {
                     inner.background_calls.remove(call_id);
                     inner.unattached_background.remove(call_id);
+                    inner.foreground.remove(call_id);
                     inner
                         .background
                         .retain(|_, open| open.native_item_id != call_id);
@@ -2016,8 +2039,11 @@ impl OpenCodeV2Session {
         let Some(mut turn) = inner.child_turns.remove(child_session) else {
             return;
         };
-        let Some(child) = inner.subagents.get(child_session) else {
-            return;
+        let (child_thread_id, child_provider_thread_id) = {
+            let Some(child) = inner.subagents.get(child_session) else {
+                return;
+            };
+            (child.thread.id.clone(), child.provider_thread.id.clone())
         };
         let now = UtcDateTime::now();
         let mut events = Vec::new();
@@ -2035,6 +2061,7 @@ impl OpenCodeV2Session {
                 &mut events,
             );
         }
+        events.extend(self.close_open_calls(inner, &mut turn, status));
         let (provider_status, node_status) = match status {
             ProviderAdapterV2TurnTerminalStatus::Completed => (
                 OrchestrationV2ProviderTurnStatus::Completed,
@@ -2058,9 +2085,9 @@ impl OpenCodeV2Session {
         events.push(ProviderAdapterV2Event::NodeUpdated {
             driver: self.driver.clone(),
             node: root_turn_node(
-                &child.thread.id,
+                &child_thread_id,
                 &turn.provider_turn.node_id,
-                &child.provider_thread.id,
+                &child_provider_thread_id,
                 &turn.provider_turn.id,
                 turn.provider_turn.native_turn_ref.clone(),
                 node_status,
@@ -2070,7 +2097,7 @@ impl OpenCodeV2Session {
         });
         events.push(ProviderAdapterV2Event::ProviderTurnUpdated {
             driver: self.driver.clone(),
-            thread_id: Some(child.thread.id.clone()),
+            thread_id: Some(child_thread_id),
             provider_turn: turn.provider_turn,
         });
         for event in events {
@@ -2366,6 +2393,113 @@ impl OpenCodeV2Session {
         });
     }
 
+    /// Upstream `finishTurn`: every open plain tool ends completed or interrupted, and every
+    /// foreground subagent is settled with the terminal status. A background call keeps running
+    /// unless the turn failed.
+    fn close_open_calls(
+        &self,
+        guard: &mut V2Inner,
+        turn: &mut V2Turn,
+        status: ProviderAdapterV2TurnTerminalStatus,
+    ) -> Vec<ProviderAdapterV2Event> {
+        let terminal_failed = matches!(status, ProviderAdapterV2TurnTerminalStatus::Failed);
+        let tool_status = match status {
+            ProviderAdapterV2TurnTerminalStatus::Completed => {
+                OrchestrationV2TurnItemStatus::Completed
+            }
+            _ => OrchestrationV2TurnItemStatus::Interrupted,
+        };
+        let call_status = match status {
+            ProviderAdapterV2TurnTerminalStatus::Completed => {
+                OrchestrationV2TurnItemStatus::Completed
+            }
+            ProviderAdapterV2TurnTerminalStatus::Failed => OrchestrationV2TurnItemStatus::Failed,
+            ProviderAdapterV2TurnTerminalStatus::Cancelled => {
+                OrchestrationV2TurnItemStatus::Cancelled
+            }
+            ProviderAdapterV2TurnTerminalStatus::Interrupted => {
+                OrchestrationV2TurnItemStatus::Interrupted
+            }
+        };
+        let now_close = UtcDateTime::now();
+        let open_calls: Vec<String> = turn.open_tools.drain().collect();
+        let mut events = Vec::new();
+        for call_id in open_calls {
+            let name = guard
+                .tool_names
+                .get(&call_id)
+                .cloned()
+                .unwrap_or_else(|| "tool".to_owned());
+            if name == "task" || name == "subagent" {
+                let child_session = guard.background.iter().find_map(|(child, open)| {
+                    (open.native_item_id == call_id).then_some(child.clone())
+                });
+                let unattached = guard.unattached_background.contains_key(&call_id);
+                if (child_session.is_some() || unattached) && !terminal_failed {
+                    continue;
+                }
+                let open = if let Some(child_session) = child_session {
+                    guard.background.remove(&child_session)
+                } else if unattached {
+                    guard.unattached_background.remove(&call_id)
+                } else {
+                    guard.foreground.remove(&call_id)
+                };
+                if let Some(open) = open {
+                    guard.background_calls.remove(&call_id);
+                    guard.unattached_background.remove(&call_id);
+                    guard.foreground.remove(&call_id);
+                    guard.settled_calls.insert(call_id.clone());
+                    events.extend(self.settle_background(open, call_status, None));
+                }
+                continue;
+            }
+            let started_at = turn
+                .tool_started
+                .get(&call_id)
+                .copied()
+                .unwrap_or(now_close);
+            let thread_id = turn.thread_id.clone();
+            let root_node_id = turn.provider_turn.node_id.clone();
+            let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
+            let provider_turn_id = turn.provider_turn.id.clone();
+            let of = NodeOf {
+                thread_id: &thread_id,
+                root_node_id: &root_node_id,
+                provider_thread_id: &provider_thread_id,
+                provider_turn_id: &provider_turn_id,
+                native_item_id: &call_id,
+                weak_ref: false,
+            };
+            events.push(ProviderAdapterV2Event::NodeUpdated {
+                driver: self.driver.clone(),
+                node: execution_node(
+                    &self.driver,
+                    &of,
+                    NodeTiming {
+                        kind: OrchestrationV2ExecutionNodeKind::ToolCall,
+                        status: node_status_of(tool_status),
+                        started_at,
+                        completed_at: Some(now_close),
+                    },
+                ),
+            });
+            let base = tool_base(
+                turn,
+                &self.driver,
+                &call_id,
+                tool_status,
+                started_at,
+                Some(now_close),
+            );
+            events.push(ProviderAdapterV2Event::TurnItemUpdated {
+                driver: self.driver.clone(),
+                turn_item: open_code_tool_turn_item(base, &name, &json!({}), None, None),
+            });
+        }
+        events
+    }
+
     fn finish(
         &self,
         guard: &mut V2Inner,
@@ -2412,32 +2546,22 @@ impl OpenCodeV2Session {
                 }
             }
         }
-        let Some(thread) = guard.threads.get_mut(session_id) else {
-            return;
+        let mut turn = {
+            let Some(thread) = guard.threads.get_mut(session_id) else {
+                return;
+            };
+            let Some(mut turn) = thread.active.take() else {
+                return;
+            };
+            if turn.finalized {
+                thread.active = Some(turn);
+                return;
+            }
+            turn.finalized = true;
+            thread.unsettled = false;
+            turn
         };
-        let Some(mut turn) = thread.active.take() else {
-            return;
-        };
-        if turn.finalized {
-            thread.active = Some(turn);
-            return;
-        }
-        turn.finalized = true;
-        thread.unsettled = false;
         let mut close_events = Vec::new();
-        let item_status = match status {
-            ProviderAdapterV2TurnTerminalStatus::Completed => {
-                OrchestrationV2TurnItemStatus::Completed
-            }
-            ProviderAdapterV2TurnTerminalStatus::Failed => OrchestrationV2TurnItemStatus::Failed,
-            _ => OrchestrationV2TurnItemStatus::Interrupted,
-        };
-        let tool_status = match status {
-            ProviderAdapterV2TurnTerminalStatus::Completed => {
-                OrchestrationV2TurnItemStatus::Completed
-            }
-            _ => OrchestrationV2TurnItemStatus::Interrupted,
-        };
         let now_close = UtcDateTime::now();
         let open_text: Vec<(String, TextBlockState)> = turn.text_blocks.drain().collect();
         for (native, block) in open_text {
@@ -2453,73 +2577,7 @@ impl OpenCodeV2Session {
                 &mut close_events,
             );
         }
-        let open_calls: Vec<String> = turn.open_tools.drain().collect();
-        for call_id in open_calls {
-            let name = guard
-                .tool_names
-                .get(&call_id)
-                .cloned()
-                .unwrap_or_else(|| "tool".to_owned());
-            if name == "task" || name == "subagent" {
-                let child_session = guard.background.iter().find_map(|(child, open)| {
-                    (open.native_item_id == call_id).then_some(child.clone())
-                });
-                if let Some(child_session) = child_session {
-                    if !terminal_failed && guard.background.contains_key(&child_session) {
-                        continue;
-                    }
-                    if let Some(open) = guard.background.remove(&child_session) {
-                        guard.background_calls.remove(&call_id);
-                        guard.unattached_background.remove(&call_id);
-                        guard.settled_calls.insert(call_id.clone());
-                        close_events.extend(self.settle_background(open, item_status, None));
-                    }
-                }
-                continue;
-            }
-            let started_at = turn
-                .tool_started
-                .get(&call_id)
-                .copied()
-                .unwrap_or(now_close);
-            let thread_id = turn.thread_id.clone();
-            let root_node_id = turn.provider_turn.node_id.clone();
-            let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
-            let provider_turn_id = turn.provider_turn.id.clone();
-            let of = NodeOf {
-                thread_id: &thread_id,
-                root_node_id: &root_node_id,
-                provider_thread_id: &provider_thread_id,
-                provider_turn_id: &provider_turn_id,
-                native_item_id: &call_id,
-                weak_ref: false,
-            };
-            close_events.push(ProviderAdapterV2Event::NodeUpdated {
-                driver: self.driver.clone(),
-                node: execution_node(
-                    &self.driver,
-                    &of,
-                    NodeTiming {
-                        kind: OrchestrationV2ExecutionNodeKind::ToolCall,
-                        status: node_status_of(tool_status),
-                        started_at,
-                        completed_at: Some(now_close),
-                    },
-                ),
-            });
-            let base = tool_base(
-                &mut turn,
-                &self.driver,
-                &call_id,
-                tool_status,
-                started_at,
-                Some(now_close),
-            );
-            close_events.push(ProviderAdapterV2Event::TurnItemUpdated {
-                driver: self.driver.clone(),
-                turn_item: open_code_tool_turn_item(base, &name, &json!({}), None, None),
-            });
-        }
+        close_events.extend(self.close_open_calls(guard, &mut turn, status));
         turn.provider_turn.status = match status {
             ProviderAdapterV2TurnTerminalStatus::Completed => {
                 OrchestrationV2ProviderTurnStatus::Completed
@@ -2578,6 +2636,9 @@ impl OpenCodeV2Session {
         let provider_turn = turn.provider_turn.clone();
         let thread_id = turn.thread_id.clone();
         let run_ordinal = turn.run_ordinal.max(1) as u64;
+        let Some(thread) = guard.threads.get_mut(session_id) else {
+            return;
+        };
         if let Some(stored) = thread
             .turns
             .iter_mut()

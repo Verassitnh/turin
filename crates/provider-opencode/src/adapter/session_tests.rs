@@ -2794,6 +2794,64 @@ async fn v2_an_open_tool_call_ends_interrupted_when_the_execution_is_interrupted
     session.close().await;
 }
 
+/// A foreground subagent still running when the execution ends is interrupted with it.
+#[tokio::test]
+async fn v2_an_open_foreground_subagent_ends_interrupted() {
+    let (script, session, mut events, _offers, thread) = v2_idle_session_with_offers().await;
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    for frame in [
+        json!({"id":"t0","type":"session.tool.called","data":{"sessionID":"ses_1","id":"call_fg","name":"subagent","input":{"prompt":"look"}}}),
+        json!({"id":"t1","type":"session.tool.progress","data":{"sessionID":"ses_1","id":"call_fg","metadata":{"sessionID":"ses_child","status":"running"}}}),
+        json!({"id":"t2","type":"session.execution.interrupted","data":{"sessionID":"ses_1"}}),
+    ] {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "interrupted"
+    })
+    .await;
+    assert!(
+        of_type(&seen, "turn_item.updated").iter().any(|event| {
+            event["turn_item"]["type"] == "subagent"
+                && event["turn_item"]["status"] == "interrupted"
+                && event["turn_item"]["nativeItemRef"]["nativeId"] == "call_fg"
+        }),
+        "{seen:#?}"
+    );
+    session.close().await;
+}
+
+/// A child turn ends its own open plain tool when the child's execution stops.
+#[tokio::test]
+async fn v2_a_child_turn_interrupts_its_open_tool() {
+    let (script, session, mut events, _offers, thread) = v2_idle_session_with_offers().await;
+    session.start_turn(turn(thread, "delegate")).await.unwrap();
+    for frame in [
+        json!({"id":"t0","type":"session.tool.success","data":{"sessionID":"ses_1","id":"call_t","name":"task","status":"running","input":{"prompt":"look"},"metadata":{"sessionID":"child_1"}}}),
+        json!({"id":"t1","type":"session.execution.started","data":{"sessionID":"child_1"}}),
+        json!({"id":"t2","type":"session.tool.called","data":{"sessionID":"child_1","id":"call_bash","name":"bash","input":{"command":"ls"}}}),
+        json!({"id":"t3","type":"session.execution.interrupted","data":{"sessionID":"child_1"}}),
+    ] {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["nativeItemRef"]["nativeId"] == "call_bash"
+            && value["turn_item"]["status"] == "interrupted"
+    })
+    .await;
+    assert!(
+        of_type(&seen, "turn_item.updated").iter().any(|event| {
+            event["turn_item"]["nativeItemRef"]["nativeId"] == "call_bash"
+                && event["turn_item"]["status"] == "interrupted"
+        }),
+        "{seen:#?}"
+    );
+    session.close().await;
+}
+
 /// Plain tool success completes even when metadata claims the call is still running.
 #[tokio::test]
 async fn v2_plain_tool_success_completes_despite_metadata_running() {

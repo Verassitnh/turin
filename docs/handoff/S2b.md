@@ -26,7 +26,7 @@ Mounts: citation links in markdown open the quote overlay; composer chips sit ab
 
 ## Screenshots
 
-`scripts/shot.sh` found the Turin window, then `screencapture -l` failed with `could not create image from window`. A full-display capture of this session was black, so `docs/screenshots/S2b/` has no images. Demos are `TURIN_CHAT_MEDIA_DEMO=image|video|citation`.
+`docs/screenshots/S2b/` from `scripts/shot.sh` with `TURIN_CHAT_MEDIA_DEMO=image|video|citation`. The overlay is `absolute` + `size_full` and paints after the composer, matching the dialog backdrop. `inset_0` did not stretch the layer.
 
 ## Remaining
 
@@ -35,4 +35,3 @@ Mounts: citation links in markdown open the quote overlay; composer chips sit ab
 - No native Mermaid renderer. The fence shows the upstream error fallback, not an SVG.
 - No video element. A video opens the unavailable frame.
 - Composer chips are not ProseMirror atoms. They are scanned from the flat prompt.
-- Screenshot pass, once a display can capture the window.

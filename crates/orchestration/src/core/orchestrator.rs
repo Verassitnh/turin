@@ -6,7 +6,7 @@
 //! [`orchestrator::dispatch`](self::dispatch), and each command group has its
 //! own file under `core/orchestrator/`, so parallel ports merge cleanly.
 //!
-//! Not ported yet: `resumeQueuedRuns`, `searchThread(Stream)`, timeline and
+//! Not ported yet: timeline and
 //! history paging, checkpoint context, and the thread-snapshot reads. Those
 //! return an error here. Command kinds not yet ported are rejected in
 //! `dispatch::decide`, which reports `OrchestratorError::CommandRejected`.
@@ -82,6 +82,8 @@ mod thread_mutation;
 mod thread_pull_request;
 #[cfg(test)]
 mod thread_pull_request_tests;
+#[cfg(test)]
+mod thread_search_tests;
 
 use std::sync::Arc;
 
@@ -110,6 +112,7 @@ use crate::projection::store::{
     shell::{ShellSnapshotLocation, ShellSnapshotOptions as ProjectionShellSnapshotOptions},
 };
 use services::{DispatchSeams, RestartRecovery};
+use turin_contracts::orchestration_v2::OrchestrationV2SearchThreadResult;
 use turin_provider_core::id_allocator::IdAllocator;
 
 /// Thread id upstream attaches to shell-snapshot errors (`shellProjectionError`).
@@ -264,6 +267,62 @@ impl OrchestratorPort for Orchestrator {
             .get_thread_records(thread_id, fields, Some(projection_record_filter(filter)))
             .await
             .map_err(|cause| Self::projection_error(thread_id, cause))
+    }
+
+    async fn search_thread_stream(
+        &self,
+        input: &turin_contracts::orchestration_v2::OrchestrationV2SearchThreadInput,
+    ) -> Result<BoxStream<'static, OrchestrationV2SearchThreadResult>, OrchestratorError> {
+        let thread_id = &input.thread_id;
+        let projection = self
+            .projection
+            .get_thread_projection(thread_id)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))?;
+        // A deleted thread, or one whose project is gone, is not found.
+        let project_root = self
+            .seams
+            .project_roots
+            .workspace_root(&projection.thread.project_id)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))?;
+        if projection.thread.deleted_at.is_some() || project_root.is_none() {
+            return Err(OrchestratorError::projection(
+                thread_id.clone(),
+                crate::projection::error::ProjectionStoreError::ThreadNotFound {
+                    thread_id: thread_id.clone(),
+                },
+            ));
+        }
+        let cwd = projection
+            .thread
+            .worktree_path
+            .as_ref()
+            .map(|path| path.as_str().to_owned())
+            .or(project_root);
+        // The revision spans every thread whose rows the view inherits.
+        let mut sources = vec![thread_id.clone()];
+        for row in &projection.visible_turn_items {
+            if !sources.contains(&row.source_thread_id) {
+                sources.push(row.source_thread_id.clone());
+            }
+        }
+        let mut sequence = 0;
+        for source in &sources {
+            let latest = self
+                .sink
+                .latest_sequence(Some(source.clone()))
+                .await
+                .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))?;
+            sequence = sequence.max(u64::try_from(latest).unwrap_or(0));
+        }
+        let frames = crate::core::thread_find::find_projected_thread_items(
+            &projection.visible_turn_items,
+            input,
+            sequence,
+            cwd.as_deref(),
+        );
+        Ok(futures::stream::iter(frames).boxed())
     }
 
     async fn get_thread_projection(

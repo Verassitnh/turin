@@ -25,6 +25,11 @@ mod message_plan_tests;
 mod message_steer;
 #[cfg(test)]
 mod message_steer_tests;
+mod message_transfer;
+#[cfg(test)]
+mod message_transfer_tests;
+#[cfg(test)]
+mod model_selection_tests;
 mod prepared_run;
 #[cfg(test)]
 mod prepared_run_tests;

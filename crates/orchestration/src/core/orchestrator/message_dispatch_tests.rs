@@ -146,11 +146,16 @@ impl ProviderAdapterV2 for FakeAdapter {
 /// Resolves the one fake instance and nothing else.
 pub(super) struct FakeAdapters {
     pub(super) adapter: Arc<dyn ProviderAdapterV2>,
+    /// A second provider, for switches and handoffs.
+    pub(super) other: Option<Arc<dyn ProviderAdapterV2>>,
 }
 
 impl ProviderAdapterLookup for FakeAdapters {
     fn adapter(&self, instance_id: &ProviderInstanceId) -> Option<Arc<dyn ProviderAdapterV2>> {
-        (instance_id == self.adapter.instance_id()).then(|| self.adapter.clone())
+        std::iter::once(&self.adapter)
+            .chain(self.other.iter())
+            .find(|adapter| adapter.instance_id() == instance_id)
+            .cloned()
     }
 }
 
@@ -178,7 +183,10 @@ async fn harness() -> (Orchestrator, EffectOutbox) {
     )
     .with_dispatch_seams(DispatchSeams {
         checkpoints: Arc::new(FakeCheckpoints),
-        adapters: Arc::new(FakeAdapters { adapter }),
+        adapters: Arc::new(FakeAdapters {
+            adapter,
+            other: None,
+        }),
         project_roots: Arc::new(FakeProjectRoots),
         ..DispatchSeams::default()
     });

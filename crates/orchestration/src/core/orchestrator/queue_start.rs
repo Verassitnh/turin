@@ -13,12 +13,16 @@
 use turin_contracts::{
     CommandId, RunId, ThreadId, UtcDateTime,
     orchestration_v2::{
-        OrchestrationV2Command as C, OrchestrationV2DomainEvent, OrchestrationV2ExecutionNode,
-        OrchestrationV2ExecutionNodeStatus, OrchestrationV2ProviderFailureClass,
-        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadStatus, OrchestrationV2Run,
-        OrchestrationV2RunAttemptStatus, OrchestrationV2RunStatus, OrchestrationV2ServerCommand,
-        OrchestrationV2ThreadHistoryOrigin, OrchestrationV2ThreadLaunchWorkspaceStrategy,
-        OrchestrationV2ThreadProjection, OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
+        OrchestrationV2Command as C, OrchestrationV2ContextHandoffStrategy,
+        OrchestrationV2ContextTransfer, OrchestrationV2ContextTransferResolution,
+        OrchestrationV2ContextTransferStatus, OrchestrationV2ContextTransferType,
+        OrchestrationV2CoveredRunOrdinals, OrchestrationV2DomainEvent,
+        OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeStatus,
+        OrchestrationV2ProviderFailureClass, OrchestrationV2ProviderThread,
+        OrchestrationV2ProviderThreadStatus, OrchestrationV2Run, OrchestrationV2RunAttemptStatus,
+        OrchestrationV2RunStatus, OrchestrationV2ServerCommand, OrchestrationV2ThreadHistoryOrigin,
+        OrchestrationV2ThreadLaunchWorkspaceStrategy, OrchestrationV2ThreadProjection,
+        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
         OrchestrationV2UserMessageInputIntent,
     },
 };
@@ -34,10 +38,19 @@ use super::message_dispatch::{
     is_blocking_run, next_turn_item_ordinal, prepare_root_scope_raw, provider_session_id_for_raw,
     wake_work_started_at,
 };
+use super::message_transfer::{
+    is_handoff_source_run, last_delivered_run_for_provider_thread, read_handoff_items,
+    transfer_strategy_name,
+};
 use super::provider_detach;
+use super::thread_fork::context_source_point_for_run;
+use crate::core::context_handoff_service::{
+    ContextHandoffService, LegacyImportInput, ProviderHandoffInput,
+};
 use crate::core::provider_session_transition_policy::{
     ProviderSessionTransition, model_selections_equal,
 };
+use crate::pipeline::command_policy::{CapabilityCheck, HandoffStrategy, ensure_context_handoff};
 use crate::pipeline::effect_outbox::{EffectRequest, PendingEffect};
 use crate::pipeline::event_sink::WriteInput;
 use crate::pipeline::orchestrator_port::OrchestratorError;
@@ -133,31 +146,6 @@ fn session_error(projection: &OrchestrationV2ThreadProjection) -> Option<String>
         .filter(|session| session.provider_instance_id == projection.thread.provider_instance_id)
         .max_by_key(|session| session.updated_at)
         .and_then(|session| session.last_error.clone())
-}
-
-fn is_handoff_source_run(run: &OrchestrationV2Run) -> bool {
-    matches!(
-        run.status,
-        OrchestrationV2RunStatus::Completed
-            | OrchestrationV2RunStatus::Failed
-            | OrchestrationV2RunStatus::Interrupted
-    )
-}
-
-/// `lastDeliveredRunForProviderThread`.
-fn last_delivered_run_for_provider_thread<'a>(
-    projection: &'a OrchestrationV2ThreadProjection,
-    provider_thread_id: &turin_contracts::ProviderThreadId,
-) -> Option<&'a OrchestrationV2Run> {
-    projection.runs.iter().rev().find(|run| {
-        is_handoff_source_run(run)
-            && run.provider_thread_id.as_ref() == Some(provider_thread_id)
-            && (run.status == OrchestrationV2RunStatus::Completed
-                || projection
-                    .provider_turns
-                    .iter()
-                    .any(|turn| turn.run_attempt_id == run.active_attempt_id))
-    })
 }
 
 impl Orchestrator {
@@ -508,22 +496,111 @@ impl Orchestrator {
             _ => Vec::new(),
         };
         let needs_full_context = delivery_provider_thread.native_thread_ref.is_none();
-        if !covered_runs.is_empty() {
-            return Err(dispatch_error_for(
-                &command_id,
-                "Handing the conversation to another provider needs the context handoff service, which is not ported yet.".to_owned(),
-            ));
-        }
-        if latest_completed_run.is_none()
-            && needs_full_context
-            && projection.thread.history_origin
-                == Some(OrchestrationV2ThreadHistoryOrigin::V1Import)
+        let legacy_import_items = if projection.thread.history_origin
+            == Some(OrchestrationV2ThreadHistoryOrigin::V1Import)
         {
-            return Err(dispatch_error_for(
-                &command_id,
-                "Legacy import handoff is not ported yet.".to_owned(),
-            ));
+            read_handoff_items(self, thread_id, Some(vec![None])).await?
+        } else {
+            Vec::new()
+        };
+        let handoffs = ContextHandoffService::default();
+        let transfer_id = (!covered_runs.is_empty())
+            .then(|| IdAllocator.context_transfer(thread_id, thread_id, "provider_handoff"));
+        if transfer_id.is_some() {
+            let capabilities = target_adapter
+                .get_capabilities()
+                .await
+                .map_err(|cause| dispatch_error_for(&command_id, cause.to_string()))?;
+            ensure_context_handoff(
+                &CapabilityCheck {
+                    command_id: &command_id,
+                    thread_id,
+                    provider_instance_id: &queued_run.provider_instance_id,
+                    capabilities: &capabilities,
+                },
+                if needs_full_context {
+                    HandoffStrategy::FullThreadSummary
+                } else {
+                    HandoffStrategy::DeltaContext
+                },
+            )
+            .map_err(|cause| {
+                // A provider that cannot take a handoff fails this message
+                // alone, as a validation error.
+                OrchestratorError::Dispatch {
+                    command_id: command_id.clone(),
+                    command_type: "message.dispatch".to_owned(),
+                    cause: Box::new(HandoffUnsupported(cause.to_string())),
+                }
+            })?;
         }
+        let handoff = match (&transfer_id, latest_handoff_run) {
+            (Some(transfer_id), Some(latest)) => {
+                let mut items = if needs_full_context && latest_completed_run.is_some() {
+                    legacy_import_items.clone()
+                } else {
+                    Vec::new()
+                };
+                items.extend(
+                    read_handoff_items(
+                        self,
+                        thread_id,
+                        Some(
+                            covered_runs
+                                .iter()
+                                .map(|run| Some(run.id.clone()))
+                                .collect(),
+                        ),
+                    )
+                    .await?,
+                );
+                let mut from_threads: Vec<turin_contracts::ProviderThreadId> = Vec::new();
+                for run in &covered_runs {
+                    if let Some(id) = &run.provider_thread_id
+                        && !from_threads.contains(id)
+                    {
+                        from_threads.push(id.clone());
+                    }
+                }
+                Some(handoffs.prepare_provider_handoff(&ProviderHandoffInput {
+                    thread_id,
+                    target_run_id: &queued_run.id,
+                    transfer_id: Some(transfer_id.clone()),
+                    from_provider_thread_ids: &from_threads,
+                    to_provider_thread_id: &queued_provider_thread.id,
+                    from_provider_instance_id: &latest.provider_instance_id,
+                    to_provider_instance_id: &queued_run.provider_instance_id,
+                    covered_run_ordinals: OrchestrationV2CoveredRunOrdinals {
+                        from: covered_runs[0].ordinal,
+                        to: covered_runs[covered_runs.len() - 1].ordinal,
+                    },
+                    runs: &projection.runs,
+                    strategy: if needs_full_context {
+                        OrchestrationV2ContextHandoffStrategy::FullThreadSummary
+                    } else {
+                        OrchestrationV2ContextHandoffStrategy::DeltaSinceTargetLastSeen
+                    },
+                    items: &items,
+                    created_at: now,
+                }))
+            }
+            _ => None,
+        };
+        let legacy_import_recovery_handoff = (latest_completed_run.is_none()
+            && needs_full_context
+            && !legacy_import_items.is_empty())
+        .then(|| {
+            handoffs.prepare_legacy_import(&LegacyImportInput {
+                thread_id,
+                target_run_id: &queued_run.id,
+                to_provider_thread_id: &queued_provider_thread.id,
+                to_provider_instance_id: &queued_run.provider_instance_id,
+                items: &legacy_import_items,
+                created_at: now,
+            })
+        });
+        let active_handoff = handoff.as_ref().or(legacy_import_recovery_handoff.as_ref());
+        let provider_handoff_prepared = handoff.is_some();
 
         let checkpoint_scope = match stored_checkpoint_scope {
             Some(scope) => scope.clone(),
@@ -562,6 +639,18 @@ impl Orchestrator {
                 .first_run_ordinal
                 .or(Some(queued_run.ordinal)),
             last_run_ordinal: Some(queued_run.ordinal),
+            handoff_ids: {
+                let mut ids_out = queued_provider_thread.handoff_ids.clone();
+                for handoff in [handoff.as_ref(), legacy_import_recovery_handoff.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if !ids_out.contains(&handoff.id) {
+                        ids_out.push(handoff.id.clone());
+                    }
+                }
+                ids_out
+            },
             updated_at: now,
             ..delivery_provider_thread
         };
@@ -569,7 +658,7 @@ impl Orchestrator {
             status: OrchestrationV2RunStatus::Starting,
             queue_position: Some(None),
             started_at: None,
-            context_handoff_id: None,
+            context_handoff_id: active_handoff.map(|handoff| handoff.id.clone()),
             work_started_at: wake_work_started_at(
                 &projection.runs,
                 queued_message.notification.is_some()
@@ -643,6 +732,143 @@ impl Orchestrator {
                 },
                 &thread,
                 now,
+            );
+        }
+        if let (Some(transfer_id), Some(handoff), Some(latest)) =
+            (&transfer_id, &handoff, latest_handoff_run)
+        {
+            let transfer = OrchestrationV2ContextTransfer {
+                id: transfer_id.clone(),
+                r#type: OrchestrationV2ContextTransferType::ProviderHandoff,
+                source_thread_id: thread_id.clone(),
+                target_thread_id: thread_id.clone(),
+                source_point: context_source_point_for_run(&projection, latest),
+                base_point: if needs_full_context {
+                    None
+                } else {
+                    target_last_completed_run
+                        .map(|run| context_source_point_for_run(&projection, run))
+                },
+                source_provider_instance_id: Some(latest.provider_instance_id.clone()),
+                target_provider_instance_id: Some(queued_run.provider_instance_id.clone()),
+                target_run_id: Some(queued_run.id.clone()),
+                status: OrchestrationV2ContextTransferStatus::Consumed,
+                resolution: Some(if needs_full_context {
+                    OrchestrationV2ContextTransferResolution::PortableContext {
+                        context_handoff_id: handoff.id.clone(),
+                    }
+                } else {
+                    OrchestrationV2ContextTransferResolution::DeltaContext {
+                        context_handoff_id: handoff.id.clone(),
+                    }
+                }),
+                created_by: queued_message.created_by,
+                error: None,
+                created_at: now,
+                updated_at: now,
+                consumed_at: Some(now),
+            };
+            let id = write.event_id(thread_id);
+            write.emit(OrchestrationV2DomainEvent::ContextTransferCreated {
+                id,
+                thread_id: thread_id.clone(),
+                run_id: Some(queued_run.id.clone()),
+                node_id: None,
+                driver: None,
+                provider_instance_id: Some(instance.clone()),
+                raw_event_id: None,
+                occurred_at: now,
+                payload: transfer,
+            });
+            let id = write.event_id(thread_id);
+            write.emit(OrchestrationV2DomainEvent::ContextHandoffUpdated {
+                id,
+                thread_id: thread_id.clone(),
+                run_id: Some(queued_run.id.clone()),
+                node_id: None,
+                driver: None,
+                provider_instance_id: Some(instance.clone()),
+                raw_event_id: None,
+                occurred_at: now,
+                payload: handoff.clone(),
+            });
+        }
+        if let Some(handoff) = &legacy_import_recovery_handoff {
+            let id = write.event_id(thread_id);
+            write.emit(OrchestrationV2DomainEvent::ContextHandoffUpdated {
+                id,
+                thread_id: thread_id.clone(),
+                run_id: Some(queued_run.id.clone()),
+                node_id: None,
+                driver: None,
+                provider_instance_id: Some(instance.clone()),
+                raw_event_id: None,
+                occurred_at: now,
+                payload: handoff.clone(),
+            });
+        }
+        if let Some(active) = active_handoff {
+            let mut from_instances: Vec<turin_contracts::provider_instance::ProviderInstanceId> =
+                Vec::new();
+            let mut from_models: Vec<turin_contracts::model_selection::ModelSelection> = Vec::new();
+            for run in &covered_runs {
+                if !from_instances.contains(&run.provider_instance_id) {
+                    from_instances.push(run.provider_instance_id.clone());
+                }
+                if !from_models.iter().any(|model| {
+                    model.instance_id == run.model_selection.instance_id
+                        && model.model == run.model_selection.model
+                }) {
+                    from_models.push(run.model_selection.clone());
+                }
+            }
+            let item = OrchestrationV2TurnItem::Handoff {
+                tool_non_execution_kind: None,
+                tool_surface: None,
+                tool_icon: None,
+                tool_source: None,
+                id: ids::run_signal_turn_item(
+                    &queued_run.id,
+                    &format!("context-handoff:{}", active.id),
+                ),
+                thread_id: thread_id.clone(),
+                run_id: Some(queued_run.id.clone()),
+                node_id: Some(root_node_id.clone()),
+                provider_thread_id: Some(queued_provider_thread.id.clone()),
+                provider_turn_id: None,
+                native_item_ref: None,
+                parent_item_id: None,
+                ordinal: queued_run.ordinal.get() * 100 - 1,
+                status: OrchestrationV2TurnItemStatus::Completed,
+                title: Some(
+                    if provider_handoff_prepared {
+                        "Provider handoff"
+                    } else {
+                        "Imported context"
+                    }
+                    .to_owned(),
+                ),
+                started_at: Some(now),
+                completed_at: Some(now),
+                updated_at: now,
+                context_handoff_id: active.id.clone(),
+                from_provider_thread_ids: active.from_provider_thread_ids.clone(),
+                to_provider_thread_id: active.to_provider_thread_id.clone(),
+                from_provider_instance_ids: from_instances,
+                to_provider_instance_id: queued_run.provider_instance_id.clone(),
+                from_model_selections: Some(from_models),
+                to_model: Some(queued_run.model_selection.model.to_string()),
+                strategy: transfer_strategy_name(active.strategy),
+                summary: Some(active.summary_text.clone()),
+            };
+            super::message_dispatch::run_scoped_event!(
+                write,
+                TurnItemUpdated,
+                thread_id,
+                &queued_run.id,
+                &root_node_id,
+                instance,
+                item
             );
         }
         provider_detach::detach_sessions(
@@ -756,11 +982,23 @@ impl Orchestrator {
             OrchestratorError::Dispatch { cause, .. } => cause.to_string(),
             other => other.to_string(),
         };
+        let handoff_unsupported = matches!(
+            cause,
+            OrchestratorError::Dispatch { cause, .. } if cause.is::<HandoffUnsupported>()
+        );
         let failure = make_provider_failure(ProviderFailureInput {
             cause: None,
             message: Some(&message),
-            code: Some(Some("queued_start_failed")),
-            class: Some(OrchestrationV2ProviderFailureClass::Unknown),
+            code: Some(Some(if handoff_unsupported {
+                "context_handoff_unsupported"
+            } else {
+                "queued_start_failed"
+            })),
+            class: Some(if handoff_unsupported {
+                OrchestrationV2ProviderFailureClass::ValidationError
+            } else {
+                OrchestrationV2ProviderFailureClass::Unknown
+            }),
             retryable: None,
             reset_at: None,
         });
@@ -884,6 +1122,19 @@ impl Orchestrator {
         .await
     }
 }
+
+/// The target provider cannot take a context handoff; the queued message
+/// fails alone with a validation error.
+#[derive(Debug)]
+struct HandoffUnsupported(String);
+
+impl std::fmt::Display for HandoffUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for HandoffUnsupported {}
 
 /// A `message.dispatch` failure for a system-started queued run, which has no
 /// client command to blame.

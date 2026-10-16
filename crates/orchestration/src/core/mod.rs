@@ -5,6 +5,7 @@
 // boxing them would leak into the pipeline API (same reason as `pipeline`).
 #![allow(clippy::result_large_err)]
 
+pub mod context_handoff_service;
 pub mod orchestrator;
 pub mod projection_applier;
 pub mod projection_reads;

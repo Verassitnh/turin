@@ -52,14 +52,15 @@ pub(super) fn command_id(id: &str) -> CommandId {
     CommandId::new(id).expect("command id")
 }
 
-fn model_selection_set(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
+/// A kind whose handler is not ported yet (delegated tasks).
+fn unported_command(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
     serde_json::from_value(json!({
-        "type": "thread.model-selection.set",
+        "type": "delegated_task.completion-delivery.dispose",
         "commandId": command,
-        "threadId": thread_id,
-        "modelSelection": {"instanceId": "codex", "model": "gpt-test"},
+        "parentThreadId": thread_id,
+        "taskId": "node:task",
     }))
-    .expect("thread.model-selection.set decodes")
+    .expect("delegated_task.completion-delivery.dispose decodes")
 }
 
 fn archive(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
@@ -98,12 +99,12 @@ async fn a_kind_without_a_handler_is_rejected_and_leaves_no_receipt() {
     let (orchestrator, receipts) = harness().await;
 
     let error = orchestrator
-        .dispatch(model_selection_set("command:unported", "thread:a"))
+        .dispatch(unported_command("command:unported", "thread:a"))
         .await
         .expect_err("unported kinds are rejected");
 
     assert!(
-        matches!(error, OrchestratorError::CommandRejected { ref command_type, .. } if command_type == "thread.model-selection.set"),
+        matches!(error, OrchestratorError::CommandRejected { ref command_type, .. } if command_type == "delegated_task.completion-delivery.dispose"),
         "{error:?}"
     );
     assert!(error.was_not_accepted());
